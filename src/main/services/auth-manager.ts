@@ -24,8 +24,10 @@
 import { shell } from 'electron'
 import type { BrowserWindow } from 'electron'
 import type { AuthFlowState, OAuthAccount } from '../../shared/types'
-import { serviceSession } from './service-session'
-import { logger } from './logger'
+import { serviceSession } from '../../core/services/service-session'
+import { invalidateLiveSessions } from './session-invalidation'
+import { logger } from '../../core/services/logger'
+import { emitEvent } from '../../core/services/sync-host'
 
 interface AuthorizeUrls {
   manualUrl?: string
@@ -86,12 +88,11 @@ class AuthManager {
     const acc = account as Record<string, unknown> | undefined
     const loggedIn = !!(acc && acc.email)
     // Matches the (routingId, source) shape of the session:auth-source event;
-    // login is global so the id is a synthetic 'system'.
-    this.window.webContents.send(
-      'session:auth-source',
-      'system',
-      loggedIn ? 'authenticated' : 'none'
-    )
+    // login is global so the id is a synthetic 'system'. Reaches every subscriber
+    // since SyncCore phase 4c — the channel rings, so a reconnecting client
+    // already replayed this from the catchup; being main-window-only live was the
+    // asymmetry, not a privacy boundary.
+    emitEvent('session:auth-source', ['system', loggedIn ? 'authenticated' : 'none'])
   }
 
   // ---------------------------------------------------------------------------
@@ -102,8 +103,16 @@ class AuthManager {
    * Begin the login flow. Opens the browser and starts awaiting the loopback
    * redirect in the background. Resolves with the "authorizing" snapshot; the
    * success/error transition is broadcast via `auth:state`.
+   *
+   * `opts.remote` (ADR-057) is the ONLY behavioural fork: a remote-initiated
+   * sign-in must NOT open a browser on the HOST — the remote user opens the URL
+   * on their own device — so `shell.openExternal` is skipped and the returned
+   * snapshot carries `manualUrl` for the remote UI to display. cli.js still
+   * performs the token EXCHANGE host-side either way (that is correct and
+   * unchanged). The desktop path (`opts` absent) is byte-identical to before.
    */
-  async signIn(): Promise<AuthFlowState> {
+  async signIn(opts?: { remote?: boolean }): Promise<AuthFlowState> {
+    const remote = opts?.remote === true
     // Never let a spawn-path throw escape as a rejected promise: callers
     // fire-and-forget this (AccountManager.addAccount → `void signIn()`), so a
     // rejection would be an unhandled rejection AND the renderer would get no
@@ -131,7 +140,10 @@ class AuthManager {
     }
 
     this.pendingState = parseState(urls.manualUrl)
-    if (urls.automaticUrl) {
+    // Remote sign-in: do NOT open a browser on the host — the remote user opens
+    // `manualUrl` on their own device (ADR-057). Desktop: open the host browser
+    // exactly as before.
+    if (!remote && urls.automaticUrl) {
       try {
         await shell.openExternal(urls.automaticUrl)
       } catch (err) {
@@ -140,12 +152,20 @@ class AuthManager {
     }
 
     // Await the loopback redirect in the background — do not block the caller.
+    // On the remote path the host loopback still arms (harmless); completion
+    // will normally arrive via `auth:submit-code` instead.
     handle
       .claudeOAuthWaitForCompletion()
       .then((res) => this.finalize(myFlow, res as OAuthResult))
       .catch((err) => this.fail(myFlow, err))
 
-    const authorizing: AuthFlowState = { status: 'authorizing', account: null, error: null }
+    const authorizing: AuthFlowState = {
+      status: 'authorizing',
+      account: null,
+      error: null,
+      // Surfaced ONLY for a remote sign-in, so the desktop snapshot is unchanged.
+      ...(remote ? { manualUrl: urls.manualUrl } : {})
+    }
     this.broadcast(authorizing)
     return authorizing
   }
@@ -195,6 +215,15 @@ class AuthManager {
 
     const state: AuthFlowState = { status: 'success', account, error: null }
     logger.info('AuthManager', `Login succeeded${account?.email ? ` (${account.email})` : ''}`)
+    // Every live engine process cached the credential this login just replaced,
+    // so stop them main-side. Before this the ONLY reaction was the desktop
+    // renderer's `auth:state` handler marking its ACTIVE session inactive: the
+    // processes stayed up on the stale token, every other session (and every
+    // other client) was told nothing, and canonical never heard about it at all.
+    // "The active session" is not expressible here on purpose — selection is
+    // per-client view state (ADR-041) — and it is also the wrong scope: every
+    // session holds the same stale credential.
+    invalidateLiveSessions('Claude login succeeded')
     this.broadcast(state)
     for (const cb of this.onSuccessCbs) {
       try {

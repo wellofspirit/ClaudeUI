@@ -615,20 +615,18 @@ export const OPENCODE_ENGINE_CAPABILITIES: EngineCapabilities = {
  * reasoning: empty object (opencode reasoning is a per-model boolean, not a
  * modes/levels control — no thinking/effort picker in 5b; follow-up phase).
  */
-export function opencodeModelCapabilities(
-  m?: {
-    // Local structural type (a subset of opencode's protocol ModelCapabilities)
-    // so shared/ stays self-contained — no import from main/.
-    capabilities?: {
-      attachment?: boolean
-      toolcall?: boolean
-      reasoning?: boolean
-      input?: { image?: boolean }
-    }
-    limit?: { context?: number; output?: number }
-    cost?: { cache?: { read: number; write: number } }
+export function opencodeModelCapabilities(m?: {
+  // Local structural type (a subset of opencode's protocol ModelCapabilities)
+  // so shared/ stays self-contained — no import from main/.
+  capabilities?: {
+    attachment?: boolean
+    toolcall?: boolean
+    reasoning?: boolean
+    input?: { image?: boolean }
   }
-): ModelCapabilities {
+  limit?: { context?: number; output?: number }
+  cost?: { cache?: { read: number; write: number } }
+}): ModelCapabilities {
   const caps = m?.capabilities
   const limit = m?.limit
   const cost = m?.cost
@@ -638,7 +636,7 @@ export function opencodeModelCapabilities(
     toolCalling: !!caps?.toolcall,
     contextWindow: limit?.context ?? 200_000,
     maxOutput: limit?.output ?? 8192,
-    promptCaching: !!(cost?.cache)
+    promptCaching: !!cost?.cache
   }
 }
 
@@ -657,9 +655,10 @@ export function resolveOpencodeCapabilities(
  * becomes authoritative on connect). ModelInfo carries no limit/cost, so
  * contextWindow/promptCaching fall back to defaults until the session connects.
  */
-export function resolveOpencodeCapabilitiesFromModel(
-  m?: { vision?: boolean; toolCalling?: boolean }
-): ResolvedCapabilities {
+export function resolveOpencodeCapabilitiesFromModel(m?: {
+  vision?: boolean
+  toolCalling?: boolean
+}): ResolvedCapabilities {
   return resolveOpencodeCapabilities(
     m ? { capabilities: { attachment: m.vision, toolcall: m.toolCalling } } : undefined
   )
@@ -692,7 +691,9 @@ export function resolveOpencodeCapabilitiesFromModel(
  *     `capabilities.queue` only — `capabilities.steer` is read nowhere in the
  *     renderer, it is a pure ADR-030 honesty/documentation flag), and the
  *     renderer's queued-message UI resolves identically either way via the
- *     engine-neutral `session:steer-consumed` ack.
+ *     engine-neutral queue of record (ADR-053: core holds the item and forwards
+ *     it as a `steer` at the next sub-turn boundary, then broadcasts the
+ *     `consumed` transition on `session:queue-changed`).
  *   - slashCommands:true, skills:true → SHIPPED in M2b via `get_commands`
  *     (doStart(), once per spawn): emits `session:slash-commands` (all
  *     non-temporary-scope entries, '/'-prefixed) and `session:skills` (source
@@ -835,17 +836,17 @@ export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
  * toolCalling is always true — every pi model that can be selected has tool
  * support (pi has no text-only-model concept exposed via get_available_models).
  */
-export function piModelCapabilities(
-  m?: {
-    vision?: boolean
-    contextWindow?: number
-    maxOutput?: number
-    reasoning?: boolean
-    effortLevels?: EffortLevel[]
-  }
-): ModelCapabilities {
+export function piModelCapabilities(m?: {
+  vision?: boolean
+  contextWindow?: number
+  maxOutput?: number
+  reasoning?: boolean
+  effortLevels?: EffortLevel[]
+}): ModelCapabilities {
   return {
-    reasoning: m?.reasoning ? { effort: { levels: m.effortLevels ?? ['low', 'medium', 'high'] } } : {},
+    reasoning: m?.reasoning
+      ? { effort: { levels: m.effortLevels ?? ['low', 'medium', 'high'] } }
+      : {},
     vision: !!m?.vision,
     toolCalling: true,
     contextWindow: m?.contextWindow ?? 200_000,

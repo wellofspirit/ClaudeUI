@@ -7,12 +7,12 @@ import * as os from 'os'
 
 // Mock fs and logger before importing the module under test
 vi.mock('fs')
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), warn: vi.fn() }
 }))
 
 import * as fs from 'fs'
-import { scanCustomCommands, _resetCache } from '../custom-command-scanner'
+import { scanCustomCommands, _resetCache } from '../../../core/services/custom-command-scanner'
 
 const HOME = os.homedir()
 const PROJECT_CWD = '/projects/my-app'

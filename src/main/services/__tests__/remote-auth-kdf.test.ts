@@ -18,15 +18,15 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import * as crypto from 'node:crypto'
-import { computeStoredCredential, dbPasswordAuthProvider } from '../remote-auth'
+import { computeStoredCredential, dbPasswordAuthProvider } from '../../../core/services/remote-auth'
 import { derivePasswordProof } from '../../../web/password-proof'
-import type { RemoteConfigRow } from '../db'
+import type { RemoteConfigRow } from '../../../core/services/db'
 
 // The provider reads the DB per call; drive it off a mutable fake row.
 const { configRef } = vi.hoisted(() => ({
   configRef: { current: null as RemoteConfigRow | null }
 }))
-vi.mock('../db', () => ({
+vi.mock('../../../core/services/db', () => ({
   getRemoteConfig: () => configRef.current,
   setRemotePassword: vi.fn()
 }))
@@ -46,6 +46,17 @@ function makeRow(over: Partial<RemoteConfigRow> = {}): RemoteConfigRow {
     tlsHttpsPort: 443,
     lastServeHttpsPort: null,
     lastServeLocalPort: null,
+    allowTerminal: false,
+    shellGrantIdleMinutes: 10,
+    authPolicy: null,
+    passwordBreakGlass: true,
+    // ADR-056 (v13): no LAN channel key on a loopback-bound test server.
+    lanE2eKey: null,
+    // ADR-054 (v12) step-up columns at their defaults.
+    stepUpTier: 'medium',
+    stepUpMutationIdleMinutes: 60,
+    sessionMaxAgeHours: 4,
+    auditRetentionDays: 365,
     passwordSalt: SALT_HEX,
     passwordHash: PINNED_HASH,
     kdfParams: JSON.stringify(KDF),

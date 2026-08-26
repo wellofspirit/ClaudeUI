@@ -1,10 +1,6 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, useCallback, useMemo, useRef } from 'react'
 import { v4 as uuid } from 'uuid'
-import {
-  useSessionStore,
-  buildTodosFromMessages,
-  buildSentFilesFromMessages
-} from '../../stores/session-store'
+import { useSessionStore } from '../../stores/session-store'
 import type {
   ChatMessage,
   DirectoryGroup,
@@ -15,127 +11,6 @@ import { useAutomationStore } from '../../stores/automation-store'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { SidebarView, type DeleteTarget } from './View'
 import { cwdToProjectKey } from '../../../../shared/project-key'
-
-/**
- * Merge opencode SessionInfo[] into an existing DirectoryGroup[] (Claude sessions).
- * opencode sessions are grouped by cwd: if a group for that cwd already exists
- * (from Claude), the opencode sessions are appended (avoiding duplicates by sessionId).
- * If no group exists for that cwd, a new group is created.
- *
- * Called on each poll; produces a new array without mutating the input.
- */
-export function mergeOpencodeIntoDirectories(
-  current: DirectoryGroup[],
-  opencodeInfos: SessionInfo[]
-): DirectoryGroup[] {
-  // Build a mutable copy indexed by cwd (forward-slash normalized for comparison).
-  const byProjectKey = new Map<string, DirectoryGroup>()
-  const order: string[] = []
-  for (const g of current) {
-    byProjectKey.set(g.projectKey, { ...g, sessions: [...g.sessions] })
-    order.push(g.projectKey)
-  }
-
-  // Remove all existing opencode sessions first (so we replace on every poll
-  // rather than accumulating stale entries). They're identified by engineId.
-  for (const [key, group] of byProjectKey) {
-    const filtered = group.sessions.filter((s) => s.engineId !== 'opencode')
-    byProjectKey.set(key, { ...group, sessions: filtered })
-  }
-
-  // Insert opencode sessions grouped by cwd
-  for (const info of opencodeInfos) {
-    const projectKey = info.projectKey
-    let group = byProjectKey.get(projectKey)
-    if (!group) {
-      const folderName = info.cwd.split(/[\\/]/).pop() || info.cwd
-      group = { cwd: info.cwd, projectKey, folderName, sessions: [] }
-      byProjectKey.set(projectKey, group)
-      order.push(projectKey)
-    }
-    group.sessions.push(info)
-  }
-
-  // Re-sort each group's sessions newest-first
-  for (const group of byProjectKey.values()) {
-    group.sessions.sort((a, b) => b.lastActivityAt - a.lastActivityAt)
-  }
-
-  // Re-assemble in original order, skip groups that ended up empty
-  const result: DirectoryGroup[] = []
-  const seen = new Set<string>()
-  for (const key of order) {
-    if (seen.has(key)) continue
-    seen.add(key)
-    const group = byProjectKey.get(key)
-    if (group && group.sessions.length > 0) result.push(group)
-  }
-
-  // Sort groups by most recent activity (mirror listDirectories sort)
-  result.sort((a, b) => {
-    const aMax = a.sessions[0]?.lastActivityAt ?? 0
-    const bMax = b.sessions[0]?.lastActivityAt ?? 0
-    return bMax - aMax
-  })
-
-  return result
-}
-
-/**
- * Merge pi SessionInfo[] into an existing DirectoryGroup[]. Structurally
- * identical to mergeOpencodeIntoDirectories (own function rather than a
- * parameterized shared helper, so opencode's behavior stays byte-for-byte
- * unchanged — see the M1 kickoff spec's "additive edits only" constraint) —
- * filters out stale 'pi' entries first (replace-not-accumulate on every poll),
- * then groups the fresh ones by projectKey, creating a new group when no
- * Claude/opencode group already covers that cwd.
- */
-export function mergePiIntoDirectories(current: DirectoryGroup[], piInfos: SessionInfo[]): DirectoryGroup[] {
-  const byProjectKey = new Map<string, DirectoryGroup>()
-  const order: string[] = []
-  for (const g of current) {
-    byProjectKey.set(g.projectKey, { ...g, sessions: [...g.sessions] })
-    order.push(g.projectKey)
-  }
-
-  for (const [key, group] of byProjectKey) {
-    const filtered = group.sessions.filter((s) => s.engineId !== 'pi')
-    byProjectKey.set(key, { ...group, sessions: filtered })
-  }
-
-  for (const info of piInfos) {
-    const projectKey = info.projectKey
-    let group = byProjectKey.get(projectKey)
-    if (!group) {
-      const folderName = info.cwd.split(/[\\/]/).pop() || info.cwd
-      group = { cwd: info.cwd, projectKey, folderName, sessions: [] }
-      byProjectKey.set(projectKey, group)
-      order.push(projectKey)
-    }
-    group.sessions.push(info)
-  }
-
-  for (const group of byProjectKey.values()) {
-    group.sessions.sort((a, b) => b.lastActivityAt - a.lastActivityAt)
-  }
-
-  const result: DirectoryGroup[] = []
-  const seen = new Set<string>()
-  for (const key of order) {
-    if (seen.has(key)) continue
-    seen.add(key)
-    const group = byProjectKey.get(key)
-    if (group && group.sessions.length > 0) result.push(group)
-  }
-
-  result.sort((a, b) => {
-    const aMax = a.sessions[0]?.lastActivityAt ?? 0
-    const bMax = b.sessions[0]?.lastActivityAt ?? 0
-    return bMax - aMax
-  })
-
-  return result
-}
 
 /** Lightweight projection of session data needed by the sidebar for structural/display decisions */
 type SidebarSessionData = {
@@ -203,7 +78,6 @@ export function Sidebar({
     sidebarSessionsRef.current = result
     return result
   })
-  const setDirectories = useSessionStore((s) => s.setDirectories)
   const createNewSession = useSessionStore((s) => s.createNewSession)
   const switchSession = useSessionStore((s) => s.switchSession)
   const loadHistoricalSession = useSessionStore((s) => s.loadHistoricalSession)
@@ -225,6 +99,7 @@ export function Sidebar({
   const deleteSessionAction = useSessionStore((s) => s.deleteSession)
   const deleteProjectAction = useSessionStore((s) => s.deleteProject)
   const showWelcome = useSessionStore((s) => s.showWelcome)
+  const requestWelcomeBrowse = useSessionStore((s) => s.requestWelcomeBrowse)
   const activeView = useSessionStore((s) => s.activeView)
   const setActiveView = useSessionStore((s) => s.setActiveView)
   const pluginViews = useSessionStore((s) => s.pluginViews)
@@ -367,50 +242,14 @@ export function Sidebar({
     [handleRename]
   )
 
-  // Build the session list from BOTH engines in one shot so they never clobber
-  // each other: fetch Claude directories (JSONL) + the global opencode session
-  // list, merge, and set once. The opencode side is best-effort — any error (not
-  // installed / server down) just yields the Claude-only list. Every code path
-  // that refreshes the sidebar MUST go through this (never `listDirectories`
-  // alone) or it wipes the merged opencode sessions until the next poll.
-  const refreshDirectories = useCallback(async (): Promise<void> => {
-    const claude = await window.api.listDirectories()
-    let merged = claude
-    try {
-      const opencodeInfos = await window.api.listOpencodeSessionsGlobal()
-      if (opencodeInfos.length > 0) {
-        merged = mergeOpencodeIntoDirectories(claude, opencodeInfos)
-      }
-    } catch {
-      // Best-effort — opencode not installed or server down → Claude-only list.
-    }
-    try {
-      const piInfos = await window.api.listPiSessionsGlobal()
-      if (piInfos.length > 0) {
-        merged = mergePiIntoDirectories(merged, piInfos)
-      }
-    } catch {
-      // Best-effort — pi not installed or no sessions yet → unchanged list.
-    }
-    setDirectories(merged)
-  }, [setDirectories])
-
-  // Runs on mount, whenever Claude JSONL files change, and on a 30s poll (so new
-  // opencode sessions made elsewhere show up).
-  useEffect(() => {
-    let cancelled = false
-    const run = (): void => {
-      if (!cancelled) void refreshDirectories()
-    }
-    run()
-    const cleanup = window.api.onDirectoriesChanged(run)
-    const interval = setInterval(run, 30_000)
-    return () => {
-      cancelled = true
-      cleanup?.()
-      clearInterval(interval)
-    }
-  }, [refreshDirectories])
+  // NO refresh loop here any more. The three-query merge (Claude JSONL +
+  // opencode + pi) and the 30 s poll moved to the MAIN process
+  // (`services/sync-seed.ts`), and `session:directories-changed` now CARRIES the
+  // merged listing, so `directories` reaches this component through the replica
+  // fold like every other replicated slice. What that fixes: the merge used to
+  // run per client and be written locally, while canonical held the Claude-only
+  // subset — so every `sync-full` force-projected that subset over the merged
+  // list and a reconnecting client lost its opencode/pi rows for up to 30 s.
 
   const handleNewSession = (): void => {
     showWelcome()
@@ -418,6 +257,16 @@ export function Sidebar({
   }
 
   const handleNewSessionDblClick = async (): Promise<void> => {
+    // The web client has no native dialog — `pickFolder()` resolves to null and
+    // `session:pick-folder` declares `host`, so it is never registered on the
+    // remote dispatcher — route to the welcome screen's host-backed browser
+    // instead of no-oping (ADR-046).
+    if (window.api.platform === 'web') {
+      showWelcome()
+      requestWelcomeBrowse()
+      if (isMobile && onToggleCollapse) onToggleCollapse()
+      return
+    }
     const folder = await window.api.pickFolder()
     if (folder) {
       const routingId = uuid()
@@ -532,14 +381,9 @@ export function Sidebar({
       warnings
     )
     if (customTitle) setCustomTitle(routingId, customTitle)
-
-    // Rebuild todos from TaskCreate/TaskUpdate/TodoWrite tool calls
-    const todos = buildTodosFromMessages(messages)
-    if (todos) useSessionStore.getState().setTodos(routingId, todos)
-    // …and the Files widget from SendUserFile calls — this is what makes it
-    // survive session resumption (nothing about it is persisted separately).
-    const sentFiles = buildSentFilesFromMessages(messages)
-    if (sentFiles) useSessionStore.getState().setSentFiles(routingId, sentFiles)
+    // todos + the Files widget are derived from the transcript INSIDE the cold-
+    // history seed now (SyncCore 4c): they are sealed, and deriving them here
+    // would have been a client computing state the reducer already computes.
     switchSession(routingId)
     // Close drawer on mobile after selecting a session
     if (isMobile && onToggleCollapse) onToggleCollapse()
@@ -576,11 +420,11 @@ export function Sidebar({
               warnings
             )
             if (ct) setCustomTitle(routingId, ct)
-            window.api.watchSession(routingId, info.sessionId, info.projectKey)
+            window.api.watchSession(routingId, info.sessionId, info.projectKey, info.cwd)
             setWatching(routingId, true)
           })
       } else {
-        window.api.watchSession(routingId, info.sessionId, info.projectKey)
+        window.api.watchSession(routingId, info.sessionId, info.projectKey, info.cwd)
         setWatching(routingId, true)
       }
     }
@@ -729,11 +573,12 @@ export function Sidebar({
       await deleteProjectAction(deleteTarget.projectKey)
     }
     setDeleteTarget(null)
-    // Refresh from BOTH engines so the deleted entry disappears immediately
-    // without wiping the other engine's sessions (a Claude-only refresh here
-    // dropped every opencode session until the next 30s poll).
-    await refreshDirectories()
-  }, [deleteTarget, deleteSessionAction, deleteProjectAction, refreshDirectories])
+    // No refresh call: main re-reads the merged listing as part of the delete
+    // itself (`handlers-core.deleteSession` / `deleteProject`) and replicates it,
+    // so the row disappears on EVERY client rather than only on the one that
+    // clicked — and without the Claude-only refetch that used to drop every
+    // opencode/pi row here until the next 30 s poll.
+  }, [deleteTarget, deleteSessionAction, deleteProjectAction])
 
   const augmentedDirs = useMemo(() => {
     // Build set of session IDs already on disk
@@ -746,7 +591,8 @@ export function Sidebar({
     const inMemoryByPk: Record<string, SessionInfo[]> = {}
     for (const [rid, data] of Object.entries(sidebarSessions)) {
       if (dirSessionIds.has(rid) || !data.cwd) continue
-      const sessionEngineId = (sessionEngines[rid]?.engineId ?? 'claude') as import('../../../../shared/types').EngineId
+      const sessionEngineId = (sessionEngines[rid]?.engineId ??
+        'claude') as import('../../../../shared/types').EngineId
       const pk = cwdToProjectKey(data.cwd)
       const info: SessionInfo = {
         sessionId: rid,

@@ -34,6 +34,8 @@
 const nodeSqlite = require('node:sqlite') as typeof import('node:sqlite')
 const { DatabaseSync } = nodeSqlite
 
+import { emulatePragma, normalizeGet } from '../../core/services/sqlite-driver'
+
 type NodeStatement = ReturnType<InstanceType<typeof DatabaseSync>['prepare']>
 
 interface RunResult {
@@ -59,7 +61,9 @@ class Statement {
   }
 
   get(...args: unknown[]): unknown {
-    return this.stmt.get(...(args as Parameters<NodeStatement['get']>))
+    // Same null→undefined contract the drivers hold to, so a test and production
+    // agree on what a miss looks like.
+    return normalizeGet(this.stmt.get(...(args as Parameters<NodeStatement['get']>)))
   }
 
   all(...args: unknown[]): unknown[] {
@@ -81,29 +85,18 @@ class Database {
   }
 
   pragma(stmt: string, opts?: { simple?: boolean }): unknown {
-    // Run the PRAGMA against real SQLite so version-guarding state
-    // (user_version) round-trips. better-sqlite3's pragma() accepts the bare
-    // pragma body (no leading "PRAGMA"); node:sqlite needs the full statement.
-    const trimmed = stmt.trim()
-    const isWrite = /=/.test(trimmed)
-
-    if (isWrite) {
-      // e.g. "user_version = 1", "journal_mode = WAL", "foreign_keys = ON".
-      // exec() handles statements with no result rows.
-      this.db.exec(`PRAGMA ${trimmed};`)
-      return null
-    }
-
-    // Read, e.g. "user_version", "journal_mode".
-    const rows = this.db.prepare(`PRAGMA ${trimmed};`).all() as Array<Record<string, unknown>>
-    if (opts?.simple) {
-      // better-sqlite3's { simple: true } returns the first column of the first row.
-      const first = rows[0]
-      if (!first) return undefined
-      const keys = Object.keys(first)
-      return keys.length > 0 ? first[keys[0]] : undefined
-    }
-    return rows
+    // Delegates to the PRODUCTION emulation (S3 stage 1) rather than carrying a
+    // second copy. This stub used to branch on `=` and return `null` for the
+    // write form — an invention: the driver conformance spec, pointed at real
+    // better-sqlite3, showed that `pragma()` has no write/read distinction and
+    // always returns the statement's result rows. Keeping a private copy here
+    // would mean the whole suite ran against pragma semantics that production
+    // does not have, which is exactly the drift the seam exists to remove.
+    return emulatePragma(
+      { exec: (sql) => this.db.exec(sql), prepare: (sql) => this.db.prepare(sql) },
+      stmt,
+      opts
+    )
   }
 
   prepare(sql: string): Statement {

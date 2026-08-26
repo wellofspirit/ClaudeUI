@@ -1,27 +1,11 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useSessionStore } from '../../stores/session-store'
+import { useIsMobile } from '../../hooks/useIsMobile'
 import { SettingsDialogView, type VersionInfo } from './View'
-import {
-  SCOPES,
-  scopeCapabilities,
-  isSectionVisible,
-  SECTION_SCOPE_MAP,
-  type SettingsScope
-} from './settings-sections'
+import { SettingsMobileView } from './MobileView'
+import { firstSectionOfScope, SECTION_SCOPE_MAP, type SettingsScope } from './settings-sections'
 import type { EngineConfig, VendorConfig } from '../../../../shared/types'
 export { SettingsToggle } from './settings-controls'
-
-function firstSectionOfScope(scope: SettingsScope): string {
-  const scopeDef = SCOPES.find((s) => s.id === scope)
-  if (!scopeDef) return ''
-  // First capability-visible section (don't default to a gated-out one).
-  const caps = scopeCapabilities(scope)
-  for (const sg of scopeDef.subgroups) {
-    const sec = sg.sections.find((s) => isSectionVisible(s.id, caps))
-    if (sec) return sec.id
-  }
-  return ''
-}
 
 export function SettingsDialog({
   onClose,
@@ -32,6 +16,7 @@ export function SettingsDialog({
   initialScope?: SettingsScope
   initialSection?: string
 }): React.JSX.Element {
+  const isMobile = useIsMobile()
   const settings = useSessionStore((s) => s.settings)
   const updateSettings = useSessionStore((s) => s.updateSettings)
   const setStoreEngineConfig = useSessionStore((s) => s.setEngineConfig)
@@ -43,7 +28,8 @@ export function SettingsDialog({
   const [vendorConfig, setVendorConfig] = useState<VendorConfig>({})
 
   useEffect(() => {
-    const scope = initialScope ?? (initialSection ? SECTION_SCOPE_MAP.get(initialSection) : undefined)
+    const scope =
+      initialScope ?? (initialSection ? SECTION_SCOPE_MAP.get(initialSection) : undefined)
     if (!scope) return
     setActiveScope(scope)
     setActiveSectionId(initialSection || firstSectionOfScope(scope))
@@ -60,8 +46,14 @@ export function SettingsDialog({
 
   // Load engine and vendor config on mount
   useEffect(() => {
-    window.api.loadEngineConfig('claude').then(setEngineConfig).catch(() => {})
-    window.api.loadVendorConfig('anthropic').then(setVendorConfig).catch(() => {})
+    window.api
+      .loadEngineConfig('claude')
+      .then(setEngineConfig)
+      .catch(() => {})
+    window.api
+      .loadVendorConfig('anthropic')
+      .then(setVendorConfig)
+      .catch(() => {})
   }, [])
 
   // Close on Escape
@@ -104,8 +96,15 @@ export function SettingsDialog({
     })
   }, [])
 
+  // Same props, two presentations (the PermissionsDialog pattern): a phone gets
+  // a fullscreen tab + accordion takeover, because the desktop dialog is a fixed
+  // 760×540 box with a 178px side nav. Container state — scope, section, search,
+  // engine/vendor config, Escape — is shared verbatim; only the presentation and
+  // the mobile-only expanded-section state fork.
+  const View = isMobile ? SettingsMobileView : SettingsDialogView
+
   return (
-    <SettingsDialogView
+    <View
       settings={settings}
       updateSettings={updateSettings}
       engineConfig={engineConfig}

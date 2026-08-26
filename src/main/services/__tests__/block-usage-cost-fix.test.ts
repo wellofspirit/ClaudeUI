@@ -21,7 +21,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest'
-import { selectRowCostUsd, type UsageCostRow } from '../usage-aggregation'
+import { selectRowCostUsd, type UsageCostRow } from '../../../core/services/usage-aggregation'
 import { registerSupplementalPricing } from '../../../shared/pricing'
 
 // ---------------------------------------------------------------------------

@@ -23,22 +23,22 @@ import os from 'os'
 // listVendorCredentialIds never touches the server, but importing the module
 // pulls in the server manager / client / model-discovery — mock them out like
 // the sibling OpencodeAuthProvider.test.ts does.
-vi.mock('../../opencode/OpencodeServerManager', () => ({
+vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: { acquire: vi.fn(), release: vi.fn() }
 }))
-vi.mock('../../opencode/OpencodeClient', () => ({ OpencodeClient: vi.fn() }))
-vi.mock('../../opencode/model-discovery', () => ({
+vi.mock('../../../core/opencode/OpencodeClient', () => ({ OpencodeClient: vi.fn() }))
+vi.mock('../../../core/opencode/model-discovery', () => ({
   invalidateOpencodeModelCache: vi.fn()
 }))
-vi.mock('../../services/persisted-sessions-dir', () => ({
+vi.mock('../../../core/services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/fake/persisted'
 }))
-vi.mock('../../services/logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() }
 }))
 
 // Import SUT AFTER mocking
-import { OpencodeAuthProvider } from '../OpencodeAuthProvider'
+import { OpencodeAuthProvider } from '../../../core/auth/OpencodeAuthProvider'
 
 describe('OpencodeAuthProvider.listVendorCredentialIds', () => {
   let tmpDir: string

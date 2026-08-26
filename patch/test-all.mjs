@@ -8,7 +8,7 @@
  * This runner reports per-test OK/FAILED and overall summary.
  */
 
-import { execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -28,21 +28,49 @@ const tests = [
   { name: 'skip-securestorage', script: resolve(__dirname, 'skip-securestorage/test.mjs') }
 ]
 
-console.log(`\nRunning ${tests.length} patch tests...\n`)
+// Tests are independent processes (separate CLI sessions, stdio MCP stubs, no
+// fixed ports; skip-securestorage is a read-only structural check), so they run
+// concurrently with a bounded pool. Each test's output is buffered and printed
+// whole when it finishes, so logs never interleave. PATCH_TEST_CONCURRENCY=1
+// restores the old fully-sequential behaviour (e.g. when debugging one test's
+// live session with DEBUG_HARNESS=1).
+const concurrency = Math.max(1, Number(process.env.PATCH_TEST_CONCURRENCY) || 4)
+
+console.log(`\nRunning ${tests.length} patch tests (concurrency ${concurrency})...\n`)
+
+const runOne = ({ name, script }) =>
+  new Promise((done) => {
+    execFile(
+      'node',
+      [script],
+      { timeout: 300_000, maxBuffer: 64 * 1024 * 1024, encoding: 'utf8' },
+      (err, stdout, stderr) => {
+        const ok = !err
+        console.log(`\n>>> ${name}`)
+        if (stdout) process.stdout.write(stdout)
+        if (stderr) process.stderr.write(stderr)
+        console.log(`>>> ${name}: ${ok ? '\x1b[32mOK\x1b[0m' : '\x1b[31mFAILED\x1b[0m'}`)
+        done({ name, ok })
+      }
+    )
+  })
 
 const results = []
-
-for (const { name, script } of tests) {
-  console.log(`\n>>> ${name}`)
-  try {
-    execFileSync('node', [script], { stdio: 'inherit', timeout: 300_000 })
-    results.push({ name, ok: true })
-    console.log(`>>> ${name}: \x1b[32mOK\x1b[0m`)
-  } catch (err) {
-    results.push({ name, ok: false })
-    console.log(`>>> ${name}: \x1b[31mFAILED\x1b[0m`)
-  }
+{
+  const queue = [...tests]
+  const workers = Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
+    while (queue.length > 0) {
+      const test = queue.shift()
+      results.push(await runOne(test))
+    }
+  })
+  await Promise.all(workers)
 }
+
+// Preserve the declaration order in the summary regardless of completion order.
+results.sort(
+  (a, b) => tests.findIndex((t) => t.name === a.name) - tests.findIndex((t) => t.name === b.name)
+)
 
 // Summary
 console.log('\n' + '='.repeat(60))

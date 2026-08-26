@@ -23,6 +23,7 @@
  *     reads sourceBinary + cli.js from vendor/claude-cli/version.json and
  *     writes vendor/claude-cli/bun-claude<ext>)
  *   node scripts/rebundle-cli.mjs <input.exe> <new-cli.js> <output.exe>
+ *   node scripts/rebundle-cli.mjs --quiet   (any mode — suppress info logs)
  *   node scripts/rebundle-cli.mjs --noop <input.exe> <output.exe>
  *     (NO-OP rebundle: reuse original cli.js contents unchanged — validates
  *      reader/writer symmetry.)
@@ -32,6 +33,7 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync, chmodSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isCliEntrypointName } from './lib/bun-entrypoint.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
@@ -48,7 +50,7 @@ function parseArgs(argv) {
   const rest = []
   for (const a of argv) {
     if (a === '--noop') args.noop = true
-    else rest.push(a)
+    else if (!a.startsWith('--')) rest.push(a)
   }
   if (args.noop) {
     ;[args.input, args.output] = rest
@@ -97,8 +99,10 @@ function die(msg) {
   process.exit(1)
 }
 
+const QUIET = process.argv.includes('--quiet')
+
 function log(...args) {
-  console.log('[rebundle-cli]', ...args)
+  if (!QUIET) console.log('[rebundle-cli]', ...args)
 }
 
 function alignUp(n, align) {
@@ -521,8 +525,7 @@ function rewritePE(buf, pe, newBlob) {
 // ---------------------------------------------------------------------------
 
 function findCliModule(modules) {
-  // cli.js names look like "B:/~BUN/root/src/entrypoints/cli.js"
-  const cli = modules.find((m) => m.name.toString('utf8').endsWith('/cli.js'))
+  const cli = modules.find((m) => isCliEntrypointName(m.name.toString('utf8')))
   if (!cli) die('cli.js module not found in blob')
   return cli
 }
@@ -553,10 +556,23 @@ function main() {
       `__BUN,__bun at 0x${sectionOff.toString(16)}, size ${sectionSize}` +
         (macho.codeSig ? `, code-sig at 0x${macho.codeSig.dataOff.toString(16)}` : '')
     )
+  } else if (format === 'elf') {
+    // Linux: Bun's ELF standalone layout is not implemented yet. ubuntu CI
+    // still runs extract+patch to prove every patch APPLIES against the
+    // linux-x64 bundle, so a clean SKIP keeps that gate meaningful — and it
+    // stays fail-closed for consumers: no bun-claude output is written at all,
+    // so nothing can silently spawn an UNPATCHED binary on Linux. Implementing
+    // the ELF rewrite lifts this (the extract side already parses the trailer
+    // platform-independently).
+    console.log(
+      'rebundle-cli: ELF (Linux) rebundle not implemented — skipping. ' +
+        'Patched cli.js remains at vendor/claude-cli/cli.js; no bun-claude binary was produced.'
+    )
+    process.exit(0)
   } else {
     die(
       `unsupported format "${format}" (first bytes: ${buf.subarray(0, 4).toString('hex')}). ` +
-        'PE (Windows) and 64-bit LE Mach-O (macOS arm64/x64) are supported; ELF (Linux) is planned.'
+        'PE (Windows) and 64-bit LE Mach-O (macOS arm64/x64) are supported.'
     )
   }
 

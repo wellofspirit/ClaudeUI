@@ -6,17 +6,17 @@
 
 ## Context
 
-Auth differs by engine at the mechanism level: ClaudeUI *drives* Claude's OAuth (service session +
-control requests, ADR-014) and manages multi-account file credentials (ADR-015); opencode *delegates*
+Auth differs by engine at the mechanism level: ClaudeUI _drives_ Claude's OAuth (service session +
+control requests, ADR-014) and manages multi-account file credentials (ADR-015); opencode _delegates_
 (owns `auth.json`, multi-vendor) but exposes auth-setting endpoints. V2 needs one neutral interface
-over both. (The implemented model is documented in `docs/architecture.md` § "Auth / accounts".)
+over both. (The implemented model is documented in `docs/architecture/engines.md` § "Auth / accounts".)
 
 ## Decision
 
 - **`EngineAuthProvider` per engine**, capability-gated by `capabilities.auth { canDriveLogin,
-  multiAccount }` (ADR-018):
+multiAccount }` (ADR-018):
   - **`ClaudeAuthProvider`** — full: probe + in-app OAuth + multi-account; wraps today's `AuthManager`
-    + `AccountManager` + service session **unchanged** (ADR-014/015 internals preserved).
+    - `AccountManager` + service session **unchanged** (ADR-014/015 internals preserved).
   - **`OpencodeAuthProvider`** — `probe()` + in-app `signIn(vendorId)`: **API-key** via
     `PUT /auth/{vendor}` (opencode stores the secret; ClaudeUI holds nothing); **OAuth paste-code**
     in-app; **OAuth loopback delegated** (open browser / `opencode auth login`, poll
@@ -31,7 +31,7 @@ over both. (The implemented model is documented in `docs/architecture.md` § "Au
 - **Detection:** keep "trust the engine, don't read creds" (Claude init response; opencode probe — no
   Keychain prompts). A 401-class error (`classifyApiError → authentication` for Claude;
   `ProviderAuthError` for opencode) surfaces that engine's re-login affordance.
-- **ToS posture:** in-app *subscription* OAuth is **non-load-bearing** (third-party OAuth is a moving
+- **ToS posture:** in-app _subscription_ OAuth is **non-load-bearing** (third-party OAuth is a moving
   target); loopback subscription OAuth defaults to delegation.
 - **Naming:** rename the existing `AuthState { status, account, error }` → `AuthFlowState`; `AuthState`
   becomes the resolved tri-state (`authenticated | unauthenticated | unknown`).

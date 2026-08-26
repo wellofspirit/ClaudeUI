@@ -41,35 +41,23 @@ const optimizer = {
     })
   }
 }
-import { registerSessionIpc } from './ipc/session.ipc'
-import { registerTerminalIpc } from './ipc/terminal.ipc'
-import { registerAutomationIpc } from './ipc/automation.ipc'
-import { registerRemoteHandlers, registerRemoteVersionInfo } from './ipc/remote-handlers'
-import { RemoteServer, getNetworkInterfaces } from './services/remote-server'
-import { RemoteDispatcher } from './services/remote-dispatcher'
-import { TailscaleManager } from './services/tailscale-manager'
-import type { RemoteConfig, TailscaleDetection } from '../shared/types'
-import {
-  DEFAULT_TLS_HTTPS_PORT,
-  getRemoteConfig,
-  setRemoteConfig as dbSetRemoteConfig,
-  clearRemotePassword
-} from './services/db'
-import { provisionPassword } from './services/remote-auth'
-import { serviceSession } from './services/service-session'
+import { bootCore, type CoreBoot } from './boot-core'
+import { setHostWindow, getHostWindow } from '../core/services/host-window'
+import { attachSyncPort } from './services/sync-port'
+import { terminalService } from '../core/services/terminal-service'
+import { registerRemoteVersionInfo } from '../core/ipc/remote-handlers'
+import { serviceSession } from '../core/services/service-session'
 import { authManager } from './services/auth-manager'
 import { accountManager } from './services/account-manager'
 import { claudeAuthProvider } from './auth/ClaudeAuthProvider'
-import { credentialSync } from './auth/vault/CredentialSync'
-import { sharedProviderService } from './shared-providers'
-import { opencodeServerManager } from './opencode/OpencodeServerManager'
-import { crossEngineDispatcher } from './services/cross-engine-dispatcher'
+import { credentialSync } from '../core/auth/vault/CredentialSync'
+import { opencodeServerManager } from '../core/opencode/OpencodeServerManager'
 import { PluginManager } from './services/plugin-manager'
 import { LogViewer } from './services/log-viewer'
-import { logger } from './services/logger'
-import { getSdkVersion } from './services/claude-session'
+import { logger } from '../core/services/logger'
+import { getCliVersion } from '../core/services/claude-session'
 import { registerMockupAssetScheme, registerMockupAssetHandler } from './services/mockup-protocol'
-import { loadPersistedPrices } from './services/opencode-pricing'
+import { loadPersistedPrices } from '../core/services/opencode-pricing'
 import { QuitCoordinator } from './quit-coordinator'
 import {
   isAllowedExternalUrl,
@@ -78,9 +66,31 @@ import {
   buildVscodeUrl,
   validateLocalFilePath,
   type AppOrigin
-} from './shell-security'
-import { readImagePreview } from './sent-file-security'
+} from '../core/shell-security'
+import { readImagePreview } from '../core/sent-file-security'
+import { setHostPaths } from '../core/host'
+import { setSqliteDriver } from '../core/services/sqlite-driver'
+import { betterSqlite3Driver } from '../core/services/sqlite/better-sqlite3-driver'
 import icon from '../../resources/icon.png?asset'
+
+// The DESKTOP's storage engine (S3 stage 1). `db.ts` talks to a driver seam now
+// — it names no SQLite implementation — so this is where the app declares that
+// it uses the native better-sqlite3, exactly as it always has. Behaviour is
+// unchanged; what changed is that the choice is now stated rather than implied
+// by an import, which is what lets `claudeui-server` state a different one.
+//
+// Wired at module load, before `setHostPaths` and long before `bootCore()`, for
+// the same reason that one is: the DB is opened lazily on first use, and no code
+// path may reach it while the seam is empty. `better-sqlite3` stays in
+// `electron.vite.config.ts`'s `external` list, so the main bundle is untouched.
+setSqliteDriver(betterSqlite3Driver())
+
+// Desktop implementation of the core `HostPaths` seam (S2). Wired at module
+// load — as early as the desktop entrypoint runs, before any window decision or
+// engine spawn — so no core module (engine locators, the web-client dir) can
+// observe an unset provider on the spawn/serve path. A non-Electron entrypoint
+// wires its own (or none; core falls back to `process.cwd()`).
+setHostPaths({ getAppPath: () => app.getAppPath() })
 
 // Single-instance lock (M-BT1). A second launch must NOT run a full second
 // instance: both would write ~/.claude/ui/*.json (last-writer-wins corruption),
@@ -127,6 +137,18 @@ const remoteAccessDisabled =
 // would put the whole app into browser headless mode and break it.
 const headlessWindow =
   process.env.CLAUDEUI_HEADLESS === '1' || process.argv.includes('--claudeui-headless')
+
+// WINDOWLESS mode (SyncCore phase 4d): boot core and serve, with no BrowserWindow
+// at all. This is the phase-4 exit criterion — canonical state, the remote HTTP+WS
+// server, session spawning and the event fan-out must not depend on a renderer
+// existing — and it is the shape the future headless `claudeui-server` deployment
+// runs in (docs/architecture/sync-core.md §Topology).
+//
+// Distinct from `headlessWindow` above, which still MAKES a window (off-screen, so
+// Playwright can screenshot it) — that one is a harness affordance, this one is a
+// deployment mode. No window means no window chrome, no tray, no menu decisions,
+// no plugins and no log-viewer window: `createWindow()` is simply never called.
+const noWindowMode = process.env.CLAUDEUI_NO_WINDOW === '1' || process.argv.includes('--no-window')
 
 if (headlessWindow) {
   // Chromium's occlusion tracker treats an off-screen window as occluded and
@@ -196,18 +218,19 @@ if (gotSingleInstanceLock && process.platform === 'darwin') {
   }
 }
 
-// Process-lifetime references to window-lifetime constructs. Hoisted to module
-// scope so (a) the single before-quit teardown reaches the LIVE services, (b) a
-// macOS `activate` re-create can stop/replace the previous ones instead of
-// leaking them, and (c) 'second-instance' can focus the current window.
-// TODO(audit): services are still *constructed* inside the window-lifetime
-// createWindow — this is idempotency hardening (R5), not the full move to
-// whenReady/process-lifetime ownership.
+// Process-lifetime state.
+//
+// `core` is the window-independent service graph, constructed ONCE in
+// `app.whenReady()` before any window decision (SyncCore phase 4d) — which is
+// what retired the standing `TODO(audit)` here: services are no longer
+// constructed inside the window-lifetime `createWindow`, so a macOS `activate`
+// re-create no longer rebuilds the SessionManager (and orphans every live
+// session) either. What remains window-lifetime is genuinely window-shaped: the
+// log viewer, the plugin host and the window itself.
+let core: CoreBoot | undefined
 let logViewer: LogViewer | undefined
 let currentWindow: BrowserWindow | undefined
-let currentRemoteServer: RemoteServer | undefined
 let currentPluginManager: PluginManager | undefined
-let currentAutomationManager: ReturnType<typeof registerAutomationIpc> | undefined
 let quitCoordinator: QuitCoordinator | undefined
 
 // Right-click context menu — provides spell-check suggestions in editable
@@ -239,29 +262,17 @@ contextMenu({
 })
 
 /**
- * Sanitized view of the persisted remote-server config for `remote:get-config`
- * / `remote:set-config` responses — NEVER includes password_salt/
- * password_hash/kdf_params (only a `passwordSet` boolean derived from
- * whether a hash is stored). Defaults mirror the DB column defaults so the
- * shape is stable even before any row has been written.
+ * Create the host window and attach it to the already-booted core.
+ *
+ * ADDITIVE by construction (SyncCore phase 4d): everything in here is either
+ * window chrome, a host-local delivery target, or a surface that only exists
+ * because a renderer does (the sync port, the plugin host, the log viewer). Core
+ * — sessions, canonical state, the remote server, watchers — is already running
+ * when this is called, and a windowless boot never calls it at all.
  */
-function sanitizedRemoteConfig(): RemoteConfig {
-  const config = getRemoteConfig()
-  return {
-    port: config?.port ?? 0,
-    bindHost: config?.bindHost ?? null,
-    autostart: config?.autostart ?? false,
-    tlsMode: config?.tlsMode ?? 0,
-    tlsHttpsPort: config?.tlsHttpsPort ?? DEFAULT_TLS_HTTPS_PORT,
-    // NOT exposed: last_serve_https_port / last_serve_local_port. They are
-    // internal bookkeeping for the startup serve reconciliation (ADR-042), not
-    // user-facing configuration.
-    passwordSet: config?.passwordHash != null,
-    passwordUpdatedAt: config?.passwordUpdatedAt ?? null
-  }
-}
-
 function createWindow(): void {
+  const boot = core
+  if (!boot) throw new Error('createWindow() called before bootCore()')
   const isMac = process.platform === 'darwin'
 
   // Create the browser window.
@@ -295,6 +306,16 @@ function createWindow(): void {
     }
   })
   currentWindow = mainWindow
+  // SyncCore phase 4a: publish the host's primary window. As of 4c it is the
+  // target for HOST-LOCAL channels only (window chrome, voice, native pickers,
+  // PTY bytes) — replicated events no longer know what a window is; as of 4d it
+  // lives in `services/host-window.ts`, read at use time by everything that wants
+  // it, so core could be registered before this window existed.
+  setHostWindow(mainWindow)
+  // SyncCore phase 4c: the renderer becomes client #1. Hands it a MessagePort on
+  // every load and answers its `sync` frames from the ring/canonical state,
+  // exactly as the WebSocket server answers a phone's.
+  attachSyncPort(mainWindow)
 
   // Navigation guard (H4). The main window runs a full-privilege preload
   // (`window.api`) with sandbox:false. Without this, any top-frame navigation —
@@ -372,70 +393,22 @@ function createWindow(): void {
     else logger.info(source, message)
   })
 
-  const sessionManager = registerSessionIpc(mainWindow)
-
-  // Cross-engine dispatch (ADR-033 M2, opencode → Claude): thread the
-  // caller-session lookup + dispatch function into OpencodeServerManager
-  // from HERE rather than importing sessionManager/crossEngineDispatcher
-  // inside opencode-hosted-tools.ts or OpencodeServerManager.ts directly —
-  // either import would form a require-cycle (see the cycle note on
-  // CallerSessionLookup in opencode-hosted-tools.ts). main/index.ts sits
-  // above both cycles, so it's the one safe place to close the loop.
-  opencodeServerManager.setCallerSessionLookup((sessionId) => {
-    const session = sessionManager.get(sessionId)
-    if (!session || session.engineId !== 'opencode') return undefined
-    return {
-      cwd: session.cwd,
-      autonomyMode: session.getAutonomyMode?.() ?? 'default',
-      emit: (channel, data) => session.emit(channel, data),
-      addDispatchedCost: (engineId, modelId, costUsd) =>
-        session.addDispatchedCost(engineId, modelId, costUsd)
-    }
-  })
-  opencodeServerManager.setDispatchAgent((req, ctx) => crossEngineDispatcher.dispatch(req, ctx))
-
+  // Attach the window to the already-booted core (SyncCore phase 4d).
+  //
+  // AuthManager.setWindow resets the login-success subscribers per window
+  // generation and the two `init` calls re-register them (C-6), so the trio runs
+  // as a unit here even though core already ran it once with no window.
   authManager.setWindow(mainWindow)
   accountManager.init(mainWindow)
   claudeAuthProvider.init(mainWindow)
-  // Reconcile central credentials first, then materialize all shared-provider
-  // routes. Both are best-effort and must never block app startup.
-  void (async () => {
-    try {
-      await credentialSync.start()
-    } catch (err) {
-      logger.warn(
-        'main',
-        `credentialSync.start() failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`
-      )
-    }
-    try {
-      await sharedProviderService.syncAll()
-    } catch (err) {
-      logger.warn(
-        'main',
-        `sharedProviderService.syncAll() failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`
-      )
-    }
-  })()
-  registerTerminalIpc(mainWindow)
-  // Stop the previous automation manager (macOS re-create) before replacing it,
-  // then hoist so the single before-quit teardown reaches the live instance.
-  currentAutomationManager?.stopAll()
-  const automationManager = registerAutomationIpc(mainWindow)
-  currentAutomationManager = automationManager
 
-  // Remote access server. Stop any previous server first (macOS re-create) so it
-  // doesn't keep listening on its old port with its stale token / RemoteBridge.
-  currentRemoteServer?.stop()
-  const remoteDispatcher = new RemoteDispatcher()
-  // ONE TailscaleManager shared between the server and the detect IPC, so the
-  // binary/version cache is coherent (and Settings' pre-flight probe sees exactly
-  // what a TLS-mode start will see).
-  const tailscaleManager = new TailscaleManager()
-  const remoteServer = new RemoteServer(remoteDispatcher, undefined, tailscaleManager)
-  currentRemoteServer = remoteServer
-  remoteServer.setWindow(mainWindow)
-  registerRemoteHandlers(remoteDispatcher, sessionManager, mainWindow)
+  // Where the desktop's own `terminal:data` / `terminal:exit` frames go — and, on
+  // that window's `closed`, the shell teardown. The pty manager itself is
+  // process-lifetime and shared with the remote transport (phase 2 multi-attach).
+  terminalService.setWindow(mainWindow)
+
+  // The one host-local channel the remote server raises (`remote:status`).
+  boot.remoteServer.setWindow(mainWindow)
 
   // Log viewer (standalone debug window) — init early so renderer console
   // capture starts before plugins load. Backend logs are captured from
@@ -449,9 +422,9 @@ function createWindow(): void {
   currentPluginManager?.stopAll()
   const pluginManager = new PluginManager({
     win: mainWindow,
-    sessionManager,
-    automationManager,
-    remoteDispatcher
+    sessionManager: boot.sessionManager,
+    automationManager: boot.automationManager,
+    remoteDispatcher: boot.remoteDispatcher
   })
   currentPluginManager = pluginManager
   pluginManager.loadAll().catch((err) => {
@@ -465,223 +438,6 @@ function createWindow(): void {
   ipcMain.handle('plugin:reload', (_e, id: string) => pluginManager.reloadPlugin(id))
   ipcMain.handle('plugin:views', () => pluginManager.getViews())
   ipcMain.handle('plugin:preload-path', () => join(__dirname, '../preload/plugin-preload.js'))
-
-  // Remote access IPC handlers
-  for (const ch of [
-    'remote:interfaces',
-    'remote:start',
-    'remote:stop',
-    'remote:status',
-    'remote:get-config',
-    'remote:set-config',
-    'remote:set-password',
-    'remote:clear-password',
-    'remote:tailscale-detect',
-    'remote:force-reserve'
-  ]) {
-    ipcMain.removeHandler(ch)
-  }
-  ipcMain.handle('remote:interfaces', () => {
-    return getNetworkInterfaces()
-  })
-  ipcMain.handle(
-    'remote:start',
-    async (_e, opts?: { port?: number; host?: string; tunnel?: boolean }) => {
-      // Harness instances never bring the listener up: the port and the
-      // `tailscale serve` config it would claim belong to the primary app.
-      if (remoteAccessDisabled) {
-        throw new Error(
-          'Remote access is disabled in this instance (CLAUDEUI_DISABLE_REMOTE=1 / --disable-remote)'
-        )
-      }
-      // Fixed port/bind-host now come from the persisted config so a
-      // configured port takes effect on every start, not just autostart.
-      // `opts.host` (from the modal's interface picker) still overrides the
-      // persisted bind host for a one-off start; `opts.port` is intentionally
-      // NOT consulted here — the modal never sends one, and the persisted
-      // port is the single source of truth for "what port do we listen on".
-      const config = getRemoteConfig()
-      const port = config?.port ?? 0
-      const host = opts?.host ?? config?.bindHost ?? undefined
-      // TLS mode is a persisted setting, not a per-start option — but the tunnel
-      // still wins (RemoteServer enforces the mutual exclusion). A serve failure
-      // does NOT fail this call (ADR-042): the loopback listener stays up and the
-      // reason travels in `RemoteStatus.tls.serveError`, which the modal shows and
-      // the app-level banner offers a one-click Force re-serve for. Only a listen
-      // failure (e.g. EADDRINUSE) rejects here.
-      return await remoteServer.start(port, host, {
-        tunnel: opts?.tunnel,
-        tls: (config?.tlsMode ?? 0) === 1
-      })
-    }
-  )
-  ipcMain.handle('remote:stop', () => {
-    remoteServer.stop()
-  })
-  ipcMain.handle('remote:status', () => {
-    return remoteServer.getStatus()
-  })
-
-  // Remote-server config + credential IPC (Phase 1 of remote auth). Desktop-
-  // renderer-only: all four channels are in RemoteDispatcher.BLOCKED and are
-  // never registered on the remote dispatcher (remote-handlers.ts), so a
-  // remote client can never reach them. remote:get-config NEVER returns
-  // password_salt/password_hash/kdf_params — only a passwordSet boolean.
-  ipcMain.handle('remote:get-config', () => sanitizedRemoteConfig())
-  ipcMain.handle(
-    'remote:set-config',
-    (
-      _e,
-      partial: {
-        port?: number
-        bindHost?: string | null
-        autostart?: boolean
-        tlsMode?: number
-        tlsHttpsPort?: number
-      }
-    ) => {
-      if (partial.port !== undefined && partial.port !== 0) {
-        if (partial.port < 1024 || partial.port > 65535) {
-          throw new Error('Port must be 0 (random) or between 1024 and 65535')
-        }
-      }
-      // Unlike the local listen port, 0 is NOT allowed: `tailscale serve` binds
-      // one concrete HTTPS port and the whole point of pinning it (ADR-042) is a
-      // stable bookmark. Any other uint16 is accepted — the CLI takes any port;
-      // 443/8443/10000 is only the Funnel-compatible triple.
-      if (partial.tlsHttpsPort !== undefined) {
-        if (
-          !Number.isInteger(partial.tlsHttpsPort) ||
-          partial.tlsHttpsPort < 1 ||
-          partial.tlsHttpsPort > 65535
-        ) {
-          throw new Error('Tailscale HTTPS port must be between 1 and 65535')
-        }
-      }
-      dbSetRemoteConfig(partial)
-      return sanitizedRemoteConfig()
-    }
-  )
-  // Provisioning/clearing rotates the credential, so any live session that
-  // authenticated with the OLD password must not outlive it. Token clients are
-  // untouched (their credential didn't change).
-  ipcMain.handle('remote:set-password', (_e, password: string) => {
-    provisionPassword(password)
-    remoteServer.disconnectPasswordClients()
-  })
-  ipcMain.handle('remote:clear-password', () => {
-    clearRemotePassword()
-    remoteServer.disconnectPasswordClients()
-  })
-  // Pre-flight probe for the Settings TLS toggle. Returned verbatim — the failure
-  // variants carry an actionable, user-facing `message`. Desktop-only (in
-  // RemoteDispatcher.BLOCKED): it discloses the node's DNS name and the owner's
-  // login. The explicit return type is the compile-time link between the manager's
-  // union and the shared one the renderer consumes.
-  ipcMain.handle('remote:tailscale-detect', async (): Promise<TailscaleDetection> => {
-    return await tailscaleManager.detect()
-  })
-  // Force re-serve (ADR-042): claim the pinned HTTPS port, overwriting whatever
-  // serve handler holds it. Desktop-only (in RemoteDispatcher.BLOCKED) — a
-  // remote client must never mutate the serve config of the very server it is
-  // connected through. Throws propagate to the renderer so the banner can show
-  // why the takeover failed.
-  ipcMain.handle('remote:force-reserve', async (): Promise<void> => {
-    // Machine-global mutation — a harness instance taking over the pinned port
-    // would knock the primary app's remote access offline.
-    if (remoteAccessDisabled) {
-      throw new Error(
-        'Remote access is disabled in this instance (CLAUDEUI_DISABLE_REMOTE=1 / --disable-remote)'
-      )
-    }
-    await remoteServer.forceReserve()
-  })
-
-  // Autostart: fire-and-forget so a listen failure (e.g. EADDRINUSE from a
-  // stale previous instance) never blocks or crashes app startup. The error
-  // reaches the UI through RemoteStatus.lastError (set by RemoteServer.start's
-  // catch block), not through this try/catch — this one is just a backstop
-  // logger so an unexpected throw (not a listen failure) doesn't go silent.
-  //
-  // A remote-disabled instance skips the WHOLE block, reconciliation included:
-  // reconcileServeRecord() cannot tell "leaked record from a previous run" from
-  // "record owned by the live primary instance", so running it here would tear
-  // down the primary app's serve entry.
-  if (remoteAccessDisabled) {
-    logger.info(
-      'main',
-      'Remote access disabled for this instance (CLAUDEUI_DISABLE_REMOTE) — skipping serve reconciliation and autostart'
-    )
-  } else {
-    void (async () => {
-      try {
-        // Serve-config reconciliation (ADR-042 decision 3) runs FIRST and
-        // unconditionally — even with autostart/TLS off, because the leaked entry
-        // it removes was created by a previous run and nothing else can clean it
-        // up. It swallows its own failures (a down daemon just means the record
-        // survives for the next launch), so it can never block autostart.
-        await remoteServer.reconcileServeRecord()
-        const config = getRemoteConfig()
-        if (config?.autostart) {
-          // autostartRetry: at login the Tailscale daemon may not be up yet, and a
-          // failed `tailscale serve` here has no modal to report to — so keep the
-          // (loopback-only) listener and retry in the background instead of failing.
-          await remoteServer.start(config.port, config.bindHost ?? undefined, {
-            tls: config.tlsMode === 1,
-            autostartRetry: true
-          })
-        }
-      } catch (err) {
-        logger.error(
-          'main',
-          `Remote server autostart failed: ${err instanceof Error ? err.message : String(err)}`
-        )
-      }
-    })()
-  }
-
-  // Before-quit: give the renderer a chance to prompt about active worktrees.
-  // The coordinator + its listener are created exactly ONCE (macOS `activate`
-  // may call createWindow again). Its dependency closures read the module-level
-  // service refs, so the single listener always tears down the LIVE services —
-  // and only on the real quit, never on a cancelled first pass (the verified bug
-  // this fixes: services were destroyed on the first, possibly-cancelled pass,
-  // and cancel still force-quit ~5s later because there was no cancel path).
-  if (!quitCoordinator) {
-    quitCoordinator = new QuitCoordinator({
-      notifyRenderer: () => {
-        if (currentWindow && !currentWindow.isDestroyed()) {
-          currentWindow.webContents.send('app:before-quit')
-        }
-      },
-      teardownServices: () => {
-        logViewer?.destroy()
-        currentPluginManager?.stopAll()
-        currentAutomationManager?.stopAll()
-        credentialSync.stop()
-        currentRemoteServer?.stop()
-        // Stop the service session (lightweight CLI subprocess for usage polling)
-        serviceSession.stop()
-        // Reap any shared opencode servers (Windows tree-kill) so opencode.exe
-        // children don't orphan on quit. Idempotent — safe to run on every invocation.
-        opencodeServerManager.dispose()
-      },
-      quit: () => app.quit()
-    })
-    app.on('before-quit', (e) => {
-      quitCoordinator!.handleBeforeQuit(() => e.preventDefault())
-    })
-  }
-
-  // Renderer confirmed the quit prompt (Keep-all / Remove-all). Re-registered per
-  // window with the same removeHandler dedupe used elsewhere; delegates to the
-  // single module-level coordinator.
-  ipcMain.removeHandler('app:quit-confirm')
-  ipcMain.handle('app:quit-confirm', () => quitCoordinator?.confirm())
-  // Renderer cancelled the quit prompt: clear the fallback timer and leave the
-  // services untouched (they were never torn down on the first pass).
-  ipcMain.removeHandler('app:quit-cancel')
-  ipcMain.handle('app:quit-cancel', () => quitCoordinator?.cancel())
 
   // Renderer error logging → main process log file
   ipcMain.removeAllListeners('log:error')
@@ -797,6 +553,12 @@ function createWindow(): void {
   // Close log viewer (and any other child windows) when the main window closes
   mainWindow.on('closed', () => {
     logViewer?.close()
+    // Un-publish the host handle: after this point there IS no host window (macOS
+    // keeps the process alive with none), and every reader copes with null. Leaving
+    // a destroyed window published would hand it to the next session spawn or a
+    // native dialog. Guarded so a macOS `activate` that already published a
+    // replacement is not clobbered by the old window's late `closed`.
+    if (getHostWindow() === mainWindow) setHostWindow(null)
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
@@ -849,19 +611,18 @@ app.whenReady().then(() => {
   // ── About panel ────────────────────────────────────────────────────
   const rawVersion = app.getVersion() // from package.json "version"
   const appVersion = is.dev || rawVersion === '1.0.0' ? 'Local Build' : rawVersion
-  const sdkVersion = getSdkVersion()
-  const cliVersion = sdkVersion !== 'unknown' ? sdkVersion.replace(/^0\./, '2.') : 'unknown'
+  const cliVersion = getCliVersion()
 
   app.setAboutPanelOptions({
     applicationName: 'ClaudeUI',
     applicationVersion: appVersion,
-    version: `SDK ${sdkVersion} · CLI ${cliVersion}`,
+    version: `CLI ${cliVersion}`,
     copyright: '© 2025 Daniel Liu',
     website: 'https://github.com/wellofspirit/ClaudeUI'
   })
 
   // ── Version info IPC (for Settings dialog) ─────────────────────────
-  const versionInfo = { appVersion, sdkVersion, cliVersion }
+  const versionInfo = { appVersion, cliVersion }
   ipcMain.handle('app:version-info', () => versionInfo)
   // Mirror to the remote dispatcher so the web client's Settings dialog can
   // read the server's build versions.
@@ -922,6 +683,61 @@ app.whenReady().then(() => {
   // No server spin-up — reads the persisted ~/.claude/ui/opencode-prices.json if present.
   loadPersistedPrices()
 
+  // ── Core, BEFORE any window decision (SyncCore phase 4d) ───────────
+  // Sessions, canonical state, the remote HTTP+WS server, watchers, seeds. None
+  // of it needs a window; `createWindow()` below only attaches to it.
+  core = bootCore({ remoteAccessDisabled })
+
+  // Before-quit: give the renderer (if there is one) a chance to prompt about
+  // active worktrees, then tear the services down. Process-lifetime — it moved
+  // out of `createWindow` in 4d, because a windowless run still has services to
+  // stop, and because "created exactly once" is a property of whenReady rather
+  // than a `if (!quitCoordinator)` guard against re-entry.
+  //
+  // Only on the real quit, never on a cancelled first pass (the verified bug this
+  // fixes: services were destroyed on the first, possibly-cancelled pass, and
+  // cancel still force-quit ~5s later because there was no cancel path).
+  quitCoordinator = new QuitCoordinator({
+    notifyRenderer: () => {
+      if (currentWindow && !currentWindow.isDestroyed()) {
+        currentWindow.webContents.send('app:before-quit')
+      }
+    },
+    teardownServices: () => {
+      logViewer?.destroy()
+      currentPluginManager?.stopAll()
+      core?.automationManager.stopAll()
+      credentialSync.stop()
+      void core?.remoteServer.stop()
+      // Stop the service session (lightweight CLI subprocess for usage polling)
+      serviceSession.stop()
+      // Reap any shared opencode servers (Windows tree-kill) so opencode.exe
+      // children don't orphan on quit. Idempotent — safe to run on every invocation.
+      opencodeServerManager.dispose()
+    },
+    quit: () => app.quit(),
+    // The first before-quit pass asks the renderer about active worktrees and waits.
+    // Windowless there is nobody to ask — and no UI decision to make — so collapse
+    // the wait instead of stalling a headless shutdown for the full fallback.
+    ...(noWindowMode ? { fallbackMs: 0 } : {})
+  })
+  app.on('before-quit', (e) => {
+    quitCoordinator!.handleBeforeQuit(() => e.preventDefault())
+  })
+  // Renderer confirmed / cancelled the quit prompt; delegates to the single
+  // coordinator. Registered here rather than per window for the same reason.
+  ipcMain.handle('app:quit-confirm', () => quitCoordinator?.confirm())
+  ipcMain.handle('app:quit-cancel', () => quitCoordinator?.cancel())
+
+  if (noWindowMode) {
+    logger.info(
+      'main',
+      'CLAUDEUI_NO_WINDOW — running windowless: no BrowserWindow, no plugins, no log-viewer window. ' +
+        'Remote clients are the only clients.'
+    )
+    return
+  }
+
   createWindow()
 
   app.on('activate', function () {
@@ -935,6 +751,11 @@ app.whenReady().then(() => {
 // for applications and their menu bar to stay active until the user quits
 // explicitly with Cmd + Q.
 app.on('window-all-closed', () => {
+  // Windowless mode never has a window to close, so this should not fire at all —
+  // but a transient child window (a future dialog, a devtools detach) closing must
+  // not be able to kill a headless server. Explicit, because "it can't happen" is
+  // exactly what made no-window an untested state before 4d.
+  if (noWindowMode) return
   if (process.platform !== 'darwin') {
     app.quit()
   }

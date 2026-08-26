@@ -93,7 +93,12 @@ describe('PiDefaultModelSection', () => {
     expect(within(field).getByTestId('ModelPicker')).toBeTruthy()
     expect(pickerOptionValues(field)).toEqual(
       // Pinned default row, the discovered models, then the custom escape hatch.
-      expect.arrayContaining(['', 'openai-codex/gpt-5.6-luna', 'anthropic/claude-sonnet-5', '__custom__'])
+      expect.arrayContaining([
+        '',
+        'openai-codex/gpt-5.6-luna',
+        'anthropic/claude-sonnet-5',
+        '__custom__'
+      ])
     )
     pickModel(field, 'openai-codex/gpt-5.6-luna')
     await waitFor(() =>

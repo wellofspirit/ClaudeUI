@@ -1,10 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { RemoteServerSettings } from '../RemoteServerSettings'
-import {
-  selectMenuValue,
-  selectMenuOptionLabels
-} from '../../../../../test/helpers/select-menu'
+import { selectMenuValue, selectMenuOptionLabels } from '../../../../../test/helpers/select-menu'
 import type { RemoteConfig, NetworkInterfaceInfo } from '../../../../../shared/types'
 
 const baseConfig: RemoteConfig = {
@@ -13,6 +10,19 @@ const baseConfig: RemoteConfig = {
   autostart: false,
   tlsMode: 0,
   tlsHttpsPort: 443,
+  allowTerminal: false,
+  shellGrantIdleMinutes: 10,
+  // ADR-052 policy fields: AUTO with nothing enrolled, i.e. the legacy stack.
+  authPolicy: null,
+  effectiveAuthPolicy: 'password',
+  credentialCount: 0,
+  passwordBreakGlass: true,
+  // ADR-054 second axis, at its defaults (series 2 owns the tier UI).
+  stepUpTier: 'medium',
+  effectiveStepUpTier: 'medium',
+  stepUpMutationIdleMinutes: 60,
+  sessionMaxAgeHours: 4,
+  auditRetentionDays: 365,
   passwordSet: false,
   passwordUpdatedAt: null
 }
@@ -28,7 +38,12 @@ const api = {
   setRemotePassword: vi.fn(),
   clearRemotePassword: vi.fn(),
   getNetworkInterfaces: vi.fn(),
-  detectTailscale: vi.fn()
+  detectTailscale: vi.fn(),
+  // Needed by the nested RemotePasskeySettings (ADR-052), which subscribes to
+  // `remote:status` and reads the credential list. Its own behavior is covered
+  // in RemotePasskeySettings.component.test.tsx; here they only have to exist.
+  onRemoteStatus: vi.fn(() => () => {}),
+  webauthnCredentials: vi.fn(async () => [])
 }
 
 describe('RemoteServerSettings', () => {
@@ -54,8 +69,6 @@ describe('RemoteServerSettings', () => {
     expect(root).toBeInTheDocument()
     expect(screen.getByTestId('RemoteServerSettings.port')).toHaveValue('4568')
     expect(selectMenuValue(screen.getByTestId('RemoteServerSettings.bindHost'))).toBe('10.0.0.5')
-    expect(screen.getByTestId('RemoteServerSettings.passwordStatus')).toHaveTextContent('Set')
-    expect(screen.getByTestId('RemoteServerSettings.setPassword')).toHaveTextContent('Change')
   })
 
   it('shows a validation message for an out-of-range port and never calls setRemoteConfig', async () => {
@@ -163,63 +176,27 @@ describe('RemoteServerSettings', () => {
     await waitFor(() => expect(api.setRemoteConfig).toHaveBeenCalledWith({ autostart: true }))
   })
 
-  it('shows a mismatch error when password + confirm differ and never calls the IPC', async () => {
+  // The password FIELDS moved into the settings editor (`SessionSecuritySettings`,
+  // ADR-054 §6 amendment): they are one of the six facts an operator reviews and
+  // changes together, inside the bounded editing mode. Their validation and
+  // rotation flows are covered by that component's suite. What stayed here is
+  // CLEARING the credential, which is host-anchor only — removing the last way
+  // back in over the network belongs beside the transport controls.
+  it('offers Clear only on the host, and only when a password exists', async () => {
+    api.getRemoteConfig.mockResolvedValue({ ...baseConfig, passwordSet: true })
     render(<RemoteServerSettings />)
     await screen.findByTestId('RemoteServerSettings')
-    fireEvent.change(screen.getByTestId('RemoteServerSettings.passwordInput'), {
-      target: { value: 'a-good-password-1' }
-    })
-    fireEvent.change(screen.getByTestId('RemoteServerSettings.passwordConfirm'), {
-      target: { value: 'a-different-password' }
-    })
-    fireEvent.click(screen.getByTestId('RemoteServerSettings.setPassword'))
-    await screen.findByTestId('RemoteServerSettings.passwordError')
-    expect(screen.getByTestId('RemoteServerSettings.passwordError')).toHaveTextContent(
-      'Passwords do not match'
-    )
-    expect(api.setRemotePassword).not.toHaveBeenCalled()
+    expect(screen.getByTestId('RemoteServerSettings.clearPassword')).toBeInTheDocument()
+    // …and no rotation surface: that is the editor's now.
+    expect(screen.queryByTestId('RemoteServerSettings.passwordInput')).toBeNull()
+    expect(screen.queryByTestId('RemoteServerSettings.setPassword')).toBeNull()
   })
 
-  it('shows an inline error from the IPC throw (min-length rejection) without clearing the fields', async () => {
-    api.setRemotePassword.mockRejectedValueOnce(
-      new Error('Password must be at least 12 characters')
-    )
+  it('hides Clear when no password is set', async () => {
+    api.getRemoteConfig.mockResolvedValue({ ...baseConfig, passwordSet: false })
     render(<RemoteServerSettings />)
     await screen.findByTestId('RemoteServerSettings')
-    fireEvent.change(screen.getByTestId('RemoteServerSettings.passwordInput'), {
-      target: { value: 'valid-length-pw' }
-    })
-    fireEvent.change(screen.getByTestId('RemoteServerSettings.passwordConfirm'), {
-      target: { value: 'valid-length-pw' }
-    })
-    fireEvent.click(screen.getByTestId('RemoteServerSettings.setPassword'))
-    await waitFor(() => expect(api.setRemotePassword).toHaveBeenCalledWith('valid-length-pw'))
-    await screen.findByTestId('RemoteServerSettings.passwordError')
-    expect(screen.getByTestId('RemoteServerSettings.passwordError')).toHaveTextContent(
-      'Password must be at least 12 characters'
-    )
-  })
-
-  it('sets a valid matching password, then reloads and clears the input fields', async () => {
-    api.setRemotePassword.mockResolvedValue(undefined)
-    api.getRemoteConfig
-      .mockResolvedValueOnce(baseConfig)
-      .mockResolvedValueOnce({ ...baseConfig, passwordSet: true, passwordUpdatedAt: Date.now() })
-    render(<RemoteServerSettings />)
-    await screen.findByTestId('RemoteServerSettings')
-    fireEvent.change(screen.getByTestId('RemoteServerSettings.passwordInput'), {
-      target: { value: 'a-good-password-123' }
-    })
-    fireEvent.change(screen.getByTestId('RemoteServerSettings.passwordConfirm'), {
-      target: { value: 'a-good-password-123' }
-    })
-    fireEvent.click(screen.getByTestId('RemoteServerSettings.setPassword'))
-    await waitFor(() => expect(api.setRemotePassword).toHaveBeenCalledWith('a-good-password-123'))
-    await waitFor(() =>
-      expect(screen.getByTestId('RemoteServerSettings.passwordStatus')).toHaveTextContent('Set')
-    )
-    expect(screen.getByTestId('RemoteServerSettings.passwordInput')).toHaveValue('')
-    expect(screen.getByTestId('RemoteServerSettings.passwordConfirm')).toHaveValue('')
+    expect(screen.queryByTestId('RemoteServerSettings.clearPassword')).toBeNull()
   })
 
   // Phase 3 — the TLS toggle is gated on a LIVE probe. `tailscale serve` on a
@@ -268,9 +245,7 @@ describe('RemoteServerSettings', () => {
       await waitFor(() => expect(api.setRemoteConfig).toHaveBeenCalledWith({ tlsMode: 1 }))
       // The bind-interface picker is meaningless in TLS mode.
       await waitFor(() =>
-        expect(
-          screen.getByTestId('RemoteServerSettings.bindHost.trigger')
-        ).toBeDisabled()
+        expect(screen.getByTestId('RemoteServerSettings.bindHost.trigger')).toBeDisabled()
       )
       expect(screen.getByTestId('RemoteServerSettings.bindHostTlsHint')).toBeInTheDocument()
     })
@@ -297,11 +272,9 @@ describe('RemoteServerSettings', () => {
     })
   })
 
-  it('always shows the transport-honesty note under the password block', async () => {
-    render(<RemoteServerSettings />)
-    const note = await screen.findByTestId('RemoteServerSettings.passwordTransportNote')
-    expect(note).toHaveTextContent('only as private as the network')
-  })
+  // The transport-honesty note (ADR-030 spirit — a password proof is a bearer
+  // secret, only as private as the network it crosses) moved with the password
+  // fields into the settings editor, and is asserted there.
 
   it('clear password requires a confirm click before calling the IPC', async () => {
     api.getRemoteConfig.mockResolvedValue({

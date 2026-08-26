@@ -26,6 +26,7 @@ interface AccountUsage {
   sevenDay: RateWindow | null
   sevenDaySonnet: RateWindow | null
   sevenDayOpus: RateWindow | null
+  sevenDayModels: Array<{ label: string; window: RateWindow }> | null
   extraUsage: ExtraUsage | null
   planName: string | null
   fetchedAt: number
@@ -38,6 +39,7 @@ function defaultUsage(): AccountUsage {
     sevenDay: null,
     sevenDaySonnet: null,
     sevenDayOpus: null,
+    sevenDayModels: null,
     extraUsage: null,
     planName: null,
     fetchedAt: Date.now(),
@@ -58,9 +60,7 @@ function parseResponse(data: Record<string, unknown>): AccountUsage {
 
   const parseWindow = (key: string): RateWindow | null => {
     const w = windowSource[key] as
-      | { utilization?: number | null; resets_at?: string | null }
-      | undefined
-      | null
+      { utilization?: number | null; resets_at?: string | null } | undefined | null
     if (!w || typeof w.utilization !== 'number') return null
     return {
       usedPercent: w.utilization,
@@ -89,6 +89,26 @@ function parseResponse(data: Record<string, unknown>): AccountUsage {
     }
   }
 
+  const sevenDayModels: Array<{ label: string; window: RateWindow }> = []
+  const limits = windowSource['limits']
+  if (Array.isArray(limits)) {
+    for (const raw of limits) {
+      const entry = raw as {
+        kind?: unknown
+        percent?: unknown
+        resets_at?: string | null
+        scope?: { model?: { display_name?: unknown } | null } | null
+      } | null
+      if (!entry || typeof entry !== 'object' || entry.kind !== 'weekly_scoped') continue
+      const label = entry.scope?.model?.display_name
+      if (typeof label !== 'string' || typeof entry.percent !== 'number') continue
+      sevenDayModels.push({
+        label,
+        window: { usedPercent: entry.percent, resetsAt: entry.resets_at ?? null }
+      })
+    }
+  }
+
   const planName = typeof data.subscription_type === 'string' ? data.subscription_type : null
 
   return {
@@ -96,6 +116,7 @@ function parseResponse(data: Record<string, unknown>): AccountUsage {
     sevenDay: parseWindow('seven_day'),
     sevenDaySonnet: parseWindow('seven_day_sonnet'),
     sevenDayOpus: parseWindow('seven_day_opus'),
+    sevenDayModels: sevenDayModels.length ? sevenDayModels : null,
     extraUsage,
     planName,
     fetchedAt: Date.now(),
@@ -321,6 +342,115 @@ describe('parseResponse — structured get_usage shape', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// Weekly per-model buckets (`rate_limits.limits[]`).
+//
+// The modern payload adds a generalized `limits[]` array beside the legacy
+// per-window keys. A weekly per-model bucket (e.g. Fable) exists ONLY there —
+// seven_day_opus / seven_day_sonnet are null on such accounts. cli.js keeps
+// `kind === "weekly_scoped"` entries with a `scope.model` and titles the bar
+// from `scope.model.display_name`; parseResponse mirrors that contract. The
+// `percent` field is already 0-100 (like `utilization`, not a header fraction).
+// ---------------------------------------------------------------------------
+
+describe('parseResponse — weekly per-model buckets (limits[])', () => {
+  const fable = {
+    kind: 'weekly_scoped',
+    group: 'weekly',
+    percent: 32,
+    severity: 'normal',
+    resets_at: '2026-08-29T05:00:00.991527+00:00',
+    scope: { model: { id: null, display_name: 'Fable' }, surface: null },
+    is_active: false
+  }
+  const session = {
+    kind: 'session',
+    group: 'session',
+    percent: 39,
+    resets_at: '2026-08-25T11:39:59.991307+00:00',
+    scope: null,
+    is_active: true
+  }
+  const weeklyAll = {
+    kind: 'weekly_all',
+    group: 'weekly',
+    percent: 18,
+    resets_at: '2026-08-29T04:59:59.991327+00:00',
+    scope: null,
+    is_active: false
+  }
+
+  it('keeps weekly_scoped entries and labels them from scope.model.display_name', () => {
+    const result = parseResponse({ five_hour: { utilization: 39 }, limits: [fable] })
+    expect(result.sevenDayModels).toEqual([
+      { label: 'Fable', window: { usedPercent: 32, resetsAt: '2026-08-29T05:00:00.991527+00:00' } }
+    ])
+  })
+
+  it('ignores session and weekly_all entries', () => {
+    const result = parseResponse({ five_hour: { utilization: 39 }, limits: [session, weeklyAll] })
+    expect(result.sevenDayModels).toBeNull()
+  })
+
+  it('reads limits[] nested under rate_limits (structured relay shape)', () => {
+    const result = parseResponse({
+      rate_limits_available: true,
+      rate_limits: {
+        five_hour: { utilization: 39 },
+        seven_day_opus: null,
+        seven_day_sonnet: null,
+        // Opaque codename keys the endpoint also serves — never surfaced.
+        nimbus_quill: { utilization: 0, resets_at: null },
+        limits: [session, weeklyAll, fable]
+      }
+    })
+    expect(result.sevenDayModels).toEqual([
+      { label: 'Fable', window: { usedPercent: 32, resetsAt: '2026-08-29T05:00:00.991527+00:00' } }
+    ])
+    expect(result.sevenDayOpus).toBeNull()
+    expect(result.sevenDaySonnet).toBeNull()
+  })
+
+  it('skips malformed weekly_scoped entries', () => {
+    const result = parseResponse({
+      five_hour: { utilization: 39 },
+      limits: [
+        null,
+        'nonsense',
+        { kind: 'weekly_scoped', percent: 10, scope: null }, // no model
+        { kind: 'weekly_scoped', percent: 10, scope: { model: null } },
+        { kind: 'weekly_scoped', percent: 10, scope: { model: { display_name: 42 } } },
+        { kind: 'weekly_scoped', percent: 'lots', scope: { model: { display_name: 'Fable' } } },
+        fable
+      ]
+    })
+    expect(result.sevenDayModels).toEqual([
+      { label: 'Fable', window: { usedPercent: 32, resetsAt: '2026-08-29T05:00:00.991527+00:00' } }
+    ])
+  })
+
+  it('defaults resetsAt to null and keeps every scoped model', () => {
+    const result = parseResponse({
+      five_hour: { utilization: 39 },
+      limits: [
+        fable,
+        { kind: 'weekly_scoped', percent: 7, scope: { model: { display_name: 'Quill' } } }
+      ]
+    })
+    expect(result.sevenDayModels).toEqual([
+      { label: 'Fable', window: { usedPercent: 32, resetsAt: '2026-08-29T05:00:00.991527+00:00' } },
+      { label: 'Quill', window: { usedPercent: 7, resetsAt: null } }
+    ])
+  })
+
+  it('returns null when limits is absent or not an array', () => {
+    expect(parseResponse({ five_hour: { utilization: 39 } }).sevenDayModels).toBeNull()
+    expect(
+      parseResponse({ five_hour: { utilization: 39 }, limits: 'nope' }).sevenDayModels
+    ).toBeNull()
+  })
+})
+
 describe('updateFromRateLimitEvent', () => {
   it('updates fiveHour from rate_limit_event', () => {
     const result = updateFromRateLimitEvent(null, {
@@ -460,7 +590,10 @@ describe('recordWindowSampleFromUsage decision logic', () => {
     knownEnds: number[],
     lastKey: string | null,
     now: number
-  ): { sample: { accountUuid: string; usedPercent: number; canonicalEnd: number } | null; key: string | null } {
+  ): {
+    sample: { accountUuid: string; usedPercent: number; canonicalEnd: number } | null
+    key: string | null
+  } {
     if (usage.error) return { sample: null, key: lastKey }
     if (!accountUuid) return { sample: null, key: lastKey }
     const resetsAt = usage.fiveHour.resetsAt
@@ -574,8 +707,20 @@ describe('recordWindowSampleFromUsage decision logic', () => {
     const knownEnds: number[] = []
     const t1 = new Date('2026-06-22T13:00:00.578Z').toISOString()
     const t2 = new Date('2026-06-22T13:00:30.000Z').toISOString() // 30s later, within tolerance
-    decide({ error: null, fiveHour: { usedPercent: 42, resetsAt: t1 } }, 'uuid_1', knownEnds, null, NOW)
-    decide({ error: null, fiveHour: { usedPercent: 50, resetsAt: t2 } }, 'uuid_1', knownEnds, null, NOW)
+    decide(
+      { error: null, fiveHour: { usedPercent: 42, resetsAt: t1 } },
+      'uuid_1',
+      knownEnds,
+      null,
+      NOW
+    )
+    decide(
+      { error: null, fiveHour: { usedPercent: 50, resetsAt: t2 } },
+      'uuid_1',
+      knownEnds,
+      null,
+      NOW
+    )
     expect(knownEnds).toHaveLength(1) // both snapped to one canonical end
   })
 })

@@ -56,7 +56,10 @@ const TASKSTOP_A_NO_VALIDATOR_EMITTER =
 function taskstopANoValidatorUpstreamed(src: string): boolean {
   const match = src.match(TASKSTOP_A_NO_VALIDATOR_EMITTER)
   if (!match) return false
-  const emitterName = match[1]
+  // Escape `$` — minified names may contain it (2.1.231 named this emitter
+  // `$m`), and unescaped it reads as an end-of-input anchor. That silently
+  // inverts `leakExists` into a false "no leak". Mirrors apply.mjs.
+  const emitterName = match[1].replace(/[$]/g, '\\$&')
   const translationExists = new RegExp(
     `status:"killed",[\\s\\S]{1,400}?${emitterName}\\([^,]+,"stopped"`
   ).test(src)
@@ -76,8 +79,11 @@ const TASKSTOP_B_UPSTREAM = /notified:!0[\s\S]{1,300}?[\w$]+\([\w$]+,"stopped",\
 const RESUME_FIX_UPSTREAM_BUILD =
   /([\w$]+)\.set\(([\w$]+)\.uuid,([\w$]+)&&\1\.has\(\3\)\?\1\.get\(\3\)\?\?null:\3\);(?:continue|return)/
 
+// 2.1.231 inserted a telemetry call ahead of the assignment:
+//   ...F.has(ee.parentUuid))mOf("rewrote"),ee.parentUuid=F.get(ee.parentUuid)??null
+// Tolerate one such leading call. Mirrors apply.mjs.
 const RESUME_FIX_UPSTREAM_APPLY =
-  /([\w$]+)\.parentUuid&&([\w$]+)\.has\(\1\.parentUuid\)\)\1\.parentUuid=\2\.get\(\1\.parentUuid\)\?\?null/
+  /([\w$]+)\.parentUuid&&([\w$]+)\.has\(\1\.parentUuid\)\)(?:[\w$]+\([^()]*\),)?\1\.parentUuid=\2\.get\(\1\.parentUuid\)\?\?null/
 
 /** Upstream detection for mcp-tool-refresh (CLI 2.1.114+). The CLI now
  *  calls refreshTools() before each API call natively — our patches are a

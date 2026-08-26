@@ -71,7 +71,12 @@ describe('SubagentMessages — tool-result image thumbnails', () => {
     id: 'm-tool-1',
     role: 'assistant',
     content: [
-      { type: 'tool_use', toolUseId: 'sub-tu-1', toolName: 'Read', toolInput: { file_path: '/s.png' } },
+      {
+        type: 'tool_use',
+        toolUseId: 'sub-tu-1',
+        toolName: 'Read',
+        toolInput: { file_path: '/s.png' }
+      },
       {
         type: 'tool_result',
         toolUseId: 'sub-tu-1',

@@ -60,7 +60,11 @@ function installApiStub(catalog: OpencodeProviderCatalogEntry[]): void {
     vendorAuthOauthCancel: vi.fn(async () => undefined),
     listSharedProviders: vi.fn(async () => []),
     setOpencodeProviderDisabled,
-    removeOpencodeProvider
+    removeOpencodeProvider,
+    // Orphan-guard inputs (see VendorOpencodeSection.reload) — empty means the
+    // guard never blocks, which is what these action tests assert against.
+    getEngineModels: vi.fn(async () => []),
+    loadEngineConfig: vi.fn(async () => ({}))
   }
 }
 
@@ -69,7 +73,14 @@ async function renderRows(catalog: OpencodeProviderCatalogEntry[]): Promise<void
   const section = SECTIONS.find((s) => s.id === 'vendor-opencode')!
   await act(async () => {
     render(
-      section.items[0].render({} as never, () => {}, {} as never, () => {}, {} as never, () => {})
+      section.items[0].render(
+        {} as never,
+        () => {},
+        {} as never,
+        () => {},
+        {} as never,
+        () => {}
+      )
     )
   })
 }
@@ -102,9 +113,7 @@ describe('opencode provider row — actions', () => {
       })
     ])
     const zen = await row('opencode')
-    expect(
-      within(zen).getByTestId('VendorOpencodeSection.providerRow.disable')
-    ).not.toBeDisabled()
+    expect(within(zen).getByTestId('VendorOpencodeSection.providerRow.disable')).not.toBeDisabled()
   })
 
   it('renders a blocked trash icon disabled, with the reason as its tooltip', async () => {
@@ -211,9 +220,7 @@ describe('opencode provider row — actions', () => {
       fireEvent.click(screen.getByTestId('VendorOpencodeSection.removeConfirm.cancel'))
     })
     expect(removeOpencodeProvider).not.toHaveBeenCalled()
-    expect(
-      screen.queryByTestId('VendorOpencodeSection.removeConfirm')
-    ).not.toBeInTheDocument()
+    expect(screen.queryByTestId('VendorOpencodeSection.removeConfirm')).not.toBeInTheDocument()
   })
 
   it('warns that a shared-provider credential will come back after removal', async () => {
@@ -246,9 +253,7 @@ describe('opencode provider row — actions', () => {
         within(openrouter).getByTestId('VendorOpencodeSection.providerRow.credential')
       )
     })
-    expect(
-      await screen.findByTestId('VendorOpencodeSection.credentialPanel')
-    ).toBeInTheDocument()
+    expect(await screen.findByTestId('VendorOpencodeSection.credentialPanel')).toBeInTheDocument()
     // Updating a credential must not run the add-flow's allowlist seeding, which
     // would hide the models this provider already shows.
     expect(saveOpencodeSettings).not.toHaveBeenCalled()

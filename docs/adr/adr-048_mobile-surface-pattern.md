@@ -1,6 +1,6 @@
 # ADR-048 — Mobile surface pattern: content-slot takeover, selection-as-navigation, keyboard-safe input placement
 
-**Status:** Accepted (2026-08-04)
+**Status:** Accepted (2026-08-04) — Decision 5 (terminal-on-mobile declined) **superseded by ADR-052**: remote terminal is now planned behind a desktop-side opt-in, capability grants, and passkey step-up (`docs/architecture/security.md`). The UI surface patterns here are unaffected. **Amended 2026-08-19** (§Amendment below): the mobile-parity arc landed Settings, Skills, MCP, the terminal, and the enroll/access-links surfaces on the phone; the amendment records the rulings that generalize this ADR's decisions.
 **Relates to:** ADR-027 (test ids), ADR-046 (remote directory browser — Decision 3 partially fulfilled here), ADR-049 (bounds this pattern: transient modal chrome like the image viewer is a portalled overlay, not a content-slot takeover), the audit remediation's remote denylist posture
 
 ## Context
@@ -15,7 +15,7 @@ on mobile (terminal was considered and dropped — see Decision 5).
 Two platform constraints shape everything below:
 
 - **Soft-keyboard viewport mechanics.** `interactive-widget=resizes-content`
-  (156df4d) makes Android Chromium shrink the *layout* viewport under the keyboard, so
+  (156df4d) makes Android Chromium shrink the _layout_ viewport under the keyboard, so
   bottom-pinned flex footers and `fixed inset-0` overlays track the visible area. **iOS
   ignores the keyword**: the keyboard overlays the bottom of an unshrunk layout viewport,
   and only the browser's scroll-into-view keeps a focused input visible.
@@ -36,7 +36,7 @@ Two platform constraints shape everything below:
 2. **Mobile right-panel surfaces are content-slot takeovers.** `MobileTaskView` set the
    pattern; `MobileGitView` follows it: when `isMobile && rightPanel === '<x>'`, the
    ChatPanel slot is replaced wholesale by a fullscreen component with a back-button header
-   that drives the *same* store action as the desktop panel's close. Panel state never
+   that drives the _same_ store action as the desktop panel's close. Panel state never
    forks between layouts. `plan` and `mockup` remain desktop-only and should adopt this
    same pattern when they get mobile surfaces.
 
@@ -45,7 +45,7 @@ Two platform constraints shape everything below:
    (prev/next over `filterAndSortFiles` order, stage/unstage, two-tap discard, full-height
    GitFileDiffView). There is deliberately **no local navigation state**:
    `gitSelectedFile === null` ⇒ list, non-null ⇒ diff, so GitFileTree's existing tap
-   handler *is* the router and mobile/desktop can't disagree. Selection-as-navigation has
+   handler _is_ the router and mobile/desktop can't disagree. Selection-as-navigation has
    consequences that must hold for every future selection writer:
    - mount does NOT auto-select the first file (unlike GitPanel) and clears stale
      selections — mobile always lands on the list;
@@ -71,7 +71,7 @@ Two platform constraints shape everything below:
    `useDirSuggestions` (`PermissionsDialog/shared.ts`), now consumed by both the desktop
    input and the mobile sheet. This partially fulfills ADR-046 Decision 3's residual
    ("lift the shared helpers"): the hook is the shared core; unifying it with
-   `DirectoryBrowserInput` remains open and should start from the hook, not the widget.
+   `DirectoryBrowserDialog` remains open and should start from the hook, not the widget.
 
 5. **No terminal on mobile.** `terminal:*` stays on the RemoteDispatcher denylist. An
    opt-in unblock (desktop-side toggle, unreachable remotely since `remote:set-config` is
@@ -91,6 +91,68 @@ Two platform constraints shape everything below:
   scroll-into-view; if that proves janky in device testing, the escape hatch is moving the
   commit box behind a top-anchored sheet like permissions (Decision 4b), not per-platform
   viewport hacks.
+
+## Amendment — the mobile-parity arc (2026-08-19, as built)
+
+Five series (`ecb2066`, `f900cfa`, `52c4cef`, `b058b7d`, with `ffd80ab` on the server
+side) closed the gap this ADR's Context named. The owner-ratified rulings, recorded
+because each generalizes a decision above:
+
+1. **The presentation-fork rule is the pattern for every dialog.** `const View = isMobile
+? MobileView : DesktopView` with the container (state, channels, mutations) shared
+   verbatim — PermissionsDialog's shape, now carried by SettingsDialog, McpDialog,
+   SkillsDialog and TerminalPanel. The desktop View files stay byte-identical; every fork
+   carries a two-direction fork-guard test.
+
+2. **Settings is scope TABS + horizontal SWIPE + accordions** (owner-picked over a
+   drill-down stack and an adaptive squeeze): fullscreen takeover, four equal-width tabs
+   with an underline, sections as lazily-mounted accordions reusing the section content
+   unchanged, and search that goes WIDE (one flat hit list across all scopes — a phone
+   user searching "sandbox" should not need to know it lives under Claude). The swipe
+   detector (`useSwipeTabs`) is touch/pen-only, direction-locked with ties to vertical,
+   pointerId-keyed (a second finger aborts), never calls `preventDefault`, and exempts
+   controls and real horizontal scrollers. Mobile settings are HOSTED by SessionView
+   (the drawer unmounts its children, so the panel inside it cannot both close the
+   drawer and keep the dialog alive); each host drops its state on its wrong side of
+   the 768px edge, so a breakpoint crossing can neither double-mount nor resurrect.
+
+3. **Decision 1's ⋯ menu absorbed its intended entries — under a gate-parity rule.**
+   Skills, MCP and Terminal entries carry character-for-character the gates their
+   desktop buttons use, so the two surfaces can never disagree about a session's
+   capabilities. The Terminal entry additionally inherits the menu's `cwd` precondition,
+   deliberately: with no cwd the panel opens empty and its `+` spawns into the `'.'`
+   fallback — an invisible orphan pty with no second entry point on a phone.
+
+4. **Master/detail dialogs become list ⇄ detail drill-downs** (Decision 3 extended):
+   selection IS the navigation (MCP derives it from the container's `selected`; a
+   successful remove lands on the list because the container clears selection), mobile
+   always lands on the list, destructive actions are two-tap with a 3s disarm on a
+   STABLE testid + `data-armed` discriminator. Deliberate omissions are stated in the
+   file headers (MCP Add Server: a six-field mid-scroll form with raw-JSON textareas is
+   a feature, not chrome — Decision 4 forbids it).
+
+5. **Decision 5's supersession is realized.** The terminal is a fullscreen takeover
+   reusing TerminalPanel wholesale — availability, pool, read-only, step-up unchanged —
+   plus an accessory key row (Esc/Tab/^C/arrows) that injects through xterm's own
+   `input(data, true)` into the same `onData` closure that holds the ADR-054 read-only
+   gate and is the renderer's only `terminal:write` caller: the keys cannot bypass
+   step-up by construction. Mobile mounts only while open; the pty ring replays on
+   re-attach, so nothing is lost.
+
+6. **The enroll offer's dismissal latch is permanent — because it stopped being the only
+   path.** The strip and the durable "Set up a passkey on this device" card (top of
+   Settings › Remote on web) share ONE flow via a `window.__REMOTE_ENROLL__` bridge;
+   the card never touches the latch. AccessLinks mounts on web with an HONEST status:
+   only facts a browser holds (the LAN row asks via `authcfg:lan-link`; tailnet/tunnel
+   rows are withheld, not guessed — a future remote status verb can make them real),
+   and the locked LAN row carries a Reveal button — re-asking on the operator's own
+   press, which is the line ADR-054 §6 draws against ambient ceremonies.
+
+7. **Test-id ruling:** mobile forks carry DISTINCT roots (`SettingsMobileView`,
+   `McpMobileView`, `SkillsMobileView`, `TerminalMobileView`) rather than
+   PermissionsDialog's shared root — the fork-guard tests depend on telling the two
+   presentations apart, and a verifier asserting the desktop id must not silently no-op
+   on a phone. PermissionsDialog keeps its shared root as the grandfathered exception.
 
 ## Alternatives considered
 

@@ -7,7 +7,9 @@
  *   3. onStop calls stopRemoteServer + refreshes status
  *   4. onRemoteStatus subscription updates status
  *   5. Escape key closes
- *   6. onCopy triggers clipboard.writeText
+ *   6. onSetTunnel restarts with/without the tunnel; onSetPassword deep-links
+ *
+ * The link/QR/copy surface is `AccessLinks` and has its own file.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -16,11 +18,6 @@ import { render, act } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import type { RemoteAccessModalViewProps } from '../View'
 import type { RemoteStatus, NetworkInterfaceInfo } from '../../../../../shared/types'
-
-// Stub QRCode.toDataURL since the real lib isn't needed for logic
-vi.mock('qrcode', () => ({
-  default: { toDataURL: async () => 'data:image/png;base64,STUB' }
-}))
 
 let viewProps: RemoteAccessModalViewProps
 vi.mock('../View', () => ({
@@ -50,7 +47,6 @@ describe('RemoteAccessModal FC', () => {
   let statusQueue: RemoteStatus[]
   let startCalls: Array<{ host?: string; tunnel?: boolean } | undefined>
   let stopCalls: number
-  let writeTextCalls: string[]
 
   beforeEach(async () => {
     app = await bootTestApp()
@@ -58,26 +54,11 @@ describe('RemoteAccessModal FC', () => {
     statusQueue = []
     startCalls = []
     stopCalls = 0
-    writeTextCalls = []
-
-    // clipboard API
-    Object.defineProperty(navigator, 'clipboard', {
-      value: {
-        writeText: (s: string) => {
-          writeTextCalls.push(s)
-          return Promise.resolve()
-        }
-      },
-      configurable: true
-    })
 
     app.bridge.ipcMain.handle('remote:status', async () => statusQueue.shift() ?? makeStatus())
-    app.bridge.ipcMain.handle(
-      'remote:interfaces',
-      async (): Promise<NetworkInterfaceInfo[]> => [
-        { name: 'eth0', address: '192.168.1.10', priority: 0 } as NetworkInterfaceInfo
-      ]
-    )
+    app.bridge.ipcMain.handle('remote:interfaces', async (): Promise<NetworkInterfaceInfo[]> => [
+      { name: 'eth0', address: '192.168.1.10', priority: 0 } as NetworkInterfaceInfo
+    ])
     app.bridge.ipcMain.handle(
       'remote:start',
       async (_e, opts?: { host?: string; tunnel?: boolean }) => {
@@ -188,43 +169,17 @@ describe('RemoteAccessModal FC', () => {
     expect(onClose).toHaveBeenCalled()
   })
 
-  it('onCopy writes shareUrl to clipboard', async () => {
-    statusQueue = [makeStatus({ running: true, port: 5123, lanUrl: 'http://host/#key123' })]
-    await act(async () => {
-      await renderFC()
-    })
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 0))
-    })
+  // Copying and QR generation moved to `AccessLinks` with the whole link
+  // presentation (ADR-056 item C — there is no single share URL any more, since
+  // each origin has its own channel and identity). Their tests moved with them,
+  // to AccessLinks.component.test.tsx.
 
-    act(() => {
-      viewProps.onCopy()
-    })
-
-    expect(writeTextCalls).toEqual(['http://host/#key123'])
-    expect(viewProps.copied).toBe(true)
-  })
-
-  // Phase 3 — the ts.net URL wins: in TLS mode the server binds loopback, so
-  // lanUrl is null and the tunnel is off; and this URL carries no fragment
-  // (Tailscale identity authenticates the browser), so it is bookmark-able.
-  it('prefers tls.url over the tunnel and LAN URLs for the QR/copy target', async () => {
+  // The tunnel row's Start/Stop is the modal's own start/stop re-parameterized:
+  // the tunnel key is minted per run, so switching it means a restart.
+  it('onSetTunnel restarts the server with the tunnel option', async () => {
     statusQueue = [
-      makeStatus({
-        running: true,
-        port: 5123,
-        lanUrl: null,
-        tunnelUrl: 'https://tunnel.example/remote#t=abc',
-        tls: {
-          mode: 1,
-          httpsPort: 443,
-          pinnedHttpsPort: 443,
-          serveError: null,
-          url: 'https://cg-mac.tail3140f8.ts.net',
-          detection: 'ok',
-          detectionMessage: null
-        }
-      })
+      makeStatus({ running: true, port: 5123, lanUrl: 'http://192.168.1.10:5123/remote#k=ab' }),
+      makeStatus({ running: true, port: 5123, tunnelState: 'starting' })
     ]
     await act(async () => {
       await renderFC()
@@ -233,12 +188,34 @@ describe('RemoteAccessModal FC', () => {
       await new Promise((r) => setTimeout(r, 0))
     })
 
-    act(() => {
-      viewProps.onCopy()
+    await act(async () => {
+      await viewProps.onSetTunnel(true)
     })
-    expect(writeTextCalls).toEqual(['https://cg-mac.tail3140f8.ts.net'])
-    // The QR encodes the same bare URL (no fragment to strip).
-    expect(viewProps.qrDataUrl).toBe('data:image/png;base64,STUB')
+
+    expect(stopCalls).toBe(1)
+    expect(startCalls).toEqual([{ tunnel: true }])
+    expect(viewProps.tunnelMode).toBe(true)
+  })
+
+  it('onSetPassword closes the modal and deep-links to the remote settings section', async () => {
+    statusQueue = [makeStatus({ running: true, port: 5123 })]
+    const events: Array<{ section?: string }> = []
+    const listener = (e: Event): void => {
+      events.push((e as CustomEvent<{ section?: string }>).detail)
+    }
+    window.addEventListener('open-settings', listener)
+    try {
+      await act(async () => {
+        await renderFC()
+      })
+      act(() => {
+        viewProps.onSetPassword()
+      })
+      expect(onClose).toHaveBeenCalled()
+      expect(events).toEqual([{ section: 'remote' }])
+    } finally {
+      window.removeEventListener('open-settings', listener)
+    }
   })
 
   it('pushed status event updates the view', async () => {

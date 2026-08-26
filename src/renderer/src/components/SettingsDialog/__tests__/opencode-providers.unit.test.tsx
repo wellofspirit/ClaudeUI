@@ -371,9 +371,7 @@ describe('opencode provider configuration dialog', () => {
       await renderModal('my-ollama')
 
       expect(screen.getByTestId('OpencodeProviderConfigModal.apiKey')).toBeInTheDocument()
-      expect(
-        screen.queryByTestId('OpencodeProviderConfigModal.keyStatus')
-      ).not.toBeInTheDocument()
+      expect(screen.queryByTestId('OpencodeProviderConfigModal.keyStatus')).not.toBeInTheDocument()
     })
   })
 })

@@ -1,13 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import {
-  useActiveSession,
-  useSessionStore,
-  OPENCODE_DEFAULT_MODEL,
-  PI_DEFAULT_MODEL
-} from '../../stores/session-store'
+import { useActiveSession, useSessionStore, PI_DEFAULT_MODEL } from '../../stores/session-store'
 import type { AppSettings } from '../../stores/session-store'
 import { PermissionsDialog } from '../PermissionsDialog'
+import {
+  OAuthOutcomeNotice,
+  OAuthPasteBackFlow,
+  classifyOAuthError
+} from '../auth/OAuthPasteBackFlow'
 import type {
   ClaudePermissions,
   ProxySettings,
@@ -37,12 +37,9 @@ import {
   type EngineCapabilities,
   CLAUDE_ENGINE_CAPABILITIES
 } from '../../../../shared/model-capabilities'
-import { engineMeta } from '../../../../shared/engine-meta'
-import {
-  AUTONOMY_TO_PERMISSION,
-  PERMISSION_TO_AUTONOMY,
-  AUTONOMY_LABELS
-} from '../../../../shared/permission-modes'
+import { engineMeta, ENGINE_META } from '../../../../shared/engine-meta'
+import { findModelReferences, formatModelReferences } from '../../../../shared/model-references'
+import { AUTONOMY_TO_PERMISSION, AUTONOMY_LABELS } from '../../../../shared/permission-modes'
 import {
   SettingsToggle,
   SettingsSlider,
@@ -188,7 +185,10 @@ function GlobalPermissionsSummary(): React.JSX.Element {
   const totalRules = perms ? perms.allow.length + perms.ask.length + perms.deny.length : 0
 
   return (
-    <div data-testid="GlobalPermissionsSummary" className="px-3 py-1.5 text-[13px] text-text-secondary">
+    <div
+      data-testid="GlobalPermissionsSummary"
+      className="px-3 py-1.5 text-[13px] text-text-secondary"
+    >
       <div className="flex items-center justify-between">
         <div>
           <div className="text-text-secondary mb-0.5">Global permission rules</div>
@@ -251,7 +251,11 @@ function ModelEffortRow({
   const levels = supportedEffortLevels(modelId)
   const fallback = defaultEffort(modelId)
   return (
-    <div data-testid="ModelEffortRow" data-id={modelId} className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
+    <div
+      data-testid="ModelEffortRow"
+      data-id={modelId}
+      className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary"
+    >
       <div className="mb-1 flex items-baseline justify-between gap-2">
         <span>{modelLabel}</span>
         <span className="text-[10px] text-text-muted/50">{modelId}</span>
@@ -271,10 +275,23 @@ function ModelEffortRow({
 
 // ── Accounts (multi-account support, ADR-015) ────────────────────────
 
+/**
+ * Adding an account starts a Claude login. On DESKTOP the host opens its own
+ * browser and nothing more is needed here. On WEB (ADR-057 / S4-UI) the host
+ * opens nothing: `account:add` returns the flow's `pendingSignIn` snapshot, we
+ * fold it into the store's `authState` — the SAME field AuthBanner drives, so
+ * there is still exactly one Claude-flow state — and the shared paste-back flow
+ * finishes it through `submitOAuthCode`.
+ */
 function AccountsSetting(): React.JSX.Element {
   const accounts = useSessionStore((s) => s.accountsState)
   const setAccounts = useSessionStore((s) => s.setAccountsState)
+  const authState = useSessionStore((s) => s.authState)
+  const setAuthState = useSessionStore((s) => s.setAuthState)
+  const submitOAuthCode = useSessionStore((s) => s.submitOAuthCode)
+  const cancelSignIn = useSessionStore((s) => s.cancelSignIn)
   const [busy, setBusy] = useState(false)
+  const [submittingCode, setSubmittingCode] = useState(false)
 
   useEffect(() => {
     void window.api.getAccounts().then(setAccounts)
@@ -282,11 +299,16 @@ function AccountsSetting(): React.JSX.Element {
 
   const enabled = accounts?.enabled ?? false
   const isMac = window.api.platform === 'darwin'
+  const isWeb = window.api.platform === 'web'
+  const pasteBack = isWeb && authState?.status === 'authorizing'
 
   const run = async (fn: () => Promise<AccountsState>): Promise<void> => {
     setBusy(true)
     try {
-      setAccounts(await fn())
+      const next = await fn()
+      setAccounts(next)
+      // Only `account:add` on a remote connection ever carries this.
+      if (next.pendingSignIn) setAuthState(next.pendingSignIn)
     } finally {
       setBusy(false)
     }
@@ -368,6 +390,32 @@ function AccountsSetting(): React.JSX.Element {
           >
             + Add account
           </button>
+
+          {pasteBack && (
+            <div
+              data-testid="AccountsSetting.signInFlow"
+              className="mt-1.5 rounded-md border border-border/40 bg-bg-secondary/40 p-2.5 space-y-2"
+            >
+              <OAuthPasteBackFlow
+                variant="code"
+                url={authState?.manualUrl}
+                busy={submittingCode}
+                onSubmit={(pasted) => {
+                  setSubmittingCode(true)
+                  void submitOAuthCode(pasted)
+                    .then(() => void window.api.getAccounts().then(setAccounts))
+                    .finally(() => setSubmittingCode(false))
+                }}
+                onCancel={() => void cancelSignIn()}
+              />
+            </div>
+          )}
+          {isWeb && authState?.status === 'error' && authState.error && (
+            <OAuthOutcomeNotice
+              kind={classifyOAuthError(authState.error)}
+              message={authState.error}
+            />
+          )}
         </div>
       )}
     </div>
@@ -377,38 +425,28 @@ function AccountsSetting(): React.JSX.Element {
 // ── Autonomy mode picker ─────────────────────────────────────────────
 
 export function AutonomyModePicker(): React.JSX.Element {
-  const [perms, setPerms] = useState<ClaudePermissions | null>(null)
   const setDefaultPermissionMode = useSessionStore((s) => s.setDefaultPermissionMode)
+  const currentMode = useSessionStore((s) => s.settings.defaultAutonomyMode)
+  const updateSettings = useSessionStore((s) => s.updateSettings)
   const availableModes = CLAUDE_ENGINE_CAPABILITIES.autonomyModes
 
-  useEffect(() => {
-    window.api
-      .loadClaudePermissions('user')
-      .then(setPerms)
-      .catch(() => {})
-  }, [])
-
-  const currentMode: AutonomyMode = perms?.defaultMode
-    ? (PERMISSION_TO_AUTONOMY[perms.defaultMode] ?? 'ask')
-    : 'ask'
-
-  const handleChange = async (mode: AutonomyMode): Promise<void> => {
-    if (!perms) return
-    const permissionMode = AUTONOMY_TO_PERMISSION[mode]
-    const next: ClaudePermissions = { ...perms, defaultMode: permissionMode }
-    setPerms(next)
-    // `defaultMode` is bootstrap-only for every engine: mirror it into the store
-    // so sessions created later in this run start in it without an app restart.
-    setDefaultPermissionMode(permissionMode)
-    await window.api.saveClaudePermissions('user', next)
+  const handleChange = (mode: AutonomyMode): void => {
+    // ClaudeUI-owned, engine-neutral, and deliberately NOT written back to
+    // `~/.claude/settings.json`: this governs opencode and pi sessions too, and
+    // editing it here should not change how the user's bare `claude` CLI
+    // behaves. Claude's own `defaultMode` is read once, to seed this.
+    updateSettings({ defaultAutonomyMode: mode })
+    // Bootstrap-only for every engine: mirror into the store so sessions created
+    // later in this run start in it without an app restart.
+    setDefaultPermissionMode(AUTONOMY_TO_PERMISSION[mode])
   }
 
   return (
     <div data-testid="AutonomyModePicker" className="px-3 py-1.5 text-[13px] text-text-secondary">
       <div className="mb-0.5">Autonomy mode</div>
       <div className="mb-1.5 text-[11px] text-text-muted">
-        Applies to new sessions. Running sessions keep their own mode — change it from the mode
-        control next to the chat input.
+        Applies to new sessions on every engine. Running sessions keep their own mode — change it
+        from the mode control next to the chat input.
       </div>
       <div className="space-y-1">
         {availableModes.map((mode) => (
@@ -421,7 +459,7 @@ export function AutonomyModePicker(): React.JSX.Element {
               name="autonomyMode"
               value={mode}
               checked={currentMode === mode}
-              onChange={() => void handleChange(mode)}
+              onChange={() => handleChange(mode)}
               className="accent-accent"
             />
             <span className="text-[12px] text-text-secondary">{AUTONOMY_LABELS[mode]}</span>
@@ -498,12 +536,28 @@ function toModelDisplays(models: ModelInfo[]): ModelDisplay[] {
 }
 
 /**
+ * A configured value that is missing from a NON-EMPTY discovered list is STALE
+ * — the engine reported its models and this one was not among them. An empty
+ * list means discovery hasn't run (or nothing is authenticated), which says
+ * nothing about the value, so it is never flagged.
+ */
+function isStaleModelValue(models: ModelInfo[], value: string): boolean {
+  return !!value && models.length > 0 && !models.some((m) => m.value === value)
+}
+
+/** Suffix marking a configured model the engine no longer offers. */
+const UNAVAILABLE_SUFFIX = ' (unavailable)'
+
+/**
  * The `ModelDisplay` a settings ModelPicker should show as selected.
  *
  * An unset value ('') means "inherit / not set" and reads as `emptyLabel`,
  * matching the pinned empty row. A CONFIGURED-but-undiscovered model
  * (hand-edited, or a provider not authenticated yet) is shown VERBATIM rather
- * than collapsing to the empty label, which would misreport what is saved.
+ * than collapsing to the empty label, which would misreport what is saved —
+ * and once discovery HAS reported models without it, it is marked unavailable
+ * in place. Keeping the value visible is the point: the fix is to change this
+ * setting, which the user cannot do without seeing what it currently says.
  */
 function selectedModelDisplay(
   models: ModelInfo[],
@@ -512,11 +566,36 @@ function selectedModelDisplay(
 ): ModelDisplay {
   const known = models.find((m) => m.value === value)
   if (known) return { ...known, shortName: known.displayName || known.value }
-  return {
-    value,
-    displayName: value || emptyLabel,
-    shortName: value || emptyLabel
-  }
+  const label = value
+    ? `${value}${isStaleModelValue(models, value) ? UNAVAILABLE_SUFFIX : ''}`
+    : emptyLabel
+  return { value, displayName: label, shortName: label }
+}
+
+/**
+ * Inline warning under a settings model picker whose saved value no longer
+ * exists. Rendered next to the picker rather than folded into it so the
+ * warning styling does not have to leak into the shared ModelPicker.
+ */
+function StaleModelNotice({
+  testid,
+  models,
+  value
+}: {
+  testid: string
+  models: ModelInfo[]
+  value: string
+}): React.JSX.Element | null {
+  if (!isStaleModelValue(models, value)) return null
+  return (
+    <div
+      data-testid={`${testid}.staleModel`}
+      data-model={value}
+      className="mt-1 text-[10px] text-yellow-400 leading-relaxed"
+    >
+      “{value}” is no longer available. Pick another model — this one will fail when it is used.
+    </div>
+  )
 }
 
 /** The `AutoModeConfig` keys that hold a classifier trust/protection list. */
@@ -626,11 +705,18 @@ function AutoModeSection({
   }, [engineId])
 
   if (engineCfg === null || installed === null) {
-    return <div data-testid={testid} className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+    return (
+      <div data-testid={testid} className="px-3 py-1.5 text-[13px] text-text-muted">
+        Loading…
+      </div>
+    )
   }
   if (!installed) {
     return (
-      <div data-testid={testid} className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+      <div
+        data-testid={testid}
+        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
+      >
         {notInstalledMessage}
       </div>
     )
@@ -694,6 +780,7 @@ function AutoModeSection({
                 onSelectModel={(v) => update({ judgeModel: v || undefined })}
               />
             </div>
+            <StaleModelNotice testid={`${testid}.judgeModel`} models={models} value={judgeModel} />
           </div>
           <SettingsSelect
             testid={`${testid}.twoStageMode`}
@@ -715,7 +802,9 @@ function AutoModeSection({
               description={f.description}
             />
           ))}
-          <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">{footerText}</div>
+          <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
+            {footerText}
+          </div>
         </>
       )}
     </div>
@@ -812,11 +901,18 @@ function DispatchSection({
   }, [engineId])
 
   if (engineCfg === null || installed === null) {
-    return <div data-testid={testid} className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+    return (
+      <div data-testid={testid} className="px-3 py-1.5 text-[13px] text-text-muted">
+        Loading…
+      </div>
+    )
   }
   if (!installed) {
     return (
-      <div data-testid={testid} className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+      <div
+        data-testid={testid}
+        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
+      >
         {notInstalledMessage}
       </div>
     )
@@ -863,6 +959,7 @@ function DispatchSection({
             onSelectModel={(v) => update({ defaultModel: v || undefined })}
           />
         </div>
+        <StaleModelNotice testid={`${testid}.defaultModel`} models={models} value={defaultModel} />
       </div>
       <div className="px-3 py-1.5 text-[13px] text-text-secondary">
         <div className="mb-1 flex items-center gap-1">
@@ -997,16 +1094,17 @@ function VendorAnthropicEditableForm({
   ]
 
   return (
-    <div data-testid="VendorAnthropicEditableForm" className="px-3 py-1.5 text-[13px] text-text-secondary space-y-4">
+    <div
+      data-testid="VendorAnthropicEditableForm"
+      className="px-3 py-1.5 text-[13px] text-text-secondary space-y-4"
+    >
       {/* Endpoint */}
       <div className="space-y-2">
         <div className="text-[11px] text-text-muted uppercase tracking-wide">Endpoint</div>
         <SettingsToggle
           label="Enable custom endpoint"
           checked={endpoint.enabled}
-          onChange={(v) =>
-            updateVendorConfig({ endpoint: { ...endpoint, enabled: v } })
-          }
+          onChange={(v) => updateVendorConfig({ endpoint: { ...endpoint, enabled: v } })}
         />
         {endpoint.enabled && (
           <div className="space-y-1.5 pl-1">
@@ -1044,9 +1142,7 @@ function VendorAnthropicEditableForm({
         <SettingsToggle
           label="Enable model override"
           checked={modelOverride.enabled}
-          onChange={(v) =>
-            updateVendorConfig({ modelOverride: { ...modelOverride, enabled: v } })
-          }
+          onChange={(v) => updateVendorConfig({ modelOverride: { ...modelOverride, enabled: v } })}
         />
         {modelOverride.enabled && (
           <div className="space-y-1.5 pl-1">
@@ -1097,18 +1193,21 @@ function ModelAllowlistDialog({
   providerId,
   providerName,
   current,
+  error,
   onSave,
   onClose
 }: {
   providerId: string
   providerName: string
   current: string[] | undefined
+  /** Blocking orphan-guard message from the last save attempt; keeps the dialog open. */
+  error?: string | null
   onSave: (ids: string[]) => void
   onClose: () => void
 }): React.JSX.Element {
-  const [models, setModels] = useState<import('../../../../shared/types').OpencodeCatalogModel[] | null>(
-    null
-  )
+  const [models, setModels] = useState<
+    import('../../../../shared/types').OpencodeCatalogModel[] | null
+  >(null)
   const [checked, setChecked] = useState<Set<string>>(new Set(current ?? []))
   const [search, setSearch] = useState('')
   const [freeOnly, setFreeOnly] = useState(false)
@@ -1268,6 +1367,15 @@ function ModelAllowlistDialog({
           )}
         </div>
 
+        {error && (
+          <div
+            data-testid="ModelAllowlistDialog.orphanError"
+            className="px-4 pt-2 text-[11px] text-red-400 leading-relaxed"
+          >
+            {error}
+          </div>
+        )}
+
         <div className="px-4 py-3 border-t border-border/50 flex items-center justify-end gap-2">
           <button
             data-testid="ModelAllowlistDialog.cancel"
@@ -1326,14 +1434,33 @@ function VendorOpencodeSection(): React.JSX.Element {
   const [removeTarget, setRemoveTarget] = useState<OpencodeProviderCatalogEntry | null>(null)
   // Provider whose credential panel is expanded inline on its row.
   const [credentialId, setCredentialId] = useState<string | null>(null)
+  // Orphan guard (see `findModelReferences`): the last edit refused because it
+  // would have deleted a model some setting still names. Cleared on the next
+  // successful edit; the allowlist dialog gets its own copy so the message lands
+  // where the edit was attempted.
+  const [orphanError, setOrphanError] = useState<string | null>(null)
+  const [allowlistOrphanError, setAllowlistOrphanError] = useState<string | null>(null)
+  // opencode's DISCOVERED models — the set an edit can make disappear. Loaded
+  // here (not read from the store) so the guard does not depend on whether a
+  // chat surface has populated `availableModels` yet.
+  const [opencodeModels, setOpencodeModels] = useState<ModelInfo[]>([])
+  // Every engine's ClaudeUI config, so a reference from ANOTHER engine (claude's
+  // cross-engine `dispatch.defaultModel` names opencode models) is caught too.
+  const [engineConfigs, setEngineConfigs] = useState<Partial<Record<EngineId, EngineConfig>>>({})
   const mountedRef = useRef(true)
-  const { vendorOAuth, authorizeVendorOAuth, cancelVendorOAuth } = useSessionStore(
-    useShallow((s) => ({
-      vendorOAuth: s.vendorOAuth,
-      authorizeVendorOAuth: s.authorizeVendorOAuth,
-      cancelVendorOAuth: s.cancelVendorOAuth
-    }))
-  )
+  const { vendorOAuth, authorizeVendorOAuth, cancelVendorOAuth, submitVendorOAuthCode } =
+    useSessionStore(
+      useShallow((s) => ({
+        vendorOAuth: s.vendorOAuth,
+        authorizeVendorOAuth: s.authorizeVendorOAuth,
+        cancelVendorOAuth: s.cancelVendorOAuth,
+        submitVendorOAuthCode: s.submitVendorOAuthCode
+      }))
+    )
+  // Web drives ADR-057's paste-back flow off `vendorOAuth`; desktop keeps the
+  // local `oauthFlow` machinery below, untouched.
+  const isWeb = window.api.platform === 'web'
+  const [pasteBusy, setPasteBusy] = useState(false)
 
   useEffect(() => {
     mountedRef.current = true
@@ -1354,6 +1481,22 @@ function VendorOpencodeSection(): React.JSX.Element {
       setCatalog(cat)
       setOpencodeCfg(settings)
       setOptions(opts)
+    })
+    window.api
+      .getEngineModels()
+      .then((groups) => {
+        if (!mountedRef.current) return
+        setOpencodeModels(groups.filter((g) => g.engineId === 'opencode').flatMap((g) => g.models))
+      })
+      .catch(() => {})
+    Promise.all(
+      (Object.keys(ENGINE_META) as EngineId[]).map(async (id) => {
+        const cfg = await window.api.loadEngineConfig(id).catch(() => ({}) as EngineConfig)
+        return [id, cfg] as const
+      })
+    ).then((entries) => {
+      if (!mountedRef.current) return
+      setEngineConfigs(Object.fromEntries(entries))
     })
   }
 
@@ -1402,6 +1545,21 @@ function VendorOpencodeSection(): React.JSX.Element {
     const a = allowlist[id]
     if (a === undefined) return 'all models'
     return `${a.length} model${a.length === 1 ? '' : 's'}`
+  }
+
+  /** Every discovered opencode model VALUE this provider contributes. */
+  const modelsOfProvider = (providerId: string): string[] =>
+    opencodeModels.filter((m) => m.vendorId === providerId).map((m) => m.value)
+
+  /**
+   * The orphan guard: `null` when the removal is safe, otherwise the message to
+   * show INSTEAD of applying it. Refusing beats applying-and-warning — after the
+   * write the reference is already broken, and the config that named it is a
+   * different dialog away.
+   */
+  const blockingReferences = (removedValues: string[]): string | null => {
+    const refs = findModelReferences({ opencode: cfg, engines: engineConfigs }, removedValues)
+    return refs.length > 0 ? formatModelReferences(refs) : null
   }
 
   // Finalize adding a provider: clear it from disabledProviders, seed an empty
@@ -1468,6 +1626,16 @@ function VendorOpencodeSection(): React.JSX.Element {
    * how the original bug (a veto outliving what it vetoed) became possible.
    */
   const handleToggleDisabled = async (vendorId: string, nextDisabled: boolean): Promise<void> => {
+    // Disabling hides every model this provider contributes — refuse while one
+    // of them is still named by a setting.
+    if (nextDisabled) {
+      const blocked = blockingReferences(modelsOfProvider(vendorId))
+      if (blocked) {
+        setOrphanError(blocked)
+        return
+      }
+    }
+    setOrphanError(null)
     setRemoving((prev) => ({ ...prev, [vendorId]: true }))
     try {
       await window.api.setOpencodeProviderDisabled(vendorId, nextDisabled)
@@ -1488,6 +1656,11 @@ function VendorOpencodeSection(): React.JSX.Element {
    */
   const handleRemove = async (entry: OpencodeProviderCatalogEntry): Promise<void> => {
     if (!entry.actions.removeKind) return
+    // Throwing (rather than a section-level banner) is deliberate: ConfirmModal
+    // keeps itself open and renders the reason under "Could not remove", which is
+    // exactly where the user is looking.
+    const blocked = blockingReferences(modelsOfProvider(entry.id))
+    if (blocked) throw new Error(blocked)
     await window.api.removeOpencodeProvider(entry.id, entry.actions.removeKind)
     const settings = await window.api.loadOpencodeSettings().catch(() => null)
     if (settings && mountedRef.current) setOpencodeCfg(settings)
@@ -1501,7 +1674,13 @@ function VendorOpencodeSection(): React.JSX.Element {
       const result = await authorizeVendorOAuth('opencode', vendorId)
       if (result.ok) {
         finishAdd(vendorId)
-      } else if (result.needsPaste) {
+        return
+      }
+      // Web: the store has already parked the flow — `paste` (the two-step
+      // form below) or `error` (opencode's remote-`auto` refusal, rendered as
+      // the desktop-only outcome). Nothing local to set.
+      if (isWeb) return
+      if (result.needsPaste) {
         setOauthFlow({
           stage: 'instructions',
           url: result.needsPaste.url,
@@ -1513,6 +1692,18 @@ function VendorOpencodeSection(): React.JSX.Element {
     } catch (err) {
       setOauthError(err instanceof Error ? err.message : 'Failed to start OAuth flow')
     }
+  }
+
+  /** Step 2 of the remote flow — see `submitVendorOAuthCode` in the store. */
+  const handlePasteBackSubmit = (vendorId: string, pasted: string): void => {
+    setPasteBusy(true)
+    void submitVendorOAuthCode(pasted)
+      .then((result) => {
+        if (result.ok) finishAdd(vendorId)
+      })
+      .finally(() => {
+        if (mountedRef.current) setPasteBusy(false)
+      })
   }
 
   const handleOAuthSubmit = async (): Promise<void> => {
@@ -1533,11 +1724,21 @@ function VendorOpencodeSection(): React.JSX.Element {
   }
 
   if (installed === null || catalog === null) {
-    return <div data-testid="VendorOpencodeSection" className="px-3 py-1.5 text-[11px] text-text-muted/60">Loading…</div>
+    return (
+      <div
+        data-testid="VendorOpencodeSection"
+        className="px-3 py-1.5 text-[11px] text-text-muted/60"
+      >
+        Loading…
+      </div>
+    )
   }
   if (!installed) {
     return (
-      <div data-testid="VendorOpencodeSection" className="px-3 py-1.5 text-[11px] text-text-muted/60 leading-relaxed">
+      <div
+        data-testid="VendorOpencodeSection"
+        className="px-3 py-1.5 text-[11px] text-text-muted/60 leading-relaxed"
+      >
         opencode is not installed. Install it to add providers and authenticate them.
       </div>
     )
@@ -1548,9 +1749,18 @@ function VendorOpencodeSection(): React.JSX.Element {
     : null
 
   return (
-    <div data-testid="VendorOpencodeSection" className="px-3 py-1.5 space-y-3 text-[13px] text-text-secondary">
-      {oauthError && (
-        <div className="text-[11px] text-red-400 leading-relaxed">{oauthError}</div>
+    <div
+      data-testid="VendorOpencodeSection"
+      className="px-3 py-1.5 space-y-3 text-[13px] text-text-secondary"
+    >
+      {oauthError && <div className="text-[11px] text-red-400 leading-relaxed">{oauthError}</div>}
+      {orphanError && (
+        <div
+          data-testid="VendorOpencodeSection.orphanError"
+          className="text-[11px] text-red-400 leading-relaxed"
+        >
+          {orphanError}
+        </div>
       )}
 
       {/* All providers — enabled and disabled, in one list. */}
@@ -1578,106 +1788,106 @@ function VendorOpencodeSection(): React.JSX.Element {
               }`}
             >
               <div className="flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                <div className="flex items-center gap-1.5">
-                  <span className="font-medium text-[12px] truncate">{p.name}</span>
-                  {/* Disabled wins the badge: opencode ignores the provider
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-medium text-[12px] truncate">{p.name}</span>
+                    {/* Disabled wins the badge: opencode ignores the provider
                       entirely, so its auth state is not the useful fact. */}
-                  {p.disabled ? (
-                    <span
-                      data-testid="VendorOpencodeSection.disabledBadge"
-                      data-id={p.id}
-                      className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-muted"
-                    >
-                      Disabled
-                    </span>
-                  ) : isFree ? (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400">
-                      Free
-                    </span>
-                  ) : (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/10 text-green-400">
-                      Authenticated
-                    </span>
-                  )}
-                  {claim && (
-                    <span
-                      data-testid="VendorOpencodeSection.sharedBadge"
-                      data-id={p.id}
-                      title={`Credentials are vended by the shared provider "${claim.name}"`}
-                      className="text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent"
-                    >
-                      Shared · {claim.name}
-                    </span>
-                  )}
-                </div>
-                <div className="text-[10px] text-text-muted/60 truncate">
-                  {/* A disabled provider surfaces NO models whatever its allowlist
+                    {p.disabled ? (
+                      <span
+                        data-testid="VendorOpencodeSection.disabledBadge"
+                        data-id={p.id}
+                        className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-muted"
+                      >
+                        Disabled
+                      </span>
+                    ) : isFree ? (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400">
+                        Free
+                      </span>
+                    ) : (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/10 text-green-400">
+                        Authenticated
+                      </span>
+                    )}
+                    {claim && (
+                      <span
+                        data-testid="VendorOpencodeSection.sharedBadge"
+                        data-id={p.id}
+                        title={`Credentials are vended by the shared provider "${claim.name}"`}
+                        className="text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent"
+                      >
+                        Shared · {claim.name}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[10px] text-text-muted/60 truncate">
+                    {/* A disabled provider surfaces NO models whatever its allowlist
                       says, so "showing all models" would be a plain lie — the exact
                       class of misleading label this rework exists to remove. */}
-                  {p.id} ·{' '}
-                  {p.disabled
-                    ? 'ignored by opencode while disabled'
-                    : `showing ${allowlistLabel(p.id)}`}
+                    {p.id} ·{' '}
+                    {p.disabled
+                      ? 'ignored by opencode while disabled'
+                      : `showing ${allowlistLabel(p.id)}`}
+                  </div>
                 </div>
-              </div>
-              <div className="flex items-center gap-0.5 shrink-0">
-                <IconButton
-                  testId="VendorOpencodeSection.providerRow.models"
-                  id={p.id}
-                  label="Manage models"
-                  onClick={() => setModelDialogId(p.id)}
-                >
-                  <SlidersIcon />
-                </IconButton>
-                {p.actions.canSetCredential && (
+                <div className="flex items-center gap-0.5 shrink-0">
                   <IconButton
-                    testId="VendorOpencodeSection.providerRow.credential"
+                    testId="VendorOpencodeSection.providerRow.models"
                     id={p.id}
-                    label="Update credential"
-                    active={credentialId === p.id}
-                    onClick={() => setCredentialId(credentialId === p.id ? null : p.id)}
+                    label="Manage models"
+                    onClick={() => setModelDialogId(p.id)}
                   >
-                    <KeyIcon />
+                    <SlidersIcon />
                   </IconButton>
-                )}
-                {p.actions.canEditDeclaration && (
+                  {p.actions.canSetCredential && (
+                    <IconButton
+                      testId="VendorOpencodeSection.providerRow.credential"
+                      id={p.id}
+                      label="Update credential"
+                      active={credentialId === p.id}
+                      onClick={() => setCredentialId(credentialId === p.id ? null : p.id)}
+                    >
+                      <KeyIcon />
+                    </IconButton>
+                  )}
+                  {p.actions.canEditDeclaration && (
+                    <IconButton
+                      testId="VendorOpencodeSection.providerRow.edit"
+                      id={p.id}
+                      label="Configure provider"
+                      onClick={() => setConfigId(p.id)}
+                    >
+                      <PencilIcon />
+                    </IconButton>
+                  )}
                   <IconButton
-                    testId="VendorOpencodeSection.providerRow.edit"
+                    testId="VendorOpencodeSection.providerRow.disable"
                     id={p.id}
-                    label="Configure provider"
-                    onClick={() => setConfigId(p.id)}
+                    label={p.disabled ? 'Enable provider' : 'Disable provider (reversible)'}
+                    active={!p.disabled}
+                    disabled={busy}
+                    onClick={() => void handleToggleDisabled(p.id, !p.disabled)}
                   >
-                    <PencilIcon />
+                    <PowerIcon />
                   </IconButton>
-                )}
-                <IconButton
-                  testId="VendorOpencodeSection.providerRow.disable"
-                  id={p.id}
-                  label={p.disabled ? 'Enable provider' : 'Disable provider (reversible)'}
-                  active={!p.disabled}
-                  disabled={busy}
-                  onClick={() => void handleToggleDisabled(p.id, !p.disabled)}
-                >
-                  <PowerIcon />
-                </IconButton>
-                <IconButton
-                  testId="VendorOpencodeSection.providerRow.remove"
-                  id={p.id}
-                  // A greyed trash with no explanation reads as a broken button,
-                  // so the blocked reason IS the label here.
-                  label={
-                    p.actions.canRemove
-                      ? removeActionLabel(p.actions.removeKind)
-                      : (p.actions.blockedReason ?? 'Cannot be removed')
-                  }
-                  danger
-                  disabled={!p.actions.canRemove || busy}
-                  onClick={() => setRemoveTarget(p)}
-                >
-                  <TrashIcon />
-                </IconButton>
-              </div>
+                  <IconButton
+                    testId="VendorOpencodeSection.providerRow.remove"
+                    id={p.id}
+                    // A greyed trash with no explanation reads as a broken button,
+                    // so the blocked reason IS the label here.
+                    label={
+                      p.actions.canRemove
+                        ? removeActionLabel(p.actions.removeKind)
+                        : (p.actions.blockedReason ?? 'Cannot be removed')
+                    }
+                    danger
+                    disabled={!p.actions.canRemove || busy}
+                    onClick={() => setRemoveTarget(p)}
+                  >
+                    <TrashIcon />
+                  </IconButton>
+                </div>
               </div>
 
               {credentialId === p.id && (
@@ -1688,8 +1898,8 @@ function VendorOpencodeSection(): React.JSX.Element {
                 >
                   {claim && (
                     <div className="text-[10px] text-yellow-400/90 leading-relaxed">
-                      This credential is vended by the shared provider &quot;{claim.name}&quot;. A key
-                      set here is replaced on its next sync.
+                      This credential is vended by the shared provider &quot;{claim.name}&quot;. A
+                      key set here is replaced on its next sync.
                     </div>
                   )}
                   {canRowOauth && (
@@ -1709,9 +1919,7 @@ function VendorOpencodeSection(): React.JSX.Element {
                       data-id={p.id}
                       placeholder="Replace API key"
                       value={apiKeys[p.id] ?? ''}
-                      onChange={(e) =>
-                        setApiKeys((prev) => ({ ...prev, [p.id]: e.target.value }))
-                      }
+                      onChange={(e) => setApiKeys((prev) => ({ ...prev, [p.id]: e.target.value }))}
                       className="flex-1 px-2 py-1 text-[11px] rounded bg-bg-input border border-border/40 text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent/60"
                     />
                     <button
@@ -1788,7 +1996,12 @@ function VendorOpencodeSection(): React.JSX.Element {
                 const canOauth = p.authMethods.includes('oauth') && oauthOptions.length > 0
                 const expanded = addingId === p.id
                 return (
-                  <div key={p.id} data-testid="VendorOpencodeSection.catalogRow" data-id={p.id} className="px-1 py-0.5">
+                  <div
+                    key={p.id}
+                    data-testid="VendorOpencodeSection.catalogRow"
+                    data-id={p.id}
+                    className="px-1 py-0.5"
+                  >
                     <button
                       onClick={() => setAddingId(expanded ? null : p.id)}
                       className="w-full flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-bg-hover transition-colors text-left cursor-default"
@@ -1857,10 +2070,33 @@ function VendorOpencodeSection(): React.JSX.Element {
                             </button>
                           </div>
                         )}
-                        {vendorOAuth?.vendorId === p.id && vendorOAuth.stage === 'error' && (
-                          <div className="text-[10px] text-red-400">
-                            Authentication failed. Try again.
-                          </div>
+                        {vendorOAuth?.vendorId === p.id &&
+                          vendorOAuth.stage === 'error' &&
+                          (vendorOAuth.error ? (
+                            // ADR-057 outcome: the remote-`auto` refusal reads as
+                            // "use the desktop", a CSRF mismatch as "start again".
+                            <OAuthOutcomeNotice
+                              kind={classifyOAuthError(vendorOAuth.error)}
+                              message={vendorOAuth.error}
+                              id={p.id}
+                            />
+                          ) : (
+                            <div className="text-[10px] text-red-400">
+                              Authentication failed. Try again.
+                            </div>
+                          ))}
+
+                        {/* Remote two-step flow. Never reached on desktop — the
+                            store only parks `paste` for a web caller. */}
+                        {vendorOAuth?.vendorId === p.id && vendorOAuth.stage === 'paste' && (
+                          <OAuthPasteBackFlow
+                            variant="url"
+                            id={p.id}
+                            url={vendorOAuth.url}
+                            busy={pasteBusy}
+                            onSubmit={(pasted) => handlePasteBackSubmit(p.id, pasted)}
+                            onCancel={cancelVendorOAuth}
+                          />
                         )}
 
                         {oauthFlow.stage === 'instructions' && oauthFlow.vendorId === p.id && (
@@ -1915,8 +2151,8 @@ function VendorOpencodeSection(): React.JSX.Element {
       )}
 
       <div className="text-[10px] text-text-muted/50 leading-relaxed">
-        Credentials are stored in opencode&apos;s own auth.json. After adding a provider, pick
-        which of its models appear in the picker via “Manage models”.
+        Credentials are stored in opencode&apos;s own auth.json. After adding a provider, pick which
+        of its models appear in the picker via “Manage models”.
       </div>
 
       {dialogProvider && (
@@ -1924,8 +2160,22 @@ function VendorOpencodeSection(): React.JSX.Element {
           providerId={dialogProvider.id}
           providerName={dialogProvider.name}
           current={allowlist[dialogProvider.id]}
-          onClose={() => setModelDialogId(null)}
+          error={allowlistOrphanError}
+          onClose={() => {
+            setAllowlistOrphanError(null)
+            setModelDialogId(null)
+          }}
           onSave={(ids) => {
+            // `ids` are BARE model ids; references are stored as picker VALUES.
+            const kept = new Set(ids.map((id) => `${dialogProvider.id}/${id}`))
+            const blocked = blockingReferences(
+              modelsOfProvider(dialogProvider.id).filter((value) => !kept.has(value))
+            )
+            if (blocked) {
+              setAllowlistOrphanError(blocked)
+              return
+            }
+            setAllowlistOrphanError(null)
             updateCfg({ modelAllowlist: { ...allowlist, [dialogProvider.id]: ids } })
             setModelDialogId(null)
             reload()
@@ -2008,8 +2258,8 @@ function removeConfirmBody(entry: OpencodeProviderCatalogEntry): React.ReactNode
           <br />
           <br />
           <span className="text-yellow-400">
-            Heads up: the shared provider &quot;{claim.name}&quot; still vends this credential, so it
-            will be restored on the next sync. Turn its opencode route off in Common · Providers
+            Heads up: the shared provider &quot;{claim.name}&quot; still vends this credential, so
+            it will be restored on the next sync. Turn its opencode route off in Common · Providers
             &amp; models to remove it for good.
           </span>
         </>
@@ -2044,11 +2294,18 @@ function OpencodeModelsSection(): React.JSX.Element {
   }, [])
 
   if (cfg === null || installed === null) {
-    return <div data-testid="OpencodeModelsSection" className="px-3 py-1.5 text-[13px] text-text-muted">Loading…</div>
+    return (
+      <div data-testid="OpencodeModelsSection" className="px-3 py-1.5 text-[13px] text-text-muted">
+        Loading…
+      </div>
+    )
   }
   if (!installed) {
     return (
-      <div data-testid="OpencodeModelsSection" className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+      <div
+        data-testid="OpencodeModelsSection"
+        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
+      >
         opencode is not installed. Model settings apply to opencode sessions.
       </div>
     )
@@ -2060,8 +2317,11 @@ function OpencodeModelsSection(): React.JSX.Element {
     window.api.saveOpencodeSettings(next).catch(() => {})
     // Mirror the default-model choice into the store so new/reopened opencode
     // sessions pick it up immediately, and refresh the picker model list.
+    // The RAW value, not the constant — an empty string is what tells the store
+    // nothing is configured, which is what separates "the builtin default may
+    // fall back silently" from "the user named this model".
     if ('model' in patch) {
-      useSessionStore.getState().setOpencodeDefaultModel(patch.model || OPENCODE_DEFAULT_MODEL)
+      useSessionStore.getState().setOpencodeDefaultModel(patch.model ?? '')
     }
     useSessionStore.getState().reloadModels()
   }
@@ -2088,6 +2348,11 @@ function OpencodeModelsSection(): React.JSX.Element {
             onSelectModel={(v) => update({ model: v || undefined })}
           />
         </div>
+        <StaleModelNotice
+          testid="OpencodeModelsSection.model"
+          models={models}
+          value={cfg.model ?? ''}
+        />
       </div>
       <div className="px-3 py-1.5 text-[13px] text-text-secondary">
         <div className="mb-1 flex items-center gap-1">
@@ -2107,6 +2372,11 @@ function OpencodeModelsSection(): React.JSX.Element {
             onSelectModel={(v) => update({ smallModel: v || undefined })}
           />
         </div>
+        <StaleModelNotice
+          testid="OpencodeModelsSection.smallModel"
+          models={models}
+          value={cfg.smallModel ?? ''}
+        />
       </div>
       <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
         Changes apply on the next opencode server start for each working directory.
@@ -2155,7 +2425,10 @@ function PiDefaultModelSection(): React.JSX.Element {
   }
   if (!installed) {
     return (
-      <div data-testid="PiDefaultModelSection" className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+      <div
+        data-testid="PiDefaultModelSection"
+        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
+      >
         pi is not installed. Model settings apply to pi sessions.
       </div>
     )
@@ -2178,18 +2451,26 @@ function PiDefaultModelSection(): React.JSX.Element {
     window.api
       .getEngineModels()
       .then((groups) =>
-        setModels(groups.filter((group) => group.engineId === 'pi').flatMap((group) => group.models))
+        setModels(
+          groups.filter((group) => group.engineId === 'pi').flatMap((group) => group.models)
+        )
       )
       .catch(() => {})
   }
 
   const update = (value: string): void => {
-    const next: EngineConfig = { ...cfg, piConfig: { ...cfg.piConfig, defaultModel: value || undefined } }
+    const next: EngineConfig = {
+      ...cfg,
+      piConfig: { ...cfg.piConfig, defaultModel: value || undefined }
+    }
     setCfg(next)
     window.api.saveEngineConfig('pi', next).catch(() => {})
     // Mirror the default-model choice into the store so new/reopened pi
     // sessions pick it up immediately, and refresh the picker model list.
-    useSessionStore.getState().setPiDefaultModel(value || PI_DEFAULT_MODEL)
+    // The RAW value (not the constant): an empty string is what tells the store
+    // that nothing is configured, which is what separates "the builtin default
+    // may fall back silently" from "the user named this model".
+    useSessionStore.getState().setPiDefaultModel(value)
     useSessionStore.getState().reloadModels()
   }
 
@@ -2266,30 +2547,42 @@ function PiDefaultModelSection(): React.JSX.Element {
           onClick={() => setManagingModels(true)}
           className="mt-1 ml-3 text-[11px] text-accent"
         >
-          Manage models ({allowlist === undefined ? 'all' : allowlist.length === 0 ? 'none' : `${allowlist.length} selected`})
+          Manage models (
+          {allowlist === undefined
+            ? 'all'
+            : allowlist.length === 0
+              ? 'none'
+              : `${allowlist.length} selected`}
+          )
         </button>
-        {defaultExcluded && (
+        {defaultExcluded ? (
           <div
             data-testid="PiDefaultModelSection.excludedDefaultWarning"
             className="mt-1 text-[10px] text-warning/90"
           >
-            The configured default is excluded by the model allowlist. ClaudeUI will use an
-            available fallback until it is enabled or replaced.
+            The configured default is excluded by the model allowlist. New pi sessions will start
+            with no model selected until it is enabled or replaced.
           </div>
+        ) : (
+          <StaleModelNotice
+            testid="PiDefaultModelSection.defaultModel"
+            models={models}
+            value={current}
+          />
         )}
         {!known && !defaultExcluded && (
           <div
             data-testid="PiDefaultModelSection.unknownWarning"
             className="mt-1 text-[10px] text-warning/90"
           >
-            Not in pi&rsquo;s currently-discovered model list — used as-is. Double-check the provider is
-            authenticated and the model id is spelled correctly.
+            Not in pi&rsquo;s currently-discovered model list — used as-is. Double-check the
+            provider is authenticated and the model id is spelled correctly.
           </div>
         )}
       </div>
       <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
-        Applies to new pi sessions. Falls back to pi&rsquo;s own default (
-        {PI_DEFAULT_MODEL}) when unset.
+        Applies to new pi sessions. Falls back to pi&rsquo;s own default ({PI_DEFAULT_MODEL}) when
+        unset.
       </div>
       {managingModels && (
         <PiModelAllowlistDialog
@@ -2723,12 +3016,19 @@ const OPENCODE_SCHEMA_DEFS = (opencodeConfigSchema as { $defs: SchemaDefs }).$de
 const OPENCODE_CONFIG_NODE = OPENCODE_SCHEMA_DEFS.Config as SchemaNode
 /** The provider-model entry schema: $defs.ProviderConfig.properties.models.additionalProperties */
 const OPENCODE_MODEL_ENTRY_SCHEMA = (
-  (
-    (OPENCODE_SCHEMA_DEFS.ProviderConfig as SchemaNode).properties as Record<string, SchemaNode>
-  ).models as SchemaNode
+  ((OPENCODE_SCHEMA_DEFS.ProviderConfig as SchemaNode).properties as Record<string, SchemaNode>)
+    .models as SchemaNode
 ).additionalProperties as SchemaNode
 /** Model capability fields the provider editor exposes (raw opencode names). */
-const MODEL_CAP_KEYS = ['attachment', 'reasoning', 'temperature', 'tool_call', 'modalities', 'cost', 'limit']
+const MODEL_CAP_KEYS = [
+  'attachment',
+  'reasoning',
+  'temperature',
+  'tool_call',
+  'modalities',
+  'cost',
+  'limit'
+]
 
 /**
  * Top-level Config keys owned by a DEDICATED UI (rendered as read-only pointers in
@@ -2773,8 +3073,7 @@ function ModelCapabilityEditor({
       .readOpencodeNativeRaw()
       .then(({ config }) => {
         const prov = (config.provider as Record<string, unknown> | undefined)?.[providerId] as
-          | Record<string, unknown>
-          | undefined
+          Record<string, unknown> | undefined
         const models = prov?.models as Record<string, unknown> | undefined
         const entry = (models?.[modelId] as Record<string, unknown> | undefined) ?? {}
         setOriginal(entry)
@@ -2882,7 +3181,10 @@ function OpencodeRawConfigSection(): React.JSX.Element {
 
   if (installed === null || original === null) {
     return (
-      <div data-testid="OpencodeRawConfigSection" className="px-3 py-1.5 text-[13px] text-text-muted">
+      <div
+        data-testid="OpencodeRawConfigSection"
+        className="px-3 py-1.5 text-[13px] text-text-muted"
+      >
         Loading…
       </div>
     )
@@ -3694,7 +3996,8 @@ export const SECTIONS: Section[] = [
       {
         key: 'remoteServerConfig',
         label: 'Remote server',
-        keywords: 'remote port password autostart bind interface server',
+        keywords:
+          'remote port password autostart bind interface server passkey webauthn biometric fingerprint face authentication sign-in enroll device credential',
         render: () => <RemoteServerSettings />
       }
     ]
@@ -3722,11 +4025,36 @@ export const SECTIONS: Section[] = [
         label: 'Global permissions',
         keywords: 'allow deny ask rules tools bash edit read write permissions security',
         render: () => <GlobalPermissionsSummary />
-      },
+      }
+    ]
+  },
+  {
+    // Its own COMMON-scope section, not an item under Claude → Permissions
+    // (where it originally lived): the setting is engine-neutral (ADR-050) and
+    // parking it inside the Claude tab read as Claude-only — the exact
+    // confusion it was built to remove.
+    id: 'autonomy',
+    label: 'Autonomy',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        <path d="M9 12l2 2 4-4" />
+      </svg>
+    ),
+    items: [
       {
         key: 'autonomyMode',
         label: 'Autonomy mode',
-        keywords: 'autonomy mode plan ask auto edit full permission mode default',
+        keywords: 'autonomy mode plan ask auto edit full permission mode default all engines',
         render: () => <AutonomyModePicker />
       }
     ]
@@ -4442,7 +4770,16 @@ export const SECTIONS: Section[] = [
     id: 'claude-dispatch',
     label: 'Cross-engine dispatch',
     icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <path d="M17 3l4 4-4 4" />
         <path d="M21 7H9a4 4 0 00-4 4v1" />
         <path d="M7 21l-4-4 4-4" />
@@ -4463,7 +4800,14 @@ export const SECTIONS: Section[] = [
     id: 'shared-providers',
     label: 'Providers & models',
     icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+      >
         <circle cx="12" cy="12" r="3" />
         <path d="M12 1v4M12 19v4M4.2 4.2l2.8 2.8M17 17l2.8 2.8M1 12h4M19 12h4" />
       </svg>
@@ -4531,7 +4875,16 @@ export const SECTIONS: Section[] = [
     id: 'opencode-automode',
     label: 'Auto mode',
     icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
         <path d="M9 12l2 2 4-4" />
       </svg>
@@ -4550,7 +4903,16 @@ export const SECTIONS: Section[] = [
     id: 'opencode-models',
     label: 'Models',
     icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <ellipse cx="12" cy="5" rx="9" ry="3" />
         <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
         <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
@@ -4569,7 +4931,16 @@ export const SECTIONS: Section[] = [
     id: 'opencode-dispatch',
     label: 'Cross-engine dispatch',
     icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <path d="M17 3l4 4-4 4" />
         <path d="M21 7H9a4 4 0 00-4 4v1" />
         <path d="M7 21l-4-4 4-4" />
@@ -4590,7 +4961,16 @@ export const SECTIONS: Section[] = [
     id: 'opencode-config',
     label: 'Configuration',
     icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <path d="M12 15a3 3 0 100-6 3 3 0 000 6z" />
         <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
       </svg>
@@ -4615,7 +4995,16 @@ export const SECTIONS: Section[] = [
     id: 'opencode-agents',
     label: 'Agents',
     icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <circle cx="12" cy="8" r="4" />
         <path d="M20 21a8 8 0 10-16 0" />
       </svg>
@@ -4633,7 +5022,16 @@ export const SECTIONS: Section[] = [
     id: 'pi-automode',
     label: 'Auto mode',
     icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
         <path d="M9 12l2 2 4-4" />
       </svg>
@@ -4652,7 +5050,16 @@ export const SECTIONS: Section[] = [
     id: 'pi-models',
     label: 'Models',
     icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <ellipse cx="12" cy="5" rx="9" ry="3" />
         <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
         <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
@@ -4689,7 +5096,8 @@ export const SECTIONS: Section[] = [
       {
         key: 'vendorPiAuth',
         label: 'Providers & subscriptions',
-        keywords: 'pi provider add auth api key oauth subscription login openai anthropic radius xai copilot',
+        keywords:
+          'pi provider add auth api key oauth subscription login openai anthropic radius xai copilot',
         render: () => <PiVendors />
       }
     ]
@@ -4700,22 +5108,35 @@ export const SECTIONS: Section[] = [
 
 /** Section ids that belong to the App group (flat, directly visible) */
 const APP_SECTION_IDS = new Set([
-  'appearance', 'chat', 'session', 'shared-providers', 'tool-output', 'diff', 'git',
-  'status-line', 'usage', 'logging', 'voice', 'remote', 'mockup'
+  'appearance',
+  'chat',
+  'session',
+  'autonomy',
+  'shared-providers',
+  'tool-output',
+  'diff',
+  'git',
+  'status-line',
+  'usage',
+  'logging',
+  'voice',
+  'remote',
+  'mockup'
 ])
 
 /** Section ids that belong to Engines > Claude */
-const ENGINE_CLAUDE_SECTION_IDS = new Set([
-  'permissions', 'sandbox', 'proxy', 'claude-dispatch'
-])
+const ENGINE_CLAUDE_SECTION_IDS = new Set(['permissions', 'sandbox', 'proxy', 'claude-dispatch'])
 
 /** Section ids that belong to Engines > opencode (content self-gates on install) */
-const ENGINE_OPENCODE_SECTION_IDS = new Set(['opencode-automode', 'opencode-models', 'opencode-dispatch', 'opencode-config'])
+const ENGINE_OPENCODE_SECTION_IDS = new Set([
+  'opencode-automode',
+  'opencode-models',
+  'opencode-dispatch',
+  'opencode-config'
+])
 
 /** Section ids that belong to Vendors > Anthropic */
-const VENDOR_ANTHROPIC_SECTION_IDS = new Set([
-  'vendor-anthropic', 'effortDefaults'
-])
+const VENDOR_ANTHROPIC_SECTION_IDS = new Set(['vendor-anthropic', 'effortDefaults'])
 
 /** Section ids that belong to Vendors > opencode (gated: only shown when opencode engine installs) */
 const VENDOR_OPENCODE_SECTION_IDS = new Set(['vendor-opencode'])
@@ -4778,8 +5199,20 @@ export const SCOPES: ScopeDef[] = [
         id: 'common-app',
         label: undefined,
         sections: getSectionsForIds(APP_SECTION_IDS, [
-          'appearance', 'chat', 'session', 'shared-providers', 'tool-output', 'diff', 'git',
-          'status-line', 'usage', 'logging', 'voice', 'remote', 'mockup'
+          'appearance',
+          'chat',
+          'session',
+          'autonomy',
+          'shared-providers',
+          'tool-output',
+          'diff',
+          'git',
+          'status-line',
+          'usage',
+          'logging',
+          'voice',
+          'remote',
+          'mockup'
         ])
       }
     ]
@@ -4792,13 +5225,19 @@ export const SCOPES: ScopeDef[] = [
         id: 'claude-engine',
         label: 'Engine',
         sections: getSectionsForIds(ENGINE_CLAUDE_SECTION_IDS, [
-          'permissions', 'sandbox', 'proxy', 'claude-dispatch'
+          'permissions',
+          'sandbox',
+          'proxy',
+          'claude-dispatch'
         ])
       },
       {
         id: 'claude-vendor',
         label: 'Vendor · Anthropic',
-        sections: getSectionsForIds(VENDOR_ANTHROPIC_SECTION_IDS, ['vendor-anthropic', 'effortDefaults'])
+        sections: getSectionsForIds(VENDOR_ANTHROPIC_SECTION_IDS, [
+          'vendor-anthropic',
+          'effortDefaults'
+        ])
       },
       {
         id: 'claude-account',
@@ -4814,7 +5253,12 @@ export const SCOPES: ScopeDef[] = [
       {
         id: 'opencode-engine',
         label: 'Engine',
-        sections: getSectionsForIds(ENGINE_OPENCODE_SECTION_IDS, ['opencode-automode', 'opencode-models', 'opencode-dispatch', 'opencode-config'])
+        sections: getSectionsForIds(ENGINE_OPENCODE_SECTION_IDS, [
+          'opencode-automode',
+          'opencode-models',
+          'opencode-dispatch',
+          'opencode-config'
+        ])
       },
       {
         id: 'opencode-vendor',
@@ -4845,6 +5289,23 @@ export const SCOPES: ScopeDef[] = [
     ]
   }
 ]
+
+/**
+ * The section a scope opens on: its first CAPABILITY-VISIBLE section, so a
+ * gated-out one is never selected. Shared by the desktop container and the
+ * mobile view (which uses it to tell a deep link apart from a plain tab
+ * switch), so the two can't drift.
+ */
+export function firstSectionOfScope(scope: SettingsScope): string {
+  const scopeDef = SCOPES.find((s) => s.id === scope)
+  if (!scopeDef) return ''
+  const caps = scopeCapabilities(scope)
+  for (const sg of scopeDef.subgroups) {
+    const sec = sg.sections.find((s) => isSectionVisible(s.id, caps))
+    if (sec) return sec.id
+  }
+  return ''
+}
 
 /** Map from section id → scope id, for search + selection logic */
 export const SECTION_SCOPE_MAP: ReadonlyMap<string, SettingsScope> = new Map(

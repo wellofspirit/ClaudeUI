@@ -10,6 +10,13 @@ import { buildMockupUrl } from '../shared/mockup-url'
 /**
  * Factory for IPC event handler registration.
  * Forwards all arguments from ipcRenderer.on (after the IpcRendererEvent) to the callback.
+ *
+ * **HOST-LOCAL channels only, as of SyncCore phase 4c.** Replicated and volatile
+ * events no longer ride `webContents.send`: they arrive on the sync port and are
+ * subscribed to in the renderer via `shared/sync/client-registry.onSyncEvent`.
+ * What is left here is the host talking to its own shell — window chrome, the
+ * native OAuth flow, voice capture, desktop PTY bytes, the log-viewer window,
+ * plugin views, quit handshake — none of which a remote client has or wants.
  */
 function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T) => () => void {
   return (cb: T) => {
@@ -19,6 +26,38 @@ function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T)
     return () => ipcRenderer.removeListener(channel, handler)
   }
 }
+
+// ---------------------------------------------------------------------------
+// Sync port hand-off (SyncCore phase 4c)
+// ---------------------------------------------------------------------------
+//
+// `MessagePort` is not a type `contextBridge` can marshal, so the preload takes
+// delivery of the port and forwards it into the main world with
+// `window.postMessage(..., [port])` — the transfer path Electron's own
+// message-ports guide prescribes for exactly this. The renderer installs its
+// `message` listener first and then calls `acquireSyncPort()`, so we hold the port
+// until it is asked for: main can (and does) post it before the renderer's
+// bundle has finished evaluating.
+
+/** Must match `renderer/src/sync/desktop-transport.ts`. */
+const SYNC_PORT_MESSAGE = 'claudeui:sync-port'
+
+let heldSyncPort: Electron.MessagePortMain | MessagePort | null = null
+let syncPortRequested = false
+
+function forwardSyncPort(): void {
+  if (!heldSyncPort || !syncPortRequested) return
+  const port = heldSyncPort
+  heldSyncPort = null
+  window.postMessage(SYNC_PORT_MESSAGE, '*', [port as unknown as MessagePort])
+}
+
+ipcRenderer.on('sync-port', (event) => {
+  // A reload gets a brand-new channel from main; if one was held un-acquired
+  // (renderer never asked), it belongs to a document that is gone.
+  heldSyncPort = event.ports[0] ?? null
+  forwardSyncPort()
+})
 
 /**
  * Unwrap safeHandler's { ok, data, error } envelope.
@@ -61,7 +100,6 @@ const api: ClaudeAPI = {
       forkSession,
       engineId
     ),
-  rekeySession: (oldId: string, newId: string) => ipcRenderer.invoke('session:rekey', oldId, newId),
   resolveForkAnchor: (
     sessionId: string,
     cwd: string,
@@ -69,13 +107,22 @@ const api: ClaudeAPI = {
     engineId: import('../shared/types').EngineId,
     messageIndex: number
   ) =>
-    ipcRenderer.invoke('session:resolve-fork-anchor', sessionId, cwd, messageId, engineId, messageIndex),
+    ipcRenderer.invoke(
+      'session:resolve-fork-anchor',
+      sessionId,
+      cwd,
+      messageId,
+      engineId,
+      messageIndex
+    ),
   sendPrompt: (
     routingId: string,
     prompt: string,
     attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
   ) => ipcRenderer.invoke('session:send', routingId, prompt, attachments),
   cancelSession: (routingId: string) => ipcRenderer.invoke('session:cancel', routingId),
+  clearConversation: (routingId: string, permissionMode?: string) =>
+    ipcRenderer.invoke('session:clear-conversation', routingId, permissionMode),
   interruptSession: (routingId: string) => ipcRenderer.invoke('session:interrupt', routingId),
   respondApproval: (
     routingId: string,
@@ -101,8 +148,8 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:load-opencode-history', sessionId),
   listPiSessionsGlobal: () => ipcRenderer.invoke('session:list-pi'),
   loadPiHistory: (sessionId: string) => ipcRenderer.invoke('session:load-pi-history', sessionId),
-  loadSessionHistory: (sessionId: string, projectKey: string) =>
-    ipcRenderer.invoke('session:load-history', sessionId, projectKey),
+  loadSessionHistory: (sessionId: string, projectKey: string, resumeSessionAt?: string) =>
+    ipcRenderer.invoke('session:load-history', sessionId, projectKey, resumeSessionAt),
   loadSubagentHistory: (sessionId: string, projectKey: string, agentId: string) =>
     ipcRenderer.invoke('session:load-subagent-history', sessionId, projectKey, agentId),
   buildSubagentFileMap: (
@@ -113,59 +160,25 @@ const api: ClaudeAPI = {
   loadBackgroundOutput: (projectKey: string, taskId: string, outputFile?: string) =>
     ipcRenderer.invoke('session:load-background-output', projectKey, taskId, outputFile),
 
-  // Routed session events — each passes (routingId, data) as separate args
-  onSessionCreated: onEvent('session:created'),
-  onUserMessage: onEvent('session:user-message'),
-  onMessage: onEvent('session:message'),
-  onStreamEvent: onEvent('session:stream'),
-  onApprovalRequest: onEvent('session:approval-request'),
-  onApprovalDismiss: onEvent('session:approval-dismiss'),
-  onStatus: onEvent('session:status'),
-  onResult: onEvent('session:result'),
-  onError: onEvent('session:error'),
-  onVendorAuthRequired: onEvent('session:vendor-auth-required'),
-  onWarning: onEvent('session:warning'),
-  onMessagesRetracted: onEvent('session:messages-retracted'),
-  onToolResult: onEvent('session:tool-result'),
-  onTaskProgress: onEvent('session:task-progress'),
-  onTaskNotification: onEvent('session:task-notification'),
-  onTaskStarted: onEvent('session:task-started'),
-  onSubagentStream: onEvent('session:subagent-stream'),
-  onSubagentMessage: onEvent('session:subagent-message'),
-  onSubagentMessageBatch: onEvent('session:subagent-message-batch'),
-  onSubagentToolResult: onEvent('session:subagent-tool-result'),
-  onSlashCommands: onEvent('session:slash-commands'),
-  onPermissionMode: onEvent('session:permission-mode'),
-  onBashOutput: onEvent('session:bash-output'),
-  onBackgroundOutput: onEvent('session:background-output'),
-  onSandboxViolation: onEvent('session:sandbox-violation'),
-  onSteerConsumed: onEvent('session:steer-consumed'),
-  onSkills: onEvent('session:skills'),
-  onStatusLine: onEvent('session:status-line'),
-  onMetering: onEvent('session:metering'),
-  onPlanSteps: onEvent('session:plan'),
-  onMcpServers: onEvent('session:mcp-servers'),
+  // Sync transport (SyncCore phase 4c). Every replicated / volatile channel
+  // arrives on the port, not here — see the `onEvent` doc comment.
+  acquireSyncPort: () => {
+    syncPortRequested = true
+    forwardSyncPort()
+  },
 
-  // Non-routed events (no routingId prefix)
+  // Host-local events: the host process talking to its own shell.
   onMaximizeChange: onEvent('window:maximized-change'),
-  onWatchUpdate: onEvent('session:watch-update'),
-  onDirectoriesChanged: onEvent('session:directories-changed'),
-  onGitStatusUpdate: onEvent('git:status-update'),
-  onSettingsChanged: onEvent('config:settings-changed'),
-  onSessionConfigChanged: onEvent('config:sessions-changed'),
-  onAccountUsage: onEvent('usage:data'),
   onAuthState: onEvent('auth:state'),
-  onAuthSource: onEvent('session:auth-source'),
   onAccountsChanged: onEvent('account:changed'),
   onAccountRespawnSessions: onEvent('account:respawn-sessions'),
-  onBlockUsage: onEvent('usage:block-data'),
   onTerminalData: onEvent('terminal:data'),
+  // Host-local like the bytes: the pty's geometry changed because some surface
+  // refitted it (ADR-060). A narrow Electron window runs the MOBILE fork, which
+  // mirrors the shared width rather than pushing its own, so the desktop
+  // renderer needs this event too — it is not a remote-only concern.
+  onTerminalResized: onEvent('terminal:resized'),
   onTerminalExit: onEvent('terminal:exit'),
-  onAutomationRunUpdate: onEvent('automation:run-update'),
-  onAutomationsChanged: onEvent('automation:changed'),
-  onAutomationRunMessage: onEvent('automation:run-message'),
-  onAutomationStreamEvent: onEvent('automation:stream-event'),
-  onAutomationProcessing: onEvent('automation:processing'),
   onBeforeQuit: onEvent('app:before-quit'),
 
   watchBackground: (routingId: string, toolUseId: string) =>
@@ -180,6 +193,7 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:background-task', routingId, toolUseId),
   dequeueMessage: (routingId: string, value: string) =>
     ipcRenderer.invoke('session:dequeue-message', routingId, value),
+  recallQueued: (routingId: string) => ipcRenderer.invoke('session:recall-queued', routingId),
   askSideQuestion: (routingId: string, question: string) =>
     ipcRenderer.invoke('session:ask-side-question', routingId, question),
   setPermissionMode: (routingId: string, mode: string) =>
@@ -214,16 +228,48 @@ const api: ClaudeAPI = {
   getPlanContent: (routingId: string) => ipcRenderer.invoke('session:get-plan-content', routingId),
   getSessionLogPath: (routingId: string) =>
     ipcRenderer.invoke('session:get-session-log-path', routingId),
-  watchSession: (routingId: string, sessionId: string, projectKey: string) =>
-    ipcRenderer.invoke('session:watch-session', routingId, sessionId, projectKey),
+  watchSession: (routingId: string, sessionId: string, projectKey: string, cwd?: string) =>
+    ipcRenderer.invoke('session:watch-session', routingId, sessionId, projectKey, cwd),
   unwatchSession: (routingId: string) => ipcRenderer.invoke('session:unwatch-session', routingId),
   // Terminal (PTY) operations
-  createTerminal: (cwd: string) => ipcRenderer.invoke('terminal:create', cwd),
+  createTerminal: (cwd: string, index?: number) =>
+    ipcRenderer.invoke('terminal:create', cwd, index),
   writeTerminal: (id: string, data: string) => ipcRenderer.invoke('terminal:write', id, data),
   resizeTerminal: (id: string, cols: number, rows: number) =>
     ipcRenderer.invoke('terminal:resize', id, cols, rows),
   killTerminal: (id: string) => ipcRenderer.invoke('terminal:kill', id),
   killTerminalsByCwd: (cwd: string) => ipcRenderer.invoke('terminal:kill-by-cwd', cwd),
+  terminalAvailability: () => ipcRenderer.invoke('terminal:availability'),
+  // Real IPC on desktop (unlike availability, which is a constant here): the
+  // pool is main-process state, and the desktop is just as capable of reopening
+  // a slot whose shell is still running as a phone is.
+  terminalPool: (cwd: string) => ipcRenderer.invoke('terminal:pool', cwd),
+  // The volatile lane's subscription verb (phase 5 S1). Real IPC on the desktop
+  // too: the renderer is client #1 and its deltas ride the same watched lane a
+  // phone's do — there is no privileged local path any more.
+  watchStreams: (sessionIds: string[], automationIds?: string[]) =>
+    ipcRenderer.invoke('stream:watch', { sessionIds, automationRuns: automationIds }),
+  // Step-up is a REMOTE concept (SyncCore phase 2): the desktop renderer is the
+  // host surface, already holding a non-decaying `shell` grant, so there is
+  // nothing to step up to. Local no-op, deliberately not an IPC round trip.
+  //
+  // That covers the `settings` intent too (ADR-054 §6): the host anchor's editor
+  // unlocks with no ceremony and has no TTL, so this answers `ok` with NO
+  // `settingsSessionExpiresAt` — and the pane reads that absence as "no
+  // countdown", which is the truth here rather than a missing field.
+  terminalStepUp: async () => ({ ok: true }),
+  // Same reasoning for the passkey factor: nothing to prove when you are the
+  // host surface, and this renderer could not run a ceremony anyway (no RP ID
+  // on `file://` — see the webauthn block below).
+  terminalStepUpPasskey: async () => ({ ok: true }),
+  // Attach/detach, by contrast, are REAL here now that terminals are a per-cwd
+  // pool: a desktop tab can resolve to a pty another surface spawned, and the
+  // attach is what replays that terminal's scrollback onto `terminal:data`.
+  attachTerminal: (id: string) => ipcRenderer.invoke('terminal:attach', id),
+  detachTerminal: (id: string) => ipcRenderer.invoke('terminal:detach', id),
+  // Only the server drops attachments (policy flip, decay, backpressure), and
+  // none of those apply to the host surface.
+  onTerminalDetached: () => () => {},
 
   // Worktree operations — all use safeHandler
   createWorktree: (cwd: string, name: string) => unwrap('worktree:create', cwd, name),
@@ -258,10 +304,13 @@ const api: ClaudeAPI = {
     unwrap('git:push-with-upstream', cwd, branch),
   gitPull: (cwd: string) => unwrap('git:pull', cwd),
   gitFetch: (cwd: string) => unwrap('git:fetch', cwd),
-  gitStartWatching: (cwd: string) => unwrap('git:start-watching', cwd),
-  gitStopWatching: (cwd: string) => unwrap('git:stop-watching', cwd),
+  // Per-connection git interest (phase 5 S2): a REPLACE set, not a
+  // start/stop pair. Real IPC on the desktop too — the renderer is one
+  // connection among several and its interest joins the same union.
+  watchGit: (cwds: string[]) => unwrap('git:watch', { cwds }),
 
   listDir: (dirPath: string) => ipcRenderer.invoke('file:list-dir', dirPath),
+  listPlaces: () => ipcRenderer.invoke('file:list-places'),
   openInVSCode: (cwd: string) => ipcRenderer.invoke('app:open-in-vscode', cwd),
   openPath: (filePath: string) => ipcRenderer.invoke('shell:open-path', filePath),
   showInFolder: (filePath: string) => ipcRenderer.invoke('shell:show-in-folder', filePath),
@@ -273,8 +322,11 @@ const api: ClaudeAPI = {
   saveSettings: (settings) => ipcRenderer.invoke('config:save-settings', settings),
   loadSessionConfig: () => ipcRenderer.invoke('config:load-sessions'),
   saveSessionConfig: (config) => ipcRenderer.invoke('config:save-sessions', config),
-  deleteSession: (sessionId: string, projectKey: string, engineId?: import('../shared/types').EngineId) =>
-    unwrap<void>('session:delete-session', sessionId, projectKey, engineId),
+  deleteSession: (
+    sessionId: string,
+    projectKey: string,
+    engineId?: import('../shared/types').EngineId
+  ) => unwrap<void>('session:delete-session', sessionId, projectKey, engineId),
   deleteProject: (projectKey: string) => unwrap<void>('session:delete-project', projectKey),
   loadSlashCommands: () => ipcRenderer.invoke('config:load-slash-commands'),
   saveSlashCommands: (commands) => ipcRenderer.invoke('config:save-slash-commands', commands),
@@ -356,11 +408,8 @@ const api: ClaudeAPI = {
     unwrap('vendor-auth:list-options', engineId),
   vendorAuthListKeys: (engineId: import('../shared/types').EngineId) =>
     unwrap('vendor-auth:list-keys', engineId),
-  vendorAuthSetKey: (
-    engineId: import('../shared/types').EngineId,
-    vendorId: string,
-    key: string
-  ) => unwrap('vendor-auth:set-key', engineId, vendorId, key),
+  vendorAuthSetKey: (engineId: import('../shared/types').EngineId, vendorId: string, key: string) =>
+    unwrap('vendor-auth:set-key', engineId, vendorId, key),
   vendorAuthOauthAuthorize: (
     engineId: import('../shared/types').EngineId,
     vendorId: string,
@@ -378,8 +427,7 @@ const api: ClaudeAPI = {
   vendorAuthOauthCancel: (engineId: import('../shared/types').EngineId) =>
     unwrap('vendor-auth:oauth-cancel', engineId),
 
-  loadEngineConfig: (engineId: string) =>
-    ipcRenderer.invoke('config:load-engine-config', engineId),
+  loadEngineConfig: (engineId: string) => ipcRenderer.invoke('config:load-engine-config', engineId),
   saveEngineConfig: (engineId: string, config: import('../shared/types').EngineConfig) =>
     ipcRenderer.invoke('config:save-engine-config', engineId, config),
   loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
@@ -389,18 +437,27 @@ const api: ClaudeAPI = {
   patchOpencodeNative: (patches: import('../shared/types').RawConfigPatch[]) =>
     unwrap('config:patch-opencode-native', patches),
   listOpencodeAgents: (cwd?: string) => unwrap('opencode-agents:list', cwd),
-  readOpencodeAgent: (name: string, scope: import('../shared/types').OpencodeAgentScope, cwd?: string) =>
-    unwrap('opencode-agents:read', name, scope, cwd),
+  readOpencodeAgent: (
+    name: string,
+    scope: import('../shared/types').OpencodeAgentScope,
+    cwd?: string
+  ) => unwrap('opencode-agents:read', name, scope, cwd),
   saveOpencodeAgent: (input: import('../shared/types').OpencodeAgentInput, cwd?: string) =>
     unwrap('opencode-agents:save', input, cwd),
-  deleteOpencodeAgent: (name: string, scope: import('../shared/types').OpencodeAgentScope, cwd?: string) =>
-    unwrap('opencode-agents:delete', name, scope, cwd),
-  setOpencodeAgentDisabled: (name: string, scope: import('../shared/types').OpencodeAgentScope, cwd: string | undefined, disabled: boolean) =>
-    unwrap('opencode-agents:set-disabled', name, scope, cwd, disabled),
+  deleteOpencodeAgent: (
+    name: string,
+    scope: import('../shared/types').OpencodeAgentScope,
+    cwd?: string
+  ) => unwrap('opencode-agents:delete', name, scope, cwd),
+  setOpencodeAgentDisabled: (
+    name: string,
+    scope: import('../shared/types').OpencodeAgentScope,
+    cwd: string | undefined,
+    disabled: boolean
+  ) => unwrap('opencode-agents:set-disabled', name, scope, cwd, disabled),
   generateOpencodeAgent: (description: string, cwd?: string) =>
     unwrap('opencode-agents:generate', description, cwd),
-  loadVendorConfig: (vendorId: string) =>
-    ipcRenderer.invoke('config:load-vendor-config', vendorId),
+  loadVendorConfig: (vendorId: string) => ipcRenderer.invoke('config:load-vendor-config', vendorId),
   saveVendorConfig: (vendorId: string, config: import('../shared/types').VendorConfig) =>
     ipcRenderer.invoke('config:save-vendor-config', vendorId, config),
   listSharedProviders: () => unwrap('shared-provider:list'),
@@ -410,8 +467,7 @@ const api: ClaudeAPI = {
   removeSharedProvider: (id: string) => unwrap('shared-provider:remove', id),
   setSharedProviderRoute: (id, harness, enabled) =>
     unwrap('shared-provider:set-route', id, harness, enabled),
-  setSharedProviderApiKey: (id: string, key: string) =>
-    unwrap('shared-provider:set-key', id, key),
+  setSharedProviderApiKey: (id: string, key: string) => unwrap('shared-provider:set-key', id, key),
   syncSharedProvider: (id: string) => unwrap('shared-provider:sync', id),
   disconnectSharedProvider: (id: string) => unwrap('shared-provider:disconnect', id),
   setSharedProviderDefaultModel: (id, harness, modelId?) =>
@@ -435,6 +491,44 @@ const api: ClaudeAPI = {
   detectTailscale: () => ipcRenderer.invoke('remote:tailscale-detect'),
   forceReserve: () => ipcRenderer.invoke('remote:force-reserve'),
 
+  // Remote-access settings, the ROUTINE subset (ADR-054 §6). Real IPC here
+  // rather than a refusal: the channels are registered on BOTH transports
+  // (authcfg.ipc.ts) precisely so the capability/kind declaration is one
+  // reviewed fact, and the desktop connection — being the host anchor — is
+  // exempt from the settings-session gate, so they behave here exactly as
+  // `remote:set-config` does. The desktop pane nonetheless SAVES through
+  // `setRemoteConfig`: it is the host path, and it is the only writer of the
+  // `off` master switch (with its typed confirmation).
+  authcfgApply: (patch) => ipcRenderer.invoke('authcfg:apply', patch),
+  authcfgEnd: () => ipcRenderer.invoke('authcfg:end'),
+  authcfgSetPassword: (password: string) => ipcRenderer.invoke('authcfg:set-password', password),
+  // The LAN channel link + rotation (ADR-056). Session-gated on the web, free
+  // here — the desktop connection IS the host anchor.
+  authcfgLanLink: () => ipcRenderer.invoke('authcfg:lan-link'),
+  authcfgRotateLanKey: () => ipcRenderer.invoke('authcfg:rotate-lan-key'),
+
+  // Passkeys (ADR-052) — MANAGEMENT ONLY on this transport. `webauthn.ipc.ts`
+  // registers exactly these four channels; the two register verbs below are
+  // deliberately absent from it, so wiring them here would be an invoke against
+  // a channel that does not exist.
+  webauthnCredentials: () => ipcRenderer.invoke('webauthn:credentials'),
+  webauthnRename: (credId: string, nickname: string | null) =>
+    ipcRenderer.invoke('webauthn:rename', credId, nickname),
+  webauthnRevoke: (credId: string) => ipcRenderer.invoke('webauthn:revoke', credId),
+  webauthnMintEnrollToken: () => ipcRenderer.invoke('webauthn:mint-enroll-token'),
+  // The ceremony verbs REFUSE here rather than round-tripping. The desktop
+  // renderer loads from `file://` (or the vite dev origin), so it has no RP ID
+  // to bind a credential to and `webauthnOrigin` is null on its connection —
+  // there is no ceremony to run, and pretending otherwise would produce a
+  // credential that can never assert. Desktop-side enrollment is the QR /
+  // one-time-link flow (`webauthnMintEnrollToken` above).
+  webauthnRegisterOptions: async () => {
+    throw new Error('Passkey enrollment runs in a browser — use the enrollment link or QR code.')
+  },
+  webauthnRegisterVerify: async () => {
+    throw new Error('Passkey enrollment runs in a browser — use the enrollment link or QR code.')
+  },
+
   // Voice input
   voiceStartServer: (routingId: string) => unwrap('voice:start-server', routingId),
   voiceStopServer: (routingId: string) => unwrap('voice:stop-server', routingId),
@@ -443,7 +537,6 @@ const api: ClaudeAPI = {
   voiceStopRecording: (routingId: string) => unwrap('voice:stop-recording', routingId),
   onVoiceTranscript: onEvent('voice:transcript'),
   onVoiceState: onEvent('voice:state'),
-  onVoiceError: onEvent('voice:error'),
 
   // Renderer → main process log relay
   logRelay: (level: string, source: string, message: string) =>
@@ -471,7 +564,6 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('mockup:watch', cwd, directory),
   unwatchMockup: (cwd: string, directory: string) =>
     ipcRenderer.invoke('mockup:unwatch', cwd, directory),
-  onMockupFileChanged: onEvent('mockup:file-changed'),
   getMockupPreviewUrl: (cwd: string, directory: string, opts?: { dark?: boolean }) =>
     buildMockupUrl(cwd, directory, { dark: opts?.dark, parentOrigin: window.location.origin })
 }
@@ -479,8 +571,10 @@ const api: ClaudeAPI = {
 if (process.contextIsolated) {
   contextBridge.exposeInMainWorld('api', api)
 } else {
-  // @ts-expect-error global augmentation
-  window.api = api
+  // The augmentation now loads in this project too (src/shared/window-api.d.ts),
+  // so the assignment typechecks and the suppression it needed is gone. The cast
+  // is what remains necessary: `api` is a structural superset of `ClaudeAPI`.
+  window.api = api as unknown as Window['api']
 }
 
 // Prime the main process with the markdown source of whatever was right-

@@ -3,13 +3,14 @@
  *
  * ## The model
  *
- * The `<img>` is laid out **fit-to-viewport and centred** (`max-width:100%;
- * max-height:100%`, so it is never upscaled past its natural size), and the
+ * The content is laid out **fit-to-viewport and centred** — a raster `<img>` via
+ * `max-width:100%; max-height:100%` (so it is never upscaled past its natural
+ * size), an inline-SVG wrapper via an explicit `fitSize` box — and the
  * interactive transform is then applied as
  * `translate(tx px, ty px) scale(scale)` with `transform-origin: center center`.
  *
- * In that model a point `d` — an offset from the image's own centre, measured in
- * *fitted* CSS px — renders at viewport offset `t + scale * d` from the viewport
+ * In that model a point `d` — an offset from the content's own centre, measured
+ * in *fitted* CSS px — renders at viewport offset `t + scale * d` from the viewport
  * centre. Every function below is stated in those terms:
  *
  * - **anchor points are offsets from the viewport centre**, not client coords.
@@ -131,11 +132,7 @@ export function panBy(state: ViewerTransform, dx: number, dy: number): ViewerTra
  * returned untouched rather than snapped to centre, so a pan is never silently
  * swallowed before layout is known.
  */
-export function clampPan(
-  state: ViewerTransform,
-  viewport: Size,
-  fitted: Size
-): ViewerTransform {
+export function clampPan(state: ViewerTransform, viewport: Size, fitted: Size): ViewerTransform {
   if (fitted.width <= 0 || fitted.height <= 0 || viewport.width <= 0 || viewport.height <= 0) {
     return state
   }
@@ -149,23 +146,26 @@ export function clampPan(
 }
 
 /**
- * The size the image renders at before any transform — `object-fit: contain`
- * semantics, except that it never upscales (mirroring the
- * `max-width/max-height: 100%` the component actually uses).
+ * The size the content renders at before any transform — `object-fit: contain`
+ * semantics.
+ *
+ * By default it never upscales, mirroring the `max-width/max-height: 100%` a
+ * raster `<img>` is laid out with: blowing a 120x60 thumbnail up to fill a 4K
+ * viewport just magnifies its pixels, so "fit" for a raster image means "at most
+ * natural size". `allowUpscale` drops that cap for content that has no pixel
+ * grid to lose — an inline SVG re-rasterizes at whatever size it is given, so a
+ * small diagram *should* grow to fill the viewport rather than sit tiny in the
+ * middle of it.
  *
  * Returns a zero size when either input is unknown, which `clampPan` reads as
  * "layout not known yet".
  */
-export function fitSize(natural: Size, viewport: Size): Size {
-  if (
-    natural.width <= 0 ||
-    natural.height <= 0 ||
-    viewport.width <= 0 ||
-    viewport.height <= 0
-  ) {
+export function fitSize(natural: Size, viewport: Size, allowUpscale = false): Size {
+  if (natural.width <= 0 || natural.height <= 0 || viewport.width <= 0 || viewport.height <= 0) {
     return { width: 0, height: 0 }
   }
-  const ratio = Math.min(1, viewport.width / natural.width, viewport.height / natural.height)
+  const contain = Math.min(viewport.width / natural.width, viewport.height / natural.height)
+  const ratio = allowUpscale ? contain : Math.min(1, contain)
   return { width: natural.width * ratio, height: natural.height * ratio }
 }
 

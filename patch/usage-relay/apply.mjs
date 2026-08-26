@@ -134,15 +134,23 @@ if (src.includes(PATCH_MARKER)) {
   // The usage fetcher contains: `${<config>().BASE_API_URL}/api/oauth/usage`
   // It's a small async function (~312 chars). Find it by searching backwards
   // from the unique "api/oauth/usage" string to the enclosing function declaration.
+  //
+  // 2.1.241: the fetcher grew an optional credentials parameter and a telemetry
+  // wrapper — `async function t5e(e){return mp("api_usage_fetch",async()=>{…
+  // _s.get("/api/oauth/usage",{…,credentials:e})…})}`. The API client treats a
+  // nullish per-request `credentials` as "resolve from ambient config"
+  // (constructor: `let l=i.credentials??null;if(l)…else if(i.config!=null)…`),
+  // so our zero-arg call keeps the old zero-arg fetcher's semantics unchanged.
   const usageUrlIdx = src.indexOf('api/oauth/usage')
   if (usageUrlIdx === -1) {
     console.error('ERROR: Cannot find "api/oauth/usage" string in cli.js')
     process.exit(1)
   }
 
-  // Look backwards from the string to find `async function <name>(){`
+  // Look backwards from the string to find `async function <name>(){` —
+  // the parameter is optional (none ≤2.1.231, credentials param 2.1.241+).
   const lookback = src.slice(Math.max(0, usageUrlIdx - 500), usageUrlIdx)
-  const fnDeclRe = new RegExp(`async function (${V})\\(\\)\\{`, 'g')
+  const fnDeclRe = new RegExp(`async function (${V})\\((?:${V})?\\)\\{`, 'g')
   let usageFetcherFn = null
   let fnMatch
   while ((fnMatch = fnDeclRe.exec(lookback)) !== null) {

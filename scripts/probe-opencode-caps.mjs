@@ -63,10 +63,10 @@ const PROBE_CONFIG = {
         'attachment-true': { attachment: true },
         'modalities-image': { modalities: { input: ['text', 'image'], output: ['text'] } },
         'caps-v2': { capabilities: { tools: true, input: ['text', 'image'], output: ['text'] } },
-        both: { attachment: true, modalities: { input: ['text', 'image'], output: ['text'] } },
-      },
-    },
-  },
+        both: { attachment: true, modalities: { input: ['text', 'image'], output: ['text'] } }
+      }
+    }
+  }
 }
 
 // ── Spawn server, wait for listening line ────────────────────────────────────
@@ -76,9 +76,9 @@ function startServer() {
       env: {
         ...process.env,
         OPENCODE_SERVER_PASSWORD: PASSWORD,
-        OPENCODE_CONFIG_CONTENT: JSON.stringify(PROBE_CONFIG),
+        OPENCODE_CONFIG_CONTENT: JSON.stringify(PROBE_CONFIG)
       },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe']
     })
 
     let stdout = ''
@@ -136,10 +136,16 @@ function buildChecks(models) {
     { name: 'bare → input.image=false', pass: img('bare') === false },
     { name: 'attachment-true → attachment=true', pass: att('attachment-true') === true },
     { name: 'modalities-image → input.image=true', pass: img('modalities-image') === true },
-    { name: 'caps-v2 → attachment=false (capabilities key ignored)', pass: att('caps-v2') === false },
-    { name: 'caps-v2 → input.image=false (capabilities key ignored)', pass: img('caps-v2') === false },
+    {
+      name: 'caps-v2 → attachment=false (capabilities key ignored)',
+      pass: att('caps-v2') === false
+    },
+    {
+      name: 'caps-v2 → input.image=false (capabilities key ignored)',
+      pass: img('caps-v2') === false
+    },
     { name: 'both → attachment=true', pass: att('both') === true },
-    { name: 'both → input.image=true', pass: img('both') === true },
+    { name: 'both → input.image=true', pass: img('both') === true }
   ]
 }
 
@@ -153,7 +159,7 @@ async function main() {
     const { baseUrl } = started
 
     const res = await fetch(`${baseUrl}/config/providers`, {
-      headers: { Authorization: AUTH, Accept: 'application/json' },
+      headers: { Authorization: AUTH, Accept: 'application/json' }
     })
     if (res.status !== 200) throw new Error(`GET /config/providers → HTTP ${res.status}`)
     const body = await res.json()

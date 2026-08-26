@@ -21,7 +21,7 @@ import { describe, it, expect, afterAll } from 'vitest'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { OpencodeServerManager } from '../../main/opencode/OpencodeServerManager'
+import { OpencodeServerManager } from '../../core/opencode/OpencodeServerManager'
 
 const SKIP = !process.env.OPENCODE_INTEGRATION_TESTS
 const BINARY_NAME = process.platform === 'win32' ? 'opencode.exe' : 'opencode'

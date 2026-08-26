@@ -27,7 +27,7 @@ import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ChildProcess } from 'node:child_process'
-import { PI_BRIDGE_EXTENSION_SOURCE } from '../../main/pi/pi-bridge-source'
+import { PI_BRIDGE_EXTENSION_SOURCE } from '../../core/pi/pi-bridge-source'
 
 const SKIP = !process.env.PI_INTEGRATION_TESTS
 const BINARY_NAME = process.platform === 'win32' ? 'pi.exe' : 'pi'
@@ -90,7 +90,10 @@ describe.skipIf(SKIP)('pi RPC smoke', () => {
     })
   }
 
-  function sendCommand(cmd: Record<string, unknown>, timeoutMs = 20_000): Promise<Record<string, unknown>> {
+  function sendCommand(
+    cmd: Record<string, unknown>,
+    timeoutMs = 20_000
+  ): Promise<Record<string, unknown>> {
     const id = `probe-${nextId++}`
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -121,7 +124,10 @@ describe.skipIf(SKIP)('pi RPC smoke', () => {
     proc.stderr?.setEncoding('utf-8')
 
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('pi process did not spawn within 15s')), 15_000)
+      const timer = setTimeout(
+        () => reject(new Error('pi process did not spawn within 15s')),
+        15_000
+      )
       proc!.once('spawn', () => {
         clearTimeout(timer)
         resolve()
@@ -164,14 +170,17 @@ describe.skipIf(SKIP)('pi RPC smoke', () => {
     expect(typeof model.id).toBe('string')
   })
 
-  it.skipIf(BINARY_MISSING)('the -e probe extension registers a command visible in get_commands', async () => {
-    const resp = await sendCommand({ type: 'get_commands' })
-    expect(resp.success).toBe(true)
-    const data = resp.data as { commands: Array<{ name: string; source: string }> }
-    const found = data.commands.find((c) => c.name === 'claudeui-probe')
-    expect(found).toBeDefined()
-    expect(found?.source).toBe('extension')
-  })
+  it.skipIf(BINARY_MISSING)(
+    'the -e probe extension registers a command visible in get_commands',
+    async () => {
+      const resp = await sendCommand({ type: 'get_commands' })
+      expect(resp.success).toBe(true)
+      const data = resp.data as { commands: Array<{ name: string; source: string }> }
+      const found = data.commands.find((c) => c.name === 'claudeui-probe')
+      expect(found).toBeDefined()
+      expect(found?.source).toBe('extension')
+    }
+  )
 
   it.skipIf(BINARY_MISSING)(
     'set_thinking_level responds with a well-formed envelope, no model configured (M2b)',
@@ -190,12 +199,15 @@ describe.skipIf(SKIP)('pi RPC smoke', () => {
     }
   )
 
-  it.skipIf(BINARY_MISSING)('stdout purity: every line emitted across the whole exchange parses as JSON', () => {
-    expect(allLines.length).toBeGreaterThan(0)
-    for (const line of allLines) {
-      expect(() => JSON.parse(line)).not.toThrow()
+  it.skipIf(BINARY_MISSING)(
+    'stdout purity: every line emitted across the whole exchange parses as JSON',
+    () => {
+      expect(allLines.length).toBeGreaterThan(0)
+      for (const line of allLines) {
+        expect(() => JSON.parse(line)).not.toThrow()
+      }
     }
-  })
+  )
 })
 
 /**
@@ -241,7 +253,10 @@ describe.skipIf(SKIP)('pi RPC smoke — shared skills (M3)', () => {
     })
   }
 
-  function sendCommand(cmd: Record<string, unknown>, timeoutMs = 20_000): Promise<Record<string, unknown>> {
+  function sendCommand(
+    cmd: Record<string, unknown>,
+    timeoutMs = 20_000
+  ): Promise<Record<string, unknown>> {
     const id = `skills-probe-${nextId++}`
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -300,7 +315,10 @@ describe.skipIf(SKIP)('pi RPC smoke — shared skills (M3)', () => {
     proc.stderr?.setEncoding('utf-8')
 
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('pi process did not spawn within 15s')), 15_000)
+      const timer = setTimeout(
+        () => reject(new Error('pi process did not spawn within 15s')),
+        15_000
+      )
       proc!.once('spawn', () => {
         clearTimeout(timer)
         resolve()

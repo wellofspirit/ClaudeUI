@@ -60,6 +60,9 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     stopTask: vi.fn(async () => ({ success: true })),
     backgroundTask: vi.fn(async () => ({ success: true })),
     dequeueMessage: vi.fn(async () => ({ removed: 0 })),
+    queuedItems: [],
+    enqueuePrompt: vi.fn(),
+    recallQueued: vi.fn(async () => ({ recalled: [], notRecalled: 0 })),
     askSideQuestion: vi.fn(async () => null),
     setPermissionMode: vi.fn(async () => {}),
     setModel: vi.fn(async () => {}),
@@ -91,7 +94,7 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
   return { gitSvcSpies, sessionManagerSpies, sessionStub }
 })
 
-vi.mock('../../services/git-service', () => {
+vi.mock('../../../core/services/git-service', () => {
   const svc: any = {}
   for (const [k, v] of Object.entries(gitSvcSpies)) svc[k] = v
   return {
@@ -103,14 +106,14 @@ vi.mock('../../services/git-service', () => {
   }
 })
 
-vi.mock('../../services/worktree', () => ({
+vi.mock('../../../core/services/worktree', () => ({
   createWorktree: vi.fn(async () => ({ path: '/tmp/wt', branch: 'feat' })),
   getWorktreeStatus: vi.fn(async () => ({ dirty: false })),
   removeWorktree: vi.fn(async () => {}),
   listWorktrees: vi.fn(async () => [{ path: '/tmp/wt', branch: 'feat' }])
 }))
 
-vi.mock('../../services/session-history', () => ({
+vi.mock('../../../core/services/session-history', () => ({
   listDirectories: vi.fn(async () => []),
   loadSessionHistory: vi.fn(async () => []),
   loadSubagentHistory: vi.fn(async () => []),
@@ -118,12 +121,12 @@ vi.mock('../../services/session-history', () => ({
   loadBackgroundOutput: vi.fn(() => '')
 }))
 
-vi.mock('../../services/session-watcher', () => ({
+vi.mock('../../../core/services/session-watcher', () => ({
   watchSession: vi.fn(),
   unwatchSession: vi.fn()
 }))
 
-vi.mock('../../services/ui-config', () => ({
+vi.mock('../../../core/services/ui-config', () => ({
   loadSettings: vi.fn(() => ({})),
   saveSettings: vi.fn(),
   loadSessionConfig: vi.fn(() => ({})),
@@ -137,12 +140,12 @@ vi.mock('../../services/ui-config', () => ({
   saveVendorConfig: vi.fn()
 }))
 
-vi.mock('../../services/claude-settings', () => ({
+vi.mock('../../../core/services/claude-settings', () => ({
   loadClaudePermissions: vi.fn(() => ({ allow: [], deny: [], ask: [] })),
   saveClaudePermissions: vi.fn()
 }))
 
-vi.mock('../../services/claude-mcp', () => ({
+vi.mock('../../../core/services/claude-mcp', () => ({
   loadMcpServers: vi.fn(() => ({})),
   saveMcpServers: vi.fn(),
   removeMcpServer: vi.fn(),
@@ -150,20 +153,20 @@ vi.mock('../../services/claude-mcp', () => ({
   writeDisabledMcpServers: vi.fn()
 }))
 
-vi.mock('../../services/skill-scanner', () => ({
+vi.mock('../../../core/services/skill-scanner', () => ({
   scanSkills: vi.fn(async () => [])
 }))
 
-vi.mock('../../services/custom-command-scanner', () => ({
+vi.mock('../../../core/services/custom-command-scanner', () => ({
   scanCustomCommands: vi.fn(async () => [])
 }))
 
-vi.mock('../../services/delete-session-files', () => ({
+vi.mock('../../../core/services/delete-session-files', () => ({
   deleteSessionFiles: vi.fn(async () => {}),
   deleteProjectFiles: vi.fn(async () => {})
 }))
 
-vi.mock('../../services/socks-bridge', () => ({
+vi.mock('../../../core/services/socks-bridge', () => ({
   startSocksBridge: vi.fn(async () => 1080),
   stopSocksBridge: vi.fn(async () => {}),
   // session.ipc.ts's proxy connectivity test now reuses the bridge's handshake.
@@ -172,7 +175,7 @@ vi.mock('../../services/socks-bridge', () => ({
   })
 }))
 
-vi.mock('../../services/usage-fetcher', () => ({
+vi.mock('../../../core/services/usage-fetcher', () => ({
   usageFetcher: {
     setWindow: vi.fn(),
     setSessionGetter: vi.fn(),
@@ -188,7 +191,7 @@ vi.mock('../../services/service-session', () => ({
   }
 }))
 
-vi.mock('../../services/block-usage', () => ({
+vi.mock('../../../core/services/block-usage', () => ({
   blockUsageService: {
     setWindow: vi.fn(),
     setDebounceSecs: vi.fn(),
@@ -198,7 +201,7 @@ vi.mock('../../services/block-usage', () => ({
   }
 }))
 
-vi.mock('../../services/persisted-sessions-dir', () => ({
+vi.mock('../../../core/services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/tmp/persisted-sessions'
 }))
 
@@ -211,7 +214,7 @@ const crossEngineSpies = vi.hoisted(() => ({
   stopDispatch: vi.fn(() => false)
 }))
 
-vi.mock('../../services/cross-engine-dispatcher', () => ({
+vi.mock('../../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: crossEngineSpies,
   XENG_REQUEST_PREFIX: 'xeng:'
 }))
@@ -229,9 +232,9 @@ const sharedProviderSpies = vi.hoisted(() => ({
   setRouteDefaultModel: vi.fn(async () => {})
 }))
 
-vi.mock('../../shared-providers', () => ({ sharedProviderService: sharedProviderSpies }))
+vi.mock('../../../core/shared-providers', () => ({ sharedProviderService: sharedProviderSpies }))
 
-vi.mock('../../services/session-manager', () => ({
+vi.mock('../../../core/services/session-manager', () => ({
   SessionManager: class {
     constructor() {
       /* no-op */
@@ -246,7 +249,7 @@ vi.mock('../../services/session-manager', () => ({
   }
 }))
 
-vi.mock('../../services/claude-session', () => {
+vi.mock('../../../core/services/claude-session', () => {
   const extraWindows = new Set<any>()
   return {
     ClaudeSession: class {
@@ -264,7 +267,7 @@ vi.mock('../../services/claude-session', () => {
   }
 })
 
-vi.mock('../../sdk', () => ({
+vi.mock('../../../core/sdk', () => ({
   query: vi.fn(() => {
     // Return an async iterable shaped like the SDK Query.
     async function* empty(): AsyncGenerator<unknown> {
@@ -279,7 +282,7 @@ vi.mock('../../sdk', () => ({
 // Electron shim — must come last among electron-related mocks.
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
 
-vi.mock('../../services/logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -289,14 +292,12 @@ vi.mock('../../services/logger', () => ({
 }))
 
 // Import AFTER mocks.
-import { registerSessionIpc } from '../session.ipc'
-import { gitServiceManager } from '../../services/git-service'
-import {
-  gitWatchRegistry,
-  GIT_WATCH_OWNER_DESKTOP,
-  GIT_WATCH_OWNER_REMOTE
-} from '../../services/git-watch-registry'
-import { BaseSession } from '../../providers/BaseSession'
+import { registerSessionIpc } from '../../../core/ipc/session.ipc'
+import { gitServiceManager } from '../../../core/services/git-service'
+import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
+import { hostConnection } from '../../../core/ipc/command-registry'
+import { addSyncSubscriber } from '../../../core/services/sync-host'
+import { setHostWindow } from '../../../core/services/host-window'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 
 // Fill in the stub's capabilities now that the top-level import is available
@@ -315,10 +316,25 @@ describe('session.ipc', () => {
       if (typeof fn === 'function') (fn as any).mockClear?.()
     }
     sessionManagerSpies.get.mockReturnValue(sessionStub)
-    registerSessionIpc(harness.win)
+    // SyncCore 4d: the registration is window-free, and the two handlers that
+    // want the host's window read it from host-window.ts at use time.
+    setHostWindow(harness.win)
+    registerSessionIpc({
+      // S3 stage 1b: the desktop-auth pair is injected now (the registrar left
+      // `src/main` and must not import the Electron-bound singletons). Neither
+      // channel family under test touches these, so a throwing stub is the
+      // honest double — it fails loudly if that ever stops being true.
+      requireEngineAuth: () => {
+        throw new Error('requireEngineAuth is not stubbed in this suite')
+      },
+      setAccountEnabled: () => {
+        throw new Error('setAccountEnabled is not stubbed in this suite')
+      }
+    })
   })
 
   afterEach(() => {
+    setHostWindow(null)
     harness.teardown()
     vi.clearAllMocks()
   })
@@ -425,7 +441,22 @@ describe('session.ipc', () => {
       await harness.call('session:send', 'rid-1', 'hello')
       expect(events).toHaveLength(1)
       expect(events[0][0]).toBe('rid-1')
-      expect(events[0][1]).toMatchObject({ prompt: 'hello', queued: false })
+      expect(events[0][1]).toMatchObject({ prompt: 'hello' })
+    })
+
+    // ADR-053 — a send that queues is the queue's business, not the
+    // transcript's: no session:user-message, and the item goes to the session.
+    it('session:send on a busy session enqueues instead of broadcasting', async () => {
+      const events: any[] = []
+      harness.onEvent('session:user-message', (...args) => events.push(args))
+      sessionStub.willQueue = true
+      try {
+        await harness.call('session:send', 'rid-1', 'queued one')
+      } finally {
+        sessionStub.willQueue = false
+      }
+      expect(events).toHaveLength(0)
+      expect(sessionStub.enqueuePrompt).toHaveBeenCalledWith('queued one', undefined)
     })
 
     it('session:send throws when routingId not found', async () => {
@@ -469,7 +500,12 @@ describe('session.ipc', () => {
 
     it('still routes ordinary requestIds to the session (dispatcher untouched)', async () => {
       await harness.call('session:approval-response', 'rid-1', 'req-9', 'deny')
-      expect(sessionStub.resolveApproval).toHaveBeenCalledWith('req-9', 'deny', undefined, undefined)
+      expect(sessionStub.resolveApproval).toHaveBeenCalledWith(
+        'req-9',
+        'deny',
+        undefined,
+        undefined
+      )
       expect(crossEngineSpies.resolveApproval).not.toHaveBeenCalled()
     })
 
@@ -551,25 +587,32 @@ describe('session.ipc', () => {
   })
 
   // -------------------------------------------------------------------------
-  // Git watching — the desktop side of the shared gitWatchRegistry.
+  // Git watching — the desktop side of the shared gitWatchRegistry (phase 5 S2:
+  // per-connection interest sets, not a collective owner).
   // -------------------------------------------------------------------------
 
   describe('git watching', () => {
     const CWD = '/tmp/watched'
+    const PHONE = 'conn-phone'
 
     afterEach(() => {
       // The registry is a module singleton shared with the remote path; unwind
-      // both owners so state can't leak into the next test.
-      gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_DESKTOP)
-      gitWatchRegistry.releaseOwner(GIT_WATCH_OWNER_REMOTE)
-      for (const w of BaseSession.getExtraWindows()) BaseSession.removeExtraWindow(w)
+      // both connections so state can't leak into the next test.
+      gitWatchRegistry.releaseConnection(hostConnection().connectionId)
+      gitWatchRegistry.releaseConnection(PHONE)
     })
 
-    it('git:start-watching starts one poller and broadcasts to the main window AND extra windows', async () => {
-      const extra: any = { webContents: { send: vi.fn() }, isDestroyed: () => false }
-      BaseSession.addExtraWindow(extra)
+    it('git:watch starts one poller and broadcasts to every subscriber', async () => {
+      // 4c: `git:status-update` is replicated, so it reaches SUBSCRIBERS — there is
+      // no "main window AND extras" any more, just clients. A second subscriber
+      // stands in for the WebSocket broadcaster, which is the hop that carries this
+      // channel to web clients.
+      const other: unknown[][] = []
+      const offOther = addSyncSubscriber((_seq, channel, args) => {
+        if (channel === 'git:status-update') other.push(args)
+      })
 
-      await harness.call('git:start-watching', CWD)
+      await harness.call('git:watch', { cwds: [CWD] })
       expect(gitSvcSpies.startPolling).toHaveBeenCalledTimes(1)
       expect(gitSvcSpies.startPolling.mock.calls[0][1]).toBe(5000)
 
@@ -580,25 +623,22 @@ describe('session.ipc', () => {
       emit(status)
       off()
 
+      offOther()
       expect(received).toEqual([[{ cwd: CWD, status }]])
-      // The remote bridge is registered as an extra window — this is the hop that
-      // carries git:status-update to web clients.
-      expect(extra.webContents.send).toHaveBeenCalledWith('git:status-update', {
-        cwd: CWD,
-        status
-      })
+      expect(other).toEqual([[{ cwd: CWD, status }]])
     })
 
-    it('a remote owner attaches to the desktop poller instead of clobbering it (CLOBBER GUARD)', async () => {
-      await harness.call('git:start-watching', CWD)
+    it('a remote connection joins the desktop poller instead of clobbering it (CLOBBER GUARD)', async () => {
+      await harness.call('git:watch', { cwds: [CWD] })
       const emit = gitSvcSpies.startPolling.mock.calls[0][0] as (s: unknown) => void
       emit({ files: [], branch: 'main' })
 
-      // The remote dispatcher path calls the same registry under its own owner.
-      gitWatchRegistry.startWatching(CWD, GIT_WATCH_OWNER_REMOTE)
+      // The remote dispatcher path reaches the same registry under its own
+      // connection id — the union grows, the poller does not.
+      gitWatchRegistry.setWatch(PHONE, [CWD])
       expect(gitSvcSpies.startPolling).toHaveBeenCalledTimes(1)
 
-      // The desktop's callback is still the live one.
+      // The one callback is still the live one.
       const received: unknown[][] = []
       const off = harness.onEvent('git:status-update', (...args) => received.push(args))
       emit({ files: [], branch: 'dev' })
@@ -606,25 +646,31 @@ describe('session.ipc', () => {
       expect(received).toEqual([[{ cwd: CWD, status: { files: [], branch: 'dev' } }]])
     })
 
-    it('git:stop-watching keeps the poller alive while the remote owner remains', async () => {
-      await harness.call('git:start-watching', CWD)
-      gitWatchRegistry.startWatching(CWD, GIT_WATCH_OWNER_REMOTE)
+    it('the desktop clearing its set keeps the poller alive while a phone watches', async () => {
+      await harness.call('git:watch', { cwds: [CWD] })
+      gitWatchRegistry.setWatch(PHONE, [CWD])
 
-      await harness.call('git:stop-watching', CWD)
+      await harness.call('git:watch', { cwds: [] })
       expect(gitSvcSpies.stopPolling).not.toHaveBeenCalled()
-      expect(gitWatchRegistry.ownersOf(CWD)).toEqual([GIT_WATCH_OWNER_REMOTE])
+      expect(gitWatchRegistry.watchersOf(CWD)).toEqual([PHONE])
     })
 
-    it('git:stop-watching tears down when it is the only owner', async () => {
-      await harness.call('git:start-watching', CWD)
-      await harness.call('git:stop-watching', CWD)
+    it('the union emptying tears the poller down', async () => {
+      await harness.call('git:watch', { cwds: [CWD] })
+      await harness.call('git:watch', { cwds: [] })
       expect(gitSvcSpies.stopPolling).toHaveBeenCalledTimes(1)
-      expect(gitWatchRegistry.ownersOf(CWD)).toEqual([])
+      expect(gitWatchRegistry.watchersOf(CWD)).toEqual([])
     })
 
-    it('git:stop-watching for an unwatched cwd is a no-op', async () => {
-      await expect(harness.call('git:stop-watching', '/tmp/never')).resolves.toBeUndefined()
+    it('an empty set from a connection that watches nothing is a no-op', async () => {
+      await expect(harness.call('git:watch', { cwds: [] })).resolves.toBeUndefined()
       expect(gitSvcSpies.stopPolling).not.toHaveBeenCalled()
+    })
+
+    it('refuses a set larger than the cap rather than clipping it', async () => {
+      const many = Array.from({ length: 33 }, (_, i) => `/tmp/many-${i}`)
+      await expect(harness.call('git:watch', { cwds: many })).rejects.toThrow(/at most 32/)
+      expect(gitSvcSpies.startPolling).not.toHaveBeenCalled()
     })
   })
 
@@ -786,7 +832,12 @@ describe('session.ipc', () => {
         run: vi.fn(),
         resolveApproval: vi.fn(),
         setPermissionMode: vi.fn(async () => {}),
-        setModel: vi.fn(async () => {})
+        setModel: vi.fn(async () => {}),
+        // Required ISession members (BaseSession implements them for every
+        // engine), so a "minimal" engine still has them.
+        queuedItems: [],
+        enqueuePrompt: vi.fn(),
+        recallQueued: vi.fn(async () => ({ recalled: [], notRecalled: 0 }))
         // Deliberately no optional members: no watchBackground, stopTask,
         // dequeueMessage, getPlanContent, getSessionLogPath, mcpServerStatus,
         // mcpToggleServer, setEffort, etc.

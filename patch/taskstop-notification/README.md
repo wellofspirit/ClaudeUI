@@ -6,13 +6,13 @@ Fixes TaskStop to properly notify SDK consumers when tasks are stopped. **As of 
 
 `cli.js` — rebundled from the Claude Code CLI Bun standalone binary.
 
-| Component              | Version                                                   |
-| ----------------------- | ---------------------------------------------------------- |
-| At time of discovery    | bundled CLI `~0.2.4x` era (Part A), `~0.2.8x` era (Part B) |
-| Part A upstreamed       | SDK 0.2.49+ (validator learned to accept `"killed"`)      |
+| Component                         | Version                                                                                              |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| At time of discovery              | bundled CLI `~0.2.4x` era (Part A), `~0.2.8x` era (Part B)                                           |
+| Part A upstreamed                 | SDK 0.2.49+ (validator learned to accept `"killed"`)                                                 |
 | Part A validator REMOVED entirely | somewhere before bundled CLI `2.1.198` (confirmed absent both in legacy and "killed"-inclusive form) |
-| Part B upstreamed       | SDK 0.2.87+ (TaskStop's kill path calls the notification emitter directly) |
-| Last re-anchored        | bundled CLI `2.1.198` (this pass — detection logic rewritten, zero bytes patched) |
+| Part B upstreamed                 | SDK 0.2.87+ (TaskStop's kill path calls the notification emitter directly)                           |
+| Last re-anchored                  | bundled CLI `2.1.198` (this pass — detection logic rewritten, zero bytes patched)                    |
 
 ## The Problem (historical)
 
@@ -54,17 +54,17 @@ CT(event):                                          ← queues onto a per-sessio
 
 ### Verified call sites (2.1.198, all confirmed via bundle-analyzer — see "How to Find This Code")
 
-| Task type      | Kill function                        | Registry sets    | Emitter call                                      |
-| -------------- | ------------------------------------- | ----------------- | -------------------------------------------------- |
-| `local_bash`   | `WEe(taskId, registry)`               | `status:"killed"`  | `qu(e,"stopped",{toolUseId:...,summary:...})`       |
-| `local_agent`  | `Rpe(taskId, registry, killedBy)`     | `status:"killed"`  | `qu(e,"stopped",{killedBy:...,...})` (via `v9e`\*)  |
-| `remote_agent` | `RemoteAgentTask.kill()`              | `status:"killed"`  | `qu(e,"stopped",{toolUseId:r,summary:o})`           |
-| `dream`        | `DreamTask.kill()`                    | `status:"killed"`  | `qu(e,"stopped",{skipTranscript:!0})`               |
-| `workflow`     | `VHe(taskId, registry)`               | `status:"killed"`  | `qu(e,"stopped",{toolUseId:...,summary:...})`       |
-| generic sweep  | `gXt({taskRegistry, setAppState})`    | (loop over all)   | `qu(r.id,"stopped",{toolUseId:...,summary:...})`    |
-| cascade (children of a killed `local_agent`) | inside `oHt()` | `notified:!0` | `qu(m.id,"stopped",{toolUseId:...,summary:...})`    |
+| Task type                                    | Kill function                      | Registry sets     | Emitter call                                       |
+| -------------------------------------------- | ---------------------------------- | ----------------- | -------------------------------------------------- |
+| `local_bash`                                 | `WEe(taskId, registry)`            | `status:"killed"` | `qu(e,"stopped",{toolUseId:...,summary:...})`      |
+| `local_agent`                                | `Rpe(taskId, registry, killedBy)`  | `status:"killed"` | `qu(e,"stopped",{killedBy:...,...})` (via `v9e`\*) |
+| `remote_agent`                               | `RemoteAgentTask.kill()`           | `status:"killed"` | `qu(e,"stopped",{toolUseId:r,summary:o})`          |
+| `dream`                                      | `DreamTask.kill()`                 | `status:"killed"` | `qu(e,"stopped",{skipTranscript:!0})`              |
+| `workflow`                                   | `VHe(taskId, registry)`            | `status:"killed"` | `qu(e,"stopped",{toolUseId:...,summary:...})`      |
+| generic sweep                                | `gXt({taskRegistry, setAppState})` | (loop over all)   | `qu(r.id,"stopped",{toolUseId:...,summary:...})`   |
+| cascade (children of a killed `local_agent`) | inside `oHt()`                     | `notified:!0`     | `qu(m.id,"stopped",{toolUseId:...,summary:...})`   |
 
-\* `local_agent`'s kill path additionally calls a separate function `v9e({taskId,status:"killed",killedBy,...})` that builds a **different**, orthogonal XML string injected into the *conversation transcript* (`<status>${n}</status>` inside a `<task-notification>` block the model reads in-context) — this is **not** the stream-json `task_notification` system event and is out of scope for this patch. `v9e`'s output can legitimately contain `<status>killed</status>` in the transcript text; that has no effect on the SDK-facing event and predates/postdates this patch equally. Do not conflate the two channels when re-analyzing a future version — see "What's NOT Changed".
+\* `local_agent`'s kill path additionally calls a separate function `v9e({taskId,status:"killed",killedBy,...})` that builds a **different**, orthogonal XML string injected into the _conversation transcript_ (`<status>${n}</status>` inside a `<task-notification>` block the model reads in-context) — this is **not** the stream-json `task_notification` system event and is out of scope for this patch. `v9e`'s output can legitimately contain `<status>killed</status>` in the transcript text; that has no effect on the SDK-facing event and predates/postdates this patch equally. Do not conflate the two channels when re-analyzing a future version — see "What's NOT Changed".
 
 **Confirmed absence of a leak:** `bundle-analyzer find cli.js 'qu\([a-zA-Z0-9_$]+,"killed"'` (or the equivalent generic `<emitterName>\([^,]+,"killed"` pattern once you've located the emitter under its current name) returns **zero matches** in 2.1.198. This is the negative-space check that proves the mapping is complete — not just that translated calls exist, but that no untranslated ones do.
 
@@ -84,7 +84,7 @@ CT(event):                                          ← queues onto a per-sessio
 
 ### 2.1.198 reality: the validator is gone, not just extended
 
-Earlier revisions of this README said "upstreamed in SDK 0.2.49 — the validator now natively accepts `killed`" and had `apply.mjs` look for the validator with `"killed"` already inlined into its allowlist (`X==="completed"||X==="failed"||X==="stopped"||X==="killed"`). That assumption held through cli.js 2.1.197. **In 2.1.198, that assumption breaks**: the whole shared-validator *function* was removed from the codebase, in either shape (plain or killed-inclusive). Grepping for both regexes against a freshly extracted 2.1.198 `cli.js` returns zero matches for both.
+Earlier revisions of this README said "upstreamed in SDK 0.2.49 — the validator now natively accepts `killed`" and had `apply.mjs` look for the validator with `"killed"` already inlined into its allowlist (`X==="completed"||X==="failed"||X==="stopped"||X==="killed"`). That assumption held through cli.js 2.1.197. **In 2.1.198, that assumption breaks**: the whole shared-validator _function_ was removed from the codebase, in either shape (plain or killed-inclusive). Grepping for both regexes against a freshly extracted 2.1.198 `cli.js` returns zero matches for both.
 
 This isn't a regression — it's a further refactor. The mapping didn't disappear, it moved: from "one central allowlist function used by many callers" to "many callers, each doing its own translation right before calling the (now dumb) emitter." Confirmed the emitter itself does no validation — see the `qu()` signature above (`status:t` — a bare passthrough parameter, no ternary, no `.includes()`, no allowlist array).
 
@@ -126,7 +126,7 @@ Found via the literal `subtype:"task_notification"` object-construction (unique,
 
 - The emitter is a low-level internal primitive, not exposed to user/tool input — its only callers are the small set of first-party kill-path functions inside cli.js.
 - All of those callers were individually located and read (not just regex-matched) — see the call-site table above.
-- The negative-space check (`qu(...,"killed"`) returning zero matches is the crucial piece — it's not enough that *some* callers translate correctly; *none* may leak.
+- The negative-space check (`qu(...,"killed"`) returning zero matches is the crucial piece — it's not enough that _some_ callers translate correctly; _none_ may leak.
 - Verified end-to-end at runtime, not just statically: `patch/taskstop-notification/test.mjs` launches a real background task against the rebundled `bun-claude.exe`, calls `stopTask()`, and asserts the resulting `task_notification` has `status:"stopped"` — this passed 3/3 against 2.1.198 with zero bytes of cli.js patched for Part A.
 
 ## Part B: Inject notification call into TaskStop
@@ -138,7 +138,9 @@ Historically this part inserted a call to the notification sender (e.g. `kxY()`/
 ### Detection (unchanged)
 
 ```js
-const upstreamNotifyRe = new RegExp(`notified:!0[\\s\\S]{1,300}?` + `(V)\\(V,"stopped",\\{toolUseId:`)
+const upstreamNotifyRe = new RegExp(
+  `notified:!0[\\s\\S]{1,300}?` + `(V)\\(V,"stopped",\\{toolUseId:`
+)
 ```
 
 Searched in a wide window (~5000 chars before, ~1000 after) around the anchor string `"Successfully stopped task:"` (the TaskStop tool's own success-message template literal, unique in the file). In 2.1.198 this anchor sits inside the `TaskStop` tool definition object itself (`tnr` in 2.1.198's naming — aliases `KillShell`/`KillBash`, `userFacingName: () => "Stop Task"`); its `call()` delegates to `oHt()`, which is where the actual `notified:!0` + `qu(id,"stopped",...)` pattern lives (within the ~5000-char lookback window). Confirmed 5 genuine (non-overlapping) matches of the general pattern across different task types in the full file — this is not a coincidental/false-positive match.
@@ -235,30 +237,30 @@ bundle-analyzer find cli.js "was stopped by Claude" --compact
 
 ## Key Functions Reference (2.1.198 — will be renamed next version)
 
-| Name (2.1.198) | Purpose                                                                 | How found                                                    |
-| --------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------- |
-| `qu`            | Notification emitter — builds & queues the `task_notification` system event | literal `subtype:"task_notification"` object construction     |
-| `Mxa`           | Guard inside `qu()` — gates whether a notification is emitted at all      | 2nd param of `qu`'s `if(!Mxa(e))return;` guard                |
-| `CT`            | Pushes an event onto the per-session output queue                        | called by `qu()`; also drained by `XJ()`/`ngo()`                |
-| `WEe`           | `local_bash` task type's `.kill()`                                        | `LocalShellTask={name:"LocalShellTask",type:"local_bash",...}` |
-| `Rpe`           | `local_agent` task type's `.kill()`                                       | `LocalAgentTask={name:"LocalAgentTask",type:"local_agent",...}`|
-| `oHt`           | Shared kill orchestrator TaskStop's `call()` delegates to                 | traced from the `"Successfully stopped task:"` anchor          |
-| `gXt`           | System-wide kill sweep (kills all running tasks matching a predicate)    | near `oHt`, iterates `taskRegistry.all()`                       |
-| `v9e`           | Builds in-context transcript XML `<task-notification>` (NOT this patch's concern) | literal `"was stopped by Claude"` / `"was stopped by user"`  |
-| `tnr`           | TaskStop tool definition object (`aliases:["KillShell","KillBash"]`)     | contains the `"Successfully stopped task:"` anchor              |
+| Name (2.1.198) | Purpose                                                                           | How found                                                       |
+| -------------- | --------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `qu`           | Notification emitter — builds & queues the `task_notification` system event       | literal `subtype:"task_notification"` object construction       |
+| `Mxa`          | Guard inside `qu()` — gates whether a notification is emitted at all              | 2nd param of `qu`'s `if(!Mxa(e))return;` guard                  |
+| `CT`           | Pushes an event onto the per-session output queue                                 | called by `qu()`; also drained by `XJ()`/`ngo()`                |
+| `WEe`          | `local_bash` task type's `.kill()`                                                | `LocalShellTask={name:"LocalShellTask",type:"local_bash",...}`  |
+| `Rpe`          | `local_agent` task type's `.kill()`                                               | `LocalAgentTask={name:"LocalAgentTask",type:"local_agent",...}` |
+| `oHt`          | Shared kill orchestrator TaskStop's `call()` delegates to                         | traced from the `"Successfully stopped task:"` anchor           |
+| `gXt`          | System-wide kill sweep (kills all running tasks matching a predicate)             | near `oHt`, iterates `taskRegistry.all()`                       |
+| `v9e`          | Builds in-context transcript XML `<task-notification>` (NOT this patch's concern) | literal `"was stopped by Claude"` / `"was stopped by user"`     |
+| `tnr`          | TaskStop tool definition object (`aliases:["KillShell","KillBash"]`)              | contains the `"Successfully stopped task:"` anchor              |
 
 **Note:** every name above will change in the next SDK/CLI version bump. Use the content-pattern searches in "How to Find This Code" to relocate them; do not grep for these literal identifiers.
 
 ## Related Patches
 
-- `patch/subagent-streaming/` — handles the synchronous `Task`/`Agent` tool streaming path; this patch's `local_agent` task type is the *async/background* counterpart (`TaskCreate` with `run_in_background`), a different code path entirely.
+- `patch/subagent-streaming/` — handles the synchronous `Task`/`Agent` tool streaming path; this patch's `local_agent` task type is the _async/background_ counterpart (`TaskCreate` with `run_in_background`), a different code path entirely.
 - `patch/background-task/` — the `background_task` control-request handler that lets ClaudeUI's own SDK layer (not the model) background a running tool call; complementary but independent of TaskStop's kill/notify path covered here.
 - `patch/queue-control/` — unrelated steer/queue mechanism; shares no code with this patch but lives in the same "task lifecycle" neighborhood.
 
 ## Files
 
-| File        | Purpose                                                          |
-| ----------- | ------------------------------------------------------------------ |
-| `README.md` | This document                                                      |
-| `apply.mjs` | Patch/detection script (currently a no-op detector on 2.1.198)    |
+| File        | Purpose                                                              |
+| ----------- | -------------------------------------------------------------------- |
+| `README.md` | This document                                                        |
+| `apply.mjs` | Patch/detection script (currently a no-op detector on 2.1.198)       |
 | `test.mjs`  | End-to-end behavioral test against the rebundled `bun-claude` binary |

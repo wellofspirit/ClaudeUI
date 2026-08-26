@@ -42,10 +42,30 @@ export const PERMISSION_TO_AUTONOMY: Record<string, AutonomyMode> = {
 
 export const AUTONOMY_LABELS: Record<AutonomyMode, string> = {
   plan: 'Read-only (Plan)',
-  ask: 'Ask (default)',
+  ask: 'Ask',
   autoEdit: 'Auto-edit files',
-  full: 'Full auto'
+  // "Auto mode", not "Full auto": the mode is classifier-gated, not a blanket
+  // approve-everything (that would be `bypassPermissions`, which ClaudeUI has no
+  // session-level equivalent for). The `full` KEY is the AutonomyMode vocabulary
+  // and stays as-is; only the human-facing string changed.
+  full: 'Auto mode (default)'
 }
+
+/**
+ * The autonomy mode new sessions start in when the user has expressed no
+ * preference — `full`, i.e. the classifier-gated `auto` PermissionMode, for
+ * EVERY engine.
+ *
+ * This mirrors Claude Code's 2026-08-14 change making auto mode the default on
+ * Pro/Max/Team, including its "pinned defaults are preserved" rule: a user who
+ * had already chosen a mode keeps it (see the seeding logic in session-store),
+ * and only profiles with nothing set adopt this.
+ *
+ * It is NOT unconditional. Auto is gated per engine by
+ * {@link autoModeAvailableForEngine} and, for Claude, by a settings-level
+ * `disableAutoMode`; a session that cannot have auto falls back to 'default'.
+ */
+export const DEFAULT_AUTONOMY_MODE: AutonomyMode = 'full'
 
 /**
  * Coerce a `permissions.defaultMode` string from settings.json into a renderer

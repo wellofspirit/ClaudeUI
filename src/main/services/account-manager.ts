@@ -22,16 +22,17 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import type { AccountsState, AccountInfo, OAuthAccount } from '../../shared/types'
-import { setSecurestorageEnv } from '../sdk/securestorage-env'
-import { serviceSession } from './service-session'
+import { setSecurestorageEnv, getSecurestorageEnv } from '../../core/sdk/securestorage-env'
+import { serviceSession } from '../../core/services/service-session'
 import { authManager } from './auth-manager'
-import { logger } from './logger'
+import { invalidateLiveSessions } from './session-invalidation'
+import { logger } from '../../core/services/logger'
 import {
   getAllAccounts,
   upsertAccount,
   deleteAccountRow,
   importAccountsOnce
-} from './db'
+} from '../../core/services/db'
 
 const ACCOUNTS_DIR = join(homedir(), '.claude', 'ui', 'accounts')
 const ACCOUNTS_FILE = join(ACCOUNTS_DIR, 'accounts.json')
@@ -55,8 +56,15 @@ class AccountManager {
   /** In-memory cache of the current state. Always consistent with DB + pointer file. */
   private state: AccountsState = { enabled: false, activeId: null, accounts: [] }
 
-  /** Wire up at app start: load state, apply active env, capture login emails. */
-  init(win: BrowserWindow): void {
+  /**
+   * Wire up at app start: load state, apply active env, capture login emails.
+   *
+   * Called from `bootCore()` (process lifetime) — `win` is `null` in a windowless
+   * boot, which costs only the two host-local broadcasts below; applying the
+   * active account's spawn env is what a headless session actually needs, and it
+   * happens either way.
+   */
+  init(win: BrowserWindow | null): void {
     this.window = win
     this.state = this.load()
     this.applyActive()
@@ -91,20 +99,41 @@ class AccountManager {
     }
   }
 
-  /** Create a new account, make it active, and kick off its login flow. */
-  async addAccount(): Promise<AccountsState> {
+  /** Create a new account, make it active, and kick off its login flow.
+   *  `opts.remote` (ADR-057) forwards to signIn so a remote add surfaces the
+   *  manual URL instead of opening a browser on the host. */
+  async addAccount(opts?: { remote?: boolean }): Promise<AccountsState> {
     if (!this.state.enabled) this.state.enabled = true
     const acc = this.createAccount(`Account ${this.state.accounts.length + 1}`)
     this.state.accounts.push(acc)
     this.state.activeId = acc.id
     this.persistAndApply()
+
     // serviceSession now points at the new (empty) dir — start the login there.
-    // signIn() resolves at the "authorizing" stage and broadcasts terminal
-    // success/error via auth:state, so we deliberately don't await it. Guard the
-    // fire-and-forget with a catch so a spawn-path throw can never surface as an
-    // unhandled rejection (signIn() itself is also hardened to broadcast errors
-    // rather than reject).
-    void authManager.signIn().catch((err) => {
+    //
+    // REMOTE (S4-UI): the caller is the only client that may see this flow's
+    // `manualUrl` (it carries the flow's CSRF `state`), and the `auth:state`
+    // event that used to carry it is host-local, so echo the "authorizing"
+    // snapshot back on the RESPONSE. signIn() resolves as soon as the authorize
+    // URL exists — it does NOT block on the login completing — so awaiting it
+    // costs one cli.js control round-trip, not a user's attention span. It is
+    // also hardened to never reject; the catch is belt-and-braces and degrades
+    // to "no pendingSignIn", which the UI renders as "no sign-in link".
+    if (opts?.remote) {
+      try {
+        return { ...this.state, pendingSignIn: await authManager.signIn(opts) }
+      } catch (err) {
+        logger.error('AccountManager', `Failed to start login for new account: ${err}`)
+        return this.state
+      }
+    }
+
+    // DESKTOP: unchanged. signIn() resolves at the "authorizing" stage and
+    // broadcasts terminal success/error via auth:state, so we deliberately don't
+    // await it. Guard the fire-and-forget with a catch so a spawn-path throw can
+    // never surface as an unhandled rejection (signIn() itself is also hardened
+    // to broadcast errors rather than reject).
+    void authManager.signIn(opts).catch((err) => {
       logger.error('AccountManager', `Failed to start login for new account: ${err}`)
     })
     return this.state
@@ -197,7 +226,15 @@ class AccountManager {
     }
   }
 
-  /** Persist pointer file + re-point env + restart sessions so the change takes effect. */
+  /**
+   * Persist pointer file + re-point env, and — only when the EFFECTIVE credential
+   * directory actually moved — stop everything holding the old one.
+   *
+   * The gate matters because this method is the common tail of four very
+   * different mutations: `setEnabled`, `addAccount`, `switchAccount` and
+   * `deleteAccount`. Only some of them change which credential a spawn would
+   * read; `deleteAccount` of a NON-active account changes nothing at all.
+   */
   private persistAndApply(): void {
     // Upsert all accounts to DB (handles any new ones from createAccount → already done,
     // but re-syncing here ensures consistency after setEnabled/switch mutations).
@@ -209,12 +246,31 @@ class AccountManager {
       }
     }
     this.savePointer()
+    // Snapshot the EFFECTIVE credential dir across `applyActive()`. Not every
+    // mutation that lands here changes it: deleting a non-active account, or
+    // re-saving the same active id, leaves every running process pointed at the
+    // exact credential it already holds — and cancelling then would destroy live
+    // turns for a settings-list edit the user does not connect to their session.
+    const dirBefore = getSecurestorageEnv()?.dir ?? null
     this.applyActive()
+    const dirAfter = getSecurestorageEnv()?.dir ?? null
+    if (dirBefore === dirAfter) {
+      this.broadcast()
+      return
+    }
     // The service session caches its credential for its process lifetime; stop
     // it so the next use respawns against the new account dir.
     serviceSession.stop()
+    // Every CHAT session caches it too, and asking the desktop renderer to flip
+    // its own `sdkActive` flags never stopped the processes — nor told any other
+    // client. Cancelling here does both: the `disconnected` status each cancel
+    // broadcasts folds to `sdkActive: false` in canonical and in every replica.
+    invalidateLiveSessions(`active account changed to ${this.state.activeId ?? 'none'}`)
     this.broadcast()
-    // Tell the renderer to respawn chat sessions against the new account.
+    // Tell the renderer to respawn chat sessions against the new account. Kept
+    // verbatim: the desktop's respawn UX is unchanged, and its local
+    // `sdkActive: false` write is now idempotent with the fold above rather
+    // than the only thing that happens.
     if (this.window && !this.window.isDestroyed()) {
       this.window.webContents.send('account:respawn-sessions')
     }

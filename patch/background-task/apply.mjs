@@ -91,20 +91,41 @@ if (src.includes(PATCH_MARKER)) {
   // ---------------------------------------------------------------------------
   console.log('\n--- Extracting function names from content patterns ---')
 
-  // Window extended from 5000 → 8000: in v2.1.197 the stop_task handler (source
-  // of the success-response-helper pattern) moved to 5647 chars before the anchor,
-  // just outside the old 5000-char window.  8000 gives a comfortable margin.
-  const nearbyCtx = src.slice(Math.max(0, anchorIdx - 8000), anchorIdx + 2000)
+  // Window history: 5000 → 8000 (v2.1.197 moved the stop_task handler, source of
+  // the success-response-helper pattern, to 5647 chars before the anchor) →
+  // 16000 (2.1.231 pushed it past 8000 again). Mirrors queue-control, which
+  // anchors off the same control-request fallback.
+  const NEARBY_BACK = 16000
+  const nearbyCtx = src.slice(Math.max(0, anchorIdx - NEARBY_BACK), anchorIdx + 2000)
 
   // --- Success response helper (called after stop_task success) ---
-  const successRe = new RegExp(`\\),(${V})\\(${msgVar.replace(/\$/g, '\\$')},\\{\\}\\)\\}catch`)
-  const successMatch = successRe.exec(nearbyCtx)
-  if (!successMatch) {
-    console.error('ERROR: Cannot find success response helper pattern')
+  //
+  // Take every match in the window and require unanimity rather than trusting
+  // the first: the window has had to grow twice, and a wide window that picks
+  // "whatever matched first" is how an unrelated handler's reply helper gets
+  // silently adopted. See the identical note in queue-control/apply.mjs.
+  const successRe = new RegExp(
+    `\\),(${V})\\(${msgVar.replace(/\$/g, '\\$')},\\{\\}\\)\\}catch`,
+    'g'
+  )
+  const successNames = [...nearbyCtx.matchAll(successRe)].map((m) => m[1])
+  if (successNames.length === 0) {
+    console.error(
+      `ERROR: Cannot find success response helper pattern within ${NEARBY_BACK} chars ` +
+        'before the control-request fallback anchor.'
+    )
     process.exit(1)
   }
-  const successFn = successMatch[1]
-  console.log(`  Success response helper: ${successFn}`)
+  if (successNames.some((n) => n !== successNames[0])) {
+    console.error(
+      `ERROR: success response helper is ambiguous — candidates disagree: ${[...new Set(successNames)].join(', ')}. Aborting.`
+    )
+    process.exit(1)
+  }
+  const successFn = successNames[0]
+  console.log(
+    `  Success response helper: ${successFn} (${successNames.length}/${successNames.length} call sites agree)`
+  )
 
   // --- getAppState variable (from stop_task handler: getAppState:$VAR) ---
   const getAppStateRe = new RegExp(`getAppState:(${V}),setAppState:(${V})`)

@@ -234,9 +234,7 @@ if (src.includes(patchF2Marker)) {
 
     src = src.slice(0, idx) + newStr + src.slice(idx + pfStr.length)
     patchCount++
-    console.log(
-      `Applied at char ${idx}. msg=${msgVar}, IVe=${iveFn}, fHo=${fhoFn}, buf=${buf}`
-    )
+    console.log(`Applied at char ${idx}. msg=${msgVar}, IVe=${iveFn}, fHo=${fhoFn}, buf=${buf}`)
   }
 }
 
@@ -445,7 +443,9 @@ if (src.includes(patchBMarker)) {
     msgVar = m[1]
     idx = src.indexOf(matchStr)
     isNtCallback = true
-    console.log(`Found sync loop body (v197+ nt-callback pattern) at char ${idx} (arr=${m[2]}, msg=${msgVar})`)
+    console.log(
+      `Found sync loop body (v197+ nt-callback pattern) at char ${idx} (arr=${m[2]}, msg=${msgVar})`
+    )
   } else {
     console.error('ERROR: Cannot locate sub-agent sync loop push+bash_progress pattern.')
     process.exit(1)
@@ -760,23 +760,60 @@ if (src.includes(patchEMarker)) {
   //   - arr var (h) = collection array
   //   - p() = shouldNotifyOwner callback — returns Fe (true when backgrounded)
   //   - toolUseContext param (.toolUseId = parent_tool_use_id)
-  const bveAnchorRe = new RegExp(
-    `if\\((${V})\\(\\),(${V})\\.type==="system"&&\\2\\.subtype==="api_error"\\)continue;(${V})\\.push\\(\\2\\)`
+  //
+  // The anchor is matched in TWO parts. Up to v2.1.220 the api_error `continue`
+  // was immediately followed by `ARR.push(MSG)`, so one regex covered both. In
+  // v2.1.231 upstream interposed a model-refusal branch between them:
+  //
+  //   if(Z(),_e.type==="system"&&_e.subtype==="api_error")continue;
+  //   if(_e.type==="system"&&_e.subtype==="model_refusal_fallback")s.update(...);
+  //   y.push(_e),...
+  //
+  // A single contiguous regex is therefore too brittle — any future statement
+  // spliced into the same gap breaks it again. Match the (unique) api_error
+  // head, then find the collection push for the SAME message var within a
+  // bounded window after it. The window keeps the search local to this loop
+  // body rather than letting it run into unrelated code.
+  const bveHeadRe = new RegExp(
+    `if\\((${V})\\(\\),(${V})\\.type==="system"&&\\2\\.subtype==="api_error"\\)continue;`
   )
-  const bveAnchorMatch = src.match(bveAnchorRe)
+  const bveHeadMatch = src.match(bveHeadRe)
+
+  /** Chars after the api_error `continue;` to search for `ARR.push(MSG)`. */
+  const BVE_PUSH_WINDOW = 800
+
+  let bveAnchorMatch = null
+  if (bveHeadMatch) {
+    const headIdx = src.indexOf(bveHeadMatch[0])
+    if (src.indexOf(bveHeadMatch[0], headIdx + 1) !== -1) {
+      console.error('ERROR: BVe anchor head matches more than once. Aborting.')
+      process.exit(1)
+    }
+    // Minified names can contain `$`, which is a regex metacharacter.
+    const msgVarLit = bveHeadMatch[2].replace(/[$]/g, '\\$&')
+    const windowStart = headIdx + bveHeadMatch[0].length
+    const window = src.slice(windowStart, windowStart + BVE_PUSH_WINDOW)
+    const pushMatch = window.match(new RegExp(`(${V})\\.push\\(${msgVarLit}\\)`))
+    if (!pushMatch) {
+      console.error(
+        `ERROR: BVe anchor head found, but no \`ARR.push(${bveHeadMatch[2]})\` within ` +
+          `${BVE_PUSH_WINDOW} chars after it. The collection loop body has changed shape.`
+      )
+      process.exit(1)
+    }
+    bveAnchorMatch = {
+      headIdx,
+      watchdogFn: bveHeadMatch[1],
+      msgVar: bveHeadMatch[2],
+      arrVar: pushMatch[1],
+      pushGap: pushMatch.index
+    }
+  }
 
   if (bveAnchorMatch) {
     // v2.1.197+ BVe path
-    const anchorStr = bveAnchorMatch[0]
-    const watchdogFn = bveAnchorMatch[1]
-    const msgVar = bveAnchorMatch[2]
-    const arrVar = bveAnchorMatch[3]
-    const anchorIdx = src.indexOf(anchorStr)
-
-    if (src.indexOf(anchorStr, anchorIdx + 1) !== -1) {
-      console.error('ERROR: BVe anchor matches more than once. Aborting.')
-      process.exit(1)
-    }
+    const { watchdogFn, msgVar, arrVar, pushGap } = bveAnchorMatch
+    const anchorIdx = bveAnchorMatch.headIdx
 
     // Detect the toolUseContext variable by binding structurally to the
     // BVe function's destructured parameter. The minified name changes
@@ -795,7 +832,7 @@ if (src.includes(patchEMarker)) {
     if (sigCandidates.length === 0) {
       console.error(
         'ERROR: No `async function(...toolUseContext:VAR,...)` signature found ' +
-        'in the 15KB prefix before the BVe anchor. Cannot determine toolUseContext binding.'
+          'in the 15KB prefix before the BVe anchor. Cannot determine toolUseContext binding.'
       )
       process.exit(1)
     }
@@ -803,12 +840,14 @@ if (src.includes(patchEMarker)) {
       const summary = sigCandidates.map((c) => `${c.fn}(toolUseContext:${c.ctxVar})`).join(', ')
       console.error(
         `ERROR: ${sigCandidates.length} async functions with toolUseContext found in the 15KB prefix. ` +
-        `Ambiguous — cannot determine which encloses the anchor. Candidates: ${summary}`
+          `Ambiguous — cannot determine which encloses the anchor. Candidates: ${summary}`
       )
       process.exit(1)
     }
     const toolUseCtxVar = sigCandidates[0].ctxVar
-    console.log(`  toolUseContext var: ${toolUseCtxVar} (from function sig "${sigCandidates[0].fn}", 1/1 matches)`)
+    console.log(
+      `  toolUseContext var: ${toolUseCtxVar} (from function sig "${sigCandidates[0].fn}", 1/1 matches)`
+    )
 
     // Extract the shouldNotifyOwner gate. It must NOT be hardcoded: in
     // v2.1.197–v2.1.207 the defaulted alias was `p` (`shouldNotifyOwner:d}){let p=d??(()=>!0)`),
@@ -839,9 +878,14 @@ if (src.includes(patchEMarker)) {
     // Patch E must forward ONLY stream_events; on older builds (v2.1.197–2.1.207,
     // no onRunSettled param) it must keep forwarding assistant/user as well.
     const hasNativeRelay = notifyMatches[0][0].includes('onRunSettled:')
-    console.log(`  native assistant/user relay: ${hasNativeRelay ? 'present (skip assistant/user writes)' : 'absent (write assistant/user)'}`)
+    console.log(
+      `  native assistant/user relay: ${hasNativeRelay ? 'present (skip assistant/user writes)' : 'absent (write assistant/user)'}`
+    )
 
-    console.log(`Found BVe for-await anchor at char ${anchorIdx} (watchdog=${watchdogFn}, msg=${msgVar}, arr=${arrVar})`)
+    console.log(
+      `Found BVe for-await anchor at char ${anchorIdx} (watchdog=${watchdogFn}, msg=${msgVar}, ` +
+        `arr=${arrVar}, push gap=${pushGap} chars)`
+    )
 
     // Inject before the full `if(WATCHDOG(),...api_error...)continue;ARR.push(MSG)` sequence.
     // We insert our check BEFORE the watchdog call so the anchor remains intact after insertion.
@@ -871,7 +915,9 @@ if (src.includes(patchEMarker)) {
 
     src = src.slice(0, anchorIdx) + injection + src.slice(anchorIdx)
     patchCount++
-    console.log('Applied (v197+ BVe path). stream_events skipped from h[], background agents get stdout.')
+    console.log(
+      'Applied (v197+ BVe path). stream_events skipped from h[], background agents get stdout.'
+    )
   } else {
     // ---- Fallback: v2.1.41–v2.1.196 legacy re-background for-await loops ----
     //
@@ -912,7 +958,9 @@ if (src.includes(patchEMarker)) {
     }
 
     if (legacyMatches.length === 0) {
-      console.error('ERROR: Cannot locate async for-await loops (tried BVe anchor and legacy patterns).')
+      console.error(
+        'ERROR: Cannot locate async for-await loops (tried BVe anchor and legacy patterns).'
+      )
       console.error('The background agent loop structure may have changed.')
       process.exit(1)
     }
@@ -921,8 +969,7 @@ if (src.includes(patchEMarker)) {
 
     // Extract parent message var and description var from the Task tool's call() signature.
     const callSigRe = new RegExp(
-      `async call\\(\\{[^}]*description:(${V})[^}]*\\},` +
-        `(${V}),(${V}),(${V}),(${V})\\)\\{`
+      `async call\\(\\{[^}]*description:(${V})[^}]*\\},` + `(${V}),(${V}),(${V}),(${V})\\)\\{`
     )
     const callSigMatch = src.match(callSigRe)
     if (!callSigMatch) {
@@ -995,7 +1042,9 @@ if (src.includes(patchGMarker)) {
   )
   const iu8Match = iu8SigRe.exec(src)
   if (!iu8Match) {
-    console.log('iu8() not found — merged into BVe() in v2.1.197+. Patch E covers this path. Skipping.')
+    console.log(
+      'iu8() not found — merged into BVe() in v2.1.197+. Patch E covers this path. Skipping.'
+    )
     patchGApplicable = false
   } else {
     // Re-discover session ID and UUID functions (same as Patch E but in Patch G scope)

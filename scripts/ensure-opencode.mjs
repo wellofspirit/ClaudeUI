@@ -28,6 +28,7 @@
  *   node scripts/ensure-opencode.mjs                 # build the fork branch
  *   node scripts/ensure-opencode.mjs --force         # rebuild/re-download even on a cache hit
  *   node scripts/ensure-opencode.mjs --from-release  # unpatched upstream release instead
+ *   node scripts/ensure-opencode.mjs --quiet         # suppress info logs (cache-hit/installed lines stay)
  */
 
 import { createGunzip } from 'node:zlib'
@@ -43,7 +44,7 @@ import {
   openSync,
   writeSync,
   closeSync,
-  renameSync,
+  renameSync
 } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -55,6 +56,13 @@ const ROOT = join(__dirname, '..')
 const VENDOR_DIR = join(ROOT, 'vendor', 'opencode-cli')
 const CACHE_BASE = join(ROOT, '.cache')
 const FORK_DIR = join(CACHE_BASE, 'opencode-fork')
+
+const QUIET = process.argv.includes('--quiet')
+
+/** Info-level log — suppressed by --quiet. */
+function info(...args) {
+  if (!QUIET) console.log(...args)
+}
 
 // ── Platform detection ────────────────────────────────────────────────────────
 
@@ -133,7 +141,7 @@ function writeVersionFile(extra) {
         version: getPinnedVersion(),
         platform: process.platform,
         arch: process.arch,
-        ...extra,
+        ...extra
       },
       null,
       2
@@ -155,7 +163,10 @@ function writeVersionFile(extra) {
 const TAR_BLOCK = 512
 
 function readOctal(buf, offset, len) {
-  const s = buf.subarray(offset, offset + len).toString('ascii').trim()
+  const s = buf
+    .subarray(offset, offset + len)
+    .toString('ascii')
+    .trim()
   return s ? parseInt(s, 8) : 0
 }
 
@@ -208,7 +219,7 @@ function walkTar(tar, targetSuffix) {
 
   while (pos + TAR_BLOCK <= tar.length) {
     const header = tar.subarray(pos, pos + TAR_BLOCK)
-    if (header.every((b) => b === 0)) break  // end-of-archive sentinel
+    if (header.every((b) => b === 0)) break // end-of-archive sentinel
 
     pos += TAR_BLOCK
 
@@ -259,7 +270,7 @@ async function download(pkgName, version) {
 
   try {
     const fullPkg = `${pkgName}@${version}`
-    console.log(`[ensure-opencode] Downloading ${fullPkg} via npm pack ...`)
+    info(`[ensure-opencode] Downloading ${fullPkg} via npm pack ...`)
 
     // Use execSync with a constructed command string so Node runs it via the
     // shell on all platforms. This avoids the shell:true + array-args deprecation
@@ -280,9 +291,9 @@ async function download(pkgName, version) {
     // The npm pack layout is: package/bin/opencode[.exe]
     const targetSuffix = `bin/${binName}`
 
-    console.log(`[ensure-opencode] Extracting ${binName} from ${tgzFiles[0]} ...`)
+    info(`[ensure-opencode] Extracting ${binName} from ${tgzFiles[0]} ...`)
     const binBytes = await extractFileFromTgz(tgzPath, targetSuffix)
-    console.log(`[ensure-opencode] Extracted ${(binBytes.length / 1024 / 1024).toFixed(1)} MB`)
+    info(`[ensure-opencode] Extracted ${(binBytes.length / 1024 / 1024).toFixed(1)} MB`)
 
     mkdirSync(VENDOR_DIR, { recursive: true })
     const dest = join(VENDOR_DIR, binName)
@@ -301,7 +312,7 @@ async function download(pkgName, version) {
     writeVersionFile({
       source: 'release',
       package: pkgName,
-      downloadedAt: new Date().toISOString(),
+      downloadedAt: new Date().toISOString()
     })
 
     console.log(
@@ -312,7 +323,6 @@ async function download(pkgName, version) {
     rmSync(tmpDir, { recursive: true, force: true })
   }
 }
-
 // ── Fork build ────────────────────────────────────────────────────────────────
 
 /**
@@ -357,10 +367,9 @@ function replaceBinary(tmp, dest) {
   try {
     rmSync(displaced, { force: true })
   } catch {
-    console.log(`[ensure-opencode] previous binary still in use; left ${displaced} for later cleanup`)
+    info(`[ensure-opencode] previous binary still in use; left ${displaced} for later cleanup`)
   }
 }
-
 /** Run git, streaming its output. */
 function gitRun(args, cwd) {
   execFileSync('git', args, { cwd, stdio: 'inherit' })
@@ -371,7 +380,7 @@ function gitOut(args, cwd) {
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'inherit'],
+    stdio: ['ignore', 'pipe', 'inherit']
   }).trim()
 }
 
@@ -392,8 +401,9 @@ function distDirName() {
  * pinned standalone bun in `.cache/` and use it only for this build.
  */
 function ensureBun(forkDir) {
-  const required = JSON.parse(readFileSync(join(forkDir, 'package.json'), 'utf8'))
-    .packageManager?.split('@')[1]
+  const required = JSON.parse(
+    readFileSync(join(forkDir, 'package.json'), 'utf8')
+  ).packageManager?.split('@')[1]
   if (!required) throw new Error('fork root package.json has no packageManager field')
 
   const localOk = (() => {
@@ -424,7 +434,7 @@ function ensureBun(forkDir) {
           ? 'bun-linux-aarch64'
           : 'bun-linux-x64'
 
-  console.log(`[ensure-opencode] Local bun does not satisfy ^${required}; fetching ${target} ...`)
+  info(`[ensure-opencode] Local bun does not satisfy ^${required}; fetching ${target} ...`)
   mkdirSync(dir, { recursive: true })
   const url = `https://github.com/oven-sh/bun/releases/download/bun-v${required}/${target}.zip`
   const zip = join(dir, 'bun.zip')
@@ -439,7 +449,7 @@ function ensureBun(forkDir) {
         '-NoProfile',
         '-NonInteractive',
         '-Command',
-        `Expand-Archive -LiteralPath '${zip}' -DestinationPath '${dir}' -Force`,
+        `Expand-Archive -LiteralPath '${zip}' -DestinationPath '${dir}' -Force`
       ],
       { stdio: 'inherit' }
     )
@@ -459,7 +469,7 @@ function ensureBun(forkDir) {
 function syncFork(fork) {
   mkdirSync(CACHE_BASE, { recursive: true })
   if (!existsSync(join(FORK_DIR, '.git'))) {
-    console.log(`[ensure-opencode] Cloning ${fork.repo} (${fork.branch}) ...`)
+    info(`[ensure-opencode] Cloning ${fork.repo} (${fork.branch}) ...`)
     // Blobless: full history/refs (the build reads `git branch --show-current`)
     // without paying for every blob ever committed.
     execFileSync(
@@ -468,7 +478,7 @@ function syncFork(fork) {
       { stdio: 'inherit' }
     )
   } else {
-    console.log(`[ensure-opencode] Refreshing ${FORK_DIR} (${fork.branch}) ...`)
+    info(`[ensure-opencode] Refreshing ${FORK_DIR} (${fork.branch}) ...`)
     gitRun(['fetch', 'origin', fork.branch], FORK_DIR)
     // `-f` is load-bearing: a previous run's `bun install` rewrites bun.lock in
     // this clone, and a plain checkout refuses to switch over a dirty file.
@@ -508,12 +518,14 @@ async function buildFork(version, fork) {
   const commit = syncFork(fork)
   const bun = ensureBun(FORK_DIR)
 
-  console.log(`[ensure-opencode] Installing fork dependencies (bun: ${bun}) ...`)
+  info(`[ensure-opencode] Installing fork dependencies (bun: ${bun}) ...`)
   withInstallWorkaround(FORK_DIR, () => {
     execFileSync(bun, ['install'], { cwd: FORK_DIR, stdio: 'inherit' })
   })
 
-  console.log(`[ensure-opencode] Building opencode ${version} from ${fork.branch}@${commit.slice(0, 8)} ...`)
+  info(
+    `[ensure-opencode] Building opencode ${version} from ${fork.branch}@${commit.slice(0, 8)} ...`
+  )
   const pkgDir = join(FORK_DIR, 'packages', 'opencode')
   execFileSync(bun, ['run', 'script/build.ts', '--single', '--skip-install'], {
     cwd: pkgDir,
@@ -521,7 +533,7 @@ async function buildFork(version, fork) {
     // Pin the version instead of letting their script derive one from the npm
     // registry / current branch name (which would produce a 0.0.0-claudeui-*
     // preview version and break every version comparison downstream).
-    env: { ...process.env, OPENCODE_VERSION: version },
+    env: { ...process.env, OPENCODE_VERSION: version }
   })
 
   const binName = binaryName()
@@ -541,9 +553,9 @@ async function buildFork(version, fork) {
       repo: fork.repo,
       branch: fork.branch,
       commit,
-      ...(fork.tag ? { forkedFrom: fork.tag } : {}),
+      ...(fork.tag ? { forkedFrom: fork.tag } : {})
     },
-    builtAt: new Date().toISOString(),
+    builtAt: new Date().toISOString()
   })
 
   console.log(

@@ -19,7 +19,7 @@ describe('SDK event contract', () => {
   describe.skipIf(SKIP)('real SDK event sequences', () => {
     it('text response yields init → assistant → result in correct order', async () => {
       // Dynamic import to avoid loading SDK when skipped
-      const { query: sdkQuery } = await import('../../main/sdk')
+      const { query: sdkQuery } = await import('../../core/sdk')
       const events: Array<Record<string, unknown>> = []
 
       const q = sdkQuery({

@@ -25,6 +25,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, act } from '@testing-library/react'
 import { useAutomationStore } from '../../../../stores/automation-store'
+import { useSessionStore } from '../../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import type { AutomationConfigViewProps } from '../View'
 import type { Automation, AutomationRun, ClaudePermissions } from '../../../../../../shared/types'
@@ -334,6 +335,60 @@ describe('AutomationConfig FC', () => {
 
     expect(useAutomationStore.getState().selectedRunId).toBe('run-xyz')
     expect(useAutomationStore.getState().selectedAutomationId).toBe('auto-1')
+  })
+
+  // ADR-046 decision 3: the cwd Browse button was a native dialog only, i.e. a
+  // silent no-op on the web client. The View gets a host listing there instead.
+  it('hands the View window.api.listDir + listPlaces on the web client', async () => {
+    ;(window as unknown as { api: { platform: string } }).api.platform = 'web'
+    await selectAutomation(makeAutomation())
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(viewProps!.listDir).toBe(window.api.listDir)
+    // The rail rides the same gate — a View that got one without the other
+    // would render a browser with a dead PLACES section.
+    expect(viewProps!.listPlaces).toBe(window.api.listPlaces)
+  })
+
+  it('leaves the View on the native dialog on desktop', async () => {
+    ;(window as unknown as { api: { platform: string } }).api.platform = 'win32'
+    await selectAutomation(makeAutomation())
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(viewProps!.listDir).toBeUndefined()
+    expect(viewProps!.listPlaces).toBeUndefined()
+  })
+
+  it('hands the View the known project directories as browse recents', async () => {
+    useSessionStore.setState({
+      directories: [
+        {
+          cwd: 'D:/work/ClaudeUI',
+          projectKey: 'D--work-ClaudeUI',
+          folderName: 'ClaudeUI',
+          sessions: []
+        }
+      ]
+    })
+    await selectAutomation(makeAutomation())
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(viewProps!.recents).toEqual([{ cwd: 'D:/work/ClaudeUI', folderName: 'ClaudeUI' }])
   })
 
   it('onSetDetailTab updates the store so tab choice persists across re-renders', async () => {

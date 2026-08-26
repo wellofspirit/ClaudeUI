@@ -1,12 +1,19 @@
 /**
  * Unit tests for `defaultPermissionMode` — the Settings autonomy-mode pick
- * (`~/.claude/settings.json#permissions.defaultMode`) reaching NEW sessions.
+ * reaching NEW sessions.
  *
- * Pre-fix this whole path was dead: `createEmptySession` hardcoded
- * `permissionMode: 'default'`, so a user who picked "Read-only (Plan)" in
- * Settings still got a `default`-mode session (the explicit mode is passed
- * straight through to `--permission-mode` at spawn), and cli.js's own
- * defaultMode never got a look-in.
+ * Two behaviours are under test, and they used to be one:
+ *
+ * 1. The pick is now a ClaudeUI-owned setting (`settings.defaultAutonomyMode`),
+ *    NOT `~/.claude/settings.json#permissions.defaultMode`. Claude's file is
+ *    read exactly once, to SEED that setting for profiles that predate it —
+ *    upstream's "pinned defaults are preserved" rule when auto mode became the
+ *    default. Once seeded, the two are independent.
+ *
+ * 2. The shipped default is `auto`, for every engine — but only where auto can
+ *    actually run. `createNewSession` degrades it to 'default' when the engine
+ *    or the account can't do auto, so an impossible mode never reaches
+ *    `--permission-mode` at spawn.
  *
  * Deliberately NOT asserted: any effect on RUNNING sessions. defaultMode is a
  * bootstrap concern; live modes change only via setPermissionMode.
@@ -16,33 +23,41 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useSessionStore, hydrateConfigFromDisk } from '../session-store'
-import type { ClaudePermissions, EngineId, PermissionMode } from '../../../../shared/types'
+import type { ClaudePermissions, EngineId, ModelInfo } from '../../../../shared/types'
 
 const store = () => useSessionStore.getState()
 
-function perms(defaultMode?: string): ClaudePermissions {
+function perms(defaultMode?: string, disableAutoMode?: string): ClaudePermissions {
   return {
     allow: [],
     deny: [],
     ask: [],
     additionalDirectories: [],
-    defaultMode
+    defaultMode,
+    disableAutoMode
   }
 }
 
+const saveSettings = vi.fn()
+
 /** Exactly what hydrateConfigFromDisk reads. */
-function stubWindowApi(userPermissions: Promise<ClaudePermissions>): void {
+function stubWindowApi(
+  userPermissions: Promise<ClaudePermissions>,
+  savedSettings: Record<string, unknown> = {}
+): void {
+  saveSettings.mockClear()
   ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
-    loadSettings: vi.fn().mockResolvedValue({}),
+    loadSettings: vi.fn().mockResolvedValue(savedSettings),
     loadSessionConfig: vi.fn().mockResolvedValue({}),
     loadSlashCommands: vi.fn().mockResolvedValue([]),
     loadEngineConfig: vi.fn().mockResolvedValue({}),
     loadOpencodeSettings: vi.fn().mockResolvedValue({}),
     loadClaudePermissions: vi.fn(() => userPermissions),
-    saveSettings: vi.fn(),
+    saveSettings,
     saveSessionConfig: vi.fn(),
-    logError: vi.fn()
+    logError: vi.fn(),
+    clearConversation: vi.fn().mockResolvedValue(undefined)
   } as any
 }
 
@@ -55,13 +70,21 @@ beforeEach(() => {
     sessionEngines: {},
     availableModels: [],
     lastSelectedEngineId: 'claude' as EngineId,
-    defaultPermissionMode: 'default'
+    defaultPermissionMode: 'default',
+    autoModeDisabledBySettings: false
   })
 })
 
 describe('hydrateConfigFromDisk → defaultPermissionMode', () => {
-  it.each(['plan', 'acceptEdits', 'auto'] as PermissionMode[])(
-    'adopts defaultMode "%s" from the user scope',
+  it('defaults to "auto" when the profile has expressed no preference', async () => {
+    stubWindowApi(Promise.resolve(perms(undefined)))
+    await hydrateConfigFromDisk()
+    expect(store().defaultPermissionMode).toBe('auto')
+    expect(store().settings.defaultAutonomyMode).toBe('full')
+  })
+
+  it.each(['plan', 'acceptEdits', 'auto'])(
+    'preserves a pinned Claude defaultMode "%s" by seeding it once',
     async (mode) => {
       stubWindowApi(Promise.resolve(perms(mode)))
       await hydrateConfigFromDisk()
@@ -69,23 +92,48 @@ describe('hydrateConfigFromDisk → defaultPermissionMode', () => {
     }
   )
 
-  it('falls back to "default" when defaultMode is unset', async () => {
-    stubWindowApi(Promise.resolve(perms(undefined)))
+  it('preserves a pinned "default" rather than upgrading it to auto', async () => {
+    stubWindowApi(Promise.resolve(perms('default')))
     await hydrateConfigFromDisk()
     expect(store().defaultPermissionMode).toBe('default')
+    expect(store().settings.defaultAutonomyMode).toBe('ask')
   })
 
-  it('falls back to "default" for a mode with no ClaudeUI equivalent', async () => {
+  it('persists the seed, so a later Claude defaultMode change cannot re-seed', async () => {
+    stubWindowApi(Promise.resolve(perms('plan')))
+    await hydrateConfigFromDisk()
+    expect(saveSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultAutonomyMode: 'plan' })
+    )
+  })
+
+  it('adopts the auto default for a mode with no ClaudeUI equivalent', async () => {
+    // bypassPermissions is MORE permissive than classifier-gated auto, so
+    // seeding the default here only ever de-escalates.
     stubWindowApi(Promise.resolve(perms('bypassPermissions')))
     await hydrateConfigFromDisk()
-    expect(store().defaultPermissionMode).toBe('default')
+    expect(store().defaultPermissionMode).toBe('auto')
   })
 
-  it('falls back to "default" when the permissions read rejects', async () => {
+  it('adopts the auto default when the permissions read rejects', async () => {
     stubWindowApi(Promise.reject(new Error('no settings file')))
     useSessionStore.setState({ defaultPermissionMode: 'plan' })
     await hydrateConfigFromDisk()
-    expect(store().defaultPermissionMode).toBe('default')
+    expect(store().defaultPermissionMode).toBe('auto')
+  })
+
+  it('lets an already-seeded ClaudeUI setting win over Claude defaultMode', async () => {
+    stubWindowApi(Promise.resolve(perms('plan')), { defaultAutonomyMode: 'autoEdit' })
+    await hydrateConfigFromDisk()
+    expect(store().defaultPermissionMode).toBe('acceptEdits')
+    // Already seeded — must not be re-persisted from Claude's file.
+    expect(saveSettings).not.toHaveBeenCalled()
+  })
+
+  it('records a settings-level disableAutoMode', async () => {
+    stubWindowApi(Promise.resolve(perms(undefined, 'disable')))
+    await hydrateConfigFromDisk()
+    expect(store().autoModeDisabledBySettings).toBe(true)
   })
 })
 
@@ -94,11 +142,6 @@ describe('createNewSession seeds permissionMode from defaultPermissionMode', () 
     useSessionStore.setState({ defaultPermissionMode: 'plan' })
     store().createNewSession('rid-plan', '/repo')
     expect(store().sessions['rid-plan'].permissionMode).toBe('plan')
-  })
-
-  it('still yields "default" when nothing is configured', () => {
-    store().createNewSession('rid-plain', '/repo')
-    expect(store().sessions['rid-plain'].permissionMode).toBe('default')
   })
 
   it('picks up a setDefaultPermissionMode change without a reload', () => {
@@ -119,5 +162,85 @@ describe('createNewSession seeds permissionMode from defaultPermissionMode', () 
     })
     store().setDefaultPermissionMode('plan')
     expect(store().sessions['rid-live'].permissionMode).toBe('default')
+  })
+})
+
+describe('every fresh-run path seeds the default, not only createNewSession', () => {
+  // cli.js applies `permissions.defaultMode` on `--resume` too, so a reopened
+  // session starting in the configured default is upstream parity. Pre-fix,
+  // only brand-new sessions got the auto default: reopening from the sidebar,
+  // forking, and clearing all silently produced 'default'-mode sessions —
+  // which is exactly "I made auto the default and my session isn't in auto".
+  it('reopening a historical session starts a fresh run in the default mode', () => {
+    useSessionStore.setState({ defaultPermissionMode: 'auto' })
+    store().loadHistoricalSession('rid-hist', [], '/repo')
+    expect(store().sessions['rid-hist'].permissionMode).toBe('auto')
+  })
+
+  it('re-hydrating an EVICTED entry keeps its own mode (not a fresh run)', () => {
+    useSessionStore.setState({ defaultPermissionMode: 'auto' })
+    store().createNewSession('rid-evict', '/repo')
+    useSessionStore.setState({
+      sessions: {
+        ...store().sessions,
+        'rid-evict': { ...store().sessions['rid-evict'], evicted: true, permissionMode: 'plan' }
+      }
+    })
+    store().loadHistoricalSession('rid-evict', [], '/repo')
+    expect(store().sessions['rid-evict'].permissionMode).toBe('plan')
+  })
+
+  /**
+   * F4 moved the RESET into the reducer, but not the DECISION: resolving the
+   * fresh-run mode needs `availableModels` + the auto-mode gate, which live only
+   * in a client. So the mode still comes from `bootstrapPermissionMode` here and
+   * rides the invoke; the reducer just files what it is told.
+   */
+  it('clearConversation sends the default mode to main', async () => {
+    useSessionStore.setState({ defaultPermissionMode: 'auto' })
+    store().createNewSession('rid-clear', '/repo')
+    useSessionStore.setState({
+      sessions: {
+        ...store().sessions,
+        'rid-clear': { ...store().sessions['rid-clear'], permissionMode: 'plan' }
+      }
+    })
+    await store().clearConversation('rid-clear')
+    expect(window.api.clearConversation).toHaveBeenCalledWith('rid-clear', 'auto')
+  })
+})
+
+describe('createNewSession gates an unavailable auto', () => {
+  /** A Claude model list that affirmatively reports no auto-mode support. */
+  const noAutoModels = [
+    { value: 'claude-x', displayName: 'x', description: '', supportsAutoMode: false }
+  ] as ModelInfo[]
+
+  it('keeps auto when nothing says it is unavailable', () => {
+    useSessionStore.setState({ defaultPermissionMode: 'auto' })
+    store().createNewSession('rid-auto', '/repo')
+    expect(store().sessions['rid-auto'].permissionMode).toBe('auto')
+  })
+
+  it('degrades to "default" when no Claude model supports auto', () => {
+    useSessionStore.setState({ defaultPermissionMode: 'auto', availableModels: noAutoModels })
+    store().createNewSession('rid-gated', '/repo')
+    expect(store().sessions['rid-gated'].permissionMode).toBe('default')
+  })
+
+  it('degrades to "default" when settings disable auto mode', () => {
+    useSessionStore.setState({ defaultPermissionMode: 'auto', autoModeDisabledBySettings: true })
+    store().createNewSession('rid-disabled', '/repo')
+    expect(store().sessions['rid-disabled'].permissionMode).toBe('default')
+  })
+
+  it('does not degrade a non-auto default', () => {
+    useSessionStore.setState({
+      defaultPermissionMode: 'plan',
+      autoModeDisabledBySettings: true,
+      availableModels: noAutoModels
+    })
+    store().createNewSession('rid-plan2', '/repo')
+    expect(store().sessions['rid-plan2'].permissionMode).toBe('plan')
   })
 })

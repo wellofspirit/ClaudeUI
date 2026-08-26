@@ -7,7 +7,7 @@
  * land there.
  */
 import { describe, it, expect } from 'vitest'
-import { classifyApiError } from '../api-error'
+import { classifyApiError } from '../../../core/services/api-error'
 
 describe('classifyApiError', () => {
   it('classifies the live 401 wording as authentication', () => {

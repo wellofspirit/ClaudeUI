@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Relates to:** ADR-038 (the same principle for approvals — lifecycle state mirrors explicit wire
 events, never inferred from turn/tool state), ADR-033 (cross-engine dispatch renders through the
-same TaskCard), `docs/protocol/04-system-subtypes.md` §4.4/§4.5 (the cli.js wire shapes)
+same TaskCard), `docs/protocol-cc/04-system-subtypes.md` §4.4/§4.5 (the cli.js wire shapes)
 
 ## Context
 
@@ -41,7 +41,7 @@ tool input, tool results, or turn state.
 - **Legacy fallback, on purpose:** engines that never emit `task_started` (opencode and pi child
   sessions, historical transcripts, cross-engine dispatch cards driven by synthesized
   notifications) have no record and keep the pre-existing heuristic
-  (`isBackground ? !bgNotification : !hasResult`) byte-for-byte. The new signal only ever *adds*
+  (`isBackground ? !bgNotification : !hasResult`) byte-for-byte. The new signal only ever _adds_
   running-ness; it cannot regress engines that don't speak it.
 - `handleTaskNotification` falls back to the wire's own `tool_use_id` when the `taskIdMap`
   reverse-lookup misses (map evicted, or `task_started` never arrived).

@@ -31,6 +31,20 @@ function main() {
     process.exit(t.summarize() ? 0 : 1)
   }
 
+  // 0. Store-less bundles (Linux, verified 2.1.231) ship no secure store: no
+  //    composed "-fallback" facade, plaintext backend only. apply.mjs no-ops
+  //    there (see its store-less guard), so the correct patched state IS the
+  //    pristine one — assert exactly that and stop.
+  const storeLess =
+    process.platform === 'linux' && !src.includes('-fallback`') && src.includes('name:"plaintext"')
+  if (storeLess) {
+    t.assert(
+      'store-less bundle: patch marker absent (no-op is the correct state)',
+      !src.includes('/*PATCHED:skip-securestorage*/')
+    )
+    process.exit(t.summarize() ? 0 : 1)
+  }
+
   // 1. Marker present exactly once (applied + idempotent).
   const markerCount = src.split('/*PATCHED:skip-securestorage*/').length - 1
   t.assert('patch marker present exactly once', markerCount === 1)

@@ -1,8 +1,5 @@
 import { useState } from 'react'
-import type {
-  ContentBlock,
-  AskUserQuestion,
-} from '../../../../../shared/types'
+import type { ContentBlock, AskUserQuestion } from '../../../../../shared/types'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 
@@ -26,7 +23,6 @@ export function AskUserQuestionBlockView({
   onSubmit,
   onDeny
 }: AskUserQuestionBlockViewProps): React.JSX.Element {
-
   const [currentStep, setCurrentStep] = useState(0)
   const [answers, setAnswers] = useState<Record<string, string>>({})
   const [otherText, setOtherText] = useState<Record<string, string>>({})
@@ -114,7 +110,10 @@ export function AskUserQuestionBlockView({
 
   if (isCompleted) {
     return (
-      <div data-testid="AskUserQuestionBlock" className="rounded-lg border border-success/30 bg-bg-secondary overflow-hidden">
+      <div
+        data-testid="AskUserQuestionBlock"
+        className="rounded-lg border border-success/30 bg-bg-secondary overflow-hidden"
+      >
         <button
           data-testid="AskUserQuestionBlock.toggleSummary"
           onClick={() => setSummaryExpanded(!summaryExpanded)}
@@ -166,7 +165,10 @@ export function AskUserQuestionBlockView({
 
   if (!isPending || totalSteps === 0) {
     return (
-      <div data-testid="AskUserQuestionBlock" className="rounded-lg border border-border bg-bg-secondary px-3 py-2.5">
+      <div
+        data-testid="AskUserQuestionBlock"
+        className="rounded-lg border border-border bg-bg-secondary px-3 py-2.5"
+      >
         <div className="flex items-center gap-2 text-[13px]">
           <span className="w-3 h-3 rounded-full border-2 border-text-muted border-t-transparent shrink-0 animate-spin-slow" />
           <span className="font-mono font-medium text-accent">AskUserQuestion</span>
@@ -185,7 +187,10 @@ export function AskUserQuestionBlockView({
   }
 
   return (
-    <div data-testid="AskUserQuestionBlock" className="rounded-lg border border-accent/30 bg-bg-secondary overflow-hidden">
+    <div
+      data-testid="AskUserQuestionBlock"
+      className="rounded-lg border border-accent/30 bg-bg-secondary overflow-hidden"
+    >
       <div className="flex items-center gap-2 px-3 h-9 text-[13px] border-b border-border">
         <svg
           width="14"

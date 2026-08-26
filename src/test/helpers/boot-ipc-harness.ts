@@ -6,7 +6,10 @@
  *   vi.mock('electron', () => import('../../test/stubs/electron-shim'))
  *   ...
  *   const { bridge, win, call } = await bootIpcHarness()
- *   registerTerminalIpc(win)
+ *   registerTerminalIpc()
+ *   // `win` is for the surfaces that still take one; the register* functions are
+ *   // window-free since SyncCore phase 4d (they run in a windowless boot), so a
+ *   // host window is published with `setHostWindow(win)` when a test needs one.
  *   const id = await call('terminal:create', '/tmp')
  *
  * For safeHandler-wrapped channels, use callSafe() which unwraps `{ ok, data, error }`.
@@ -15,6 +18,10 @@
 
 import { TestIpcBridge } from '../bridges/test-ipc-bridge'
 import { setIpcBridge } from '../stubs/electron-shim'
+import { installDesktopTransport } from '../../main/ipc/desktop-transport'
+import { setDesktopTransportBinder } from '../../core/ipc/desktop-transport-binding'
+import { addSyncSubscriber, clearSyncSubscribersForTests } from '../../core/services/sync-host'
+import { channelSpec } from '../../core/shared/sync/channels'
 
 export interface IpcHarness {
   bridge: TestIpcBridge
@@ -27,7 +34,14 @@ export interface IpcHarness {
    * Throws with the error message if `ok: false`.
    */
   callSafe: <T = unknown>(channel: string, ...args: unknown[]) => Promise<T>
-  /** Listen for an event fired via `win.webContents.send` */
+  /**
+   * Listen for one emitted event, on whichever lane it actually travels.
+   *
+   * Routes by channel CLASS since SyncCore phase 4c, mirroring the production
+   * delivery adapter: `host-local` off `win.webContents.send`, everything else
+   * off the funnel's subscriber registry. Keeping ONE method means every existing
+   * call site is unchanged even though half of them moved lane.
+   */
   onEvent: (channel: string, handler: (...args: unknown[]) => void) => () => void
   /** Observe the next emission of a channel as a promise. Resolves with args array. */
   waitForEvent: (channel: string, timeoutMs?: number) => Promise<unknown[]>
@@ -39,6 +53,16 @@ export function bootIpcHarness(): IpcHarness {
   const bridge = new TestIpcBridge()
   setIpcBridge(bridge)
   const win = bridge.createBrowserWindow()
+
+  // Install the DESKTOP transport binder (S3 stage 1b). The registrars moved to
+  // `src/core` and no longer touch `ipcMain` themselves — they call the
+  // Electron-free `handleIpc`, which binds through whatever the host installed.
+  // Production installs this exact adapter from `bootCore()`; here it resolves
+  // `ipcMain` to the electron-shim these suites already `vi.mock` in, so the
+  // channels land on `bridge` as they always did. Using the REAL adapter rather
+  // than a harness-local copy is deliberate: a second implementation of the
+  // binder is exactly the drift the seam exists to prevent.
+  installDesktopTransport()
 
   const call = async <T>(channel: string, ...args: unknown[]): Promise<T> => {
     return (await bridge.ipcRenderer.invoke(channel, ...args)) as T
@@ -55,6 +79,11 @@ export function bootIpcHarness(): IpcHarness {
     return res as T
   }
   const onEvent = (channel: string, handler: (...args: unknown[]) => void): (() => void) => {
+    if (channelSpec(channel)?.cls !== 'host-local') {
+      return addSyncSubscriber((_seq, emitted, args) => {
+        if (emitted === channel) handler(...args)
+      })
+    }
     const wrap = (_: unknown, ...args: unknown[]): void => handler(...args)
     bridge.ipcRenderer.on(channel, wrap)
     return () => bridge.ipcRenderer.removeListener(channel, wrap)
@@ -80,6 +109,15 @@ export function bootIpcHarness(): IpcHarness {
     callSafe,
     onEvent,
     waitForEvent,
-    teardown: () => bridge.reset()
+    teardown: () => {
+      // Subscribers are a module singleton on the funnel; leaking one would fan
+      // the next test's ring out into this test's closures.
+      clearSyncSubscribersForTests()
+      // Same reasoning for the binder: it is module state pointing at THIS
+      // bridge, so leaving it installed would let a later suite's registration
+      // bind onto a bridge that has already been reset.
+      setDesktopTransportBinder(null)
+      bridge.reset()
+    }
   }
 }

@@ -22,12 +22,8 @@ vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'
 // time (the vi.mock above only covers OUR import specifiers), so stub it too.
 vi.mock('@electron-toolkit/utils', () => ({ is: { dev: false } }))
 
-import {
-  LogEntryBatcher,
-  ENTRY_BATCH_INTERVAL_MS,
-  ENTRY_BATCH_MAX
-} from '../log-viewer'
-import type { LogEntry } from '../logger'
+import { LogEntryBatcher, ENTRY_BATCH_INTERVAL_MS, ENTRY_BATCH_MAX } from '../log-viewer'
+import type { LogEntry } from '../../../core/services/logger'
 
 function entry(message: string): LogEntry {
   return { timestamp: '00:00:00.000', level: 'debug', source: 'T', message }

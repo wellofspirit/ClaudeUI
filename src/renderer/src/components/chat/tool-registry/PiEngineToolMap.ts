@@ -222,7 +222,12 @@ function piNormalize(
         return {
           kind: 'task',
           description: `Subagents: ${names.join(', ')}`,
-          prompt: list.map((t) => `[${t.agent != null ? String(t.agent) : '?'}] ${t.task != null ? String(t.task) : ''}`).join('\n\n'),
+          prompt: list
+            .map(
+              (t) =>
+                `[${t.agent != null ? String(t.agent) : '?'}] ${t.task != null ? String(t.task) : ''}`
+            )
+            .join('\n\n'),
           subagent: names.join(', ')
         }
       }

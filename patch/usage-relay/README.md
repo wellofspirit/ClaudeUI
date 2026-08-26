@@ -100,9 +100,25 @@ function u_() {
     "utilization": 0.30,
     "resets_at": "2026-03-10T00:00:00Z"
   },
+  "limits": [
+    { "kind": "session", "group": "session", "percent": 39, "resets_at": "...", "scope": null },
+    { "kind": "weekly_all", "group": "weekly", "percent": 18, "resets_at": "...", "scope": null },
+    {
+      "kind": "weekly_scoped",
+      "group": "weekly",
+      "percent": 32,
+      "resets_at": "...",
+      "scope": { "model": { "id": null, "display_name": "Fable" }, "surface": null }
+    }
+  ],
   "extra_usage": { ... }
 }
 ```
+
+`limits[]` generalizes the per-window keys; `percent` is 0-100 like `utilization`.
+ClaudeUI parses the `weekly_scoped` entries (the only place a weekly per-model
+bucket appears once `seven_day_opus` / `seven_day_sonnet` go null) into one
+sidebar bar each, labelled from the server's `scope.model.display_name`.
 
 For non-subscription accounts (API key auth), `k9q` returns `{}` (empty object).
 For expired tokens, it returns `null`.
@@ -149,8 +165,9 @@ else <errorFn>(<msgVar>,`Unsupported control request subtype: ${<msgVar>.request
 This is the same anchor used by `queue-control`, `background-task`, and `voice-server` patches. All inject `else if` branches before the fallback `else`.
 
 Version notes:
-- ≤ v2.1.207 the fallback tail was `` ...subtype}`);continue}else if(<msgVar>.type==="control_response") `` and the anchor regex included it.
-- v2.1.219 wrapped the dispatch chain in `try{...}finally{...}` (the tail became `` ...subtype}`)}finally{...}continue}... ``), so the anchor is now matched tail-less — still globally unique.
+
+- ≤ v2.1.207 the fallback tail was ``...subtype}`);continue}else if(<msgVar>.type==="control_response")`` and the anchor regex included it.
+- v2.1.219 wrapped the dispatch chain in `try{...}finally{...}` (the tail became ``...subtype}`)}finally{...}continue}...``), so the anchor is now matched tail-less — still globally unique.
 - v2.1.219 also introduced a **second**, class-based dispatcher (`async processControlRequest(e,t)` ending in `throw Error("Unsupported control request subtype: "+e.request.subtype)`). That one serves the SDK `Query` transport, NOT the stream-json stdin loop ClaudeUI drives — do not anchor there. The correct loop is recognizable by its tail `else if(<msgVar>.type==="control_response"){if(<opts>.replayUserMessages)...`.
 
 #### Before
@@ -347,6 +364,8 @@ It becomes a thin wrapper that calls `session.getUsage()` on a timer and parses 
 5. **Chose control message approach**: Modeled after `queue-control` and `background-task` patches — add `else if` branch at the "Unsupported control request subtype" fallback, expose via `sdk.mjs` method.
 
 6. **First attempt failed**: Regex `async function (${V})\\(\\)\\{[^}]*api/oauth/usage` didn't match because the function body contains `}` characters (object literals). Fixed by searching for the string index first, then scanning backwards for the enclosing function declaration.
+
+7. **2.1.241 re-anchor**: the fetcher grew an optional credentials parameter and a telemetry wrapper — `async function t5e(e){return mp("api_usage_fetch",async()=>{…_s.get("/api/oauth/usage",{…,refreshOAuth:!0,credentials:e})…})}`. The backward-scan declaration regex was widened to `async function (V)\((?:V)?\)\{` (parameter optional). The patch's zero-arg call is still correct: the API client treats a nullish per-request `credentials` as "resolve from ambient config" (client ctor: `let l=i.credentials??null;if(l)…else if(i.config!=null)…`), which is exactly what the old zero-arg fetcher did. Note `api/oauth/usage` now appears twice (a debug log line + the `_s.get` call), both inside the same fetcher — the existing clustering check covers this.
 
 ## Key Functions Reference
 

@@ -12,7 +12,10 @@ export function AutomationDetail({ className }: AutomationDetailProps): React.JS
 
   if (!selectedAutomationId) {
     return (
-      <div data-testid="AutomationDetail" className={`flex items-center justify-center ${className}`}>
+      <div
+        data-testid="AutomationDetail"
+        className={`flex items-center justify-center ${className}`}
+      >
         <div className="text-center text-text-muted">
           <svg
             width="40"

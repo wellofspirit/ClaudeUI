@@ -17,7 +17,7 @@ interface Props {
 
 export function AskUserQuestionBlock({ block, result, view, approval }: Props): React.JSX.Element {
   const routingId = useSessionStore((s) => s.activeSessionId)
-  const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
+  const dismissApproval = useSessionStore((s) => s.dismissApproval)
   const [submitted, setSubmitted] = useState(false)
 
   const isCompleted = !!result || submitted
@@ -27,14 +27,14 @@ export function AskUserQuestionBlock({ block, result, view, approval }: Props): 
     if (!approval || !routingId) return
     setSubmitted(true)
     await window.api.respondApproval(routingId, approval.requestId, 'allow', answers)
-    removePendingApproval(routingId, approval.requestId)
+    dismissApproval(routingId, approval.requestId)
   }
 
   const handleDeny = async (): Promise<void> => {
     if (!approval || !routingId) return
     setSubmitted(true)
     await window.api.respondApproval(routingId, approval.requestId, 'deny')
-    removePendingApproval(routingId, approval.requestId)
+    dismissApproval(routingId, approval.requestId)
   }
 
   return (

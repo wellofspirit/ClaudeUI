@@ -18,7 +18,7 @@ import {
   dispatchedCostsByRouting,
   renameDispatchedUsage,
   type Db
-} from '../db'
+} from '../../../core/services/db'
 
 beforeEach(() => closeDb())
 afterEach(() => closeDb())
@@ -36,9 +36,9 @@ describe('DB migration — v6 dispatched_usage', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      // Bump alongside MIGRATIONS in db.ts — currently v8 (remote_config pinned
-      // HTTPS port + serve cleanup record, ADR-042).
-      expect(userVersion(db)).toBe(8)
+      // Bump alongside MIGRATIONS in db.ts — currently v11 (webauthn_credential
+      // + auth-policy columns, ADR-052 passkeys).
+      expect(userVersion(db)).toBe(13)
     } finally {
       db.close()
     }

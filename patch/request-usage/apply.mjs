@@ -65,9 +65,15 @@ console.log('\n--- Locating streaming message_start case ---')
 
 // As of 2.1.197 the case gained a boolean flag assignment before the message:
 //   case"message_start":{ma=!0,An=In.message,xn=Math.max(...),gn=Fse(gn,In.message?.usage),...
+// 2.1.231 wrapped that same comma sequence in an `if(...)` whose final operand
+// is a model check:
+//   case"message_start":{if(Bn=!0,lt=Hr.message,...,Hr.message?.model)Vlo(...);...
+// The assignments still run unconditionally (comma operator), and this match is
+// only used to HARVEST variable names — the injection happens at message_stop,
+// where those bindings are equally in scope — so tolerating the wrapper is safe.
 // Group layout: g1=flagVar, g2=msgVar, g3=eventVar, g4=ttftVar, g5=timerVar, g6=usageVar, g7=mergeFn
 const startRe = new RegExp(
-  `case"message_start":\\{(${V})=!0,(${V})=(${V})\\.message,` +
+  `case"message_start":\\{(?:if\\()?(${V})=!0,(${V})=(${V})\\.message,` +
     `(${V})=Math\\.max\\(0,Math\\.round\\(performance\\.now\\(\\)-(${V})\\)\\),` +
     `(${V})=(${V})\\(${V},${V}\\.message\\?\\.usage\\)`
 )

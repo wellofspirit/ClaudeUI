@@ -34,13 +34,13 @@ vi.mock('fs', async () => {
   const actual = await vi.importActual<typeof import('fs')>('fs')
   return { ...actual, watch: watchMock }
 })
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
 import * as fsp from 'node:fs/promises'
 import * as path from 'node:path'
-import { watchSubagent, unwatchSubagent } from '../subagent-watcher'
+import { watchSubagent, unwatchSubagent } from '../../../core/services/subagent-watcher'
 
 const PROMPT = 'Investigate the flaky login test and report the root cause'
 

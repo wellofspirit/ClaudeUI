@@ -4,12 +4,7 @@
   "$defs": {
     "LogLevel": {
       "type": "string",
-      "enum": [
-        "DEBUG",
-        "INFO",
-        "WARN",
-        "ERROR"
-      ],
+      "enum": ["DEBUG", "INFO", "WARN", "ERROR"],
       "description": "Log level"
     },
     "ServerConfig": {
@@ -59,9 +54,7 @@
           "type": "boolean"
         }
       },
-      "required": [
-        "repository"
-      ],
+      "required": ["repository"],
       "additionalProperties": false
     },
     "ConfigV2.Reference.Local": {
@@ -77,18 +70,12 @@
           "type": "boolean"
         }
       },
-      "required": [
-        "path"
-      ],
+      "required": ["path"],
       "additionalProperties": false
     },
     "PermissionActionConfig": {
       "type": "string",
-      "enum": [
-        "ask",
-        "allow",
-        "deny"
-      ]
+      "enum": ["ask", "allow", "deny"]
     },
     "PermissionObjectConfig": {
       "type": "object",
@@ -202,11 +189,7 @@
         },
         "mode": {
           "type": "string",
-          "enum": [
-            "subagent",
-            "primary",
-            "all"
-          ]
+          "enum": ["subagent", "primary", "all"]
         },
         "hidden": {
           "type": "boolean",
@@ -223,15 +206,7 @@
             },
             {
               "type": "string",
-              "enum": [
-                "primary",
-                "secondary",
-                "accent",
-                "success",
-                "warning",
-                "error",
-                "info"
-              ]
+              "enum": ["primary", "secondary", "accent", "success", "warning", "error", "info"]
             }
           ],
           "description": "Hex color code (e.g., #FF5733) or theme color (e.g., primary)"
@@ -312,9 +287,7 @@
                 },
                 {
                   "type": "boolean",
-                  "enum": [
-                    false
-                  ]
+                  "enum": [false]
                 }
               ],
               "description": "Timeout in milliseconds for full requests to this provider. Set to false to disable timeout."
@@ -328,9 +301,7 @@
                 },
                 {
                   "type": "boolean",
-                  "enum": [
-                    false
-                  ]
+                  "enum": [false]
                 }
               ],
               "description": "Timeout in milliseconds to wait for response headers. Provider integrations may set defaults. Set to false to disable timeout."
@@ -376,25 +347,17 @@
                 "anyOf": [
                   {
                     "type": "boolean",
-                    "enum": [
-                      true
-                    ]
+                    "enum": [true]
                   },
                   {
                     "type": "object",
                     "properties": {
                       "field": {
                         "type": "string",
-                        "enum": [
-                          "reasoning",
-                          "reasoning_content",
-                          "reasoning_details"
-                        ]
+                        "enum": ["reasoning", "reasoning_content", "reasoning_details"]
                       }
                     },
-                    "required": [
-                      "field"
-                    ],
+                    "required": ["field"],
                     "additionalProperties": false
                   }
                 ]
@@ -430,17 +393,11 @@
                         "type": "number"
                       }
                     },
-                    "required": [
-                      "input",
-                      "output"
-                    ],
+                    "required": ["input", "output"],
                     "additionalProperties": false
                   }
                 },
-                "required": [
-                  "input",
-                  "output"
-                ],
+                "required": ["input", "output"],
                 "additionalProperties": false
               },
               "limit": {
@@ -456,10 +413,7 @@
                     "type": "number"
                   }
                 },
-                "required": [
-                  "context",
-                  "output"
-                ],
+                "required": ["context", "output"],
                 "additionalProperties": false
               },
               "modalities": {
@@ -469,26 +423,14 @@
                     "type": "array",
                     "items": {
                       "type": "string",
-                      "enum": [
-                        "text",
-                        "audio",
-                        "image",
-                        "video",
-                        "pdf"
-                      ]
+                      "enum": ["text", "audio", "image", "video", "pdf"]
                     }
                   },
                   "output": {
                     "type": "array",
                     "items": {
                       "type": "string",
-                      "enum": [
-                        "text",
-                        "audio",
-                        "image",
-                        "video",
-                        "pdf"
-                      ]
+                      "enum": ["text", "audio", "image", "video", "pdf"]
                     }
                   }
                 },
@@ -499,12 +441,7 @@
               },
               "status": {
                 "type": "string",
-                "enum": [
-                  "alpha",
-                  "beta",
-                  "deprecated",
-                  "active"
-                ]
+                "enum": ["alpha", "beta", "deprecated", "active"]
               },
               "provider": {
                 "type": "object",
@@ -552,9 +489,7 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": [
-            "local"
-          ],
+          "enum": ["local"],
           "description": "Type of MCP server connection"
         },
         "command": {
@@ -586,10 +521,7 @@
           "description": "Timeout in ms for MCP server requests. Defaults to 5000 (5 seconds) if not specified."
         }
       },
-      "required": [
-        "type",
-        "command"
-      ],
+      "required": ["type", "command"],
       "additionalProperties": false
     },
     "McpOAuthConfig": {
@@ -625,9 +557,7 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": [
-            "remote"
-          ],
+          "enum": ["remote"],
           "description": "Type of MCP server connection"
         },
         "url": {
@@ -652,9 +582,7 @@
             },
             {
               "type": "boolean",
-              "enum": [
-                false
-              ]
+              "enum": [false]
             }
           ],
           "description": "OAuth authentication configuration for the MCP server. Set to false to disable OAuth auto-detection."
@@ -666,18 +594,12 @@
           "description": "Timeout in ms for MCP server requests. Defaults to 5000 (5 seconds) if not specified."
         }
       },
-      "required": [
-        "type",
-        "url"
-      ],
+      "required": ["type", "url"],
       "additionalProperties": false
     },
     "LayoutConfig": {
       "type": "string",
-      "enum": [
-        "auto",
-        "stretch"
-      ]
+      "enum": ["auto", "stretch"]
     },
     "ImageAttachmentConfig": {
       "type": "object",
@@ -719,10 +641,7 @@
     },
     "Policy.Effect": {
       "type": "string",
-      "enum": [
-        "allow",
-        "deny"
-      ]
+      "enum": ["allow", "deny"]
     },
     "ConfigV2.Experimental.Policy": {
       "type": "object",
@@ -733,9 +652,7 @@
               "anyOf": [
                 {
                   "type": "string",
-                  "enum": [
-                    "provider.use"
-                  ]
+                  "enum": ["provider.use"]
                 }
               ]
             }
@@ -748,11 +665,7 @@
           "type": "string"
         }
       },
-      "required": [
-        "action",
-        "effect",
-        "resource"
-      ],
+      "required": ["action", "effect", "resource"],
       "additionalProperties": false
     },
     "Config": {
@@ -799,9 +712,7 @@
                 "type": "boolean"
               }
             },
-            "required": [
-              "template"
-            ],
+            "required": ["template"],
             "additionalProperties": false
           },
           "description": "Command configuration, see https://opencode.ai/docs/commands"
@@ -902,11 +813,7 @@
         },
         "share": {
           "type": "string",
-          "enum": [
-            "manual",
-            "auto",
-            "disabled"
-          ],
+          "enum": ["manual", "auto", "disabled"],
           "description": "Control sharing behavior:'manual' allows manual sharing via commands, 'auto' enables automatic sharing, 'disabled' disables all sharing"
         },
         "autoshare": {
@@ -920,9 +827,7 @@
             },
             {
               "type": "string",
-              "enum": [
-                "notify"
-              ]
+              "enum": ["notify"]
             }
           ],
           "description": "Automatically update to the latest version. Set to true to auto-update, false to disable, or 'notify' to show update notifications"
@@ -1038,9 +943,7 @@
                     "type": "boolean"
                   }
                 },
-                "required": [
-                  "enabled"
-                ],
+                "required": ["enabled"],
                 "additionalProperties": false
               }
             ]
@@ -1099,14 +1002,10 @@
                     "properties": {
                       "disabled": {
                         "type": "boolean",
-                        "enum": [
-                          true
-                        ]
+                        "enum": [true]
                       }
                     },
-                    "required": [
-                      "disabled"
-                    ],
+                    "required": ["disabled"],
                     "additionalProperties": false
                   },
                   {
@@ -1137,9 +1036,7 @@
                         "type": "object"
                       }
                     },
-                    "required": [
-                      "command"
-                    ],
+                    "required": ["command"],
                     "additionalProperties": false
                   }
                 ]

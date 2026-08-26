@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, within } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { AutomationConfigView, type AutomationConfigViewProps, type ModelOption } from '../View'
 import type { Automation } from '../../../../../../shared/types'
 
@@ -149,6 +149,83 @@ describe('AutomationConfigView — model / thinking / effort pickers', () => {
       effort: 'high',
       thinkingMode: 'disabled'
     })
+  })
+
+  it('keeps the native folder dialog when no host listing is injected (desktop)', async () => {
+    const onPickFolder = vi.fn(async () => 'D:/picked/by/dialog')
+    render(<AutomationConfigView {...makeProps({ onPickFolder })} />)
+
+    fireEvent.click(screen.getByTestId('AutomationConfig.browseFolder'))
+
+    expect(onPickFolder).toHaveBeenCalledTimes(1)
+    expect(screen.queryByTestId('DirectoryBrowserDialog')).toBeNull()
+    await waitFor(() =>
+      expect(screen.getByTestId('AutomationConfig.cwd')).toHaveValue('D:/picked/by/dialog')
+    )
+  })
+
+  it('browses the host in a dialog when a listing is injected (web — ADR-046 decision 3)', async () => {
+    const onPickFolder = vi.fn(async () => null)
+    const listDir = vi.fn(async () => ({
+      entries: [],
+      isRoot: false,
+      resolvedPath: 'D:/work/ClaudeUI'
+    }))
+    render(<AutomationConfigView {...makeProps({ onPickFolder, listDir })} />)
+
+    fireEvent.click(screen.getByTestId('AutomationConfig.browseFolder'))
+    // pickFolder() resolves to null on web — the row must never reach it.
+    expect(onPickFolder).not.toHaveBeenCalled()
+
+    const input = screen.getByTestId('DirectoryBrowserDialog.path')
+    fireEvent.change(input, { target: { value: 'D:/work/ClaudeUI' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    await waitFor(() =>
+      expect(screen.getByTestId('AutomationConfig.cwd')).toHaveValue('D:/work/ClaudeUI')
+    )
+    expect(screen.queryByTestId('DirectoryBrowserDialog')).toBeNull()
+  })
+
+  it("opens the browser on the automation's own cwd, not the host home", async () => {
+    // The ADR-046 residual: the browse used to seed `listDir('')` (home) and
+    // ignore the directory the automation already names.
+    const listDir = vi.fn(async (dirPath: string) => ({
+      entries: [],
+      isRoot: false,
+      resolvedPath: dirPath === '' ? 'C:/Users/dev' : dirPath.replace(/\\/g, '/')
+    }))
+    const automation = makeAutomation({ cwd: 'D:/work/ClaudeUI' })
+    render(<AutomationConfigView {...makeProps({ automation, listDir })} />)
+
+    fireEvent.click(screen.getByTestId('AutomationConfig.browseFolder'))
+    const input = screen.getByTestId('DirectoryBrowserDialog.path') as HTMLInputElement
+    expect(input.value).toBe('D:/work/ClaudeUI/')
+
+    // The home seed resolves afterwards and must not clobber it.
+    await waitFor(() => expect(listDir).toHaveBeenCalledWith(''))
+    expect(input.value).toBe('D:/work/ClaudeUI/')
+  })
+
+  it('offers the injected recents in the browser rail', () => {
+    const listDir = vi.fn(async () => ({ entries: [], isRoot: false, resolvedPath: '' }))
+    const listPlaces = vi.fn(async () => ({ home: '', hostname: '', drives: [] }))
+    render(
+      <AutomationConfigView
+        {...makeProps({
+          listDir,
+          listPlaces,
+          recents: [{ cwd: 'D:/work/ClaudeUI', folderName: 'ClaudeUI' }]
+        })}
+      />
+    )
+
+    fireEvent.click(screen.getByTestId('AutomationConfig.browseFolder'))
+    expect(screen.getByTestId('DirectoryBrowserDialog.recent')).toHaveAttribute(
+      'data-id',
+      'D:/work/ClaudeUI'
+    )
+    expect(listPlaces).toHaveBeenCalledTimes(1)
   })
 
   it('switching to a model without adaptive support coerces thinkingMode down', () => {

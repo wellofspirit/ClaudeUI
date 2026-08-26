@@ -5,9 +5,15 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { perEngineBreakdown, type AggEntry } from '../usage-aggregation'
+import { perEngineBreakdown, type AggEntry } from '../../../core/services/usage-aggregation'
 
-function entry(engineId: string, model: string, input: number, output: number, cost: number): AggEntry {
+function entry(
+  engineId: string,
+  model: string,
+  input: number,
+  output: number,
+  cost: number
+): AggEntry {
   return {
     timestamp: Date.now(),
     model,
@@ -90,8 +96,8 @@ describe('perEngineBreakdown', () => {
     expect(claude.models).toHaveLength(2)
     const sonnet = claude.models.find((m) => m.model === 'claude-sonnet-4-6')!
     expect(sonnet).toBeDefined()
-    expect(sonnet.tokens.inputTokens).toBe(1500)  // 1000 + 500
-    expect(sonnet.tokens.outputTokens).toBe(700)   // 500 + 200
+    expect(sonnet.tokens.inputTokens).toBe(1500) // 1000 + 500
+    expect(sonnet.tokens.outputTokens).toBe(700) // 500 + 200
     expect(sonnet.costUsd).toBeCloseTo(0.015)
     expect(sonnet.requestCount).toBe(2)
 
@@ -110,7 +116,7 @@ describe('perEngineBreakdown', () => {
 
   it('models[] sorted by total tokens descending within each engine', () => {
     const entries: AggEntry[] = [
-      entry('opencode', 'cheap-model', 10, 5, 0.001),       // fewer tokens
+      entry('opencode', 'cheap-model', 10, 5, 0.001), // fewer tokens
       entry('opencode', 'expensive-model', 5000, 2000, 0.1) // more tokens
     ]
     const [opencode] = perEngineBreakdown(entries)

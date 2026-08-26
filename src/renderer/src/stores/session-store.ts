@@ -1,12 +1,17 @@
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
-import { mergeContentBlocks } from '../utils/content-blocks'
 import { VOICE_LANGUAGES } from '../../../shared/types'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import type { EffortLevel } from '../../../shared/model-capabilities'
-import { toPermissionMode } from '../../../shared/permission-modes'
+import {
+  DEFAULT_AUTONOMY_MODE,
+  PERMISSION_TO_AUTONOMY,
+  autoModeAvailableForEngine
+} from '../../../shared/permission-modes'
+import type { AutonomyMode } from '../../../shared/model-capabilities'
 import {
   engineMeta,
+  ENGINE_META,
   OPENCODE_DEFAULT_MODEL,
   PI_DEFAULT_MODEL,
   FREE_OPENCODE_VENDOR_IDS
@@ -16,12 +21,11 @@ import type {
   ChatMessage,
   SessionStatus,
   PendingApproval,
-  ContentBlock,
   TodoItem,
   SentFile,
+  QueuedItem,
   TaskProgress,
   TaskNotification,
-  TaskStartedData,
   PermissionMode,
   ModelInfo,
   DirectoryGroup,
@@ -47,15 +51,55 @@ import type {
   EngineId,
   ModelRef,
   EngineConfig,
-  FileDiff,
-  ToolResultImage,
   FileAttachment
 } from '../../../shared/types'
+/**
+ * The replica owns every SEALED slice of this store (see `sealed-fields.ts`).
+ *
+ * Direction of the dependency, so the cycle below reads as intentional:
+ * `replica.ts` imports this module for `useSessionStore` + the empty-state
+ * constants, and this module imports the replica's SANCTIONED LOCAL WRITES.
+ * Both directions are function calls made after both modules have evaluated —
+ * nothing at either module's top level touches the other — so the ESM live
+ * bindings resolve fine, and keeping the projection in one file is what lets the
+ * lint brand name a single writer.
+ */
+import {
+  seedColdSession,
+  patchLocalSession,
+  patchLocalApp,
+  seedLocalApp,
+  dropLocalSessions,
+  evictLocalSessions,
+  isLocallyCreated
+} from './replica'
 
 /** Normalize cwd for use as a terminal group key (strip trailing slash). */
 export function normalizeCwd(cwd: string): string {
   if (cwd.length > 1 && cwd.endsWith('/')) return cwd.slice(0, -1)
   return cwd || '.'
+}
+
+type TerminalGroups = Record<string, { tabs: TerminalTab[]; activeTabId: string | null }>
+
+/**
+ * Drop one tab from whichever cwd group holds it, promoting the last remaining
+ * tab when the active one goes. Shared by `closeTerminalTab` (the user closing
+ * a viewer) and `removeTerminalTab` (the pty exited) — since terminals became a
+ * shared pool the two do exactly the same thing to tab state, and the pty's
+ * lifetime is no longer coupled to either.
+ */
+function dropTerminalTab(groups: TerminalGroups, id: string): { terminalGroups: TerminalGroups } {
+  const next = { ...groups }
+  for (const [key, group] of Object.entries(next)) {
+    if (!group.tabs.some((t) => t.id === id)) continue
+    const tabs = group.tabs.filter((t) => t.id !== id)
+    const activeTabId =
+      group.activeTabId === id ? (tabs[tabs.length - 1]?.id ?? null) : group.activeTabId
+    next[key] = { tabs, activeTabId }
+    break
+  }
+  return { terminalGroups: next }
 }
 
 /**
@@ -107,161 +151,127 @@ function isModelForEngine(model: ModelInfo, engineId: EngineId): boolean {
   return (model.engineId ?? 'claude') === engineId
 }
 
-function resolveEngineDefaultModel(
+/**
+ * The per-engine default-model inputs `resolveEngineDefaultModel` needs, bundled
+ * so the CONFIGURED flag always travels with the value it qualifies. Splitting
+ * them (a raw string plus a boolean argument per engine) is how the two drift.
+ */
+export interface EngineDefaultModels {
+  opencodeDefaultModel: string
+  opencodeDefaultModelConfigured: boolean
+  piDefaultModel: string
+  piDefaultModelConfigured: boolean
+}
+
+/** Narrow a store snapshot to the default-model inputs. */
+export function engineDefaultModels(state: {
+  opencodeDefaultModel: string
+  opencodeDefaultModelConfigured: boolean
+  piDefaultModel: string
+  piDefaultModelConfigured: boolean
+}): EngineDefaultModels {
+  return {
+    opencodeDefaultModel: state.opencodeDefaultModel,
+    opencodeDefaultModelConfigured: state.opencodeDefaultModelConfigured,
+    piDefaultModel: state.piDefaultModel,
+    piDefaultModelConfigured: state.piDefaultModelConfigured
+  }
+}
+
+/**
+ * The default model VALUE a fresh session on `engineId` should start from, or
+ * `null` when the user's OWN configured default names a model that the engine no
+ * longer offers.
+ *
+ * `null` is deliberately NOT a fallback signal: an explicit user-configured model
+ * reference that has disappeared must surface as an error and leave the picker
+ * unset, never resolve to a silent substitute (the substitute is how a no-vision
+ * model got seeded onto a session whose picker showed a vision model). A BUILTIN
+ * heuristic default carries no such promise, so the not-configured ladder keeps
+ * falling back quietly.
+ *
+ * "No longer offers" requires a NON-EMPTY engine model list — an empty list means
+ * discovery has not run (or every provider is off), which cannot distinguish a
+ * stale reference from an unavailable engine, so the configured value passes
+ * through unchanged exactly as the main-process spawn resolvers do.
+ */
+export function resolveEngineDefaultModel(
   engineId: EngineId,
   models: ModelInfo[],
-  opencodeDefaultModel: string,
-  piDefaultModel: string
-): string {
+  defaults: EngineDefaultModels
+): string | null {
   if (engineId === 'opencode') {
+    const oc = models.filter((model) => isModelForEngine(model, 'opencode'))
+    if (defaults.opencodeDefaultModelConfigured && oc.length > 0) {
+      return oc.some((model) => model.value === defaults.opencodeDefaultModel)
+        ? defaults.opencodeDefaultModel
+        : null
+    }
     return (
-      resolveOpencodeModel(models, opencodeDefaultModel) ??
-      engineMeta(engineId).defaultModelValue(opencodeDefaultModel)
+      resolveOpencodeModel(models, defaults.opencodeDefaultModel) ??
+      engineMeta(engineId).defaultModelValue(defaults.opencodeDefaultModel)
     )
   }
   if (engineId === 'pi') {
     const piModels = models.filter((model) => isModelForEngine(model, 'pi'))
+    if (defaults.piDefaultModelConfigured && piModels.length > 0) {
+      return piModels.some((model) => model.value === defaults.piDefaultModel)
+        ? defaults.piDefaultModel
+        : null
+    }
     return (
-      piModels.find((model) => model.value === piDefaultModel)?.value ??
+      piModels.find((model) => model.value === defaults.piDefaultModel)?.value ??
       piModels[0]?.value ??
-      engineMeta(engineId).defaultModelValue(piDefaultModel)
+      engineMeta(engineId).defaultModelValue(defaults.piDefaultModel)
     )
   }
   return engineMeta(engineId).defaultModelValue()
 }
 
-const TASK_TOOL_NAMES = new Set(['TaskCreate', 'TaskUpdate', 'TodoWrite'])
-
-/**
- * Scan messages for TaskCreate/TaskUpdate/TodoWrite tool calls and build the
- * final TodoItem[] state. Returns null if no relevant tool calls found.
- */
-export function buildTodosFromMessages(messages: ChatMessage[]): TodoItem[] | null {
-  const tasks = new Map<string, TodoItem>()
-  let hasTaskCalls = false
-
-  for (const msg of messages) {
-    if (msg.role !== 'assistant') continue
-    for (const block of msg.content) {
-      if (block.type !== 'tool_use' || !block.toolName || !TASK_TOOL_NAMES.has(block.toolName))
-        continue
-      const input = block.toolInput || {}
-
-      if (block.toolName === 'TodoWrite') {
-        hasTaskCalls = true
-        tasks.clear()
-        if (Array.isArray(input.todos)) {
-          ;(input.todos as Record<string, unknown>[]).forEach((t, i) => {
-            tasks.set(String(i), {
-              content: String(t.content || ''),
-              status: (t.status as TodoItem['status']) || 'pending',
-              activeForm: String(t.activeForm || '')
-            })
-          })
-        }
-      } else if (block.toolName === 'TaskCreate') {
-        hasTaskCalls = true
-        // New batch: if all existing tasks are completed/empty, start fresh
-        if (tasks.size > 0) {
-          const allDone = Array.from(tasks.values()).every((t) => t.status === 'completed')
-          if (allDone) tasks.clear()
-        }
-        // Extract ID from the tool_result in the same message
-        const resultBlock = msg.content.find(
-          (b) => b.type === 'tool_result' && b.toolUseId === block.toolUseId
-        )
-        const idMatch =
-          resultBlock?.type === 'tool_result' ? resultBlock.toolResult.match(/Task #(\w+)/) : null
-        const id = idMatch ? idMatch[1] : block.toolUseId || String(tasks.size)
-        tasks.set(id, {
-          content: String(input.subject || ''),
-          status: 'pending',
-          activeForm: String(input.activeForm || '')
-        })
-      } else if (block.toolName === 'TaskUpdate') {
-        hasTaskCalls = true
-        const id = String(input.taskId || '')
-        const existing = tasks.get(id)
-        if (existing) {
-          if (input.status === 'deleted') {
-            tasks.delete(id)
-          } else if (input.status) {
-            existing.status = input.status as TodoItem['status']
-          }
-          if (input.subject) existing.content = String(input.subject)
-          if (input.activeForm) existing.activeForm = String(input.activeForm)
-        }
-      }
-    }
-  }
-
-  if (!hasTaskCalls) return null
-  return Array.from(tasks.values())
+/** The configured-but-missing default model for `engineId`, for error copy. */
+function configuredDefaultModelOf(engineId: EngineId, defaults: EngineDefaultModels): string {
+  return engineId === 'pi' ? defaults.piDefaultModel : defaults.opencodeDefaultModel
 }
 
-/** Max chars of a SendUserFile error result kept for display. */
-const SENT_FILE_ERROR_MAX = 500
+/**
+ * The banner shown when an engine's CONFIGURED default model has vanished. Names
+ * the model and the settings surface that owns it — an unactionable "model not
+ * found" is what made the silent substitute look preferable in the first place.
+ */
+export function staleDefaultModelMessage(engineId: EngineId, model: string): string {
+  return (
+    `The configured ${engineMeta(engineId).label} default model "${model}" is no longer available. ` +
+    `Pick a model in the picker, or change the default in Settings → Engines → ${engineMeta(engineId).label}.`
+  )
+}
+
+/** localStorage key holding the last model picked for one engine. */
+function lastSelectedModelKey(engineId: EngineId): string {
+  return `lastSelectedModel:${engineId}`
+}
 
 /**
- * Scan messages for Claude Code `SendUserFile` tool calls and build the list of
- * files the agent has handed to the user. Returns null if there are none —
- * mirroring {@link buildTodosFromMessages}'s contract, so a rebuild never
- * clobbers existing state when the transcript has nothing to say.
- *
- * Semantics that differ from todos:
- *  - the list is cumulative for the whole session and is NEVER cleared;
- *  - a re-send of the same path replaces the earlier entry and moves it to the
- *    end (latest send wins — its caption/display/error are the current truth);
- *  - a call whose tool_result hasn't landed yet is still included (in-flight),
- *    and the rebuild triggered by the result later fills in `error`.
+ * Load the per-engine model stickiness map. One plain-string key per engine
+ * (matching `lastSelectedEngineId`'s style) rather than one JSON blob, so a
+ * corrupt entry can only lose that engine's memory.
  */
-export function buildSentFilesFromMessages(messages: ChatMessage[]): SentFile[] | null {
-  const byPath = new Map<string, SentFile>()
-  let hasSendCalls = false
-
-  for (const msg of messages) {
-    if (msg.role !== 'assistant') continue
-    for (const block of msg.content) {
-      if (block.type !== 'tool_use' || block.toolName !== 'SendUserFile') continue
-      hasSendCalls = true
-      const input = block.toolInput || {}
-
-      // cli.js coerces a bare string to [string]; accept both shapes.
-      const raw = input.files
-      const paths = (Array.isArray(raw) ? raw : [raw]).filter(
-        (p): p is string => typeof p === 'string' && p.trim().length > 0
-      )
-      if (paths.length === 0) continue
-
-      const resultBlock = msg.content.find(
-        (b) => b.type === 'tool_result' && b.toolUseId === block.toolUseId
-      )
-      const error =
-        resultBlock?.type === 'tool_result' && resultBlock.isError
-          ? resultBlock.toolResult.trim().slice(0, SENT_FILE_ERROR_MAX)
-          : undefined
-
-      const caption = typeof input.caption === 'string' ? input.caption : undefined
-      const display =
-        input.display === 'render' || input.display === 'attach' ? input.display : undefined
-
-      for (const p of paths) {
-        // Delete first so a re-sent path moves to the end of the insertion order.
-        byPath.delete(p)
-        byPath.set(p, {
-          path: p,
-          ...(caption ? { caption } : {}),
-          ...(display ? { display } : {}),
-          toolUseId: block.toolUseId,
-          ...(error ? { error } : {})
-        })
-      }
-    }
+function loadLastSelectedModels(): Partial<Record<EngineId, string>> {
+  const out: Partial<Record<EngineId, string>> = {}
+  for (const id of Object.keys(ENGINE_META) as EngineId[]) {
+    const value = localStorage.getItem(lastSelectedModelKey(id))
+    if (value) out[id] = value
   }
-
-  if (!hasSendCalls) return null
-  return Array.from(byPath.values())
+  return out
 }
+
+/**
+ * Derived-state scanners moved to `shared/derive-session.ts` (SyncCore phase 4a):
+ * todos / sentFiles are derived inside the shared reducer now, and core plus every
+ * client replica must derive identically. Re-exported so existing import sites
+ * (useClaudeEvents, tests) are unchanged.
+ */
+export { buildTodosFromMessages, buildSentFilesFromMessages } from '../../../shared/derive-session'
+import { buildTodosFromMessages, buildSentFilesFromMessages } from '../../../shared/derive-session'
 
 export type ThemeId = 'dark' | 'light' | 'monokai'
 
@@ -309,9 +319,22 @@ export interface AppSettings {
    * appears. 0 = no truncation. Default 5000.
    */
   toolOutputMaxChars: number
+  /**
+   * Autonomy mode new sessions start in, for every engine. Defaults to
+   * {@link DEFAULT_AUTONOMY_MODE} ('full' → the classifier-gated `auto`).
+   *
+   * ClaudeUI-owned on purpose. This used to be read straight from
+   * `~/.claude/settings.json permissions.defaultMode`, which meant Claude Code's
+   * config silently governed opencode and pi sessions too, and that changing the
+   * default in ClaudeUI rewrote the user's bare-CLI behaviour. Existing
+   * `defaultMode` values are still honoured — once, as the seed for this
+   * setting — but from then on the two are independent.
+   */
+  defaultAutonomyMode: AutonomyMode
 }
 
-const DEFAULT_SETTINGS: AppSettings = {
+/** Exported for the replica's settings projection (one merge base, not two). */
+export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark',
   expandToolCalls: true,
   expandReadResults: false,
@@ -343,7 +366,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   logFilter: '',
   mockupConnectAllowlist: '',
   mockupAllowHttp: false,
-  toolOutputMaxChars: 5000
+  toolOutputMaxChars: 5000,
+  defaultAutonomyMode: DEFAULT_AUTONOMY_MODE
 }
 
 export function applyTheme(theme: ThemeId): void {
@@ -455,33 +479,74 @@ export async function hydrateConfigFromDisk(): Promise<void> {
   }
 
   const saved = savedSettings as Partial<AppSettings>
+  // Always a fresh object: the normalization below (voiceLanguage validation,
+  // defaultAutonomyMode seeding) MUTATES `settings`, and aliasing the
+  // module-level DEFAULT_SETTINGS here would write those mutations into the
+  // shared constant for the rest of the process.
   const settings: AppSettings =
     Object.keys(saved).length > 0
       ? {
           ...DEFAULT_SETTINGS,
           ...saved
         }
-      : DEFAULT_SETTINGS
+      : { ...DEFAULT_SETTINGS }
 
   // Validate voiceLanguage — unsupported codes (e.g. 'zh' removed in v0.2.97) fall back to 'en'
   if (settings.voiceLanguage && !VOICE_LANGUAGES.some((l) => l.code === settings.voiceLanguage)) {
     settings.voiceLanguage = 'en'
   }
 
+  // One-time seed of `defaultAutonomyMode` for profiles that predate it.
+  //
+  // Upstream's rule when auto became the default was "pinned defaults are
+  // preserved", and this is where we honour it: a user who had already written
+  // `permissions.defaultMode` keeps that mode; a user who never expressed a
+  // preference adopts the new auto default. Absence of the KEY (not a falsy
+  // value) is what marks a pre-upgrade profile, so a later deliberate pick of
+  // the same mode is never mistaken for "unset" and re-seeded.
+  //
+  // A `defaultMode` we have no session-level equivalent for (`bypassPermissions`,
+  // `dontAsk`) seeds the new default instead. Every such mode is MORE permissive
+  // than classifier-gated auto, so this only ever de-escalates.
+  if (saved.defaultAutonomyMode === undefined) {
+    const pinned = userPermissions?.defaultMode
+      ? PERMISSION_TO_AUTONOMY[userPermissions.defaultMode]
+      : undefined
+    settings.defaultAutonomyMode = pinned ?? DEFAULT_AUTONOMY_MODE
+    // Persist the seed so it happens exactly once — otherwise a later change to
+    // Claude's `defaultMode` would re-seed and silently overwrite the user's
+    // ClaudeUI pick.
+    saveSettings(settings)
+  }
+
   applyTheme(settings.theme)
 
+  // View / host-local state this client owns outright.
   useSessionStore.setState({
     engineConfig: loadedEngineConfig,
     opencodeDefaultModel: opencodeSettings?.model || OPENCODE_DEFAULT_MODEL,
+    // The `*Configured` flags keep "the user named this model" distinguishable
+    // from "we fell back to the builtin constant" — the two resolve identically
+    // while the model exists and must diverge the moment it does not.
+    opencodeDefaultModelConfigured: !!opencodeSettings?.model,
     piDefaultModel: piEngineConfig?.piConfig?.defaultModel || PI_DEFAULT_MODEL,
-    defaultPermissionMode: toPermissionMode(userPermissions?.defaultMode),
-    settings,
+    piDefaultModelConfigured: !!piEngineConfig?.piConfig?.defaultModel
+  })
+  // Replicated app-level state goes through the replica (SyncCore phase 4c), which
+  // projects it into the store. Not a competing source of truth: the HOST seeds
+  // canonical from these same files at the same point in boot
+  // (`services/sync-seed.ts`), so this and the port's first `sync-full` write equal
+  // values. It exists so the desktop has a theme and a sidebar BEFORE that
+  // snapshot arrives — otherwise boot flashes defaults.
+  seedLocalApp({
+    settings: settings as unknown as Record<string, unknown>,
+    autoModeDisabledBySettings: userPermissions?.disableAutoMode === 'disable',
     recentSessionIds: sessionConfig.recentSessions ?? [],
     pinnedSessionIds: sessionConfig.pinnedSessions ?? [],
     customTitles: sessionConfig.customTitles ?? {},
     worktreeInfoMap: sessionConfig.worktreeInfoMap ?? {},
-    hiddenSessionIds: sessionConfig.hiddenSessions ?? [],
-    hiddenProjectKeys: sessionConfig.hiddenProjects ?? [],
+    hiddenSessions: sessionConfig.hiddenSessions ?? [],
+    hiddenProjects: sessionConfig.hiddenProjects ?? [],
     sessionEngines: sessionConfig.sessionEngines ?? {},
     slashCommands: slashCommands ?? []
   })
@@ -496,22 +561,46 @@ function tryParseLocalStorage<T>(key: string): T | null {
   }
 }
 
-/** Remove a session from state if it has no messages (empty new session) */
+/**
+ * Remove a session from state if it has no messages (empty new session).
+ *
+ * `dropped` names the id so the caller can drop it from the REPLICA too — an
+ * abandoned session lives only in this client (it never spawned, so no
+ * `session:created` ever named it), and leaving it in canonical would let the
+ * next projection resurrect it in the sidebar.
+ *
+ * **Only a session THIS CLIENT invented may be cleaned up** ({@link isLocallyCreated}).
+ * "Empty" is a local judgement — no messages, no draft, not `sdkActive` — and it
+ * does not distinguish an abandoned scratch session from a REAL host session that
+ * was cancelled before its first prompt, or one whose transcript this client has
+ * not projected yet. Dropping the second kind threw away state the host still had,
+ * and post-F7 its later events are honest no-ops, so it did not come back: the
+ * session was simply gone from this client until the next `sync-full`.
+ *
+ * Removing a session the host DOES know is the explicit-delete path's job
+ * (`session:removed`), and that one is replicated.
+ */
 function cleanupEmptySession(
   sessions: Record<string, PerSessionState>,
   recentSessionIds: string[],
   routingId: string | null
-): { sessions: Record<string, PerSessionState>; recentSessionIds: string[] } {
-  if (!routingId) return { sessions, recentSessionIds }
+): {
+  sessions: Record<string, PerSessionState>
+  recentSessionIds: string[]
+  dropped: string | null
+} {
+  if (!routingId) return { sessions, recentSessionIds, dropped: null }
   const session = sessions[routingId]
-  if (!session) return { sessions, recentSessionIds }
+  if (!session) return { sessions, recentSessionIds, dropped: null }
+  if (!isLocallyCreated(routingId)) return { sessions, recentSessionIds, dropped: null }
   // Only clean up sessions with no messages and no active SDK
   if (session.messages.length > 0 || session.sdkActive || session.draftText)
-    return { sessions, recentSessionIds }
+    return { sessions, recentSessionIds, dropped: null }
   const { [routingId]: _, ...rest } = sessions
   return {
     sessions: rest,
-    recentSessionIds: recentSessionIds.filter((id) => id !== routingId)
+    recentSessionIds: recentSessionIds.filter((id) => id !== routingId),
+    dropped: routingId
   }
 }
 
@@ -528,13 +617,23 @@ export interface PerSessionState {
   messages: ChatMessage[]
   streamingText: string
   streamingThinking: string
+  /**
+   * Wall clock at the start of the currently-open thinking span, or null.
+   *
+   * PRESENTATION ONLY as of SyncCore phase 4c — it drives ThinkingBlock's live
+   * "Thought for Ns" ticker and nothing else. The DURATION a finished block
+   * renders now arrives on the block itself (`BaseSession.send` times the span and
+   * the reducer stamps it), so the renderer no longer measures anything that ends
+   * up in state: the two scalars that used to park a measured duration
+   * (`thinkingDurationMs`, `pendingThinkingDurationMs`) are deleted.
+   *
+   * Written by the replica projection, derived from `streamingThinking`: stamped
+   * when the buffer goes from empty to non-empty, cleared when it empties. One
+   * place instead of the four writers (`appendStreamingThinking`,
+   * `appendStreamingText`, `addMessage`, `setStatus`) that each had to remember
+   * the same rule.
+   */
   thinkingStartedAt: number | null
-  thinkingDurationMs: number | null
-  /** Duration of the most-recently sealed thinking span awaiting attachment to
-   *  the next committed thinking block (see addMessage). Decouples the seal point
-   *  (appendStreamingText) from the block-commit point (addMessage) so each
-   *  thinking block records its OWN duration instead of all reading one scalar. */
-  pendingThinkingDurationMs: number | null
   /** True once the heavy arrays (messages, subagentMessages, bash/background
    *  outputs) have been evicted from memory for an inactive session. The entry
    *  is kept resident (draft/effort/engine preserved) and re-hydrated from disk
@@ -584,7 +683,9 @@ export interface PerSessionState {
   statusLine: StatusLineData | null
   /** Engine-neutral metering snapshot (Phase 7 Pass 2). Additive to statusLine. */
   metering: MeteringSnapshot | null
-  queuedText: string
+  /** Queue of record, replicated from main (ADR-053). Only `queued` items live
+   *  here — a consumed item has already become a chat message. */
+  queuedItems: QueuedItem[]
   draftText: string
   /** Per-session unsent attachments (mirrors draftText). Scoped so a file added
    *  in session A can never be sent from B, and is restored on return to A. */
@@ -629,7 +730,8 @@ export interface PerSessionState {
   vendorAuthRequired: { vendorId: string; message: string } | null
 }
 
-const EMPTY_SESSION_STATE: PerSessionState = {
+/** Exported so the replica can build a store entry for a session it learns of first. */
+export const EMPTY_SESSION_STATE: PerSessionState = {
   cwd: '',
   sdkActive: false,
   isHistorical: false,
@@ -638,8 +740,6 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   streamingText: '',
   streamingThinking: '',
   thinkingStartedAt: null,
-  thinkingDurationMs: null,
-  pendingThinkingDurationMs: null,
   evicted: false,
   // Full caps assumed for new sessions before the first status event.
   status: {
@@ -677,7 +777,7 @@ const EMPTY_SESSION_STATE: PerSessionState = {
   reasoningVariant: null,
   statusLine: null,
   metering: null,
-  queuedText: '',
+  queuedItems: [],
   draftText: '',
   draftAttachments: [],
   selectedModel: 'default',
@@ -707,10 +807,40 @@ const EMPTY_SESSION_STATE: PerSessionState = {
 }
 
 /**
+ * The PermissionMode a fresh RUN of a session should start in: the configured
+ * default (`settings.defaultAutonomyMode` → `defaultPermissionMode`), degraded
+ * to 'default' when this engine or account cannot actually run auto — either
+ * the launch-time model fetch says no Claude model supports it, or Claude
+ * settings carry `disableAutoMode: "disable"`. Gating here (before spawn)
+ * beats letting cli.js reject `--permission-mode auto` and snap the mode back
+ * mid-session.
+ *
+ * Used by every path that starts a NEW RUN: createNewSession, reopening a
+ * historical session, forking, and clearConversation. That set is deliberate —
+ * cli.js applies `permissions.defaultMode` to resumed sessions too, so a
+ * reopened session starting in the configured default is upstream parity, not
+ * scope creep. Placeholder-entry paths (ensureSession's event bootstrap) stay
+ * on plain 'default': they exist to catch stray events, and the real mode
+ * arrives with the session's own sync.
+ */
+export function bootstrapPermissionMode(
+  state: Pick<
+    SessionState,
+    'defaultPermissionMode' | 'availableModels' | 'autoModeDisabledBySettings'
+  >,
+  engineId: EngineId
+): PermissionMode {
+  if (state.defaultPermissionMode !== 'auto') return state.defaultPermissionMode
+  const autoBlocked =
+    !autoModeAvailableForEngine(engineId, state.availableModels) ||
+    (engineId === 'claude' && state.autoModeDisabledBySettings)
+  return autoBlocked ? 'default' : 'auto'
+}
+
+/**
  * `permissionMode` defaults to 'default' rather than reading the store, so the
- * paths that only need a placeholder entry (event bootstrap, transcript
- * re-hydration, clearConversation) are unaffected. Genuine session CREATION
- * passes the store's `defaultPermissionMode` — see createNewSession.
+ * paths that only need a placeholder entry (event bootstrap) are unaffected.
+ * Paths that start a genuine fresh RUN pass `bootstrapPermissionMode(...)`.
  */
 function createEmptySession(
   cwd: string,
@@ -746,33 +876,6 @@ function setCapped<K, V>(map: Map<K, V>, key: K, value: V, cap: number): void {
 }
 
 /**
- * Maps old (pre-rekey) routingIds → new (SDK session) IDs.
- * When the store rekeys a session, the main process may still send events
- * with the old routingId until it processes the rekey IPC round-trip.
- * This map lets setStatusLine (and potentially other handlers) resolve them.
- *
- * Bounded: only *recent* rekeys matter (the main process catches up within one
- * IPC round-trip), and stale ids die with their session.
- */
-const REKEY_MAP_MAX = 200
-const rekeyMap = new Map<string, string>()
-
-/**
- * Resolve a possibly-stale (pre-rekey) routingId to the canonical session id.
- * When a session rekeys to its SDK id, the main process keeps emitting events
- * with the old routingId until it processes the rekey IPC round-trip. Resolving
- * at the event boundary (useClaudeEvents) makes ALL handlers — messages,
- * streams, approvals, tool results — target the same id, so a rekey can no
- * longer split-brain a session (xhigh#9). Returns the input unchanged when no
- * mapping applies (pre-rekey, or the mapped session no longer exists).
- */
-export function resolveRoutingId(routingId: string): string {
-  const mapped = rekeyMap.get(routingId)
-  if (mapped && useSessionStore.getState().sessions[mapped]) return mapped
-  return routingId
-}
-
-/**
  * Monotonic token for the in-flight vendor-OAuth `auto` flow. Each
  * authorizeVendorOAuth() captures the current token; cancelVendorOAuth()
  * bumps it. The long-lived `oauthCallback` await checks its captured token
@@ -795,6 +898,16 @@ let vendorOAuthFlowToken = 0
 const GIT_STATUS_CACHE_MAX = 100
 const gitStatusCache = new Map<string, GitStatusData>()
 
+/**
+ * A rejected `window.api.*` invoke as displayable text. Deliberately verbatim:
+ * the OAuth surfaces (ADR-057) classify the backend's own wording, so replacing
+ * it with a friendly generic would break the outcome mapping.
+ */
+function errorText(err: unknown): string {
+  if (err instanceof Error) return err.message
+  return typeof err === 'string' ? err : 'Unknown error'
+}
+
 /** Helper to update a specific session's state */
 function updateSession(
   sessions: Record<string, PerSessionState>,
@@ -807,20 +920,6 @@ function updateSession(
 }
 
 /**
- * Ensure a session exists for this routingId, creating an empty one if needed.
- * Lets actions on routingIds that haven't been created yet (e.g. cross-window
- * IPC arriving before this renderer's createNewSession) bootstrap from incoming
- * events instead of dropping them on the floor.
- */
-function ensureSession(
-  sessions: Record<string, PerSessionState>,
-  routingId: string
-): Record<string, PerSessionState> {
-  if (sessions[routingId]) return sessions
-  return { ...sessions, [routingId]: createEmptySession('') }
-}
-
-/**
  * How many recently-viewed transcripts stay fully resident (besides the active
  * session, pinned sessions, and watched/running ones). Older on-disk
  * transcripts have their heavy arrays evicted and are re-hydrated on reselect.
@@ -828,23 +927,26 @@ function ensureSession(
 const MAX_RESIDENT_TRANSCRIPTS = 10
 
 /**
- * Evict the heavy per-session arrays (messages / subagent messages / bash +
- * background outputs) for sessions that are neither active, recently-viewed,
- * pinned, watched, running, nor awaiting an approval — bounding renderer heap
- * (Opus B). The lightweight entry stays resident (draft, effort, model, engine,
- * status, todos), and the transcript re-hydrates from disk on reselection via
- * loadHistoricalSession (the `evicted` flag routes Sidebar.handleClickSession
- * back through the disk-load path). Only on-disk sessions are eligible, so an
- * evicted transcript is always reloadable — a fresh, not-yet-flushed session is
- * never touched. Returns the same map reference when nothing was evicted.
+ * Which sessions' heavy arrays should be evicted — bounding renderer heap
+ * (Opus B). Eligible: neither active, recently-viewed, pinned, watched, running,
+ * nor awaiting an approval, AND already on disk, so an evicted transcript is
+ * always reloadable (a fresh, not-yet-flushed session is never touched).
+ *
+ * SyncCore phase 4c split the decision from the write. The heavy arrays are
+ * SEALED, so the strip happens in the replica (`evictLocalSessions`) and the
+ * projection carries it into the store; the `evicted` / `isHistorical` flags are
+ * per-client view state and stay here. Stripping the store directly would have
+ * been undone by the next projection — canonical on the HOST deliberately does
+ * not evict (docs/architecture/sync-channels.md §Eviction), so its copy still has
+ * the transcript.
  */
-function evictColdSessions(
+function coldSessionIds(
   sessions: Record<string, PerSessionState>,
   activeSessionId: string | null,
   recentSessionIds: string[],
   pinnedSessionIds: string[],
   directories: DirectoryGroup[]
-): Record<string, PerSessionState> {
+): string[] {
   const keep = new Set<string>()
   if (activeSessionId) keep.add(activeSessionId)
   for (const id of recentSessionIds.slice(0, MAX_RESIDENT_TRANSCRIPTS)) keep.add(id)
@@ -855,8 +957,7 @@ function evictColdSessions(
     for (const s of group.sessions) onDisk.add(s.sessionId)
   }
 
-  let changed = false
-  const next: Record<string, PerSessionState> = {}
+  const cold: string[] = []
   for (const id in sessions) {
     const sess = sessions[id]
     const canEvict =
@@ -867,30 +968,44 @@ function evictColdSessions(
       sess.pendingApprovals.length === 0 &&
       sess.messages.length > 0 &&
       onDisk.has(id)
-    if (canEvict) {
-      changed = true
-      next[id] = {
-        ...sess,
-        evicted: true,
-        isHistorical: true,
-        messages: [],
-        streamingText: '',
-        streamingThinking: '',
-        subagentMessages: {},
-        subagentStreamingText: {},
-        subagentStreamingThinking: {},
-        bashOutputs: {},
-        backgroundOutputs: {},
-        backgroundWatcherCounts: {}
-      }
-    } else {
-      next[id] = sess
-    }
+    if (canEvict) cold.push(id)
   }
-  return changed ? next : sessions
+  return cold
 }
 
-interface SessionState {
+/**
+ * The ONE vendor-OAuth flow state, shared by every surface that can start one
+ * (the chat re-auth card, Settings › Providers, Shared providers).
+ *
+ * Three stages, two of them as old as the feature:
+ *  - `waiting` — the DESKTOP `auto` drive: the host opened a browser and is
+ *    blocked on its own loopback listener;
+ *  - `error`   — the flow failed; `error` carries the backend's verbatim text
+ *    for the ADR-057 outcome mapping (older callers only rendered a generic
+ *    "Authentication failed", so the field is optional);
+ *  - `paste`   — S4-UI: a REMOTE (web) client drives ADR-057's two-step
+ *    paste-back instead. There is no host browser and no loopback to wait on,
+ *    so `url` (what the client opens itself) and `method` (which vendor auth
+ *    option the paste completes) are carried here. Never set on desktop.
+ */
+export interface VendorOAuthState {
+  engineId: string
+  vendorId: string
+  stage: 'waiting' | 'error' | 'paste'
+  instructions: string
+  /** Authorize URL — `paste` stage only (the client opens it, not the host). */
+  url?: string
+  /** Index into the vendor's auth options, needed by `vendor-auth:oauth-callback`. */
+  method?: number
+  /**
+   * Verbatim backend message — `error` stage only, and only for flows that
+   * reached it through S4-UI's paths (the legacy desktop `auto` failure sets no
+   * message and its surfaces still render their own generic text).
+   */
+  error?: string
+}
+
+export interface SessionState {
   // Multi-session
   activeSessionId: string | null
   sessions: Record<string, PerSessionState>
@@ -909,18 +1024,37 @@ interface SessionState {
 
   /** Remembered engine choice — pre-fills engine for newly created sessions. */
   lastSelectedEngineId: EngineId
+  /** Remembered MODEL choice, per engine — the model twin of `lastSelectedEngineId`.
+   *  Persisted in localStorage; pre-fills the model for newly created sessions so a
+   *  pick made on the welcome screen (where there is no session to write to) is not
+   *  dropped. Heuristic stickiness, NOT user configuration: a stale entry falls back
+   *  to the engine default silently. */
+  lastSelectedModelByEngine: Partial<Record<EngineId, string>>
   /** Configurable opencode default model (engines/opencode.json `opencodeConfig.model`).
    *  The opencode-engine value `engineMeta('opencode').defaultModelValue()` resolves to. */
   opencodeDefaultModel: string
+  /** True when {@link opencodeDefaultModel} came from the user's own opencode config
+   *  rather than the builtin {@link OPENCODE_DEFAULT_MODEL}. An explicit user
+   *  reference that no longer resolves must ERROR, never silently substitute; the
+   *  builtin heuristic may keep falling back. */
+  opencodeDefaultModelConfigured: boolean
   /** Configurable pi default model (engines/pi.json `piConfig.defaultModel`, M3).
    *  The pi-engine value `engineMeta('pi').defaultModelValue()` resolves to. */
   piDefaultModel: string
-  /** `~/.claude/settings.json#permissions.defaultMode`, mapped to a renderer
-   *  PermissionMode. A SESSION-BOOTSTRAP concern only: it seeds the mode of
-   *  sessions created from here on. Running sessions keep the mode they were
-   *  spawned with (cli.js re-derives rules on a settings change but never the
-   *  mode) — changing a live session's mode is `setPermissionMode`'s job. */
+  /** The pi twin of {@link opencodeDefaultModelConfigured}. */
+  piDefaultModelConfigured: boolean
+  /** `settings.defaultAutonomyMode` mapped to a renderer PermissionMode. A
+   *  SESSION-BOOTSTRAP concern only: it seeds the mode of sessions created from
+   *  here on. Running sessions keep the mode they were spawned with (cli.js
+   *  re-derives rules on a settings change but never the mode) — changing a live
+   *  session's mode is `setPermissionMode`'s job. */
   defaultPermissionMode: PermissionMode
+  /** `~/.claude/settings.json` sets `disableAutoMode: "disable"` (nested under
+   *  `permissions` or top-level — cli.js honours both). Claude sessions must not
+   *  be spawned with `--permission-mode auto` when this is set: cli.js would
+   *  reject it. Claude-only — opencode and pi implement auto themselves and are
+   *  not governed by Claude's settings file. */
+  autoModeDisabledBySettings: boolean
   /** Bumped to force the model picker to re-fetch getEngineModels() — e.g. after
    *  an opencode provider/default-model change in Settings. */
   modelReloadNonce: number
@@ -945,13 +1079,12 @@ interface SessionState {
   /** Multi-account state (ADR-015). Null until first load/event. */
   accountsState: AccountsState | null
   /** Global vendor OAuth flow state (auto/loopback OAuth in progress). */
-  vendorOAuth: {
-    engineId: string
-    vendorId: string
-    stage: 'waiting' | 'error'
-    instructions: string
-  } | null
+  vendorOAuth: VendorOAuthState | null
   activeView: ActiveView
+  /** Bumped when a surface with no native folder dialog (the web client's
+   *  sidebar double-click) asks the welcome screen to open its host-backed
+   *  directory browser. Local UI signal — never replicated, never persisted. */
+  welcomeBrowseToken: number
   pluginViews: PluginViewWithOwner[]
 
   // Worktree (global)
@@ -967,6 +1100,22 @@ interface SessionState {
   showWelcome: () => void
   switchSession: (routingId: string) => void
   createNewSession: (routingId: string, cwd: string, switchTo?: boolean) => void
+  /**
+   * Register a session ANOTHER client created (`session:created`). The reducer
+   * already bootstrapped its replicated state; this adds the local registry
+   * entries (recents + engine map) and optionally follows it.
+   */
+  registerRemoteSession: (routingId: string, switchTo: boolean) => void
+  /** View-only: this session is a live run, not a historical transcript. */
+  markSessionLive: (routingId: string) => void
+  /**
+   * Persist the CURRENT registry config to `sessions.json`. Used after a
+   * reducer-owned rekey, where the renamed rows are already in the replica and
+   * only the disk copy is behind.
+   */
+  persistSessionRegistry: () => void
+  /** Record (and persist) a session's engine + model in the registry. */
+  recordSessionEngine: (routingId: string, engineId: EngineId, model: string) => void
   /** Set the remembered engine choice. Persisted in localStorage (lightweight). */
   setLastSelectedEngineId: (engineId: EngineId) => void
   /** Switch the active fresh session's engine and seed its effective default model. */
@@ -996,7 +1145,6 @@ interface SessionState {
   forkFromMessage: (sourceRoutingId: string, messageId: string) => Promise<string | null>
   markSdkActive: (routingId: string) => void
   markSdkInactive: (routingId: string) => void
-  setDirectories: (dirs: DirectoryGroup[]) => void
   addRecentSession: (routingId: string) => void
   removeRecentSession: (routingId: string) => void
   setCustomTitle: (sessionId: string, title: string | null) => void
@@ -1010,78 +1158,37 @@ interface SessionState {
   deleteSession: (sessionId: string, projectKey: string, engineId?: EngineId) => Promise<void>
   deleteProject: (projectKey: string) => Promise<void>
 
+  // -----------------------------------------------------------------------
   // Per-session actions (all take routingId)
-  addMessage: (routingId: string, message: ChatMessage) => void
-  addUserMessage: (
-    routingId: string,
-    id: string,
-    text: string,
-    planContent?: string,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-  ) => void
-  appendStreamingText: (routingId: string, text: string) => void
-  appendStreamingThinking: (routingId: string, text: string) => void
-  clearStreamingText: (routingId: string) => void
-  setStatus: (routingId: string, status: SessionStatus) => void
-  addPendingApproval: (routingId: string, approval: PendingApproval) => void
-  removePendingApproval: (routingId: string, requestId: string) => void
+  //
+  // SyncCore phase 4c deleted every action that wrote a SEALED field — the
+  // transcript, streams, status, approvals, todos/sentFiles, tasks, subagents,
+  // the queue and per-session config are the replica fold's output now
+  // (`stores/replica.ts`, `stores/sealed-fields.ts`). What survives here is view
+  // state and the transient toast/banner slices whose channels carry no snapshot
+  // field.
+  // -----------------------------------------------------------------------
   /**
-   * Clear any approval whose `toolUseId` matches. Called when a tool_result
-   * arrives so stale approvals — say, a backend race where the resolver
-   * already fired but the store cleanup got lost — don't keep bleeding into
-   * future cards. Distinct from removePendingApproval(requestId) because
-   * consumers see tool_use_id first on tool_result events.
+   * Retire an approval card THIS client just answered.
+   *
+   * The approval LIFECYCLE is event-driven (ADR-038) and the reducer owns it —
+   * `session:approval-request` adds, `session:approval-dismiss` and
+   * `session:tool-result` remove. What this covers is the gap between answering
+   * and the engine's acknowledgement: `respondApproval` resolves a promise inside
+   * cli.js and emits nothing, so without a local dismiss the card would sit under
+   * the user's click until the tool finished (or forever, for a deny that yields
+   * no tool_result). It goes through the replica so `pendingApprovals` still has
+   * exactly one writer, and every incoming event converges on the same list.
    */
-  removePendingApprovalByToolUse: (routingId: string, toolUseId: string) => void
-  clearPendingApprovals: (routingId: string) => void
+  dismissApproval: (routingId: string, requestId: string) => void
   addError: (routingId: string, error: string) => void
   addWarning: (routingId: string, warning: string) => void
   removeWarning: (routingId: string, index: number) => void
   clearWarnings: (routingId: string) => void
-  /**
-   * Refusal-fallback retraction: remove the refused partial's messages and
-   * clear any streamed text it left behind. Unknown ids are a no-op.
-   */
-  retractMessages: (routingId: string, messageIds: string[]) => void
   removeError: (routingId: string, index: number) => void
   clearErrors: (routingId: string) => void
   addSandboxViolation: (routingId: string, message: string) => void
   removeSandboxViolation: (routingId: string, index: number) => void
-  appendToolResult: (
-    routingId: string,
-    toolUseId: string,
-    result: string,
-    isError: boolean,
-    fileDiffs?: FileDiff[],
-    images?: ToolResultImage[]
-  ) => void
-  setTodos: (routingId: string, todos: TodoItem[]) => void
-  setSentFiles: (routingId: string, sentFiles: SentFile[]) => void
-  updateTaskProgress: (routingId: string, progress: TaskProgress) => void
-  /** Record a task_started event — see PerSessionState.activeTasks doc comment. */
-  setTaskStarted: (routingId: string, data: TaskStartedData) => void
-  addTaskNotification: (routingId: string, notification: TaskNotification) => void
-  bulkSetSubagentMessages: (
-    routingId: string,
-    subagentMessages: Record<string, ChatMessage[]>
-  ) => void
-  addSubagentMessage: (routingId: string, toolUseId: string, message: ChatMessage) => void
-  appendSubagentMessageBatch: (
-    routingId: string,
-    toolUseId: string,
-    messages: ChatMessage[]
-  ) => void
-  appendSubagentStreamingText: (routingId: string, toolUseId: string, text: string) => void
-  appendSubagentStreamingThinking: (routingId: string, toolUseId: string, text: string) => void
-  appendSubagentToolResult: (
-    routingId: string,
-    toolUseId: string,
-    toolResultToolUseId: string,
-    result: string,
-    isError: boolean,
-    fileDiffs?: FileDiff[],
-    images?: ToolResultImage[]
-  ) => void
   setBashOutput: (
     routingId: string,
     toolUseId: string,
@@ -1105,28 +1212,13 @@ interface SessionState {
   clearTaskStopping: (routingId: string, toolUseId: string) => void
   setNeedsAttention: (routingId: string, value: boolean) => void
   setWatching: (routingId: string, watching: boolean) => void
-  updateWatchedSession: (
-    routingId: string,
-    messages: ChatMessage[],
-    taskNotifications: TaskNotification[]
-  ) => void
   updateSettings: (partial: Partial<AppSettings>) => void
   setEngineConfig: (config: EngineConfig) => void
-  applyExternalSettings: (settings: Record<string, unknown>) => void
-  applyExternalSessionConfig: (config: {
-    recentSessions?: string[]
-    pinnedSessions?: string[]
-    customTitles?: Record<string, string>
-    worktreeInfoMap?: Record<string, WorktreeInfo>
-    hiddenSessions?: string[]
-    hiddenProjects?: string[]
-    sessionEngines?: Record<string, { engineId: EngineId; model?: ModelRef }>
-  }) => void
-  applyRemoteSnapshot: (
-    snapshot: import('../../../shared/remote-protocol').FullStateSnapshot,
-    isResync?: boolean
-  ) => void
-  setPermissionMode: (mode: PermissionMode, routingId?: string) => void
+  /**
+   * Pick a permission mode for a session. Fire-and-forget: the mode the pill
+   * shows is whatever `session:permission-mode` says, so a mode the engine
+   * rejects corrects itself instead of being optimistically shown and reverted.
+   */
   changePermissionMode: (routingId: string, next: PermissionMode) => void
   setEffort: (
     effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null,
@@ -1134,12 +1226,6 @@ interface SessionState {
   ) => void
   setThinkingMode: (mode: 'adaptive' | 'enabled' | 'disabled' | null, routingId?: string) => void
   setReasoningVariant: (variant: string | null, routingId?: string) => void
-  setStatusLine: (routingId: string, data: StatusLineData) => void
-  setMetering: (routingId: string, data: MeteringSnapshot) => void
-  appendQueuedText: (text: string) => void
-  setQueuedText: (routingId: string, text: string) => void
-  clearQueuedText: () => void
-  consumeQueuedText: (routingId: string) => void
   setDraftText: (text: string) => void
   /** Append unsent attachments to a specific session (keyed by routingId — see impl). */
   addDraftAttachments: (routingId: string, attachments: FileAttachment[]) => void
@@ -1149,12 +1235,14 @@ interface SessionState {
   setDraftAttachments: (routingId: string, attachments: FileAttachment[]) => void
   /** Set the active session's model picker value within its selected engine. */
   setSelectedModel: (model: string) => void
-  setSlashCommands: (commands: SlashCommandInfo[]) => void
   setCustomCommands: (commands: SlashCommandInfo[]) => void
-  setSdkSkillNames: (names: string[]) => void
   setAvailableModels: (models: ModelInfo[]) => void
-  rekeySession: (oldId: string, newId: string) => void
-  clearConversation: (routingId: string) => void
+  /**
+   * "Start fresh". Async since the reset became a replicated event — await it
+   * before spawning a replacement session, or the birth event can land BEFORE
+   * the clear and be blanked by it.
+   */
+  clearConversation: (routingId: string) => Promise<void>
   // Worktree actions
   setWorktreeInfo: (routingId: string, info: WorktreeInfo | null) => void
   clearWorktreeInfo: (routingId: string) => void
@@ -1187,27 +1275,35 @@ interface SessionState {
   signIn: () => Promise<void>
   submitOAuthCode: (code: string) => Promise<void>
   cancelSignIn: () => Promise<void>
-  setVendorOAuth(
-    state: {
-      engineId: string
-      vendorId: string
-      stage: 'waiting' | 'error'
-      instructions: string
-    } | null
-  ): void
+  setVendorOAuth(state: VendorOAuthState | null): void
   cancelVendorOAuth(): void
   setVendorAuthRequired(routingId: string, data: { vendorId: string; message: string } | null): void
   clearVendorAuthRequired(routingId: string): void
   authorizeVendorOAuth(
     engineId: EngineId,
     vendorId: string
-  ): Promise<{ ok: boolean; needsPaste?: { url: string; method: number; instructions: string } }>
+  ): Promise<{
+    ok: boolean
+    needsPaste?: { url: string; method: number; instructions: string }
+    /** Verbatim backend failure text (e.g. opencode's remote-`auto` refusal). */
+    error?: string
+  }>
+  /**
+   * Finish the `paste` stage: post the user's pasted string to
+   * `vendor-auth:oauth-callback` VERBATIM (the backend parses URL-vs-code) and
+   * fold the result back into `vendorOAuth`. Remote-only by construction — the
+   * stage it consumes is never set on desktop.
+   */
+  submitVendorOAuthCode(pasted: string): Promise<{ ok: boolean; error?: string }>
   /** Respawn the session's cli.js process (so it re-reads freshly-stored
    *  credentials) and resend a prompt. Used by the post-login Retry. */
   retrySend: (routingId: string, prompt: string) => Promise<void>
   // Block usage analytics
   setBlockUsage: (data: BlockUsageData) => void
   setActiveView: (view: ActiveView) => void
+  /** Ask the welcome screen to open its directory browser (see
+   *  {@link SessionState.welcomeBrowseToken}). */
+  requestWelcomeBrowse: () => void
   setPluginViews: (views: PluginViewWithOwner[]) => void
   // Git sync operations
   setGitSyncOperation: (routingId: string, op: 'idle' | 'fetching' | 'pulling' | 'pushing') => void
@@ -1259,9 +1355,16 @@ export const useSessionStore = create<SessionState>((set) => ({
   lastSelectedEngineId:
     ((localStorage.getItem('lastSelectedEngineId') ??
       localStorage.getItem('lastSelectedProvider')) as EngineId | null) ?? 'claude',
+  lastSelectedModelByEngine: loadLastSelectedModels(),
   opencodeDefaultModel: OPENCODE_DEFAULT_MODEL,
+  opencodeDefaultModelConfigured: false,
   piDefaultModel: PI_DEFAULT_MODEL,
+  piDefaultModelConfigured: false,
+  // Pre-hydration seed only. `hydrate()` overwrites this from
+  // `settings.defaultAutonomyMode` before any session can be created; 'default'
+  // is the conservative placeholder for the window in between.
   defaultPermissionMode: 'default' as PermissionMode,
+  autoModeDisabledBySettings: false,
   modelReloadNonce: 0,
   engineConfig: {},
   settings: DEFAULT_SETTINGS,
@@ -1277,6 +1380,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   vendorOAuth: null,
   blockUsage: null,
   activeView: { type: 'chat' } as ActiveView,
+  welcomeBrowseToken: 0,
   pluginViews: [],
   worktreeInfoMap: {},
   quitWorktrees: null,
@@ -1284,54 +1388,70 @@ export const useSessionStore = create<SessionState>((set) => ({
   terminalPanelOpen: false,
   terminalPanelHeight: Number(localStorage.getItem('terminalPanelHeight')) || 280,
 
-  showWelcome: () =>
-    set((state) => {
-      const cleaned = cleanupEmptySession(
-        state.sessions,
-        state.recentSessionIds,
-        state.activeSessionId
-      )
-      if (cleaned.recentSessionIds !== state.recentSessionIds) {
-        saveSessionConfig(state, { recentSessionIds: cleaned.recentSessionIds })
-      }
-      return { activeSessionId: null, activeView: { type: 'chat' } as ActiveView, ...cleaned }
-    }),
+  // Cleanup order (both actions below): the store `set` runs FIRST, then the
+  // replica mutations. The projection those mutations trigger overlays sealed
+  // fields onto whatever the store now holds — doing it the other way round would
+  // have the `set` write back the pre-eviction transcript it captured.
+  showWelcome: () => {
+    const state = useSessionStore.getState()
+    const cleaned = cleanupEmptySession(
+      state.sessions,
+      state.recentSessionIds,
+      state.activeSessionId
+    )
+    set({
+      activeSessionId: null,
+      activeView: { type: 'chat' } as ActiveView,
+      sessions: cleaned.sessions
+    })
+    if (cleaned.dropped) dropLocalSessions([cleaned.dropped])
+    if (cleaned.recentSessionIds !== state.recentSessionIds) {
+      patchLocalApp({ recentSessionIds: cleaned.recentSessionIds })
+      saveSessionConfig(state, { recentSessionIds: cleaned.recentSessionIds })
+    }
+  },
 
-  switchSession: (routingId) =>
-    set((state) => {
-      const cleaned = cleanupEmptySession(
-        state.sessions,
-        state.recentSessionIds,
-        state.activeSessionId
-      )
-      if (cleaned.recentSessionIds !== state.recentSessionIds) {
-        saveSessionConfig(state, { recentSessionIds: cleaned.recentSessionIds })
-      }
-      const withAttention = updateSession(cleaned.sessions, routingId, () => ({
-        needsAttention: false
+  switchSession: (routingId) => {
+    const state = useSessionStore.getState()
+    const cleaned = cleanupEmptySession(
+      state.sessions,
+      state.recentSessionIds,
+      state.activeSessionId
+    )
+    // Bound the renderer heap (Opus B): evict the heavy transcript arrays of
+    // cold, on-disk sessions on every switch. The active/recent/pinned/running/
+    // watched sessions are always kept; an evicted session re-hydrates from
+    // disk on reselect (Sidebar routes an evicted entry through
+    // loadHistoricalSession rather than the resident fast-path).
+    const cold = coldSessionIds(
+      cleaned.sessions,
+      routingId,
+      cleaned.recentSessionIds,
+      state.pinnedSessionIds,
+      state.directories
+    )
+    let sessions = updateSession(cleaned.sessions, routingId, () => ({ needsAttention: false }))
+    for (const id of cold) {
+      sessions = updateSession(sessions, id, () => ({
+        evicted: true,
+        isHistorical: true,
+        bashOutputs: {},
+        backgroundOutputs: {},
+        backgroundWatcherCounts: {}
       }))
-      // Bound the renderer heap (Opus B): evict the heavy transcript arrays of
-      // cold, on-disk sessions on every switch. The active/recent/pinned/running/
-      // watched sessions are always kept; an evicted session re-hydrates from
-      // disk on reselect (Sidebar routes an evicted entry through
-      // loadHistoricalSession rather than the resident fast-path).
-      const sessions = evictColdSessions(
-        withAttention,
-        routingId,
-        cleaned.recentSessionIds,
-        state.pinnedSessionIds,
-        state.directories
-      )
-      return {
-        activeSessionId: routingId,
-        activeView: { type: 'chat' } as ActiveView,
-        sessions,
-        recentSessionIds: cleaned.recentSessionIds
-      }
-    }),
+    }
+    set({ activeSessionId: routingId, activeView: { type: 'chat' } as ActiveView, sessions })
+    if (cleaned.dropped) dropLocalSessions([cleaned.dropped])
+    if (cold.length > 0) evictLocalSessions(cold)
+    if (cleaned.recentSessionIds !== state.recentSessionIds) {
+      patchLocalApp({ recentSessionIds: cleaned.recentSessionIds })
+      saveSessionConfig(state, { recentSessionIds: cleaned.recentSessionIds })
+    }
+  },
 
-  createNewSession: (routingId, cwd, switchTo = true) =>
-    set((state) => {
+  createNewSession: (routingId, cwd, switchTo = true) => {
+    const state = useSessionStore.getState()
+    {
       const recentSessionIds = [
         routingId,
         ...state.recentSessionIds.filter((id) => id !== routingId)
@@ -1343,99 +1463,186 @@ export const useSessionStore = create<SessionState>((set) => ({
       // would show a Claude model in the picker while routing send to a phantom
       // opencode model (the desync regression). Fall back to claude in that case.
       let engineId = state.lastSelectedEngineId
-      let defaultModel = resolveEngineDefaultModel(
-        engineId,
-        state.availableModels,
-        state.opencodeDefaultModel,
-        state.piDefaultModel
-      )
+      const defaults = engineDefaultModels(state)
+      // The user's last pick on THIS engine wins over the engine default — the
+      // model twin of `lastSelectedEngineId`. Only when it is still offered:
+      // stickiness is a heuristic, so a stale entry falls through quietly (the
+      // configured-default error rule below still applies underneath it).
+      const sticky = state.lastSelectedModelByEngine[engineId]
+      const stickyAvailable =
+        !!sticky &&
+        state.availableModels.some((m) => m.value === sticky && isModelForEngine(m, engineId))
+      // `null` = the user's CONFIGURED default named a model this engine no longer
+      // offers. Seed the picker's unset state and say so, rather than substituting
+      // a model whose capabilities differ from the one the user asked for.
+      let defaultModel = stickyAvailable
+        ? (sticky as string)
+        : resolveEngineDefaultModel(engineId, state.availableModels, defaults)
+      const staleDefault =
+        defaultModel === null ? configuredDefaultModelOf(engineId, defaults) : null
       if (
         engineId === 'opencode' &&
         !resolveOpencodeModel(state.availableModels, state.opencodeDefaultModel)
       ) {
+        // Distinct from the stale-default case above: opencode has NO usable model
+        // at all, so there is no picker state to land in — fall back to claude.
         engineId = 'claude'
         defaultModel = 'default'
       }
+      const seededModel = defaultModel ?? ''
       // Write model into sessionEngines so it can be seeded on reopen (spec §3).
       // Always write the entry so the engine is recorded; model is set on first model event.
       const sessionEngines = {
         ...state.sessionEngines,
-        [routingId]: { engineId, model: engineMeta(engineId).decodeModelValue(defaultModel) }
+        [routingId]: {
+          engineId,
+          // An unresolved model must not be encoded — `decodeModelValue('')` would
+          // persist a phantom ModelRef that reopen would then restore.
+          ...(seededModel ? { model: engineMeta(engineId).decodeModelValue(seededModel) } : {})
+        }
       }
+      // A session created here has not spawned, so NO event carries its engine,
+      // model or permission mode — they exist nowhere but this client until the
+      // first `session:config-changed` / `session:permission-mode`. Seeding the
+      // replica is what stops the `session:created` that eventually arrives from
+      // projecting `emptySession()`'s claude/default over the user's pick.
+      patchLocalSession(
+        routingId,
+        {
+          cwd,
+          permissionMode: bootstrapPermissionMode(state, engineId),
+          selectedEngineId: engineId,
+          selectedModel: seededModel,
+          // Seed status.engineId/capabilities to match so they're correct before spawn
+          status: {
+            ...EMPTY_SESSION_STATE.status,
+            engineId,
+            capabilities: engineMeta(engineId).seedCapabilities(
+              seededModel,
+              state.availableModels.find(
+                (m) => m.value === seededModel && isModelForEngine(m, engineId)
+              )
+            )
+          }
+        },
+        { create: true }
+      )
+      // After the session exists — `addError` writes through `updateSession`.
+      if (staleDefault) {
+        useSessionStore
+          .getState()
+          .addError(routingId, staleDefaultModelMessage(engineId, staleDefault))
+      }
+      patchLocalApp({ recentSessionIds, sessionEngines })
       saveSessionConfig(state, { recentSessionIds, sessionEngines })
-      // Settings' autonomy-mode pick is a bootstrap default: it applies here,
-      // at creation, and nowhere else.
-      const newSession = createEmptySession(cwd, state.defaultPermissionMode)
-      newSession.selectedEngineId = engineId
-      newSession.selectedModel = defaultModel
-      // Seed status.engineId/capabilities to match so they're correct before spawn
-      newSession.status = {
-        ...newSession.status,
-        engineId,
-        capabilities: engineMeta(engineId).seedCapabilities(
-          defaultModel,
-          state.availableModels.find(
-            (m) => m.value === defaultModel && isModelForEngine(m, engineId)
-          )
-        )
+      if (switchTo) {
+        set({ activeSessionId: routingId, activeView: { type: 'chat' } as ActiveView })
       }
-      return {
-        ...(switchTo
-          ? { activeSessionId: routingId, activeView: { type: 'chat' } as ActiveView }
-          : {}),
-        sessions: { ...state.sessions, [routingId]: newSession },
-        recentSessionIds,
-        sessionEngines
+      // A brand-new session's git status is known from the cwd cache, and that is
+      // view state the projection does not carry.
+      const cached = cwd ? gitStatusCache.get(cwd) : undefined
+      if (cached) {
+        set((s) => ({
+          sessions: updateSession(s.sessions, routingId, () => ({
+            isGitRepo: true,
+            gitStatus: cached
+          }))
+        }))
       }
-    }),
+    }
+  },
+
+  registerRemoteSession: (routingId, switchTo) => {
+    const state = useSessionStore.getState()
+    const recentSessionIds = [
+      routingId,
+      ...state.recentSessionIds.filter((id) => id !== routingId)
+    ].slice(0, state.settings.maxRecentSessions)
+    patchLocalApp({ recentSessionIds })
+    saveSessionConfig(state, { recentSessionIds })
+    if (switchTo) set({ activeSessionId: routingId, activeView: { type: 'chat' } as ActiveView })
+  },
+
+  markSessionLive: (routingId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, () => ({ isHistorical: false }))
+    })),
+
+  persistSessionRegistry: () => {
+    saveSessionConfig(useSessionStore.getState())
+  },
+
+  recordSessionEngine: (routingId, engineId, model) => {
+    const state = useSessionStore.getState()
+    const sessionEngines = {
+      ...state.sessionEngines,
+      [routingId]: { engineId, model: engineMeta(engineId).decodeModelValue(model) }
+    }
+    patchLocalApp({ sessionEngines })
+    saveSessionConfig(state, { sessionEngines })
+  },
 
   setLastSelectedEngineId: (engineId) => {
     localStorage.setItem('lastSelectedEngineId', engineId)
     set({ lastSelectedEngineId: engineId })
   },
 
-  setSelectedEngine: (engineId) =>
-    set((state) => {
-      const id = state.activeSessionId
-      const session = id ? state.sessions[id] : undefined
-      if (!id || !session || session.sdkActive || session.status.sessionId || session.isHistorical)
-        return {}
-      if (session.selectedEngineId === engineId) return {}
-      const model = resolveEngineDefaultModel(
+  setSelectedEngine: (engineId) => {
+    const state = useSessionStore.getState()
+    const id = state.activeSessionId
+    const session = id ? state.sessions[id] : undefined
+    if (!id || !session || session.sdkActive || session.status.sessionId || session.isHistorical)
+      return
+    if (session.selectedEngineId === engineId) return
+    const defaults = engineDefaultModels(state)
+    const resolved = resolveEngineDefaultModel(engineId, state.availableModels, defaults)
+    // A stale CONFIGURED default leaves the picker unset (and says why) instead of
+    // handing the new engine a substitute model — same rule as `createNewSession`.
+    const model = resolved ?? ''
+    const modelInfo = state.availableModels.find(
+      (candidate) => candidate.value === model && isModelForEngine(candidate, engineId)
+    )
+    const sessionEngines = {
+      ...state.sessionEngines,
+      [id]: {
         engineId,
-        state.availableModels,
-        state.opencodeDefaultModel,
-        state.piDefaultModel
-      )
-      const modelInfo = state.availableModels.find(
-        (candidate) => candidate.value === model && isModelForEngine(candidate, engineId)
-      )
-      const sessionEngines = {
-        ...state.sessionEngines,
-        [id]: { engineId, model: engineMeta(engineId).decodeModelValue(model) }
+        ...(model ? { model: engineMeta(engineId).decodeModelValue(model) } : {})
       }
-      saveSessionConfig(state, { sessionEngines })
-      localStorage.setItem('lastSelectedEngineId', engineId)
-      return {
-        sessions: updateSession(state.sessions, id, () => ({
-          selectedEngineId: engineId,
-          selectedModel: model,
-          reasoningVariant: null,
-          status: {
-            ...session.status,
-            engineId,
-            capabilities: engineMeta(engineId).seedCapabilities(model, modelInfo)
-          }
-        })),
-        sessionEngines,
-        lastSelectedEngineId: engineId
+    }
+    localStorage.setItem('lastSelectedEngineId', engineId)
+    set({ lastSelectedEngineId: engineId })
+    // Pre-spawn only (guarded above), so no event exists to carry the switch —
+    // the replica is where it has to live.
+    patchLocalSession(id, {
+      selectedEngineId: engineId,
+      selectedModel: model,
+      reasoningVariant: null,
+      status: {
+        ...session.status,
+        engineId,
+        capabilities: engineMeta(engineId).seedCapabilities(model, modelInfo)
       }
-    }),
+    })
+    if (resolved === null) {
+      useSessionStore
+        .getState()
+        .addError(
+          id,
+          staleDefaultModelMessage(engineId, configuredDefaultModelOf(engineId, defaults))
+        )
+    }
+    patchLocalApp({ sessionEngines })
+    saveSessionConfig(state, { sessionEngines })
+  },
 
   setOpencodeDefaultModel: (model) =>
-    set({ opencodeDefaultModel: model || OPENCODE_DEFAULT_MODEL }),
+    set({
+      opencodeDefaultModel: model || OPENCODE_DEFAULT_MODEL,
+      opencodeDefaultModelConfigured: !!model
+    }),
 
-  setPiDefaultModel: (model) => set({ piDefaultModel: model || PI_DEFAULT_MODEL }),
+  setPiDefaultModel: (model) =>
+    set({ piDefaultModel: model || PI_DEFAULT_MODEL, piDefaultModelConfigured: !!model }),
 
   setDefaultPermissionMode: (mode) => set({ defaultPermissionMode: mode }),
 
@@ -1449,13 +1656,9 @@ export const useSessionStore = create<SessionState>((set) => ({
     subagentMessages?,
     statusLine?,
     warnings?
-  ) =>
-    set((state) => {
-      // Re-hydrating an evicted entry: start from the resident (lightweight)
-      // entry so draft / effort / thinking / permission mode survive the round
-      // trip. A genuinely fresh load starts from a blank session.
-      const prior = state.sessions[routingId]
-      const base = prior?.evicted ? prior : createEmptySession(cwd)
+  ) => {
+    const state = useSessionStore.getState()
+    {
       // Per-session model memory: restore the persisted model when present, so
       // reopening a session brings back the model you last used in it. The engine
       // is restored too (an opencode session reopens as opencode). When NO model
@@ -1463,6 +1666,18 @@ export const useSessionStore = create<SessionState>((set) => ({
       // engine-aware, never Claude's "default" on an opencode session (the bug).
       const persistedEntry = state.sessionEngines[routingId]
       const persistedEngineId = persistedEntry?.engineId ?? 'claude'
+      // Re-hydrating an evicted entry: start from the resident (lightweight)
+      // entry so draft / effort / thinking / permission mode survive the round
+      // trip. A genuinely FRESH load is a new run of the session, and a new run
+      // starts in the configured default mode — same rule cli.js applies to
+      // `--resume` (`permissions.defaultMode` is read at every bootstrap, not
+      // only for brand-new conversations). Without this, only never-before-seen
+      // sessions got the auto default; every session reopened from the sidebar
+      // silently started in 'default'.
+      const prior = state.sessions[routingId]
+      const base = prior?.evicted
+        ? prior
+        : createEmptySession(cwd, bootstrapPermissionMode(state, persistedEngineId))
       const persistedModelRef = persistedEntry?.model
       // For opencode the picker value is "vendorId/modelId"; for claude it's the modelId.
       const persistedModel: string | undefined = persistedModelRef
@@ -1481,31 +1696,54 @@ export const useSessionStore = create<SessionState>((set) => ({
       const modelInfo = state.availableModels.find(
         (m) => m.value === selectedModel && isModelForEngine(m, persistedEngineId)
       )
-      return {
-        sessions: {
-          ...state.sessions,
-          [routingId]: {
-            ...base,
-            cwd,
-            messages,
-            isHistorical: true,
-            evicted: false,
-            taskNotifications: taskNotifications ?? base.taskNotifications,
-            subagentMessages: subagentMessages ?? base.subagentMessages,
-            statusLine: statusLine ?? base.statusLine ?? null,
-            warnings: warnings ?? base.warnings,
-            worktreeInfo: state.worktreeInfoMap[routingId] ?? base.worktreeInfo ?? null,
-            selectedEngineId: persistedEngineId,
-            selectedModel,
-            status: {
-              ...base.status,
-              engineId: persistedEngineId,
-              capabilities: engineMeta(persistedEngineId).seedCapabilities(selectedModel, modelInfo)
-            }
+      // Session identity + config: a LOCAL decision (which engine/model this
+      // session reopens as comes from `sessionEngines`, not from any event), so it
+      // is applied unconditionally.
+      patchLocalSession(
+        routingId,
+        {
+          cwd,
+          permissionMode: base.permissionMode,
+          selectedEngineId: persistedEngineId,
+          selectedModel,
+          status: {
+            ...base.status,
+            engineId: persistedEngineId,
+            capabilities: engineMeta(persistedEngineId).seedCapabilities(selectedModel, modelInfo)
           }
-        }
-      }
-    }),
+        },
+        { create: true }
+      )
+      // The transcript: on disk and NOWHERE in the event stream, because browsing
+      // an old session spawns nothing for the host to emit. `seedColdSession` is
+      // the one sanctioned local write for it, and it refuses to clobber a live
+      // transcript (a slow disk read resolving mid-turn must not wipe the turn).
+      seedColdSession(routingId, {
+        cwd,
+        messages,
+        taskNotifications: taskNotifications ?? base.taskNotifications,
+        subagentMessages: subagentMessages ?? base.subagentMessages,
+        statusLine: statusLine ?? base.statusLine ?? null,
+        // Derived from the transcript, with the same scanners the reducer uses —
+        // which is what makes the todo widget and the Files widget survive
+        // session resumption (neither is persisted separately). Deriving it HERE
+        // rather than in the Sidebar is the difference between seeding the replica
+        // and a client computing state (sync-core.md §"Clients never compute state").
+        todos: buildTodosFromMessages(messages) ?? [],
+        sentFiles: buildSentFilesFromMessages(messages) ?? []
+      })
+      // View-only half LAST: `updateSession` no-ops on an unknown id, so it has to
+      // run after the seed has created the entry (a fresh sidebar click reaches
+      // here with nothing resident).
+      set((s) => ({
+        sessions: updateSession(s.sessions, routingId, () => ({
+          isHistorical: true,
+          evicted: false,
+          warnings: warnings ?? base.warnings
+        }))
+      }))
+    }
+  },
 
   forkFromMessage: async (sourceRoutingId, messageId) => {
     const src = useSessionStore.getState().sessions[sourceRoutingId]
@@ -1565,7 +1803,8 @@ export const useSessionStore = create<SessionState>((set) => ({
     }))
 
     const newRoutingId = crypto.randomUUID()
-    set((s) => {
+    {
+      const s = useSessionStore.getState()
       const recentSessionIds = [
         newRoutingId,
         ...s.recentSessionIds.filter((id) => id !== newRoutingId)
@@ -1582,512 +1821,282 @@ export const useSessionStore = create<SessionState>((set) => ({
           model: engineMeta(forkEngineId).decodeModelValue(src.selectedModel)
         }
       }
-      saveSessionConfig(s, { recentSessionIds, sessionEngines })
-      const baseSession = createEmptySession(src.cwd)
-      return {
-        sessions: {
-          ...s.sessions,
-          [newRoutingId]: {
-            ...baseSession,
-            messages: seeded,
-            // Render the seeded history immediately; the fork-spawn path in
-            // InputBox (gated on forkOrigin) overrides the resume target.
-            isHistorical: true,
-            forkOrigin: { sourceSessionId, anchorUuid },
-            // Inherit the source's engine/model/permission/effort/thinking choices.
-            selectedEngineId: forkEngineId,
-            selectedModel: src.selectedModel,
-            permissionMode: src.permissionMode,
-            effort: src.effort,
-            thinkingMode: src.thinkingMode,
-            reasoningVariant: src.reasoningVariant,
-            status: {
-              ...baseSession.status,
-              engineId: src.status.engineId,
-              capabilities: src.status.capabilities
-            }
+      // A fork is a new run: it starts in the configured default mode, gated
+      // per the FORK's engine, not in whatever mode the source session held.
+      patchLocalSession(
+        newRoutingId,
+        {
+          cwd: src.cwd,
+          messages: seeded,
+          permissionMode: bootstrapPermissionMode(s, forkEngineId),
+          // Inherit the source's engine/model/effort/thinking choices.
+          selectedEngineId: forkEngineId,
+          selectedModel: src.selectedModel,
+          effort: src.effort,
+          thinkingMode: src.thinkingMode,
+          reasoningVariant: src.reasoningVariant,
+          status: {
+            ...EMPTY_SESSION_STATE.status,
+            engineId: src.status.engineId,
+            capabilities: src.status.capabilities
           }
         },
+        { create: true }
+      )
+      patchLocalApp({ recentSessionIds, sessionEngines })
+      saveSessionConfig(s, { recentSessionIds, sessionEngines })
+      set((cur) => ({
+        // Render the seeded history immediately; the fork-spawn path in
+        // InputBox (gated on forkOrigin) overrides the resume target.
+        sessions: updateSession(cur.sessions, newRoutingId, () => ({
+          isHistorical: true,
+          forkOrigin: { sourceSessionId, anchorUuid }
+        })),
         activeSessionId: newRoutingId,
-        activeView: { type: 'chat' } as ActiveView,
-        recentSessionIds,
-        sessionEngines
-      }
-    })
+        activeView: { type: 'chat' } as ActiveView
+      }))
+    }
     return newRoutingId
   },
 
-  markSdkActive: (routingId) =>
+  markSdkActive: (routingId) => {
+    // `sdkActive` is SEALED (`session:created` sets it, `session:status`
+    // disconnected clears it). The UI still flips it optimistically on the paths
+    // that spawn a session, so it goes through the replica; `isHistorical` is view
+    // state and stays here.
+    patchLocalSession(routingId, { sdkActive: true })
     set((state) => ({
-      sessions: updateSession(state.sessions, routingId, () => ({
-        sdkActive: true,
-        isHistorical: false
-      }))
-    })),
+      sessions: updateSession(state.sessions, routingId, () => ({ isHistorical: false }))
+    }))
+  },
 
-  markSdkInactive: (routingId) =>
-    set((state) => ({
-      sessions: updateSession(state.sessions, routingId, () => ({ sdkActive: false }))
-    })),
+  markSdkInactive: (routingId) => {
+    patchLocalSession(routingId, { sdkActive: false })
+  },
 
-  setDirectories: (dirs) => set({ directories: dirs }),
+  // -----------------------------------------------------------------------
+  // Registry config (recents / pins / titles / hidden / engine map)
+  //
+  // Two steps, in this order, at every site below: apply to the REPLICA (so the
+  // sealed field has exactly one writer and the sidebar does not lag a round trip
+  // behind the click), then persist through `config:save-sessions`, whose
+  // `config:sessions-changed` echo reaches this client too since 4c and re-applies
+  // the same whole-config replace. Applying locally first is not just latency:
+  // `saveSessionConfig` merges from CURRENT state, so two rapid mutations would
+  // otherwise both merge from a stale base and the second would revert the first.
+  // -----------------------------------------------------------------------
+  addRecentSession: (routingId) => {
+    const state = useSessionStore.getState()
+    // Don't add pinned sessions to recents — they have their own section
+    if (state.pinnedSessionIds.includes(routingId)) return
+    const recentSessionIds = [
+      routingId,
+      ...state.recentSessionIds.filter((id) => id !== routingId)
+    ].slice(0, state.settings.maxRecentSessions)
+    patchLocalApp({ recentSessionIds })
+    saveSessionConfig(state, { recentSessionIds })
+  },
 
-  addRecentSession: (routingId) =>
-    set((state) => {
-      // Don't add pinned sessions to recents — they have their own section
-      if (state.pinnedSessionIds.includes(routingId)) return state
-      const recentSessionIds = [
-        routingId,
-        ...state.recentSessionIds.filter((id) => id !== routingId)
-      ].slice(0, state.settings.maxRecentSessions)
-      saveSessionConfig(state, { recentSessionIds })
-      return { recentSessionIds }
-    }),
+  removeRecentSession: (routingId) => {
+    const state = useSessionStore.getState()
+    const recentSessionIds = state.recentSessionIds.filter((id) => id !== routingId)
+    patchLocalApp({ recentSessionIds })
+    saveSessionConfig(state, { recentSessionIds })
+  },
 
-  removeRecentSession: (routingId) =>
-    set((state) => {
-      const recentSessionIds = state.recentSessionIds.filter((id) => id !== routingId)
-      saveSessionConfig(state, { recentSessionIds })
-      return { recentSessionIds }
-    }),
+  setCustomTitle: (sessionId, title) => {
+    const state = useSessionStore.getState()
+    const customTitles = { ...state.customTitles }
+    if (title) {
+      customTitles[sessionId] = title
+    } else {
+      delete customTitles[sessionId]
+    }
+    patchLocalApp({ customTitles })
+    saveSessionConfig(state, { customTitles })
+  },
 
-  setCustomTitle: (sessionId, title) =>
-    set((state) => {
-      const customTitles = { ...state.customTitles }
-      if (title) {
-        customTitles[sessionId] = title
-      } else {
-        delete customTitles[sessionId]
-      }
-      saveSessionConfig(state, { customTitles })
-      return { customTitles }
-    }),
+  pinSession: (routingId) => {
+    const state = useSessionStore.getState()
+    if (state.pinnedSessionIds.includes(routingId)) return
+    const pinnedSessionIds = [...state.pinnedSessionIds, routingId]
+    const recentSessionIds = state.recentSessionIds.filter((id) => id !== routingId)
+    patchLocalApp({ pinnedSessionIds, recentSessionIds })
+    saveSessionConfig(state, { pinnedSessionIds, recentSessionIds })
+  },
 
-  pinSession: (routingId) =>
-    set((state) => {
-      if (state.pinnedSessionIds.includes(routingId)) return state
-      const pinnedSessionIds = [...state.pinnedSessionIds, routingId]
-      const recentSessionIds = state.recentSessionIds.filter((id) => id !== routingId)
-      saveSessionConfig(state, { pinnedSessionIds, recentSessionIds })
-      return { pinnedSessionIds, recentSessionIds }
-    }),
+  unpinSession: (routingId) => {
+    const state = useSessionStore.getState()
+    const pinnedSessionIds = state.pinnedSessionIds.filter((id) => id !== routingId)
+    const recentSessionIds = [
+      routingId,
+      ...state.recentSessionIds.filter((id) => id !== routingId)
+    ].slice(0, state.settings.maxRecentSessions)
+    patchLocalApp({ pinnedSessionIds, recentSessionIds })
+    saveSessionConfig(state, { pinnedSessionIds, recentSessionIds })
+  },
 
-  unpinSession: (routingId) =>
-    set((state) => {
-      const pinnedSessionIds = state.pinnedSessionIds.filter((id) => id !== routingId)
-      const recentSessionIds = [
-        routingId,
-        ...state.recentSessionIds.filter((id) => id !== routingId)
-      ].slice(0, state.settings.maxRecentSessions)
-      saveSessionConfig(state, { pinnedSessionIds, recentSessionIds })
-      return { pinnedSessionIds, recentSessionIds }
-    }),
+  reorderPinnedSessions: (ids) => {
+    const state = useSessionStore.getState()
+    patchLocalApp({ pinnedSessionIds: ids })
+    saveSessionConfig(state, { pinnedSessionIds: ids })
+  },
 
-  reorderPinnedSessions: (ids) =>
-    set((state) => {
-      saveSessionConfig(state, { pinnedSessionIds: ids })
-      return { pinnedSessionIds: ids }
-    }),
+  hideSession: (sessionId) => {
+    const state = useSessionStore.getState()
+    if (state.hiddenSessionIds.includes(sessionId)) return
+    const hiddenSessions = [...state.hiddenSessionIds, sessionId]
+    patchLocalApp({ hiddenSessions })
+    saveSessionConfig(state, { hiddenSessionIds: hiddenSessions })
+  },
 
-  hideSession: (sessionId) =>
-    set((state) => {
-      if (state.hiddenSessionIds.includes(sessionId)) return state
-      const hiddenSessionIds = [...state.hiddenSessionIds, sessionId]
-      saveSessionConfig(state, { hiddenSessionIds })
-      return { hiddenSessionIds }
-    }),
+  unhideSession: (sessionId) => {
+    const state = useSessionStore.getState()
+    if (!state.hiddenSessionIds.includes(sessionId)) return
+    const hiddenSessions = state.hiddenSessionIds.filter((id) => id !== sessionId)
+    patchLocalApp({ hiddenSessions })
+    saveSessionConfig(state, { hiddenSessionIds: hiddenSessions })
+  },
 
-  unhideSession: (sessionId) =>
-    set((state) => {
-      if (!state.hiddenSessionIds.includes(sessionId)) return state
-      const hiddenSessionIds = state.hiddenSessionIds.filter((id) => id !== sessionId)
-      saveSessionConfig(state, { hiddenSessionIds })
-      return { hiddenSessionIds }
-    }),
+  hideProject: (projectKey) => {
+    const state = useSessionStore.getState()
+    if (!projectKey || state.hiddenProjectKeys.includes(projectKey)) return
+    const hiddenProjects = [...state.hiddenProjectKeys, projectKey]
+    patchLocalApp({ hiddenProjects })
+    saveSessionConfig(state, { hiddenProjectKeys: hiddenProjects })
+  },
 
-  hideProject: (projectKey) =>
-    set((state) => {
-      if (!projectKey || state.hiddenProjectKeys.includes(projectKey)) return state
-      const hiddenProjectKeys = [...state.hiddenProjectKeys, projectKey]
-      saveSessionConfig(state, { hiddenProjectKeys })
-      return { hiddenProjectKeys }
-    }),
-
-  unhideProject: (projectKey) =>
-    set((state) => {
-      if (!state.hiddenProjectKeys.includes(projectKey)) return state
-      const hiddenProjectKeys = state.hiddenProjectKeys.filter((k) => k !== projectKey)
-      saveSessionConfig(state, { hiddenProjectKeys })
-      return { hiddenProjectKeys }
-    }),
+  unhideProject: (projectKey) => {
+    const state = useSessionStore.getState()
+    if (!state.hiddenProjectKeys.includes(projectKey)) return
+    const hiddenProjects = state.hiddenProjectKeys.filter((k) => k !== projectKey)
+    patchLocalApp({ hiddenProjects })
+    saveSessionConfig(state, { hiddenProjectKeys: hiddenProjects })
+  },
 
   deleteSession: async (sessionId, projectKey, engineId) => {
     await window.api.deleteSession(sessionId, projectKey, engineId)
     // Also scrub any references to this session from persisted config + in-memory state
-    useSessionStore.setState((state) => {
-      const recentSessionIds = state.recentSessionIds.filter((id) => id !== sessionId)
-      const pinnedSessionIds = state.pinnedSessionIds.filter((id) => id !== sessionId)
-      const hiddenSessionIds = state.hiddenSessionIds.filter((id) => id !== sessionId)
-      const customTitles = { ...state.customTitles }
-      delete customTitles[sessionId]
-      const worktreeInfoMap = { ...state.worktreeInfoMap }
-      delete worktreeInfoMap[sessionId]
-      // The persisted engine/model row is keyed by routingId too — without this
-      // it survives every delete and accumulates forever (RN8).
-      const sessionEngines = { ...state.sessionEngines }
-      delete sessionEngines[sessionId]
-      const sessions = { ...state.sessions }
+    const state = useSessionStore.getState()
+    const recentSessionIds = state.recentSessionIds.filter((id) => id !== sessionId)
+    const pinnedSessionIds = state.pinnedSessionIds.filter((id) => id !== sessionId)
+    const hiddenSessions = state.hiddenSessionIds.filter((id) => id !== sessionId)
+    const customTitles = { ...state.customTitles }
+    delete customTitles[sessionId]
+    const worktreeInfoMap = { ...state.worktreeInfoMap }
+    delete worktreeInfoMap[sessionId]
+    // The persisted engine/model row is keyed by routingId too — without this
+    // it survives every delete and accumulates forever (RN8).
+    const sessionEngines = { ...state.sessionEngines }
+    delete sessionEngines[sessionId]
+    // Drop the session from its directory group; drop the group itself if now empty
+    const directories = state.directories
+      .map((g) =>
+        g.sessions.some((s) => s.sessionId === sessionId)
+          ? { ...g, sessions: g.sessions.filter((s) => s.sessionId !== sessionId) }
+          : g
+      )
+      .filter((g) => g.sessions.length > 0)
+    set((s) => {
+      const sessions = { ...s.sessions }
       delete sessions[sessionId]
-      // Drop the session from its directory group; drop the group itself if now empty
-      const directories = state.directories
-        .map((g) =>
-          g.sessions.some((s) => s.sessionId === sessionId)
-            ? { ...g, sessions: g.sessions.filter((s) => s.sessionId !== sessionId) }
-            : g
-        )
-        .filter((g) => g.sessions.length > 0)
-      const activeSessionId = state.activeSessionId === sessionId ? null : state.activeSessionId
-      saveSessionConfig(state, {
-        recentSessionIds,
-        pinnedSessionIds,
-        hiddenSessionIds,
-        customTitles,
-        worktreeInfoMap,
-        sessionEngines
-      })
       return {
-        recentSessionIds,
-        pinnedSessionIds,
-        hiddenSessionIds,
-        customTitles,
-        worktreeInfoMap,
-        sessionEngines,
         sessions,
-        directories,
-        activeSessionId
+        activeSessionId: s.activeSessionId === sessionId ? null : s.activeSessionId
       }
+    })
+    dropLocalSessions([sessionId])
+    patchLocalApp({
+      recentSessionIds,
+      pinnedSessionIds,
+      hiddenSessions,
+      customTitles,
+      worktreeInfoMap,
+      sessionEngines,
+      directories
+    })
+    saveSessionConfig(state, {
+      recentSessionIds,
+      pinnedSessionIds,
+      hiddenSessionIds: hiddenSessions,
+      customTitles,
+      worktreeInfoMap,
+      sessionEngines
     })
   },
 
   deleteProject: async (projectKey) => {
+    // Deletes the OTHER engines' sessions too. This action used to follow up with
+    // its own `deleteSession` loop for opencode rows, because `deleteProjectFiles`
+    // only removes Claude's files and the surviving opencode data re-created the
+    // group on the next listing refresh. `handlers-core.deleteProject` does that
+    // sweep main-side now (pi included), which is also the only way the REMOTE
+    // surface ever got it — a phone has no such follow-up loop.
     await window.api.deleteProject(projectKey)
-    // Also delete any opencode sessions in this group so they don't reappear on the next poll.
-    const opencodeSessions =
-      useSessionStore
-        .getState()
-        .directories.find((g) => g.projectKey === projectKey)
-        ?.sessions.filter((s) => s.engineId === 'opencode') ?? []
-    if (opencodeSessions.length > 0) {
-      await Promise.allSettled(
-        opencodeSessions.map((s) => window.api.deleteSession(s.sessionId, projectKey, 'opencode'))
-      )
-    }
     // Collect all session IDs in this project (both on-disk group members and live in-memory
     // sessions sharing the project's cwd) so we can purge them from every piece of state.
-    useSessionStore.setState((state) => {
-      const group = state.directories.find((g) => g.projectKey === projectKey)
-      const projectCwd = group?.cwd
-      const projectSessionIds = new Set(group?.sessions.map((s) => s.sessionId) ?? [])
-      if (projectCwd) {
-        for (const [id, sess] of Object.entries(state.sessions)) {
-          if (sess.cwd === projectCwd) projectSessionIds.add(id)
-        }
+    const state = useSessionStore.getState()
+    const group = state.directories.find((g) => g.projectKey === projectKey)
+    const projectCwd = group?.cwd
+    const projectSessionIds = new Set(group?.sessions.map((s) => s.sessionId) ?? [])
+    if (projectCwd) {
+      for (const [id, sess] of Object.entries(state.sessions)) {
+        if (sess.cwd === projectCwd) projectSessionIds.add(id)
       }
-      const recentSessionIds = state.recentSessionIds.filter((id) => !projectSessionIds.has(id))
-      const pinnedSessionIds = state.pinnedSessionIds.filter((id) => !projectSessionIds.has(id))
-      const hiddenSessionIds = state.hiddenSessionIds.filter((id) => !projectSessionIds.has(id))
-      const hiddenProjectKeys = state.hiddenProjectKeys.filter((k) => k !== projectKey)
-      const customTitles = { ...state.customTitles }
-      const worktreeInfoMap = { ...state.worktreeInfoMap }
-      // Persisted engine/model rows are keyed by routingId — purge them with the
-      // rest of the project's state so they can't accumulate forever (RN8).
-      const sessionEngines = { ...state.sessionEngines }
-      const sessions = { ...state.sessions }
-      for (const id of projectSessionIds) {
-        delete customTitles[id]
-        delete worktreeInfoMap[id]
-        delete sessionEngines[id]
-        delete sessions[id]
-      }
-      const directories = state.directories.filter((g) => g.projectKey !== projectKey)
-      const activeSessionId =
-        state.activeSessionId && projectSessionIds.has(state.activeSessionId)
-          ? null
-          : state.activeSessionId
-      saveSessionConfig(state, {
-        recentSessionIds,
-        pinnedSessionIds,
-        hiddenSessionIds,
-        hiddenProjectKeys,
-        customTitles,
-        worktreeInfoMap,
-        sessionEngines
-      })
+    }
+    const recentSessionIds = state.recentSessionIds.filter((id) => !projectSessionIds.has(id))
+    const pinnedSessionIds = state.pinnedSessionIds.filter((id) => !projectSessionIds.has(id))
+    const hiddenSessions = state.hiddenSessionIds.filter((id) => !projectSessionIds.has(id))
+    const hiddenProjects = state.hiddenProjectKeys.filter((k) => k !== projectKey)
+    const customTitles = { ...state.customTitles }
+    const worktreeInfoMap = { ...state.worktreeInfoMap }
+    // Persisted engine/model rows are keyed by routingId — purge them with the
+    // rest of the project's state so they can't accumulate forever (RN8).
+    const sessionEngines = { ...state.sessionEngines }
+    for (const id of projectSessionIds) {
+      delete customTitles[id]
+      delete worktreeInfoMap[id]
+      delete sessionEngines[id]
+    }
+    const directories = state.directories.filter((g) => g.projectKey !== projectKey)
+    set((s) => {
+      const sessions = { ...s.sessions }
+      for (const id of projectSessionIds) delete sessions[id]
       return {
-        recentSessionIds,
-        pinnedSessionIds,
-        hiddenSessionIds,
-        hiddenProjectKeys,
-        customTitles,
-        worktreeInfoMap,
-        sessionEngines,
         sessions,
-        directories,
-        activeSessionId
+        activeSessionId:
+          s.activeSessionId && projectSessionIds.has(s.activeSessionId) ? null : s.activeSessionId
       }
+    })
+    dropLocalSessions([...projectSessionIds])
+    patchLocalApp({
+      recentSessionIds,
+      pinnedSessionIds,
+      hiddenSessions,
+      hiddenProjects,
+      customTitles,
+      worktreeInfoMap,
+      sessionEngines,
+      directories
+    })
+    saveSessionConfig(state, {
+      recentSessionIds,
+      pinnedSessionIds,
+      hiddenSessionIds: hiddenSessions,
+      hiddenProjectKeys: hiddenProjects,
+      customTitles,
+      worktreeInfoMap,
+      sessionEngines
     })
   },
 
-  addMessage: (routingId, message) =>
-    set((state) => {
-      const sessions = ensureSession(state.sessions, routingId)
-      const session = sessions[routingId]
-
-      const idx = session.messages.findIndex((m) => m.id === message.id)
-      const hasNonThinking = message.content.some((b) => b.type === 'text' || b.type === 'tool_use')
-      const sealedDuration =
-        session.thinkingStartedAt && hasNonThinking ? Date.now() - session.thinkingStartedAt : null
-
-      let committed: ChatMessage =
-        idx < 0
-          ? message
-          : {
-              ...message,
-              content: mergeContentBlocks(session.messages[idx].content, message.content)
-            }
-
-      // Record the finished thinking span's duration on the block itself, so each
-      // thinking block renders its OWN "Thought for Xs" instead of all reading a
-      // single per-session scalar (Low). The span may seal here (all-in-one
-      // message) or earlier in appendStreamingText (streaming), in which case the
-      // duration was parked in pendingThinkingDurationMs and is consumed now.
-      const durationToStamp = sealedDuration ?? session.pendingThinkingDurationMs
-      let didStamp = false
-      if (durationToStamp != null) {
-        const content = committed.content.map((b) => {
-          if (b.type === 'thinking' && b.durationMs == null) {
-            didStamp = true
-            return { ...b, durationMs: durationToStamp }
-          }
-          return b
-        })
-        if (didStamp) committed = { ...committed, content }
-      }
-
-      const updatedMessages =
-        idx < 0
-          ? [...session.messages, committed]
-          : session.messages.map((m, i) => (i === idx ? committed : m))
-
-      return {
-        sessions: {
-          ...sessions,
-          [routingId]: {
-            ...session,
-            messages: updatedMessages,
-            streamingText: '',
-            ...(sealedDuration != null
-              ? { streamingThinking: '', thinkingDurationMs: sealedDuration, thinkingStartedAt: null }
-              : {}),
-            // Keep the parked duration only if it wasn't attached to a block here.
-            pendingThinkingDurationMs: didStamp ? null : durationToStamp
-          }
-        }
-      }
-    }),
-
-  addUserMessage: (routingId, id, text, planContent?, attachments?) =>
-    set((state) => {
-      const session = state.sessions[routingId]
-      if (!session) return state
-
-      const recentSessionIds = [
-        routingId,
-        ...state.recentSessionIds.filter((rid) => rid !== routingId)
-      ].slice(0, state.settings.maxRecentSessions)
-      saveSessionConfig(state, { recentSessionIds })
-
-      const content: ContentBlock[] = []
-      if (attachments && attachments.length > 0) {
-        for (const att of attachments) {
-          if (att.mediaType === 'application/pdf') {
-            content.push({
-              type: 'document',
-              mediaType: 'application/pdf',
-              base64Data: att.base64Data,
-              fileName: att.fileName
-            })
-          } else {
-            content.push({
-              type: 'image',
-              mediaType: att.mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
-              base64Data: att.base64Data,
-              fileName: att.fileName
-            })
-          }
-        }
-      }
-      if (text) {
-        content.push({ type: 'text' as const, text })
-      }
-
-      return {
-        sessions: {
-          ...state.sessions,
-          [routingId]: {
-            ...session,
-            messages: [
-              ...session.messages,
-              {
-                id,
-                role: 'user' as const,
-                content,
-                timestamp: Date.now(),
-                ...(planContent ? { planContent } : {})
-              }
-            ]
-          }
-        },
-        recentSessionIds
-      }
-    }),
-
-  appendStreamingText: (routingId, text) =>
-    set((state) => {
-      const sessions = ensureSession(state.sessions, routingId)
-      const session = sessions[routingId]
-
-      if (session.thinkingStartedAt) {
-        const duration = Date.now() - session.thinkingStartedAt
-        return {
-          sessions: updateSession(sessions, routingId, () => ({
-            streamingText: session.streamingText + text,
-            streamingThinking: '',
-            thinkingDurationMs: duration,
-            // Park the sealed span's duration so the addMessage that finalizes
-            // THIS thinking block stamps its own durationMs (per-block "Thought
-            // for Xs"), not a shared per-session scalar. thinkingStartedAt is
-            // nulled here, so without this the consuming addMessage has nothing
-            // to read.
-            pendingThinkingDurationMs: duration,
-            thinkingStartedAt: null
-          }))
-        }
-      }
-      return {
-        sessions: updateSession(sessions, routingId, (s) => ({
-          streamingText: s.streamingText + text
-        }))
-      }
-    }),
-
-  appendStreamingThinking: (routingId, text) =>
-    set((state) => ({
-      sessions: updateSession(state.sessions, routingId, (s) => ({
-        streamingThinking: s.streamingThinking + text,
-        thinkingStartedAt: s.thinkingStartedAt ?? Date.now()
-      }))
-    })),
-
-  clearStreamingText: (routingId) =>
-    set((state) => ({
-      sessions: updateSession(state.sessions, routingId, () => ({
-        streamingText: '',
-        streamingThinking: '',
-        thinkingStartedAt: null,
-        thinkingDurationMs: null
-      }))
-    })),
-
-  setStatus: (routingId, status) =>
-    set((state) => ({
-      sessions: updateSession(state.sessions, routingId, (s) => {
-        const updates: Partial<PerSessionState> = {
-          status,
-          // Update top-level cwd when SDK reports a new working directory (e.g. worktree enter/exit)
-          ...(status.cwd && status.cwd !== s.cwd ? { cwd: status.cwd } : {})
-        }
-
-        // When the turn ends (interrupt, error, natural completion), seal any
-        // in-flight thinking state. Natural completions usually finalize via
-        // appendStreamingText / addMessage before this point — this is the
-        // safety net for paths (interrupt, abrupt termination) that never send
-        // a closing message.
-        if (status.state === 'idle') {
-          if (s.thinkingStartedAt) {
-            updates.streamingThinking = ''
-            updates.thinkingDurationMs = Date.now() - s.thinkingStartedAt
-            updates.thinkingStartedAt = null
-          }
-
-          // Foreground subagent buffers: if a Task tool is foreground (not
-          // run_in_background) and still has a streaming buffer, the parent
-          // going idle means the subagent is done (interrupted or finished).
-          // Background tasks keep streaming after the parent idles, so leave
-          // them alone.
-          const subThinking = s.subagentStreamingThinking
-          const subText = s.subagentStreamingText
-          const toolUseIds = new Set([...Object.keys(subThinking), ...Object.keys(subText)])
-          if (toolUseIds.size > 0) {
-            const bgToolUseIds = new Set<string>()
-            for (const msg of s.messages) {
-              for (const block of msg.content) {
-                if (
-                  block.type === 'tool_use' &&
-                  toolUseIds.has(block.toolUseId) &&
-                  block.toolInput?.run_in_background
-                ) {
-                  bgToolUseIds.add(block.toolUseId)
-                }
-              }
-            }
-            let nextThinking = subThinking
-            let nextText = subText
-            for (const toolUseId of toolUseIds) {
-              if (bgToolUseIds.has(toolUseId)) continue
-              if (subThinking[toolUseId]) {
-                if (nextThinking === subThinking) nextThinking = { ...subThinking }
-                nextThinking[toolUseId] = ''
-              }
-              if (subText[toolUseId]) {
-                if (nextText === subText) nextText = { ...subText }
-                nextText[toolUseId] = ''
-              }
-            }
-            if (nextThinking !== subThinking) updates.subagentStreamingThinking = nextThinking
-            if (nextText !== subText) updates.subagentStreamingText = nextText
-          }
-        }
-
-        return updates
-      })
-    })),
-
-  addPendingApproval: (routingId, approval) =>
-    set((state) => ({
-      sessions: updateSession(state.sessions, routingId, (s) => ({
-        pendingApprovals: [...s.pendingApprovals, approval]
-      }))
-    })),
-
-  removePendingApproval: (routingId, requestId) =>
-    set((state) => ({
-      sessions: updateSession(state.sessions, routingId, (s) => ({
-        pendingApprovals: s.pendingApprovals.filter((a) => a.requestId !== requestId)
-      }))
-    })),
-
-  removePendingApprovalByToolUse: (routingId, toolUseId) =>
-    set((state) => ({
-      sessions: updateSession(state.sessions, routingId, (s) => ({
-        pendingApprovals: s.pendingApprovals.filter((a) => a.toolUseId !== toolUseId)
-      }))
-    })),
-
-  clearPendingApprovals: (routingId) =>
-    set((state) => ({
-      sessions: updateSession(state.sessions, routingId, () => ({ pendingApprovals: [] }))
-    })),
+  dismissApproval: (routingId, requestId) => {
+    const session = useSessionStore.getState().sessions[routingId]
+    if (!session) return
+    const pendingApprovals = session.pendingApprovals.filter((a) => a.requestId !== requestId)
+    if (pendingApprovals.length === session.pendingApprovals.length) return
+    patchLocalSession(routingId, { pendingApprovals })
+  },
 
   addError: (routingId, error) =>
     set((state) => ({
@@ -2127,17 +2136,6 @@ export const useSessionStore = create<SessionState>((set) => ({
       sessions: updateSession(state.sessions, routingId, () => ({ warnings: [] }))
     })),
 
-  retractMessages: (routingId, messageIds) =>
-    set((state) => ({
-      sessions: updateSession(state.sessions, routingId, (s) => ({
-        messages:
-          messageIds.length > 0 ? s.messages.filter((m) => !messageIds.includes(m.id)) : s.messages,
-        streamingText: '',
-        streamingThinking: '',
-        thinkingStartedAt: null
-      }))
-    })),
-
   addSandboxViolation: (routingId, message) =>
     set((state) => ({
       sessions: updateSession(state.sessions, routingId, (s) => ({
@@ -2151,252 +2149,6 @@ export const useSessionStore = create<SessionState>((set) => ({
         sandboxViolations: s.sandboxViolations.filter((_, i) => i !== index)
       }))
     })),
-
-  appendToolResult: (routingId, toolUseId, result, isError, fileDiffs, images) =>
-    set((state) => {
-      const session = state.sessions[routingId]
-      if (!session) return state
-
-      const messages = [...session.messages]
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const msg = messages[i]
-        if (msg.role === 'assistant') {
-          const hasToolUse = msg.content.some(
-            (b) => b.type === 'tool_use' && b.toolUseId === toolUseId
-          )
-          if (hasToolUse) {
-            // Idempotent: a replayed onToolResult (reconnect catchup / history
-            // replay) must not append a second tool_result block for the same
-            // toolUseId. The renderer only shows the first, so the duplicates
-            // were invisible while still growing the message forever (RN10).
-            // First result wins — no caller replaces an existing result.
-            const alreadyHasResult = msg.content.some(
-              (b) => b.type === 'tool_result' && b.toolUseId === toolUseId
-            )
-            if (alreadyHasResult) return state
-            messages[i] = {
-              ...msg,
-              content: [
-                ...msg.content,
-                {
-                  type: 'tool_result',
-                  toolUseId,
-                  toolResult: result,
-                  isError,
-                  ...(fileDiffs ? { fileDiffs } : {}),
-                  ...(images ? { images } : {})
-                }
-              ]
-            }
-            break
-          }
-        }
-      }
-      return {
-        sessions: { ...state.sessions, [routingId]: { ...session, messages } }
-      }
-    }),
-
-  setTodos: (routingId, todos) =>
-    set((state) => ({
-      sessions: updateSession(state.sessions, routingId, () => ({ todos }))
-    })),
-
-  setSentFiles: (routingId, sentFiles) =>
-    set((state) => ({
-      sessions: updateSession(state.sessions, routingId, () => ({ sentFiles }))
-    })),
-
-  updateTaskProgress: (routingId, progress) =>
-    set((state) => ({
-      sessions: updateSession(state.sessions, routingId, (s) => ({
-        taskProgressMap: { ...s.taskProgressMap, [progress.toolUseId]: progress }
-      }))
-    })),
-
-  setTaskStarted: (routingId, data) =>
-    set((state) => ({
-      sessions: updateSession(state.sessions, routingId, (s) => ({
-        activeTasks: {
-          ...s.activeTasks,
-          [data.toolUseId]: { taskId: data.taskId, taskType: data.taskType }
-        }
-      }))
-    })),
-
-  addTaskNotification: (routingId, notification) =>
-    set((state) => ({
-      sessions: updateSession(state.sessions, routingId, (s) => {
-        const stoppingTaskIds = notification.toolUseId
-          ? s.stoppingTaskIds.filter((id) => id !== notification.toolUseId)
-          : s.stoppingTaskIds
-        // Clear live bash output for this tool now that it's done
-        const bashOutputs = notification.toolUseId
-          ? (({ [notification.toolUseId]: _, ...rest }) => rest)(s.bashOutputs)
-          : s.bashOutputs
-        // The task has reached a terminal state — it's no longer "active".
-        const activeTasks = notification.toolUseId
-          ? (({ [notification.toolUseId]: _, ...rest }) => rest)(s.activeTasks)
-          : s.activeTasks
-        return {
-          taskNotifications: [...s.taskNotifications, notification],
-          stoppingTaskIds,
-          bashOutputs,
-          activeTasks
-        }
-      })
-    })),
-
-  bulkSetSubagentMessages: (routingId, subagentMessages) =>
-    set((state) => {
-      const sessions = ensureSession(state.sessions, routingId)
-      return {
-        sessions: updateSession(sessions, routingId, (s) => ({
-          subagentMessages: { ...s.subagentMessages, ...subagentMessages }
-        }))
-      }
-    }),
-
-  addSubagentMessage: (routingId, toolUseId, message) =>
-    set((state) => {
-      const sessions = ensureSession(state.sessions, routingId)
-      const session = sessions[routingId]
-
-      const existing = session.subagentMessages[toolUseId] || []
-      const idx = existing.findIndex((m) => m.id === message.id)
-      let updated: ChatMessage[]
-      if (idx < 0) {
-        updated = [...existing, message]
-      } else {
-        const merged = {
-          ...message,
-          content: mergeContentBlocks(existing[idx].content, message.content)
-        }
-        updated = existing.map((m, i) => (i === idx ? merged : m))
-      }
-      return {
-        sessions: {
-          ...sessions,
-          [routingId]: {
-            ...session,
-            subagentMessages: { ...session.subagentMessages, [toolUseId]: updated },
-            subagentStreamingText: { ...session.subagentStreamingText, [toolUseId]: '' },
-            subagentStreamingThinking: { ...session.subagentStreamingThinking, [toolUseId]: '' }
-          }
-        }
-      }
-    }),
-
-  appendSubagentMessageBatch: (routingId, toolUseId, messages) =>
-    set((state) => {
-      const sessions = ensureSession(state.sessions, routingId)
-      const session = sessions[routingId]
-      const current = [...(session.subagentMessages[toolUseId] || [])]
-
-      for (const message of messages) {
-        const idx = current.findIndex((m) => m.id === message.id)
-        if (idx < 0) {
-          current.push(message)
-        } else {
-          current[idx] = {
-            ...message,
-            content: mergeContentBlocks(current[idx].content, message.content)
-          }
-        }
-      }
-
-      return {
-        sessions: {
-          ...sessions,
-          [routingId]: {
-            ...session,
-            subagentMessages: { ...session.subagentMessages, [toolUseId]: current },
-            subagentStreamingText: { ...session.subagentStreamingText, [toolUseId]: '' },
-            subagentStreamingThinking: { ...session.subagentStreamingThinking, [toolUseId]: '' }
-          }
-        }
-      }
-    }),
-
-  appendSubagentStreamingText: (routingId, toolUseId, text) =>
-    set((state) => {
-      const sessions = ensureSession(state.sessions, routingId)
-      return {
-        sessions: updateSession(sessions, routingId, (s) => ({
-          subagentStreamingText: {
-            ...s.subagentStreamingText,
-            [toolUseId]: (s.subagentStreamingText[toolUseId] || '') + text
-          },
-          subagentStreamingThinking: {
-            ...s.subagentStreamingThinking,
-            [toolUseId]: ''
-          }
-        }))
-      }
-    }),
-
-  appendSubagentStreamingThinking: (routingId, toolUseId, text) =>
-    set((state) => {
-      const sessions = ensureSession(state.sessions, routingId)
-      return {
-        sessions: updateSession(sessions, routingId, (s) => ({
-          subagentStreamingThinking: {
-            ...s.subagentStreamingThinking,
-            [toolUseId]: (s.subagentStreamingThinking[toolUseId] || '') + text
-          }
-        }))
-      }
-    }),
-
-  appendSubagentToolResult: (
-    routingId,
-    toolUseId,
-    toolResultToolUseId,
-    result,
-    isError,
-    fileDiffs,
-    images
-  ) =>
-    set((state) => {
-      const session = state.sessions[routingId]
-      if (!session) return state
-
-      const msgs = session.subagentMessages[toolUseId] || []
-      const updated = [...msgs]
-      for (let i = updated.length - 1; i >= 0; i--) {
-        const msg = updated[i]
-        if (msg.role !== 'assistant') continue
-        const hasToolUse = msg.content.some(
-          (b) => b.type === 'tool_use' && b.toolUseId === toolResultToolUseId
-        )
-        if (hasToolUse) {
-          updated[i] = {
-            ...msg,
-            content: [
-              ...msg.content,
-              {
-                type: 'tool_result',
-                toolUseId: toolResultToolUseId,
-                toolResult: result,
-                isError,
-                ...(fileDiffs ? { fileDiffs } : {}),
-                ...(images ? { images } : {})
-              }
-            ]
-          }
-          break
-        }
-      }
-      return {
-        sessions: {
-          ...state.sessions,
-          [routingId]: {
-            ...session,
-            subagentMessages: { ...session.subagentMessages, [toolUseId]: updated }
-          }
-        }
-      }
-    }),
 
   setBashOutput: (routingId, toolUseId, output, totalLines, totalBytes) =>
     set((state) => ({
@@ -2524,277 +2276,62 @@ export const useSessionStore = create<SessionState>((set) => ({
       sessions: updateSession(state.sessions, routingId, () => ({ isWatching: watching }))
     })),
 
-  updateWatchedSession: (routingId, messages, taskNotifications) =>
-    set((state) => ({
-      sessions: updateSession(state.sessions, routingId, () => ({ messages, taskNotifications }))
-    })),
-
-  updateSettings: (partial) =>
-    set((state) => {
-      const settings = { ...state.settings, ...partial }
-      saveSettings(settings)
-      if (partial.theme) applyTheme(partial.theme)
-      return { settings }
-    }),
+  updateSettings: (partial) => {
+    const state = useSessionStore.getState()
+    const settings = { ...state.settings, ...partial }
+    // `settings` is SEALED (`config:settings-changed`), so the write goes through
+    // the replica — which also applies the theme — and the save's echo re-applies
+    // the same replace. Same rule as the registry-config actions above.
+    patchLocalApp({ settings: settings as unknown as Record<string, unknown> })
+    saveSettings(settings)
+  },
 
   setEngineConfig: (config) => set({ engineConfig: config }),
-
-  // Apply settings from an external source (another instance) — no save back to disk
-  applyExternalSettings: (raw) =>
-    set(() => {
-      const settings = { ...DEFAULT_SETTINGS, ...(raw as Partial<AppSettings>) }
-      applyTheme(settings.theme)
-      return { settings }
-    }),
-
-  // Apply session config from an external source — no save back to disk.
-  // Only overwrite a field when the payload GENUINELY carries it: the
-  // file-watcher `config:sessions-changed` payload is the on-disk sessions.json
-  // which strips sessionEngines (it lives in the DB), so `?? {}` would zero the
-  // receiving instance's engine/model map on every external sync (H15). Treat a
-  // missing key as "leave the current value intact".
-  applyExternalSessionConfig: (config) =>
-    set((state) => ({
-      recentSessionIds:
-        'recentSessions' in config ? (config.recentSessions ?? []) : state.recentSessionIds,
-      pinnedSessionIds:
-        'pinnedSessions' in config ? (config.pinnedSessions ?? []) : state.pinnedSessionIds,
-      customTitles: 'customTitles' in config ? (config.customTitles ?? {}) : state.customTitles,
-      worktreeInfoMap:
-        'worktreeInfoMap' in config ? (config.worktreeInfoMap ?? {}) : state.worktreeInfoMap,
-      hiddenSessionIds:
-        'hiddenSessions' in config ? (config.hiddenSessions ?? []) : state.hiddenSessionIds,
-      hiddenProjectKeys:
-        'hiddenProjects' in config ? (config.hiddenProjects ?? []) : state.hiddenProjectKeys,
-      sessionEngines:
-        'sessionEngines' in config ? (config.sessionEngines ?? {}) : state.sessionEngines
-    })),
-
-  // Apply a full state snapshot from the remote server (initial sync, or a
-  // reconnect re-sync when `isResync` is true).
-  //
-  // First hydration (isResync falsy): the snapshot wins wholesale — there is no
-  // local state worth preserving yet.
-  //
-  // Re-sync (isResync true): a mobile client that backgrounded/returned may have
-  // navigated to a historical session (loadHistoricalSession) the desktop
-  // snapshot knows nothing about, or may simply be looking at a different
-  // session than the desktop's current `activeSessionId`. Unconditionally
-  // adopting the snapshot here routes the next prompt to the wrong session (or
-  // the wrong engine) — see the mobile-picker-bug investigation. So: keep the
-  // local `activeSessionId` when set, and merge session entries rather than
-  // replacing the map (snapshot entries still win where both sides know the
-  // session — only local-only entries are preserved).
-  applyRemoteSnapshot: (snapshot, isResync) =>
-    set((state) => {
-      // Rebuild per-session state from the snapshot
-      const sessions: Record<string, PerSessionState> = {}
-      for (const [id, snap] of Object.entries(snapshot.sessions)) {
-        sessions[id] = {
-          ...EMPTY_SESSION_STATE,
-          cwd: snap.cwd,
-          messages: snap.messages,
-          streamingText: snap.streamingText,
-          streamingThinking: snap.streamingThinking,
-          status: snap.status,
-          pendingApprovals: snap.pendingApprovals,
-          todos: snap.todos,
-          sentFiles: snap.sentFiles ?? [],
-          taskNotifications: snap.taskNotifications,
-          activeTasks: snap.activeTasks ?? {},
-          taskProgressMap: snap.taskProgressMap,
-          subagentMessages: snap.subagentMessages,
-          subagentStreamingText: snap.subagentStreamingText,
-          subagentStreamingThinking: snap.subagentStreamingThinking,
-          // Coerce a stale 'localAuto' from an older (pre-removal) remote server —
-          // that mode no longer exists on this client's PermissionMode union.
-          permissionMode: (snap.permissionMode === 'localAuto'
-            ? 'auto'
-            : snap.permissionMode) as PermissionMode,
-          effort: (snap.effort ?? null) as 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null,
-          thinkingMode: (snap.thinkingMode ?? null) as 'adaptive' | 'enabled' | 'disabled' | null,
-          reasoningVariant: (snap.reasoningVariant ?? null) as string | null,
-          statusLine: snap.statusLine,
-          // H15 — hydrate the live engine identity so a remote first-send steers
-          // the running session instead of respawning it as Claude (InputBox.doSend).
-          sdkActive: snap.sdkActive ?? EMPTY_SESSION_STATE.sdkActive,
-          selectedEngineId: snap.selectedEngineId ?? EMPTY_SESSION_STATE.selectedEngineId,
-          selectedModel: snap.selectedModel ?? EMPTY_SESSION_STATE.selectedModel
-        }
-      }
-
-      // Apply settings + theme
-      const settings = { ...DEFAULT_SETTINGS, ...(snapshot.settings as Partial<AppSettings>) }
-      applyTheme(settings.theme)
-
-      // Merge the sessions map: snapshot entries win where both sides know the
-      // session, but local-only entries (mobile-hydrated historical sessions
-      // the snapshot never saw) survive.
-      const mergedSessions: Record<string, PerSessionState> = isResync
-        ? { ...state.sessions, ...sessions }
-        : sessions
-
-      let activeSessionId = snapshot.activeSessionId
-      if (isResync) {
-        // Preserve the local active session unless there isn't one — and only
-        // if it still resolves to a real entry post-merge. A local
-        // `activeSessionId` pointing at nothing (shouldn't happen, but a stale
-        // pointer is worse than falling back) drops to the snapshot's choice
-        // rather than rendering a broken view (EMPTY_SESSION_STATE).
-        const preserved = state.activeSessionId ?? snapshot.activeSessionId
-        activeSessionId = preserved && mergedSessions[preserved] ? preserved : snapshot.activeSessionId
-      }
-
-      return {
-        sessions: mergedSessions,
-        directories: snapshot.directories,
-        activeSessionId,
-        settings,
-        recentSessionIds: snapshot.recentSessionIds ?? [],
-        pinnedSessionIds: snapshot.pinnedSessionIds ?? [],
-        customTitles: snapshot.customTitles ?? {},
-        worktreeInfoMap: snapshot.worktreeInfoMap ?? {},
-        // H15 — hydrate the engine/model map + hidden lists so a subsequent save
-        // from this client round-trips the real state, not an empty map.
-        sessionEngines: snapshot.sessionEngines ?? {},
-        hiddenSessionIds: snapshot.hiddenSessions ?? [],
-        hiddenProjectKeys: snapshot.hiddenProjects ?? []
-      }
-    }),
-
-  setPermissionMode: (mode, routingId) =>
-    set((state) => {
-      const id = routingId ?? state.activeSessionId
-      if (!id) return {}
-      return { sessions: updateSession(state.sessions, id, () => ({ permissionMode: mode })) }
-    }),
 
   // Centralizes the apply semantics for a permission-mode change, shared by
   // the desktop Shift+Tab handler and the mobile mode picker (any client that
   // lets the user pick a mode).
   //
-  // Don't optimistically update for 'auto' on a LIVE session — the main
-  // process may reject it and broadcast a fallback to 'default' instead.
-  // Pre-spawn there is no main-side session to reject/broadcast anything
-  // (manager.get() is a no-op), so update the store directly; the mode still
-  // rides into spawn via createSession, and init-sync corrects it if the
-  // account can't use auto.
+  // SyncCore phase 4c deleted the optimistic write AND its revert. Both halves
+  // existed because the mode the pill showed was this client's guess: a LIVE
+  // session's `auto` could be rejected, so the guess was skipped for that one
+  // case and un-guessed in a `.catch`. The pill now renders `permissionMode`
+  // straight from the replica, and EVERY path emits `session:permission-mode` —
+  // the live session's own setter (including the reverted mode when the engine
+  // says no) and, pre-spawn where there is no session object,
+  // `handlers-core.setPermissionMode`'s echo. So there is nothing left to guess
+  // and nothing left to undo.
+  //
+  // `causedBy` (ADR-051 contract 2) is the designed escape hatch if the
+  // round-trip ever feels slow from a phone: tag the command, apply optimistically,
+  // reconcile when the tagged event lands. NOT built — the owner decides after
+  // living with the honest round trip.
   changePermissionMode: (routingId, next) => {
-    const state = useSessionStore.getState()
-    const session = state.sessions[routingId]
-    const previous = session?.permissionMode ?? 'default'
-    if (next !== 'auto' || !session?.sdkActive) state.setPermissionMode(next, routingId)
-    window.api.setPermissionMode(routingId, next).catch(() => {
-      // SDK rejected the mode change — revert to previous mode (the main
-      // process already sent the reverted mode via session:permission-mode).
-      state.setPermissionMode(previous, routingId)
+    void window.api.setPermissionMode(routingId, next).catch(() => {
+      /* the engine's own broadcast is the source of truth for the applied mode */
     })
   },
 
-  setEffort: (effort, routingId) =>
-    set((state) => {
-      const id = routingId ?? state.activeSessionId
-      if (!id) return {}
-      return { sessions: updateSession(state.sessions, id, () => ({ effort })) }
-    }),
+  // Effort / thinking / reasoning-variant picks. Applied through the replica
+  // because for effort + thinking there is NO event at all: the desktop picker
+  // restarts the session instead of pushing a live setter, so the value's only
+  // home until the respawn reads it is this client (see InputBox.restartSdkSession).
+  // Where an IPC setter DOES exist (reasoning variant, model), its
+  // `session:config-changed` echo re-applies the same per-field replace.
+  setEffort: (effort, routingId) => {
+    const id = routingId ?? useSessionStore.getState().activeSessionId
+    if (id) patchLocalSession(id, { effort })
+  },
 
-  setThinkingMode: (mode, routingId) =>
-    set((state) => {
-      const id = routingId ?? state.activeSessionId
-      if (!id) return {}
-      return { sessions: updateSession(state.sessions, id, () => ({ thinkingMode: mode })) }
-    }),
+  setThinkingMode: (mode, routingId) => {
+    const id = routingId ?? useSessionStore.getState().activeSessionId
+    if (id) patchLocalSession(id, { thinkingMode: mode })
+  },
 
-  setReasoningVariant: (variant, routingId) =>
-    set((state) => {
-      const id = routingId ?? state.activeSessionId
-      if (!id) return {}
-      return { sessions: updateSession(state.sessions, id, () => ({ reasoningVariant: variant })) }
-    }),
-
-  setStatusLine: (routingId, data) =>
-    set((state) => {
-      // Direct match — fast path
-      if (state.sessions[routingId]) {
-        return { sessions: updateSession(state.sessions, routingId, () => ({ statusLine: data })) }
-      }
-      // Fallback: the routingId may be a pre-rekey client ID. After the store
-      // rekeys (session:status triggers rekeySession), subsequent events from
-      // the main process may still carry the old routingId until the main
-      // process processes the rekey IPC round-trip. Use the rekey map.
-      const newId = rekeyMap.get(routingId)
-      if (newId && state.sessions[newId]) {
-        return { sessions: updateSession(state.sessions, newId, () => ({ statusLine: data })) }
-      }
-      return {}
-    }),
-
-  // Phase 7 Pass 2 — engine-neutral metering snapshot. Mirrors setStatusLine
-  // (including the pre-rekey routingId fallback). Additive: does not touch
-  // statusLine, so the Claude status-line rendering is unchanged.
-  setMetering: (routingId, data) =>
-    set((state) => {
-      if (state.sessions[routingId]) {
-        return { sessions: updateSession(state.sessions, routingId, () => ({ metering: data })) }
-      }
-      const newId = rekeyMap.get(routingId)
-      if (newId && state.sessions[newId]) {
-        return { sessions: updateSession(state.sessions, newId, () => ({ metering: data })) }
-      }
-      return {}
-    }),
-
-  appendQueuedText: (text) =>
-    set((state) => {
-      const id = state.activeSessionId
-      if (!id) return {}
-      return {
-        sessions: updateSession(state.sessions, id, (s) => ({
-          queuedText: s.queuedText ? s.queuedText + '\n' + text : text
-        }))
-      }
-    }),
-
-  setQueuedText: (routingId, text) =>
-    set((state) => {
-      if (!state.sessions[routingId]) return state
-      return {
-        sessions: updateSession(state.sessions, routingId, (s) => ({
-          queuedText: s.queuedText ? s.queuedText + '\n' + text : text
-        }))
-      }
-    }),
-
-  clearQueuedText: () =>
-    set((state) => {
-      const id = state.activeSessionId
-      if (!id) return {}
-      return { sessions: updateSession(state.sessions, id, () => ({ queuedText: '' })) }
-    }),
-
-  consumeQueuedText: (routingId) =>
-    set((state) => {
-      const session = state.sessions[routingId]
-      if (!session || !session.queuedText) return state
-      const userMsg = {
-        // crypto.randomUUID (not Date.now) so two steers within the same ms can't
-        // collide into a duplicate React key (Low).
-        id: `steer-${crypto.randomUUID()}`,
-        role: 'user' as const,
-        content: [{ type: 'text' as const, text: session.queuedText }],
-        timestamp: Date.now()
-      }
-      return {
-        sessions: {
-          ...state.sessions,
-          [routingId]: {
-            ...session,
-            messages: [...session.messages, userMsg],
-            queuedText: ''
-          }
-        }
-      }
-    }),
+  setReasoningVariant: (variant, routingId) => {
+    const id = routingId ?? useSessionStore.getState().activeSessionId
+    if (id) patchLocalSession(id, { reasoningVariant: variant })
+  },
 
   setDraftText: (text) =>
     set((state) => {
@@ -2831,41 +2368,66 @@ export const useSessionStore = create<SessionState>((set) => ({
     set((state) => {
       if (!state.sessions[routingId]) return {}
       return {
-        sessions: updateSession(state.sessions, routingId, () => ({ draftAttachments: attachments }))
+        sessions: updateSession(state.sessions, routingId, () => ({
+          draftAttachments: attachments
+        }))
       }
     }),
 
-  setSelectedModel: (model) =>
-    set((state) => {
-      const id = state.activeSessionId
-      if (!id) return {}
-      const session = state.sessions[id]
-      const targetEngine = session?.selectedEngineId ?? 'claude'
+  setSelectedModel: (model) => {
+    const state = useSessionStore.getState()
+    const id = state.activeSessionId
+    const session = id ? state.sessions[id] : undefined
+    // With no active session the picker is the WELCOME picker, which edits
+    // `lastSelectedEngineId` (InputBox's `effectiveEngineId`) — that is the engine
+    // this pick belongs to.
+    const targetEngine = id ? (session?.selectedEngineId ?? 'claude') : state.lastSelectedEngineId
 
-      // Persist the engine-correct ModelRef into sessionEngines so it seeds
-      // selectedModel + engine on reopen.
-      const existing = state.sessionEngines[id]
-      const modelRef = engineMeta(targetEngine).decodeModelValue(model)
-      const sessionEngines = existing
+    // Per-engine stickiness, recorded for BOTH picker surfaces so "new session uses
+    // my last model" behaves the same however the pick was made. Previously the
+    // no-session branch returned early and the welcome pick was simply lost.
+    localStorage.setItem(lastSelectedModelKey(targetEngine), model)
+    set((s) => ({
+      lastSelectedModelByEngine: { ...s.lastSelectedModelByEngine, [targetEngine]: model }
+    }))
+
+    if (!id) return
+
+    // Persist the engine-correct ModelRef into sessionEngines so it seeds
+    // selectedModel + engine on reopen.
+    const existing = state.sessionEngines[id]
+    const modelRef = engineMeta(targetEngine).decodeModelValue(model)
+    // Pre-spawn, NOTHING re-seeds `status.capabilities` for a model switch: the
+    // backend's `setModel` → `session:status` only exists once a session has
+    // started, so an un-started session kept the capabilities of the model it was
+    // created with (a no-vision seed silently swallowed pasted images even after
+    // the user picked a vision model). Mirrors `setSelectedEngine`. A STARTED
+    // session is left alone — its engine's own re-emitted status is authoritative.
+    const reseedCapabilities = !!session && !session.status.sessionId
+    const modelInfo = reseedCapabilities
+      ? state.availableModels.find((m) => m.value === model && isModelForEngine(m, targetEngine))
+      : undefined
+    // Always reset reasoningVariant on model change — different models have different variants.
+    patchLocalSession(id, {
+      selectedModel: model,
+      reasoningVariant: null,
+      ...(reseedCapabilities && session
         ? {
-            ...state.sessionEngines,
-            [id]: { ...existing, model: modelRef }
+            status: {
+              ...session.status,
+              capabilities: engineMeta(targetEngine).seedCapabilities(model, modelInfo)
+            }
           }
-        : state.sessionEngines
-      if (existing) saveSessionConfig(state, { sessionEngines })
+        : {})
+    })
+    if (existing) {
+      const sessionEngines = { ...state.sessionEngines, [id]: { ...existing, model: modelRef } }
+      patchLocalApp({ sessionEngines })
+      saveSessionConfig(state, { sessionEngines })
+    }
+  },
 
-      // Always reset reasoningVariant on model change — different models have different variants.
-      const patch: Partial<PerSessionState> = { selectedModel: model, reasoningVariant: null }
-
-      return {
-        sessions: updateSession(state.sessions, id, () => patch),
-        sessionEngines
-      }
-    }),
-
-  setSlashCommands: (commands) => set({ slashCommands: commands }),
   setCustomCommands: (commands) => set({ customCommands: commands }),
-  setSdkSkillNames: (names) => set({ sdkSkillNames: names }),
 
   setAvailableModels: (models) => set({ availableModels: models }),
 
@@ -2877,20 +2439,29 @@ export const useSessionStore = create<SessionState>((set) => ({
   setAuthSource: (source) => set({ authSource: source }),
   setVendorAuth: (map) => set({ vendorAuth: map }),
   setAccountsState: (data) => set({ accountsState: data }),
-  respawnAllSessions: () =>
-    set((s) => ({
-      sessions: Object.fromEntries(
-        Object.entries(s.sessions).map(([id, sess]) => [id, { ...sess, sdkActive: false }])
-      )
-    })),
+  respawnAllSessions: () => {
+    for (const id of Object.keys(useSessionStore.getState().sessions)) {
+      patchLocalSession(id, { sdkActive: false })
+    }
+  },
   signIn: async () => {
     set({ authState: { status: 'authorizing', account: null, error: null } })
-    const result = await window.api.signIn()
-    set({ authState: result })
+    // A rejected invoke used to leave the UI stuck on "authorizing" forever.
+    // Harmless on desktop (AuthManager.signIn never rejects), but a remote
+    // caller can be refused by the capability gate, and S4-UI's paste flow reads
+    // `manualUrl` off this very state — so surface the failure instead.
+    try {
+      set({ authState: await window.api.signIn() })
+    } catch (err) {
+      set({ authState: { status: 'error', account: null, error: errorText(err) } })
+    }
   },
   submitOAuthCode: async (code) => {
-    const result = await window.api.submitOAuthCode(code)
-    set({ authState: result })
+    try {
+      set({ authState: await window.api.submitOAuthCode(code) })
+    } catch (err) {
+      set({ authState: { status: 'error', account: null, error: errorText(err) } })
+    }
   },
   cancelSignIn: async () => {
     await window.api.cancelSignIn()
@@ -2926,6 +2497,25 @@ export const useSessionStore = create<SessionState>((set) => ({
       if (!firstOAuthOption) return { ok: false }
       const methodIdx = vendorOptions.indexOf(firstOAuthOption)
       const result = await window.api.vendorAuthOauthAuthorize(engineId, vendorId, methodIdx)
+      // ADR-057 / S4-UI: a REMOTE client can neither reach the host's loopback
+      // nor be sent to a page by the host, so BOTH methods become the two-step
+      // paste-back — and the open is the flow component's own user-gesture
+      // `window.open`, not this post-await one (which every mobile browser
+      // blocks). Desktop is untouched: same open, same `auto` loopback drive.
+      if (window.api.platform === 'web') {
+        useSessionStore.getState().setVendorOAuth({
+          engineId,
+          vendorId,
+          stage: 'paste',
+          instructions: result.instructions,
+          url: result.url,
+          method: methodIdx
+        })
+        return {
+          ok: false,
+          needsPaste: { url: result.url, method: methodIdx, instructions: result.instructions }
+        }
+      }
       window.open(result.url, '_blank')
       if (result.method === 'auto') {
         // Capture the flow token AFTER authorize so a Cancel during authorize is
@@ -2976,8 +2566,53 @@ export const useSessionStore = create<SessionState>((set) => ({
           needsPaste: { url: result.url, method: methodIdx, instructions: result.instructions }
         }
       }
-    } catch {
-      return { ok: false }
+    } catch (err) {
+      // The message matters now: `vendor-auth:oauth-authorize` refuses
+      // opencode's `auto` method for a remote caller, and that refusal IS the
+      // mockup's desktop-only outcome. Previously swallowed entirely.
+      const message = errorText(err)
+      if (window.api.platform === 'web') {
+        useSessionStore
+          .getState()
+          .setVendorOAuth({ engineId, vendorId, stage: 'error', instructions: '', error: message })
+      }
+      return { ok: false, error: message }
+    }
+  },
+  submitVendorOAuthCode: async (pasted) => {
+    const flow = useSessionStore.getState().vendorOAuth
+    if (!flow || flow.stage !== 'paste' || flow.method === undefined) {
+      return { ok: false, error: 'No sign-in is in progress. Start again from step 1.' }
+    }
+    const { engineId, vendorId, method, instructions } = flow
+    // A failed paste is TERMINAL for the flow, not a retryable field error:
+    // CodexLoginFlow.completeFromPastedInput() calls terminate() on every
+    // failure path (missing code, state mismatch, exchange error), so the
+    // host-held PKCE verifier is already gone. Dropping to `error` — which the
+    // surfaces render as an outcome plus their own start-over affordance — is
+    // therefore the honest state, and it is what the mockup's "Start again from
+    // step 1" means. Leaving the paste field up would invite the user to retype
+    // a code into a flow that can no longer accept one.
+    const fail = (message: string): { ok: false; error: string } => {
+      useSessionStore
+        .getState()
+        .setVendorOAuth({ engineId, vendorId, stage: 'error', instructions, error: message })
+      return { ok: false, error: message }
+    }
+    try {
+      // VERBATIM (trimmed by the caller): the backend decides URL-vs-code and
+      // applies the shape-dependent CSRF rule (ADR-057).
+      const ok = await window.api.vendorAuthOauthCallback(
+        engineId as EngineId,
+        vendorId,
+        method,
+        pasted
+      )
+      if (!ok) return fail('The vendor rejected that sign-in. Start again from step 1.')
+      useSessionStore.getState().setVendorOAuth(null)
+      return { ok: true }
+    } catch (err) {
+      return fail(errorText(err))
     }
   },
   retrySend: async (routingId, prompt) => {
@@ -3011,116 +2646,89 @@ export const useSessionStore = create<SessionState>((set) => ({
       undefined,
       session.selectedEngineId
     )
-    set((s) => ({ sessions: updateSession(s.sessions, routingId, () => ({ sdkActive: true })) }))
+    patchLocalSession(routingId, { sdkActive: true })
     await window.api.sendPrompt(routingId, prompt)
   },
   setBlockUsage: (data) => set({ blockUsage: data }),
   setActiveView: (view) => set({ activeView: view }),
+  requestWelcomeBrowse: () => set((s) => ({ welcomeBrowseToken: s.welcomeBrowseToken + 1 })),
   setPluginViews: (views) => set({ pluginViews: views }),
 
-  rekeySession: (oldId, newId) => {
-    // Record the mapping so events arriving with the old routingId can be resolved
-    setCapped(rekeyMap, oldId, newId, REKEY_MAP_MAX)
-    set((state) => {
-      if (oldId === newId) return state
-      const session = state.sessions[oldId]
-      if (!session) return state
-      const { [oldId]: _, ...rest } = state.sessions
-      const sessions = { ...rest, [newId]: session }
-      const activeSessionId = state.activeSessionId === oldId ? newId : state.activeSessionId
-      const recentSessionIds = state.recentSessionIds.map((id) => (id === oldId ? newId : id))
-      const pinnedSessionIds = state.pinnedSessionIds.map((id) => (id === oldId ? newId : id))
-      const hiddenSessionIds = state.hiddenSessionIds.map((id) => (id === oldId ? newId : id))
-      const customTitles = { ...state.customTitles }
-      if (customTitles[oldId]) {
-        customTitles[newId] = customTitles[oldId]
-        delete customTitles[oldId]
-      }
-      const worktreeInfoMap = { ...state.worktreeInfoMap }
-      if (worktreeInfoMap[oldId]) {
-        worktreeInfoMap[newId] = worktreeInfoMap[oldId]
-        delete worktreeInfoMap[oldId]
-      }
-      // Carry over persisted engine mapping to the canonical session ID
-      const sessionEngines = { ...state.sessionEngines }
-      if (sessionEngines[oldId]) {
-        sessionEngines[newId] = sessionEngines[oldId]
-        delete sessionEngines[oldId]
-      } else {
-        // Always record the engine + current model, defaulting to the session's choices
-        const modelRef = engineMeta(session.selectedEngineId).decodeModelValue(
-          session.selectedModel
-        )
-        sessionEngines[newId] = {
-          engineId: session.selectedEngineId,
-          model: modelRef
-        }
-      }
-      saveSessionConfig(state, {
-        recentSessionIds,
-        pinnedSessionIds,
-        hiddenSessionIds,
-        customTitles,
-        worktreeInfoMap,
-        sessionEngines
-      })
-      return {
-        sessions,
-        activeSessionId,
-        recentSessionIds,
-        pinnedSessionIds,
-        hiddenSessionIds,
-        customTitles,
-        worktreeInfoMap,
-        sessionEngines
-      }
-    })
+  clearConversation: async (routingId) => {
+    const state = useSessionStore.getState()
+    const session = state.sessions[routingId]
+    if (!session) return
+    // The SEALED half is no longer written here. It used to be a local
+    // `patchLocalSession`, which meant the clear existed only in the clearing
+    // client's replica: canonical kept the whole transcript, every other client
+    // kept showing it, and the next `sync-full` handed it back to the client that
+    // had just cleared it. Now this is an invoke, main emits the replicated
+    // `session:conversation-cleared`, and the fold blanks the same field set
+    // everywhere — including here, over the in-process MessagePort, which is why
+    // the originator still sees it clear immediately.
+    //
+    // The MODE has to travel with it: a cleared conversation's next message is a
+    // new RUN, so it starts in the configured default, and resolving that default
+    // needs `availableModels` + the auto-mode gate — client state no reducer and
+    // no main-process handler can see.
+    await window.api.clearConversation(
+      routingId,
+      bootstrapPermissionMode(state, session.selectedEngineId)
+    )
+    // The VIEW half (drafts, panels, toasts, fork origin) is per-client and dies
+    // here, as it always did.
+    set((s) => ({
+      sessions: updateSession(s.sessions, routingId, () => ({
+        isHistorical: false,
+        evicted: false,
+        forkOrigin: null,
+        errors: [],
+        warnings: [],
+        sandboxViolations: [],
+        openedTaskToolUseIds: [],
+        rightPanel: 'none' as const,
+        bashOutputs: {},
+        backgroundOutputs: {},
+        backgroundWatcherCounts: {},
+        stoppingTaskIds: [],
+        draftText: '',
+        draftAttachments: [],
+        planReview: null,
+        mockupDir: null,
+        mockupTitle: null,
+        vendorAuthRequired: null
+      }))
+    }))
   },
 
-  clearConversation: (routingId) =>
-    set((state) => {
-      const session = state.sessions[routingId]
-      if (!session) return state
-      return {
-        sessions: {
-          ...state.sessions,
-          [routingId]: { ...createEmptySession(session.cwd), sdkActive: session.sdkActive }
-        }
-      }
-    }),
-
-  // Worktree actions
-  setWorktreeInfo: (routingId, info) =>
-    set((state) => {
-      const worktreeInfoMap = { ...state.worktreeInfoMap }
-      if (info) {
-        worktreeInfoMap[routingId] = info
-      } else {
-        delete worktreeInfoMap[routingId]
-      }
-      saveSessionConfig(state, { worktreeInfoMap })
-      return {
-        worktreeInfoMap,
-        sessions: updateSession(state.sessions, routingId, (s) => ({
-          worktreeInfo: info,
-          // Also update cwd to worktree path so git watcher restarts on the new directory
-          ...(info && info.worktreePath && s.cwd !== info.worktreePath
-            ? { cwd: info.worktreePath }
-            : {})
-        }))
-      }
-    }),
-
-  clearWorktreeInfo: (routingId) =>
-    set((state) => {
-      const worktreeInfoMap = { ...state.worktreeInfoMap }
+  // Worktree actions. `worktreeInfoMap` is SEALED (`config:sessions-changed`), and
+  // the per-session `worktreeInfo` is projected from it — one map, one writer, so
+  // the reducer's worktree-EXIT rule (drop the entry when cwd returns to
+  // `originalCwd`) can no longer disagree with a second code path.
+  setWorktreeInfo: (routingId, info) => {
+    const state = useSessionStore.getState()
+    const worktreeInfoMap = { ...state.worktreeInfoMap }
+    if (info) {
+      worktreeInfoMap[routingId] = info
+    } else {
       delete worktreeInfoMap[routingId]
-      saveSessionConfig(state, { worktreeInfoMap })
-      return {
-        worktreeInfoMap,
-        sessions: updateSession(state.sessions, routingId, () => ({ worktreeInfo: null }))
-      }
-    }),
+    }
+    patchLocalApp({ worktreeInfoMap })
+    // Also update cwd to the worktree path so the git watcher restarts on the new
+    // directory. The host learns the same cwd from the engine's next status.
+    if (info?.worktreePath && state.sessions[routingId]?.cwd !== info.worktreePath) {
+      patchLocalSession(routingId, { cwd: info.worktreePath })
+    }
+    saveSessionConfig(state, { worktreeInfoMap })
+  },
+
+  clearWorktreeInfo: (routingId) => {
+    const state = useSessionStore.getState()
+    const worktreeInfoMap = { ...state.worktreeInfoMap }
+    delete worktreeInfoMap[routingId]
+    patchLocalApp({ worktreeInfoMap })
+    saveSessionConfig(state, { worktreeInfoMap })
+  },
 
   setQuitWorktrees: (sessions) => set({ quitWorktrees: sessions }),
 
@@ -3325,37 +2933,24 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     }),
 
-  closeTerminalTab: (id) => {
-    window.api.killTerminal(id)
-    set((state) => {
-      const groups = { ...state.terminalGroups }
-      for (const [key, group] of Object.entries(groups)) {
-        const idx = group.tabs.findIndex((t) => t.id === id)
-        if (idx === -1) continue
-        const tabs = group.tabs.filter((t) => t.id !== id)
-        const activeTabId =
-          group.activeTabId === id ? (tabs[tabs.length - 1]?.id ?? null) : group.activeTabId
-        groups[key] = { tabs, activeTabId }
-        break
-      }
-      return { terminalGroups: groups }
-    })
-  },
+  /**
+   * Drops a tab from its cwd group. Pure tab state — it kills nothing.
+   *
+   * Closing a terminal in the UI does kill the shell (ADR-062), but the panel
+   * owns that: it awaits `terminal:kill` and calls this only once the kill
+   * landed, so a refused kill leaves the tab where it is. Killing from here
+   * instead would fire on the DETACH path too (Shift-click, the tab menu), where
+   * the shell may still be open on a phone and must survive — and on every
+   * non-user caller of this reducer. The detach itself rides the XTermInstance
+   * unmount, which is the thing that actually holds the attachment.
+   *
+   * Identical to {@link removeTerminalTab}, which is the pty-exit path. A pty
+   * dies on its own `exit`, on an explicit `terminal:kill`, on the cold-session
+   * sweep (`killTerminalsByCwd`), and with the window.
+   */
+  closeTerminalTab: (id) => set((state) => dropTerminalTab(state.terminalGroups, id)),
 
-  removeTerminalTab: (id) =>
-    set((state) => {
-      const groups = { ...state.terminalGroups }
-      for (const [key, group] of Object.entries(groups)) {
-        const idx = group.tabs.findIndex((t) => t.id === id)
-        if (idx === -1) continue
-        const tabs = group.tabs.filter((t) => t.id !== id)
-        const activeTabId =
-          group.activeTabId === id ? (tabs[tabs.length - 1]?.id ?? null) : group.activeTabId
-        groups[key] = { tabs, activeTabId }
-        break
-      }
-      return { terminalGroups: groups }
-    }),
+  removeTerminalTab: (id) => set((state) => dropTerminalTab(state.terminalGroups, id)),
 
   setActiveTerminal: (id, cwd) =>
     set((state) => {
@@ -3518,109 +3113,4 @@ export function useFocusedAgentData(): FocusedAgentData {
       }
     })
   )
-}
-
-// ---------------------------------------------------------------------------
-// Remote state snapshot (called from main process via executeJavaScript)
-// ---------------------------------------------------------------------------
-
-/**
- * Build a serializable snapshot of the current Zustand state for remote clients.
- * Strips UI-only fields (draft text, git diffs, etc.) to keep the payload lean.
- */
-export function getRemoteStateSnapshot(): {
-  sessions: Record<
-    string,
-    {
-      routingId: string
-      cwd: string
-      messages: ChatMessage[]
-      streamingText: string
-      streamingThinking: string
-      status: SessionStatus
-      pendingApprovals: PendingApproval[]
-      todos: TodoItem[]
-      sentFiles: SentFile[]
-      taskNotifications: TaskNotification[]
-      activeTasks: Record<string, { taskId: string; taskType: string }>
-      taskProgressMap: Record<string, TaskProgress>
-      subagentMessages: Record<string, ChatMessage[]>
-      subagentStreamingText: Record<string, string>
-      subagentStreamingThinking: Record<string, string>
-      permissionMode: string
-      effort: string
-      thinkingMode: string
-      reasoningVariant: string | null
-      statusLine: StatusLineData | null
-      slashCommands: SlashCommandInfo[]
-      customCommands: SlashCommandInfo[]
-      sdkSkillNames: string[]
-      sdkActive: boolean
-      selectedEngineId: EngineId
-      selectedModel: string
-    }
-  >
-  directories: DirectoryGroup[]
-  activeSessionId: string | null
-  settings: Record<string, unknown>
-  recentSessionIds: string[]
-  pinnedSessionIds: string[]
-  customTitles: Record<string, string>
-  worktreeInfoMap: Record<string, WorktreeInfo>
-  sessionEngines: Record<string, { engineId: EngineId; model?: ModelRef }>
-  hiddenSessions: string[]
-  hiddenProjects: string[]
-} {
-  const state = useSessionStore.getState()
-  const sessions: Record<string, unknown> = {}
-
-  for (const [id, s] of Object.entries(state.sessions)) {
-    sessions[id] = {
-      routingId: id,
-      cwd: s.cwd,
-      messages: s.messages,
-      streamingText: s.streamingText,
-      streamingThinking: s.streamingThinking,
-      status: s.status,
-      pendingApprovals: s.pendingApprovals,
-      todos: s.todos,
-      sentFiles: s.sentFiles,
-      taskNotifications: s.taskNotifications,
-      activeTasks: s.activeTasks,
-      taskProgressMap: s.taskProgressMap,
-      subagentMessages: s.subagentMessages,
-      subagentStreamingText: s.subagentStreamingText,
-      subagentStreamingThinking: s.subagentStreamingThinking,
-      permissionMode: s.permissionMode,
-      effort: s.effort,
-      thinkingMode: s.thinkingMode,
-      reasoningVariant: s.reasoningVariant,
-      statusLine: s.statusLine,
-      slashCommands: state.slashCommands,
-      customCommands: state.customCommands,
-      sdkSkillNames: state.sdkSkillNames,
-      // H15 — a remote client needs the live engine identity so its first send
-      // steers the running session instead of respawning it as Claude.
-      sdkActive: s.sdkActive,
-      selectedEngineId: s.selectedEngineId,
-      selectedModel: s.selectedModel
-    }
-  }
-
-  return {
-    sessions: sessions as ReturnType<typeof getRemoteStateSnapshot>['sessions'],
-    directories: state.directories,
-    activeSessionId: state.activeSessionId,
-    settings: state.settings as unknown as Record<string, unknown>,
-    recentSessionIds: state.recentSessionIds,
-    pinnedSessionIds: state.pinnedSessionIds,
-    customTitles: state.customTitles,
-    worktreeInfoMap: state.worktreeInfoMap,
-    // H15 — carry the per-session engine/model map + hidden lists so a remote
-    // client's save round-trips the real state instead of an empty map that
-    // would wipe every session's engine mapping on the desktop.
-    sessionEngines: state.sessionEngines,
-    hiddenSessions: state.hiddenSessionIds,
-    hiddenProjects: state.hiddenProjectKeys
-  }
 }

@@ -43,8 +43,12 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
-import { PiRpcClient } from '../../main/pi/PiRpcClient'
-import { PiBridgeHost, writeBridgeExtension, writeSubagentExtension } from '../../main/pi/PiBridgeHost'
+import { PiRpcClient } from '../../core/pi/PiRpcClient'
+import {
+  PiBridgeHost,
+  writeBridgeExtension,
+  writeSubagentExtension
+} from '../../core/pi/PiBridgeHost'
 
 const SKIP = !process.env.PI_INTEGRATION_TESTS
 const BINARY_NAME = process.platform === 'win32' ? 'pi.exe' : 'pi'
@@ -112,95 +116,110 @@ function findSubagentToolResultText(events: Record<string, unknown>[]): string |
   return null
 }
 
-describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)('pi in-pi subagent integration (M5b)', () => {
-  let client: PiRpcClient
-  let bridgeHost: PiBridgeHost
-  let tmpDir: string
-  let agentsDir: string
-  const events: Record<string, unknown>[] = []
+describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
+  'pi in-pi subagent integration (M5b)',
+  () => {
+    let client: PiRpcClient
+    let bridgeHost: PiBridgeHost
+    let tmpDir: string
+    let agentsDir: string
+    const events: Record<string, unknown>[] = []
 
-  beforeAll(async () => {
-    tmpDir = mkdtempSync(join(tmpdir(), 'pi-subagent-guard-'))
-    agentsDir = mkdtempSync(join(tmpdir(), 'pi-subagent-guard-agents-'))
-    writeFileSync(join(agentsDir, 'echoer.md'), ECHOER_MD, 'utf-8')
+    beforeAll(async () => {
+      tmpDir = mkdtempSync(join(tmpdir(), 'pi-subagent-guard-'))
+      agentsDir = mkdtempSync(join(tmpdir(), 'pi-subagent-guard-agents-'))
+      writeFileSync(join(agentsDir, 'echoer.md'), ECHOER_MD, 'utf-8')
 
-    // Gate handler: real product code, always-allow (the 'task'-kind gating
-    // policy for `subagent` itself is unit-tested in permission-engine.test.ts
-    // — this integration test only proves the TRANSPORT + the extension's OWN
-    // child-spawn logic, not the approval policy).
-    const gateHandler = async (): Promise<{ behavior: 'allow' }> => ({ behavior: 'allow' })
-    bridgeHost = new PiBridgeHost(gateHandler)
-    const { url, token } = await bridgeHost.start()
-    // Real product code — the SAME two file writers PiSession.doStart() calls.
-    const bridgePath = writeBridgeExtension()
-    const subagentPath = writeSubagentExtension()
+      // Gate handler: real product code, always-allow (the 'task'-kind gating
+      // policy for `subagent` itself is unit-tested in permission-engine.test.ts
+      // — this integration test only proves the TRANSPORT + the extension's OWN
+      // child-spawn logic, not the approval policy).
+      const gateHandler = async (): Promise<{ behavior: 'allow' }> => ({ behavior: 'allow' })
+      bridgeHost = new PiBridgeHost(gateHandler)
+      const { url, token } = await bridgeHost.start()
+      // Real product code — the SAME two file writers PiSession.doStart() calls.
+      const bridgePath = writeBridgeExtension()
+      const subagentPath = writeSubagentExtension()
 
-    const binary = findBinary()!
-    client = new PiRpcClient(binary, {
-      cwd: tmpDir,
-      args: ['--mode', 'rpc', '-e', bridgePath, '-e', subagentPath, '--session-dir', tmpDir],
-      env: {
-        CLAUDEUI_PI_BRIDGE_URL: url,
-        CLAUDEUI_PI_BRIDGE_TOKEN: token,
-        // The exact env vars PiSession.doStart() sets when capabilities.subagents
-        // is true (M5b) — proves the real subagent extension registers under
-        // this real gating, not a synthetic one. CLAUDEUI_PI_AGENTS_DIR
-        // overrides the default `~/.pi/agent/agents` so this test never
-        // touches the dev machine's real agent definitions.
-        CLAUDEUI_PI_SUBAGENTS: '1',
-        CLAUDEUI_PI_AGENTS_DIR: agentsDir,
-        CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL: `${MODEL.provider}/${MODEL.modelId}`
+      const binary = findBinary()!
+      client = new PiRpcClient(binary, {
+        cwd: tmpDir,
+        args: ['--mode', 'rpc', '-e', bridgePath, '-e', subagentPath, '--session-dir', tmpDir],
+        env: {
+          CLAUDEUI_PI_BRIDGE_URL: url,
+          CLAUDEUI_PI_BRIDGE_TOKEN: token,
+          // The exact env vars PiSession.doStart() sets when capabilities.subagents
+          // is true (M5b) — proves the real subagent extension registers under
+          // this real gating, not a synthetic one. CLAUDEUI_PI_AGENTS_DIR
+          // overrides the default `~/.pi/agent/agents` so this test never
+          // touches the dev machine's real agent definitions.
+          CLAUDEUI_PI_SUBAGENTS: '1',
+          CLAUDEUI_PI_AGENTS_DIR: agentsDir,
+          CLAUDEUI_PI_SUBAGENT_DEFAULT_MODEL: `${MODEL.provider}/${MODEL.modelId}`
+        }
+      })
+      client.onEvent((ev) => events.push(ev as unknown as Record<string, unknown>))
+      await client.start()
+
+      const setModelResp = await client.request(
+        { type: 'set_model', provider: MODEL.provider, modelId: MODEL.modelId },
+        45_000
+      )
+      expect(setModelResp.success, `set_model failed: ${JSON.stringify(setModelResp)}`).toBe(true)
+    }, 45_000)
+
+    afterAll(async () => {
+      client?.dispose()
+      bridgeHost?.dispose()
+      // Windows holds the cwd handle briefly after the parent (and any child)
+      // process exits — wait, with a bounded fallback, before touching the tmp
+      // dirs. Mirrors pi-hosted-tools.integration.test.ts's identical precedent.
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+      if (tmpDir) rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+      if (agentsDir)
+        rmSync(agentsDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+    })
+
+    /** Poll the shared events buffer until an `agent_settled` appears since `fromIndex` — the real turn-complete signal (docs/protocol-pi/README.md). Generous timeout: this turn spawns a SECOND real pi process that makes its OWN real model call. */
+    async function waitForTurnEnd(
+      fromIndex: number,
+      timeoutMs = 120_000
+    ): Promise<Record<string, unknown>[]> {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        const slice = events.slice(fromIndex)
+        if (slice.some((ev) => ev.type === 'agent_settled')) return slice
+        await new Promise((resolve) => setTimeout(resolve, 300))
       }
-    })
-    client.onEvent((ev) => events.push(ev as unknown as Record<string, unknown>))
-    await client.start()
-
-    const setModelResp = await client.request({ type: 'set_model', provider: MODEL.provider, modelId: MODEL.modelId }, 45_000)
-    expect(setModelResp.success, `set_model failed: ${JSON.stringify(setModelResp)}`).toBe(true)
-  }, 45_000)
-
-  afterAll(async () => {
-    client?.dispose()
-    bridgeHost?.dispose()
-    // Windows holds the cwd handle briefly after the parent (and any child)
-    // process exits — wait, with a bounded fallback, before touching the tmp
-    // dirs. Mirrors pi-hosted-tools.integration.test.ts's identical precedent.
-    await new Promise((resolve) => setTimeout(resolve, 1_000))
-    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
-    if (agentsDir) rmSync(agentsDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
-  })
-
-  /** Poll the shared events buffer until an `agent_settled` appears since `fromIndex` — the real turn-complete signal (docs/protocol-pi/README.md). Generous timeout: this turn spawns a SECOND real pi process that makes its OWN real model call. */
-  async function waitForTurnEnd(fromIndex: number, timeoutMs = 120_000): Promise<Record<string, unknown>[]> {
-    const deadline = Date.now() + timeoutMs
-    while (Date.now() < deadline) {
-      const slice = events.slice(fromIndex)
-      if (slice.some((ev) => ev.type === 'agent_settled')) return slice
-      await new Promise((resolve) => setTimeout(resolve, 300))
+      throw new Error(
+        `turn did not settle within ${timeoutMs}ms — events so far: ${JSON.stringify(events.slice(fromIndex))}`
+      )
     }
-    throw new Error(`turn did not settle within ${timeoutMs}ms — events so far: ${JSON.stringify(events.slice(fromIndex))}`)
+
+    it("a real model turn calls subagent -> a real child pi process runs -> cuiSubagent updates arrive -> the final result contains the child's answer", async () => {
+      const fromIndex = events.length
+      const resp = await client.request({
+        type: 'prompt',
+        message:
+          "Call the subagent tool EXACTLY once with agent 'echoer' and task 'ping' -- no other tool calls, " +
+          'no explanation, just make the call and then report back exactly what it returned.'
+      })
+      expect(resp.success).toBe(true)
+
+      const turnEvents = await waitForTurnEnd(fromIndex, 120_000)
+
+      const subagentUpdates = findSubagentUpdates(turnEvents)
+      expect(
+        subagentUpdates.length,
+        `no tool_execution_update carried a cuiSubagent payload — events: ${JSON.stringify(turnEvents)}`
+      ).toBeGreaterThan(0)
+
+      const toolResultText = findSubagentToolResultText(turnEvents)
+      expect(
+        toolResultText,
+        `subagent toolResult never arrived — events: ${JSON.stringify(turnEvents)}`
+      ).not.toBeNull()
+      expect(toolResultText).toMatch(/ECHO:\s*ping/i)
+    }, 150_000)
   }
-
-  it('a real model turn calls subagent -> a real child pi process runs -> cuiSubagent updates arrive -> the final result contains the child\'s answer', async () => {
-    const fromIndex = events.length
-    const resp = await client.request({
-      type: 'prompt',
-      message:
-        "Call the subagent tool EXACTLY once with agent 'echoer' and task 'ping' -- no other tool calls, " +
-        'no explanation, just make the call and then report back exactly what it returned.'
-    })
-    expect(resp.success).toBe(true)
-
-    const turnEvents = await waitForTurnEnd(fromIndex, 120_000)
-
-    const subagentUpdates = findSubagentUpdates(turnEvents)
-    expect(
-      subagentUpdates.length,
-      `no tool_execution_update carried a cuiSubagent payload — events: ${JSON.stringify(turnEvents)}`
-    ).toBeGreaterThan(0)
-
-    const toolResultText = findSubagentToolResultText(turnEvents)
-    expect(toolResultText, `subagent toolResult never arrived — events: ${JSON.stringify(turnEvents)}`).not.toBeNull()
-    expect(toolResultText).toMatch(/ECHO:\s*ping/i)
-  }, 150_000)
-})
+)

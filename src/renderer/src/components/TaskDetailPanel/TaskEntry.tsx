@@ -159,7 +159,11 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   }
 
   return (
-    <div data-testid="TaskEntry" data-id={toolUseId} className="flex flex-col min-h-0 h-full overflow-hidden">
+    <div
+      data-testid="TaskEntry"
+      data-id={toolUseId}
+      className="flex flex-col min-h-0 h-full overflow-hidden"
+    >
       <button
         data-testid="TaskEntry.toggle"
         onClick={() => setExpanded(!expanded)}

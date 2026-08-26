@@ -28,6 +28,7 @@ import { useSessionStore } from '../../../stores/session-store'
 import { makePendingApproval, resetFactoryCounter } from '@test/factories/messages'
 import type { PendingApproval, PermissionSuggestion } from '../../../../../shared/types'
 import { FloatingApproval } from '../FloatingApproval'
+import { seed, resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 let bridge: TestIpcBridge
 
@@ -41,6 +42,10 @@ let lastApprovalResponse: {
 } | null = null
 
 beforeEach(() => {
+  // The replica is a module singleton holding canonical state: resetting only the
+  // store would leave the two disagreeing and the next projection would resurrect
+  // the previous test's sessions (SyncCore phase 4c).
+  resetReplicaSeam()
   bridge = new TestIpcBridge()
   resetFactoryCounter()
   lastApprovalResponse = null
@@ -92,10 +97,13 @@ beforeEach(() => {
     pinnedSessionIds: [],
     customTitles: {}
   })
+  mirrorStoreIntoReplica()
   // Reset sandbox exclusions (mutated by sandbox escape tests)
   const currentSandbox = useSessionStore.getState().engineConfig.sandbox
   if (currentSandbox) {
-    useSessionStore.getState().setEngineConfig({ sandbox: { ...currentSandbox, excludedCommands: [] } })
+    useSessionStore
+      .getState()
+      .setEngineConfig({ sandbox: { ...currentSandbox, excludedCommands: [] } })
   }
 })
 
@@ -117,7 +125,7 @@ async function simulateApprovalResponse(
     checkedSuggestions?: boolean[]
   } = {}
 ): Promise<void> {
-  const { activeSessionId, sessions, removePendingApproval, engineConfig, setEngineConfig } =
+  const { activeSessionId, sessions, dismissApproval, engineConfig, setEngineConfig } =
     useSessionStore.getState()
   if (!activeSessionId) return
 
@@ -138,7 +146,21 @@ async function simulateApprovalResponse(
     if (!currentExcluded.includes(cmd)) {
       const nextSandbox = sandboxSettings
         ? { ...sandboxSettings, excludedCommands: [...currentExcluded, cmd] }
-        : { enabled: false, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false, network: { restrictNetwork: false, allowLocalBinding: false, allowedDomains: [], allowManagedDomainsOnly: false, allowAllUnixSockets: false, allowUnixSockets: [] }, filesystem: { allowWrite: [], denyWrite: [], denyRead: [] }, excludedCommands: [cmd] }
+        : {
+            enabled: false,
+            autoAllowBashIfSandboxed: false,
+            allowUnsandboxedCommands: false,
+            network: {
+              restrictNetwork: false,
+              allowLocalBinding: false,
+              allowedDomains: [],
+              allowManagedDomainsOnly: false,
+              allowAllUnixSockets: false,
+              allowUnixSockets: []
+            },
+            filesystem: { allowWrite: [], denyWrite: [], denyRead: [] },
+            excludedCommands: [cmd]
+          }
       setEngineConfig({ ...engineConfig, sandbox: nextSandbox })
     }
   }
@@ -156,7 +178,7 @@ async function simulateApprovalResponse(
     undefined,
     selected?.length ? selected : undefined
   )
-  removePendingApproval(activeSessionId, approval.requestId)
+  dismissApproval(activeSessionId, approval.requestId)
 }
 
 // ---------------------------------------------------------------------------
@@ -171,7 +193,7 @@ describe('FloatingApproval approval response flow', () => {
     useSessionStore.setState({ activeSessionId: ROUTE })
 
     const approval = makePendingApproval(approvalOverrides)
-    useSessionStore.getState().addPendingApproval(ROUTE, approval)
+    seed.approvalRequest(ROUTE, approval)
     return approval
   }
 
@@ -303,7 +325,21 @@ describe('FloatingApproval approval response flow', () => {
       ...store.engineConfig,
       sandbox: existing
         ? { ...existing, excludedCommands: ['dangerous-cmd'] }
-        : { enabled: false, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false, network: { restrictNetwork: false, allowLocalBinding: false, allowedDomains: [], allowManagedDomainsOnly: false, allowAllUnixSockets: false, allowUnixSockets: [] }, filesystem: { allowWrite: [], denyWrite: [], denyRead: [] }, excludedCommands: ['dangerous-cmd'] }
+        : {
+            enabled: false,
+            autoAllowBashIfSandboxed: false,
+            allowUnsandboxedCommands: false,
+            network: {
+              restrictNetwork: false,
+              allowLocalBinding: false,
+              allowedDomains: [],
+              allowManagedDomainsOnly: false,
+              allowAllUnixSockets: false,
+              allowUnixSockets: []
+            },
+            filesystem: { allowWrite: [], denyWrite: [], denyRead: [] },
+            excludedCommands: ['dangerous-cmd']
+          }
     })
 
     setup({
@@ -314,7 +350,9 @@ describe('FloatingApproval approval response flow', () => {
     await simulateApprovalResponse('allow', { alwaysAllow: true })
 
     const sandbox = useSessionStore.getState().engineConfig.sandbox
-    expect((sandbox?.excludedCommands ?? []).filter((c: string) => c === 'dangerous-cmd')).toHaveLength(1)
+    expect(
+      (sandbox?.excludedCommands ?? []).filter((c: string) => c === 'dangerous-cmd')
+    ).toHaveLength(1)
   })
 
   it('does not modify sandbox exclusions for non-sandbox-escape approvals', async () => {
@@ -344,8 +382,8 @@ describe('FloatingApproval approval response flow', () => {
 
     const approval1 = makePendingApproval({ toolName: 'Bash', input: { command: 'ls' } })
     const approval2 = makePendingApproval({ toolName: 'Read', input: { file_path: '/foo' } })
-    useSessionStore.getState().addPendingApproval(ROUTE, approval1)
-    useSessionStore.getState().addPendingApproval(ROUTE, approval2)
+    seed.approvalRequest(ROUTE, approval1)
+    seed.approvalRequest(ROUTE, approval2)
 
     // Respond to first only
     await simulateApprovalResponse('allow')
@@ -368,7 +406,7 @@ describe('FloatingApproval rendered component', () => {
     useSessionStore.setState({ activeSessionId: ROUTE })
 
     const approval = makePendingApproval(approvalOverrides)
-    useSessionStore.getState().addPendingApproval(ROUTE, approval)
+    seed.approvalRequest(ROUTE, approval)
     return approval
   }
 
@@ -490,8 +528,8 @@ describe('FloatingApproval rendered component', () => {
 
     const approval1 = makePendingApproval({ toolName: 'Bash', input: { command: 'ls' } })
     const approval2 = makePendingApproval({ toolName: 'Read', input: { file_path: '/foo' } })
-    useSessionStore.getState().addPendingApproval(ROUTE, approval1)
-    useSessionStore.getState().addPendingApproval(ROUTE, approval2)
+    seed.approvalRequest(ROUTE, approval1)
+    seed.approvalRequest(ROUTE, approval2)
 
     render(<FloatingApproval />)
 
@@ -506,8 +544,8 @@ describe('FloatingApproval rendered component', () => {
 
     const approval1 = makePendingApproval({ toolName: 'Bash', input: { command: 'ls' } })
     const approval2 = makePendingApproval({ toolName: 'Read', input: { file_path: '/foo' } })
-    useSessionStore.getState().addPendingApproval(ROUTE, approval1)
-    useSessionStore.getState().addPendingApproval(ROUTE, approval2)
+    seed.approvalRequest(ROUTE, approval1)
+    seed.approvalRequest(ROUTE, approval2)
 
     render(<FloatingApproval />)
 
@@ -538,7 +576,7 @@ describe('FloatingApproval "Allow for session" button', () => {
     useSessionStore.setState({ activeSessionId: 'route-claude' })
 
     const approval = makePendingApproval({ toolName: 'Shell', input: { command: 'ls' } })
-    useSessionStore.getState().addPendingApproval('route-claude', approval)
+    seed.approvalRequest('route-claude', approval)
 
     render(<FloatingApproval />)
 
@@ -570,7 +608,10 @@ describe('FloatingApproval — AskUserQuestion floating card (child question)', 
           {
             question: 'Pick one',
             header: 'Choice',
-            options: [{ label: 'Option A', description: '' }, { label: 'Option B', description: '' }],
+            options: [
+              { label: 'Option A', description: '' },
+              { label: 'Option B', description: '' }
+            ],
             multiSelect: false
           }
         ]
@@ -583,7 +624,7 @@ describe('FloatingApproval — AskUserQuestion floating card (child question)', 
     useSessionStore.setState({ activeSessionId: ROUTE })
     const approval = makeQuestionApproval()
     const merged = { ...approval, ...overrides }
-    useSessionStore.getState().addPendingApproval(ROUTE, merged)
+    seed.approvalRequest(ROUTE, merged)
     return merged
   }
 
@@ -649,7 +690,7 @@ describe('FloatingApproval — AskUserQuestion floating card (child question)', 
     useSessionStore.getState().createNewSession(ROUTE, '/test')
     useSessionStore.setState({ activeSessionId: ROUTE })
     const permApproval = makePendingApproval({ toolName: 'Bash', input: { command: 'ls' } })
-    useSessionStore.getState().addPendingApproval(ROUTE, permApproval)
+    seed.approvalRequest(ROUTE, permApproval)
     render(<FloatingApproval />)
     expect(screen.getByText('Allow')).toBeInTheDocument()
     expect(screen.getByText('Deny')).toBeInTheDocument()

@@ -34,11 +34,11 @@ vi.mock('os', async () => {
   }
 })
 
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), warn: vi.fn(), info: vi.fn(), error: vi.fn() }
 }))
 
-import { isWorkspaceTrusted } from '../claude-settings'
+import { isWorkspaceTrusted } from '../../../core/services/claude-settings'
 
 const CLAUDE_JSON = path.join(hoisted.TEST_HOME, '.claude.json')
 

@@ -103,7 +103,12 @@ function claudeNormalize(
     case 'web':
       return {
         kind: 'web',
-        target: inp.url != null ? String(inp.url) : inp.query != null ? String(inp.query) : JSON.stringify(inp)
+        target:
+          inp.url != null
+            ? String(inp.url)
+            : inp.query != null
+              ? String(inp.query)
+              : JSON.stringify(inp)
       }
 
     case 'task': {
@@ -127,11 +132,12 @@ function claudeNormalize(
         description: inp.description != null ? String(inp.description) : '',
         prompt: inp.prompt != null ? String(inp.prompt) : '',
         // Claude uses snake_case subagent_type; fall back to camelCase for older transcripts
-        subagent: inp.subagent_type != null
-          ? String(inp.subagent_type)
-          : inp.subagentType != null
-            ? String(inp.subagentType)
-            : undefined,
+        subagent:
+          inp.subagent_type != null
+            ? String(inp.subagent_type)
+            : inp.subagentType != null
+              ? String(inp.subagentType)
+              : undefined,
         model: inp.model != null ? String(inp.model) : undefined,
         background: inp.run_in_background != null ? Boolean(inp.run_in_background) : undefined
       }

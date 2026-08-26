@@ -2,12 +2,14 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import { ipcMain, BrowserWindow } from 'electron'
-import { query as sdkQuery } from '../sdk'
-import { logger } from './logger'
-import { SessionManager } from './session-manager'
-import { AutomationManager } from './automation-manager'
-import { RemoteDispatcher } from './remote-dispatcher'
-import { BaseSession } from '../providers/BaseSession'
+import { query as sdkQuery } from '../../core/sdk'
+import { logger } from '../../core/services/logger'
+import { SessionManager } from '../../core/services/session-manager'
+import { AutomationManager } from '../../core/services/automation-manager'
+import { RemoteDispatcher } from '../../core/services/remote-dispatcher'
+import { commandRegistry, hostConnection, registerCommand } from '../../core/ipc/command-registry'
+import { addStreamObserver, addSyncSubscriber } from '../../core/services/sync-host'
+import { streamFrameToEmission } from '../../core/shared/sync/stream'
 import type {
   ClaudeUIPlugin,
   PluginContext,
@@ -21,37 +23,19 @@ const PLUGINS_DIR = path.join(os.homedir(), '.claude', 'ui', 'plugins')
 const ACTIVATION_TIMEOUT_MS = 10_000
 const LOG_SOURCE = 'plugin-manager'
 
-// ---------------------------------------------------------------------------
-// PluginBridge — virtual BrowserWindow that bridges session events to plugins
-// ---------------------------------------------------------------------------
-
-class PluginBridge {
-  private destroyed = false
-  private pushFn: ((channel: string, ...args: unknown[]) => void) | null = null
-
-  onEvent(fn: (channel: string, ...args: unknown[]) => void): void {
-    this.pushFn = fn
-  }
-
-  isDestroyed(): boolean {
-    return this.destroyed
-  }
-
-  get webContents(): { send: (channel: string, ...args: unknown[]) => void } {
-    return {
-      send: (channel: string, ...args: unknown[]): void => {
-        if (!this.destroyed && this.pushFn) {
-          this.pushFn(channel, ...args)
-        }
-      }
-    }
-  }
-
-  destroy(): void {
-    this.destroyed = true
-    this.pushFn = null
-  }
-}
+/**
+ * Capability/kind for every `plugin:<id>:<channel>` a plugin registers.
+ *
+ * PARITY: plugin remote handlers are reachable from a remote client today (the
+ * pre-registry dispatcher never denylisted them), so their capability has to be
+ * one a remote connection is granted — hence `config`, the extension/config
+ * bucket, and NOT `admin`, which would silently remove a working surface. The
+ * honest caveat is that plugin code runs unsandboxed in the main process, so
+ * `config` under-states the authority a plugin channel actually carries; making
+ * plugins declare their own capability is a follow-up, not a phase-1 change.
+ * `command` (never `query`) so every plugin invocation lands in the audit log.
+ */
+const PLUGIN_CHANNEL_DECLARATION = { capability: 'config', kind: 'command' } as const
 
 // ---------------------------------------------------------------------------
 // LoadedPlugin — internal tracking
@@ -76,7 +60,10 @@ interface LoadedPlugin {
 export class PluginManager {
   private plugins = new Map<string, LoadedPlugin>()
   private eventListeners = new Map<string, Set<(...args: unknown[]) => void>>()
-  private bridge: PluginBridge
+  /** Unsubscribe for this manager's funnel sink (SyncCore phase 4c). */
+  private unsubscribeSync: (() => void) | null = null
+  /** Removal for this manager's volatile-lane observer (phase 5 S1). */
+  private unsubscribeStream: (() => void) | null = null
   private win: BrowserWindow
   private sessionManager: SessionManager
   private automationManager: AutomationManager
@@ -94,29 +81,75 @@ export class PluginManager {
     this.automationManager = opts.automationManager
     this.remoteDispatcher = opts.remoteDispatcher
 
-    // Create bridge and wire it to the event bus.
+    // Subscribe to the funnel's fan-out (SyncCore phase 4c — the fake-BrowserWindow
+    // `PluginBridge` is gone; a plugin surface is one subscriber like every other
+    // client).
+    //
     // Session events arrive as (channel, routingId, data) from BaseSession.send().
     // We wrap them into an object with { routingId, sessionId, ...data } so plugins
     // get a stable, self-documenting event shape (see ADR-005).
-    this.bridge = new PluginBridge()
-    this.bridge.onEvent((channel, ...args) => {
+    this.unsubscribeSync = addSyncSubscriber((_seq, channel, args) => {
       if (this.tracing) {
         logger.debug(LOG_SOURCE, `[trace] ${channel} ${JSON.stringify(args).slice(0, 200)}`)
       }
-      if (channel.startsWith('session:') && args.length >= 2) {
-        const routingId = args[0] as string
-        const data = args[1]
-        const sessionId = this.sessionManager.getSessionId(routingId)
-        this.fireEvent(channel, {
-          routingId,
-          sessionId,
-          ...(data && typeof data === 'object' ? (data as Record<string, unknown>) : { data })
-        })
-      } else {
-        this.fireEvent(channel, ...args)
-      }
+      this.fireSessionScoped(channel, args)
     })
-    BaseSession.addExtraWindow(this.bridge as unknown as BrowserWindow)
+
+    // The VOLATILE LANE (phase 5 S1, extended by S2). The two delta channels and
+    // then the three tails stopped being events, so a plain sync subscriber no
+    // longer sees them — but a plugin's contract predates the lane split and must
+    // not change because of it. An in-process OBSERVER receives every frame (it
+    // has no session selection to filter by, unlike a remote connection) and it is
+    // re-materialized into the emission shape plugins have always been handed: a
+    // text frame through the shared inverse, a PASS-THROUGH frame by simply
+    // reading `(channel, args)` back off it — it never stopped being the emission.
+    //
+    // GATED on someone actually listening: with no plugin subscribed to these
+    // channels the synthesis is skipped entirely, so the token firehose costs
+    // nothing on a machine with no plugins — which is every machine by default.
+    this.unsubscribeStream = addStreamObserver((frame) => {
+      if (frame.type === 'stream-ev') {
+        if (!this.hasListeners(frame.channel)) return
+        if (this.tracing) {
+          logger.debug(LOG_SOURCE, `[trace] ${frame.channel} (volatile)`)
+        }
+        this.fireSessionScoped(frame.channel, frame.args)
+        return
+      }
+      if (!this.hasStreamListeners()) return
+      const emission = streamFrameToEmission(frame)
+      if (!emission) return
+      if (this.tracing) {
+        logger.debug(LOG_SOURCE, `[trace] ${emission.channel} ${frame.streamId}`)
+      }
+      this.fireSessionScoped(emission.channel, [emission.routingId, emission.data])
+    })
+  }
+
+  /** Is any plugin listening to `channel`? */
+  private hasListeners(channel: string): boolean {
+    return (this.eventListeners.get(channel)?.size ?? 0) > 0
+  }
+
+  /** Is any plugin listening to the lane's two TEXT-STREAM channels? */
+  private hasStreamListeners(): boolean {
+    return this.hasListeners('session:stream') || this.hasListeners('session:subagent-stream')
+  }
+
+  /** One wrapper for both lanes — see the ADR-005 event shape note above. */
+  private fireSessionScoped(channel: string, args: unknown[]): void {
+    if (channel.startsWith('session:') && args.length >= 2) {
+      const routingId = args[0] as string
+      const data = args[1]
+      const sessionId = this.sessionManager.getSessionId(routingId)
+      this.fireEvent(channel, {
+        routingId,
+        sessionId,
+        ...(data && typeof data === 'object' ? (data as Record<string, unknown>) : { data })
+      })
+      return
+    }
+    this.fireEvent(channel, ...args)
   }
 
   // -------------------------------------------------------------------------
@@ -169,8 +202,10 @@ export class PluginManager {
         logger.error(LOG_SOURCE, `Error deactivating plugin "${id}" during shutdown`, err)
       }
     }
-    BaseSession.removeExtraWindow(this.bridge as unknown as BrowserWindow)
-    this.bridge.destroy()
+    this.unsubscribeSync?.()
+    this.unsubscribeSync = null
+    this.unsubscribeStream?.()
+    this.unsubscribeStream = null
   }
 
   listPlugins(): PluginInfo[] {
@@ -433,12 +468,21 @@ export class PluginManager {
         handler: (...args: unknown[]) => unknown
       ): Disposable => {
         const fullChannel = `plugin:${id}:${channel}`
-        ipcMain.handle(fullChannel, (_event, ...args) => handler(...args))
+        registerCommand({
+          channel: fullChannel,
+          ...PLUGIN_CHANNEL_DECLARATION,
+          transport: 'desktop',
+          handler: (...args: unknown[]) => handler(...args)
+        })
+        ipcMain.handle(fullChannel, (_event, ...args: unknown[]) =>
+          commandRegistry.dispatch(fullChannel, 'desktop', args, hostConnection())
+        )
         pluginLogger.debug(`Registered IPC handler: ${fullChannel}`)
 
         const disposable: Disposable = {
           dispose: () => {
             ipcMain.removeHandler(fullChannel)
+            commandRegistry.unregister(fullChannel, 'desktop')
             pluginLogger.debug(`Removed IPC handler: ${fullChannel}`)
           }
         }
@@ -451,7 +495,12 @@ export class PluginManager {
         handler: (...args: unknown[]) => unknown
       ): Disposable => {
         const fullChannel = `plugin:${id}:${channel}`
-        this.remoteDispatcher.register(fullChannel, async (...args) => handler(...args))
+        registerCommand({
+          channel: fullChannel,
+          ...PLUGIN_CHANNEL_DECLARATION,
+          transport: 'remote',
+          handler: async (...args: unknown[]) => handler(...args)
+        })
         pluginLogger.debug(`Registered remote handler: ${fullChannel}`)
 
         const disposable: Disposable = {

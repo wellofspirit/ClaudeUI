@@ -34,7 +34,10 @@ export function PluginWebView({ pluginId, onClose }: PluginWebViewProps): React.
 
   if (!view) {
     return (
-      <div data-testid="PluginWebView" className="flex flex-col h-full bg-bg-primary items-center justify-center text-text-muted">
+      <div
+        data-testid="PluginWebView"
+        className="flex flex-col h-full bg-bg-primary items-center justify-center text-text-muted"
+      >
         Plugin view not found
       </div>
     )

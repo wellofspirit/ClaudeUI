@@ -13,6 +13,8 @@
  *   at our per-test temp dir.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
+import { clearSyncSubscribersForTests, syncCore } from '../../../core/services/sync-host'
 import * as fsp from 'node:fs/promises'
 import * as path from 'node:path'
 
@@ -48,19 +50,19 @@ const { testHome, loadSessionHistoryMock } = vi.hoisted(() => {
 
 // claude-session is only used for `ClaudeSession.getExtraWindows()`. Stub it
 // so we don't drag in the SDK.
-vi.mock('../claude-session', () => ({
+vi.mock('../../../core/services/claude-session', () => ({
   ClaudeSession: {
     getExtraWindows: () => new Set()
   }
 }))
 
-vi.mock('../session-history', () => ({
+vi.mock('../../../core/services/session-history', () => ({
   loadSessionHistory: (sessionId: string, projectKey: string) =>
     loadSessionHistoryMock(sessionId, projectKey)
 }))
 
 // Silence logger.
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -70,7 +72,7 @@ vi.mock('../logger', () => ({
 }))
 
 // Import AFTER mocks.
-import { watchSession, unwatchSession, unwatchAll } from '../session-watcher'
+import { watchSession, unwatchSession, unwatchAll } from '../../../core/services/session-watcher'
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -82,12 +84,18 @@ interface FakeWin {
   _destroyed: boolean
 }
 
+/**
+ * A stub window that is also a CLIENT (SyncCore phase 4c): `session:watch-update`
+ * is replicated, so it reaches SUBSCRIBERS, not a privileged window. Subscribing
+ * the stub keeps every `win.webContents.send` assertion below meaningful.
+ */
 function makeFakeWindow(): FakeWin {
   const win: FakeWin = {
     _destroyed: false,
     isDestroyed: () => win._destroyed,
     webContents: { send: vi.fn() }
   }
+  subscribeWindowToSync(win as unknown as Parameters<typeof subscribeWindowToSync>[0])
   return win
 }
 
@@ -135,17 +143,13 @@ describe('session-watcher', () => {
   })
 
   afterEach(async () => {
+    clearSyncSubscribersForTests()
     await cleanupCtx(ctx)
   })
 
   it('emits session:watch-update via webContents.send when the JSONL file grows', async () => {
     const win = makeFakeWindow()
-    watchSession(
-      'routing-1',
-      ctx.sessionId,
-      ctx.projectKey,
-      win as unknown as Electron.BrowserWindow
-    )
+    watchSession('routing-1', ctx.sessionId, ctx.projectKey)
 
     // Cause a change on the watched file.
     await fsp.appendFile(ctx.filePath, JSON.stringify({ type: 'assistant' }) + '\n')
@@ -157,7 +161,151 @@ describe('session-watcher', () => {
         const [channel, payload] = win.webContents.send.mock.calls[0]
         expect(channel).toBe('session:watch-update')
         expect(payload.routingId).toBe('routing-1')
-        expect(Array.isArray(payload.messages)).toBe(true)
+        // The notify addresses the transcript; it no longer carries it (S4).
+        expect(payload.sessionId).toBe(ctx.sessionId)
+        expect(payload.projectKey).toBe(ctx.projectKey)
+        expect('messages' in payload).toBe(false)
+      },
+      { timeout: 3000 }
+    )
+  })
+
+  /**
+   * S4's whole point: the RING entry is a notify, not a transcript.
+   *
+   * A watched session re-read its entire file into the event payload on every
+   * change, so a 5000-entry ring could hold hundreds of full transcripts and
+   * every reconnecting client replayed them. The content is a SEED now
+   * (`SyncCore.seedWatchedSession`, applied before the notify), and canonical
+   * still holds it — so this asserts both halves at once.
+   */
+  it('rings a NOTIFY, not the transcript, and canonical still holds the content', async () => {
+    const before = syncCore.currentSeq()
+    watchSession('routing-ring', ctx.sessionId, ctx.projectKey, '/repo/ring')
+
+    await fsp.appendFile(ctx.filePath, JSON.stringify({ type: 'assistant' }) + '\n')
+
+    await vi.waitFor(
+      () => {
+        const entries = syncCore.getAfter(before) ?? []
+        const entry = entries.find((e) => e.channel === 'session:watch-update')
+        expect(entry, 'no watch-update reached the ring').toBeDefined()
+        const payload = entry!.args[0] as Record<string, unknown>
+        // The bloat, gone: no transcript, no notifications, no status line.
+        expect(Object.keys(payload).sort()).toEqual(['cwd', 'projectKey', 'routingId', 'sessionId'])
+      },
+      { timeout: 3000 }
+    )
+
+    // The content moved to the seed rather than being dropped, and the seed is
+    // ordered BEFORE the notify, so a client refetching on the notify reads
+    // state that already contains what the notify announces.
+    const session = syncCore.getCanonicalState().sessions['routing-ring']
+    expect(session.messages.map((m) => m.id)).toEqual(['m-1'])
+    expect(session.cwd).toBe('/repo/ring')
+    expect(session.seeded).toBe(true)
+  })
+
+  /**
+   * The post-await race, closed by S4.
+   *
+   * The debounce callback AWAITS the file read, and a delete can land inside that
+   * await — `handlers-core.deleteSession` unwatches first precisely because the
+   * unlink makes the watcher fire one more time, but nothing stopped a read that
+   * had ALREADY started. Its seed bootstraps by design and its notify's reducer
+   * branch is the one that still bootstraps, so the pair re-minted the session
+   * canonical had just removed: a `cwd`-carrying ghost in canonical and in every
+   * replica, which is exactly what the unwatch exists to prevent.
+   */
+  it('a delete landing DURING the read leaves no ghost and emits no notify', async () => {
+    const win = makeFakeWindow()
+    const before = syncCore.currentSeq()
+    let release: (() => void) | null = null
+    loadSessionHistoryMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({
+              messages: [
+                {
+                  id: 'm-1',
+                  role: 'assistant',
+                  content: [{ type: 'text', text: 'hi' }],
+                  timestamp: 0
+                }
+              ],
+              taskNotifications: [],
+              customTitle: null,
+              agentIdToToolUseId: {},
+              statusLine: null,
+              _sessionId: ctx.sessionId,
+              _projectKey: ctx.projectKey
+            })
+        })
+    )
+
+    watchSession('routing-ghost', ctx.sessionId, ctx.projectKey, '/repo/ghost')
+    await fsp.appendFile(ctx.filePath, JSON.stringify({ type: 'assistant' }) + '\n')
+    await vi.waitFor(() => expect(loadSessionHistoryMock).toHaveBeenCalled(), { timeout: 3000 })
+
+    // The delete, in production order: unwatch, THEN remove.
+    unwatchSession('routing-ghost')
+    release!()
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(syncCore.getCanonicalState().sessions['routing-ghost']).toBeUndefined()
+    const entries = syncCore.getAfter(before) ?? []
+    expect(
+      entries.some(
+        (e) =>
+          e.channel === 'session:watch-update' &&
+          (e.args[0] as { routingId?: string }).routingId === 'routing-ghost'
+      )
+    ).toBe(false)
+    expect(win.webContents.send).not.toHaveBeenCalled()
+  })
+
+  /**
+   * F2. `session:watch-update` is the ONLY event that introduces a watched
+   * session — nothing spawns, so there is no `session:created` — which is why
+   * its reducer branch is the one place `ensured()` still bootstraps an entry.
+   * Without a cwd on the payload that entry was born with `cwd: ''`, and every
+   * cwd-keyed feature missed it: git status, the folder name in the sidebar and
+   * in notifications, the per-cwd terminal group, `deleteProject`'s live sweep.
+   *
+   * It has to be an ARGUMENT: `projectKey` is `cwdToProjectKey`'s output, which
+   * is documented as lossy and irreversible.
+   */
+  it('carries the watched session cwd on the update payload', async () => {
+    const win = makeFakeWindow()
+    watchSession('routing-cwd', ctx.sessionId, ctx.projectKey, '/repo/work')
+
+    await fsp.appendFile(ctx.filePath, JSON.stringify({ type: 'assistant' }) + '\n')
+
+    await vi.waitFor(
+      () => {
+        expect(win.webContents.send).toHaveBeenCalled()
+        const [, payload] = win.webContents.send.mock.calls[0]
+        expect(payload.cwd).toBe('/repo/work')
+      },
+      { timeout: 3000 }
+    )
+  })
+
+  it('omits cwd entirely when the caller had none (old-shape client)', async () => {
+    // Omitted, not blanked: the reducer treats an absent cwd as "leave it alone",
+    // so an old `/remote` bundle's 3-arg watch cannot erase a cwd another event
+    // already established.
+    const win = makeFakeWindow()
+    watchSession('routing-nocwd', ctx.sessionId, ctx.projectKey)
+
+    await fsp.appendFile(ctx.filePath, JSON.stringify({ type: 'assistant' }) + '\n')
+
+    await vi.waitFor(
+      () => {
+        expect(win.webContents.send).toHaveBeenCalled()
+        const [, payload] = win.webContents.send.mock.calls[0]
+        expect('cwd' in payload).toBe(false)
       },
       { timeout: 3000 }
     )
@@ -165,12 +313,7 @@ describe('session-watcher', () => {
 
   it('coalesces multiple rapid writes into a single debounced update', async () => {
     const win = makeFakeWindow()
-    watchSession(
-      'routing-burst',
-      ctx.sessionId,
-      ctx.projectKey,
-      win as unknown as Electron.BrowserWindow
-    )
+    watchSession('routing-burst', ctx.sessionId, ctx.projectKey)
 
     // Burst of writes within the 100ms debounce window.
     for (let i = 0; i < 5; i++) {
@@ -200,12 +343,7 @@ describe('session-watcher', () => {
 
   it('unwatchSession stops further updates', async () => {
     const win = makeFakeWindow()
-    watchSession(
-      'routing-stop',
-      ctx.sessionId,
-      ctx.projectKey,
-      win as unknown as Electron.BrowserWindow
-    )
+    watchSession('routing-stop', ctx.sessionId, ctx.projectKey)
 
     await fsp.appendFile(ctx.filePath, JSON.stringify({ type: 'assistant' }) + '\n')
     await vi.waitFor(() => expect(win.webContents.send).toHaveBeenCalled(), { timeout: 3000 })
@@ -225,14 +363,7 @@ describe('session-watcher', () => {
     const win = makeFakeWindow()
     const missingSessionId = 'never-created-session'
 
-    expect(() =>
-      watchSession(
-        'routing-missing',
-        missingSessionId,
-        ctx.projectKey,
-        win as unknown as Electron.BrowserWindow
-      )
-    ).not.toThrow()
+    expect(() => watchSession('routing-missing', missingSessionId, ctx.projectKey)).not.toThrow()
 
     // No watcher was registered, so calling unwatch on it is also safe.
     expect(() => unwatchSession('routing-missing')).not.toThrow()
@@ -250,24 +381,14 @@ describe('session-watcher', () => {
     const win = makeFakeWindow()
 
     // First lifecycle: watch → event → unwatch.
-    watchSession(
-      'routing-recycle',
-      ctx.sessionId,
-      ctx.projectKey,
-      win as unknown as Electron.BrowserWindow
-    )
+    watchSession('routing-recycle', ctx.sessionId, ctx.projectKey)
     await fsp.appendFile(ctx.filePath, JSON.stringify({ type: 'assistant', cycle: 1 }) + '\n')
     await vi.waitFor(() => expect(win.webContents.send).toHaveBeenCalled(), { timeout: 3000 })
     const firstCycleCalls = win.webContents.send.mock.calls.length
     unwatchSession('routing-recycle')
 
     // Second lifecycle: watch again on the same routingId.
-    watchSession(
-      'routing-recycle',
-      ctx.sessionId,
-      ctx.projectKey,
-      win as unknown as Electron.BrowserWindow
-    )
+    watchSession('routing-recycle', ctx.sessionId, ctx.projectKey)
     await fsp.appendFile(ctx.filePath, JSON.stringify({ type: 'assistant', cycle: 2 }) + '\n')
 
     await vi.waitFor(

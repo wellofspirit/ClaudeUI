@@ -164,11 +164,9 @@ describe('PiAutoModeSection — load', () => {
     openJudgePicker()
 
     // Pinned "inherit" row + pi models; the opencode group is filtered out.
-    expect(screen.getAllByTestId('ModelPicker.option').map((o) => o.getAttribute('data-value'))).toEqual([
-      '',
-      'openai-codex/gpt-5.6-luna',
-      'openai-codex/gpt-5.6-mini'
-    ])
+    expect(
+      screen.getAllByTestId('ModelPicker.option').map((o) => o.getAttribute('data-value'))
+    ).toEqual(['', 'openai-codex/gpt-5.6-luna', 'openai-codex/gpt-5.6-mini'])
   })
 
   it('uses the themed ModelPicker, never a native <select>, for the judge model', async () => {
@@ -209,6 +207,38 @@ describe('PiAutoModeSection — load', () => {
     expect(field.getAttribute('data-value')).toBe('local/mystery')
     expect(field.textContent).toContain('local/mystery')
     expect(field.textContent).not.toContain('Same as session model')
+  })
+
+  /**
+   * Item 3e. Verbatim is not enough on its own: discovery HAS reported pi's
+   * models and this value was not among them, so it is stale and will fail the
+   * moment auto mode uses it. Mark it in place, keeping the value visible —
+   * the fix is to change this very setting.
+   */
+  it('marks a configured judge model the engine no longer offers as unavailable', async () => {
+    installApiStub({
+      loadEngineConfig: vi.fn(async () => ({ autoMode: { judgeModel: 'local/mystery' } }))
+    })
+    await renderLoaded()
+
+    const field = screen.getByTestId('PiAutoModeSection.judgeModel')
+    expect(field.textContent).toContain('(unavailable)')
+    const notice = screen.getByTestId('PiAutoModeSection.judgeModel.staleModel')
+    expect(notice.getAttribute('data-model')).toBe('local/mystery')
+  })
+
+  it('does NOT mark an unset judge model, nor one that IS discovered', async () => {
+    installApiStub({
+      loadEngineConfig: vi.fn(async () => ({
+        autoMode: { judgeModel: 'openai-codex/gpt-5.6-mini' }
+      }))
+    })
+    await renderLoaded()
+
+    expect(screen.getByTestId('PiAutoModeSection.judgeModel').textContent).not.toContain(
+      '(unavailable)'
+    )
+    expect(screen.queryByTestId('PiAutoModeSection.judgeModel.staleModel')).toBeNull()
   })
 })
 
@@ -416,22 +446,30 @@ describe('OpencodeAutoModeSection - same core, own engine + testids', () => {
       (i) => i.key === 'opencodeAutoMode'
     )!
     render(
-      item.render({} as never, () => {}, {} as never, () => {}, {} as never, () => {})
+      item.render(
+        {} as never,
+        () => {},
+        {} as never,
+        () => {},
+        {} as never,
+        () => {}
+      )
     )
   }
 
   it('renders opencode models in a themed picker and saves to the opencode config', async () => {
     renderOpencode()
-    await waitFor(() => expect(screen.getByTestId('OpencodeAutoModeSection.judgeModel')).toBeTruthy())
+    await waitFor(() =>
+      expect(screen.getByTestId('OpencodeAutoModeSection.judgeModel')).toBeTruthy()
+    )
 
     const field = screen.getByTestId('OpencodeAutoModeSection.judgeModel')
     expect(field.querySelector('select')).toBeNull()
 
     fireEvent.click(within(field).getByTestId('ModelPicker.trigger'))
-    expect(screen.getAllByTestId('ModelPicker.option').map((o) => o.getAttribute('data-value'))).toEqual([
-      '',
-      'openai/gpt-5'
-    ])
+    expect(
+      screen.getAllByTestId('ModelPicker.option').map((o) => o.getAttribute('data-value'))
+    ).toEqual(['', 'openai/gpt-5'])
 
     fireEvent.click(judgeOption('openai/gpt-5'))
     expect(savedEngineIds[0]).toBe('opencode')

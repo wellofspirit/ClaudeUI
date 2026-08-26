@@ -2,15 +2,14 @@
  * WebSocket test client — lightweight wrapper around `ws` that speaks the
  * remote-access protocol implemented in `src/main/services/remote-server.ts`.
  *
- * Protocol (from remote-server.ts + shared/remote-protocol.ts):
+ * Protocol (from remote-server.ts + shared/remote-protocol.ts), in ADR-056 order:
  *   1. Client opens WebSocket.
- *   2. Client sends  { type: 'auth', token }  as plain JSON.
- *   3. Server replies { type: 'auth-response', ok, error? }.
- *   4. If the server was started with a tunnel E2E key, the client sends
- *      { type: 'e2e-activate' }, server replies with an ENCRYPTED
- *      { type: 'e2e-ack' } (the ack is the first encrypted frame, not the
- *      last plaintext one), and all subsequent messages are AES-256-GCM
- *      encrypted using HKDF-SHA256 key derivation (shared/e2e-crypto.ts).
+ *   2. WITH a channel key (`e2eKey`, i.e. a tunnel or LAN origin): the client
+ *      sends { type: 'e2e-activate' } as plain JSON FIRST and the server replies
+ *      with an ENCRYPTED { type: 'e2e-ack' }; every frame after that — the auth
+ *      frame included — is AES-256-GCM (shared/e2e-crypto.ts).
+ *   3. Client sends { type: 'auth', pwProof? , enrollToken? }.
+ *   4. Server replies { type: 'auth-response', ok, error? }.
  *   5. Messages are JSON objects of type 'invoke', 'sync', 'ping', 'pong'
  *      client→server, and 'invoke-response', 'event', 'sync-catchup',
  *      'sync-full', 'ping', 'pong' server→client.
@@ -20,22 +19,44 @@
  *   const server = await startRemoteServer(...)
  *   const client = await connectRemoteClient({
  *     url: `ws://localhost:${port}/`,
- *     token: 'test-token',
+ *     pwProof,
  *   })
  *   await client.ready
  *   const res = await client.invoke('some:channel', arg1, arg2)
- *   client.close()
+ *   await client.close()
  */
 
 import WebSocket from 'ws'
 import { E2ECrypto } from '../../shared/e2e-crypto'
 import type { WsServerMessage, WsInvokeResponse, WsEvent } from '../../shared/remote-protocol'
 
+/** How long `close()` waits for the close handshake before terminating. */
+const CLOSE_GRACE_MS = 250
+
 export interface ConnectOptions {
   url: string
-  token: string
-  /** Hex-encoded 32-byte E2E key (only needed when the server was started with a tunnel key). */
+  /**
+   * `hex(scrypt(password, salt))` — the only admission credential a plain socket
+   * has since ADR-056. Omitted for an `off`-policy server (any auth frame is
+   * accepted) or when presenting an enrollment link instead.
+   */
+  pwProof?: string
+  /** One-time `#enroll=` token, for the enrollment path. */
+  enrollToken?: string
+  /**
+   * Hex-encoded 32-byte CHANNEL key. Present ⇒ this client behaves like a
+   * tunnel/LAN browser: activate E2E first, then authenticate inside it.
+   */
   e2eKey?: string
+  /**
+   * Extra request headers for the upgrade — `Host` above all.
+   *
+   * Since ADR-056 the server CLASSIFIES a connection's origin (tunnel / tailnet
+   * serve / localhost / LAN) and picks the expected channel key from it, and the
+   * tunnel arm is identified by the `Host` the tunnel passes through verbatim.
+   * A test that wants to be a tunnel client therefore has to look like one.
+   */
+  headers?: Record<string, string>
   /** Milliseconds to wait for the handshake to complete */
   handshakeTimeoutMs?: number
 }
@@ -50,7 +71,12 @@ export interface RemoteClient {
   onMessage: (cb: (msg: WsServerMessage) => void) => () => void
   /** Send a raw WsClientMessage (encrypts if E2E is active). */
   send: (msg: unknown) => Promise<void>
-  close: () => void
+  /**
+   * Close the socket. Resolves once the handle is actually gone, so a teardown
+   * can await it; callers that ignore the promise keep the old fire-and-forget
+   * behavior.
+   */
+  close: () => Promise<void>
   /** Resolves once the auth handshake (and optional E2E activation) is done. */
   ready: Promise<void>
   /** True after the server's auth-response (ok:true) has been received. */
@@ -63,8 +89,8 @@ interface PendingRequest {
 }
 
 export async function connectRemoteClient(opts: ConnectOptions): Promise<RemoteClient> {
-  const { url, token, e2eKey, handshakeTimeoutMs = 5000 } = opts
-  const ws = new WebSocket(url)
+  const { url, pwProof, enrollToken, e2eKey, headers, handshakeTimeoutMs = 5000 } = opts
+  const ws = new WebSocket(url, headers ? { headers } : undefined)
 
   const pending = new Map<string, PendingRequest>()
   const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
@@ -87,14 +113,32 @@ export async function connectRemoteClient(opts: ConnectOptions): Promise<RemoteC
       reject(new Error(`Handshake timeout after ${handshakeTimeoutMs}ms`))
     }, handshakeTimeoutMs)
 
+    /** Exactly one credential field, in the server's own branch order. */
+    const authFrame = (): Record<string, unknown> => ({
+      type: 'auth',
+      ...(pwProof !== undefined ? { pwProof } : {}),
+      ...(pwProof === undefined && enrollToken !== undefined ? { enrollToken } : {})
+    })
+
     ws.on('open', () => {
-      // Send auth message as first plaintext frame.
-      try {
-        ws.send(JSON.stringify({ type: 'auth', token }))
-      } catch (err) {
-        clearTimeout(timeout)
-        reject(err as Error)
-      }
+      void (async () => {
+        try {
+          // ADR-056: with a channel key the CHANNEL comes first and the
+          // credential travels inside it; without one the auth frame is still
+          // the first frame. The cipher is initialised BEFORE activation is
+          // asked for, because the server's ack is already ciphertext.
+          if (e2eKey) {
+            e2e = new E2ECrypto()
+            await e2e.init(e2eKey)
+            ws.send(JSON.stringify({ type: 'e2e-activate' }))
+          } else {
+            ws.send(JSON.stringify(authFrame()))
+          }
+        } catch (err) {
+          clearTimeout(timeout)
+          reject(err as Error)
+        }
+      })()
     })
 
     ws.on('error', (err) => {
@@ -147,21 +191,15 @@ export async function connectRemoteClient(opts: ConnectOptions): Promise<RemoteC
           return
         }
         authenticated = true
-        if (e2eKey) {
-          // Initialize crypto on our side, then ask the server to activate E2E.
-          e2e = new E2ECrypto()
-          await e2e.init(e2eKey)
-          ws.send(JSON.stringify({ type: 'e2e-activate' }))
-        } else {
-          clearTimeout(timeout)
-          resolve()
-        }
+        clearTimeout(timeout)
+        resolve()
         return
       }
 
       if (parsed?.type === 'e2e-ack') {
-        clearTimeout(timeout)
-        resolve()
+        // The channel is open and proven (we just decrypted this). Present the
+        // credential inside it — `ready` settles on the auth-response.
+        await client.send(authFrame())
         return
       }
 
@@ -242,16 +280,26 @@ export async function connectRemoteClient(opts: ConnectOptions): Promise<RemoteC
       rawListeners.add(cb)
       return () => rawListeners.delete(cb)
     },
-    close() {
+    close(): Promise<void> {
       for (const [id, req] of pending) {
         req.reject(new Error('Connection closed'))
         pending.delete(id)
       }
-      try {
-        ws.close()
-      } catch {
-        /* ignore */
-      }
+      if (ws.readyState === WebSocket.CLOSED) return Promise.resolve()
+      return new Promise<void>((resolve) => {
+        // Bounded: a peer that never answers the close handshake must not hang
+        // a teardown, so force the handle shut after a short grace.
+        const grace = setTimeout(() => ws.terminate(), CLOSE_GRACE_MS)
+        ws.once('close', () => {
+          clearTimeout(grace)
+          resolve()
+        })
+        try {
+          ws.close()
+        } catch {
+          /* ignore */
+        }
+      })
     }
   }
 

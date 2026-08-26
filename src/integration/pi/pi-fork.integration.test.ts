@@ -43,7 +43,7 @@ import { existsSync, mkdtempSync, rmSync, readFileSync, readdirSync } from 'node
 import { createHash } from 'node:crypto'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
-import { PiRpcClient } from '../../main/pi/PiRpcClient'
+import { PiRpcClient } from '../../core/pi/PiRpcClient'
 
 const SKIP = !process.env.PI_INTEGRATION_TESTS
 const BINARY_NAME = process.platform === 'win32' ? 'pi.exe' : 'pi'
@@ -89,162 +89,172 @@ function makeSender(client: PiRpcClient) {
     }>
 }
 
-describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)('pi fork/clone integration (M5c)', () => {
-  let tmpDir: string
-  let sourceClient: PiRpcClient
-  let sourceFile: string
-  let sourceSessionId: string
-  let firstUserEntryId: string
-  let secondUserEntryId: string
-  let sourceHashBaseline: string
+describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
+  'pi fork/clone integration (M5c)',
+  () => {
+    let tmpDir: string
+    let sourceClient: PiRpcClient
+    let sourceFile: string
+    let sourceSessionId: string
+    let firstUserEntryId: string
+    let secondUserEntryId: string
+    let sourceHashBaseline: string
 
-  beforeAll(async () => {
-    const binary = findBinary()!
-    tmpDir = mkdtempSync(join(tmpdir(), 'pi-fork-integration-'))
-
-    sourceClient = new PiRpcClient(binary, {
-      cwd: tmpDir,
-      args: ['--mode', 'rpc', '--session-dir', tmpDir]
-    })
-    await sourceClient.start()
-    const send = makeSender(sourceClient)
-
-    const setModelResp = await send({ type: 'set_model', provider: MODEL.provider, modelId: MODEL.modelId }, 45_000)
-    expect(setModelResp.success, `set_model failed: ${JSON.stringify(setModelResp)}`).toBe(true)
-
-    // Two trivial, deterministic turns — kept minimal per the M5c kickoff spec.
-    const turn1 = await send({ type: 'prompt', message: 'Reply with exactly: TURN ONE' }, 60_000)
-    expect(turn1.success, `turn 1 prompt failed: ${JSON.stringify(turn1)}`).toBe(true)
-    await waitForSettled(sourceClient)
-
-    const turn2 = await send({ type: 'prompt', message: 'Reply with exactly: TURN TWO' }, 60_000)
-    expect(turn2.success, `turn 2 prompt failed: ${JSON.stringify(turn2)}`).toBe(true)
-    await waitForSettled(sourceClient)
-
-    const state = await send({ type: 'get_state' })
-    expect(state.success).toBe(true)
-    sourceSessionId = state.data!.sessionId as string
-    sourceFile = state.data!.sessionFile as string
-
-    const forkMessages = await send({ type: 'get_fork_messages' })
-    expect(forkMessages.success).toBe(true)
-    const messages = (forkMessages.data!.messages as Array<{ entryId: string; text: string }>) ?? []
-    expect(messages.length).toBe(2)
-    firstUserEntryId = messages[0].entryId
-    secondUserEntryId = messages[1].entryId
-
-    // Fully dispose the source client and give Windows a moment to release
-    // the file handle before hashing — mirrors the other pi integration
-    // files' identical afterAll precedent, done here mid-test instead since
-    // later `it`s need the file untouched from this exact point on.
-    sourceClient.dispose()
-    await new Promise((resolve) => setTimeout(resolve, 1_000))
-
-    sourceHashBaseline = sha256(sourceFile)
-  }, 180_000)
-
-  afterAll(async () => {
-    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
-  })
-
-  /** Poll for `agent_settled` on a fresh listener — the real turn-complete signal. */
-  async function waitForSettled(client: PiRpcClient, timeoutMs = 60_000): Promise<void> {
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('timed out waiting for agent_settled')), timeoutMs)
-      const unsubscribe = client.onEvent((ev) => {
-        if (ev.type === 'agent_settled') {
-          clearTimeout(timer)
-          unsubscribe()
-          resolve()
-        }
-      })
-    })
-  }
-
-  it.skipIf(BINARY_MISSING || CREDENTIALS_MISSING)(
-    'fork {entryId} on a resumed source — drops the second turn, creates a new file, source stays byte-unchanged',
-    async () => {
+    beforeAll(async () => {
       const binary = findBinary()!
-      const client = new PiRpcClient(binary, {
+      tmpDir = mkdtempSync(join(tmpdir(), 'pi-fork-integration-'))
+
+      sourceClient = new PiRpcClient(binary, {
         cwd: tmpDir,
-        args: ['--mode', 'rpc', '--session-dir', tmpDir, '--session', sourceFile]
+        args: ['--mode', 'rpc', '--session-dir', tmpDir]
       })
-      await client.start()
-      const send = makeSender(client)
-      try {
-        const resumedState = await send({ type: 'get_state' })
-        expect(resumedState.success).toBe(true)
-        expect(resumedState.data!.sessionId).toBe(sourceSessionId)
+      await sourceClient.start()
+      const send = makeSender(sourceClient)
 
-        const filesBefore = listSessionFiles(tmpDir)
+      const setModelResp = await send(
+        { type: 'set_model', provider: MODEL.provider, modelId: MODEL.modelId },
+        45_000
+      )
+      expect(setModelResp.success, `set_model failed: ${JSON.stringify(setModelResp)}`).toBe(true)
 
-        // Drop the SECOND turn — mirrors PiSession.doStart's fork block:
-        // `fork {entryId}` directly, no preceding `clone`.
-        const forkResp = await send({ type: 'fork', entryId: secondUserEntryId })
-        expect(forkResp.success, `fork failed: ${JSON.stringify(forkResp)}`).toBe(true)
-        expect((forkResp.data as { cancelled?: boolean } | undefined)?.cancelled).toBe(false)
+      // Two trivial, deterministic turns — kept minimal per the M5c kickoff spec.
+      const turn1 = await send({ type: 'prompt', message: 'Reply with exactly: TURN ONE' }, 60_000)
+      expect(turn1.success, `turn 1 prompt failed: ${JSON.stringify(turn1)}`).toBe(true)
+      await waitForSettled(sourceClient)
 
-        const forkedState = await send({ type: 'get_state' })
-        expect(forkedState.success).toBe(true)
-        expect(forkedState.data!.sessionId).not.toBe(sourceSessionId)
-        // Only the first turn (1 user + 1 assistant message) survives.
-        expect(forkedState.data!.messageCount).toBe(2)
+      const turn2 = await send({ type: 'prompt', message: 'Reply with exactly: TURN TWO' }, 60_000)
+      expect(turn2.success, `turn 2 prompt failed: ${JSON.stringify(turn2)}`).toBe(true)
+      await waitForSettled(sourceClient)
 
-        const filesAfter = listSessionFiles(tmpDir)
-        const newFiles = filesAfter.filter((f) => !filesBefore.includes(f))
-        expect(newFiles.length).toBe(1)
+      const state = await send({ type: 'get_state' })
+      expect(state.success).toBe(true)
+      sourceSessionId = state.data!.sessionId as string
+      sourceFile = state.data!.sessionFile as string
 
-        // THE proof: the source file this test resumed from is untouched.
-        expect(sha256(sourceFile)).toBe(sourceHashBaseline)
-      } finally {
-        client.dispose()
-        await new Promise((resolve) => setTimeout(resolve, 500))
-      }
-    },
-    90_000
-  )
+      const forkMessages = await send({ type: 'get_fork_messages' })
+      expect(forkMessages.success).toBe(true)
+      const messages =
+        (forkMessages.data!.messages as Array<{ entryId: string; text: string }>) ?? []
+      expect(messages.length).toBe(2)
+      firstUserEntryId = messages[0].entryId
+      secondUserEntryId = messages[1].entryId
 
-  it.skipIf(BINARY_MISSING || CREDENTIALS_MISSING)(
-    'clone-latest sentinel path: `clone` alone on a resumed source — keeps everything, creates a new file, source stays byte-unchanged',
-    async () => {
-      const binary = findBinary()!
-      const client = new PiRpcClient(binary, {
-        cwd: tmpDir,
-        args: ['--mode', 'rpc', '--session-dir', tmpDir, '--session', sourceFile]
+      // Fully dispose the source client and give Windows a moment to release
+      // the file handle before hashing — mirrors the other pi integration
+      // files' identical afterAll precedent, done here mid-test instead since
+      // later `it`s need the file untouched from this exact point on.
+      sourceClient.dispose()
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+
+      sourceHashBaseline = sha256(sourceFile)
+    }, 180_000)
+
+    afterAll(async () => {
+      if (tmpDir) rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+    })
+
+    /** Poll for `agent_settled` on a fresh listener — the real turn-complete signal. */
+    async function waitForSettled(client: PiRpcClient, timeoutMs = 60_000): Promise<void> {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error('timed out waiting for agent_settled')),
+          timeoutMs
+        )
+        const unsubscribe = client.onEvent((ev) => {
+          if (ev.type === 'agent_settled') {
+            clearTimeout(timer)
+            unsubscribe()
+            resolve()
+          }
+        })
       })
-      await client.start()
-      const send = makeSender(client)
-      try {
-        await send({ type: 'get_state' })
-        const filesBefore = listSessionFiles(tmpDir)
-
-        const cloneResp = await send({ type: 'clone' })
-        expect(cloneResp.success, `clone failed: ${JSON.stringify(cloneResp)}`).toBe(true)
-        expect((cloneResp.data as { cancelled?: boolean } | undefined)?.cancelled).toBe(false)
-
-        const clonedState = await send({ type: 'get_state' })
-        expect(clonedState.success).toBe(true)
-        expect(clonedState.data!.sessionId).not.toBe(sourceSessionId)
-        // Both turns survive — clone duplicates the FULL active branch.
-        expect(clonedState.data!.messageCount).toBe(4)
-
-        const filesAfter = listSessionFiles(tmpDir)
-        const newFiles = filesAfter.filter((f) => !filesBefore.includes(f))
-        expect(newFiles.length).toBe(1)
-
-        expect(sha256(sourceFile)).toBe(sourceHashBaseline)
-      } finally {
-        client.dispose()
-        await new Promise((resolve) => setTimeout(resolve, 500))
-      }
-    },
-    90_000
-  )
-
-  it.skipIf(BINARY_MISSING || CREDENTIALS_MISSING)(
-    'sanity: the two turns really did produce two distinct user entries to fork between',
-    () => {
-      expect(firstUserEntryId).not.toBe(secondUserEntryId)
     }
-  )
-})
+
+    it.skipIf(BINARY_MISSING || CREDENTIALS_MISSING)(
+      'fork {entryId} on a resumed source — drops the second turn, creates a new file, source stays byte-unchanged',
+      async () => {
+        const binary = findBinary()!
+        const client = new PiRpcClient(binary, {
+          cwd: tmpDir,
+          args: ['--mode', 'rpc', '--session-dir', tmpDir, '--session', sourceFile]
+        })
+        await client.start()
+        const send = makeSender(client)
+        try {
+          const resumedState = await send({ type: 'get_state' })
+          expect(resumedState.success).toBe(true)
+          expect(resumedState.data!.sessionId).toBe(sourceSessionId)
+
+          const filesBefore = listSessionFiles(tmpDir)
+
+          // Drop the SECOND turn — mirrors PiSession.doStart's fork block:
+          // `fork {entryId}` directly, no preceding `clone`.
+          const forkResp = await send({ type: 'fork', entryId: secondUserEntryId })
+          expect(forkResp.success, `fork failed: ${JSON.stringify(forkResp)}`).toBe(true)
+          expect((forkResp.data as { cancelled?: boolean } | undefined)?.cancelled).toBe(false)
+
+          const forkedState = await send({ type: 'get_state' })
+          expect(forkedState.success).toBe(true)
+          expect(forkedState.data!.sessionId).not.toBe(sourceSessionId)
+          // Only the first turn (1 user + 1 assistant message) survives.
+          expect(forkedState.data!.messageCount).toBe(2)
+
+          const filesAfter = listSessionFiles(tmpDir)
+          const newFiles = filesAfter.filter((f) => !filesBefore.includes(f))
+          expect(newFiles.length).toBe(1)
+
+          // THE proof: the source file this test resumed from is untouched.
+          expect(sha256(sourceFile)).toBe(sourceHashBaseline)
+        } finally {
+          client.dispose()
+          await new Promise((resolve) => setTimeout(resolve, 500))
+        }
+      },
+      90_000
+    )
+
+    it.skipIf(BINARY_MISSING || CREDENTIALS_MISSING)(
+      'clone-latest sentinel path: `clone` alone on a resumed source — keeps everything, creates a new file, source stays byte-unchanged',
+      async () => {
+        const binary = findBinary()!
+        const client = new PiRpcClient(binary, {
+          cwd: tmpDir,
+          args: ['--mode', 'rpc', '--session-dir', tmpDir, '--session', sourceFile]
+        })
+        await client.start()
+        const send = makeSender(client)
+        try {
+          await send({ type: 'get_state' })
+          const filesBefore = listSessionFiles(tmpDir)
+
+          const cloneResp = await send({ type: 'clone' })
+          expect(cloneResp.success, `clone failed: ${JSON.stringify(cloneResp)}`).toBe(true)
+          expect((cloneResp.data as { cancelled?: boolean } | undefined)?.cancelled).toBe(false)
+
+          const clonedState = await send({ type: 'get_state' })
+          expect(clonedState.success).toBe(true)
+          expect(clonedState.data!.sessionId).not.toBe(sourceSessionId)
+          // Both turns survive — clone duplicates the FULL active branch.
+          expect(clonedState.data!.messageCount).toBe(4)
+
+          const filesAfter = listSessionFiles(tmpDir)
+          const newFiles = filesAfter.filter((f) => !filesBefore.includes(f))
+          expect(newFiles.length).toBe(1)
+
+          expect(sha256(sourceFile)).toBe(sourceHashBaseline)
+        } finally {
+          client.dispose()
+          await new Promise((resolve) => setTimeout(resolve, 500))
+        }
+      },
+      90_000
+    )
+
+    it.skipIf(BINARY_MISSING || CREDENTIALS_MISSING)(
+      'sanity: the two turns really did produce two distinct user entries to fork between',
+      () => {
+        expect(firstUserEntryId).not.toBe(secondUserEntryId)
+      }
+    )
+  }
+)

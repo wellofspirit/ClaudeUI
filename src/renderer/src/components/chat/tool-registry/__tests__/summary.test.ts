@@ -180,16 +180,31 @@ describe('summarizeTool — mockup show_mockup wording (documented drift)', () =
 
 describe('displayName — Claude passthrough', () => {
   it('returns standard tool names verbatim', () => {
-    const names = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetch', 'WebSearch',
-      'TodoWrite', 'AskUserQuestion', 'ExitPlanMode']
+    const names = [
+      'Bash',
+      'Read',
+      'Write',
+      'Edit',
+      'Glob',
+      'Grep',
+      'WebFetch',
+      'WebSearch',
+      'TodoWrite',
+      'AskUserQuestion',
+      'ExitPlanMode'
+    ]
     for (const name of names) {
       expect(ClaudeEngineToolMap.displayName(name)).toBe(name)
     }
   })
 
   it('passes through MCP tool names verbatim', () => {
-    expect(ClaudeEngineToolMap.displayName('mcp__claude-ui__render_mermaid')).toBe('mcp__claude-ui__render_mermaid')
-    expect(ClaudeEngineToolMap.displayName('mcp__claude-ui-mockup__create_mockup')).toBe('mcp__claude-ui-mockup__create_mockup')
+    expect(ClaudeEngineToolMap.displayName('mcp__claude-ui__render_mermaid')).toBe(
+      'mcp__claude-ui__render_mermaid'
+    )
+    expect(ClaudeEngineToolMap.displayName('mcp__claude-ui-mockup__create_mockup')).toBe(
+      'mcp__claude-ui-mockup__create_mockup'
+    )
   })
 
   it('passes through agent tool names verbatim', () => {

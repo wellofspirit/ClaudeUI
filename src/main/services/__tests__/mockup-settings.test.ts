@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { parseMockupSettings } from '../mockup-settings'
+import { parseMockupSettings } from '../../../core/services/mockup-settings'
 
 describe('parseMockupSettings', () => {
   it('returns empty defaults when the keys are absent', () => {

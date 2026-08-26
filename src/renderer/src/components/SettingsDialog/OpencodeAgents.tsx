@@ -8,7 +8,14 @@
  */
 
 import { useState, useEffect } from 'react'
-import type { OpencodeAgentScope, OpencodeAgentSummary, OpencodeAgentDetail, OpencodeAgentInput, OpencodeAgentMode, ModelInfo } from '../../../../shared/types'
+import type {
+  OpencodeAgentScope,
+  OpencodeAgentSummary,
+  OpencodeAgentDetail,
+  OpencodeAgentInput,
+  OpencodeAgentMode,
+  ModelInfo
+} from '../../../../shared/types'
 import { useActiveSession } from '../../stores/session-store'
 import { SettingsSlider } from './settings-controls'
 import { SelectMenu } from '../shared/SelectMenu'
@@ -21,9 +28,15 @@ function useOpencodeInstalled(): boolean | null {
     let cancelled = false
     window.api
       .engineIsInstalled('opencode')
-      .then((v) => { if (!cancelled) setInstalled(v) })
-      .catch(() => { if (!cancelled) setInstalled(false) })
-    return () => { cancelled = true }
+      .then((v) => {
+        if (!cancelled) setInstalled(v)
+      })
+      .catch(() => {
+        if (!cancelled) setInstalled(false)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [])
   return installed
 }
@@ -36,13 +49,23 @@ const inputClass =
 // ── View state machine ───────────────────────────────────────────────
 
 type ViewState =
-  | { mode: 'list' }
-  | { mode: 'edit'; name: string; scope: OpencodeAgentScope }
-  | { mode: 'new' }
+  { mode: 'list' } | { mode: 'edit'; name: string; scope: OpencodeAgentScope } | { mode: 'new' }
 
 // ── Permission tool categories ───────────────────────────────────────
 
-const PERM_CATS = ['bash', 'edit', 'read', 'glob', 'grep', 'webfetch', 'task', 'websearch', 'todowrite', 'lsp', 'skill'] as const
+const PERM_CATS = [
+  'bash',
+  'edit',
+  'read',
+  'glob',
+  'grep',
+  'webfetch',
+  'task',
+  'websearch',
+  'todowrite',
+  'lsp',
+  'skill'
+] as const
 type PermAction = 'allow' | 'ask' | 'deny'
 
 // ── Preset colors ────────────────────────────────────────────────────
@@ -53,7 +76,7 @@ const PRESET_COLORS = [
   '#a78bfa', // violet
   '#4ade80', // green
   '#f87171', // red
-  '#60a5fa', // blue
+  '#60a5fa' // blue
 ]
 
 // ── Draft form state ─────────────────────────────────────────────────
@@ -90,7 +113,7 @@ const BLANK_DRAFT: Draft = {
   color: '',
   hidden: false,
   restrict: false,
-  permGrid: {},
+  permGrid: {}
 }
 
 function detailToDraft(detail: OpencodeAgentDetail): Draft {
@@ -108,7 +131,7 @@ function detailToDraft(detail: OpencodeAgentDetail): Draft {
     color: detail.color ?? '',
     hidden: detail.hidden ?? false,
     restrict: detail.restrict,
-    permGrid: { ...(detail.permission ?? {}) },
+    permGrid: { ...(detail.permission ?? {}) }
   }
 }
 
@@ -118,10 +141,12 @@ function ModeBadge({ mode }: { mode: OpencodeAgentMode }): React.JSX.Element {
   const colors: Record<OpencodeAgentMode, string> = {
     primary: 'bg-amber-500/15 text-amber-400',
     subagent: 'bg-blue-500/15 text-blue-400',
-    all: 'bg-purple-500/15 text-purple-400',
+    all: 'bg-purple-500/15 text-purple-400'
   }
   return (
-    <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-medium uppercase tracking-wide ${colors[mode]}`}>
+    <span
+      className={`text-[9px] px-1.5 py-0.5 rounded-full font-medium uppercase tracking-wide ${colors[mode]}`}
+    >
       {mode}
     </span>
   )
@@ -145,9 +170,18 @@ function ListView({ cwd, refresh, onEdit, onNew }: ListViewProps): React.JSX.Ele
     setLoading(true)
     window.api
       .listOpencodeAgents(cwd || undefined)
-      .then((list) => { if (!cancelled) { setAgents(list); setLoading(false) } })
-      .catch(() => { if (!cancelled) setLoading(false) })
-    return () => { cancelled = true }
+      .then((list) => {
+        if (!cancelled) {
+          setAgents(list)
+          setLoading(false)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [cwd, refresh])
 
   const custom = agents.filter((a) => a.kind === 'custom')
@@ -172,7 +206,9 @@ function ListView({ cwd, refresh, onEdit, onNew }: ListViewProps): React.JSX.Ele
       />
 
       {/* Name */}
-      <span className={`text-[12px] text-text-secondary flex-1 min-w-0 truncate ${a.disabled ? 'line-through' : ''}`}>
+      <span
+        className={`text-[12px] text-text-secondary flex-1 min-w-0 truncate ${a.disabled ? 'line-through' : ''}`}
+      >
         {a.name}
       </span>
 
@@ -181,11 +217,13 @@ function ListView({ cwd, refresh, onEdit, onNew }: ListViewProps): React.JSX.Ele
         <ModeBadge mode={a.mode} />
 
         {a.kind === 'custom' && (
-          <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-medium uppercase tracking-wide ${
-            (a.scope ?? 'global') === 'global'
-              ? 'bg-gray-500/15 text-gray-400'
-              : 'bg-purple-500/15 text-purple-400'
-          }`}>
+          <span
+            className={`text-[9px] px-1.5 py-0.5 rounded-full font-medium uppercase tracking-wide ${
+              (a.scope ?? 'global') === 'global'
+                ? 'bg-gray-500/15 text-gray-400'
+                : 'bg-purple-500/15 text-purple-400'
+            }`}
+          >
             {a.scope ?? 'global'}
           </span>
         )}
@@ -231,14 +269,18 @@ function ListView({ cwd, refresh, onEdit, onNew }: ListViewProps): React.JSX.Ele
 
       {custom.length > 0 && (
         <div>
-          <div className="px-3 py-1 text-[10px] text-text-muted/50 uppercase tracking-wide">Custom</div>
+          <div className="px-3 py-1 text-[10px] text-text-muted/50 uppercase tracking-wide">
+            Custom
+          </div>
           {custom.map(renderRow)}
         </div>
       )}
 
       {builtin.length > 0 && (
         <div>
-          <div className="px-3 py-1 text-[10px] text-text-muted/50 uppercase tracking-wide">Built-in</div>
+          <div className="px-3 py-1 text-[10px] text-text-muted/50 uppercase tracking-wide">
+            Built-in
+          </div>
           {builtin.map(renderRow)}
         </div>
       )}
@@ -276,9 +318,27 @@ function PermGrid({ grid, onChange }: PermGridProps): React.JSX.Element {
           <div key={cat} className="flex items-center gap-2">
             <span className="text-[11px] text-text-muted w-24 shrink-0">{cat}</span>
             <div className="flex items-center gap-0.5">
-              <button className={btnCls(current === 'allow', 'allow')} onClick={() => onChange(cat, 'allow')} title="Allow">A</button>
-              <button className={btnCls(current === 'ask', 'ask')} onClick={() => onChange(cat, 'ask')} title="Ask">?</button>
-              <button className={btnCls(current === 'deny', 'deny')} onClick={() => onChange(cat, 'deny')} title="Deny">✕</button>
+              <button
+                className={btnCls(current === 'allow', 'allow')}
+                onClick={() => onChange(cat, 'allow')}
+                title="Allow"
+              >
+                A
+              </button>
+              <button
+                className={btnCls(current === 'ask', 'ask')}
+                onClick={() => onChange(cat, 'ask')}
+                title="Ask"
+              >
+                ?
+              </button>
+              <button
+                className={btnCls(current === 'deny', 'deny')}
+                onClick={() => onChange(cat, 'deny')}
+                title="Deny"
+              >
+                ✕
+              </button>
             </div>
           </div>
         )
@@ -339,7 +399,7 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
           setLoading(false)
         })
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   if (loading) {
@@ -349,20 +409,23 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
     return (
       <div className="px-3 py-2 text-[12px] text-text-muted/70">
         Failed to load agent.{' '}
-        <button onClick={onBack} className="text-accent hover:underline">Go back</button>
+        <button onClick={onBack} className="text-accent hover:underline">
+          Go back
+        </button>
       </div>
     )
   }
 
-  const isBuiltin = view.mode === 'edit' && (detail?.kind === 'builtin')
+  const isBuiltin = view.mode === 'edit' && detail?.kind === 'builtin'
   const isCustom = view.mode === 'edit' && detail?.kind === 'custom'
 
   // File path hint
   const scopeForHint = draft.scope
   const nameForHint = draft.name || '<name>'
-  const filePath = scopeForHint === 'global'
-    ? `~/.config/opencode/agents/${nameForHint}.md`
-    : `${cwd || '<cwd>'}/.opencode/agents/${nameForHint}.md`
+  const filePath =
+    scopeForHint === 'global'
+      ? `~/.config/opencode/agents/${nameForHint}.md`
+      : `${cwd || '<cwd>'}/.opencode/agents/${nameForHint}.md`
 
   const update = (patch: Partial<Draft>): void => setDraft((prev) => ({ ...prev, ...patch }))
 
@@ -375,7 +438,7 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
       update({
         name: result.identifier || draft.name,
         description: result.whenToUse || draft.description,
-        prompt: result.systemPrompt || draft.prompt,
+        prompt: result.systemPrompt || draft.prompt
       })
     } catch (e) {
       setGenError(e instanceof Error ? e.message : String(e))
@@ -402,7 +465,7 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
       const input: OpencodeAgentInput = {
         name: draft.name.trim(),
         scope: draft.scope,
-        mode: draft.mode,
+        mode: draft.mode
       }
       if (draft.model) input.model = draft.model
       if (draft.description) input.description = draft.description
@@ -444,7 +507,9 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
         !detail?.disabled
       )
       onSaved()
-    } catch (_) { /* ignore */ }
+    } catch (_) {
+      /* ignore */
+    }
   }
 
   const handleReset = async (): Promise<void> => {
@@ -452,7 +517,9 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
     try {
       await window.api.deleteOpencodeAgent(view.name, view.scope, cwd || undefined)
       onSaved()
-    } catch (_) { /* ignore */ }
+    } catch (_) {
+      /* ignore */
+    }
   }
 
   const handleDelete = async (): Promise<void> => {
@@ -460,12 +527,14 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
     try {
       await window.api.deleteOpencodeAgent(view.name, view.scope, cwd || undefined)
       onSaved()
-    } catch (_) { /* ignore */ }
+    } catch (_) {
+      /* ignore */
+    }
   }
 
   const modelOptions = [
     { value: '', label: 'Inherit (session model)' },
-    ...models.map((m) => ({ value: m.value, label: m.displayName || m.value })),
+    ...models.map((m) => ({ value: m.value, label: m.displayName || m.value }))
   ]
 
   const projectDisabled = !cwd
@@ -488,7 +557,8 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
         {/* Built-in banner */}
         {isBuiltin && (
           <div className="mx-3 px-2 py-1.5 bg-amber-500/10 border border-amber-500/20 rounded text-[11px] text-amber-400/80 leading-relaxed">
-            Overriding built-in <strong>{view.mode === 'edit' ? view.name : ''}</strong> — unset fields use opencode&apos;s defaults.
+            Overriding built-in <strong>{view.mode === 'edit' ? view.name : ''}</strong> — unset
+            fields use opencode&apos;s defaults.
           </div>
         )}
 
@@ -503,9 +573,7 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
             placeholder="my-agent"
             className={`${inputClass} w-full ${isBuiltin ? 'opacity-60 cursor-default' : ''}`}
           />
-          {nameError && (
-            <div className="text-[10px] text-red-400 mt-0.5">{nameError}</div>
-          )}
+          {nameError && <div className="text-[10px] text-red-400 mt-0.5">{nameError}</div>}
           <div className="text-[10px] text-text-muted/50 mt-1 font-mono truncate">{filePath}</div>
         </div>
 
@@ -529,13 +597,17 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
             ))}
           </div>
           {draft.scope === 'project' && !cwd && (
-            <div className="text-[10px] text-text-muted/50 mt-0.5">Open a project session to use project scope</div>
+            <div className="text-[10px] text-text-muted/50 mt-0.5">
+              Open a project session to use project scope
+            </div>
           )}
         </div>
 
         {/* Generate with AI */}
         <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-          <div className="mb-1 text-[11px] text-text-muted/70 uppercase tracking-wide">Generate with AI</div>
+          <div className="mb-1 text-[11px] text-text-muted/70 uppercase tracking-wide">
+            Generate with AI
+          </div>
           <div className="flex gap-1.5">
             <input
               type="text"
@@ -543,7 +615,9 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
               onChange={(e) => setGenDesc(e.target.value)}
               placeholder="Describe what this agent should do…"
               className={`${inputClass} flex-1`}
-              onKeyDown={(e) => { if (e.key === 'Enter' && !generating) void handleGenerate() }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !generating) void handleGenerate()
+              }}
             />
             <button
               data-testid="OpencodeAgentsSection.generate"
@@ -554,9 +628,7 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
               {generating ? 'Generating…' : 'Generate'}
             </button>
           </div>
-          {genError && (
-            <div className="text-[10px] text-red-400 mt-0.5">{genError}</div>
-          )}
+          {genError && <div className="text-[10px] text-red-400 mt-0.5">{genError}</div>}
         </div>
 
         {/* Description */}
@@ -591,7 +663,9 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
             ))}
           </div>
           {draft.mode === 'subagent' && (
-            <div className="text-[10px] text-text-muted/50 mt-0.5">Subagent → callable via the task tool.</div>
+            <div className="text-[10px] text-text-muted/50 mt-0.5">
+              Subagent → callable via the task tool.
+            </div>
           )}
         </div>
 
@@ -628,16 +702,18 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
             className="w-full flex items-center justify-between py-1 cursor-default"
           >
             <span className="text-[12px]">Restrict tool permissions</span>
-            <span className={`w-7 h-4 rounded-full relative transition-colors ${draft.restrict ? 'bg-accent' : 'bg-text-muted/30'}`}>
-              <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${draft.restrict ? 'left-3.5' : 'left-0.5'}`} />
+            <span
+              className={`w-7 h-4 rounded-full relative transition-colors ${draft.restrict ? 'bg-accent' : 'bg-text-muted/30'}`}
+            >
+              <span
+                className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${draft.restrict ? 'left-3.5' : 'left-0.5'}`}
+              />
             </span>
           </button>
           {draft.restrict ? (
             <PermGrid
               grid={draft.permGrid}
-              onChange={(cat, action) =>
-                update({ permGrid: { ...draft.permGrid, [cat]: action } })
-              }
+              onChange={(cat, action) => update({ permGrid: { ...draft.permGrid, [cat]: action } })}
             />
           ) : (
             <div className="text-[10px] text-text-muted/50 mt-0.5">
@@ -716,7 +792,9 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
                     key={c}
                     onClick={() => update({ color: draft.color === c ? '' : c })}
                     className={`w-5 h-5 rounded-full transition-transform hover:scale-110 cursor-default ${
-                      draft.color === c ? 'ring-2 ring-offset-1 ring-offset-bg-primary ring-accent scale-110' : ''
+                      draft.color === c
+                        ? 'ring-2 ring-offset-1 ring-offset-bg-primary ring-accent scale-110'
+                        : ''
                     }`}
                     style={{ backgroundColor: c }}
                     title={c}
@@ -738,8 +816,12 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
               className="w-full flex items-center justify-between py-1 text-[13px] text-text-secondary cursor-default"
             >
               <span className="text-[11px]">Hidden</span>
-              <span className={`w-7 h-4 rounded-full relative transition-colors ${draft.hidden ? 'bg-accent' : 'bg-text-muted/30'}`}>
-                <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${draft.hidden ? 'left-3.5' : 'left-0.5'}`} />
+              <span
+                className={`w-7 h-4 rounded-full relative transition-colors ${draft.hidden ? 'bg-accent' : 'bg-text-muted/30'}`}
+              >
+                <span
+                  className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${draft.hidden ? 'left-3.5' : 'left-0.5'}`}
+                />
               </span>
             </button>
           </div>
@@ -830,7 +912,10 @@ export function OpencodeAgentsSection(): React.JSX.Element {
 
   if (!installed) {
     return (
-      <div data-testid="OpencodeAgentsSection" className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed">
+      <div
+        data-testid="OpencodeAgentsSection"
+        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
+      >
         opencode is not installed. Agent settings apply to opencode sessions.
       </div>
     )

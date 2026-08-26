@@ -39,9 +39,7 @@ function rowKey(f: SentFile): string {
 }
 
 type PreviewState =
-  | { status: 'loading' }
-  | { status: 'ready'; src: string }
-  | { status: 'error'; error: string }
+  { status: 'loading' } | { status: 'ready'; src: string } | { status: 'error'; error: string }
 
 function FileIcon({ error }: { error?: string }): React.JSX.Element {
   return (

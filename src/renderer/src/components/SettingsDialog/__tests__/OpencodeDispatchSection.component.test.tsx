@@ -159,10 +159,7 @@ describe('OpencodeDispatchSection — load', () => {
 
     // One allowed-model row per opencode model, discriminated by data-id.
     const rows = screen.getAllByTestId('OpencodeDispatchSection.allowedModel')
-    expect(rows.map((r) => r.getAttribute('data-id'))).toEqual([
-      'openai/gpt-5',
-      'google/gemini-3'
-    ])
+    expect(rows.map((r) => r.getAttribute('data-id'))).toEqual(['openai/gpt-5', 'google/gemini-3'])
   })
 })
 

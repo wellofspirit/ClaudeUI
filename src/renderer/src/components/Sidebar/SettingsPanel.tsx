@@ -1,11 +1,29 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, lazy, Suspense } from 'react'
 import { useSessionStore } from '../../stores/session-store'
+import { useIsMobile } from '../../hooks/useIsMobile'
 import { SettingsDialog, SettingsToggle } from '../SettingsDialog'
 import { SECTION_SCOPE_MAP, type SettingsScope } from '../SettingsDialog/settings-sections'
-import { RemoteAccessModal } from '../RemoteAccessModal'
 import { UsageRing } from './UsagePanel'
 
+// Lazy: the modal tree + qrcode must not ride the eager App chunk — the trigger
+// below is desktop-only, so on the web client THIS modal is unreachable. Its
+// `AccessLinks` card is not, as of series M4: Settings › Remote mounts that card
+// on its own (`SettingsDialog/WebAccessLinks`, lazy for the same reason), so the
+// shared bytes are now split into a chunk both entries pull. The specifier must
+// stay '../RemoteAccessModal' for tests that mock that exact module id.
+const RemoteAccessModal = lazy(() =>
+  import('../RemoteAccessModal').then((m) => ({ default: m.RemoteAccessModal }))
+)
+
 export function SettingsPanel(): React.JSX.Element {
+  /**
+   * On mobile this panel lives inside the sidebar DRAWER, which SessionView
+   * unmounts the moment it closes — so a dialog hosted here could never survive
+   * "open Settings, dismiss the drawer". There, `open-settings` is handled by
+   * SessionView instead (which owns the drawer) and this panel only fires the
+   * event. Desktop keeps hosting the dialog itself, unchanged.
+   */
+  const isMobile = useIsMobile()
   const [open, setOpen] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [settingsTarget, setSettingsTarget] = useState<{
@@ -38,18 +56,30 @@ export function SettingsPanel(): React.JSX.Element {
   }, [])
 
   // Listen for 'open-settings' custom events (e.g. from sandbox pill in InputBox)
+  //
+  // Narrowing past the breakpoint hands this dialog to SessionView, so a dialog
+  // opened while wide must CLOSE here rather than linger: left open it would
+  // render the mobile takeover from inside the drawer, and any `open-settings`
+  // fired from within it (settings-sections' "Open Providers & models",
+  // PiVendors) would mount a SECOND takeover from SessionView on top.
   useEffect(() => {
+    if (isMobile) {
+      setDialogOpen(false)
+      setSettingsTarget({})
+      return
+    }
     const handler = (event: Event): void => {
       const detail = (event as CustomEvent<{ scope?: SettingsScope; section?: string }>).detail
       setSettingsTarget({
-        scope: detail?.scope ?? (detail?.section ? SECTION_SCOPE_MAP.get(detail.section) : undefined),
+        scope:
+          detail?.scope ?? (detail?.section ? SECTION_SCOPE_MAP.get(detail.section) : undefined),
         section: detail?.section
       })
       setDialogOpen(true)
     }
     window.addEventListener('open-settings', handler)
     return () => window.removeEventListener('open-settings', handler)
-  }, [])
+  }, [isMobile])
 
   // Close popup on outside click
   useEffect(() => {
@@ -112,6 +142,12 @@ export function SettingsPanel(): React.JSX.Element {
             data-testid="SettingsPanel.allSettings"
             onClick={() => {
               setOpen(false)
+              if (isMobile) {
+                // SessionView answers this, opens the fullscreen mobile view and
+                // dismisses the drawer this button sits in.
+                window.dispatchEvent(new CustomEvent('open-settings', { detail: {} }))
+                return
+              }
               setSettingsTarget({})
               setDialogOpen(true)
             }}
@@ -198,7 +234,11 @@ export function SettingsPanel(): React.JSX.Element {
           initialSection={settingsTarget.section}
         />
       )}
-      {remoteModalOpen && <RemoteAccessModal onClose={() => setRemoteModalOpen(false)} />}
+      {remoteModalOpen && (
+        <Suspense fallback={null}>
+          <RemoteAccessModal onClose={() => setRemoteModalOpen(false)} />
+        </Suspense>
+      )}
     </div>
   )
 }

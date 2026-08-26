@@ -13,6 +13,11 @@ const STATE_LABELS: Record<ConnectionState, string> = {
   syncing: 'Syncing state...',
   connected: 'Connected',
   reconnecting: 'Reconnecting...',
+  // Both passkey states are normally intercepted in main.tsx, which renders
+  // their own screens. These labels exist for the window where the phase has
+  // not caught up with the connection yet.
+  'passkey-required': 'Passkey Required',
+  enrolling: 'Setting Up This Device',
   'auth-rejected': 'Sign-in Required',
   failed: 'Connection Failed'
 }

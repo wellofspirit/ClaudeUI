@@ -413,6 +413,7 @@ globalThis.__vs = server
 6. **Chose TCP over WebSocket**: Node.js built-in `net` module is always available. WebSocket would require finding the bundled `ws` library (fragile) or implementing the handshake from scratch (~80 lines). TCP with newline-delimited JSON is simpler and sufficient for localhost IPC.
 7. **Chose base64 over binary framing**: Eliminates need for length-prefix frame parser. Audio overhead is ~33% but total bandwidth is still <50 KB/s through localhost — irrelevant.
 8. **Reused the control request pattern**: Same anchor and success function pattern as `queue-control`. Proven approach for adding new SDK-accessible functionality.
+9. **2.1.241 re-anchor**: the voice stream function gained a third optional credentials param — `async function fFl(e,t,r){let n;if($t()&&r!==void 0)await Hb({credentials:r}),n=await Mw(r);else await Hb(),n=ya();if(!n?.accessToken)return E("[voice_stream] No OAuth token available"),null;…}`. The locator regex now allows the extra param (`(?:,V)?`) and the body-prefix gap became `[\s\S]{0,300}?` because the new prefix contains braces (`Hb({credentials:r})` — the old `[^}]{0,200}` stopped there). The patch's 2-arg call is unchanged and correct: `r===void 0` routes to the ambient `Hb();ya()` auth path, the pre-2.1.241 behaviour.
 
 ## Key Functions Reference
 

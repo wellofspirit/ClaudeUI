@@ -31,7 +31,7 @@ autocomplete — which works over remote today — and the `@`-mention browser).
 2. **`file:list-dir` keeps its current (unconfined-beyond-dotfiles) posture.** No path
    containment was added. Rationale: the remote channel is gated by ADR-039 auth, and an
    authenticated remote client can already create a session with an arbitrary cwd and run
-   full `git:*` mutations — a directory *listing* is strictly weaker than what the token
+   full `git:*` mutations — a directory _listing_ is strictly weaker than what the token
    already grants. Dotfiles/noise stay hidden by the handler. If the remote trust model
    ever weakens (e.g. scoped/guest tokens), containment must be revisited HERE first —
    `path-containment.ts` (`isPathInside`) is the ready-made primitive.
@@ -39,9 +39,9 @@ autocomplete — which works over remote today — and the `@`-mention browser).
    need a host directory on web (AutomationConfig's cwd field, the first-run screen).
    PermissionsDialog's `AddRuleInput` keeps its private copy of the path mechanics for now;
    whoever touches it next should lift the shared helpers out of `DirectoryBrowserInput`.
-   *(Partially done by ADR-048: the mechanics were extracted into `useDirSuggestions` in
+   _(Partially done by ADR-048: the mechanics were extracted into `useDirSuggestions` in
    `PermissionsDialog/shared.ts`, shared by the desktop input and the mobile entry sheet.
-   Unifying with `DirectoryBrowserInput` is still open — start from the hook.)*
+   Unifying with `DirectoryBrowserInput` is still open — start from the hook.)_
 
 ## Consequences
 
@@ -51,6 +51,56 @@ autocomplete — which works over remote today — and the `@`-mention browser).
 - Known residuals: AutomationConfig / first-run WelcomeScreen / sidebar double-click still
   have no web browse; `listDirEntries` hides dot-directories, so a dot-named project root
   must be typed rather than picked from the listing.
+  _(2026-08-25 — three of those are closed. The sidebar's "New session" double-click no
+  longer calls the null-resolving `pickFolder()` on web: it shows the welcome screen and
+  bumps an ephemeral `welcomeBrowseToken`, which `WelcomeState` consumes by opening this
+  browser. `listDirEntries('')` now answers with the host's home directory instead of
+  throwing `readdir('')` into the empty shape, and `DirectoryBrowserInput` seeds itself
+  from it once on mount — the widget used to open on an empty box that listed nothing
+  until an absolute path was typed. AutomationConfig's cwd row adopts the component on
+  web, which is decision 3 above. Still open: the first-run `WelcomeScreen` is native-only
+  (it appears unrouted), and dot-directories remain hidden.)_
+
+## Amendment — 2026-08-26: the inline browser becomes a places-rail dialog
+
+`DirectoryBrowserInput` is replaced by `DirectoryBrowserDialog` (Option C of the picker
+mockups). Same component contract — dumb/presentational, host listing injected, confirm
+still re-validated through `listDir` — but rendered as a centered modal (`createPortal` to
+`<body>`, `z-[200]`, backdrop/Esc/× all cancel) with two panes: a left rail of RECENT
+project directories plus the host's PLACES, and a right browse pane holding the path input,
+the entry list and a footer that previews the resolved path. The old widget grew inside a
+288px dropdown, which is where the "unusable on a phone" reports came from. Rail clicks
+NAVIGATE — they never confirm — so every path, typed or clicked, still goes through the host
+before it can start a session. _(The rail was initially `hidden sm:flex`, leaving narrow
+viewports the typed-path flow only — superseded the same day by the mobile layout below.)_
+
+Both web browse surfaces now share it: `WelcomeState` (the dropdown's "Browse path…" row and
+the sidebar's `welcomeBrowseToken`, which opens the dialog directly instead of opening the
+dropdown into browse mode) and `AutomationConfig`'s Directory row, which additionally passes
+`initialPath={cwd}` — closing the residual where its browse opened on the host's home instead
+of the directory the automation already names. Desktop is unchanged: both surfaces keep the
+native `pickFolder()` and never mount the dialog.
+
+New channel `file:list-places` (`listPlaces` in `handlers-core.ts`), registered on both
+transports under the **existing `fs-read` capability**, answering `{ home, hostname, drives }`
+— the home path, the machine name for the dialog's "on <hostname>", and the reachable drive
+roots (probed `A:`–`Z:` on win32, `['/']` elsewhere). No widening of the remote surface in
+substance: that capability already lists any path by name, and these are strictly weaker
+reads. Best-effort by construction — a field the host cannot determine comes back empty and
+the rail hides that entry rather than failing.
+
+Below 768px the same component renders a full-screen two-view drill-in instead (Mobile B of
+the mockups): a **shortcuts** view — "Type a path…", RECENT rows carrying the cwd as a
+subtitle, PLACES rows for Home and each drive — drilling into a **browse** view whose header
+is a back chevron plus the path input, with the entry list and a full-width confirm below.
+It is a JS fork on `useIsMobile`, not CSS, so the desktop dialog is untouched and the
+original `hidden sm:flex` rail rule is gone with it (the rail is plain `flex`; narrow
+viewports never reach that branch). One state, one set of mechanics: the seed
+effects, `descend`, the confirm latch and the "only a path the host resolved reaches
+`onConfirm`" invariant are shared verbatim — only the markup differs. The one behavioural
+fork is focus: programmatic `input.focus()` is desktop-only, because on a phone it raises the
+software keyboard over half the screen on every folder tap; the "Type a path…" row is the
+single exception, since tapping it IS the request to type.
 
 ## Alternatives considered
 

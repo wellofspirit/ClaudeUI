@@ -27,6 +27,10 @@ import {
 } from '../../shared/InlinePickers'
 import { SelectMenu } from '../../shared/SelectMenu'
 import {
+  DirectoryBrowserDialog,
+  type DirectoryBrowserDialogProps
+} from '../../shared/DirectoryBrowserDialog'
+import {
   modelSupportsAdaptiveThinking,
   modelSupportsEffort,
   modelSupportedEffortLevels,
@@ -39,6 +43,13 @@ import {
 } from '../../../../../shared/model-capabilities'
 
 export type ModelOption = ModelDisplay
+
+/** Stand-in when the container gated `listDir` on but not `listPlaces`. */
+const NO_PLACES: DirectoryBrowserDialogProps['listPlaces'] = async () => ({
+  home: '',
+  hostname: '',
+  drives: []
+})
 
 export interface InheritedPerms {
   allow: string[]
@@ -59,6 +70,13 @@ export interface AutomationConfigViewProps {
   onRunNow: () => void
   onStopRun: () => void
   onPickFolder: () => Promise<string | null>
+  /** Present only where there is no native folder dialog (the web client): the
+   *  Directory row browses the host through this instead of `onPickFolder`. */
+  listDir?: DirectoryBrowserDialogProps['listDir']
+  /** Rail shortcuts for that browser. Same web-only gate as `listDir`. */
+  listPlaces?: DirectoryBrowserDialogProps['listPlaces']
+  /** Recently used project directories for the browser's RECENT rail section. */
+  recents?: DirectoryBrowserDialogProps['recents']
   onSelectRun: (runId: string) => void
   onSetDetailTab: (tab: DetailTab) => void
 }
@@ -78,6 +96,9 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
     onRunNow,
     onStopRun,
     onPickFolder,
+    listDir,
+    listPlaces,
+    recents,
     onSelectRun,
     onSetDetailTab
   } = props
@@ -348,10 +369,18 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
       {/* Tabs */}
       <div className="px-6 border-b border-border/30 shrink-0">
         <div className="flex gap-1 pt-2.5">
-          <TabButton data-testid="AutomationConfig.tab.configure" active={detailTab === 'configure'} onClick={() => onSetDetailTab('configure')}>
+          <TabButton
+            data-testid="AutomationConfig.tab.configure"
+            active={detailTab === 'configure'}
+            onClick={() => onSetDetailTab('configure')}
+          >
             Configure
           </TabButton>
-          <TabButton data-testid="AutomationConfig.tab.runs" active={detailTab === 'runs'} onClick={() => onSetDetailTab('runs')}>
+          <TabButton
+            data-testid="AutomationConfig.tab.runs"
+            active={detailTab === 'runs'}
+            onClick={() => onSetDetailTab('runs')}
+          >
             Runs
             {runs && runs.length > 0 && (
               <span className="ml-1.5 text-text-muted">{runs.length}</span>
@@ -382,6 +411,9 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
             cwd={cwd}
             setCwd={setCwd}
             onBrowseFolder={handlePickFolder}
+            listDir={listDir}
+            listPlaces={listPlaces}
+            recents={recents}
             models={models}
             selectedModel={selectedModel}
             onSelectModel={handleSelectModel}
@@ -443,6 +475,9 @@ interface ConfigurePanelProps {
   cwd: string
   setCwd: (v: string) => void
   onBrowseFolder: () => void
+  listDir?: DirectoryBrowserDialogProps['listDir']
+  listPlaces?: DirectoryBrowserDialogProps['listPlaces']
+  recents?: DirectoryBrowserDialogProps['recents']
   models: ModelOption[]
   selectedModel: ModelDisplay
   onSelectModel: (v: string) => void
@@ -470,6 +505,9 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
     cwd,
     setCwd,
     onBrowseFolder,
+    listDir,
+    listPlaces,
+    recents,
     models,
     selectedModel,
     onSelectModel,
@@ -489,6 +527,9 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
 
   const nextRuns = useMemo(() => computeNextRuns(schedule, lastRunAt, 4), [schedule, lastRunAt])
 
+  /** Host browser dialog, open only where `listDir` stands in for the native one. */
+  const [browsing, setBrowsing] = useState(false)
+
   // Sticky unit for the interval editor — if we derived it every render, typing
   // "60" (minutes) would snap to "1 hour" and you couldn't edit freely.
   const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>(() =>
@@ -507,7 +548,10 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
   }
   const changeIntervalUnit = (u: IntervalUnit): void => {
     setIntervalUnit(u)
-    setSchedule({ type: 'interval', intervalMs: clampIntervalMs(intervalValue * unitMultiplier(u)) })
+    setSchedule({
+      type: 'interval',
+      intervalMs: clampIntervalMs(intervalValue * unitMultiplier(u))
+    })
   }
 
   return (
@@ -593,30 +637,52 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
         <SectionHeader icon="folder">Environment</SectionHeader>
 
         <InspectorRow label="Directory">
-          <div className="flex items-center gap-2 bg-bg-tertiary border border-border/40 rounded-md px-2.5 py-1 focus-within:border-text-accent/60 transition-colors">
-            <svg
-              width="13"
-              height="13"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              className="text-text-muted shrink-0"
-            >
-              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-            </svg>
-            <input
-              value={cwd}
-              onChange={(e) => setCwd(e.target.value)}
-              className="flex-1 bg-transparent text-[13px] font-mono text-text-primary outline-none min-w-0"
-              placeholder="/path/to/project"
-            />
-            <button
-              onClick={onBrowseFolder}
-              className="text-[11px] text-text-muted hover:text-text-secondary px-2 py-0.5 rounded border border-border/40 hover:bg-bg-hover transition-colors shrink-0"
-            >
-              Browse
-            </button>
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center gap-2 bg-bg-tertiary border border-border/40 rounded-md px-2.5 py-1 focus-within:border-text-accent/60 transition-colors">
+              <svg
+                width="13"
+                height="13"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                className="text-text-muted shrink-0"
+              >
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+              </svg>
+              <input
+                data-testid="AutomationConfig.cwd"
+                value={cwd}
+                onChange={(e) => setCwd(e.target.value)}
+                className="flex-1 bg-transparent text-[13px] font-mono text-text-primary outline-none min-w-0"
+                placeholder="/path/to/project"
+              />
+              <button
+                data-testid="AutomationConfig.browseFolder"
+                onClick={listDir ? () => setBrowsing(true) : onBrowseFolder}
+                className="text-[11px] text-text-muted hover:text-text-secondary px-2 py-0.5 rounded border border-border/40 hover:bg-bg-hover transition-colors shrink-0"
+              >
+                Browse
+              </button>
+            </div>
+            {browsing && listDir && (
+              <DirectoryBrowserDialog
+                listDir={listDir}
+                // `listPlaces` rides the same web-only gate as `listDir` in the
+                // container, but the types cannot express that pairing — the
+                // fallback just costs the rail's PLACES section, never the browse.
+                listPlaces={listPlaces ?? NO_PLACES}
+                recents={recents}
+                // Browse from the directory the automation already names, not
+                // from the host's home (the ADR-046 residual).
+                initialPath={cwd || undefined}
+                onConfirm={(picked) => {
+                  setCwd(picked)
+                  setBrowsing(false)
+                }}
+                onCancel={() => setBrowsing(false)}
+              />
+            )}
           </div>
         </InspectorRow>
       </section>

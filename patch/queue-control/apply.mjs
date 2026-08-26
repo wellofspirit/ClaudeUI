@@ -103,56 +103,101 @@ if (!skipA1) {
   // ---------------------------------------------------------------------------
   console.log('\n--- Extracting function names from content patterns ---')
 
-  // Window extended from 5000→8000: in 2.1.197 the stop_task handler (which contains the
-  // success-response-helper anchor) moved to 6578 chars before the fallback, outside 5000.
-  const nearbyCtx = src.slice(Math.max(0, anchorIdx - 8000), anchorIdx + 2000)
+  // Window history: 5000 → 8000 (2.1.197 moved the stop_task handler holding the
+  // success-response-helper anchor to 6578 chars before the fallback) → 16000
+  // (2.1.231 pushed it to 8479, outside 8000 again).
+  const NEARBY_BACK = 16000
+  const nearbyCtx = src.slice(Math.max(0, anchorIdx - NEARBY_BACK), anchorIdx + 2000)
 
   // --- Success response helper ---
-  const successRe = new RegExp(`\\),(${V})\\(${msgVar.replace(/\$/g, '\\$')},\\{\\}\\)\\}catch`)
-  const successMatch = successRe.exec(nearbyCtx)
-  if (!successMatch) {
-    console.error('ERROR: Cannot find success response helper pattern')
+  //
+  // The window only bounds the search; it does not identify the helper. Since
+  // the anchor keeps drifting, widening it blindly would eventually let an
+  // unrelated `FN(msg,{})}catch` be picked up as "the" helper. So take EVERY
+  // match in the window and require them to name the same function — with
+  // several sibling control handlers all replying through the one helper, unanimity
+  // is a far stronger signal than "whatever matched first".
+  const successRe = new RegExp(
+    `\\),(${V})\\(${msgVar.replace(/\$/g, '\\$')},\\{\\}\\)\\}catch`,
+    'g'
+  )
+  const successNames = [...nearbyCtx.matchAll(successRe)].map((m) => m[1])
+  if (successNames.length === 0) {
+    console.error(
+      `ERROR: Cannot find success response helper pattern within ${NEARBY_BACK} chars ` +
+        'before the control-request fallback anchor.'
+    )
     process.exit(1)
   }
-  const successFn = successMatch[1]
-  console.log(`  Success response helper: ${successFn}`)
+  const successFn = successNames[0]
+  if (successNames.some((n) => n !== successFn)) {
+    console.error(
+      `ERROR: success response helper is ambiguous — candidates disagree: ${[...new Set(successNames)].join(', ')}. Aborting.`
+    )
+    process.exit(1)
+  }
+  console.log(
+    `  Success response helper: ${successFn} (${successNames.length}/${successNames.length} call sites agree)`
+  )
 
   // --- Queue push function (found by structural content pattern) ---
-  // The push function pushes to an array with priority??"next":
-  //   function <pushFn>(<A>){<arr>.push({...<A>,priority:<A>.priority??"next"}),...}
-  // We search for the priority??"next" literal and extract the surrounding function.
+  // The push function pushes to an array with priority??"next". Shape history:
+  //   ≤2.1.196  function <pushFn>(<A>){<arr>.push({...<A>,priority:<A>.priority??"next"}),...}
+  //   2.1.197+  ...same, plus a trailing `timestamp:` field
+  //   2.1.231   function X(ae){if(!q(ae))return;e.push({...xDd(ae),priority:ae.priority??"next",timestamp:...
+  //             — gained an admission guard, and the spread is now a NORMALIZER
+  //             CALL on the param rather than the bare param.
+  //   2.1.241   function ne(Ze){if(!Z(Ze))return!1;return n.push({...GPf(Ze),priority:Ze.priority??"next",timestamp:...
+  //             — the guard rejects with `return!1` and the push itself is now
+  //             a `return` expression (the enqueue reports success).
+  // So both the guard and the normalizer are optional (the guard's return value
+  // too), and `priority:` is pinned to the function's own parameter (the part
+  // that actually identifies this as the enqueue path). The "next" literal
+  // keeps us off its `"later"` sibling, which is otherwise identical.
   const pushDefRe = new RegExp(
-    // 2.1.197+: push call now includes a trailing `timestamp:` field after priority??"next"
-    // Old: {...A,priority:A.priority??"next"}   New: {...A,priority:A.priority??"next",timestamp:...}
-    `function (${V})\\((${V})\\)\\{(${V})\\.push\\(\\{\\.\\.\\.(${V}),priority:\\4\\.priority\\?\\?"next",timestamp:`
+    `function (${V})\\((${V})\\)\\{(?:if\\(!${V}\\(\\2\\)\\)return(?:!1)?;)?` +
+      `(?:return )?(${V})\\.push\\(\\{\\.\\.\\.(?:\\2|${V}\\(\\2\\)),priority:\\2\\.priority\\?\\?"next",timestamp:`
   )
   const pushDefMatch = pushDefRe.exec(src)
   if (!pushDefMatch) {
     console.error('ERROR: Cannot find queue push function by priority??"next" pattern')
     process.exit(1)
   }
+  if (pushDefRe.exec(src.slice(pushDefMatch.index + 1))) {
+    console.error('ERROR: queue push function pattern matched more than once. Aborting.')
+    process.exit(1)
+  }
   const pushFn = pushDefMatch[1]
-  const pushDefIdx = pushDefMatch.index
   const queueArr = pushDefMatch[3]
   console.log(`  Queue push function: ${pushFn}`)
   console.log(`  Queue array: ${queueArr}`)
 
-  // --- Queue remove-by-predicate function (module-level binding) ---
-  // The actual function is defined inside a factory closure (closure-local names
-  // like `Z` are NOT visible outside it). After the factory returns, the host
-  // module binds each closure-export to a top-level identifier via an
-  // assignment chain at module init: `MODLOCAL = FACTORY_RETURN.dequeueAllMatching`.
-  // We need that MODLOCAL — the control-request handler runs in a scope where
-  // the closure-locals are not in lexical scope. Using `Z` would shadow with
-  // whatever happens to be named `Z` at the handler site (e.g. a string).
-  const removeFnRe = new RegExp(`(${V})=(${V})\\.dequeueAllMatching\\b`)
-  const removeFnMatch = removeFnRe.exec(src)
-  if (!removeFnMatch) {
-    console.error('ERROR: Cannot find module-level binding for queue.dequeueAllMatching')
+  // --- Queue instance (derived from the sibling cancel_async_message handler) ---
+  // ≤2.1.231 this captured a module-level `MODLOCAL = FACTORY.dequeueAllMatching`
+  // binding. 2.1.241 has NO such binding — the first `X=Y.dequeueAllMatching`
+  // match in the bundle is an unrelated LOCAL holding a RESULT array
+  // (`let o=e.dequeueAllMatching(...)` in a drain helper), which made the
+  // injected handler call a non-function at runtime (silent until live).
+  // The queue is an INSTANCE in the dispatch scope; read its name off the
+  // native cancel_async_message handler in the SAME else-if chain as our
+  // injection point, so the captured name is in-scope by construction:
+  //   subtype==="cancel_async_message"){let Yn=Pt.request.message_uuid,
+  //     Zo=S.isFoldInFlight(Yn)?[]:S.dequeueAllMatching((ga)=>ga.uuid===Yn);
+  const msgVarEsc = msgVar.replace(/\$/g, '\\$')
+  const cancelSiblingRe = new RegExp(
+    `subtype==="cancel_async_message"\\)\\{let ${V}=${msgVarEsc}\\.request\\.message_uuid,` +
+      `${V}=(${V})\\.isFoldInFlight\\(${V}\\)\\?\\[\\]:\\1\\.dequeueAllMatching\\(`
+  )
+  const cancelSiblingMatch = cancelSiblingRe.exec(src)
+  if (!cancelSiblingMatch) {
+    console.error(
+      'ERROR: Cannot find the cancel_async_message sibling handler to derive the queue instance.'
+    )
     process.exit(1)
   }
-  const removeFn = removeFnMatch[1]
-  console.log(`  Queue remove-by-predicate: ${removeFn} (= ${removeFnMatch[2]}.dequeueAllMatching)`)
+  const queueInstance = cancelSiblingMatch[1]
+  const removeFn = `${queueInstance}.dequeueAllMatching`
+  console.log(`  Queue instance: ${queueInstance} (remove via ${removeFn})`)
 
   // --- Find extractQueueText function (Ha9-like) ---
   // This function extracts the text from a queue item's value.
@@ -180,31 +225,23 @@ if (!skipA1) {
   // Simpler approach: match on JSON.stringify of the value or use a custom predicate.
   // For robustness, let's find the extractQueueText pattern.
 
-  // Search for a function called as <fn>(<var>.value) in the ~2000 chars after removeFn
-  const afterRemoveFn = src.slice(pushDefIdx, pushDefIdx + 3000)
-  // Look for pattern: <fn>(<var>.value) used with string comparison
-  // In CLI 2.1.50, this appears as: Ha9(v2.value) in popAllEditable
-  const extractTextRe = new RegExp(`(${V})\\(${V}\\.value\\)`)
-  const extractTextMatch = extractTextRe.exec(afterRemoveFn)
-  let extractTextFn = null
-  if (extractTextMatch) {
-    extractTextFn = extractTextMatch[1]
-    console.log(`  Extract queue text function: ${extractTextFn}`)
-  } else {
-    console.log(
-      '  WARNING: Cannot find extractQueueText function — will use direct value comparison'
-    )
-  }
-
   // ---------------------------------------------------------------------------
   // Inject the dequeue_message handler
   // ---------------------------------------------------------------------------
   console.log('\n--- Injecting dequeue_message handler ---')
 
-  // The predicate for dequeue: match items where the extracted text equals the provided value
-  const predicate = extractTextFn
-    ? `(_6)=>${extractTextFn}(_6.value)===Y6`
-    : `(_6)=>typeof _6.value==="string"?_6.value===Y6:JSON.stringify(_6.value)===Y6`
+  // Matching predicate: cli.js's own queue-text rule, INLINED. Earlier versions
+  // captured the helper by name (Ha9/VV_; g1S in 2.1.241 — `typeof v==="string"
+  // ?v:Gd(v,`\n`)`), but the helper lives in a different bundle module than the
+  // dispatch scope, so a bare-name call is not guaranteed to resolve there. The
+  // rule itself is three lines (docs/protocol-cc/04-system-subtypes.md §4.10:
+  // string verbatim; else keep `text` blocks' text, joined with "\n"), so we
+  // inline it — self-contained, scope-proof, and byte-compatible with
+  // ClaudeUI's side (src/core/sdk/queued-command-text.ts).
+  const predicate =
+    `(_6)=>(typeof _6.value==="string"?_6.value:` +
+    `Array.isArray(_6.value)?_6.value.filter((b6)=>b6&&b6.type==="text"&&typeof b6.text==="string")` +
+    `.map((b6)=>b6.text).join("\\n"):"")===Y6`
 
   const injectionA1 =
     PATCH_A1_MARKER +
@@ -231,121 +268,211 @@ if (skipA2) {
 if (!skipA2) {
   console.log('\n=== Part A2: queued_command_consumed notification ===')
 
-  // Find the queued_command attachment handler in submitMessage.
+  // Find the queued_command attachment handler.
   // SDK ≤0.2.87: else if(Z&&q8.attachment.type==="queued_command")yield{...isReplay:!0}
   // SDK ≥0.2.89: else if(Z&&q8.attachment.type==="queued_command"){let W6=q8.attachment;yield{...}}
+  // 2.1.241:     the submitMessage else-if chain became a message-normalization
+  //              switch — function*gGy(e,t,r,{replayUserMessages:n,includePartialMessages:o}):
+  //                case"attachment":if(n&&e.attachment.type==="queued_command"){
+  //                  yield{...seo(e.attachment,e),session_id:e.session_id};return}
+  //                yield*WTn([e],e.session_id);return;
+  //              where seo(att,msg) builds the isReplay user message. The message's
+  //              own e.session_id is in scope, so no session-id generator extraction
+  //              is needed; uuid uses globalThis.crypto.randomUUID (precedent:
+  //              subagent-streaming).
   // We replace it so it:
   //   1. Always yields a system notification (regardless of replay var)
   //   2. Only yields the user message replay when replay var is true
+  //   3. (switch shape) leaves the non-queued_command fallthrough and the
+  //      replay-off fallthrough (yield*WTn) byte-identical to unpatched.
 
-  // Try new pattern first (≥0.2.89): has `let` extraction + braces wrapping + fileAttachments spread
-  // Then fall back to old pattern (≤0.2.87): inline yield
-  const qcReNew = new RegExp(
-    `else if\\((${V})&&(${V})\\.attachment\\.type==="queued_command"\\)\\{let (${V})=\\2\\.attachment;yield\\{`
+  // Try the switch shape first (2.1.241), then the two else-if shapes.
+  const qcReSwitch = new RegExp(
+    `case"attachment":if\\((${V})&&(${V})\\.attachment\\.type==="queued_command"\\)` +
+      `\\{yield\\{\\.\\.\\.(${V})\\(\\2\\.attachment,\\2\\),session_id:\\2\\.session_id\\};return\\}`
   )
-  const qcReOld = new RegExp(
-    `else if\\((${V})&&(${V})\\.attachment\\.type==="queued_command"\\)yield\\{`
-  )
-
-  let qcMatch = qcReNew.exec(src)
-  const isNewPattern = !!qcMatch
-  if (!qcMatch) qcMatch = qcReOld.exec(src)
-  if (!qcMatch) {
-    console.error('ERROR: Cannot find queued_command attachment handler in submitMessage')
-    process.exit(1)
-  }
-
-  const qcIdx = qcMatch.index
-  const replayVar = qcMatch[1]
-  const attachVar = qcMatch[2]
-  const extractedVar = isNewPattern ? qcMatch[3] : null
-  console.log(
-    `Found queued_command handler at char ${qcIdx}, replay var: ${replayVar}, attachment var: ${attachVar}${isNewPattern ? `, extracted var: ${extractedVar}` : ''} (${isNewPattern ? 'new' : 'old'} pattern)`
-  )
-
-  // Verify uniqueness
-  const qcReUsed = isNewPattern ? qcReNew : qcReOld
-  const allQcMatches = [...src.matchAll(new RegExp(qcReUsed, 'g'))]
-  if (allQcMatches.length > 1) {
-    console.error('ERROR: queued_command handler matched multiple times. Aborting.')
-    process.exit(1)
-  }
-
-  // Find the full extent of the handler.
-  // New pattern (≥0.2.89): ends with `...fileAttachments}:{}}}` (double-close for let-block + yield)
-  // Old pattern (≤0.2.87): ends with `isReplay:!0}`
-  const afterQc = src.slice(qcIdx)
-  let fullQcRe
-  if (isNewPattern) {
-    // Match up to the `break;case"` that follows the handler block
-    fullQcRe = new RegExp(
-      `else if\\(${replayVar.replace(/\$/g, '\\$')}&&${attachVar.replace(/\$/g, '\\$')}\\.attachment\\.type==="queued_command"\\)\\{[\\s\\S]*?\\}\\}(?=break;case")`
+  const switchMatch = qcReSwitch.exec(src)
+  if (switchMatch) {
+    if (qcReSwitch.exec(src.slice(switchMatch.index + 1))) {
+      console.error('ERROR: queued_command switch handler matched more than once. Aborting.')
+      process.exit(1)
+    }
+    const [oldCode, replayVar, msgVar2, replayBuilderFn] = switchMatch
+    console.log(
+      `Found queued_command switch handler at char ${switchMatch.index}, ` +
+        `replay var: ${replayVar}, message var: ${msgVar2}, replay builder: ${replayBuilderFn}`
     )
-  } else {
-    fullQcRe = new RegExp(
-      `else if\\(${replayVar.replace(/\$/g, '\\$')}&&${attachVar.replace(/\$/g, '\\$')}\\.attachment\\.type==="queued_command"\\)yield\\{[\\s\\S]*?isReplay:!0\\}`
+    const att = `${msgVar2}.attachment`
+    const newCode =
+      `case"attachment":${PATCH_A2_MARKER}` +
+      `if(${att}.type==="queued_command")` +
+      `yield{type:"system",subtype:"queued_command_consumed",` +
+      `prompt:${att}.prompt,source_uuid:${att}.source_uuid,` +
+      `session_id:${msgVar2}.session_id,uuid:globalThis.crypto.randomUUID()};` +
+      `if(${replayVar}&&${att}.type==="queued_command")` +
+      `{yield{...${replayBuilderFn}(${att},${msgVar2}),session_id:${msgVar2}.session_id};return}`
+    src = src.slice(0, switchMatch.index) + newCode + src.slice(switchMatch.index + oldCode.length)
+    console.log('Replaced queued_command switch handler with consumed notification')
+
+    // -- Site 2 (REQUIRED on 2.1.241): the stdin stream-json loop --------------
+    // gGy above serves the SDK-hosted transport. The stdin loop that ClaudeUI
+    // actually drives consumes mid-turn queued_command attachments here (the
+    // true descendant of the old submitMessage else-if chain — note the yield
+    // is now a BUILDER CALL, not an object literal, which is why every legacy
+    // `yield{` pattern missed it):
+    //   else if(C&&Sr.attachment.type==="queued_command")yield seo(Sr.attachment,Sr);
+    // C = replayUserMessages, seo = the isReplay user-message builder. We make
+    // the consumed notification unconditional and keep the replay gated on C.
+    // session_id comes from the same generator the surrounding emitters use
+    // (`session_id:Vt()` in the adjacent cases), extracted from forward context.
+    const stdinSiteRe = new RegExp(
+      `else if\\((${V})&&(${V})\\.attachment\\.type==="queued_command"\\)` +
+        `yield (${V})\\(\\2\\.attachment,\\2\\);`
     )
+    const stdinMatch = stdinSiteRe.exec(src)
+    if (!stdinMatch) {
+      console.error(
+        'ERROR: Cannot find the stdin-loop queued_command handler (yield-builder shape).'
+      )
+      process.exit(1)
+    }
+    if (stdinSiteRe.exec(src.slice(stdinMatch.index + 1))) {
+      console.error('ERROR: stdin-loop queued_command handler matched more than once. Aborting.')
+      process.exit(1)
+    }
+    const [stdinOld, stdinReplayVar, stdinMsgVar, stdinBuilderFn] = stdinMatch
+    const stdinFwd = src.slice(stdinMatch.index, stdinMatch.index + 1000)
+    const sessGenMatch = new RegExp(`session_id:(${V})\\(\\)`).exec(stdinFwd)
+    if (!sessGenMatch) {
+      console.error('ERROR: Cannot extract session-id generator near the stdin-loop handler.')
+      process.exit(1)
+    }
+    const stdinSessFn = sessGenMatch[1]
+    console.log(
+      `Found stdin-loop queued_command handler at char ${stdinMatch.index}, ` +
+        `replay var: ${stdinReplayVar}, message var: ${stdinMsgVar}, ` +
+        `builder: ${stdinBuilderFn}, session-id gen: ${stdinSessFn}`
+    )
+    const stdinAtt = `${stdinMsgVar}.attachment`
+    const stdinNew =
+      `else if(${stdinAtt}.type==="queued_command"){` +
+      `yield{type:"system",subtype:"queued_command_consumed",` +
+      `prompt:${stdinAtt}.prompt,source_uuid:${stdinAtt}.source_uuid,` +
+      `session_id:${stdinSessFn}(),uuid:globalThis.crypto.randomUUID()};` +
+      `if(${stdinReplayVar})yield ${stdinBuilderFn}(${stdinAtt},${stdinMsgVar});}`
+    src = src.slice(0, stdinMatch.index) + stdinNew + src.slice(stdinMatch.index + stdinOld.length)
+    console.log('Replaced stdin-loop queued_command handler with consumed notification')
   }
-  const fullQcMatch = fullQcRe.exec(afterQc)
-  if (!fullQcMatch) {
-    console.error('ERROR: Cannot extract full queued_command yield statement')
-    process.exit(1)
-  }
 
-  const oldCode = fullQcMatch[0]
-  console.log(`Old code length: ${oldCode.length} chars`)
+  // Legacy else-if shapes (pre-2.1.241) — only when the switch shape is absent.
+  if (!switchMatch) {
+    const qcReNew = new RegExp(
+      `else if\\((${V})&&(${V})\\.attachment\\.type==="queued_command"\\)\\{let (${V})=\\2\\.attachment;yield\\{`
+    )
+    const qcReOld = new RegExp(
+      `else if\\((${V})&&(${V})\\.attachment\\.type==="queued_command"\\)yield\\{`
+    )
 
-  // Extract session_id generator from the old code: session_id:<fn>()
-  const sessionIdRe = new RegExp(`session_id:(${V})\\(\\)`)
-  const sessionIdMatch = sessionIdRe.exec(oldCode)
-  if (!sessionIdMatch) {
-    console.error('ERROR: Cannot extract session_id generator from yield')
-    process.exit(1)
-  }
-  const sessionIdFn = sessionIdMatch[1]
-  console.log(`  Session ID generator: ${sessionIdFn}`)
+    let qcMatch = qcReNew.exec(src)
+    const isNewPattern = !!qcMatch
+    if (!qcMatch) qcMatch = qcReOld.exec(src)
+    if (!qcMatch) {
+      console.error('ERROR: Cannot find queued_command attachment handler in submitMessage')
+      process.exit(1)
+    }
 
-  // Extract uuid generator from a nearby yield in the same function (submitMessage/vHq).
-  // Look for "uuid:<fn>()" where <fn> is a standalone call (not .uuid or .source_uuid).
-  // The queued_command yield itself uses uuid:g6.attachment.source_uuid||g6.uuid (not a generator),
-  // but other yields in the same function use uuid:<fn>() — e.g., the result yield.
-  // Search in the ~2000 chars before and after the queued_command handler.
-  const vHqCtx = src.slice(Math.max(0, qcIdx - 3000), qcIdx + 3000)
-  // Accepts bare fn `FUNC()` and method call `OBJ.randomUUID()` (2.1.113+).
-  const uuidGenRe = new RegExp(`uuid:(${V}(?:\\.${V})?)\\(\\)\\}`)
-  const uuidGenMatch = uuidGenRe.exec(vHqCtx)
-  if (!uuidGenMatch) {
-    console.error('ERROR: Cannot extract uuid generator from submitMessage context')
-    process.exit(1)
-  }
-  const uuidFn = uuidGenMatch[1]
-  console.log(`  UUID generator: ${uuidFn}`)
+    const qcIdx = qcMatch.index
+    const replayVar = qcMatch[1]
+    const attachVar = qcMatch[2]
+    const extractedVar = isNewPattern ? qcMatch[3] : null
+    console.log(
+      `Found queued_command handler at char ${qcIdx}, replay var: ${replayVar}, attachment var: ${attachVar}${isNewPattern ? `, extracted var: ${extractedVar}` : ''} (${isNewPattern ? 'new' : 'old'} pattern)`
+    )
 
-  // Build the replacement code
-  // For the new pattern (≥0.2.89), preserve timestamp and fileAttachments spread
-  const att = isNewPattern ? extractedVar : `${attachVar}.attachment`
-  const promptExpr = `${att}.prompt`
-  const srcUuidExpr = `${att}.source_uuid`
-  const fileAttachExpr = isNewPattern
-    ? `,...${att}.fileAttachments?.length?{file_attachments:${att}.fileAttachments}:{}`
-    : ''
-  const timestampExpr = isNewPattern ? `,timestamp:${attachVar}.timestamp` : ''
-  const letPrefix = isNewPattern ? `let ${extractedVar}=${attachVar}.attachment;` : ''
+    // Verify uniqueness
+    const qcReUsed = isNewPattern ? qcReNew : qcReOld
+    const allQcMatches = [...src.matchAll(new RegExp(qcReUsed, 'g'))]
+    if (allQcMatches.length > 1) {
+      console.error('ERROR: queued_command handler matched multiple times. Aborting.')
+      process.exit(1)
+    }
 
-  const newCode =
-    PATCH_A2_MARKER +
-    `else if(${attachVar}.attachment.type==="queued_command"){` +
-    letPrefix +
-    `yield{type:"system",subtype:"queued_command_consumed",` +
-    `prompt:${promptExpr},source_uuid:${srcUuidExpr},` +
-    `session_id:${sessionIdFn}(),uuid:${uuidFn}()};` +
-    `if(${replayVar})yield{type:"user",message:{role:"user",content:${promptExpr}},` +
-    `session_id:${sessionIdFn}(),parent_tool_use_id:null,` +
-    `uuid:${srcUuidExpr}||${attachVar}.uuid${timestampExpr},isReplay:!0${fileAttachExpr}}` +
-    `}`
+    // Find the full extent of the handler.
+    // New pattern (≥0.2.89): ends with `...fileAttachments}:{}}}` (double-close for let-block + yield)
+    // Old pattern (≤0.2.87): ends with `isReplay:!0}`
+    const afterQc = src.slice(qcIdx)
+    let fullQcRe
+    if (isNewPattern) {
+      // Match up to the `break;case"` that follows the handler block
+      fullQcRe = new RegExp(
+        `else if\\(${replayVar.replace(/\$/g, '\\$')}&&${attachVar.replace(/\$/g, '\\$')}\\.attachment\\.type==="queued_command"\\)\\{[\\s\\S]*?\\}\\}(?=break;case")`
+      )
+    } else {
+      fullQcRe = new RegExp(
+        `else if\\(${replayVar.replace(/\$/g, '\\$')}&&${attachVar.replace(/\$/g, '\\$')}\\.attachment\\.type==="queued_command"\\)yield\\{[\\s\\S]*?isReplay:!0\\}`
+      )
+    }
+    const fullQcMatch = fullQcRe.exec(afterQc)
+    if (!fullQcMatch) {
+      console.error('ERROR: Cannot extract full queued_command yield statement')
+      process.exit(1)
+    }
 
-  src = src.slice(0, qcIdx) + newCode + src.slice(qcIdx + oldCode.length)
-  console.log('Replaced queued_command handler with consumed notification')
+    const oldCode = fullQcMatch[0]
+    console.log(`Old code length: ${oldCode.length} chars`)
+
+    // Extract session_id generator from the old code: session_id:<fn>()
+    const sessionIdRe = new RegExp(`session_id:(${V})\\(\\)`)
+    const sessionIdMatch = sessionIdRe.exec(oldCode)
+    if (!sessionIdMatch) {
+      console.error('ERROR: Cannot extract session_id generator from yield')
+      process.exit(1)
+    }
+    const sessionIdFn = sessionIdMatch[1]
+    console.log(`  Session ID generator: ${sessionIdFn}`)
+
+    // Extract uuid generator from a nearby yield in the same function (submitMessage/vHq).
+    // Look for "uuid:<fn>()" where <fn> is a standalone call (not .uuid or .source_uuid).
+    // The queued_command yield itself uses uuid:g6.attachment.source_uuid||g6.uuid (not a generator),
+    // but other yields in the same function use uuid:<fn>() — e.g., the result yield.
+    // Search in the ~2000 chars before and after the queued_command handler.
+    const vHqCtx = src.slice(Math.max(0, qcIdx - 3000), qcIdx + 3000)
+    // Accepts bare fn `FUNC()` and method call `OBJ.randomUUID()` (2.1.113+).
+    const uuidGenRe = new RegExp(`uuid:(${V}(?:\\.${V})?)\\(\\)\\}`)
+    const uuidGenMatch = uuidGenRe.exec(vHqCtx)
+    if (!uuidGenMatch) {
+      console.error('ERROR: Cannot extract uuid generator from submitMessage context')
+      process.exit(1)
+    }
+    const uuidFn = uuidGenMatch[1]
+    console.log(`  UUID generator: ${uuidFn}`)
+
+    // Build the replacement code
+    // For the new pattern (≥0.2.89), preserve timestamp and fileAttachments spread
+    const att = isNewPattern ? extractedVar : `${attachVar}.attachment`
+    const promptExpr = `${att}.prompt`
+    const srcUuidExpr = `${att}.source_uuid`
+    const fileAttachExpr = isNewPattern
+      ? `,...${att}.fileAttachments?.length?{file_attachments:${att}.fileAttachments}:{}`
+      : ''
+    const timestampExpr = isNewPattern ? `,timestamp:${attachVar}.timestamp` : ''
+    const letPrefix = isNewPattern ? `let ${extractedVar}=${attachVar}.attachment;` : ''
+
+    const newCode =
+      PATCH_A2_MARKER +
+      `else if(${attachVar}.attachment.type==="queued_command"){` +
+      letPrefix +
+      `yield{type:"system",subtype:"queued_command_consumed",` +
+      `prompt:${promptExpr},source_uuid:${srcUuidExpr},` +
+      `session_id:${sessionIdFn}(),uuid:${uuidFn}()};` +
+      `if(${replayVar})yield{type:"user",message:{role:"user",content:${promptExpr}},` +
+      `session_id:${sessionIdFn}(),parent_tool_use_id:null,` +
+      `uuid:${srcUuidExpr}||${attachVar}.uuid${timestampExpr},isReplay:!0${fileAttachExpr}}` +
+      `}`
+
+    src = src.slice(0, qcIdx) + newCode + src.slice(qcIdx + oldCode.length)
+    console.log('Replaced queued_command handler with consumed notification')
+  } // end legacy else-if shapes
 }
 
 // ---------------------------------------------------------------------------

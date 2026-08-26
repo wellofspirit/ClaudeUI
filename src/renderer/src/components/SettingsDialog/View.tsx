@@ -11,7 +11,6 @@ import {
 
 export interface VersionInfo {
   appVersion: string
-  sdkVersion: string
   cliVersion: string
 }
 
@@ -198,9 +197,7 @@ export function SettingsDialogView({
             </div>
 
             {visibleSubgroups.length === 0 ? (
-              <div className="px-2 py-4 text-[11px] text-text-muted/50 text-center">
-                No matches
-              </div>
+              <div className="px-2 py-4 text-[11px] text-text-muted/50 text-center">No matches</div>
             ) : (
               visibleSubgroups.map((sg) => (
                 <div key={sg.id}>
@@ -268,7 +265,7 @@ export function SettingsDialogView({
                 {/^\d/.test(versionInfo.appVersion)
                   ? `v${versionInfo.appVersion}`
                   : versionInfo.appVersion}{' '}
-                · SDK {versionInfo.sdkVersion} · CLI {versionInfo.cliVersion}
+                · CLI {versionInfo.cliVersion}
               </div>
             )}
           </div>

@@ -40,9 +40,7 @@ const MODEL_GROUPS: EngineModelGroup[] = [
     engineId: 'opencode',
     vendorId: 'openai',
     vendorName: 'OpenAI',
-    models: [
-      { value: 'openai/gpt-5', displayName: 'GPT-5', description: '', engineId: 'opencode' }
-    ]
+    models: [{ value: 'openai/gpt-5', displayName: 'GPT-5', description: '', engineId: 'opencode' }]
   }
 ]
 
@@ -72,9 +70,7 @@ function installApiStub(overrides: Record<string, unknown> = {}): void {
 
 async function renderLoaded(): Promise<void> {
   render(<ClaudeDispatchSection />)
-  await waitFor(() =>
-    expect(screen.getByTestId('ClaudeDispatchSection.defaultModel')).toBeTruthy()
-  )
+  await waitFor(() => expect(screen.getByTestId('ClaudeDispatchSection.defaultModel')).toBeTruthy())
 }
 
 /**

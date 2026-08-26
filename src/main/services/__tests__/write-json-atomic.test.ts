@@ -5,11 +5,19 @@
  * Real fs against per-test temp dirs; the real home directory is never touched.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, existsSync, readdirSync } from 'node:fs'
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+  existsSync,
+  readdirSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
@@ -37,7 +45,7 @@ import {
   writeJsonAtomicAsync,
   writeFileAtomicSync,
   readJsonFileForWrite
-} from '../write-json-atomic'
+} from '../../../core/services/write-json-atomic'
 
 let dir: string
 beforeEach(() => {

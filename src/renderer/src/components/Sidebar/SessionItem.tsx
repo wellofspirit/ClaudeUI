@@ -188,7 +188,11 @@ export const SessionItem = memo(function SessionItem({
             }}
             title={info.title}
           >
-            <EngineLogo engineId={info.engineId ?? 'claude'} size={10} className="shrink-0 opacity-80" />
+            <EngineLogo
+              engineId={info.engineId ?? 'claude'}
+              size={10}
+              className="shrink-0 opacity-80"
+            />
             {info.title}
           </span>
         )}

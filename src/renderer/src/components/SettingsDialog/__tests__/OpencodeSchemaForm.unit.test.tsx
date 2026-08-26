@@ -9,7 +9,12 @@
 import { useState } from 'react'
 import { describe, it, expect } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
-import { OpencodeSchemaForm, detectKind, type SchemaNode, type SchemaDefs } from '../OpencodeSchemaForm'
+import {
+  OpencodeSchemaForm,
+  detectKind,
+  type SchemaNode,
+  type SchemaDefs
+} from '../OpencodeSchemaForm'
 import { selectMenuOptionValues } from '../../../../../test/helpers/select-menu'
 
 const miniSchema: SchemaNode = {
@@ -26,9 +31,7 @@ const defs: SchemaDefs = {}
 
 function Harness({ initial }: { initial: Record<string, unknown> }): React.JSX.Element {
   const [value, setValue] = useState<Record<string, unknown>>(initial)
-  return (
-    <OpencodeSchemaForm schema={miniSchema} defs={defs} value={value} onChange={setValue} />
-  )
+  return <OpencodeSchemaForm schema={miniSchema} defs={defs} value={value} onChange={setValue} />
 }
 
 describe('detectKind', () => {
@@ -38,9 +41,9 @@ describe('detectKind', () => {
     expect(detectKind({ type: 'integer' }, defs)).toBe('number')
     expect(detectKind({ type: 'string', enum: ['a'] }, defs)).toBe('enum')
     expect(detectKind({ type: 'array', items: { type: 'string' } }, defs)).toBe('stringArray')
-    expect(
-      detectKind({ type: 'array', items: { type: 'string', enum: ['x'] } }, defs)
-    ).toBe('enumArray')
+    expect(detectKind({ type: 'array', items: { type: 'string', enum: ['x'] } }, defs)).toBe(
+      'enumArray'
+    )
     expect(detectKind({ type: 'object', additionalProperties: { type: 'boolean' } }, defs)).toBe(
       'record'
     )
@@ -116,9 +119,9 @@ describe('Record key editing (draft state, commit on blur)', () => {
     // Blur commits: the row identity becomes 'new'.
     fireEvent.blur(keyInput)
     expect(screen.getByTestId('OpencodeSchemaForm.recordRow')).toHaveAttribute('data-id', 'new')
-    expect(
-      (screen.getByTestId('OpencodeSchemaForm.recordKey') as HTMLInputElement).value
-    ).toBe('new')
+    expect((screen.getByTestId('OpencodeSchemaForm.recordKey') as HTMLInputElement).value).toBe(
+      'new'
+    )
   })
 
   it('Enter commits the rename like blur does', () => {

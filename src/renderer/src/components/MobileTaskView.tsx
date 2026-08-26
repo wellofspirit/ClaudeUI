@@ -32,7 +32,10 @@ export function MobileTaskView(): React.JSX.Element {
   }
 
   return (
-    <div data-testid="MobileTaskView" className="h-full flex flex-col bg-bg-primary overflow-hidden">
+    <div
+      data-testid="MobileTaskView"
+      className="h-full flex flex-col bg-bg-primary overflow-hidden"
+    >
       <div
         className="shrink-0 flex items-center gap-3 px-3 h-12 border-b border-border"
         style={{ paddingTop: 'env(safe-area-inset-top)' }}

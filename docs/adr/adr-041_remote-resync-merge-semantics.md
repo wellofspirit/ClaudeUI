@@ -1,6 +1,6 @@
 # ADR-041 — Remote re-sync merges into local view state instead of replacing it
 
-**Status:** Accepted
+**Status:** Accepted — **superseded in part by ADR-051 (SyncCore)**: the desktop-renderer snapshot source and the resync merge model are replaced by main-process canonical state (`docs/architecture/sync-core.md`). **SyncCore phase 4b landed the snapshot half:** `sync-full` now carries `SyncCore.getSnapshot()`, not `window.__getRemoteState()`, so the sentences below about "the desktop renderer's Zustand state" describe the pre-4b system. The merge semantics themselves survive verbatim — and the ADR's core lesson is now enforced rather than negotiated: selection is per-client, so core serves `activeSessionId: null` and the client resolves its own (local selection → server's, for an older host → most recent known session). The other per-client-view-state rules (drafts, layout, scroll) carry forward into SyncCore's state classification.
 **Relates to:** ADR-039 (the remote server this rides on), ADR-008 (the web client is typed against
 `ClaudeAPI` — `applyRemoteSnapshot` is part of that contract), ADR-040 (`activeTasks` is one of the
 per-session fields the snapshot carries)
@@ -14,7 +14,7 @@ snapshot is literally the **desktop renderer's** Zustand state (`window.__getRem
 
 The web client used to apply every sync-full wholesale: replace the `sessions` map, adopt the
 desktop's `activeSessionId`. On a phone this is the common path, not the edge case — mobile
-browsers discard backgrounded pages, so *every* app switch produced a full re-hydration that
+browsers discard backgrounded pages, so _every_ app switch produced a full re-hydration that
 teleported the client to whatever the desktop was showing. With the desktop on the welcome screen
 (`activeSessionId: null`) the phone fell back to its localStorage `lastSelectedEngineId` plus a
 first-in-catalog model ("opencode / Qwen 3.8 max"). Both cases were **routing bugs, not cosmetic**:
@@ -38,7 +38,7 @@ client passes `isResync = true` from the second sync-full onward (a `hasHydrated
   value when it resolves in the merged map; otherwise it falls back to the snapshot's (a stale
   pointer rendering `EMPTY_SESSION_STATE` is worse than following the desktop).
 - Server-authoritative collections (`directories`, `recentSessionIds`, pins, custom titles,
-  settings) are still adopted wholesale on every sync — the merge protects *view/navigation*
+  settings) are still adopted wholesale on every sync — the merge protects _view/navigation_
   state, not data the desktop owns.
 
 ## Consequences

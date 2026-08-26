@@ -39,9 +39,11 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-async function freshResolveForkAnchor(): Promise<typeof import('../session-history')['resolveForkAnchor']> {
+async function freshResolveForkAnchor(): Promise<
+  (typeof import('../../../core/services/session-history'))['resolveForkAnchor']
+> {
   vi.resetModules()
-  const mod = await import('../session-history')
+  const mod = await import('../../../core/services/session-history')
   return mod.resolveForkAnchor
 }
 
@@ -74,7 +76,13 @@ describe('resolveForkAnchor — transcript project-key derivation (H14)', () => 
     seedTranscript(correctKey, 'sess-underscore')
 
     const resolveForkAnchor = await freshResolveForkAnchor()
-    const res = await resolveForkAnchor('sess-underscore', CWD_WITH_UNDERSCORE, 'msg_x', 'claude', 0)
+    const res = await resolveForkAnchor(
+      'sess-underscore',
+      CWD_WITH_UNDERSCORE,
+      'msg_x',
+      'claude',
+      0
+    )
 
     // Old derivation looked in '-home-user-my_proj' (underscore kept) → the file
     // is not there → 'transcript-not-found'. The correct one finds + resolves it.

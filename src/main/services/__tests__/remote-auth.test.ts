@@ -17,8 +17,8 @@ import {
   dbPasswordAuthProvider,
   safeHexEqual,
   MIN_PASSWORD_LENGTH
-} from '../remote-auth'
-import type { RemoteConfigRow } from '../db'
+} from '../../../core/services/remote-auth'
+import type { RemoteConfigRow } from '../../../core/services/db'
 
 // provisionPassword writes through to the DB and the auth provider reads from
 // it — stub both db.ts entry points so this stays a pure unit test of
@@ -28,7 +28,7 @@ const { dbSetRemotePassword, configRef } = vi.hoisted(() => ({
   dbSetRemotePassword: vi.fn(),
   configRef: { current: null as RemoteConfigRow | null }
 }))
-vi.mock('../db', () => ({
+vi.mock('../../../core/services/db', () => ({
   setRemotePassword: dbSetRemotePassword,
   getRemoteConfig: () => configRef.current
 }))
@@ -44,6 +44,16 @@ function makeRow(over: Partial<RemoteConfigRow> = {}): RemoteConfigRow {
     tlsHttpsPort: 443,
     lastServeHttpsPort: null,
     lastServeLocalPort: null,
+    allowTerminal: false,
+    shellGrantIdleMinutes: 10,
+    authPolicy: null,
+    passwordBreakGlass: true,
+    lanE2eKey: null,
+    // ADR-054 (v12) step-up columns at their defaults.
+    stepUpTier: 'medium',
+    stepUpMutationIdleMinutes: 60,
+    sessionMaxAgeHours: 4,
+    auditRetentionDays: 365,
     passwordSalt: 'aa'.repeat(16),
     passwordHash: 'bb'.repeat(32),
     kdfParams: KDF_JSON,

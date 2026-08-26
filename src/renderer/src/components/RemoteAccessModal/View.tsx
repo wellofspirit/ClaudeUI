@@ -1,12 +1,11 @@
 import { useRef, useCallback } from 'react'
 import type { RemoteStatus, NetworkInterfaceInfo } from '../../../../shared/types'
 import { SelectMenu } from '../shared/SelectMenu'
+import { AccessLinks } from './AccessLinks'
 
 export interface RemoteAccessModalViewProps {
   status: RemoteStatus | null
   starting: boolean
-  qrDataUrl: string | null
-  copied: boolean
   interfaces: NetworkInterfaceInfo[]
   selectedHost: string
   tunnelMode: boolean
@@ -14,15 +13,14 @@ export interface RemoteAccessModalViewProps {
   onSetTunnelMode: (on: boolean) => void
   onStart: () => void
   onStop: () => void
-  onCopy: () => void
+  onSetTunnel: (on: boolean) => Promise<void>
+  onSetPassword: () => void
   onClose: () => void
 }
 
 export function RemoteAccessModalView({
   status,
   starting,
-  qrDataUrl,
-  copied,
   interfaces,
   selectedHost,
   tunnelMode,
@@ -30,15 +28,11 @@ export function RemoteAccessModalView({
   onSetTunnelMode,
   onStart,
   onStop,
-  onCopy,
+  onSetTunnel,
+  onSetPassword,
   onClose
 }: RemoteAccessModalViewProps): React.JSX.Element {
   const overlayRef = useRef<HTMLDivElement>(null)
-
-  // Same precedence as the container's QR source — see RemoteAccessModal.tsx.
-  const tlsUrl = status?.tls?.url ?? null
-  const shareUrl = tlsUrl ?? status?.tunnelUrl ?? status?.lanUrl ?? null
-  const displayUrl = shareUrl ? shareUrl.replace(/#.*$/, '') : null
 
   const handleOverlayClick = useCallback(
     (e: React.MouseEvent) => {
@@ -63,9 +57,13 @@ export function RemoteAccessModalView({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
       onClick={handleOverlayClick}
     >
-      <div className="bg-bg-secondary rounded-xl border border-border shadow-2xl w-[380px] max-h-[90vh] overflow-hidden animate-fade-in">
+      {/* Wider than the pre-ADR-056 card: the running state now carries three
+          link rows with actions rather than one URL under a QR. The BODY
+          scrolls, not the card, so the header (and its close button) stays put
+          when the rows expand a QR. */}
+      <div className="bg-bg-secondary rounded-xl border border-border shadow-2xl w-[440px] max-h-[90vh] overflow-hidden flex flex-col animate-fade-in">
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+        <div className="shrink-0 flex items-center justify-between px-5 py-4 border-b border-border">
           <div className="flex items-center gap-2.5">
             <svg
               width="18"
@@ -105,7 +103,7 @@ export function RemoteAccessModalView({
         </div>
 
         {/* Body */}
-        <div className="px-5 py-5">
+        <div className="px-5 py-5 overflow-y-auto">
           {!isRunning ? (
             /* Not running state */
             <div className="flex flex-col items-center gap-4 py-4">
@@ -228,16 +226,14 @@ export function RemoteAccessModalView({
           ) : status ? (
             /* Running state */
             <div className="flex flex-col items-center gap-4">
-              {/* QR Code */}
-              <div className="relative">
-                {qrDataUrl ? (
-                  <div className="p-3 bg-bg-tertiary rounded-xl">
-                    <img src={qrDataUrl} alt="QR Code" width={220} height={220} className="block" />
-                  </div>
-                ) : (
-                  <div className="w-[220px] h-[220px] bg-bg-tertiary rounded-xl animate-pulse" />
-                )}
-              </div>
+              {/* The links themselves — one row per ORIGIN, because the origin
+                  decides both the channel and the identity a device will still
+                  have to present inside it (ADR-056). */}
+              <AccessLinks
+                status={status}
+                onSetTunnel={onSetTunnel}
+                onSetPassword={onSetPassword}
+              />
 
               {/* Tunnel status */}
               {isTunnelActive && (
@@ -292,16 +288,9 @@ export function RemoteAccessModalView({
                 </div>
               )}
 
-              {/* TLS mode: why there is no token in the URL, and who can use it. */}
-              {tlsUrl && (
-                <div
-                  data-testid="RemoteAccessModal.tlsIdentity"
-                  className="w-full text-[11px] text-success px-1"
-                >
-                  Authenticated by Tailscale identity — only this machine&apos;s Tailscale owner can
-                  sign in. No token in the link.
-                </div>
-              )}
+              {/* The tailnet row's own copy now carries what the standalone TLS
+                  identity line used to say ("No secret in the link — sign-in is
+                  your passkey"), so it is not repeated here. */}
 
               {/* TLS mode asked for but `tailscale serve` is not up (autostart
                   keeps retrying) — this is the only place the reason surfaces. */}
@@ -313,50 +302,6 @@ export function RemoteAccessModalView({
                   {status.tls.detectionMessage}
                 </div>
               )}
-
-              {/* URL */}
-              <div className="w-full">
-                <div className="flex items-center gap-2 bg-bg-primary rounded-lg px-3 py-2 border border-border">
-                  <code className="flex-1 text-[11px] text-text-secondary truncate font-mono">
-                    {displayUrl}
-                  </code>
-                  <button
-                    data-testid="RemoteAccessModal.copyUrl"
-                    onClick={onCopy}
-                    className="shrink-0 text-text-muted hover:text-accent transition-colors"
-                    title="Copy URL"
-                  >
-                    {copied ? (
-                      <svg
-                        width="14"
-                        height="14"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        className="text-success"
-                      >
-                        <path d="M20 6L9 17l-5-5" />
-                      </svg>
-                    ) : (
-                      <svg
-                        width="14"
-                        height="14"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      >
-                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                        <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
-                      </svg>
-                    )}
-                  </button>
-                </div>
-              </div>
 
               {/* Connection status */}
               <div className="w-full flex items-center justify-between text-[12px] px-1">

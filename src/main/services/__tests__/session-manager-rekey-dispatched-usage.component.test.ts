@@ -22,27 +22,27 @@ const { mockRenameDispatchedUsage, mockCreateSession } = vi.hoisted(() => ({
   mockCreateSession: vi.fn()
 }))
 
-vi.mock('../db', () => ({
+vi.mock('../../../core/services/db', () => ({
   renameDispatchedUsage: mockRenameDispatchedUsage
 }))
 
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
 // Side-effect-only in the real module (registers engine factories) — mocked
 // out so importing SessionManager doesn't pull in ClaudeSession/OpencodeSession.
-vi.mock('../../providers/register-engines', () => ({}))
+vi.mock('../../../core/providers/register-engines', () => ({}))
 
-vi.mock('../../providers/EngineRegistry', () => ({
+vi.mock('../../../core/providers/EngineRegistry', () => ({
   engineRegistry: {
     createSession: mockCreateSession
   }
 }))
 
-vi.mock('../session-history', () => ({ loadSessionHistory: vi.fn() }))
+vi.mock('../../../core/services/session-history', () => ({ loadSessionHistory: vi.fn() }))
 
-import { SessionManager } from '../session-manager'
+import { SessionManager } from '../../../core/services/session-manager'
 
 function makeFakeSession(routingId: string): {
   routingId: string

@@ -34,7 +34,11 @@ export function ReviewBar({ comments }: Props): React.JSX.Element | null {
         session?.effort ?? 'medium',
         resumeId,
         session?.permissionMode,
-        undefined,
+        // The session's own pick, NOT undefined: an absent model makes the
+        // opencode resolver substitute a catalog fallback, and since 0065eef the
+        // birth event announces the resolved model to every replica — an
+        // undefined here would overwrite the user's picker with that fallback.
+        session?.selectedModel,
         undefined,
         undefined,
         undefined,

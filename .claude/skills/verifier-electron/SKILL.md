@@ -32,6 +32,7 @@ coexists with an already-running app.
 ```
 bun run build        # produces out/main/index.js + out/renderer/index.html
 ```
+
 The harness launches the **built** app (not dev). `playwright` is a devDep; if a
 fresh clone lacks it: `bun add -d playwright`.
 
@@ -52,13 +53,20 @@ React mounts and first IPC settles, performs each `--click` in order, screenshot
 to `--out` (default `.cache/screenshots/app.png`), then prints JSON:
 
 ```json
-{ "ok": true, "screenshot": "...", "headless": true, "windowTitle": "ClaudeUI",
-  "needle": "Codex", "needleVisibleInDom": 0, "needleInRawHtml": 0,
-  "consoleErrors": [] }
+{
+  "ok": true,
+  "screenshot": "...",
+  "headless": true,
+  "windowTitle": "ClaudeUI",
+  "needle": "Codex",
+  "needleVisibleInDom": 0,
+  "needleInRawHtml": 0,
+  "consoleErrors": []
+}
 ```
 
 - `needleVisibleInDom` / `needleInRawHtml` — count a string in the live UI
-  (`--needle`). **Interpret carefully:** a hit can be user *data* (session titles,
+  (`--needle`). **Interpret carefully:** a hit can be user _data_ (session titles,
   chat text) rather than UI chrome. Always Read the PNG to disambiguate — text
   counts are a tripwire, the screenshot is the verdict.
 - `consoleErrors` — renderer console errors + pageerrors. Non-empty is a finding.
@@ -69,7 +77,7 @@ to `--out` (default `.cache/screenshots/app.png`), then prints JSON:
 **Remote access is suppressed by default.** The harness launches the app with
 `CLAUDEUI_DISABLE_REMOTE=1`, so the instance it starts never reconciles the
 `tailscale serve` record, never autostarts the remote listener, and never tears
-either down on quit. Those are *machine-global* (a pinned TCP port + the host's
+either down on quit. Those are _machine-global_ (a pinned TCP port + the host's
 serve config), not per-instance: without the suppression a second instance
 treats the primary app's live serve record as a leaked leftover and removes it,
 races it for the port, and disables `tailscale serve` on exit — i.e. it kills
@@ -80,11 +88,11 @@ set, `remote:start` and `remote:force-reserve` reject.
 
 **The app runs "headless" by default.** The harness launches it with
 `CLAUDEUI_HEADLESS=1` (the app also honours a `--claudeui-headless` CLI switch),
-which shows the window *inactive*, positioned beyond the virtual desktop, with
+which shows the window _inactive_, positioned beyond the virtual desktop, with
 no taskbar entry — so a verifier run never steals your focus, covers your
 screen, or leaves a stray taskbar button. Screenshots, `capturePage`, and clicks
 all still work because the window is genuinely shown and keeps painting
-(`--disable-backgrounding-occluded-windows`); a *hidden* window produces no
+(`--disable-backgrounding-occluded-windows`); a _hidden_ window produces no
 compositor frames at all and hangs `screenshot()`. Pass `--headed` to opt out
 and get a normal visible window; `--keep` implies `--headed`, since an
 invisible, taskbar-less instance left running is impossible to close by hand.
@@ -115,7 +123,7 @@ renderer source for `title=`/`aria-label`/button text.
   user's API quota **and writes to real `~/.claude` transcripts**. Don't drive it
   live without explicit OK, or first isolate config (point the app at a throwaway
   `HOME`/config dir). For most UI changes the boot log (`Service session spawned`)
-  + the e2e suite already cover the chat pipeline.
+  - the e2e suite already cover the chat pipeline.
 
 ## Report
 
@@ -123,4 +131,7 @@ Follow the `/verify` report format: Verdict (PASS/FAIL/BLOCKED/SKIP), Claim,
 Method, Steps (each a thing you did to the running app + what you saw; mark
 off-happy-path probes 🔍), the key screenshot, and Findings. The screenshot and
 the JSON are your evidence — paste/Read them, don't paraphrase.
+
+```
+
 ```

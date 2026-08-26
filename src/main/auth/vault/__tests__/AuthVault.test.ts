@@ -8,9 +8,9 @@ vi.mock('node:os', async () => {
   const actual = await vi.importActual<typeof import('node:os')>('node:os')
   return { ...actual, homedir: () => home.value, default: { ...actual, homedir: () => home.value } }
 })
-import { AuthVault, vaultPath } from '../AuthVault'
-import { CredentialSync, type CodexFeedTarget } from '../CredentialSync'
-import type { VaultCredential } from '../codex-oauth'
+import { AuthVault, vaultPath } from '../../../../core/auth/vault/AuthVault'
+import { CredentialSync, type CodexFeedTarget } from '../../../../core/auth/vault/CredentialSync'
+import type { VaultCredential } from '../../../../core/auth/vault/codex-oauth'
 let testHome: string
 beforeEach(() => {
   testHome = mkdtempSync(join(tmpdir(), 'auth-vault-'))
@@ -154,7 +154,9 @@ describe('AuthVault validation', () => {
 })
 
 describe('AuthVault lifecycle compatibility', () => {
-  function flow(overrides: Partial<import('../codex-oauth').LoginFlow> = {}) {
+  function flow(
+    overrides: Partial<import('../../../../core/auth/vault/codex-oauth').LoginFlow> = {}
+  ) {
     return {
       start: vi.fn(async () => ({ authorizeUrl: 'https://example.test/auth', state: 's' })),
       waitForCallback: vi.fn(async () => ({
@@ -201,6 +203,39 @@ describe('AuthVault lifecycle compatibility', () => {
     await cancelledVault.beginLogin()
     cancelledVault.cancelLogin()
     expect(cancelled.cancel).toHaveBeenCalled()
+  })
+
+  it('completeLoginFromPastedInput drives the flow paste path, saves, and clears the flow (ADR-057)', async () => {
+    const pasteFlow = flow({
+      completeFromPastedInput: vi.fn(async () => ({
+        type: 'oauth' as const,
+        access: 'pasted-acc',
+        refresh: 'pasted-ref',
+        expires: 42
+      }))
+    })
+    const vault = new AuthVault({ loginFlowFactory: () => pasteFlow })
+    await vault.beginLogin()
+    const cred = await vault.completeLoginFromPastedInput(
+      'http://localhost:1455/auth/callback?code=c&state=s'
+    )
+    expect(pasteFlow.completeFromPastedInput).toHaveBeenCalledWith(
+      'http://localhost:1455/auth/callback?code=c&state=s'
+    )
+    expect(cred.access).toBe('pasted-acc')
+    // Saved to the vault and the active flow cleared (a second completion fails).
+    await expect(vault.load()).resolves.toMatchObject({ access: 'pasted-acc' })
+    await expect(vault.completeLoginFromPastedInput('x')).rejects.toThrow(/no login/)
+  })
+
+  it('completeLoginFromPastedInput rejects a flow that has no paste support', async () => {
+    // A flow WITHOUT completeFromPastedInput (the interface method is optional).
+    const loopbackOnly = flow()
+    const vault = new AuthVault({ loginFlowFactory: () => loopbackOnly })
+    await vault.beginLogin()
+    await expect(vault.completeLoginFromPastedInput('x')).rejects.toThrow(
+      /does not support pasted completion/
+    )
   })
 
   it('supersedes a SETTLED (abandoned) flow so re-login is not blocked', async () => {

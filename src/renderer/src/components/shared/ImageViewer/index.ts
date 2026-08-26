@@ -1,5 +1,11 @@
 export { ImageViewerOverlay } from './ImageViewerOverlay'
-export type { ImageViewerOverlayProps, ViewerImage, ViewerTab } from './ImageViewerOverlay'
+export type {
+  ImageViewerOverlayProps,
+  ViewerImage,
+  ViewerRasterImage,
+  ViewerSvgImage,
+  ViewerTab
+} from './ImageViewerOverlay'
 export { ImageGalleryProvider, useImageGallery } from './ImageGalleryProvider'
 export type { ImageGalleryContextValue } from './ImageGalleryProvider'
 export {
@@ -15,3 +21,10 @@ export {
   toolResultKey
 } from './gallery'
 export type { DerivedGalleries, GalleryEntry } from './gallery'
+export { ensureViewBox, parseSvgElement, svgElementToXml } from './svg-dom'
+export {
+  rasterToPngBlob,
+  svgToPngBlob,
+  themeCanvasBackground,
+  writeClipboardImage
+} from './copy-image'

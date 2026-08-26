@@ -52,7 +52,15 @@ function renderToolBlock(
     return <ExitPlanModeCard key={key} block={block} view={view} approval={approval} />
   }
   if (kind === 'question' && view.kind === 'question') {
-    return <AskUserQuestionBlock key={key} block={block} result={result} view={view} approval={approval} />
+    return (
+      <AskUserQuestionBlock
+        key={key}
+        block={block}
+        result={result}
+        view={view}
+        approval={approval}
+      />
+    )
   }
   if (kind === 'todo' && view.kind === 'todo') {
     return <TodoToolBlock key={key} block={block} result={result} view={view} />
@@ -102,7 +110,11 @@ export const MessageBubble = memo(function MessageBubble({
   // System messages (compact separators, CLI commands, API errors)
   if (message.role === 'system') {
     return (
-      <div data-testid="MessageBubble" data-id={message.id} className="flex flex-col gap-2 animate-fade-in">
+      <div
+        data-testid="MessageBubble"
+        data-id={message.id}
+        className="flex flex-col gap-2 animate-fade-in"
+      >
         {message.content.map((block, i) => {
           if (block.type === 'compact_separator') {
             return <CompactSeparator key={i} summary={block.text} />
@@ -153,7 +165,11 @@ export const MessageBubble = memo(function MessageBubble({
     const userMarkdown = textBlocks.map((b) => b.text).join('\n\n')
 
     return (
-      <div data-testid="MessageBubble" data-id={message.id} className="flex justify-end animate-fade-in">
+      <div
+        data-testid="MessageBubble"
+        data-id={message.id}
+        className="flex justify-end animate-fade-in"
+      >
         <div
           className="max-w-[85%] bg-bg-tertiary rounded-2xl px-4 py-2.5 text-[13px] text-text-primary leading-[1.6]"
           data-markdown-source={userMarkdown || undefined}
@@ -295,7 +311,11 @@ export const MessageBubble = memo(function MessageBubble({
   const lastThinkingGi = items.reduce((acc, item, i) => (item.kind === 'thinking' ? i : acc), -1)
 
   return (
-    <div data-testid="MessageBubble" data-id={message.id} className="group/msg flex flex-col gap-2 animate-fade-in">
+    <div
+      data-testid="MessageBubble"
+      data-id={message.id}
+      className="group/msg flex flex-col gap-2 animate-fade-in"
+    >
       {items.map((item, gi) => {
         if (item.kind === 'thinking') {
           const isLast = gi === lastThinkingGi

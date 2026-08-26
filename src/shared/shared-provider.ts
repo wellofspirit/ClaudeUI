@@ -1,8 +1,6 @@
 export type ConfigurableHarnessId = 'pi' | 'opencode'
 export type SharedProviderProtocol =
-  | 'openai-completions'
-  | 'openai-responses'
-  | 'anthropic-messages'
+  'openai-completions' | 'openai-responses' | 'anthropic-messages'
 
 export interface SharedProviderModel {
   id: string
@@ -53,9 +51,7 @@ export interface SharedProviderDefinition {
  *                            or discovery failed.
  */
 export type SharedProviderRouteDiagnosis =
-  | 'provider-disabled'
-  | 'models-restricted'
-  | 'no-models-discovered'
+  'provider-disabled' | 'models-restricted' | 'no-models-discovered'
 
 export interface SharedProviderStatus {
   id: string

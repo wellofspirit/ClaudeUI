@@ -15,7 +15,7 @@ import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ChildProcess } from 'node:child_process'
-import snapshot from '../../main/opencode/protocol/doc-snapshot.1.18.9.json'
+import snapshot from '../../core/opencode/protocol/doc-snapshot.1.18.9.json'
 
 const SKIP = !process.env.OPENCODE_INTEGRATION_TESTS
 const BINARY_NAME = process.platform === 'win32' ? 'opencode.exe' : 'opencode'
@@ -24,7 +24,7 @@ const ROOT = join(__dirname, '..', '..', '..')
 function findBinary(): string | null {
   const candidates = [
     join(ROOT, 'vendor', 'opencode-cli', BINARY_NAME),
-    join(ROOT, '.cache', 'opencode-probe', 'package', 'bin', BINARY_NAME),
+    join(ROOT, '.cache', 'opencode-probe', 'package', 'bin', BINARY_NAME)
   ]
   return candidates.find(existsSync) ?? null
 }
@@ -45,7 +45,7 @@ describe.skipIf(SKIP)('opencode server smoke', () => {
       proc = spawn(binary, ['serve', '--port', '0', '--hostname', '127.0.0.1'], {
         cwd: ROOT,
         env: { ...process.env, OPENCODE_SERVER_PASSWORD: password },
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['ignore', 'pipe', 'pipe']
       })
 
       let stdout = ''
@@ -74,7 +74,7 @@ describe.skipIf(SKIP)('opencode server smoke', () => {
 
   it('GET /doc returns openapi 3.1 with expected version', async () => {
     const res = await fetch(`${baseUrl}/doc`, {
-      headers: { Authorization: authHeader, Accept: 'application/json' },
+      headers: { Authorization: authHeader, Accept: 'application/json' }
     })
     expect(res.status).toBe(200)
     const doc = (await res.json()) as { openapi: string; info: { version: string } }
@@ -84,7 +84,7 @@ describe.skipIf(SKIP)('opencode server smoke', () => {
 
   it('GET /config/providers returns providers array', async () => {
     const res = await fetch(`${baseUrl}/config/providers`, {
-      headers: { Authorization: authHeader, Accept: 'application/json' },
+      headers: { Authorization: authHeader, Accept: 'application/json' }
     })
     expect(res.status).toBe(200)
     const body = (await res.json()) as { providers: unknown[] }
@@ -93,7 +93,7 @@ describe.skipIf(SKIP)('opencode server smoke', () => {
 
   it('GET /session returns array (empty on fresh start)', async () => {
     const res = await fetch(`${baseUrl}/session`, {
-      headers: { Authorization: authHeader, Accept: 'application/json' },
+      headers: { Authorization: authHeader, Accept: 'application/json' }
     })
     expect(res.status).toBe(200)
     const body = await res.json()
@@ -104,7 +104,7 @@ describe.skipIf(SKIP)('opencode server smoke', () => {
     const controller = new AbortController()
     const res = await fetch(`${baseUrl}/event`, {
       headers: { Authorization: authHeader, Accept: 'text/event-stream' },
-      signal: controller.signal,
+      signal: controller.signal
     })
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toContain('text/event-stream')
@@ -149,7 +149,7 @@ describe.skipIf(SKIP)('opencode server smoke', () => {
 
   it('v1 operation IDs listed in snapshot exist in /doc', async () => {
     const res = await fetch(`${baseUrl}/doc`, {
-      headers: { Authorization: authHeader, Accept: 'application/json' },
+      headers: { Authorization: authHeader, Accept: 'application/json' }
     })
     const doc = (await res.json()) as {
       paths: Record<string, Record<string, { operationId?: string }>>

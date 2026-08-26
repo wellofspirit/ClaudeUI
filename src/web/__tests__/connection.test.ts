@@ -42,19 +42,31 @@ interface Internals {
   handleMessage(msg: unknown): void
   decodeIncoming(raw: string): Promise<unknown>
   sendSync(): void
+  initE2E(): Promise<void>
   scheduleReconnect(): void
-  lastSeq: number
-  epoch?: string
+  /** The protocol core: cursor + epoch + registry live here now, not on the
+   *  transport. Poked directly (like every other private in this file) to set
+   *  up a mid-stream cursor without replaying a whole sync. */
+  sync: { lastSeq: number; epoch?: string }
   e2e: unknown
   ws: unknown
   destroyed: boolean
   reconnectTimer?: ReturnType<typeof setTimeout>
 }
 
+/** Channels these tests push through the transport. */
+const CHANNELS = ['session:message', 'session:status', 'x', 'dup', 'new']
+
 function makeConn(): { conn: RemoteConnection; internals: Internals; events: unknown[][] } {
-  const conn = new RemoteConnection('http://host:1/remote', { token: 'tok' })
+  const conn = new RemoteConnection('http://host:1/remote', {})
   const events: unknown[][] = []
-  conn.setEventHandler((channel, ...args) => events.push([channel, ...args]))
+  for (const channel of CHANNELS) {
+    conn.on(channel)((...args) => events.push([channel, ...args]))
+  }
+  // These cases are about a MOUNTED client's message routing, so open the
+  // readiness gate up front. The gate itself is covered below (defect 4) and in
+  // shared/sync/__tests__/sync-client.test.ts.
+  conn.markReady()
   return { conn, internals: conn as unknown as Internals, events }
 }
 
@@ -94,12 +106,12 @@ describe('RemoteConnection', () => {
         ['session:status', 'rid', 'idle']
       ])
       expect(created.conn.getLastSeq()).toBe(2)
-      expect(internals.epoch).toBe('epoch-A')
+      expect(internals.sync.epoch).toBe('epoch-A')
     })
 
     it('skips catchup events at/below lastSeq (no double-apply)', () => {
       const { internals, events } = created
-      internals.lastSeq = 1
+      internals.sync.lastSeq = 1
       internals.handleMessage({
         type: 'sync-catchup',
         epoch: 'epoch-A',
@@ -119,8 +131,8 @@ describe('RemoteConnection', () => {
     it('on a gap: requests sync (with epoch) and does not apply/advance', () => {
       const { internals, events } = created
       const { sent } = attachFakeSocket(internals)
-      internals.lastSeq = 5
-      internals.epoch = 'epoch-A'
+      internals.sync.lastSeq = 5
+      internals.sync.epoch = 'epoch-A'
 
       internals.handleMessage({ type: 'event', seq: 8, channel: 'x', args: [1] })
 
@@ -132,7 +144,7 @@ describe('RemoteConnection', () => {
 
     it('applies a contiguous event and advances lastSeq', () => {
       const { internals, events } = created
-      internals.lastSeq = 5
+      internals.sync.lastSeq = 5
       internals.handleMessage({ type: 'event', seq: 6, channel: 'x', args: [7] })
       expect(events).toEqual([['x', 7]])
       expect(created.conn.getLastSeq()).toBe(6)
@@ -140,10 +152,79 @@ describe('RemoteConnection', () => {
 
     it('ignores a stale/duplicate event (seq <= lastSeq)', () => {
       const { internals, events } = created
-      internals.lastSeq = 6
+      internals.sync.lastSeq = 6
       internals.handleMessage({ type: 'event', seq: 3, channel: 'x', args: [1] })
       expect(events).toEqual([])
       expect(created.conn.getLastSeq()).toBe(6)
+    })
+  })
+
+  // remote.md defect 4 — the web client mounts its listeners several async hops
+  // after the socket connects (snapshot apply → store import → App chunk →
+  // effects). Everything the server pushed in that window used to be dispatched
+  // into an empty registry AND acked, so it was gone for good: the next `sync`
+  // told the server "applied through here". main.tsx now calls markReady() once
+  // App's subtree has mounted.
+  describe('readiness gate (defect 4)', () => {
+    /** Same as makeConn, minus the markReady — i.e. the app hasn't mounted. */
+    function makeUnreadyConn(): {
+      conn: RemoteConnection
+      internals: Internals
+      events: unknown[][]
+    } {
+      const conn = new RemoteConnection('http://host:1/remote', {})
+      const events: unknown[][] = []
+      for (const channel of CHANNELS) {
+        conn.on(channel)((...args) => events.push([channel, ...args]))
+      }
+      return { conn, internals: conn as unknown as Internals, events }
+    }
+
+    it('holds events (and the cursor) until markReady, then flushes in order (GUARD)', () => {
+      const { conn, internals, events } = makeUnreadyConn()
+      internals.handleMessage({ type: 'sync-full', epoch: 'e', state: { seq: 10 } })
+
+      internals.handleMessage({ type: 'event', seq: 11, channel: 'x', args: ['a'] })
+      internals.handleMessage({ type: 'event', seq: 12, channel: 'x', args: ['b'] })
+
+      expect(events).toEqual([])
+      // The ack must not run ahead of the apply: a `sync` sent right now has to
+      // ask for 11 again.
+      expect(conn.getLastSeq()).toBe(10)
+
+      conn.markReady()
+
+      expect(events).toEqual([
+        ['x', 'a'],
+        ['x', 'b']
+      ])
+      expect(conn.getLastSeq()).toBe(12)
+      conn.destroy()
+    })
+
+    it('holds a pre-mount CATCHUP too (the phone-foreground path)', () => {
+      const { conn, internals, events } = makeUnreadyConn()
+      internals.handleMessage({ type: 'sync-full', epoch: 'e', state: { seq: 3 } })
+      internals.handleMessage({
+        type: 'sync-catchup',
+        epoch: 'e',
+        events: [
+          { seq: 4, channel: 'session:message', args: ['rid', { a: 1 }] },
+          { seq: 5, channel: 'session:status', args: ['rid', 'idle'] }
+        ]
+      })
+
+      expect(events).toEqual([])
+      expect(conn.getLastSeq()).toBe(3)
+
+      conn.markReady()
+
+      expect(events).toEqual([
+        ['session:message', 'rid', { a: 1 }],
+        ['session:status', 'rid', 'idle']
+      ])
+      expect(conn.getLastSeq()).toBe(5)
+      conn.destroy()
     })
   })
 
@@ -196,27 +277,32 @@ describe('RemoteConnection', () => {
       }
     }
 
-    it('drops a plaintext ack once ready, but decodes+handles an encrypted one and sends an encrypted sync', async () => {
-      const conn = new RemoteConnection('http://host:1/remote', { token: 'tok' }, TEST_KEY_HEX)
+    it('drops a plaintext ack once ready, but decodes an encrypted one and AUTHENTICATES inside it', async () => {
+      // ADR-056 inverted the order this case was written under: the channel is
+      // opened FIRST and the credential travels inside it, so the ack is
+      // followed by an ENCRYPTED `auth` frame rather than by a sync. The
+      // strictness guard is unchanged and is why the ack must be ciphertext.
+      const conn = new RemoteConnection(
+        'http://host:1/remote',
+        { pwProof: 'ff'.repeat(32) },
+        TEST_KEY_HEX
+      )
       const states: string[] = []
       conn.setStateHandler((s) => states.push(s))
       const internals = conn as unknown as Internals
       const { sent } = attachFakeSocket(internals)
 
-      // auth-response ok → client kicks off initE2E() (fire-and-forget).
-      internals.handleMessage({ type: 'auth-response', ok: true })
+      // The socket opening kicks off initE2E() (fire-and-forget).
+      internals.initE2E()
       await waitUntil(
         () => (internals.e2e as { isReady?: boolean } | null)?.isReady === true,
         'client E2E init to finish'
       )
-      expect(states.at(-1)).toBe('e2e-activating')
 
-      // GUARD: documents the strictness that caused the deadlock — a
-      // plaintext ack (the pre-fix server behavior) is silently dropped once
-      // the client's crypto is ready, so the client never leaves
-      // 'e2e-activating'.
+      // GUARD: documents the strictness that caused the deadlock — a plaintext
+      // ack (the pre-fix server behavior) is silently dropped once the client's
+      // crypto is ready, so the handshake never advances.
       expect(await internals.decodeIncoming('{"type":"e2e-ack"}')).toBeNull()
-      expect(states.at(-1)).toBe('e2e-activating') // unchanged — still stuck
 
       // A second real E2ECrypto with the SAME key stands in for the server.
       const peer = new E2ECrypto()
@@ -227,15 +313,14 @@ describe('RemoteConnection', () => {
       expect(decoded).toEqual({ type: 'e2e-ack' })
 
       internals.handleMessage(decoded as { type: 'e2e-ack' })
-      expect(states.at(-1)).toBe('syncing')
+      expect(states.at(-1)).toBe('authenticating')
 
-      // handleMessage('e2e-ack') calls sendSync(), which encrypts+enqueues
-      // through sendQueue asynchronously. sent[0] is the earlier plaintext
-      // `e2e-activate` (sent via sendRaw during initE2E); the sync frame
-      // arrives after it, and must be encrypted.
-      await waitUntil(() => sent.length > 1, 'sync frame to be sent')
+      // sent[0] is the plaintext `e2e-activate` (the ONLY plaintext frame this
+      // client ever sends); the auth frame that follows must be ciphertext.
+      await waitUntil(() => sent.length > 1, 'auth frame to be sent')
       expect(sent[0]).toBe(JSON.stringify({ type: 'e2e-activate' }))
-      expect(sent[1].startsWith('{')).toBe(false) // encrypted, not plaintext JSON
+      expect(sent[1].startsWith('{')).toBe(false)
+      expect(await peer.decrypt(sent[1])).toEqual({ type: 'auth', pwProof: 'ff'.repeat(32) })
 
       conn.destroy()
     })
@@ -248,7 +333,7 @@ describe('RemoteConnection', () => {
   // processing can't even start until the earlier one's has finished.
   describe('inbound decrypt serialization (recvQueue) — GUARD', () => {
     it('handles frames in arrival order even when a later decrypt resolves before an earlier one', async () => {
-      const conn = new RemoteConnection('http://host:1/remote', { token: 'tok' })
+      const conn = new RemoteConnection('http://host:1/remote', {})
       const internals = conn as unknown as Internals
 
       // Record handleMessage call order directly (shadows the real method on
@@ -278,6 +363,11 @@ describe('RemoteConnection', () => {
         FRAME_A: deferredA,
         FRAME_B: deferredB
       }
+      const before = FakeWebSocket.instances.length
+      conn.connect()
+      // Installed AFTER connect(): `createWebSocket` resets the cipher per
+      // socket (ADR-056 — its replay counters are per connection on both ends),
+      // so a fake planted beforehand would be wiped.
       internals.e2e = {
         isReady: true,
         // Explicit `await` (not `return byFrame[raw].promise`) — matches the
@@ -286,9 +376,6 @@ describe('RemoteConnection', () => {
         // microtask hop that this test's ordering assertion depends on.
         decrypt: async (raw: string) => await byFrame[raw].promise
       }
-
-      const before = FakeWebSocket.instances.length
-      conn.connect()
       const ws = FakeWebSocket.instances[before]
       const onmessage = ws.onmessage as (ev: { data: string }) => void
 
@@ -325,7 +412,7 @@ describe('RemoteConnection', () => {
         state: { seq: 42 }
       })
 
-      expect(internals.epoch).toBe('epoch-Z')
+      expect(internals.sync.epoch).toBe('epoch-Z')
       expect(conn.getMockupToken()).toBe('mock-123')
       expect(conn.getLastSeq()).toBe(42)
       expect(snapshots).toEqual([{ seq: 42 }])
@@ -353,8 +440,8 @@ describe('RemoteConnection', () => {
     it('sendSync echoes the stored epoch (R7)', () => {
       const { internals } = created
       const { sent } = attachFakeSocket(internals)
-      internals.epoch = 'epoch-Z'
-      internals.lastSeq = 7
+      internals.sync.epoch = 'epoch-Z'
+      internals.sync.lastSeq = 7
       internals.sendSync()
       expect(JSON.parse(sent[0])).toEqual({ type: 'sync', lastSeq: 7, epoch: 'epoch-Z' })
     })
@@ -431,7 +518,7 @@ describe('RemoteConnection', () => {
     })
 
     it('the TOKEN path still latches destroyed and reports failed', () => {
-      const conn = new RemoteConnection('http://host:1/remote', { token: 'tok' })
+      const conn = new RemoteConnection('http://host:1/remote', {})
       const states: string[] = []
       conn.setStateHandler((s) => states.push(s))
       const internals = conn as unknown as Internals
@@ -506,13 +593,22 @@ describe('RemoteConnection', () => {
       conn.destroy()
     })
 
-    it('drops the E2E key for a password credential (tunnel excludes passwords)', () => {
+    it('KEEPS the E2E key for a password credential — the two go together now', () => {
+      // Inverted by ADR-056. The key used to be dropped because the tunnel
+      // refused password auth outright; the order is reversed now, so a
+      // channel-key client is EXACTLY the client that presents a password —
+      // inside the channel it just opened. Dropping the key here would leave a
+      // LAN/tunnel browser unable to open the socket at all.
       const conn = new RemoteConnection(
         'http://host:1/remote',
         { pwProof: 'ab'.repeat(32) },
         'ff'.repeat(32)
       )
-      expect((conn as unknown as { e2eKeyHex?: string }).e2eKeyHex).toBeUndefined()
+      expect((conn as unknown as { e2eKeyHex?: string }).e2eKeyHex).toBe('ff'.repeat(32))
+      // …and a re-prompt must not throw it away either: the key is a property of
+      // the ADDRESS, not of the credential.
+      conn.setCredential({ pwProof: 'cd'.repeat(32) })
+      expect((conn as unknown as { e2eKeyHex?: string }).e2eKeyHex).toBe('ff'.repeat(32))
       conn.destroy()
     })
   })
@@ -526,7 +622,7 @@ describe('RemoteConnection', () => {
     })
 
     it('constructs a NEW WebSocket when connect() follows destroy()', () => {
-      const conn = new RemoteConnection('http://host:1/remote', { token: 'tok' })
+      const conn = new RemoteConnection('http://host:1/remote', {})
       conn.connect()
       expect(FakeWebSocket.instances).toHaveLength(1)
 
@@ -538,7 +634,7 @@ describe('RemoteConnection', () => {
     })
 
     it('detaches handlers from the discarded socket so its close cannot revive-race', () => {
-      const conn = new RemoteConnection('http://host:1/remote', { token: 'tok' })
+      const conn = new RemoteConnection('http://host:1/remote', {})
       conn.connect()
       const first = FakeWebSocket.instances[0]
       expect(first.onclose).toBeTypeOf('function')
@@ -552,7 +648,7 @@ describe('RemoteConnection', () => {
     })
 
     it('keeps auth failure from *scheduling* a reconnect, yet an explicit connect() revives', () => {
-      const conn = new RemoteConnection('http://host:1/remote', { token: 'tok' })
+      const conn = new RemoteConnection('http://host:1/remote', {})
       const states: string[] = []
       conn.setStateHandler((s) => states.push(s))
       conn.connect()

@@ -33,9 +33,9 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { existsSync, mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
-import { PiRpcClient } from '../../main/pi/PiRpcClient'
-import { PiBridgeHost, writeBridgeExtension } from '../../main/pi/PiBridgeHost'
-import type { GateDecision, PiToolCallPayload } from '../../main/pi/PiBridgeHost'
+import { PiRpcClient } from '../../core/pi/PiRpcClient'
+import { PiBridgeHost, writeBridgeExtension } from '../../core/pi/PiBridgeHost'
+import type { GateDecision, PiToolCallPayload } from '../../core/pi/PiBridgeHost'
 
 const SKIP = !process.env.PI_INTEGRATION_TESTS
 const BINARY_NAME = process.platform === 'win32' ? 'pi.exe' : 'pi'
@@ -71,7 +71,9 @@ function toBashPath(p: string): string {
 }
 
 /** Find the bash toolResult message in a batch of raw wire events (loose-typed — see pi-rpc.integration.test.ts's identical precedent for why this file doesn't fight PiEvent's discriminated union in test code). */
-function findBashToolResult(events: Record<string, unknown>[]): { isError: boolean; text: string } | null {
+function findBashToolResult(
+  events: Record<string, unknown>[]
+): { isError: boolean; text: string } | null {
   for (const ev of events) {
     if (ev.type !== 'message_end') continue
     const msg = ev.message as Record<string, unknown> | undefined
@@ -86,101 +88,121 @@ function findBashToolResult(events: Record<string, unknown>[]): { isError: boole
   return null
 }
 
-describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)('pi approval-bridge integration guard', () => {
-  let client: PiRpcClient
-  let bridgeHost: PiBridgeHost
-  let tmpDir: string
-  let markerPath: string
-  const events: Record<string, unknown>[] = []
+describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
+  'pi approval-bridge integration guard',
+  () => {
+    let client: PiRpcClient
+    let bridgeHost: PiBridgeHost
+    let tmpDir: string
+    let markerPath: string
+    const events: Record<string, unknown>[] = []
 
-  beforeAll(async () => {
-    tmpDir = mkdtempSync(join(tmpdir(), 'pi-bridge-guard-'))
-    markerPath = join(tmpDir, 'marker.txt')
+    beforeAll(async () => {
+      tmpDir = mkdtempSync(join(tmpdir(), 'pi-bridge-guard-'))
+      markerPath = join(tmpDir, 'marker.txt')
 
-    // The scripted local host: DENIES any bash command containing the trigger
-    // string, ALLOWS everything else — real product code (PiBridgeHost), not
-    // a reimplementation.
-    const handler = async (payload: PiToolCallPayload): Promise<GateDecision> => {
-      if (payload.toolName === 'bash' && String(payload.input.command ?? '').includes(DENY_TRIGGER)) {
-        return { behavior: 'deny', reason: DENY_REASON }
+      // The scripted local host: DENIES any bash command containing the trigger
+      // string, ALLOWS everything else — real product code (PiBridgeHost), not
+      // a reimplementation.
+      const handler = async (payload: PiToolCallPayload): Promise<GateDecision> => {
+        if (
+          payload.toolName === 'bash' &&
+          String(payload.input.command ?? '').includes(DENY_TRIGGER)
+        ) {
+          return { behavior: 'deny', reason: DENY_REASON }
+        }
+        return { behavior: 'allow' }
       }
-      return { behavior: 'allow' }
-    }
-    bridgeHost = new PiBridgeHost(handler)
-    const { url, token } = await bridgeHost.start()
-    // Also real product code — the SAME file writer PiSession.doStart() calls.
-    const bridgePath = writeBridgeExtension()
+      bridgeHost = new PiBridgeHost(handler)
+      const { url, token } = await bridgeHost.start()
+      // Also real product code — the SAME file writer PiSession.doStart() calls.
+      const bridgePath = writeBridgeExtension()
 
-    const binary = findBinary()!
-    client = new PiRpcClient(binary, {
-      cwd: tmpDir,
-      args: ['--mode', 'rpc', '-e', bridgePath, '--session-dir', tmpDir],
-      env: { CLAUDEUI_PI_BRIDGE_URL: url, CLAUDEUI_PI_BRIDGE_TOKEN: token }
+      const binary = findBinary()!
+      client = new PiRpcClient(binary, {
+        cwd: tmpDir,
+        args: ['--mode', 'rpc', '-e', bridgePath, '--session-dir', tmpDir],
+        env: { CLAUDEUI_PI_BRIDGE_URL: url, CLAUDEUI_PI_BRIDGE_TOKEN: token }
+      })
+      client.onEvent((ev) => events.push(ev as unknown as Record<string, unknown>))
+      await client.start()
+
+      const setModelResp = await client.request(
+        { type: 'set_model', provider: MODEL.provider, modelId: MODEL.modelId },
+        45_000
+      )
+      expect(setModelResp.success, `set_model failed: ${JSON.stringify(setModelResp)}`).toBe(true)
+    }, 45_000)
+
+    afterAll(async () => {
+      client?.dispose()
+      bridgeHost?.dispose()
+      // Windows holds the cwd handle briefly after the parent process exits
+      // (bash sub-children under the `bash` tool release it slightly later) —
+      // wait, with a bounded fallback, before touching the tmp dir. Mirrors
+      // pi-rpc.integration.test.ts's identical precedent.
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+      if (tmpDir) rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
     })
-    client.onEvent((ev) => events.push(ev as unknown as Record<string, unknown>))
-    await client.start()
 
-    const setModelResp = await client.request({ type: 'set_model', provider: MODEL.provider, modelId: MODEL.modelId }, 45_000)
-    expect(setModelResp.success, `set_model failed: ${JSON.stringify(setModelResp)}`).toBe(true)
-  }, 45_000)
-
-  afterAll(async () => {
-    client?.dispose()
-    bridgeHost?.dispose()
-    // Windows holds the cwd handle briefly after the parent process exits
-    // (bash sub-children under the `bash` tool release it slightly later) —
-    // wait, with a bounded fallback, before touching the tmp dir. Mirrors
-    // pi-rpc.integration.test.ts's identical precedent.
-    await new Promise((resolve) => setTimeout(resolve, 1_000))
-    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
-  })
-
-  /** Poll the shared events buffer until an `agent_settled` appears since `fromIndex` — the real turn-complete signal (docs/protocol-pi/README.md). */
-  async function waitForTurnEnd(fromIndex: number, timeoutMs = 60_000): Promise<Record<string, unknown>[]> {
-    const deadline = Date.now() + timeoutMs
-    while (Date.now() < deadline) {
-      const slice = events.slice(fromIndex)
-      if (slice.some((ev) => ev.type === 'agent_settled')) return slice
-      await new Promise((resolve) => setTimeout(resolve, 200))
+    /** Poll the shared events buffer until an `agent_settled` appears since `fromIndex` — the real turn-complete signal (docs/protocol-pi/README.md). */
+    async function waitForTurnEnd(
+      fromIndex: number,
+      timeoutMs = 60_000
+    ): Promise<Record<string, unknown>[]> {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        const slice = events.slice(fromIndex)
+        if (slice.some((ev) => ev.type === 'agent_settled')) return slice
+        await new Promise((resolve) => setTimeout(resolve, 200))
+      }
+      throw new Error(
+        `turn did not settle within ${timeoutMs}ms — events so far: ${JSON.stringify(events.slice(fromIndex))}`
+      )
     }
-    throw new Error(`turn did not settle within ${timeoutMs}ms — events so far: ${JSON.stringify(events.slice(fromIndex))}`)
+
+    it('denies a bash tool call containing the trigger string — the marker file is provably never created', async () => {
+      const fromIndex = events.length
+      const resp = await client.request({
+        type: 'prompt',
+        message:
+          'Call the bash tool exactly once with EXACTLY this command and nothing else -- no explanation, ' +
+          `no other tool calls, do not modify it in any way: touch ${toBashPath(markerPath)} # ${DENY_TRIGGER}`
+      })
+      expect(resp.success).toBe(true)
+
+      const turnEvents = await waitForTurnEnd(fromIndex)
+      const toolResult = findBashToolResult(turnEvents)
+
+      expect(
+        toolResult,
+        `model never called the bash tool -- events: ${JSON.stringify(turnEvents)}`
+      ).not.toBeNull()
+      expect(toolResult!.isError).toBe(true)
+      expect(toolResult!.text).toContain(DENY_REASON)
+
+      // The tool provably did not run.
+      expect(existsSync(markerPath)).toBe(false)
+    }, 90_000)
+
+    it('allows a subsequent echo command -- the tool actually runs', async () => {
+      const fromIndex = events.length
+      const token = `claudeui-guard-${Date.now()}`
+      const resp = await client.request({
+        type: 'prompt',
+        message: `Call the bash tool exactly once with EXACTLY this command and nothing else: echo ${token}`
+      })
+      expect(resp.success).toBe(true)
+
+      const turnEvents = await waitForTurnEnd(fromIndex)
+      const toolResult = findBashToolResult(turnEvents)
+
+      expect(
+        toolResult,
+        `model never called the bash tool -- events: ${JSON.stringify(turnEvents)}`
+      ).not.toBeNull()
+      expect(toolResult!.isError).toBe(false)
+      expect(toolResult!.text).toContain(token)
+    }, 90_000)
   }
-
-  it('denies a bash tool call containing the trigger string — the marker file is provably never created', async () => {
-    const fromIndex = events.length
-    const resp = await client.request({
-      type: 'prompt',
-      message:
-        'Call the bash tool exactly once with EXACTLY this command and nothing else -- no explanation, ' +
-        `no other tool calls, do not modify it in any way: touch ${toBashPath(markerPath)} # ${DENY_TRIGGER}`
-    })
-    expect(resp.success).toBe(true)
-
-    const turnEvents = await waitForTurnEnd(fromIndex)
-    const toolResult = findBashToolResult(turnEvents)
-
-    expect(toolResult, `model never called the bash tool -- events: ${JSON.stringify(turnEvents)}`).not.toBeNull()
-    expect(toolResult!.isError).toBe(true)
-    expect(toolResult!.text).toContain(DENY_REASON)
-
-    // The tool provably did not run.
-    expect(existsSync(markerPath)).toBe(false)
-  }, 90_000)
-
-  it('allows a subsequent echo command -- the tool actually runs', async () => {
-    const fromIndex = events.length
-    const token = `claudeui-guard-${Date.now()}`
-    const resp = await client.request({
-      type: 'prompt',
-      message: `Call the bash tool exactly once with EXACTLY this command and nothing else: echo ${token}`
-    })
-    expect(resp.success).toBe(true)
-
-    const turnEvents = await waitForTurnEnd(fromIndex)
-    const toolResult = findBashToolResult(turnEvents)
-
-    expect(toolResult, `model never called the bash tool -- events: ${JSON.stringify(turnEvents)}`).not.toBeNull()
-    expect(toolResult!.isError).toBe(false)
-    expect(toolResult!.text).toContain(token)
-  }, 90_000)
-})
+)

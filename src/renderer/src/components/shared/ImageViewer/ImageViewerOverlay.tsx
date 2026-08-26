@@ -15,6 +15,17 @@
  *     (dismissal is resolved from pointer events, never from `click` — see
  *     `sealFromAncestors` for the pointer-capture retargeting that forces this)
  *   - navigation stops at the ends (no wrap); changing image or tab resets zoom
+ *   - right-click opens a context menu (copy as image, and for a diagram entry
+ *     copy as markdown). Every gesture handler ignores non-primary buttons, so a
+ *     right-click neither starts a pan nor counts as the backdrop tap that closes.
+ *
+ * An entry is either a raster image (`<img src>`) or **inline SVG markup**
+ * (`ViewerSvgImage`, used by the Mermaid diagram cards). The SVG variant exists
+ * because rasterizing a diagram into an `<img>` would go blurry under the
+ * composited `transform: scale` — as live DOM it re-renders crisply at every
+ * zoom level. It is otherwise indistinguishable: the same gesture state machine
+ * drives both, with the fitted box coming from the SVG's intrinsic (viewBox)
+ * size instead of `naturalWidth/Height`.
  *
  * All the transform math lives in `./transform` as pure functions — see the
  * header there for the coordinate model and why it is separated.
@@ -27,6 +38,13 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useContextMenu } from '../../../hooks/useContextMenu'
+import {
+  rasterToPngBlob,
+  svgToPngBlob,
+  themeCanvasBackground,
+  writeClipboardImage
+} from './copy-image'
 import {
   DOUBLE_TAP_SCALE,
   FIT_TRANSFORM,
@@ -48,10 +66,42 @@ import {
   type ViewerTransform
 } from './transform'
 
-export interface ViewerImage {
-  /** Anything an `<img src>` accepts — a `data:` URI for attachments, an authenticated URL for sent files. */
+/** A raster image — anything an `<img src>` accepts. */
+export interface ViewerRasterImage {
+  /** A `data:` URI for attachments, an authenticated URL for sent files. */
   src: string
   fileName?: string
+}
+
+/** Inline vector content — sanitized SVG markup rendered as DOM, not an `<img>`. */
+export interface ViewerSvgImage {
+  /**
+   * Already-sanitized SVG markup. Sanitizing is the **caller's** responsibility:
+   * this goes through `dangerouslySetInnerHTML` (see `sanitizeMermaidSvg`).
+   */
+  svgHtml: string
+  /**
+   * Intrinsic (viewBox) size. There is no `naturalWidth` to read off live DOM, so
+   * this is what the fit/clamp math is stated in — it need only be the right
+   * *aspect ratio and units*, since the wrapper is sized by `fitSize`.
+   */
+  intrinsicWidth: number
+  intrinsicHeight: number
+  fileName?: string
+  /**
+   * The markup's source form, when it has one — for a Mermaid diagram, its
+   * mermaid source. Present ⇒ the context menu offers "Copy as markdown", which
+   * writes it back out as a fenced ```mermaid block. Keeping it on the entry is
+   * what lets the viewer stay ignorant of diagrams: it copies a string it was
+   * handed, it does not know how to make one.
+   */
+  markdownSource?: string
+}
+
+export type ViewerImage = ViewerRasterImage | ViewerSvgImage
+
+function isSvgImage(image: ViewerImage): image is ViewerSvgImage {
+  return 'svgHtml' in image
 }
 
 export interface ViewerTab {
@@ -78,13 +128,23 @@ interface GestureState {
   moved: boolean
   /** Two-finger span at the previous move, or null while single-pointer. */
   pinchSpan: number | null
-  /** The gesture began on the image (pan/zoom/double-tap). */
+  /** The gesture began on the image / diagram (pan/zoom/double-tap). */
   onImage: boolean
   /**
    * The gesture began on the viewport itself — the empty backdrop around the
-   * image, as opposed to the image or a chevron. A tap there closes.
+   * content, as opposed to the content or a chevron. A tap there closes.
    */
   onBackdrop: boolean
+  /**
+   * The context menu was open when the press started, so this tap is the one that
+   * dismisses the MENU and must not also close the viewer.
+   *
+   * Captured at pointerdown rather than read at pointerup because
+   * `useContextMenu`'s own outside-click dismissal listens on `mousedown`, which
+   * Chromium fires between our pointerdown and pointerup — by the time the tap is
+   * resolved the menu has already closed itself.
+   */
+  menuWasOpen: boolean
 }
 
 export function ImageViewerOverlay({
@@ -99,7 +159,9 @@ export function ImageViewerOverlay({
     () => galleries.find((t) => t.id === initialTabId)?.id ?? galleries[0]?.id ?? ''
   )
   const activeTab = galleries.find((t) => t.id === activeTabId) ?? galleries[0]
-  const images = activeTab?.images ?? []
+  // Memoised only so the `?? []` fallback cannot hand a fresh array identity to
+  // the copy callbacks on every render.
+  const images = useMemo(() => activeTab?.images ?? [], [activeTab])
 
   const [rawIndex, setIndex] = useState(() =>
     Math.min(Math.max(0, initialIndex), Math.max(0, (images.length || 1) - 1))
@@ -107,7 +169,12 @@ export function ImageViewerOverlay({
   const [transform, setTransform] = useState<ViewerTransform>(FIT_TRANSFORM)
 
   const viewportRef = useRef<HTMLDivElement>(null)
-  const imageRef = useRef<HTMLImageElement>(null)
+  /**
+   * Whichever element carries the content — the `<img>` or the inline-SVG
+   * wrapper. Assigned by a ref callback rather than handed to `ref` directly
+   * because a `RefObject<HTMLElement>` is not assignable to `Ref<HTMLImageElement>`.
+   */
+  const contentRef = useRef<HTMLElement | null>(null)
   const pointers = useRef(new Map<number, Point>())
   const gesture = useRef<GestureState | null>(null)
   const lastTap = useRef<{ time: number; x: number; y: number } | null>(null)
@@ -118,12 +185,26 @@ export function ImageViewerOverlay({
     transformRef.current = transform
   }, [transform])
 
+  // Right-click menu. The hook owns the anchor, the viewport-edge flipping and
+  // outside-click dismissal — the same one the sidebar and git tree use, so the
+  // menu behaves identically to every other context menu in the app. Destructured
+  // rather than kept as a `menu` object so the members can be honest hook
+  // dependencies below (the object itself is new on every render).
+  const {
+    isOpen: menuOpen,
+    ref: menuRef,
+    style: menuStyle,
+    open: openContextMenu,
+    close: closeContextMenu
+  } = useContextMenu()
+
   const total = images.length
   // Clamped at *render* time, not in an effect: the gallery can shrink under an
   // open viewer (switching session re-derives `tabs`), and an effect would only
   // fire after this render had already dereferenced a missing image.
   const index = Math.min(rawIndex, Math.max(0, total - 1))
   const current = images[index]
+  const currentSvg = current && isSvgImage(current) ? current : null
 
   // ── Geometry helpers (all ref reads — stable identities) ──────────────────
 
@@ -133,10 +214,21 @@ export function ImageViewerOverlay({
   }, [])
 
   const fittedSize = useCallback((): Size => {
-    const img = imageRef.current
-    if (!img) return { width: 0, height: 0 }
+    const el = contentRef.current
+    if (!el) return { width: 0, height: 0 }
+    // Inline SVG has no `naturalWidth` — its fitted box is the one this component
+    // computed from the intrinsic size, and unlike a raster image it is allowed
+    // to scale up to fill the viewport.
+    if (currentSvg) {
+      return fitSize(
+        { width: currentSvg.intrinsicWidth, height: currentSvg.intrinsicHeight },
+        viewportSize(),
+        true
+      )
+    }
+    const img = el as HTMLImageElement
     return fitSize({ width: img.naturalWidth, height: img.naturalHeight }, viewportSize())
-  }, [viewportSize])
+  }, [currentSvg, viewportSize])
 
   /** Client coords → offset from the viewport centre, the anchor space `transform.ts` uses. */
   const anchorOf = useCallback((clientX: number, clientY: number): Point => {
@@ -152,6 +244,34 @@ export function ImageViewerOverlay({
     },
     [fittedSize, viewportSize]
   )
+
+  // ── Viewport measurement (inline SVG only) ───────────────────────────────
+
+  /**
+   * The inline-SVG wrapper needs its fitted box as *explicit px*, so unlike the
+   * `<img>` (which CSS fits for free via `max-width/max-height`) the viewport
+   * size has to reach the render pass as state.
+   *
+   * Deliberately gated on the current entry being SVG: for a raster gallery this
+   * effect never runs and never sets state, so that path keeps its exact
+   * pre-existing render behaviour. `useLayoutEffect` + an immediate measure means
+   * the un-measured `{0,0}` state is never painted; the `ResizeObserver` then
+   * keeps up with window resizes and the mobile keyboard.
+   */
+  const [viewportBox, setViewportBox] = useState<Size>({ width: 0, height: 0 })
+  const hasSvgEntry = currentSvg !== null
+  useLayoutEffect(() => {
+    const el = viewportRef.current
+    if (!el || !hasSvgEntry) return
+    const measure = (): void => setViewportBox({ width: el.clientWidth, height: el.clientHeight })
+    measure()
+    // Guarded because jsdom ships no ResizeObserver: without this, every test
+    // that opens a diagram would have to stub one.
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [hasSvgEntry])
 
   // ── Navigation ───────────────────────────────────────────────────────────
 
@@ -173,11 +293,49 @@ export function ImageViewerOverlay({
     setIndex(0)
   }, [])
 
-  // Changing image or tab always returns to a centred fit.
+  // Changing image or tab always returns to a centred fit — and drops a menu that
+  // was opened for the entry we just left.
   useEffect(() => {
     setTransform(FIT_TRANSFORM)
     lastTap.current = null
-  }, [activeTabId, index])
+    closeContextMenu()
+  }, [activeTabId, index, closeContextMenu])
+
+  // ── Copy actions (context menu) ──────────────────────────────────────────
+
+  /**
+   * Both entry variants copy as PNG: Chromium's async clipboard rejects most
+   * other image types, so even a JPEG attachment is re-encoded. The blob is
+   * handed to `writeClipboardImage` as a promise, which is what keeps the write
+   * inside the click's user-gesture window (see that function).
+   *
+   * There is no toast infrastructure at this layer and the viewer is not the place
+   * to introduce one, so a failure is a console error — the menu has already
+   * closed either way.
+   */
+  const copyImage = useCallback((): void => {
+    closeContextMenu()
+    const entry = images[index]
+    if (!entry) return
+    const blob = isSvgImage(entry)
+      ? svgToPngBlob(entry.svgHtml, themeCanvasBackground())
+      : rasterToPngBlob(entry.src)
+    writeClipboardImage(blob).catch((err) => {
+      console.error('Failed to copy image to clipboard:', err)
+    })
+  }, [images, index, closeContextMenu])
+
+  /** Exactly one newline before the closing fence, and nothing after it. */
+  const copyMarkdown = useCallback((): void => {
+    closeContextMenu()
+    const source = currentSvg?.markdownSource
+    if (!source) return
+    navigator.clipboard
+      .writeText(`\`\`\`mermaid\n${source.replace(/\n+$/, '')}\n\`\`\``)
+      .catch((err) => {
+        console.error('Failed to copy diagram source to clipboard:', err)
+      })
+  }, [currentSvg, closeContextMenu])
 
   // ── Keyboard ─────────────────────────────────────────────────────────────
 
@@ -188,6 +346,12 @@ export function ImageViewerOverlay({
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
+        // Innermost thing first: Esc dismisses the context menu, and only a
+        // second Esc closes the viewer.
+        if (menuOpen) {
+          closeContextMenu()
+          return
+        }
         onClose()
         return
       }
@@ -199,7 +363,7 @@ export function ImageViewerOverlay({
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [onClose, step])
+  }, [onClose, step, menuOpen, closeContextMenu])
 
   // ── Body scroll lock ─────────────────────────────────────────────────────
 
@@ -232,7 +396,12 @@ export function ImageViewerOverlay({
   // ── Pointer gestures ─────────────────────────────────────────────────────
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>): void => {
-    const onImage = imageRef.current?.contains(e.target as Node) ?? false
+    // Primary button only. A right-click must not start a gesture: with no guard
+    // it captured the pointer, and its pointerup then resolved as a zero-movement
+    // tap — closing the viewer outright when the press was on the backdrop. Touch
+    // and pen both report button 0, so this costs them nothing.
+    if (e.button !== 0) return
+    const onImage = contentRef.current?.contains(e.target as Node) ?? false
     // Capture only for a gesture that starts on the image: a pan must keep
     // tracking once the pointer leaves the viewport, whereas capturing a press
     // that began on a chevron would retarget its pointer events away from the
@@ -248,7 +417,8 @@ export function ImageViewerOverlay({
         moved: false,
         pinchSpan: null,
         onImage,
-        onBackdrop: e.target === e.currentTarget
+        onBackdrop: e.target === e.currentTarget,
+        menuWasOpen: menuOpen
       }
       return
     }
@@ -295,6 +465,10 @@ export function ImageViewerOverlay({
   // pointerup/pointercancel, and calling it for a pointer that was never
   // captured (a press that started on the backdrop) throws NotFoundError.
   const endPointer = (e: React.PointerEvent<HTMLDivElement>): void => {
+    // Mirrors the pointerdown guard: a right-button release must not be resolved
+    // as a tap, and — crucially — must not perturb a left-button gesture that is
+    // still in flight underneath it.
+    if (e.button !== 0) return
     pointers.current.delete(e.pointerId)
     const g = gesture.current
     if (!g) return
@@ -320,6 +494,13 @@ export function ImageViewerOverlay({
       return
     }
 
+    // A tap that began while the context menu was open only dismisses the menu —
+    // one click should not both close the menu and tear down the viewer.
+    if (g.menuWasOpen) {
+      closeContextMenu()
+      return
+    }
+
     // A tap on the empty area around the image dismisses the viewer. Decided
     // here rather than from a `click` handler — see `sealFromAncestors` below
     // for why `click` is unusable for this.
@@ -335,9 +516,7 @@ export function ImageViewerOverlay({
       const anchor = anchorOf(tap.x, tap.y)
       setTransform((t) =>
         clampPan(
-          t.scale > MIN_SCALE
-            ? FIT_TRANSFORM
-            : zoomTo(t, anchor, DOUBLE_TAP_SCALE),
+          t.scale > MIN_SCALE ? FIT_TRANSFORM : zoomTo(t, anchor, DOUBLE_TAP_SCALE),
           viewportSize(),
           fittedSize()
         )
@@ -356,6 +535,31 @@ export function ImageViewerOverlay({
 
   const showTabs = galleries.length >= 2
   const showNav = total > 1
+
+  const contentTransform: React.CSSProperties = {
+    transform: `translate(${transform.tx}px, ${transform.ty}px) scale(${transform.scale})`,
+    cursor: transform.scale > MIN_SCALE ? 'grab' : 'zoom-in',
+    willChange: 'transform'
+  }
+
+  /**
+   * The inline-SVG wrapper is sized to exactly the fitted content box, which is
+   * what keeps the rest of the component honest: the empty area around the
+   * diagram remains the *viewport* element, so `endPointer`'s backdrop-tap
+   * dismissal (`e.target === e.currentTarget`) needs no special case, and the
+   * flex viewport centres the wrapper just like it centres the `<img>` — the
+   * default `transform-origin: center` the maths assumes.
+   *
+   * Before the first measure (and always in jsdom, where `clientWidth` is 0) it
+   * falls back to the intrinsic size capped by `max-width/max-height: 100%`,
+   * rather than emitting a NaN or zero box.
+   */
+  const svgBox = ((): Size => {
+    if (!currentSvg) return { width: 0, height: 0 }
+    const intrinsic = { width: currentSvg.intrinsicWidth, height: currentSvg.intrinsicHeight }
+    const fitted = fitSize(intrinsic, viewportBox, true)
+    return fitted.width > 0 ? fitted : intrinsic
+  })()
 
   /**
    * The overlay is portalled to `<body>`, but React still bubbles *synthetic*
@@ -387,6 +591,7 @@ export function ImageViewerOverlay({
       onPointerDown={sealFromAncestors}
       onPointerUp={sealFromAncestors}
       onKeyDown={sealFromAncestors}
+      onContextMenu={sealFromAncestors}
     >
       {/* Top bar: tabs · filename · counter · close */}
       <div className="shrink-0 flex items-center gap-3 px-3 h-11 bg-black/40">
@@ -455,24 +660,51 @@ export function ImageViewerOverlay({
         onPointerMove={onPointerMove}
         onPointerUp={endPointer}
         onPointerCancel={onPointerCancel}
+        onContextMenu={openContextMenu}
         className="relative flex-1 min-h-0 flex items-center justify-center overflow-hidden"
         style={{ touchAction: 'none' }}
       >
-        <img
-          ref={imageRef}
-          data-testid="ImageViewerOverlay.image"
-          data-id={String(index)}
-          src={current.src}
-          alt={current.fileName ?? 'Image'}
-          draggable={false}
-          onDragStart={(e) => e.preventDefault()}
-          className="max-w-full max-h-full object-contain"
-          style={{
-            transform: `translate(${transform.tx}px, ${transform.ty}px) scale(${transform.scale})`,
-            cursor: transform.scale > MIN_SCALE ? 'grab' : 'zoom-in',
-            willChange: 'transform'
-          }}
-        />
+        {isSvgImage(current) ? (
+          <div
+            ref={(el) => {
+              contentRef.current = el
+            }}
+            data-testid="ImageViewerOverlay.svg"
+            data-id={String(index)}
+            draggable={false}
+            onDragStart={(e) => e.preventDefault()}
+            dangerouslySetInnerHTML={{ __html: current.svgHtml }}
+            style={{
+              ...contentTransform,
+              width: svgBox.width,
+              height: svgBox.height,
+              maxWidth: '100%',
+              maxHeight: '100%',
+              // Mermaid SVGs are transparent, so on the black/80 backdrop a
+              // light-theme diagram's black text and edges would be unreadable.
+              // border-box keeps the padding inside the fitted box, so the
+              // transform maths still sees the size it computed.
+              background: 'var(--color-bg-primary)',
+              borderRadius: 6,
+              padding: 12,
+              boxSizing: 'border-box'
+            }}
+          />
+        ) : (
+          <img
+            ref={(el) => {
+              contentRef.current = el
+            }}
+            data-testid="ImageViewerOverlay.image"
+            data-id={String(index)}
+            src={current.src}
+            alt={current.fileName ?? 'Image'}
+            draggable={false}
+            onDragStart={(e) => e.preventDefault()}
+            className="max-w-full max-h-full object-contain"
+            style={contentTransform}
+          />
+        )}
 
         {showNav && (
           <>
@@ -493,6 +725,40 @@ export function ImageViewerOverlay({
           </>
         )}
       </div>
+
+      {/* Right-click menu. Inside the overlay root so its own events are sealed
+          from the page behind, and `position: fixed` so the anchor coordinates
+          the hook computed are viewport coordinates. Structure and classes are
+          the app's standard context menu (Sidebar/SessionItem, GitFileTree) —
+          it sits above the viewer's own z-[300] for the same reason those sit
+          above their panels. */}
+      {menuOpen && (
+        <div
+          ref={menuRef}
+          data-testid="ImageViewerOverlay.contextMenu"
+          className="fixed z-[9999] py-1 rounded-lg bg-bg-tertiary border border-border shadow-lg grid"
+          style={menuStyle}
+        >
+          <button
+            type="button"
+            data-testid="ImageViewerOverlay.copyImage"
+            onClick={copyImage}
+            className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
+          >
+            Copy as image
+          </button>
+          {currentSvg?.markdownSource && (
+            <button
+              type="button"
+              data-testid="ImageViewerOverlay.copyMarkdown"
+              onClick={copyMarkdown}
+              className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
+            >
+              Copy as markdown
+            </button>
+          )}
+        </div>
+      )}
     </div>,
     document.body
   )
@@ -533,7 +799,11 @@ function NavButton({
         strokeLinecap="round"
         strokeLinejoin="round"
       >
-        {side === 'left' ? <polyline points="15 18 9 12 15 6" /> : <polyline points="9 18 15 12 9 6" />}
+        {side === 'left' ? (
+          <polyline points="15 18 9 12 15 6" />
+        ) : (
+          <polyline points="9 18 15 12 9 6" />
+        )}
       </svg>
     </button>
   )

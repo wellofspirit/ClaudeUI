@@ -13,7 +13,7 @@ cli.js's credential store is a `keychain-with-plaintext-fallback` facade:
 Keychain is **primary**, the plaintext `<dir>/.credentials.json` is only a
 fallback, and a successful Keychain write **deletes** the file copy. There is no
 built-in flag to disable the Keychain (only `CLAUDE_SECURESTORAGE_CONFIG_DIR`,
-which relocates the *fallback file* but leaves Keychain primary). Consequences
+which relocates the _fallback file_ but leaves Keychain primary). Consequences
 established in ADR-014:
 
 - The Keychain holds a **single** credential (service `Claude Code-credentials`,
@@ -42,19 +42,19 @@ Add the missing flag to cli.js and manage per-account credential **files**.
 2. **Per-account credential dir, shared config.** Each account is a directory
    `~/.claude/ui/accounts/<id>/` holding only its `.credentials.json`. cli.js is
    spawned with `SKIP_SECURESTORAGE=1` + `CLAUDE_SECURESTORAGE_CONFIG_DIR=<that
-   dir>` (via the existing `buildEnv` overlay). `CLAUDE_SECURESTORAGE_CONFIG_DIR`
+dir>` (via the existing `buildEnv` overlay). `CLAUDE_SECURESTORAGE_CONFIG_DIR`
    relocates **only** the credentials file — settings, `projects/` history, and
    usage stay shared in `~/.claude`. This realizes the "shared config,
    creds-only switch" goal (the option set aside in ADR-014) without symlinks or
    Keychain access.
 
 3. **Account lifecycle.**
-   - *Add* — run the OAuth login flow (ADR-014) with a fresh account dir set;
+   - _Add_ — run the OAuth login flow (ADR-014) with a fresh account dir set;
      cli.js writes that account's `.credentials.json`.
-   - *Switch* — change the active account id; chat/service sessions respawn with
+   - _Switch_ — change the active account id; chat/service sessions respawn with
      the new dir (sessions already respawn to pick up credential changes per
      ADR-014).
-   - *Delete* — remove the account dir.
+   - _Delete_ — remove the account dir.
 
 4. **Opt-in setting.** A "multiple account support" checkbox in Settings. When
    enabled, all cli.js spawns get `SKIP_SECURESTORAGE=1`. macOS users see a

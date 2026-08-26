@@ -8,7 +8,15 @@
  * is never read or written.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, statSync } from 'node:fs'
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+  existsSync,
+  statSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -25,10 +33,10 @@ vi.mock('os', async () => {
 const { mockInvalidatePiModelCache } = vi.hoisted(() => ({
   mockInvalidatePiModelCache: vi.fn()
 }))
-vi.mock('../../pi/model-discovery', () => ({
+vi.mock('../../../core/pi/model-discovery', () => ({
   invalidatePiModelCache: mockInvalidatePiModelCache
 }))
-vi.mock('../../services/logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
@@ -37,12 +45,16 @@ const { mockBeginLogin, mockCompleteLogin, mockCancelLogin } = vi.hoisted(() => 
   mockCompleteLogin: vi.fn(),
   mockCancelLogin: vi.fn()
 }))
-vi.mock('../vault/CredentialSync', () => ({
-  credentialSync: { beginLogin: mockBeginLogin, completeLogin: mockCompleteLogin, cancelLogin: mockCancelLogin },
+vi.mock('../../../core/auth/vault/CredentialSync', () => ({
+  credentialSync: {
+    beginLogin: mockBeginLogin,
+    completeLogin: mockCompleteLogin,
+    cancelLogin: mockCancelLogin
+  },
   PI_CODEX_VENDOR_ID: 'openai-codex'
 }))
 
-import { PiAuthProvider } from '../PiAuthProvider'
+import { PiAuthProvider } from '../../../core/auth/PiAuthProvider'
 
 let testHome: string
 
@@ -97,7 +109,11 @@ describe('PiAuthProvider.probe', () => {
     writeAuthJson({ anthropic: { type: 'api_key', key: 'sk-ant-test' } })
     const provider = new PiAuthProvider()
     const map = await provider.probe()
-    expect(map.anthropic).toEqual({ authState: 'authenticated', billingType: 'apiKey', label: 'API key' })
+    expect(map.anthropic).toEqual({
+      authState: 'authenticated',
+      billingType: 'apiKey',
+      label: 'API key'
+    })
   })
 
   it('maps a non-expired oauth entry to authenticated/subscription/"OAuth"', async () => {
@@ -106,7 +122,11 @@ describe('PiAuthProvider.probe', () => {
     })
     const provider = new PiAuthProvider()
     const map = await provider.probe()
-    expect(map['openai-codex']).toEqual({ authState: 'authenticated', billingType: 'subscription', label: 'OAuth' })
+    expect(map['openai-codex']).toEqual({
+      authState: 'authenticated',
+      billingType: 'subscription',
+      label: 'OAuth'
+    })
   })
 
   it('maps an EXPIRED oauth entry to still-authenticated with the expired label', async () => {
@@ -165,7 +185,9 @@ describe('PiAuthProvider.listVendorAuthOptions', () => {
     const provider = new PiAuthProvider()
     const options = await provider.listVendorAuthOptions()
     const apiOption = options.openai.find((o) => o.type === 'api')!
-    expect(apiOption.prompts).toEqual([{ type: 'text', key: 'key', message: 'API key', secret: true }])
+    expect(apiOption.prompts).toEqual([
+      { type: 'text', key: 'key', message: 'API key', secret: true }
+    ])
   })
 })
 
@@ -321,7 +343,12 @@ describe('PiAuthProvider.feedOauthCredential', () => {
   it('writes a {type:"oauth", access, refresh, expires} entry, preserving every other provider entry', async () => {
     writeAuthJson({ anthropic: { type: 'api_key', key: 'sk-ant-test' } })
     const provider = new PiAuthProvider()
-    await provider.feedOauthCredential('openai-codex', { access: 'a1', refresh: 'r1', expires: 12345, accountId: 'acct-1' })
+    await provider.feedOauthCredential('openai-codex', {
+      access: 'a1',
+      refresh: 'r1',
+      expires: 12345,
+      accountId: 'acct-1'
+    })
 
     expect(readAuthJsonRaw()).toEqual({
       anthropic: { type: 'api_key', key: 'sk-ant-test' },
@@ -331,14 +358,25 @@ describe('PiAuthProvider.feedOauthCredential', () => {
 
   it('does NOT persist accountId — pi has no such field, unlike opencode', async () => {
     const provider = new PiAuthProvider()
-    await provider.feedOauthCredential('openai-codex', { access: 'a1', refresh: 'r1', expires: 12345, accountId: 'acct-1' })
+    await provider.feedOauthCredential('openai-codex', {
+      access: 'a1',
+      refresh: 'r1',
+      expires: 12345,
+      accountId: 'acct-1'
+    })
     expect(readAuthJsonRaw()['openai-codex']).not.toHaveProperty('accountId')
   })
 
   it('preserves unknown fields already on the SAME entry (merge, not overwrite)', async () => {
-    writeAuthJson({ 'openai-codex': { type: 'api_key', key: 'stale', someUnknownField: 'keep-me' } })
+    writeAuthJson({
+      'openai-codex': { type: 'api_key', key: 'stale', someUnknownField: 'keep-me' }
+    })
     const provider = new PiAuthProvider()
-    await provider.feedOauthCredential('openai-codex', { access: 'a2', refresh: 'r2', expires: 999 })
+    await provider.feedOauthCredential('openai-codex', {
+      access: 'a2',
+      refresh: 'r2',
+      expires: 999
+    })
     expect(readAuthJsonRaw()['openai-codex']).toEqual({
       type: 'oauth',
       key: 'stale',
@@ -351,7 +389,11 @@ describe('PiAuthProvider.feedOauthCredential', () => {
 
   it('invalidates the pi model cache and refreshes the probe snapshot', async () => {
     const provider = new PiAuthProvider()
-    await provider.feedOauthCredential('openai-codex', { access: 'a1', refresh: 'r1', expires: Date.now() + 60_000 })
+    await provider.feedOauthCredential('openai-codex', {
+      access: 'a1',
+      refresh: 'r1',
+      expires: Date.now() + 60_000
+    })
     expect(mockInvalidatePiModelCache).toHaveBeenCalledTimes(1)
     expect(provider.buildPiAccountRef('openai-codex')).toEqual({
       engineId: 'pi',
@@ -364,7 +406,11 @@ describe('PiAuthProvider.feedOauthCredential', () => {
 
   it('listVendorCredentialIds reports openai-codex as oauth-credentialed after a feed', async () => {
     const provider = new PiAuthProvider()
-    await provider.feedOauthCredential('openai-codex', { access: 'a1', refresh: 'r1', expires: Date.now() + 60_000 })
+    await provider.feedOauthCredential('openai-codex', {
+      access: 'a1',
+      refresh: 'r1',
+      expires: Date.now() + 60_000
+    })
     expect(await provider.listVendorCredentialIds()).toEqual({ 'openai-codex': 'oauth' })
   })
 })
@@ -373,7 +419,11 @@ describe('PiAuthProvider.readOauthEntry', () => {
   it('returns the entry for a present oauth vendor', async () => {
     writeAuthJson({ 'openai-codex': { type: 'oauth', access: 'a1', refresh: 'r1', expires: 999 } })
     const provider = new PiAuthProvider()
-    expect(await provider.readOauthEntry('openai-codex')).toEqual({ access: 'a1', refresh: 'r1', expires: 999 })
+    expect(await provider.readOauthEntry('openai-codex')).toEqual({
+      access: 'a1',
+      refresh: 'r1',
+      expires: 999
+    })
   })
 
   it('returns null when the vendor is absent', async () => {
@@ -396,7 +446,9 @@ describe('PiAuthProvider.readOauthEntry', () => {
 
 describe('PiAuthProvider OAuth delegation (openai-codex only)', () => {
   it('oauthAuthorize("openai-codex") returns the vault authorize URL via credentialSync.beginLogin()', async () => {
-    mockBeginLogin.mockResolvedValue({ authorizeUrl: 'https://auth.openai.com/oauth/authorize?x=1' })
+    mockBeginLogin.mockResolvedValue({
+      authorizeUrl: 'https://auth.openai.com/oauth/authorize?x=1'
+    })
     const provider = new PiAuthProvider()
     const result = await provider.oauthAuthorize('openai-codex', 0)
     expect(mockBeginLogin).toHaveBeenCalledTimes(1)
@@ -424,6 +476,21 @@ describe('PiAuthProvider OAuth delegation (openai-codex only)', () => {
     const provider = new PiAuthProvider()
     await expect(provider.oauthCallback('anthropic', 0)).rejects.toThrow(/openai-codex/)
     expect(mockCompleteLogin).not.toHaveBeenCalled()
+  })
+
+  it('oauthCallback with a pasted URL/code drives completeLogin(pasted) (ADR-057 remote paste-back)', async () => {
+    mockCompleteLogin.mockResolvedValue({ type: 'oauth', access: 'a', refresh: 'r', expires: 1 })
+    const provider = new PiAuthProvider()
+    const pasted = 'http://localhost:1455/auth/callback?code=abc&state=st'
+    await expect(provider.oauthCallback('openai-codex', 0, pasted)).resolves.toBe(true)
+    expect(mockCompleteLogin).toHaveBeenCalledWith(pasted)
+  })
+
+  it('oauthCallback with a blank code falls back to the loopback completeLogin() (desktop)', async () => {
+    mockCompleteLogin.mockResolvedValue({ type: 'oauth', access: 'a', refresh: 'r', expires: 1 })
+    const provider = new PiAuthProvider()
+    await expect(provider.oauthCallback('openai-codex', 0, '   ')).resolves.toBe(true)
+    expect(mockCompleteLogin).toHaveBeenCalledWith()
   })
 
   it('cancelVendorOauth() delegates to credentialSync.cancelLogin()', async () => {
@@ -474,13 +541,19 @@ describe('PiAuthProvider — corrupt auth.json write guard (H18)', () => {
   it('setVendorApiKey REFUSES to write over a corrupt file', async () => {
     writeCorruptAuthJson(corrupt)
     const provider = new PiAuthProvider()
-    await expect(provider.setVendorApiKey('openai', 'sk-new')).rejects.toThrow(/Refusing to overwrite/)
+    await expect(provider.setVendorApiKey('openai', 'sk-new')).rejects.toThrow(
+      /Refusing to overwrite/
+    )
     expect(readFileSync(authJsonPath(), 'utf-8')).toBe(corrupt)
   })
 
   it('still creates a fresh auth.json when the file is simply MISSING (not corrupt)', async () => {
     const provider = new PiAuthProvider()
-    await provider.feedOauthCredential('openai-codex', { access: 'a1', refresh: 'r1', expires: 123 })
+    await provider.feedOauthCredential('openai-codex', {
+      access: 'a1',
+      refresh: 'r1',
+      expires: 123
+    })
     expect(readAuthJsonRaw()).toEqual({
       'openai-codex': { type: 'oauth', access: 'a1', refresh: 'r1', expires: 123 }
     })

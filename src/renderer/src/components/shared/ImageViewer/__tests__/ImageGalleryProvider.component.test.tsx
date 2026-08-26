@@ -35,7 +35,11 @@ function renderChat(messages: ChatMessage[], wrap = true): ReturnType<typeof ren
     />
   ))
   return render(
-    wrap ? <ImageGalleryProvider messages={messages}>{bubbles}</ImageGalleryProvider> : <>{bubbles}</>
+    wrap ? (
+      <ImageGalleryProvider messages={messages}>{bubbles}</ImageGalleryProvider>
+    ) : (
+      <>{bubbles}</>
+    )
   )
 }
 
@@ -137,10 +141,7 @@ describe('ImageGalleryProvider + MessageBubble thumbnails', () => {
   })
 
   it('renders inert thumbnails when no provider is mounted', () => {
-    const { getAllByTestId, queryByTestId } = renderChat(
-      [userMessage('m1', [image('AAA')])],
-      false
-    )
+    const { getAllByTestId, queryByTestId } = renderChat([userMessage('m1', [image('AAA')])], false)
     const thumb = getAllByTestId('MessageBubble.imageThumb')[0]
     expect(thumb).toBeDisabled()
     fireEvent.click(thumb)

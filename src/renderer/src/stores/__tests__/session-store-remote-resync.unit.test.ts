@@ -9,7 +9,7 @@
  * whatever the desktop happens to be looking at (or to welcome/wrong-engine)
  * after backgrounding/returning.
  *
- * `applyRemoteSnapshot(snapshot, isResync)` fixes this: `isResync` is falsy on
+ * `hydrateReplica(snapshot, isResync)` fixes this: `isResync` is falsy on
  * first hydration (snapshot wins wholesale, unchanged), and true on every
  * subsequent sync-full, where the local `activeSessionId` and any local-only
  * session entries are preserved.
@@ -23,11 +23,19 @@
  *   snapshot): keeps X and its local session entry (messages included).
  * - re-sync where X is absent from BOTH local and the snapshot: falls back to
  *   the snapshot's activeSessionId rather than rendering a broken view.
+ * - the queue of record survives a resync (ADR-053): pre-fix the snapshot
+ *   carried no queue at all, so every reconnect silently emptied the card while
+ *   the items were still live in main.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useSessionStore } from '../session-store'
+import { getReplicaState } from '../replica'
+import { toSnapshot } from '../../../../core/shared/sync/state'
 import { resetFactoryCounter, makeUserMessage } from '@test/factories/messages'
 import type { FullStateSnapshot } from '../../../../shared/remote-protocol'
+import type { QueuedItem } from '../../../../shared/types'
+import { seed, resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
+import { hydrateReplica } from '@renderer/stores/replica'
 
 const store = () => useSessionStore.getState()
 
@@ -83,6 +91,10 @@ function makeSnapshot(
 }
 
 beforeEach(() => {
+  // The replica is a module singleton holding canonical state: resetting only the
+  // store would leave the two disagreeing and the next projection would resurrect
+  // the previous test's sessions (SyncCore phase 4c).
+  resetReplicaSeam()
   resetFactoryCounter()
   ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
@@ -103,17 +115,21 @@ beforeEach(() => {
     sessionEngines: {},
     availableModels: []
   })
+  mirrorStoreIntoReplica()
 })
 
-describe('applyRemoteSnapshot — first hydration (isResync falsy)', () => {
+describe('hydrateReplica — first hydration (isResync falsy)', () => {
   it('adopts the snapshot activeSessionId + sessions wholesale', () => {
     // Local store already has an (irrelevant, pre-connect) session — first
     // hydration must still stomp it, matching today's behavior.
     store().createNewSession('local-stale', '/stale')
     useSessionStore.setState({ activeSessionId: 'local-stale' })
 
-    const snapshot = makeSnapshot({ 'desktop-active': baseSnapshotSession('desktop-active') }, 'desktop-active')
-    store().applyRemoteSnapshot(snapshot)
+    const snapshot = makeSnapshot(
+      { 'desktop-active': baseSnapshotSession('desktop-active') },
+      'desktop-active'
+    )
+    hydrateReplica(snapshot)
 
     expect(store().activeSessionId).toBe('desktop-active')
     expect(store().sessions['desktop-active']).toBeDefined()
@@ -121,7 +137,7 @@ describe('applyRemoteSnapshot — first hydration (isResync falsy)', () => {
   })
 })
 
-describe('applyRemoteSnapshot — re-sync (isResync=true)', () => {
+describe('hydrateReplica — re-sync (isResync=true)', () => {
   it('keeps local activeSessionId=X when X is present in the snapshot, refreshing its data', () => {
     store().createNewSession('X', '/test')
     useSessionStore.setState({ activeSessionId: 'X' })
@@ -131,7 +147,7 @@ describe('applyRemoteSnapshot — re-sync (isResync=true)', () => {
       { X: refreshedX, 'desktop-active': baseSnapshotSession('desktop-active') },
       'desktop-active'
     )
-    store().applyRemoteSnapshot(snapshot, true)
+    hydrateReplica(snapshot, true)
 
     expect(store().activeSessionId).toBe('X')
     // Session data refreshed from the snapshot.
@@ -147,11 +163,15 @@ describe('applyRemoteSnapshot — re-sync (isResync=true)', () => {
       activeSessionId: 'X',
       sessions: { ...s.sessions, X: { ...s.sessions['X'], messages: [msg] } }
     }))
+    mirrorStoreIntoReplica()
 
     // The desktop snapshot has no idea 'X' exists — it's only in the snapshot
     // via a different active session.
-    const snapshot = makeSnapshot({ 'desktop-active': baseSnapshotSession('desktop-active') }, 'desktop-active')
-    store().applyRemoteSnapshot(snapshot, true)
+    const snapshot = makeSnapshot(
+      { 'desktop-active': baseSnapshotSession('desktop-active') },
+      'desktop-active'
+    )
+    hydrateReplica(snapshot, true)
 
     expect(store().activeSessionId).toBe('X')
     expect(store().sessions['X']).toBeDefined()
@@ -167,9 +187,13 @@ describe('applyRemoteSnapshot — re-sync (isResync=true)', () => {
     // No local session named 'X' at all, and activeSessionId already points
     // at a dead id (e.g. evicted between backgrounding and reconnect).
     useSessionStore.setState({ activeSessionId: 'X', sessions: {} })
+    mirrorStoreIntoReplica()
 
-    const snapshot = makeSnapshot({ 'desktop-active': baseSnapshotSession('desktop-active') }, 'desktop-active')
-    store().applyRemoteSnapshot(snapshot, true)
+    const snapshot = makeSnapshot(
+      { 'desktop-active': baseSnapshotSession('desktop-active') },
+      'desktop-active'
+    )
+    hydrateReplica(snapshot, true)
 
     expect(store().activeSessionId).toBe('desktop-active')
     expect(store().sessions['desktop-active']).toBeDefined()
@@ -177,28 +201,108 @@ describe('applyRemoteSnapshot — re-sync (isResync=true)', () => {
 
   it('adopts the snapshot activeSessionId when local activeSessionId is null', () => {
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
 
-    const snapshot = makeSnapshot({ 'desktop-active': baseSnapshotSession('desktop-active') }, 'desktop-active')
-    store().applyRemoteSnapshot(snapshot, true)
+    const snapshot = makeSnapshot(
+      { 'desktop-active': baseSnapshotSession('desktop-active') },
+      'desktop-active'
+    )
+    hydrateReplica(snapshot, true)
 
     expect(store().activeSessionId).toBe('desktop-active')
   })
 })
 
-describe('applyRemoteSnapshot — sentFiles (Files widget) round-trip', () => {
+describe('hydrateReplica — sentFiles (Files widget) round-trip', () => {
   it('hydrates sentFiles from the snapshot', () => {
     const snap = {
       ...baseSnapshotSession('S'),
       sentFiles: [{ path: 'out/report.html', toolUseId: 'tu-1', caption: 'the report' }]
     }
-    store().applyRemoteSnapshot(makeSnapshot({ S: snap }, 'S'))
+    hydrateReplica(makeSnapshot({ S: snap }, 'S'))
     expect(store().sessions['S'].sentFiles).toEqual([
       { path: 'out/report.html', toolUseId: 'tu-1', caption: 'the report' }
     ])
   })
 
   it('falls back to [] when an older remote server omits sentFiles', () => {
-    store().applyRemoteSnapshot(makeSnapshot({ S: baseSnapshotSession('S') }, 'S'))
+    hydrateReplica(makeSnapshot({ S: baseSnapshotSession('S') }, 'S'))
     expect(store().sessions['S'].sentFiles).toEqual([])
+  })
+})
+
+describe('hydrateReplica — new-session default mode (ADR-050)', () => {
+  // The web client never runs hydrateConfigFromDisk: the snapshot IS its
+  // hydration, so the fields hydrate derives from settings must be derived here
+  // too. Pre-fix the remote store kept the initial 'default' forever — no mode
+  // tab on the welcome input, and sessions CREATED from the remote client
+  // spawned without the auto default.
+  it('derives defaultPermissionMode from synced settings.defaultAutonomyMode', () => {
+    hydrateReplica({
+      ...makeSnapshot({}, null),
+      settings: { defaultAutonomyMode: 'full' }
+    })
+    expect(store().defaultPermissionMode).toBe('auto')
+  })
+
+  it('an older host that omits the key still yields the shipped auto default', () => {
+    // {...DEFAULT_SETTINGS, ...snapshot.settings} fills the gap.
+    hydrateReplica(makeSnapshot({}, null))
+    expect(store().defaultPermissionMode).toBe('auto')
+  })
+
+  it('respects a pinned non-auto pick from the host', () => {
+    hydrateReplica({
+      ...makeSnapshot({}, null),
+      settings: { defaultAutonomyMode: 'ask' }
+    })
+    expect(store().defaultPermissionMode).toBe('default')
+  })
+
+  it('hydrates the host-derived disableAutoMode gate', () => {
+    hydrateReplica({
+      ...makeSnapshot({}, null),
+      autoModeDisabledBySettings: true
+    })
+    expect(store().autoModeDisabledBySettings).toBe(true)
+    // ...and an older host omitting it reads as "not disabled".
+    hydrateReplica(makeSnapshot({}, null))
+    expect(store().autoModeDisabledBySettings).toBe(false)
+  })
+})
+
+describe('hydrateReplica — queue of record (ADR-053)', () => {
+  const item = (itemId: string, text: string): QueuedItem => ({ itemId, text, state: 'queued' })
+
+  it('round-trips the queue through the replica → toSnapshot → hydrateReplica', () => {
+    store().createNewSession('X', '/test')
+    useSessionStore.setState({ activeSessionId: 'X' })
+    seed.queue('X', [item('q1', 'fix the bug'), item('q2', 'also update tests')])
+
+    // The desktop builds the snapshot from its own store...
+    const produced = toSnapshot(getReplicaState(), 0)
+    expect(produced.sessions['X'].queue!.map((i) => i.text)).toEqual([
+      'fix the bug',
+      'also update tests'
+    ])
+
+    // ...and a reconnecting client applies it.
+    hydrateReplica(
+      makeSnapshot(
+        { X: { ...baseSnapshotSession('X'), queue: produced.sessions['X'].queue } },
+        'X'
+      ),
+      true
+    )
+
+    expect(store().sessions['X'].queuedItems.map((i) => i.text)).toEqual([
+      'fix the bug',
+      'also update tests'
+    ])
+  })
+
+  it('an older server that omits `queue` hydrates to an empty queue, not a crash', () => {
+    hydrateReplica(makeSnapshot({ X: baseSnapshotSession('X') }, 'X'))
+    expect(store().sessions['X'].queuedItems).toEqual([])
   })
 })

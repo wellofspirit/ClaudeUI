@@ -18,7 +18,10 @@ export function WorktreeCleanupModalView({
   onCancel
 }: WorktreeCleanupModalViewProps): React.JSX.Element {
   return (
-    <div data-testid="WorktreeCleanupModal" className="fixed inset-0 z-[100] flex items-center justify-center">
+    <div
+      data-testid="WorktreeCleanupModal"
+      className="fixed inset-0 z-[100] flex items-center justify-center"
+    >
       <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onCancel} />
       <div className="relative bg-bg-primary border border-border rounded-xl shadow-2xl w-[400px] p-5 animate-fade-in">
         <h3 className="text-[15px] font-medium text-text-primary mb-3">Worktree cleanup</h3>

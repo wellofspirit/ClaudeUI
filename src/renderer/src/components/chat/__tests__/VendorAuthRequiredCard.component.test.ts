@@ -32,7 +32,7 @@ beforeEach(() => {
     vendorAuthProbe: vi.fn().mockResolvedValue({}),
     vendorAuthListOptions: vi.fn().mockResolvedValue({}),
     vendorAuthOauthAuthorize: vi.fn(),
-    vendorAuthOauthCallback: vi.fn(),
+    vendorAuthOauthCallback: vi.fn()
   }
   ;(globalThis as any).window.open = vi.fn()
 })
@@ -102,9 +102,14 @@ describe('VendorAuthRequiredCard — authorizeVendorOAuth integration', () => {
     // vendorOAuth should be null after success
     expect(useSessionStore.getState().vendorOAuth).toBeNull()
     // window.open should have been called
-    expect((globalThis as any).window.open).toHaveBeenCalledWith('https://openai.com/auth', '_blank')
+    expect((globalThis as any).window.open).toHaveBeenCalledWith(
+      'https://openai.com/auth',
+      '_blank'
+    )
     // callback was called without a code
-    const callbackMock = (globalThis as any).window.api.vendorAuthOauthCallback as ReturnType<typeof vi.fn>
+    const callbackMock = (globalThis as any).window.api.vendorAuthOauthCallback as ReturnType<
+      typeof vi.fn
+    >
     expect(callbackMock).toHaveBeenCalledWith('opencode', 'openai', 0)
   })
 
@@ -124,7 +129,9 @@ describe('VendorAuthRequiredCard — authorizeVendorOAuth integration', () => {
     expect(result.needsPaste).toBeDefined()
     expect(result.needsPaste?.url).toBe('https://github.com/auth')
     // callback should NOT have been called
-    const callbackMock = (globalThis as any).window.api.vendorAuthOauthCallback as ReturnType<typeof vi.fn>
+    const callbackMock = (globalThis as any).window.api.vendorAuthOauthCallback as ReturnType<
+      typeof vi.fn
+    >
     expect(callbackMock).not.toHaveBeenCalled()
   })
 
@@ -137,7 +144,9 @@ describe('VendorAuthRequiredCard — authorizeVendorOAuth integration', () => {
       method: 'auto',
       instructions: 'Instructions'
     })
-    ;(globalThis as any).window.api.vendorAuthOauthCallback = vi.fn().mockRejectedValue(new Error('network error'))
+    ;(globalThis as any).window.api.vendorAuthOauthCallback = vi
+      .fn()
+      .mockRejectedValue(new Error('network error'))
 
     const result = await useSessionStore.getState().authorizeVendorOAuth('opencode', 'openai')
 

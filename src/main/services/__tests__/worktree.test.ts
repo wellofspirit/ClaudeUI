@@ -15,7 +15,7 @@ import simpleGit from 'simple-git'
 import { makeTempGitRepo, type TempGitRepo } from '../../../test/helpers/temp-git-repo'
 
 // Silence logger writes during tests.
-vi.mock('../logger', () => ({
+vi.mock('../../../core/services/logger', () => ({
   logger: {
     debug: vi.fn(),
     info: vi.fn(),
@@ -25,7 +25,12 @@ vi.mock('../logger', () => ({
 }))
 
 // Import after the mock is registered.
-import { createWorktree, removeWorktree, listWorktrees, getWorktreeStatus } from '../worktree'
+import {
+  createWorktree,
+  removeWorktree,
+  listWorktrees,
+  getWorktreeStatus
+} from '../../../core/services/worktree'
 
 // ---------------------------------------------------------------------------
 // createWorktree

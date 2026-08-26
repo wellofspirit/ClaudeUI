@@ -29,7 +29,7 @@ vi.mock('node:os', async () => {
   }
 })
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
-vi.mock('../service-session', () => ({ serviceSession: { stop: vi.fn() } }))
+vi.mock('../../../core/services/service-session', () => ({ serviceSession: { stop: vi.fn() } }))
 vi.mock('../auth-manager', () => ({
   authManager: {
     onLoginSuccess: vi.fn((cb: (a: unknown) => void) => {
@@ -40,13 +40,16 @@ vi.mock('../auth-manager', () => ({
     signIn: vi.fn(async () => {})
   }
 }))
-vi.mock('../logger', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } }))
+vi.mock('../../../core/services/logger', () => ({
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+}))
 
 import { accountManager } from '../account-manager'
-import { getSecurestorageEnv } from '../../sdk/securestorage-env'
-import { serviceSession } from '../service-session'
+import { setLiveSessionCanceller } from '../session-invalidation'
+import { getSecurestorageEnv } from '../../../core/sdk/securestorage-env'
+import { serviceSession } from '../../../core/services/service-session'
 import { authManager } from '../auth-manager'
-import { logger } from '../logger'
+import { logger } from '../../../core/services/logger'
 
 const ACCOUNTS_DIR = path.join(hoisted.TEST_HOME, '.claude', 'ui', 'accounts')
 
@@ -108,6 +111,49 @@ describe('AccountManager', () => {
     expect(authManager.signIn).toHaveBeenCalled()
   })
 
+  /**
+   * ADR-057 / S4-UI, item C. `manualUrl` is what a remote client needs to render
+   * step 1, and it existed only on the `auth:state` event — which is `host-local`
+   * and therefore never reached the caller. It rides the RESPONSE instead of
+   * widening that event's delivery, because an in-flight OAuth flow belongs to
+   * the ONE client that started it: `manualUrl` carries the flow's CSRF `state`,
+   * so fanning it out would let any other admitted client finish someone else's
+   * sign-in with their own account.
+   */
+  describe('addAccount — remote sign-in hand-back (ADR-057)', () => {
+    it('remote: awaits the sign-in and returns its snapshot on the response', async () => {
+      const authorizing = {
+        status: 'authorizing',
+        account: null,
+        error: null,
+        manualUrl: 'https://claude.ai/oauth?state=s'
+      }
+      ;(authManager.signIn as ReturnType<typeof vi.fn>).mockResolvedValueOnce(authorizing)
+      await accountManager.setEnabled(true)
+      const state = await accountManager.addAccount({ remote: true })
+      expect(authManager.signIn).toHaveBeenCalledWith({ remote: true })
+      expect(state.pendingSignIn).toEqual(authorizing)
+    })
+
+    it('desktop: no pendingSignIn — the host opened its own browser', async () => {
+      await accountManager.setEnabled(true)
+      const state = await accountManager.addAccount()
+      expect(state.pendingSignIn).toBeUndefined()
+    })
+
+    it('remote: a rejected sign-in degrades to no pendingSignIn, never a rejection', async () => {
+      ;(authManager.signIn as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error('service session down')
+      )
+      await accountManager.setEnabled(true)
+      const state = await accountManager.addAccount({ remote: true })
+      expect(state.pendingSignIn).toBeUndefined()
+      // The account itself was still created — only its login failed to start.
+      expect(state.accounts.length).toBeGreaterThan(0)
+      expect(logger.error).toHaveBeenCalled()
+    })
+  })
+
   it('a failing login start on addAccount is caught (no unhandled rejection) and logged', async () => {
     ;(authManager.signIn as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new Error('service session down')
@@ -128,6 +174,84 @@ describe('AccountManager', () => {
     expect(state.activeId).toBe(first)
     expect(getSecurestorageEnv()?.dir).toBe(path.join(ACCOUNTS_DIR, first))
     expect(sent.some(([ch]) => ch === 'account:respawn-sessions')).toBe(true)
+  })
+
+  /**
+   * F5. The respawn broadcast above is a REQUEST to one renderer; it never
+   * stopped the processes holding the old account's credential, and no other
+   * client heard about the switch at all. Cancelling main-side is what makes the
+   * `disconnected` status (→ `sdkActive: false` in canonical and in every
+   * replica) happen.
+   *
+   * PRE-FIX: `cancelled` stays empty — nothing main-side reacted to a switch.
+   */
+  it('switching accounts cancels every live session MAIN-side', async () => {
+    const cancelled: string[] = []
+    setLiveSessionCanceller(() => cancelled.push('cancelAll'))
+    try {
+      await accountManager.setEnabled(true)
+      const first = accountManager.getState().accounts[0].id
+      await accountManager.addAccount()
+      cancelled.length = 0
+      await accountManager.switchAccount(first)
+      expect(cancelled).toEqual(['cancelAll'])
+    } finally {
+      setLiveSessionCanceller(null)
+    }
+  })
+
+  /** A windowless boot (or a not-yet-wired one) must not throw on a switch. */
+  it('an unwired canceller is a no-op, not a throw', async () => {
+    setLiveSessionCanceller(null)
+    await expect(accountManager.setEnabled(true)).resolves.toBeDefined()
+  })
+
+  /**
+   * R4. `persistAndApply` is the common tail of four different mutations, and
+   * only some of them move the EFFECTIVE credential dir. Deleting an account the
+   * user is not signed in as changes nothing a running process reads — cancelling
+   * there destroys live turns for a settings-list edit the user does not connect
+   * to their sessions.
+   */
+  it('deleting a NON-active account does not cancel anything', async () => {
+    const cancelled: string[] = []
+    setLiveSessionCanceller(() => cancelled.push('cancel'))
+    try {
+      await accountManager.setEnabled(true)
+      await accountManager.addAccount() // second account is now active
+      const inactive = accountManager
+        .getState()
+        .accounts.find((a) => a.id !== accountManager.getState().activeId)!
+      cancelled.length = 0
+      sent.length = 0
+
+      await accountManager.deleteAccount(inactive.id)
+
+      expect(cancelled).toEqual([])
+      // …and the renderer is not asked to respawn either: nothing changed for it.
+      expect(sent.some(([ch]) => ch === 'account:respawn-sessions')).toBe(false)
+      // The account list itself still changed, so the state broadcast still goes.
+      expect(sent.some(([ch]) => ch === 'account:changed')).toBe(true)
+    } finally {
+      setLiveSessionCanceller(null)
+    }
+  })
+
+  it('deleting the ACTIVE account does cancel (the dir really moves)', async () => {
+    const cancelled: string[] = []
+    setLiveSessionCanceller(() => cancelled.push('cancel'))
+    try {
+      await accountManager.setEnabled(true)
+      await accountManager.addAccount()
+      const activeId = accountManager.getState().activeId!
+      cancelled.length = 0
+
+      await accountManager.deleteAccount(activeId)
+
+      expect(cancelled).toEqual(['cancel'])
+    } finally {
+      setLiveSessionCanceller(null)
+    }
   })
 
   it('deleteAccount removes the dir and reassigns active', async () => {

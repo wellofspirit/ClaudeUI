@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { onSyncEvent } from '../../../core/shared/sync/client-registry'
 import { useAutomationStore } from '../stores/automation-store'
 
 /**
@@ -31,7 +32,7 @@ export function useAutomationEvents(): void {
     })
 
     const cleanups = [
-      window.api.onAutomationRunUpdate(({ automationId, run }) => {
+      onSyncEvent('automation:run-update', ({ automationId, run }) => {
         const store = useAutomationStore.getState()
         store.updateRun(automationId, run)
         // Badge only on completion (not on 'running' status)
@@ -45,7 +46,7 @@ export function useAutomationEvents(): void {
         }
       }),
 
-      window.api.onAutomationProcessing(({ automationId, isProcessing }) => {
+      onSyncEvent('automation:processing', ({ automationId, isProcessing }) => {
         const store = useAutomationStore.getState()
         if (automationId === store.selectedAutomationId) {
           store.setIsRunProcessing(isProcessing)
@@ -53,11 +54,11 @@ export function useAutomationEvents(): void {
         }
       }),
 
-      window.api.onAutomationsChanged((automations) => {
+      onSyncEvent('automation:changed', (automations) => {
         useAutomationStore.getState().setAutomations(automations)
       }),
 
-      window.api.onAutomationRunMessage(({ automationId, message }) => {
+      onSyncEvent('automation:run-message', ({ automationId, message }) => {
         const store = useAutomationStore.getState()
         store.appendRunMessage(automationId, message)
         // Clear streaming text when a final assistant message arrives — but only
@@ -67,7 +68,7 @@ export function useAutomationEvents(): void {
         }
       }),
 
-      window.api.onAutomationStreamEvent(({ automationId, type, text }) => {
+      onSyncEvent('automation:stream-event', ({ automationId, type, text }) => {
         const store = useAutomationStore.getState()
         if (type === 'text' && viewingLiveStream(store, automationId)) {
           store.appendStreamingText(text)

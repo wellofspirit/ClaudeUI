@@ -10,7 +10,10 @@ export function PlanReviewBarView({
   onSend
 }: PlanReviewBarViewProps): React.JSX.Element {
   return (
-    <div data-testid="PlanReviewBar" className="shrink-0 flex items-center justify-between px-3 py-2 border-t border-border bg-bg-secondary/80">
+    <div
+      data-testid="PlanReviewBar"
+      className="shrink-0 flex items-center justify-between px-3 py-2 border-t border-border bg-bg-secondary/80"
+    >
       <span className="text-[11px] text-text-muted">
         {commentCount
           ? `${commentCount} comment${commentCount !== 1 ? 's' : ''}`

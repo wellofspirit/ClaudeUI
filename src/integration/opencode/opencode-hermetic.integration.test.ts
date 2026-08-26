@@ -86,7 +86,8 @@ describe.skipIf(SKIP)('opencode hermetic sessions (ADR-037 P2)', () => {
 
   beforeAll(async () => {
     const binary = join(VENDOR_DIR, BINARY_NAME)
-    if (!existsSync(binary)) throw new Error('opencode binary not found — run `bun run ensure-opencode` first')
+    if (!existsSync(binary))
+      throw new Error('opencode binary not found — run `bun run ensure-opencode` first')
 
     const password = 'hermetic-integration-secret'
     authHeader = 'Basic ' + Buffer.from('opencode:' + password).toString('base64')
@@ -137,14 +138,16 @@ describe.skipIf(SKIP)('opencode hermetic sessions (ADR-037 P2)', () => {
     const { status, json } = await api('GET', '/doc')
     expect(status).toBe(200)
     const spec = json as {
-      paths: Record<string, Record<string, { requestBody?: { content?: Record<string, { schema?: unknown }> } }>>
+      paths: Record<
+        string,
+        Record<string, { requestBody?: { content?: Record<string, { schema?: unknown }> } }>
+      >
       components?: { schemas?: Record<string, { properties?: Record<string, unknown> }> }
     }
     const patchOp = spec.paths['/session/{sessionID}']?.patch
     expect(patchOp, 'PATCH /session/{sessionID} must exist').toBeDefined()
     const schema = patchOp!.requestBody?.content?.['application/json']?.schema as
-      | { $ref?: string; properties?: Record<string, unknown> }
-      | undefined
+      { $ref?: string; properties?: Record<string, unknown> } | undefined
     const resolved = schema?.$ref
       ? spec.components?.schemas?.[schema.$ref.replace('#/components/schemas/', '')]
       : schema
@@ -170,7 +173,10 @@ describe.skipIf(SKIP)('opencode hermetic sessions (ADR-037 P2)', () => {
     // would see a foreign field — this pins that it does not.
     const sealed = await newSession('sealed')
     const plain = await newSession('plain')
-    const a = await api('PATCH', `/session/${sealed}`, { permission: DENY_ALL, permissionHermetic: true })
+    const a = await api('PATCH', `/session/${sealed}`, {
+      permission: DENY_ALL,
+      permissionHermetic: true
+    })
     const b = await api('PATCH', `/session/${plain}`, { permission: DENY_ALL })
     expect(a.status).toBe(200)
     expect(b.status).toBe(200)
