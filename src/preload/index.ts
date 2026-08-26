@@ -310,6 +310,7 @@ const api: ClaudeAPI = {
   watchGit: (cwds: string[]) => unwrap('git:watch', { cwds }),
 
   listDir: (dirPath: string) => ipcRenderer.invoke('file:list-dir', dirPath),
+  listPlaces: () => ipcRenderer.invoke('file:list-places'),
   openInVSCode: (cwd: string) => ipcRenderer.invoke('app:open-in-vscode', cwd),
   openPath: (filePath: string) => ipcRenderer.invoke('shell:open-path', filePath),
   showInFolder: (filePath: string) => ipcRenderer.invoke('shell:show-in-folder', filePath),

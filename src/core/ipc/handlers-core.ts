@@ -5,7 +5,12 @@ import * as path from 'path'
 import type { SessionManager } from '../services/session-manager'
 import { scanSkills } from '../services/skill-scanner'
 import { saveCleanupPeriodDays, saveClaudePermissions } from '../services/claude-settings'
-import type { ClaudePermissions, EngineId, PermissionScope } from '../../shared/types'
+import type {
+  ClaudePermissions,
+  EngineId,
+  ListPlacesResult,
+  PermissionScope
+} from '../../shared/types'
 import {
   saveSessionConfig,
   saveSettings,
@@ -732,4 +737,79 @@ export async function listDirEntries(dirPath: string): Promise<{
   } catch {
     return { entries: [], isRoot: false, resolvedPath: '' }
   }
+}
+
+const DRIVE_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+
+/**
+ * Reachable filesystem roots. On win32 there is no API to enumerate them, so
+ * every letter is probed concurrently and the ones that answer are kept — an
+ * unmapped letter simply throws ENOENT. POSIX has exactly one root.
+ *
+ * Each probe is bounded at 1.5 s ON ITS OWN. `access` against a stale mapped
+ * network drive stays pending for the SMB timeout, and `home` + `hostname` ride
+ * the same `listPlaces` promise — so one dead mapping would otherwise stall the
+ * whole rail, header included. A letter that misses the bound drops out; every
+ * fast letter still appears.
+ */
+async function probeDrives(): Promise<string[]> {
+  if (process.platform !== 'win32') return ['/']
+  const PROBE_TIMEOUT_MS = 1500
+  const probes = await Promise.all(
+    [...DRIVE_LETTERS].map(async (letter) => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        const reachable = await Promise.race([
+          fs.promises.access(`${letter}:\\`).then(() => true),
+          new Promise<boolean>((resolve) => {
+            timer = setTimeout(() => resolve(false), PROBE_TIMEOUT_MS)
+          })
+        ])
+        return reachable ? `${letter}:/` : null
+      } catch {
+        return null
+      } finally {
+        // Losing the race leaves the timer armed, and an armed timer holds the
+        // event loop open — which for the bun-compiled server means a process
+        // that will not exit. `clearTimeout` rather than `unref`: it behaves the
+        // same on every runtime this file is built for.
+        clearTimeout(timer)
+      }
+    })
+  )
+  return probes.filter((d): d is string => d !== null)
+}
+
+/**
+ * The picker's places rail (ADR-046): where a browse can start, as opposed to
+ * `listDirEntries`, which answers what is inside one directory.
+ *
+ * No capability change — this rides `fs-read` with the listing itself, and the
+ * home path plus drive roots are strictly weaker than the arbitrary-path
+ * listing that channel already grants. Best-effort throughout: a failure hides
+ * one rail entry, so nothing here is allowed to throw.
+ */
+export async function listPlaces(): Promise<ListPlacesResult> {
+  let home = ''
+  try {
+    const posix = os.homedir().replace(/\\/g, '/')
+    // Trailing-slash strip mirrors `listDirEntries`' resolvedPath — but a
+    // one-character home ('/') is the path, not a separator to trim.
+    home = posix.length > 1 ? posix.replace(/\/$/, '') : posix
+  } catch {
+    home = ''
+  }
+  let hostname = ''
+  try {
+    hostname = os.hostname()
+  } catch {
+    hostname = ''
+  }
+  let drives: string[] = []
+  try {
+    drives = await probeDrives()
+  } catch {
+    drives = []
+  }
+  return { home, hostname, drives }
 }

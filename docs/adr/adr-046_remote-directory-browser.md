@@ -61,6 +61,34 @@ autocomplete — which works over remote today — and the `@`-mention browser).
   web, which is decision 3 above. Still open: the first-run `WelcomeScreen` is native-only
   (it appears unrouted), and dot-directories remain hidden.)_
 
+## Amendment — 2026-08-26: the inline browser becomes a places-rail dialog
+
+`DirectoryBrowserInput` is replaced by `DirectoryBrowserDialog` (Option C of the picker
+mockups). Same component contract — dumb/presentational, host listing injected, confirm
+still re-validated through `listDir` — but rendered as a centered modal (`createPortal` to
+`<body>`, `z-[200]`, backdrop/Esc/× all cancel) with two panes: a left rail of RECENT
+project directories plus the host's PLACES, and a right browse pane holding the path input,
+the entry list and a footer that previews the resolved path. The old widget grew inside a
+288px dropdown, which is where the "unusable on a phone" reports came from. Rail clicks
+NAVIGATE — they never confirm — so every path, typed or clicked, still goes through the host
+before it can start a session. The rail is `hidden sm:flex`: on a narrow viewport the
+typed-path flow is the whole dialog.
+
+Both web browse surfaces now share it: `WelcomeState` (the dropdown's "Browse path…" row and
+the sidebar's `welcomeBrowseToken`, which opens the dialog directly instead of opening the
+dropdown into browse mode) and `AutomationConfig`'s Directory row, which additionally passes
+`initialPath={cwd}` — closing the residual where its browse opened on the host's home instead
+of the directory the automation already names. Desktop is unchanged: both surfaces keep the
+native `pickFolder()` and never mount the dialog.
+
+New channel `file:list-places` (`listPlaces` in `handlers-core.ts`), registered on both
+transports under the **existing `fs-read` capability**, answering `{ home, hostname, drives }`
+— the home path, the machine name for the dialog's "on <hostname>", and the reachable drive
+roots (probed `A:`–`Z:` on win32, `['/']` elsewhere). No widening of the remote surface in
+substance: that capability already lists any path by name, and these are strictly weaker
+reads. Best-effort by construction — a field the host cannot determine comes back empty and
+the rail hides that entry rather than failing.
+
 ## Alternatives considered
 
 - **Free-text cwd input only** (the old api-adapter comment's suggestion): rejected —

@@ -27,9 +27,9 @@ import {
 } from '../../shared/InlinePickers'
 import { SelectMenu } from '../../shared/SelectMenu'
 import {
-  DirectoryBrowserInput,
-  type DirectoryBrowserInputProps
-} from '../../shared/DirectoryBrowserInput'
+  DirectoryBrowserDialog,
+  type DirectoryBrowserDialogProps
+} from '../../shared/DirectoryBrowserDialog'
 import {
   modelSupportsAdaptiveThinking,
   modelSupportsEffort,
@@ -43,6 +43,13 @@ import {
 } from '../../../../../shared/model-capabilities'
 
 export type ModelOption = ModelDisplay
+
+/** Stand-in when the container gated `listDir` on but not `listPlaces`. */
+const NO_PLACES: DirectoryBrowserDialogProps['listPlaces'] = async () => ({
+  home: '',
+  hostname: '',
+  drives: []
+})
 
 export interface InheritedPerms {
   allow: string[]
@@ -65,7 +72,11 @@ export interface AutomationConfigViewProps {
   onPickFolder: () => Promise<string | null>
   /** Present only where there is no native folder dialog (the web client): the
    *  Directory row browses the host through this instead of `onPickFolder`. */
-  listDir?: DirectoryBrowserInputProps['listDir']
+  listDir?: DirectoryBrowserDialogProps['listDir']
+  /** Rail shortcuts for that browser. Same web-only gate as `listDir`. */
+  listPlaces?: DirectoryBrowserDialogProps['listPlaces']
+  /** Recently used project directories for the browser's RECENT rail section. */
+  recents?: DirectoryBrowserDialogProps['recents']
   onSelectRun: (runId: string) => void
   onSetDetailTab: (tab: DetailTab) => void
 }
@@ -86,6 +97,8 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
     onStopRun,
     onPickFolder,
     listDir,
+    listPlaces,
+    recents,
     onSelectRun,
     onSetDetailTab
   } = props
@@ -399,6 +412,8 @@ export function AutomationConfigView(props: AutomationConfigViewProps): React.JS
             setCwd={setCwd}
             onBrowseFolder={handlePickFolder}
             listDir={listDir}
+            listPlaces={listPlaces}
+            recents={recents}
             models={models}
             selectedModel={selectedModel}
             onSelectModel={handleSelectModel}
@@ -460,7 +475,9 @@ interface ConfigurePanelProps {
   cwd: string
   setCwd: (v: string) => void
   onBrowseFolder: () => void
-  listDir?: DirectoryBrowserInputProps['listDir']
+  listDir?: DirectoryBrowserDialogProps['listDir']
+  listPlaces?: DirectoryBrowserDialogProps['listPlaces']
+  recents?: DirectoryBrowserDialogProps['recents']
   models: ModelOption[]
   selectedModel: ModelDisplay
   onSelectModel: (v: string) => void
@@ -489,6 +506,8 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
     setCwd,
     onBrowseFolder,
     listDir,
+    listPlaces,
+    recents,
     models,
     selectedModel,
     onSelectModel,
@@ -508,7 +527,7 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
 
   const nextRuns = useMemo(() => computeNextRuns(schedule, lastRunAt, 4), [schedule, lastRunAt])
 
-  /** Inline host browser, open only where `listDir` stands in for the dialog. */
+  /** Host browser dialog, open only where `listDir` stands in for the native one. */
   const [browsing, setBrowsing] = useState(false)
 
   // Sticky unit for the interval editor — if we derived it every render, typing
@@ -647,17 +666,22 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
               </button>
             </div>
             {browsing && listDir && (
-              <div className="rounded-md border border-border/40 bg-bg-tertiary">
-                <DirectoryBrowserInput
-                  listDir={listDir}
-                  onConfirm={(picked) => {
-                    setCwd(picked)
-                    setBrowsing(false)
-                  }}
-                  onCancel={() => setBrowsing(false)}
-                  autoFocus
-                />
-              </div>
+              <DirectoryBrowserDialog
+                listDir={listDir}
+                // `listPlaces` rides the same web-only gate as `listDir` in the
+                // container, but the types cannot express that pairing — the
+                // fallback just costs the rail's PLACES section, never the browse.
+                listPlaces={listPlaces ?? NO_PLACES}
+                recents={recents}
+                // Browse from the directory the automation already names, not
+                // from the host's home (the ADR-046 residual).
+                initialPath={cwd || undefined}
+                onConfirm={(picked) => {
+                  setCwd(picked)
+                  setBrowsing(false)
+                }}
+                onCancel={() => setBrowsing(false)}
+              />
             )}
           </div>
         </InspectorRow>

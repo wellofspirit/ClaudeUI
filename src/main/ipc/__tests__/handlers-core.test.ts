@@ -13,6 +13,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import * as os from 'os'
+import * as path from 'path'
 import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
 import { CommandRegistry, makeRemoteConnection } from '../../../core/ipc/command-registry'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
@@ -59,6 +60,7 @@ import {
   dequeueMessage,
   saveSessions,
   listDirEntries,
+  listPlaces,
   setPermissionMode,
   setModel,
   deleteSession,
@@ -205,6 +207,33 @@ describe('handlers-core', () => {
 
     expect(seeded.resolvedPath).toBe(home)
     expect(seeded).toEqual(explicit)
+  })
+
+  describe('listPlaces', () => {
+    it('answers with a POSIX home, a hostname and a drive list', async () => {
+      const places = await listPlaces()
+
+      // The dialog seeds its rail from this, so a backslash in `home` would be
+      // a path the browse pane cannot compare against its own POSIX values.
+      expect(places.home).not.toBe('')
+      expect(places.home).not.toContain('\\')
+      expect(places.hostname).not.toBe('')
+      expect(Array.isArray(places.drives)).toBe(true)
+      for (const drive of places.drives) expect(typeof drive).toBe('string')
+    })
+
+    it('reports the roots this OS actually has', async () => {
+      const { drives } = await listPlaces()
+
+      if (process.platform === 'win32') {
+        // Whatever else is mounted, the drive the home directory lives on must
+        // have answered the probe.
+        const homeRoot = path.parse(os.homedir()).root.replace(/\\/g, '/')
+        expect(drives).toContain(homeRoot)
+      } else {
+        expect(drives).toEqual(['/'])
+      }
+    })
   })
 
   describe('setPermissionMode', () => {

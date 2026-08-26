@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useAutomationStore } from '../../../stores/automation-store'
+import { useSessionStore } from '../../../stores/session-store'
 import type {
   Automation,
   AutomationRun,
@@ -127,7 +128,18 @@ function AutomationConfigController({ automation }: { automation: Automation }):
   // ADR-046 decision 3: on the web client `pickFolder()` resolves to null, so the
   // View browses the host's filesystem through `file:list-dir` instead. Desktop
   // passes nothing and keeps the native dialog.
-  const listDir = window.api.platform === 'web' ? window.api.listDir : undefined
+  const isWeb = window.api.platform === 'web'
+  const listDir = isWeb ? window.api.listDir : undefined
+  const listPlaces = isWeb ? window.api.listPlaces : undefined
+
+  // Recents for the browser's rail. Mapped through a memo, not inside the
+  // selector: a selector that builds a new array every call never compares
+  // equal, so the store would re-render this tree on every notification.
+  const directories = useSessionStore((s) => s.directories)
+  const recents = useMemo(
+    () => directories.map((g) => ({ cwd: g.cwd, folderName: g.folderName })),
+    [directories]
+  )
 
   const handleSelectRun = useCallback(
     (runId: string) => {
@@ -152,6 +164,8 @@ function AutomationConfigController({ automation }: { automation: Automation }):
       onStopRun={handleStopRun}
       onPickFolder={handlePickFolder}
       listDir={listDir}
+      listPlaces={listPlaces}
+      recents={recents}
       onSelectRun={handleSelectRun}
       onSetDetailTab={setDetailTab}
     />

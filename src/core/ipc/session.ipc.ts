@@ -113,6 +113,7 @@ import {
   saveSessions,
   saveUiSettings,
   listDirEntries,
+  listPlaces,
   deleteSession,
   deleteProject,
   clearConversation
@@ -378,6 +379,7 @@ const SESSION_IPC_CHANNELS = [
   'git:fetch',
   'git:watch',
   'file:list-dir',
+  'file:list-places',
   'usage:fetch',
   'usage:fetch-block',
   'usage:set-account-filter',
@@ -1009,6 +1011,13 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'fs-read',
     kind: 'query',
     handler: async (dirPath: string) => listDirEntries(dirPath)
+  })
+
+  handleIpc({
+    channel: 'file:list-places',
+    capability: 'fs-read',
+    kind: 'query',
+    handler: async () => listPlaces()
   })
 
   handleIpc({

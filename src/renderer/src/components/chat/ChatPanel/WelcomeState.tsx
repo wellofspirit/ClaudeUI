@@ -1,7 +1,7 @@
 import { useState, useMemo, useCallback, useEffect } from 'react'
 import { v4 as uuid } from 'uuid'
 import { useActiveSession, useSessionStore } from '../../../stores/session-store'
-import { DirectoryBrowserInput } from '../../shared/DirectoryBrowserInput'
+import { DirectoryBrowserDialog } from '../../shared/DirectoryBrowserDialog'
 
 const WELCOME_PHRASES = [
   "Let's build",
@@ -81,7 +81,7 @@ export function WelcomeState(): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const welcomeBrowseToken = useSessionStore((s) => s.welcomeBrowseToken)
   const [dropdownOpen, setDropdownOpen] = useState(false)
-  const [browseMode, setBrowseMode] = useState(false)
+  const [browseDialogOpen, setBrowseDialogOpen] = useState(false)
   const [worktreeEnabled, setWorktreeEnabled] = useState(false)
   const [worktreeName, setWorktreeName] = useState(() => generateRandomName())
   const [isCreatingWorktree, setIsCreatingWorktree] = useState(false)
@@ -115,17 +115,16 @@ export function WelcomeState(): React.JSX.Element {
   )
 
   // A surface with no native dialog (the sidebar's web double-click) asked for
-  // the browser — open the dropdown straight into browse mode.
+  // the browser — go straight to the picker. The dropdown stays shut: it was
+  // only ever the browser's container, and the dialog is its own surface now.
   useEffect(() => {
     if (welcomeBrowseToken <= lastBrowseTokenConsumed) return
     lastBrowseTokenConsumed = welcomeBrowseToken
-    setDropdownOpen(true)
-    setBrowseMode(true)
+    setBrowseDialogOpen(true)
   }, [welcomeBrowseToken])
 
   const closeDropdown = (): void => {
     setDropdownOpen(false)
-    setBrowseMode(false)
   }
 
   const handleSelectDir = (dirCwd: string): void => {
@@ -139,7 +138,8 @@ export function WelcomeState(): React.JSX.Element {
 
   const handleBrowse = async (): Promise<void> => {
     if (isWeb) {
-      setBrowseMode(true)
+      closeDropdown()
+      setBrowseDialogOpen(true)
       return
     }
     closeDropdown()
@@ -246,35 +246,26 @@ export function WelcomeState(): React.JSX.Element {
                   </button>
                 ))}
                 {directories.length > 0 && <div className="border-t border-border" />}
-                {browseMode ? (
-                  <DirectoryBrowserInput
-                    listDir={window.api.listDir}
-                    onConfirm={handleSelectDir}
-                    onCancel={() => setBrowseMode(false)}
-                    autoFocus
-                  />
-                ) : (
-                  <button
-                    data-testid="WelcomeState.browse"
-                    onClick={handleBrowse}
-                    className="w-full flex items-center gap-2.5 px-3 py-2 text-[13px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors text-left cursor-default"
+                <button
+                  data-testid="WelcomeState.browse"
+                  onClick={handleBrowse}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 text-[13px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors text-left cursor-default"
+                >
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    className="shrink-0 text-text-muted"
                   >
-                    <svg
-                      width="14"
-                      height="14"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.8"
-                      strokeLinecap="round"
-                      className="shrink-0 text-text-muted"
-                    >
-                      <circle cx="11" cy="11" r="8" />
-                      <path d="M21 21l-4.35-4.35" />
-                    </svg>
-                    <span>{isWeb ? 'Browse path...' : 'Browse...'}</span>
-                  </button>
-                )}
+                    <circle cx="11" cy="11" r="8" />
+                    <path d="M21 21l-4.35-4.35" />
+                  </svg>
+                  <span>{isWeb ? 'Browse path...' : 'Browse...'}</span>
+                </button>
               </div>
             </>
           )}
@@ -339,6 +330,21 @@ export function WelcomeState(): React.JSX.Element {
       {/* Current directory */}
       {cwd && (
         <span className="text-[15px] text-text-muted">{cwd.split(/[\\/]/).pop() || cwd}</span>
+      )}
+
+      {/* Host browser (web only — desktop never opens it, see handleBrowse).
+          Portalled, so it renders here purely for co-location with its state. */}
+      {browseDialogOpen && (
+        <DirectoryBrowserDialog
+          listDir={window.api.listDir}
+          listPlaces={window.api.listPlaces}
+          recents={directories.map((g) => ({ cwd: g.cwd, folderName: g.folderName }))}
+          onConfirm={(picked) => {
+            setBrowseDialogOpen(false)
+            handleSelectDir(picked)
+          }}
+          onCancel={() => setBrowseDialogOpen(false)}
+        />
       )}
     </div>
   )

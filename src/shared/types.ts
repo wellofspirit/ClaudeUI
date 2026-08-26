@@ -951,6 +951,21 @@ export interface DirEntry {
   isDirectory: boolean
 }
 
+/**
+ * Where a directory browse can sensibly START on the host — the places rail of
+ * the remote picker (ADR-046). Every field is best-effort: the host answers
+ * with whatever it could determine and the rail hides the rest, so a probe
+ * failure costs one shortcut rather than the whole dialog.
+ */
+export interface ListPlacesResult {
+  /** Home directory, POSIX-normalized without a trailing separator. `''` when unknown. */
+  home: string
+  /** Host machine name, rendered as the dialog's "on <hostname>". `''` when unknown. */
+  hostname: string
+  /** Reachable filesystem roots: `['C:/', 'D:/']` on Windows, `['/']` elsewhere. */
+  drives: string[]
+}
+
 export interface DirectoryGroup {
   cwd: string
   projectKey: string
@@ -1459,6 +1474,8 @@ interface AutomationAPI {
 
 interface FileAPI {
   listDir(dirPath: string): Promise<{ entries: DirEntry[]; isRoot: boolean; resolvedPath: string }>
+  /** Rail shortcuts for the directory picker — home, hostname, drive roots (ADR-046). */
+  listPlaces(): Promise<ListPlacesResult>
   openInVSCode(cwd: string): Promise<void>
   /**
    * Open a local file with the OS default handler. Optional: only the desktop

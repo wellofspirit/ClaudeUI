@@ -1394,8 +1394,13 @@ const SHELL_GATED_CHANNELS = [
  * `session:cancel` and `session:send`: "start fresh" is a conversation action a
  * phone must be able to take, and it touches nothing outside the session it
  * names.
+ *
+ * `file:list-places` (ADR-046 dialog) is `fs-read`, the same capability as the
+ * `file:list-dir` it rides beside: home path, hostname and drive roots are a
+ * strictly weaker read than the arbitrary-path listing that channel already
+ * grants, so the effective remote surface widens by nothing.
  */
-const POST_PORT_CHANNELS = ['session:clear-conversation'] as const
+const POST_PORT_CHANNELS = ['session:clear-conversation', 'file:list-places'] as const
 
 /**
  * ADR-052 passkeys. Listed separately for the same reason the terminal set is:

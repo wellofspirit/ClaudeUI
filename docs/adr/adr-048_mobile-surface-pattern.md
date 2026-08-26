@@ -71,7 +71,7 @@ Two platform constraints shape everything below:
    `useDirSuggestions` (`PermissionsDialog/shared.ts`), now consumed by both the desktop
    input and the mobile sheet. This partially fulfills ADR-046 Decision 3's residual
    ("lift the shared helpers"): the hook is the shared core; unifying it with
-   `DirectoryBrowserInput` remains open and should start from the hook, not the widget.
+   `DirectoryBrowserDialog` remains open and should start from the hook, not the widget.
 
 5. **No terminal on mobile.** `terminal:*` stays on the RemoteDispatcher denylist. An
    opt-in unblock (desktop-side toggle, unreachable remotely since `remote:set-config` is

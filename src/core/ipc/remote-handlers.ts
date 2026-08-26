@@ -120,6 +120,7 @@ import {
   saveSessions,
   saveUiSettings,
   listDirEntries,
+  listPlaces,
   deleteSession,
   deleteProject,
   clearConversation
@@ -966,6 +967,13 @@ export function registerRemoteHandlers(
     capability: 'fs-read',
     kind: 'query',
     handler: async (dirPath: string) => listDirEntries(dirPath)
+  })
+
+  handleRemote({
+    channel: 'file:list-places',
+    capability: 'fs-read',
+    kind: 'query',
+    handler: async () => listPlaces()
   })
 
   // -------------------------------------------------------------------------

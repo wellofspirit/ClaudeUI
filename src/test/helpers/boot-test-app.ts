@@ -235,6 +235,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     deleteProject: (projectKey) => ipcRenderer.invoke('session:delete-project', projectKey),
 
     listDir: (dirPath) => ipcRenderer.invoke('file:list-dir', dirPath),
+    listPlaces: () => ipcRenderer.invoke('file:list-places'),
     openInVSCode: (cwd) => ipcRenderer.invoke('app:open-in-vscode', cwd),
     loadSettings: () => ipcRenderer.invoke('config:load-settings'),
     saveSettings: (settings) => ipcRenderer.invoke('config:save-settings', settings),

@@ -499,6 +499,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // File ops
     listDir: (dirPath) =>
       connection.invoke('file:list-dir', dirPath) as ReturnType<ClaudeAPI['listDir']>,
+    listPlaces: () => connection.invoke('file:list-places') as ReturnType<ClaudeAPI['listPlaces']>,
     openInVSCode: async () => {}, // No-op on web
 
     // Sent-file preview: no RPC — the src IS an authenticated same-origin URL

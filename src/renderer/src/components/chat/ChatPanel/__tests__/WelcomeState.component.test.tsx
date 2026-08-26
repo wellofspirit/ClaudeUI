@@ -4,9 +4,13 @@
  * On the web client `pickFolder()` resolves to null (no native dialog, and
  * `session:pick-folder` is permanently denylisted on the remote dispatcher), so
  * the "Browse..." row used to close the dropdown and do nothing at all — the
- * known-directories list was the only way into a session. Web therefore gets an
- * inline browser over `file:list-dir` instead; desktop must keep the native
+ * known-directories list was the only way into a session. Web therefore gets a
+ * host browser over `file:list-dir` instead; desktop must keep the native
  * dialog untouched.
+ *
+ * That browser is a modal dialog now (ADR-046 Option C), not an inline panel
+ * inside the 288px dropdown — so "browse" and "the dropdown is open" are two
+ * independent states here, and the dropdown closes on the way in.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { StrictMode } from 'react'
@@ -57,6 +61,7 @@ function stubApi(platform: string): void {
       if (!entries) return { entries: [], isRoot: false, resolvedPath: '' }
       return { entries, isRoot: false, resolvedPath: key }
     }),
+    listPlaces: vi.fn(async () => ({ home: 'D:/work', hostname: 'host-pc', drives: ['D:/'] })),
     createWorktree: vi.fn(),
     logError: vi.fn()
   }
@@ -65,6 +70,7 @@ function stubApi(platform: string): void {
 interface StubbedApi {
   pickFolder: ReturnType<typeof vi.fn>
   listDir: ReturnType<typeof vi.fn>
+  listPlaces: ReturnType<typeof vi.fn>
 }
 
 const api = (): StubbedApi => (window as unknown as { api: StubbedApi }).api
@@ -112,10 +118,10 @@ describe('WelcomeState — web client', () => {
     // native "Browse..." that resolved to null and started nothing.
     fireEvent.click(screen.getByText(/^Browse/))
 
-    const input = screen.getByTestId('DirectoryBrowserInput.path')
+    const input = screen.getByTestId('DirectoryBrowserDialog.path')
     fireEvent.change(input, { target: { value: 'D:/work/' } })
     await waitFor(() =>
-      expect(screen.getAllByTestId('DirectoryBrowserInput.entry').length).toBeGreaterThan(0)
+      expect(screen.getAllByTestId('DirectoryBrowserDialog.entry').length).toBeGreaterThan(0)
     )
 
     fireEvent.change(input, { target: { value: 'D:/work/ClaudeUI' } })
@@ -125,8 +131,7 @@ describe('WelcomeState — web client', () => {
       expect(store.createNewSession).toHaveBeenCalledWith(expect.any(String), 'D:/work/ClaudeUI')
     )
     expect(api().pickFolder).not.toHaveBeenCalled()
-    // the whole dropdown closes, same as picking a known directory
-    expect(screen.queryByTestId('DirectoryBrowserInput')).toBeNull()
+    expect(screen.queryByTestId('DirectoryBrowserDialog')).toBeNull()
   })
 
   it('does not start a session for a path the host cannot list', async () => {
@@ -134,32 +139,46 @@ describe('WelcomeState — web client', () => {
     openDropdown()
     fireEvent.click(screen.getByTestId('WelcomeState.browse'))
 
-    const input = screen.getByTestId('DirectoryBrowserInput.path')
+    const input = screen.getByTestId('DirectoryBrowserDialog.path')
     fireEvent.change(input, { target: { value: 'D:/typed/on/the/phone' } })
     fireEvent.keyDown(input, { key: 'Enter' })
 
-    await waitFor(() => expect(screen.getByTestId('DirectoryBrowserInput.error')).toBeTruthy())
+    await waitFor(() => expect(screen.getByTestId('DirectoryBrowserDialog.error')).toBeTruthy())
     expect(store.createNewSession).not.toHaveBeenCalled()
-    expect(screen.getByTestId('DirectoryBrowserInput')).toBeTruthy()
+    expect(screen.getByTestId('DirectoryBrowserDialog')).toBeTruthy()
   })
 
-  it('keeps the known directories clickable while browsing', () => {
+  it('closes the dropdown on the way into the dialog', () => {
+    render(<WelcomeState />)
+    openDropdown()
+    expect(screen.getByTestId('WelcomeState.directory')).toBeTruthy()
+
+    fireEvent.click(screen.getByTestId('WelcomeState.browse'))
+
+    // The dialog is its own surface now — the 288px dropdown was only ever the
+    // inline browser's container, and leaving it open would stack two lists.
+    expect(screen.queryByTestId('WelcomeState.directory')).toBeNull()
+    expect(screen.getByTestId('DirectoryBrowserDialog')).toBeTruthy()
+  })
+
+  it('carries the known directories into the dialog as its RECENT rail', () => {
     render(<WelcomeState />)
     openDropdown()
     fireEvent.click(screen.getByTestId('WelcomeState.browse'))
 
-    fireEvent.click(screen.getByTestId('WelcomeState.directory'))
-    expect(store.createNewSession).toHaveBeenCalledWith(expect.any(String), KNOWN_DIR.cwd)
+    const recents = screen.getAllByTestId('DirectoryBrowserDialog.recent')
+    expect(recents.map((e) => e.getAttribute('data-id'))).toEqual([KNOWN_DIR.cwd])
   })
 
-  it('Cancel returns to the plain dropdown list', () => {
+  it('Cancel closes the dialog and leaves the welcome screen usable', () => {
     render(<WelcomeState />)
     openDropdown()
     fireEvent.click(screen.getByTestId('WelcomeState.browse'))
-    fireEvent.click(screen.getByTestId('DirectoryBrowserInput.cancel'))
+    fireEvent.click(screen.getByTestId('DirectoryBrowserDialog.cancel'))
 
-    expect(screen.queryByTestId('DirectoryBrowserInput')).toBeNull()
-    expect(screen.getByTestId('WelcomeState.browse')).toBeTruthy()
+    expect(screen.queryByTestId('DirectoryBrowserDialog')).toBeNull()
+    expect(store.createNewSession).not.toHaveBeenCalled()
+    expect(screen.getByTestId('WelcomeState.selectDirectory')).toBeTruthy()
   })
 })
 
@@ -176,18 +195,20 @@ describe('WelcomeState — sidebar browse request', () => {
     store.welcomeBrowseToken = nextBrowseToken()
     render(<WelcomeState />)
 
-    expect(screen.getByTestId('DirectoryBrowserInput')).toBeTruthy()
+    expect(screen.getByTestId('DirectoryBrowserDialog')).toBeTruthy()
+    // Straight to the dialog — the dropdown is not part of this path at all.
+    expect(screen.queryByTestId('WelcomeState.directory')).toBeNull()
   })
 
   it('opens the browser when the request arrives while it is already mounted', () => {
     const token = nextBrowseToken()
     const { rerender } = render(<WelcomeState />)
-    expect(screen.queryByTestId('DirectoryBrowserInput')).toBeNull()
+    expect(screen.queryByTestId('DirectoryBrowserDialog')).toBeNull()
 
     store.welcomeBrowseToken = token
     rerender(<WelcomeState />)
 
-    expect(screen.getByTestId('DirectoryBrowserInput')).toBeTruthy()
+    expect(screen.getByTestId('DirectoryBrowserDialog')).toBeTruthy()
   })
 
   it('survives StrictMode, whose second effect pass sees the token already consumed', () => {
@@ -198,20 +219,20 @@ describe('WelcomeState — sidebar browse request', () => {
       </StrictMode>
     )
 
-    expect(screen.getByTestId('DirectoryBrowserInput')).toBeTruthy()
+    expect(screen.getByTestId('DirectoryBrowserDialog')).toBeTruthy()
   })
 
   it('does not re-open the browser on a later remount without a new request', () => {
     store.welcomeBrowseToken = nextBrowseToken()
     render(<WelcomeState />)
-    expect(screen.getByTestId('DirectoryBrowserInput')).toBeTruthy()
+    expect(screen.getByTestId('DirectoryBrowserDialog')).toBeTruthy()
 
     // Every visit to the welcome screen remounts this component; only a NEW
     // request may re-open the browser.
     cleanup()
     render(<WelcomeState />)
 
-    expect(screen.queryByTestId('DirectoryBrowserInput')).toBeNull()
+    expect(screen.queryByTestId('DirectoryBrowserDialog')).toBeNull()
     expect(screen.getByTestId('WelcomeState.selectDirectory')).toBeTruthy()
   })
 })
@@ -227,7 +248,7 @@ describe('WelcomeState — desktop', () => {
     fireEvent.click(screen.getByTestId('WelcomeState.browse'))
 
     expect(api().pickFolder).toHaveBeenCalledTimes(1)
-    expect(screen.queryByTestId('DirectoryBrowserInput')).toBeNull()
+    expect(screen.queryByTestId('DirectoryBrowserDialog')).toBeNull()
     await waitFor(() =>
       expect(store.createNewSession).toHaveBeenCalledWith(expect.any(String), 'D:/picked/by/dialog')
     )
