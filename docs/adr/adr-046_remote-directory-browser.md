@@ -71,8 +71,8 @@ project directories plus the host's PLACES, and a right browse pane holding the 
 the entry list and a footer that previews the resolved path. The old widget grew inside a
 288px dropdown, which is where the "unusable on a phone" reports came from. Rail clicks
 NAVIGATE — they never confirm — so every path, typed or clicked, still goes through the host
-before it can start a session. The rail is `hidden sm:flex`: on a narrow viewport the
-typed-path flow is the whole dialog.
+before it can start a session. _(The rail was initially `hidden sm:flex`, leaving narrow
+viewports the typed-path flow only — superseded the same day by the mobile layout below.)_
 
 Both web browse surfaces now share it: `WelcomeState` (the dropdown's "Browse path…" row and
 the sidebar's `welcomeBrowseToken`, which opens the dialog directly instead of opening the
@@ -88,6 +88,19 @@ roots (probed `A:`–`Z:` on win32, `['/']` elsewhere). No widening of the remot
 substance: that capability already lists any path by name, and these are strictly weaker
 reads. Best-effort by construction — a field the host cannot determine comes back empty and
 the rail hides that entry rather than failing.
+
+Below 768px the same component renders a full-screen two-view drill-in instead (Mobile B of
+the mockups): a **shortcuts** view — "Type a path…", RECENT rows carrying the cwd as a
+subtitle, PLACES rows for Home and each drive — drilling into a **browse** view whose header
+is a back chevron plus the path input, with the entry list and a full-width confirm below.
+It is a JS fork on `useIsMobile`, not CSS, so the desktop dialog is untouched and the
+original `hidden sm:flex` rail rule is gone with it (the rail is plain `flex`; narrow
+viewports never reach that branch). One state, one set of mechanics: the seed
+effects, `descend`, the confirm latch and the "only a path the host resolved reaches
+`onConfirm`" invariant are shared verbatim — only the markup differs. The one behavioural
+fork is focus: programmatic `input.focus()` is desktop-only, because on a phone it raises the
+software keyboard over half the screen on every folder tap; the "Type a path…" row is the
+single exception, since tapping it IS the request to type.
 
 ## Alternatives considered
 

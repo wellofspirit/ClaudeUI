@@ -13,11 +13,21 @@
  * the caller's recents. A rail click NAVIGATES, so those paths go through the
  * same host confirmation as a typed one.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { StrictMode } from 'react'
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
-import { DirectoryBrowserDialog } from '../DirectoryBrowserDialog'
+import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react'
 import type { DirEntry, ListPlacesResult } from '../../../../../shared/types'
+
+// Viewport fork (ADR-046 mobile layout). Default false so every case below the
+// mobile block keeps exercising the desktop dialog — which is also what jsdom's
+// 1024px innerWidth would give, but pinned rather than inherited.
+let mockIsMobile = false
+vi.mock('../../../hooks/useIsMobile', () => ({
+  useIsMobile: () => mockIsMobile,
+  useVisualViewportHeight: () => undefined
+}))
+
+import { DirectoryBrowserDialog } from '../DirectoryBrowserDialog'
 
 // jsdom has no layout engine
 if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = (): void => {}
@@ -540,5 +550,222 @@ describe('DirectoryBrowserDialog — initialPath', () => {
   it('does not double a separator the caller already supplied', () => {
     const { input } = renderDialog({ initialPath: 'D:/work/' })
     expect(input.value).toBe('D:/work/')
+  })
+})
+
+/**
+ * Below 768px the same state renders as a full-screen drill-in: a shortcuts
+ * view (recents + places + "Type a path…") that leads into the browse view.
+ *
+ * The invariants this block pins are the ones a phone adds on top of the
+ * desktop contract: a folder tap must NOT summon the software keyboard (it
+ * would eat half the screen on every drill-in), the back chevron must not throw
+ * away what the user typed, and confirm must still be the host-validated path —
+ * the layout may fork, the "only a directory the host confirmed" rule may not.
+ */
+describe('DirectoryBrowserDialog — mobile drill-in', () => {
+  const PLACES: ListPlacesResult = {
+    home: 'C:/Users/dev',
+    hostname: 'daniel-pc',
+    drives: ['D:/']
+  }
+  const RECENTS = [{ cwd: 'D:/work/ClaudeUI', folderName: 'ClaudeUI' }]
+
+  beforeEach(() => {
+    mockIsMobile = true
+  })
+  afterEach(() => {
+    mockIsMobile = false
+  })
+
+  function renderMobile(opts: RenderOpts = {}): {
+    listDir: ReturnType<typeof vi.fn<ListDir>>
+    onConfirm: ReturnType<typeof vi.fn>
+    onCancel: ReturnType<typeof vi.fn>
+  } {
+    const listDir = opts.listDir ?? makeListDir()
+    const listPlaces = opts.listPlaces ?? makeListPlaces(PLACES)
+    const onConfirm = vi.fn()
+    const onCancel = vi.fn()
+    render(
+      <DirectoryBrowserDialog
+        listDir={listDir}
+        listPlaces={listPlaces}
+        recents={opts.recents ?? RECENTS}
+        initialPath={opts.initialPath}
+        confirmLabel={opts.confirmLabel}
+        onConfirm={onConfirm}
+        onCancel={onCancel}
+      />
+    )
+    return { listDir, onConfirm, onCancel }
+  }
+
+  const view = (): string | null =>
+    screen.getByTestId('DirectoryBrowserDialog').getAttribute('data-view')
+
+  it('opens on the shortcuts view, with no path input mounted', async () => {
+    renderMobile()
+
+    expect(view()).toBe('shortcuts')
+    expect(screen.getByTestId('DirectoryBrowserDialog.typePath')).toBeTruthy()
+    expect(idsOf('DirectoryBrowserDialog.recent')).toEqual(['D:/work/ClaudeUI'])
+    await waitFor(() =>
+      expect(idsOf('DirectoryBrowserDialog.place')).toEqual(['C:/Users/dev', 'D:/'])
+    )
+    // Recents carry the cwd underneath the folder name; Home carries its path.
+    expect(screen.getByTestId('DirectoryBrowserDialog.recent')).toHaveTextContent(
+      'D:/work/ClaudeUI'
+    )
+    expect(screen.getByTestId('DirectoryBrowserDialog')).toHaveTextContent('C:/Users/dev')
+    // The whole point of the opening view: nothing to type into, nothing to
+    // raise the keyboard over.
+    expect(screen.queryByTestId('DirectoryBrowserDialog.path')).toBeNull()
+  })
+
+  it('drills into a recent without summoning the keyboard', async () => {
+    renderMobile()
+
+    fireEvent.click(screen.getByTestId('DirectoryBrowserDialog.recent'))
+
+    expect(view()).toBe('browse')
+    const input = screen.getByTestId('DirectoryBrowserDialog.path') as HTMLInputElement
+    expect(input.value).toBe('D:/work/ClaudeUI/')
+    await waitFor(() => expect(entryNames()).toEqual(['..', 'src']))
+    // Past the animation frame the desktop path would have focused on: the
+    // assertion has to outlive `navigate`'s rAF or it proves nothing.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    // A focused input is a raised keyboard on a phone — the tap navigated, and
+    // that is all it did.
+    expect(document.activeElement).not.toBe(input)
+  })
+
+  it('descending a folder in the browse list does not summon the keyboard either', async () => {
+    renderMobile({ initialPath: 'D:/work' })
+    await waitFor(() => expect(entryNames()).toContain('ClaudeUI'))
+
+    fireEvent.click(
+      screen
+        .getAllByTestId('DirectoryBrowserDialog.entry')
+        .find((e) => e.getAttribute('data-id') === 'ClaudeUI')!
+    )
+
+    const input = screen.getByTestId('DirectoryBrowserDialog.path') as HTMLInputElement
+    expect(input.value).toBe('D:/work/ClaudeUI/')
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expect(document.activeElement).not.toBe(input)
+  })
+
+  it('drills into a place the same way', async () => {
+    renderMobile()
+
+    await waitFor(() => expect(idsOf('DirectoryBrowserDialog.place')).toContain('D:/'))
+    fireEvent.click(
+      screen
+        .getAllByTestId('DirectoryBrowserDialog.place')
+        .find((e) => e.getAttribute('data-id') === 'D:/')!
+    )
+
+    expect(view()).toBe('browse')
+    expect((screen.getByTestId('DirectoryBrowserDialog.path') as HTMLInputElement).value).toBe(
+      'D:/'
+    )
+    await waitFor(() => expect(entryNames()).toEqual(['work']))
+  })
+
+  it('focuses the input only when the user asked to type', () => {
+    renderMobile()
+
+    fireEvent.click(screen.getByTestId('DirectoryBrowserDialog.typePath'))
+
+    expect(view()).toBe('browse')
+    expect(document.activeElement).toBe(screen.getByTestId('DirectoryBrowserDialog.path'))
+  })
+
+  it('back returns to shortcuts, keeps the path and drops the error', async () => {
+    const { onConfirm } = renderMobile()
+    fireEvent.click(screen.getByTestId('DirectoryBrowserDialog.typePath'))
+
+    const input = screen.getByTestId('DirectoryBrowserDialog.path') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'D:/does-not-exist' } })
+    fireEvent.click(screen.getByTestId('DirectoryBrowserDialog.confirm'))
+    await waitFor(() => expect(screen.getByTestId('DirectoryBrowserDialog.error')).toBeTruthy())
+    expect(onConfirm).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByTestId('DirectoryBrowserDialog.back'))
+    expect(view()).toBe('shortcuts')
+
+    // Re-entering shows the same path, minus the stale error.
+    fireEvent.click(screen.getByTestId('DirectoryBrowserDialog.typePath'))
+    expect((screen.getByTestId('DirectoryBrowserDialog.path') as HTMLInputElement).value).toBe(
+      'D:/does-not-exist'
+    )
+    expect(screen.queryByTestId('DirectoryBrowserDialog.error')).toBeNull()
+  })
+
+  it('opens straight on the browse view when the caller named a path', async () => {
+    renderMobile({ initialPath: 'D:/work/ClaudeUI' })
+
+    expect(view()).toBe('browse')
+    expect((screen.getByTestId('DirectoryBrowserDialog.path') as HTMLInputElement).value).toBe(
+      'D:/work/ClaudeUI/'
+    )
+    await waitFor(() => expect(entryNames()).toEqual(['..', 'src']))
+  })
+
+  it('confirms the host-resolved path from the mobile footer', async () => {
+    const { onConfirm } = renderMobile()
+    fireEvent.click(screen.getByTestId('DirectoryBrowserDialog.recent'))
+
+    const button = screen.getByTestId('DirectoryBrowserDialog.confirm')
+    expect(button).toHaveTextContent('Select this directory')
+    fireEvent.click(button)
+
+    await waitFor(() => expect(onConfirm).toHaveBeenCalledWith('D:/work/ClaudeUI'))
+  })
+
+  it('lets an explicit confirmLabel override the mobile default', () => {
+    renderMobile({ initialPath: 'D:/work', confirmLabel: 'Start' })
+    expect(screen.getByTestId('DirectoryBrowserDialog.confirm')).toHaveTextContent('Start')
+  })
+
+  it('× on the shortcuts view cancels', () => {
+    const { onCancel } = renderMobile()
+    fireEvent.click(screen.getByTestId('DirectoryBrowserDialog.close'))
+    expect(onCancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('Escape in the browse input cancels exactly once', () => {
+    const { onCancel } = renderMobile({ initialPath: 'D:/work' })
+    // Both the input and the full-screen root listen; the seal keeps one
+    // keystroke from cancelling twice.
+    fireEvent.keyDown(screen.getByTestId('DirectoryBrowserDialog.path'), { key: 'Escape' })
+    expect(onCancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows a host rejection in the footer instead of confirming', async () => {
+    const { onConfirm } = renderMobile({ initialPath: 'D:/typed/on/the/phone' })
+
+    fireEvent.click(screen.getByTestId('DirectoryBrowserDialog.confirm'))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('DirectoryBrowserDialog.error')).toHaveTextContent(
+        'No such directory on the host'
+      )
+    )
+    expect(onConfirm).not.toHaveBeenCalled()
+    expect(view()).toBe('browse')
+  })
+
+  it('leaves the desktop-only chrome out of the mobile shell', () => {
+    renderMobile({ initialPath: 'D:/work' })
+    // No Cancel button and no × in the browse header — Escape and back-then-×
+    // are the documented exits (mockup fidelity).
+    expect(screen.queryByTestId('DirectoryBrowserDialog.cancel')).toBeNull()
+    expect(screen.queryByTestId('DirectoryBrowserDialog.close')).toBeNull()
   })
 })
