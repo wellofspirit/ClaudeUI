@@ -1363,4 +1363,27 @@ describe('reducer — subagents', () => {
     expect(s.sessions['rid'].activeTasks).toEqual({})
     expect(s.sessions['rid'].taskNotifications).toHaveLength(1)
   })
+
+  it('drops activeTasks on `disconnected` — they lived in the dead process', () => {
+    const s = fold([
+      created(),
+      ['session:task-started', 'rid', { toolUseId: 't1', taskId: 'a', taskType: 'local_agent' }],
+      ['session:status', 'rid', status({ state: 'disconnected' })]
+    ])
+    expect(s.sessions['rid'].activeTasks).toEqual({})
+    expect(s.sessions['rid'].sdkActive).toBe(false)
+  })
+
+  it('KEEPS activeTasks on the running→idle edge', () => {
+    // Background agents outlive the parent turn; inferring their death from idle
+    // is the 4003c19 mistake in another costume.
+    const s = fold([
+      created(),
+      ['session:task-started', 'rid', { toolUseId: 't1', taskId: 'a', taskType: 'local_agent' }],
+      ['session:status', 'rid', status({ state: 'idle' })]
+    ])
+    expect(s.sessions['rid'].activeTasks).toEqual({
+      t1: { taskId: 'a', taskType: 'local_agent' }
+    })
+  })
 })

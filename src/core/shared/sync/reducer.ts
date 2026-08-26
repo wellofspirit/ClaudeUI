@@ -857,13 +857,21 @@ export function applyEvent(
         // ADR-045: report idle, drop approvals, mark the engine gone. Queue
         // transitions are NOT inferred here (ADR-053) — the session's own
         // disconnect path recalls and broadcasts.
+        //
+        // Background tasks lived inside the dead process: left "active" they would
+        // suppress turn-end notifications forever after a respawn on this routingId
+        // and keep TaskCard offering Stop for a task that no longer exists. A
+        // `--resume` that adopts orphans re-emits `task_started` and rebuilds the
+        // map. Only DISCONNECT clears them — `idle` must not, because background
+        // agents outlive the parent turn by design.
         aux.thinkingOpen[id] = false
         bumpSelfStream(aux, id, 'thinking')
         return withSession(next, id, () => ({
           status: { ...status, state: 'idle' as const },
           sdkActive: false,
           pendingApprovals: [],
-          streamingThinking: ''
+          streamingThinking: '',
+          activeTasks: {}
         }))
       }
 

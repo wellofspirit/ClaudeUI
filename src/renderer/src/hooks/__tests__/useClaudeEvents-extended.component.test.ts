@@ -1324,6 +1324,74 @@ describe('useClaudeEvents extended component tests', () => {
     })
   })
 
+  describe('session:result turn-end gate', () => {
+    const routingId = 'route-1'
+    type NotifyCall = (title: string, options?: NotificationOptions) => void
+    let notified: ReturnType<typeof vi.fn<NotifyCall>>
+    let originalNotification: PropertyDescriptor | undefined
+
+    beforeEach(() => {
+      // The jsdom setup installs its DENIED stub only when `Notification` is
+      // absent, and `notifyIfNeeded` reads the global at call time — so granting
+      // permission is a per-test descriptor swap, restored below.
+      originalNotification = Object.getOwnPropertyDescriptor(globalThis, 'Notification')
+      notified = vi.fn<NotifyCall>()
+      Object.defineProperty(globalThis, 'Notification', {
+        configurable: true,
+        value: class {
+          static permission = 'granted'
+          static requestPermission = async (): Promise<NotificationPermission> => 'granted'
+          constructor(title: string, options?: NotificationOptions) {
+            notified(title, options)
+          }
+        }
+      })
+      // switchTo=false: the attention branch is only reachable for a session that
+      // is not the active one, and jsdom's document is focused.
+      useSessionStore.getState().createNewSession(routingId, '/test', false)
+      useSessionStore.getState().markSdkActive(routingId)
+    })
+
+    afterEach(() => {
+      if (originalNotification) {
+        Object.defineProperty(globalThis, 'Notification', originalNotification)
+      } else {
+        Reflect.deleteProperty(globalThis, 'Notification')
+      }
+    })
+
+    it("does not claim the user's turn while a background agent is running", () => {
+      seed.taskStarted(routingId, { toolUseId: 't1', taskId: 'a1', taskType: 'local_agent' })
+
+      app.emit('session:result', routingId)
+
+      expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(false)
+      expect(notified).not.toHaveBeenCalled()
+    })
+
+    it('still claims the turn while a background SHELL is running', () => {
+      // A dev server left running is the user's turn, not the agent's.
+      seed.taskStarted(routingId, { toolUseId: 't1', taskId: 'a1', taskType: 'local_bash' })
+
+      app.emit('session:result', routingId)
+
+      expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(true)
+    })
+
+    it('claims the turn once the background agent has reported in', () => {
+      seed.taskStarted(routingId, { toolUseId: 't1', taskId: 'a1', taskType: 'local_agent' })
+      seed.taskNotification(
+        routingId,
+        makeTaskNotification({ toolUseId: 't1', status: 'completed' })
+      )
+
+      app.emit('session:result', routingId)
+
+      expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(true)
+      expect(notified).toHaveBeenCalledWith('Ready for input', expect.anything())
+    })
+  })
+
   describe('session:status worktree exit detection', () => {
     it('clears worktreeInfo when cwd returns to originalCwd', () => {
       const routingId = 'route-1'
