@@ -174,7 +174,13 @@ Fires when a new API request begins streaming.
 
 A task (background agent, Bash shell, subagent, in-process teammate) reached a terminal state.
 
-**Anchors:** `FY` emitter at `3995289`; subagent at `7820041`; team-streaming-C at `8650876`; XML re-emission at `12834859`.
+A terminal `task_notification` for an auto-continuing task type (`local_agent`, `remote_agent`,
+`in_process_teammate`, `local_workflow`) means cli.js will re-invoke the main agent on its own:
+mid-turn it is absorbed into the current turn; between turns it starts a fresh auto-continued turn
+(new `system/init`, own `result`). See §3.7 "`result` vs background tasks" for the probed sequences
+(2026-08-26, 2.1.241).
+
+**Anchors:** `FY` emitter at `3995289`; subagent at `7820041`; team-streaming-C at `8650876`; XML re-emission at `12834859`. (2.1.241: the emitter is `Qg` at `cli.js@char2620439`.)
 
 **Gate:** Always.
 
@@ -238,6 +244,18 @@ A task transitions from non-existent to existing (first `setAppState` update).
   "uuid": "..."
 }
 ```
+
+### `task_type` values (2.1.241)
+
+The full enum grew past the four documented at 2.1.114 (`Wlv` map, `cli.js@char3683754`):
+`local_bash` (`t`/`b` ids), `local_agent` (`a`), `remote_agent` (`r`), `in_process_teammate` (`t`),
+`local_workflow` (`w`), `monitor_mcp` (`m`), `monitor_ws` (`s`), `mcp_task` (`k`), `dream` (`d`),
+`auto_mode_scan` (`e`). Of these, `local_agent`/`remote_agent`/`in_process_teammate`/`local_workflow`
+are the auto-continuing "agent-like" set (upstream busy predicate `S3e`, §3.7).
+
+**Scoping gotcha (probed 2026-08-26):** a background Bash started INSIDE a subagent emits its own
+top-level `task_started`/`task_notification` (`task_type: "local_bash"`) with **no
+`parent_tool_use_id`** — task events are not scoped to the agent that spawned the task.
 
 ---
 
@@ -609,7 +627,7 @@ The outer filter at char `12822512` lists subtypes excluded from `--output-forma
 
 - **`init`** — always handle. First-message parsing for session metadata.
 - **`status`** — handle all three variants. Differentiate by presence of `permissionMode` vs `compact_result` vs bare `status: "requesting"`.
-- **`task_*`** — correlate by `task_id` in the client. `task_started` → `task_progress` (many) → `task_notification`.
+- **`task_*`** — correlate by `task_id` in the client. `task_started` → `task_progress` (many) → `task_notification`. An active (non-terminal) task of an auto-continuing type means the conversation is NOT waiting for the user even after a `result` — see §3.7 "`result` vs background tasks".
 - **`compact_boundary`** — preserve `compact_metadata` for session replay.
 - **`api_retry`** — show in UI if visible. `retry_delay_ms` tells the user how long they're waiting.
 - **`queued_command_consumed`** — dismiss the corresponding queued-card UI element.

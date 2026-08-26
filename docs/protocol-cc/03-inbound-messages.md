@@ -338,7 +338,35 @@ webSearchRequests, costUSD, contextWindow, maxOutputTokens }` — `costUSD` is
 
 ### Ordering
 
-The `result` is the LAST message of a turn. All other messages (stream_events, assistant, user, system) arrive before it. Consumer can treat `result` arrival as the turn-complete signal.
+The `result` is the LAST message of a turn. All other messages (stream_events, assistant, user, system) arrive before it. Consumer can treat `result` arrival as the turn-complete signal — but **turn-complete ≠ conversation-idle**, see below.
+
+### `result` vs background tasks (probed 2026-08-26 against 2.1.241)
+
+A `result` marks the end of the MAIN agent's turn only. It carries **no field** indicating that
+background tasks are still running, and it fires even while they are:
+
+- **Launch + end turn:** `assistant` (Agent tool_use) → `system/task_started` (`local_agent`) →
+  synthetic tool_result ("Async agent launched successfully") → assistant text → `result`
+  (`stop_reason: "end_turn"`), all while the subagent keeps streaming (its `assistant`/`stream_event`
+  messages with `parent_tool_use_id` continue AFTER this `result`).
+- **Idle-time completion** (task finishes while the main agent is between turns): cli.js
+  auto-continues the conversation — `system/task_notification` → a **fresh `system/init`** →
+  assistant message(s) → that turn's own `result` (`num_turns` restarts at 1). No user-role
+  `<task-notification>` XML message was observed on the wire for `local_agent` completions in
+  2.1.241 — the prompt injection is internal to cli.js (older versions re-emitted it; the
+  claude-session.ts handler for that shape is kept for compatibility).
+- **Mid-turn completion** (task finishes while the main turn is still running): the notification is
+  absorbed into the CURRENT turn — `system/task_notification` arrives before the turn's single
+  `result`, and no intermediate `result` exists.
+
+Consequence for consumers: "the conversation is waiting for the user" must be derived by tracking
+`task_started`/`task_notification` (§4.5/§4.4) and checking for active auto-continuing task types at
+`result` time. Because mid-turn completions are absorbed, that tracked state is always accurate at
+the moment a `result` is observed. cli.js's own interactive UI uses the same rule (busy predicate
+`S3e`/`rsi`, `cli.js@char3683025` in 2.1.241): active tasks of type `local_agent`, `remote_agent`
+(unless `isLongRunning`), `in_process_teammate` (unless `isIdle`), or `local_workflow` ⇒ busy;
+`local_bash` shows as idle-with-shell; monitor types never count as busy. ClaudeUI mirrors this in
+the `session:result` observer (`useClaudeEvents.ts`) to gate the "Ready for input" notification.
 
 ---
 
