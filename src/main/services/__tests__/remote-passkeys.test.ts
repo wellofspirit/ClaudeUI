@@ -469,6 +469,10 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
   beforeEach(() => {
     auditRows.length = 0
     credentialRows.clear()
+    // ADR-063: the token store lives on the module singleton, so it outlives a
+    // test the way the credential table would if this line's neighbour above
+    // did not exist.
+    webauthnService.clearResumeTokens()
     throwOnGet.current = false
     clients = []
     commandRegistry.reset()
@@ -1753,5 +1757,240 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     expect(await fetchAuthInfo(port, `127.0.0.1:${port}`)).not.toHaveProperty('webauthn')
     // The policy mode is never disclosed anywhere.
     expect(JSON.stringify(await fetchAuthInfo(port, DNS_NAME))).not.toContain('passkey-always')
+  })
+
+  // -------------------------------------------------------------------------
+  // Resumption tokens (ADR-063)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Boot with an injected strong-tier max-age budget. Same reason
+   * {@link bootWithDeadlines} injects the pre-auth ones: the persisted setting
+   * floors at one HOUR, and `vi.useFakeTimers()` would freeze the socket I/O
+   * every assertion here rides on.
+   */
+  async function bootWithMaxAge(
+    sessionMaxAgeMs: number,
+    over: Partial<RemoteConfigRow> = {}
+  ): Promise<void> {
+    await server.stop()
+    server = new RemoteServer(
+      dispatcherRef,
+      passwordProvider() as never,
+      tailscaleStub as never,
+      undefined,
+      undefined,
+      { sessionMaxAgeMs }
+    )
+    await boot('passkey-always', over)
+  }
+
+  /** Run a ceremony and return the resumption token it minted. */
+  async function ceremonyToken(client: RawClient, device: VirtualAuthenticator): Promise<string> {
+    const accepted = await ceremony(client, device)
+    expect(accepted).toMatchObject({ ok: true, method: 'webauthn' })
+    const token = accepted.resumeToken
+    expect(token).toMatch(/^[0-9a-f]{64}$/)
+    return token!
+  }
+
+  it('a ceremony mints a token, and a FRESH socket presenting it signs in silently', async () => {
+    await boot('passkey-always')
+    const device = await enroll('Work phone')
+    const token = await ceremonyToken(await connect(), device)
+
+    auditRows.length = 0
+    const second = await connect()
+    second.send({ type: 'auth', resumeToken: token })
+    const resumed = await second.waitFor('auth-response')
+    // Attributed to the CREDENTIAL, not to the token — a resume is a passkey
+    // identity, and the operator's client list must keep naming the device.
+    expect(resumed).toMatchObject({
+      ok: true,
+      method: 'webauthn-resumed',
+      identity: { login: 'Work phone' },
+      webauthnCapableOrigin: true
+    })
+    // A resume does NOT re-mint (ADR-063): the age is always "time since the
+    // last biometric", and a sliding token would be forever-auth on a timer.
+    expect(resumed.resumeToken).toBeUndefined()
+    // …and it holds the full bundle, exactly like the ceremony it descends from.
+    await expect(invoke(second, 'webauthn:credentials')).resolves.toHaveLength(1)
+
+    expect(auditRows.find((r) => r.channel === 'auth:resume')).toMatchObject({
+      method: 'webauthn-resumed',
+      label: 'Work phone',
+      outcome: 'ok'
+    })
+    // MULTI-USE within the TTL: a third socket presents the same token.
+    const third = await connect()
+    third.send({ type: 'auth', resumeToken: token })
+    expect(await third.waitFor('auth-response')).toMatchObject({ method: 'webauthn-resumed' })
+  })
+
+  it('a resumed connection is NOT armed — the terminal still costs a ceremony', async () => {
+    await boot('passkey-always', { allowTerminal: true })
+    const device = await enroll()
+    const first = await connect()
+    const token = await ceremonyToken(first, device)
+    // The CONTRAST: arm-on-auth armed the ceremony socket at accept.
+    await expect(invoke(first, 'terminal:availability')).resolves.toMatchObject({ granted: true })
+
+    const resumed = await connect()
+    resumed.send({ type: 'auth', resumeToken: token })
+    expect(await resumed.waitFor('auth-response')).toMatchObject({ method: 'webauthn-resumed' })
+    // The token says a browser once held a biometric, not that a human is here
+    // now — so under the default `medium` tier the shell is unarmed and both
+    // halves of the read/act split refuse.
+    await expect(invoke(resumed, 'terminal:availability')).resolves.toMatchObject({
+      granted: false
+    })
+    await expect(invoke(resumed, 'terminal:create', '/tmp/x')).rejects.toThrow('needs-step-up')
+    // …and a real ceremony on that same socket cures it, which is the recovery.
+    resumed.frames.length = 0
+    resumed.send({ type: 'step-up-challenge-request' })
+    const challenge = await resumed.waitFor('step-up-challenge')
+    resumed.send({
+      type: 'step-up',
+      assertion: device.authenticate({
+        challenge: challenge.options.challenge,
+        origin: ORIGIN,
+        rpId: DNS_NAME
+      })
+    })
+    expect(await resumed.waitFor('step-up-response')).toMatchObject({ ok: true })
+  })
+
+  it('an INVALID token falls through as bare auth and spends NO failure budget', async () => {
+    await boot('passkey-always')
+    await enroll()
+
+    const dead = 'ab'.repeat(32)
+    // More attempts than MAX_FAILED_AUTH (5). If a refused resume charged the
+    // budget, the last of these would be refused at the socket with 4006.
+    for (let i = 0; i < 7; i++) {
+      const client = await connect()
+      auditRows.length = 0
+      client.send({ type: 'auth', resumeToken: dead })
+      // Exactly what a credential-less client gets — same code, same open socket.
+      expect(await client.waitFor('auth-response')).toMatchObject({
+        ok: false,
+        error: 'passkey-required',
+        retryable: false
+      })
+      expect(client.ws.readyState).toBe(WebSocket.OPEN)
+      // Audited, so probing is still visible — and the row never carries the token.
+      const row = auditRows.find((r) => r.channel === 'auth:resume')
+      expect(row).toMatchObject({ outcome: 'error', method: 'webauthn-resumed' })
+      expect(JSON.stringify(row)).not.toContain(dead)
+    }
+
+    // The budget is untouched, so a legitimate ceremony still works from here.
+    const device = await enroll('Second device')
+    const client = await connect()
+    expect(await ceremony(client, device)).toMatchObject({ ok: true, method: 'webauthn' })
+  })
+
+  it('revoking the bound credential kills its token', async () => {
+    await boot('passkey-always')
+    const device = await enroll('Old phone')
+    const keeper = await enroll('Keeper')
+    const doomedToken = await ceremonyToken(await connect(), device)
+    const keeperToken = await ceremonyToken(await connect(), keeper)
+
+    // Through the REGISTRY verb, so the production revoke path is what sweeps.
+    const admin = await connect()
+    await ceremony(admin, keeper)
+    await invoke(admin, 'webauthn:revoke', device.credId)
+
+    const dead = await connect()
+    dead.send({ type: 'auth', resumeToken: doomedToken })
+    expect(await dead.waitFor('auth-response')).toMatchObject({ error: 'passkey-required' })
+    // …and only that credential's tokens went.
+    const alive = await connect()
+    alive.send({ type: 'auth', resumeToken: keeperToken })
+    expect(await alive.waitFor('auth-response')).toMatchObject({ method: 'webauthn-resumed' })
+  })
+
+  it('the `off` sweep kills every token (what the host anchor calls on the flip)', async () => {
+    await boot('passkey-always')
+    const device = await enroll()
+    const token = await ceremonyToken(await connect(), device)
+
+    // `clearResumeTokens()` is exactly what `host-anchor.setConfig` invokes when
+    // the effective policy transitions TO `off`; driving it here keeps this an
+    // assertion about the sweep rather than about the settings plumbing.
+    server.clearResumeTokens()
+
+    const client = await connect()
+    client.send({ type: 'auth', resumeToken: token })
+    expect(await client.waitFor('auth-response')).toMatchObject({ error: 'passkey-required' })
+  })
+
+  it('the enroll→webauthn UPGRADE mints a token too', async () => {
+    await boot('passkey-always')
+    const { token: enrollToken } = server.mintEnrollToken()
+    const client = await connect()
+    client.send({ type: 'auth', enrollToken })
+    await client.waitFor('auth-response')
+
+    const options = (await invoke(client, 'webauthn:register-options')) as { challenge: string }
+    const device = new VirtualAuthenticator()
+    await invoke(client, 'webauthn:register-verify', {
+      response: device.register({ challenge: options.challenge, origin: ORIGIN, rpId: DNS_NAME }),
+      nickname: 'New tablet'
+    })
+    client.frames.length = 0
+    const upgraded = await ceremony(client, device)
+    expect(upgraded).toMatchObject({ ok: true, method: 'webauthn' })
+    // The device most likely to be a phone about to background itself must not
+    // be the one passkey client with no resumption.
+    expect(upgraded.resumeToken).toMatch(/^[0-9a-f]{64}$/)
+
+    const second = await connect()
+    second.send({ type: 'auth', resumeToken: upgraded.resumeToken })
+    expect(await second.waitFor('auth-response')).toMatchObject({
+      method: 'webauthn-resumed',
+      identity: { login: 'New tablet' }
+    })
+  })
+
+  it('strong tier: a token older than the session max-age is refused', async () => {
+    const MAX_AGE = 250
+    await bootWithMaxAge(MAX_AGE, { stepUpTier: 'strong' })
+    const device = await enroll()
+    const first = await connect()
+    const token = await ceremonyToken(first, device)
+    // The minting socket is cut on its own budget, which is also how we know the
+    // budget has elapsed without sleeping on a guess.
+    expect(await first.waitForClose(3000)).toBe(4010)
+
+    const stale = await connect()
+    stale.send({ type: 'auth', resumeToken: token })
+    // Refused, and refused by FALLING THROUGH — the answer is the ordinary
+    // ceremony prompt, not a new error code. Otherwise `sessionMaxAgeHours`
+    // would be decorative: cut, reconnect with the token, repeat.
+    expect(await stale.waitFor('auth-response')).toMatchObject({ error: 'passkey-required' })
+    expect(auditRows.find((r) => r.channel === 'auth:resume' && r.outcome === 'error')).toBeTruthy()
+  })
+
+  it('strong tier: an accepted resume inherits the MINT time for its 4010 cut', async () => {
+    const MAX_AGE = 1500
+    await bootWithMaxAge(MAX_AGE, { stepUpTier: 'strong' })
+    const device = await enroll()
+    const token = await ceremonyToken(await connect(), device)
+
+    // Spend most of the budget before resuming.
+    await new Promise((r) => setTimeout(r, 900))
+    const resumed = await connect()
+    resumed.send({ type: 'auth', resumeToken: token })
+    expect(await resumed.waitFor('auth-response')).toMatchObject({ method: 'webauthn-resumed' })
+
+    const acceptedAt = Date.now()
+    expect(await resumed.waitForClose(3000)).toBe(4010)
+    // Anchored on the CEREMONY, not on this connect: a connect-anchored cut
+    // would have handed the socket a fresh full budget, and reconnecting would
+    // renew the session indefinitely.
+    expect(Date.now() - acceptedAt).toBeLessThan(MAX_AGE)
   })
 })

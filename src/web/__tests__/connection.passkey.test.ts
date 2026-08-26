@@ -314,6 +314,105 @@ describe('RemoteConnection — passkey handshake', () => {
   })
 })
 
+describe('RemoteConnection — resumption token (ADR-063)', () => {
+  const TOKEN = 'ab'.repeat(32)
+
+  beforeEach(() => {
+    FakeWebSocket.instances.length = 0
+    startAuthentication.mockReset()
+    startAuthentication.mockResolvedValue(ASSERTION)
+  })
+
+  it('presents a seeded token, and only after the other two credentials', () => {
+    const { conn } = makeConn({ resumeToken: TOKEN })
+    expect(sentFrames(conn)[0]).toEqual({ type: 'auth', resumeToken: TOKEN })
+    conn.destroy()
+
+    // The server branches pwProof → enrollToken → resumeToken and never falls
+    // through between methods, so a client that sent two would just be sending
+    // one the server ignores.
+    const { conn: withPw } = makeConn({ pwProof: 'cafe', resumeToken: TOKEN })
+    expect(sentFrames(withPw)[0]).toEqual({ type: 'auth', pwProof: 'cafe' })
+    withPw.destroy()
+
+    const { conn: withEnroll } = makeConn({ enrollToken: 'etok', resumeToken: TOKEN })
+    expect(sentFrames(withEnroll)[0]).toEqual({ type: 'auth', enrollToken: 'etok' })
+    withEnroll.destroy()
+  })
+
+  it('an accept carrying a token reports it AND keeps it for this instance', () => {
+    const seen: (string | null)[] = []
+    const { conn, internals } = makeConn()
+    conn.setResumeTokenHandler((t) => seen.push(t))
+    expect(sentFrames(conn)[0]).toEqual({ type: 'auth' })
+
+    internals.handleMessage({
+      type: 'auth-response',
+      ok: true,
+      method: 'webauthn',
+      resumeToken: TOKEN
+    })
+    expect(seen).toEqual([TOKEN])
+    // Held on the CREDENTIAL, so this instance's own next handshake presents it
+    // without waiting for the page to hand it back through `setCredential` —
+    // which is what makes a socket that dies mid-session recover silently.
+    const before = FakeWebSocket.instances.length
+    conn.connect()
+    const reconnected = FakeWebSocket.instances.at(-1)!
+    expect(FakeWebSocket.instances.length).toBe(before + 1)
+    ;(reconnected.onopen as (() => void) | null)?.()
+    expect(JSON.parse(reconnected.sent[0])).toEqual({ type: 'auth', resumeToken: TOKEN })
+    conn.destroy()
+  })
+
+  it('a refused resume drops the cached token and lands on the tap screen', () => {
+    const seen: (string | null)[] = []
+    const { conn, internals, states } = makeConn({ resumeToken: TOKEN })
+    conn.setResumeTokenHandler((t) => seen.push(t))
+
+    // The server treated the frame as bare auth, so this is the ORDINARY
+    // ceremony prompt — nothing about it says "resume", which is why the client
+    // has to remember it presented one.
+    internals.handleMessage({
+      type: 'auth-response',
+      ok: false,
+      error: PASSKEY_REQUIRED_ERROR,
+      retryable: false
+    })
+    expect(seen).toEqual([null])
+    expect(states.at(-1)?.state).toBe('passkey-required')
+    // …and the socket stays open, because that IS the ceremony prompt.
+    expect(internals.ws?.closed).toBeNull()
+    expect(internals.destroyed).toBe(false)
+    conn.destroy()
+  })
+
+  it('does NOT clear the token for a refusal this client did not present one for', () => {
+    const seen: (string | null)[] = []
+    const { conn, internals } = makeConn()
+    conn.setResumeTokenHandler((t) => seen.push(t))
+    internals.handleMessage({
+      type: 'auth-response',
+      ok: false,
+      error: PASSKEY_REQUIRED_ERROR,
+      retryable: false
+    })
+    // A credential-less client meeting the ordinary prompt must not wipe a
+    // perfectly good cached token — that would turn one tap into one per socket.
+    expect(seen).toEqual([])
+    conn.destroy()
+  })
+
+  it('a resumed session counts as a passkey identity for the step-up offer', () => {
+    const { conn, internals } = makeConn({ resumeToken: TOKEN })
+    internals.handleMessage({ type: 'auth-response', ok: true, method: 'webauthn-resumed' })
+    // It is the connection that most NEEDS the offer: a resume arms nothing, so
+    // it meets the step-up on its first act.
+    expect(conn.passkeyAvailable()).toBe(true)
+    conn.destroy()
+  })
+})
+
 describe('RemoteConnection — enrollment token', () => {
   beforeEach(() => {
     FakeWebSocket.instances.length = 0

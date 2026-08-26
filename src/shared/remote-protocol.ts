@@ -90,6 +90,18 @@ export interface WsAuthRequest {
    * `webauthn`. It reaches nothing else — not chat, not config, not git.
    */
   enrollToken?: string
+  /**
+   * Passkey RESUMPTION token (ADR-063), from a previous `auth-response` on this
+   * origin. 32 random bytes, hex. ADDITIVE like `enrollToken`: an older bundle
+   * never sends one and an older server never reads one, so no compatibility
+   * lane is owed — an unread field is a frame with no credential, which is
+   * exactly the bare-auth fallthrough an invalid token gets anyway.
+   *
+   * A SECRET, with the same handling rules as the two fields above: it rides
+   * `sessionStorage` and the ciphertext, never a URL, a log line, an error
+   * message or a state label.
+   */
+  resumeToken?: string
 }
 
 /** Server → Client: auth result */
@@ -109,6 +121,9 @@ export interface WsAuthResponse {
    *   the upgrade request headers and there is nothing for the client to send.
    * - `webauthn` (ADR-052) — the credential's nickname, or a short credential-id
    *   prefix when it has none, so a client can say WHICH passkey signed in.
+   * - `webauthn-resumed` (ADR-063) — the same label the bound credential's own
+   *   ceremony would have produced: a resumption is attributed to the passkey it
+   *   descends from, not to the token.
    * - `none` (`off` policy) — the literal `unauthenticated`, which is the honest
    *   answer: no credential was checked.
    * - `password` — the tailnet login when `tailscale serve` supplied one for this
@@ -168,6 +183,22 @@ export interface WsAuthResponse {
    * offer rather than inventing one, the safe direction.
    */
   webauthnCapableOrigin?: true
+  /**
+   * Success only, and only on an accept produced by a REAL CEREMONY (ADR-063):
+   * the handshake assertion or the enroll→webauthn upgrade. 32 random bytes,
+   * hex — the client caches it in `sessionStorage` and presents it as
+   * {@link WsAuthRequest.resumeToken} on a later handshake.
+   *
+   * An accept whose method is `webauthn-resumed` deliberately carries NO token.
+   * A resume does not re-mint: the token's age is always "time since the last
+   * biometric", and a sliding one would be ambient forever-auth wearing a
+   * countdown. The client therefore keeps the token it presented rather than
+   * expecting a replacement.
+   *
+   * A SECRET like every other credential on this wire — never log it, never put
+   * it in a URL, never render it.
+   */
+  resumeToken?: string
 }
 
 /**

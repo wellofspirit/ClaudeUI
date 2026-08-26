@@ -38,6 +38,12 @@
  * verifying. Attestation is `'none'` — we do not care WHICH authenticator model
  * the owner used, only that the key lives in one.
  *
+ * A fourth thing lives here since ADR-063, and it lives here because it is the
+ * ceremony's own residue: the RESUMPTION TOKEN store. Every accepted assertion
+ * mints one, the server accepts it later as `webauthn-resumed`, and it is kept
+ * beside the challenge state for the same reasons that state is — in memory,
+ * hashed, pruned lazily, and gone on restart.
+ *
  * Sign counters are recorded and NEVER enforced: synced passkeys (iCloud
  * Keychain, Google Password Manager) legitimately report 0 forever, so a
  * counter-regression rejection would lock out exactly the credentials this
@@ -57,6 +63,7 @@ import type {
   PublicKeyCredentialRequestOptionsJSON,
   RegistrationResponseJSON
 } from '@simplewebauthn/server'
+import * as crypto from 'node:crypto'
 import {
   countWebauthnCredentials,
   deleteWebauthnCredential,
@@ -155,6 +162,53 @@ export class ChallengeStore {
       if (record.expiresAt <= now) this.records.delete(challenge)
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Resumption tokens (ADR-063)
+// ---------------------------------------------------------------------------
+
+/**
+ * How long a resumption token stays usable after the ceremony that minted it.
+ *
+ * A CONSTANT, not a config dial (ADR-063): the auth surface already has enough
+ * dials, and a new one would have to join the auth-surface sweep — a setting
+ * whose only job is to shorten a convenience is not worth that cost. Note it is
+ * deliberately LONGER than the strong tier's 4 h default max-age, which is what
+ * makes the strong-tier check bind first there rather than this TTL.
+ */
+export const RESUME_TOKEN_TTL_MS = 24 * 60 * 60_000
+
+/**
+ * Hard cap on live token records, oldest evicted first.
+ *
+ * The store only grows when a REAL ceremony happens, so it is already bounded by
+ * how often a human touches a sensor — the cap exists so that "already bounded"
+ * does not have to stay true for the memory footprint to be. 64 is far above any
+ * plausible device count for a single operator.
+ */
+export const RESUME_TOKEN_MAX = 64
+
+/** What a live resumption token is bound to. The plaintext is never stored. */
+interface ResumeTokenRecord {
+  /** The credential whose assertion minted it — the label attribution follows it. */
+  credId: string
+  /** The exact WebAuthn origin of the minting connection. Verified only there. */
+  origin: string
+  /** When the ceremony happened. The TTL, and the strong tier's cut, both measure from here. */
+  mintedAt: number
+}
+
+/** Token plaintext shape on the wire: 32 bytes, hex. Checked before hashing. */
+const RESUME_TOKEN_RE = /^[0-9a-f]{64}$/i
+
+/**
+ * Store key for a token. The plaintext exists only in the mint's return value
+ * and in the client's `sessionStorage`; what the host holds is a hash, so a
+ * memory dump of this process yields nothing that can be presented.
+ */
+function hashResumeToken(token: string): string {
+  return crypto.createHash('sha256').update(token.toLowerCase(), 'utf-8').digest('hex')
 }
 
 /** Where a connection's ceremony is anchored, derived from its request Host. */
@@ -289,6 +343,17 @@ export type WebauthnRegisterResult =
 export class WebauthnService {
   private readonly store: WebauthnCredentialStore
   readonly challenges = new ChallengeStore()
+  /**
+   * Live resumption tokens (ADR-063), keyed by `sha256(token)`.
+   *
+   * In memory beside the challenge state, and for a related reason: nothing is
+   * persisted, so a host restart logs every passkey device out exactly once —
+   * an acceptable and VISIBLE event — and no new stored secret class joins the
+   * DB. Pruned lazily on access, like {@link ChallengeStore}, because a timer
+   * would be a second lifetime to reason about for a map only a real ceremony
+   * can grow.
+   */
+  private readonly resumeTokens = new Map<string, ResumeTokenRecord>()
 
   constructor(store: WebauthnCredentialStore = dbWebauthnCredentialStore()) {
     this.store = store
@@ -316,7 +381,120 @@ export class WebauthnService {
   }
 
   revoke(credId: string): boolean {
+    // A token dies with the credential it descends from (ADR-063 §Invalidation).
+    // Revoking a SYNCED passkey was already documented as revoking it
+    // everywhere; its resumptions have to go with it, or "I removed that phone"
+    // would leave the phone signed in for up to a day.
+    this.dropResumeTokensFor(credId)
     return this.store.remove(credId)
+  }
+
+  // -------------------------------------------------------------------------
+  // Resumption tokens (ADR-063)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Mint a resumption token for a credential that has just completed an
+   * assertion. Returns the PLAINTEXT — the only time it ever exists here.
+   *
+   * Only a real ceremony calls this (the handshake assertion and the
+   * enroll→webauthn upgrade). A resume deliberately does not re-mint: the
+   * token's age is always "time since the last biometric", and a sliding one
+   * would be ambient forever-auth wearing a countdown.
+   */
+  mintResumeToken(credId: string, origin: string, now = Date.now()): string {
+    this.pruneResumeTokens(now)
+    // Evict the OLDEST rather than refusing the newest: a mint follows a
+    // biometric the operator has already performed, and answering it with "your
+    // device list is full" would be a lockout produced by a memory bound.
+    while (this.resumeTokens.size >= RESUME_TOKEN_MAX) {
+      let oldestKey: string | null = null
+      let oldestAt = Infinity
+      for (const [key, record] of this.resumeTokens) {
+        if (record.mintedAt < oldestAt) {
+          oldestAt = record.mintedAt
+          oldestKey = key
+        }
+      }
+      if (oldestKey === null) break
+      this.resumeTokens.delete(oldestKey)
+    }
+    const token = crypto.randomBytes(32).toString('hex')
+    this.resumeTokens.set(hashResumeToken(token), { credId, origin, mintedAt: now })
+    return token
+  }
+
+  /**
+   * Judge a presented token. `null` means "not a credential" — the caller then
+   * treats the frame exactly as a bare `{type:'auth'}` (ADR-063).
+   *
+   * Four ways to die, and the entry is deleted for the two that are permanent
+   * (expired, orphaned) so a dead record cannot linger under the cap:
+   *
+   *  - **unknown / malformed** — never minted here, or not 32 hex bytes. Shape is
+   *    checked BEFORE hashing so an arbitrary-length client string never reaches
+   *    the digest.
+   *  - **expired** — past {@link RESUME_TOKEN_TTL_MS} from the mint.
+   *  - **origin mismatch** — a token minted on the tailnet name is not a token
+   *    for anywhere else. The caller passes the connection's own WebAuthn origin,
+   *    so an origin that cannot do WebAuthn at all (`''`) can never match: every
+   *    record carries a real origin string, and one is refused outright below.
+   *  - **credential gone** — the bound passkey was revoked (or the table was
+   *    wiped). Re-checked against the LIVE table rather than trusted from the
+   *    record, and the live row is returned so the caller labels the connection
+   *    with the nickname as it stands now.
+   */
+  verifyResumeToken(
+    token: string,
+    origin: string,
+    now = Date.now()
+  ): { credId: string; mintedAt: number; credential: WebauthnCredentialRow } | null {
+    if (typeof token !== 'string' || !RESUME_TOKEN_RE.test(token)) return null
+    // A fabricated origin must never verify — see the caller in remote-server.
+    if (typeof origin !== 'string' || origin === '') return null
+    this.pruneResumeTokens(now)
+    const key = hashResumeToken(token)
+    const record = this.resumeTokens.get(key)
+    if (!record) return null
+    if (record.origin !== origin) return null
+    // Multi-use within the TTL (ADR-063): no rotate-on-use, so the record
+    // survives a successful verify. Rotation would buy theft DETECTION at the
+    // price of a lost-ack race on exactly the flaky mobile reconnects this
+    // exists for.
+    const credential = this.store.get(record.credId)
+    if (!credential) {
+      this.resumeTokens.delete(key)
+      return null
+    }
+    return { credId: record.credId, mintedAt: record.mintedAt, credential }
+  }
+
+  /**
+   * Invalidate every token. The `off` flip calls this (ADR-063 §Invalidation):
+   * re-enabling authentication demands fresh ceremonies, so nothing minted
+   * before the anchor-guarded flip may survive it.
+   */
+  clearResumeTokens(): void {
+    this.resumeTokens.clear()
+  }
+
+  /** Live token count — test seam / diagnostics, like {@link ChallengeStore.size}. */
+  get resumeTokenCount(): number {
+    this.pruneResumeTokens(Date.now())
+    return this.resumeTokens.size
+  }
+
+  /** Drop every token bound to one credential. */
+  private dropResumeTokensFor(credId: string): void {
+    for (const [key, record] of this.resumeTokens) {
+      if (record.credId === credId) this.resumeTokens.delete(key)
+    }
+  }
+
+  private pruneResumeTokens(now: number): void {
+    for (const [key, record] of this.resumeTokens) {
+      if (record.mintedAt + RESUME_TOKEN_TTL_MS <= now) this.resumeTokens.delete(key)
+    }
   }
 
   // -------------------------------------------------------------------------

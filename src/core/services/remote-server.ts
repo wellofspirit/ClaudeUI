@@ -603,6 +603,19 @@ interface AuthenticatedClient {
    * this copy is what the transport's own paths (max-age, arming) consult.
    */
   stepUpTier: StepUpTier
+  /**
+   * When the CEREMONY behind this connection happened (ADR-063), or `undefined`
+   * for a method that never had one.
+   *
+   * A handshake assertion and the enroll→webauthn upgrade set it to now; a
+   * `webauthn-resumed` accept sets it to the token's MINT time, which is the
+   * whole point — a resumed socket inherits the age of the biometric it
+   * descends from rather than getting a fresh clock for reconnecting. It is what
+   * {@link RemoteServer.armMaxAgeCut} measures the strong tier's absolute cut
+   * from, and it persists across a re-snapshot so the inheritance survives a
+   * settings change too.
+   */
+  ceremonyAt?: number
   lastActivity: number
   pingTimer?: ReturnType<typeof setInterval>
   /**
@@ -1833,6 +1846,24 @@ export class RemoteServer {
     }
   }
 
+  /**
+   * Kill every live resumption token (ADR-063 §Invalidation).
+   *
+   * Called by the host anchor on the transition TO auth-mode `off`, and only
+   * that transition: re-enabling authentication afterwards must demand fresh
+   * ceremonies, so nothing minted before the anchor-guarded flip may survive it.
+   * An ordinary 4009 auth-surface change deliberately does NOT call this — the
+   * fresh handshake presents the token and the rules in force judge it, exactly
+   * like every other credential.
+   *
+   * A thin forward rather than a reach into `this.webauthn` from the anchor,
+   * which has a `RemoteServer` and no service handle — and the server's own
+   * instance is the one the handshake verifies against.
+   */
+  clearResumeTokens(): void {
+    this.webauthn.clearResumeTokens()
+  }
+
   // ---------------------------------------------------------------------------
   // HTTP handler
   // ---------------------------------------------------------------------------
@@ -2564,7 +2595,19 @@ export class RemoteServer {
      * Shared success path for every method. Hoisted out of `handleFrame` because
      * tailnet identity authenticates on `connection`, before any client frame.
      */
-    const accept = (method: AcceptedAuthMethod, login: string | null = null): void => {
+    const accept = (
+      method: AcceptedAuthMethod,
+      login: string | null = null,
+      /**
+       * ADR-063. Both optional so every existing caller is untouched:
+       *
+       * - `resumeToken` rides out on the `auth-response`. Set ONLY by an accept
+       *   produced by a real ceremony, which is what makes "a resume does not
+       *   re-mint" a property of the call site rather than a rule to remember.
+       * - `ceremonyAt` is when that ceremony happened — {@link AuthenticatedClient.ceremonyAt}.
+       */
+      opts: { resumeToken?: string; ceremonyAt?: number } = {}
+    ): void => {
       authenticated = true
       clearTimeout(authTimeout)
       clearPending()
@@ -2587,6 +2630,7 @@ export class RemoteServer {
         policy: auth.policy,
         policyCtx: auth.ctx,
         stepUpTier,
+        ceremonyAt: opts.ceremonyAt,
         lastActivity: Date.now(),
         pingTimer: setInterval(() => {
           this.sendTo(ws, { type: 'ping', timestamp: Date.now() })
@@ -2624,6 +2668,15 @@ export class RemoteServer {
       // in: its proof is deterministic and client-cacheable, so it authenticates
       // the browser rather than provably the human (ADR-052's recorded caveat).
       // It stays the step-up FALLBACK, where the human has to type it again.
+      //
+      // `webauthn-resumed` is DELIBERATELY EXCLUDED by this exact comparison
+      // (ADR-063). A resumption token is the passkey's analogue of that cached
+      // proof — it says a browser once held a biometric, not that a human is
+      // here now — so it arms nothing and meets the step-up as its first
+      // presence proof, exactly like the password. It still lands in the tier-
+      // `off` waiver below when that tier applies, which is correct: it is an
+      // ordinary full-grant method, and the waiver is a capability grant rather
+      // than a proof.
       if (method === 'webauthn') {
         this.armPresence(newClient, 'passkey login')
       } else if (stepUpTier === 'off') {
@@ -2668,7 +2721,11 @@ export class RemoteServer {
         // ceremony gates above were decided from, never re-derived: an
         // enrollment offer that disagreed with `passwordAuthAllowed` about which
         // origin this is would be a UI promising what the server refuses.
-        ...(capableOrigin ? { webauthnCapableOrigin: true as const } : {})
+        ...(capableOrigin ? { webauthnCapableOrigin: true as const } : {}),
+        // ADR-063: present only where a real ceremony just minted one. Absent on
+        // every other accept, a `webauthn-resumed` one included — the client
+        // keeps the token it presented rather than expecting a replacement.
+        ...(opts.resumeToken ? { resumeToken: opts.resumeToken } : {})
       })
       logger.info(
         'remote-server',
@@ -2937,7 +2994,16 @@ export class RemoteServer {
               // reach `off`, where the auth frame never gets this far.
               detail: 'passkey login accepted; conferred admin+enroll; presence armed'
             })
-            accept('webauthn', label)
+            // ADR-063: every accepted assertion leaves a resumption token behind,
+            // so the next socket this browser opens is silent. `webauthnOrigin`
+            // is non-null on this path by construction — the ceremony gate above
+            // refused the frame outright otherwise — and it is the origin the
+            // token binds to, never a fabricated one.
+            const resumeToken = this.webauthn.mintResumeToken(
+              result.credential.credId,
+              webauthnOrigin.origin
+            )
+            accept('webauthn', label, { resumeToken, ceremonyAt: Date.now() })
             return
           }
 
@@ -3021,6 +3087,81 @@ export class RemoteServer {
             })
             accept('enroll-token')
             return
+          }
+
+          // ── RESUMPTION TOKEN (ADR-063) ───────────────────────────────────
+          //
+          // The one credential in this chain that does NOT get its own refusal:
+          // a token that does not check out leaves the frame exactly as a bare
+          // `{type:'auth'}` and falls through to the tail below, which is the
+          // designed recovery (`passkey-required` → the tap screen). So this
+          // branch returns only on ACCEPT.
+          if (typeof msg.resumeToken === 'string') {
+            // A token can only ever have been minted on a WebAuthn-capable
+            // origin, so a connection without one can never hold a valid resume
+            // — and must never be verified against a fabricated origin string.
+            const resumed = webauthnOrigin
+              ? this.webauthn.verifyResumeToken(msg.resumeToken, webauthnOrigin.origin)
+              : null
+            // STRONG-TIER AGE CHECK (the ADR-054 amendment). Without it
+            // `sessionMaxAgeHours` would be decorative under `strong`: cut,
+            // reconnect with the token, repeat. Measured from the MINT, against
+            // the same budget `armMaxAgeCut` arms — so the two can never
+            // disagree about how old is too old.
+            const tier = resolveStepUpTier(auth.policy, auth.ctx.stepUpTier)
+            const tooOldForStrongTier =
+              resumed !== null &&
+              tier === 'strong' &&
+              Date.now() - resumed.mintedAt >= this.maxAgeBudgetMs(auth.ctx)
+            if (resumed && !tooOldForStrongTier) {
+              const label = credentialLabel(resumed.credential.nickname, resumed.credId)
+              this.auditAuth({
+                channel: 'auth:resume',
+                connectionId,
+                method: 'webauthn-resumed',
+                label,
+                capability: 'admin',
+                outcome: 'ok',
+                detail: 'resumption token accepted; conferred admin+enroll; no presence armed'
+              })
+              logger.info(
+                'remote-server',
+                `Resumed passkey session from ${ip} (${label}) — no ceremony, nothing armed`
+              )
+              // `ceremonyAt` is the MINT time, not now: a resume inherits the age
+              // of the biometric it descends from, which is what makes the
+              // strong tier's max-age mean "hours since a human was here".
+              accept('webauthn-resumed', label, { ceremonyAt: resumed.mintedAt })
+              return
+            }
+            // NO `recordFailedAuth` HERE, deliberately (ADR-063). The failure
+            // budget exists for LOW-ENTROPY secrets — a password anyone can
+            // guess at. A 32-byte token is not brute-forceable in the budget's
+            // lifetime, and the invalidations that produce this branch are
+            // ROUTINE (a host restart, a revoked credential, an expired TTL): a
+            // legitimate phone reconnecting after the host rebooted must not be
+            // throttled into a lockout for holding a token that used to work.
+            // The row below is what keeps probing visible instead.
+            this.auditAuth({
+              channel: 'auth:resume',
+              connectionId,
+              method: 'webauthn-resumed',
+              label: 'unauthenticated',
+              capability: 'admin',
+              outcome: 'error',
+              // The REASON CLASS only — never the token, and never anything
+              // derived from it.
+              detail: tooOldForStrongTier
+                ? 'resumption token refused (older than the strong tier session max-age); falling through to bare auth'
+                : webauthnOrigin
+                  ? 'resumption token refused (unknown, expired, wrong origin or revoked credential); falling through to bare auth'
+                  : 'resumption token refused (this origin cannot bind a passkey); falling through to bare auth'
+            })
+            logger.info(
+              'remote-server',
+              `Resumption token from ${ip} was not accepted — treating the frame as bare auth`
+            )
+            // …and FALL THROUGH. No return.
           }
 
           // THE TOKEN ARM IS GONE (ADR-056). A stale cached bundle still sends
@@ -3415,6 +3556,11 @@ export class RemoteServer {
     // touched the sensor twice (register, then assert) and must not be asked a
     // third time to open a terminal.
     this.armPresence(client, 'enrollment upgrade to passkey')
+    // ADR-063: this IS a ceremony, so it mints like the handshake one and the
+    // socket's max-age anchor moves to it. `origin` is non-null by the guard at
+    // the top of this method.
+    const resumeToken = this.webauthn.mintResumeToken(result.credential.credId, origin.origin)
+    client.ceremonyAt = Date.now()
     this.auditAuth({
       channel: 'auth:webauthn-assert',
       connectionId: client.connection.connectionId,
@@ -3445,7 +3591,13 @@ export class RemoteServer {
       // where a credential can bind), and a ceremony against it has this instant
       // verified. Derived from the connection's own `webauthnOrigin`, the same
       // value the handshake's `capableOrigin` came from.
-      ...(origin !== null ? { webauthnCapableOrigin: true as const } : {})
+      ...(origin !== null ? { webauthnCapableOrigin: true as const } : {}),
+      // Same rule once more (ADR-063): an accept produced by a real assertion
+      // carries a resumption token, and this is one. Without it the device that
+      // just enrolled would be the ONLY passkey client with no resumption —
+      // and it is the device most likely to be a phone about to background
+      // itself.
+      resumeToken
     })
     this.notifyStatus()
   }
@@ -3935,10 +4087,34 @@ export class RemoteServer {
   }
 
   /**
+   * The strong tier's absolute session budget, in ms.
+   *
+   * ONE reader, because two consumers must never disagree about it: the cut
+   * itself ({@link armMaxAgeCut}) and ADR-063's resume age check, which refuses
+   * a token already older than the budget. A test-injected
+   * `timeouts.sessionMaxAgeMs` overrides the setting, and the
+   * {@link MAX_TIMER_MS} clamp is applied here so the check is measured against
+   * exactly the value the timer will use.
+   */
+  private maxAgeBudgetMs(policyCtx: AuthPolicyContext): number {
+    return Math.min(
+      this.timeouts.sessionMaxAgeMs ?? sessionMaxAgeMs(policyCtx.sessionMaxAgeHours),
+      MAX_TIMER_MS
+    )
+  }
+
+  /**
    * Strong tier only: arm the absolute session cut (ADR-054 decision 1).
    *
-   * "Nothing stays alive forever" — measured from CONNECT, and nothing slides
-   * it. At expiry the socket is closed with {@link CLOSE_SESSION_EXPIRED}, which
+   * "Nothing stays alive forever" — measured from the last CEREMONY where one is
+   * on record (ADR-063's amendment to ADR-054) and from CONNECT otherwise, with
+   * nothing sliding it either way. A resumed socket therefore inherits the age
+   * of the biometric its token descends from instead of getting a fresh budget
+   * for reconnecting, and because `ceremonyAt` lives on the client, every later
+   * re-snapshot keeps inheriting it. `sessionMaxAgeHours` now means what its
+   * name claims: hours since a human was actually here.
+   *
+   * At expiry the socket is closed with {@link CLOSE_SESSION_EXPIRED}, which
    * takes the sync STREAM with it (deliberately: a read-lock that left the
    * stream running would be a veil, not a lock), and the client's existing
    * reconnect machinery then faces a fresh ceremony.
@@ -3962,15 +4138,15 @@ export class RemoteServer {
     // setting is already clamped to a week, and the injected test budget is
     // small — this guard exists so that neither of those has to stay true for
     // the failure mode to remain impossible.
-    const budget = Math.min(
-      this.timeouts.sessionMaxAgeMs ?? sessionMaxAgeMs(client.policyCtx.sessionMaxAgeHours),
-      MAX_TIMER_MS
-    )
-    // Measured from CONNECT, not from now — the age is ABSOLUTE, so a
-    // re-snapshot part-way through a session inherits the elapsed time instead
-    // of handing the socket a fresh full budget it could renew indefinitely by
-    // flipping a setting.
-    const remaining = Math.max(0, client.connection.identity.connectedAt + budget - Date.now())
+    const budget = this.maxAgeBudgetMs(client.policyCtx)
+    // Measured from the CEREMONY where there was one, else from CONNECT — never
+    // from now. The age is ABSOLUTE, so a re-snapshot part-way through a session
+    // inherits the elapsed time instead of handing the socket a fresh full
+    // budget it could renew indefinitely by flipping a setting; and since
+    // ADR-063 a `webauthn-resumed` socket inherits its token's mint time for the
+    // same reason, so reconnecting cannot renew it either.
+    const anchor = client.ceremonyAt ?? client.connection.identity.connectedAt
+    const remaining = Math.max(0, anchor + budget - Date.now())
     client.maxAgeTimer = setTimeout(() => {
       // The socket may have gone in the meantime; `clients` is the liveness test.
       if (!this.clients.has(client.ws)) return

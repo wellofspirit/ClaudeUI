@@ -335,6 +335,13 @@ export function createHostAnchor({
           moved ? `${moved} (via remote:set-config on the host anchor)` : null
         )
         if (after.effectiveAuthPolicy === 'off') {
+          // ADR-063: nothing minted before the anchor-guarded flip survives it,
+          // so turning auth back on demands fresh ceremonies. Guarded on the
+          // TRANSITION, not merely on the destination — an ordinary
+          // auth-surface change (including one made while already `off`) lets a
+          // token be re-judged by the rules now in force, like every other
+          // credential.
+          if (before.effectiveAuthPolicy !== 'off') remoteServer.clearResumeTokens()
           logger.warn(
             'main',
             'REMOTE AUTHENTICATION HAS BEEN DISABLED (remoteAuthPolicy = "off"): every client that ' +

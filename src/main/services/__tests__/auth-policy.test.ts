@@ -158,7 +158,13 @@ describe('grantsFor — THREE outcomes (ADR-056 grant collapse)', () => {
   const E = ENROLL_ONLY_GRANTS
   const OFF = AUTH_OFF_GRANTS
 
-  const METHODS: AuthGrantMethod[] = ['password', 'webauthn', 'enroll-token', 'none']
+  const METHODS: AuthGrantMethod[] = [
+    'password',
+    'webauthn',
+    'webauthn-resumed',
+    'enroll-token',
+    'none'
+  ]
 
   interface Row {
     method: AuthGrantMethod
@@ -177,6 +183,11 @@ describe('grantsFor — THREE outcomes (ADR-056 grant collapse)', () => {
       expected: FULL,
       why: 'the break-glass password is the owner’s own secret — FULL under every policy now'
     },
+    {
+      method: 'webauthn-resumed',
+      expected: FULL,
+      why: 'ADR-063 — the same bundle the cached password proof already had, so it widens nothing'
+    },
     { method: 'enroll-token', expected: E, why: 'enroll and nothing else' },
     { method: 'none', expected: OFF, why: 'the no-auth surface, deliberately without admin/enroll' }
   ]
@@ -193,6 +204,16 @@ describe('grantsFor — THREE outcomes (ADR-056 grant collapse)', () => {
     const grants = grantsFor('password')
     expect(grants.has('admin')).toBe(true)
     expect(grants.has('enroll')).toBe(true)
+  })
+
+  it('a RESUMED passkey holds exactly what a fresh one does (ADR-063)', () => {
+    // The trust argument for the token is "no wider than the cached password
+    // proof, and attributed to a real credential", so the bundle has to be
+    // identical to `webauthn`'s — a resume that held LESS would silently break
+    // the surfaces a reconnecting phone already had, and one that held MORE
+    // would be a token outranking the ceremony it descends from.
+    expect([...grantsFor('webauthn-resumed')].sort()).toEqual([...grantsFor('webauthn')].sort())
+    expect([...grantsFor('webauthn-resumed')].sort()).toEqual([...FULL_REMOTE_GRANTS].sort())
   })
 
   it('is a function of the METHOD alone — the policy is no longer an input', () => {

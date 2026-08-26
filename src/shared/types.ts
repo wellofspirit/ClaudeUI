@@ -2026,6 +2026,13 @@ export type TunnelState =
  *   (LAN, tunnel) can present, and it always travels inside E2E there.
  * - `'webauthn'` — a completed passkey assertion: the only method that proves a
  *   HUMAN rather than a cached client secret.
+ * - `'webauthn-resumed'` (ADR-063) — a RESUMPTION TOKEN minted by an earlier
+ *   assertion and replayed on a later handshake. It is the passkey's analogue of
+ *   the cached password proof and carries the same trust reading: it
+ *   authenticates the BROWSER, never the human. Same grant bundle as
+ *   `'webauthn'`, attributed to the same credential's label, and it ARMS
+ *   NOTHING — a terminal act, a settings session and the strong tier's mutation
+ *   window still demand a live ceremony.
  * - `'enroll-token'` — the one-time minted enrollment link, which authenticates
  *   a socket that may do nothing but register a credential.
  * - `'none'` — the `off` policy mode, where authentication is disabled outright.
@@ -2039,7 +2046,7 @@ export type TunnelState =
  * was a link that carried authority, which is exactly what that ADR retires.
  */
 export type RemoteAuthMethod =
-  'password' | 'tailnet-identity' | 'webauthn' | 'enroll-token' | 'none'
+  'password' | 'tailnet-identity' | 'webauthn' | 'webauthn-resumed' | 'enroll-token' | 'none'
 
 /**
  * Remote authentication POLICY (ADR-052 decision 3, ADR-056 §grant collapse /

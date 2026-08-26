@@ -139,15 +139,25 @@ export function resolveAuthPolicy(ctx: AuthPolicyContext): RemoteAuthPolicy {
 }
 
 /** How a connection proved itself, for grant purposes. */
-export type AuthGrantMethod = 'password' | 'webauthn' | 'enroll-token' | 'none'
+export type AuthGrantMethod = 'password' | 'webauthn' | 'webauthn-resumed' | 'enroll-token' | 'none'
 
 /**
  * The grant bundle for one authenticated connection — THREE outcomes, and the
  * collapse to three is ADR-056's point.
  *
- * - `webauthn` / `password` ⇒ {@link FULL_REMOTE_GRANTS}, under every policy.
+ * - `webauthn` / `webauthn-resumed` / `password` ⇒ {@link FULL_REMOTE_GRANTS},
+ *   under every policy.
  *   A passkey proves a human and the break-glass password is the owner's own
- *   secret; both are the operator. The password's old `legacy`-mode carve-out
+ *   secret; both are the operator. `webauthn-resumed` (ADR-063) is the passkey's
+ *   analogue of the cached password proof — a 32-byte token minted by a real
+ *   assertion and replayed on a later handshake — so it gets exactly the bundle
+ *   the cached proof already had and widens nothing. What it must NOT do is ARM:
+ *   the token authenticates the browser, not the human, so a terminal act, a
+ *   settings session and the strong tier's mutation window still cost a live
+ *   ceremony. That half is not expressible here (grants are not freshness) and
+ *   is enforced at the accept site in `remote-server.ts`, which deliberately
+ *   matches `'webauthn'` alone.
+ *   The password's old `legacy`-mode carve-out
  *   (base set only, no `enroll`) is retired because it was already theatre: the
  *   same connection held `admin`, and `webauthn:mint-enroll-token` is an `admin`
  *   verb, so it could always mint itself the enrollment link the carve-out
@@ -175,6 +185,7 @@ export type AuthGrantMethod = 'password' | 'webauthn' | 'enroll-token' | 'none'
 export function grantsFor(method: AuthGrantMethod): ReadonlySet<Capability> {
   switch (method) {
     case 'webauthn':
+    case 'webauthn-resumed':
     case 'password':
       return FULL_REMOTE_GRANTS
     case 'enroll-token':

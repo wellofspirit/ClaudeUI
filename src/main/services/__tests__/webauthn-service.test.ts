@@ -34,6 +34,8 @@ vi.mock('../../../core/services/db', () => ({
 import {
   ChallengeStore,
   CHALLENGE_TTL_MS,
+  RESUME_TOKEN_MAX,
+  RESUME_TOKEN_TTL_MS,
   WebauthnService,
   normalizeNickname,
   resolveWebauthnOrigin,
@@ -503,6 +505,134 @@ describe('WebauthnService — authentication', () => {
     const [summary] = service.credentials()
     expect(summary).toMatchObject({ credId: device.credId, nickname: 'Phone', backedUp: false })
     expect('publicKey' in summary).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Resumption tokens (ADR-063)
+// ---------------------------------------------------------------------------
+
+describe('WebauthnService — resumption tokens (ADR-063)', () => {
+  const OTHER_ORIGIN = 'https://elsewhere.tail1234.ts.net'
+  let store: ReturnType<typeof memoryStore>
+  let service: WebauthnService
+
+  /** A credential row good enough for the token store's liveness re-check. */
+  function seedCredential(credId: string, nickname: string | null = null): void {
+    store.insert({ credId, publicKey: new Uint8Array([1, 2, 3]), nickname })
+  }
+
+  beforeEach(() => {
+    store = memoryStore()
+    service = new WebauthnService(store)
+    seedCredential('cred-a', 'Phone')
+  })
+
+  it('mints a 32-byte hex token and verifies it back to the LIVE credential row', () => {
+    const token = service.mintResumeToken('cred-a', TAILNET.origin)
+    expect(token).toMatch(/^[0-9a-f]{64}$/)
+
+    const verified = service.verifyResumeToken(token, TAILNET.origin)
+    expect(verified?.credId).toBe('cred-a')
+    // The row, not a copy of the mint-time facts: the caller labels the
+    // connection from it, so a rename must be visible.
+    store.rename('cred-a', 'Work phone')
+    expect(service.verifyResumeToken(token, TAILNET.origin)?.credential.nickname).toBe('Work phone')
+  })
+
+  it('is MULTI-USE within the TTL — a verify does not burn the token', () => {
+    const token = service.mintResumeToken('cred-a', TAILNET.origin)
+    expect(service.verifyResumeToken(token, TAILNET.origin)).not.toBeNull()
+    expect(service.verifyResumeToken(token, TAILNET.origin)).not.toBeNull()
+    expect(service.resumeTokenCount).toBe(1)
+  })
+
+  it('refuses an unknown token', () => {
+    service.mintResumeToken('cred-a', TAILNET.origin)
+    expect(service.verifyResumeToken('ab'.repeat(32), TAILNET.origin)).toBeNull()
+  })
+
+  it('refuses malformed input BEFORE it ever reaches the digest', () => {
+    for (const bad of ['', 'nothex'.repeat(10), 'ab'.repeat(31), 'ab'.repeat(33), 42 as never]) {
+      expect(service.verifyResumeToken(bad as string, TAILNET.origin)).toBeNull()
+    }
+  })
+
+  it('expires at the TTL, and prunes the dead record rather than leaking it', () => {
+    const t0 = 1_000_000
+    const token = service.mintResumeToken('cred-a', TAILNET.origin, t0)
+    expect(
+      service.verifyResumeToken(token, TAILNET.origin, t0 + RESUME_TOKEN_TTL_MS - 1)
+    ).not.toBeNull()
+    expect(service.verifyResumeToken(token, TAILNET.origin, t0 + RESUME_TOKEN_TTL_MS)).toBeNull()
+    // The prune ran on that access, so nothing is left under the cap.
+    expect(service.verifyResumeToken(token, TAILNET.origin, t0 + 1)).toBeNull()
+  })
+
+  it('is ORIGIN-BOUND — a token minted on one name verifies nowhere else', () => {
+    const token = service.mintResumeToken('cred-a', TAILNET.origin)
+    expect(service.verifyResumeToken(token, OTHER_ORIGIN)).toBeNull()
+    // An origin that cannot do WebAuthn at all reaches this as the empty string
+    // (remote-server passes no fabricated origin), which can never match.
+    expect(service.verifyResumeToken(token, '')).toBeNull()
+    expect(service.verifyResumeToken(token, TAILNET.origin)).not.toBeNull()
+  })
+
+  it('dies with its bound credential — and takes NO other credential down with it', () => {
+    seedCredential('cred-b', 'Laptop')
+    const a = service.mintResumeToken('cred-a', TAILNET.origin)
+    const b = service.mintResumeToken('cred-b', TAILNET.origin)
+
+    expect(service.revoke('cred-a')).toBe(true)
+    expect(service.verifyResumeToken(a, TAILNET.origin)).toBeNull()
+    expect(service.verifyResumeToken(b, TAILNET.origin)?.credId).toBe('cred-b')
+  })
+
+  it('refuses a token whose credential vanished from the table underneath it', () => {
+    const token = service.mintResumeToken('cred-a', TAILNET.origin)
+    // Removed at the STORE, bypassing `revoke`'s sweep — the liveness re-check
+    // is what has to catch this, not the sweep.
+    store.remove('cred-a')
+    expect(service.verifyResumeToken(token, TAILNET.origin)).toBeNull()
+  })
+
+  it('caps the store at RESUME_TOKEN_MAX, evicting the OLDEST', () => {
+    // Anchored to the REAL clock: `resumeTokenCount` prunes against `Date.now()`,
+    // so a fixture timestamp in the distant past would expire the whole store
+    // before the cap ever came into it.
+    const t0 = Date.now()
+    const first = service.mintResumeToken('cred-a', TAILNET.origin, t0)
+    const middle: string[] = []
+    for (let i = 1; i < RESUME_TOKEN_MAX; i++) {
+      middle.push(service.mintResumeToken('cred-a', TAILNET.origin, t0 + i))
+    }
+    expect(service.resumeTokenCount).toBe(RESUME_TOKEN_MAX)
+    expect(service.verifyResumeToken(first, TAILNET.origin, t0 + RESUME_TOKEN_MAX)).not.toBeNull()
+
+    const newest = service.mintResumeToken('cred-a', TAILNET.origin, t0 + RESUME_TOKEN_MAX)
+    expect(service.resumeTokenCount).toBe(RESUME_TOKEN_MAX)
+    expect(service.verifyResumeToken(first, TAILNET.origin, t0 + RESUME_TOKEN_MAX)).toBeNull()
+    expect(service.verifyResumeToken(newest, TAILNET.origin, t0 + RESUME_TOKEN_MAX)).not.toBeNull()
+    // …and everything between the evicted one and the newest survived.
+    for (const token of middle) {
+      expect(service.verifyResumeToken(token, TAILNET.origin, t0 + RESUME_TOKEN_MAX)).not.toBeNull()
+    }
+  })
+
+  it('clearResumeTokens sweeps every token (the `off` flip)', () => {
+    seedCredential('cred-b')
+    const a = service.mintResumeToken('cred-a', TAILNET.origin)
+    const b = service.mintResumeToken('cred-b', TAILNET.origin)
+    service.clearResumeTokens()
+    expect(service.resumeTokenCount).toBe(0)
+    expect(service.verifyResumeToken(a, TAILNET.origin)).toBeNull()
+    expect(service.verifyResumeToken(b, TAILNET.origin)).toBeNull()
+  })
+
+  it('never returns the same token twice', () => {
+    const seen = new Set<string>()
+    for (let i = 0; i < 32; i++) seen.add(service.mintResumeToken('cred-a', TAILNET.origin))
+    expect(seen.size).toBe(32)
   })
 })
 

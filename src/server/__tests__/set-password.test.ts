@@ -415,22 +415,28 @@ async function freshAnchor(opts?: { asConsole?: boolean }): Promise<{
   db: typeof import('../../core/services/db')
   disconnects: () => number
   surfaceSweeps: () => number
+  resumeSweeps: () => number
 }> {
   const { db, consoleActor } = await freshConsole()
   const { createHostAnchor } = await import('../../core/boot/host-anchor')
 
   let disconnected = 0
   let surfaceSwept = 0
+  let resumeSweeps = 0
   const anchor = createHostAnchor({
-    // The two reactions the tested paths reach: `setPassword`'s 4008 sweep and
-    // `setConfig`'s 4009 auth-surface sweep. A stub keeps a listener (and a
-    // machine-global port claim) out of a unit test.
+    // The three reactions the tested paths reach: `setPassword`'s 4008 sweep,
+    // `setConfig`'s 4009 auth-surface sweep, and (ADR-063) the resumption-token
+    // sweep the transition to auth-mode `off` owes. A stub keeps a listener (and
+    // a machine-global port claim) out of a unit test.
     remoteServer: {
       disconnectPasswordClients: () => {
         disconnected++
       },
       disconnectAuthSurfaceClients: () => {
         surfaceSwept++
+      },
+      clearResumeTokens: () => {
+        resumeSweeps++
       }
     } as unknown as import('../../core/services/remote-server').RemoteServer,
     tailscaleManager:
@@ -442,7 +448,8 @@ async function freshAnchor(opts?: { asConsole?: boolean }): Promise<{
     anchor,
     db,
     disconnects: () => disconnected,
-    surfaceSweeps: () => surfaceSwept
+    surfaceSweeps: () => surfaceSwept,
+    resumeSweeps: () => resumeSweeps
   }
 }
 
@@ -558,7 +565,7 @@ describe('the set-password write path', () => {
   // (that is the rename), so only the label proves the console's identity
   // actually reached `auditAuthPolicyChange` rather than the renderer default.
   it('attributes a console --disable-auth policy row to label "server-console"', async () => {
-    const { anchor, db, surfaceSweeps } = await freshAnchor({ asConsole: true })
+    const { anchor, db, surfaceSweeps, resumeSweeps } = await freshAnchor({ asConsole: true })
 
     anchor.setConfig({ authPolicy: 'off' })
 
@@ -575,6 +582,28 @@ describe('the set-password write path', () => {
     // The other half of the same branch: auditing a change nobody was
     // re-admitted for would be a trail that lies.
     expect(surfaceSweeps()).toBe(1)
+    // …and the third half since ADR-063: turning authentication OFF must not
+    // leave a resumption token alive to walk back in on when it is turned on
+    // again. Nothing minted before the anchor-guarded flip survives it.
+    expect(resumeSweeps()).toBe(1)
+  })
+
+  it('an auth-surface change that is NOT the `off` flip leaves resumption tokens alone', async () => {
+    const { anchor, surfaceSweeps, resumeSweeps } = await freshAnchor({ asConsole: true })
+
+    // A break-glass flip is a full auth-surface change (4009 sweep and all) —
+    // and deliberately NOT an invalidation: the fresh handshake presents the
+    // token and the rules now in force judge it, exactly like every other
+    // credential (ADR-063 §Invalidation).
+    anchor.setConfig({ passwordBreakGlass: false })
+    expect(surfaceSweeps()).toBe(1)
+    expect(resumeSweeps()).toBe(0)
+
+    // Nor does a change made while ALREADY `off` re-sweep: only the transition.
+    anchor.setConfig({ authPolicy: 'off' })
+    expect(resumeSweeps()).toBe(1)
+    anchor.setConfig({ sessionMaxAgeHours: 8 })
+    expect(resumeSweeps()).toBe(1)
   })
 
   it('leaves the DESKTOP anchor’s policy row on the renderer label', async () => {

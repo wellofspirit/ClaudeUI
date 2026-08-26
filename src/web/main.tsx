@@ -21,6 +21,11 @@ import {
   installEnrollBridge
 } from '@renderer/components/SettingsDialog/enroll-flow'
 import { readCachedProof, writeCachedProof, clearCachedProof } from './password-proof'
+import {
+  readCachedResumeToken,
+  writeCachedResumeToken,
+  clearCachedResumeToken
+} from './resume-cache'
 import { decideAuthEntry, type PasswordParams } from './auth-entry'
 import type { FullStateSnapshot, RemoteAuthInfo, RemoteAuthMethod } from '../shared/remote-protocol'
 
@@ -397,8 +402,16 @@ function RemoteApp(): React.JSX.Element {
     connection.setStateHandler(handleStateChange)
     connection.setFullStateHandler(handleFullState)
     connection.setSessionExpiredHandler(() => setSessionExpired(true))
+    // ADR-063: the transport reports the token moving, this owns where it lives.
+    // A token arrives on every accept produced by a real ceremony; `null` means
+    // one we PRESENTED was refused, so the cached copy is dead.
+    connection.setResumeTokenHandler((token) => {
+      if (token) writeCachedResumeToken(token)
+      else clearCachedResumeToken()
+    })
     return () => {
       connection.setSessionExpiredHandler(null)
+      connection.setResumeTokenHandler(null)
       connection.destroy()
     }
   }, [handleStateChange, handleFullState])
@@ -460,9 +473,23 @@ function RemoteApp(): React.JSX.Element {
               detail: 'This server speaks a newer remote protocol — update the desktop app.'
             })
             return
-          case 'passkey':
+          case 'passkey': {
+            // ADR-063: same tab, already signed in this session — present the
+            // resumption token and skip the tap entirely, exactly as the
+            // password route skips its form for a cached proof. A token the
+            // server no longer honours costs one round trip and falls through
+            // server-side as bare auth, so the answer is `passkey-required` and
+            // `handleStateChange` puts the tap screen up after all.
+            const resumeToken = readCachedResumeToken()
+            if (resumeToken) {
+              connection.setCredential({ resumeToken })
+              setPhase({ kind: 'connecting' })
+              connection.connect()
+              return
+            }
             setPhase({ kind: 'passkey' })
             return
+          }
           case 'unavailable':
             setPhase({ kind: 'unavailable' })
             return

@@ -774,6 +774,42 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
     )
   }, 240_000)
 
+  /**
+   * ADR-063 — the resumption token, in the browser that actually caches it.
+   *
+   * A RELOAD is the honest proof: a brand-new JS context, no in-memory state
+   * carried over, nothing but the `sessionStorage` key to go on. What the
+   * pre-ADR bundle did here was show the one-tap screen and wait for a finger.
+   */
+  it('3b. a RELOAD signs back in on the resumption token — no second ceremony', async () => {
+    const assertsBefore = auditRows('auth:webauthn-assert').length
+    const resumesBefore = auditRows('auth:resume').length
+
+    await loginPage!.page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 })
+    await waitForSurface(loginPage!, 'SessionView', {
+      timeoutMs: APP_SURFACE_TIMEOUT_MS,
+      label: 'step3b-app-surface'
+    })
+
+    // The headline property: the app came back with NO assertion anywhere.
+    expect(auditRows('auth:webauthn-assert').length, 'a reload must not cost a biometric').toBe(
+      assertsBefore
+    )
+    const resumes = auditRows('auth:resume')
+    expect(resumes.length).toBe(resumesBefore + 1)
+    // Attributed to the credential the token descends from, not to the token.
+    expect(resumes.at(-1)).toMatchObject({
+      method: 'webauthn-resumed',
+      label: 'Walk Edge',
+      capability: 'admin',
+      outcome: 'ok'
+    })
+    const shotResume = await shot(loginPage!.page, '04b-resumed-after-reload')
+    note(
+      `step 3b: reload → connected with zero new assertions; audit auth:resume +1 {label:"Walk Edge"} → ${shotResume}`
+    )
+  }, 180_000)
+
   it('4. break-glass password signs in AT THE TAILNET ORIGIN', async () => {
     // A device with NO authenticator at all — the passkey path is impossible
     // here, which is the situation break-glass exists for, and the phone whose
@@ -868,24 +904,38 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
     note('step 5: passwordBreakGlass true→false dropped every live client (server sends 4009)')
 
     // (b) …and the client treats it as "reconnect and re-decide": the fresh
-    // handshake owes a ceremony again, so the one-tap screen comes back.
-    await waitForTestId(loginPage!.page, 'PasskeyLogin', 60_000)
-    const shot8 = await shot(loginPage!.page, '08-4009-reauth-required')
-    note(`step 5: the connected page recovered onto the one-tap screen, not an error → ${shot8}`)
-
-    await loginPage!.page.locator('[data-testid="PasskeyLogin.submit"]').click()
+    // handshake presents whatever this client holds and the rules NOW in force
+    // judge it. Since ADR-063 that is the resumption token, which a 4009
+    // deliberately does NOT invalidate — the auth surface moved, the credential
+    // did not — so the page comes back by itself with no tap and no biometric.
+    // Before ADR-063 this was the one-tap screen; the property being asserted is
+    // the same one either way, and it is the one that matters: a rules change is
+    // a re-admission, never a rejection.
+    const resumesBefore = auditRows('auth:resume').length
+    await until(
+      'the client to be re-admitted by itself',
+      () => status().connectedClients >= 1,
+      30_000
+    )
     await waitForSurface(loginPage!, 'SessionView', {
       timeoutMs: APP_SURFACE_TIMEOUT_MS,
       label: 'step5-app-surface'
     })
     const shot9 = await shot(loginPage!.page, '09-4009-recovered')
-    expect(auditRows('auth:webauthn-assert').length).toBeGreaterThan(assertsBefore)
+    expect(
+      auditRows('auth:webauthn-assert').length,
+      'a rules change must not cost a biometric — the token is re-judged, not rejected'
+    ).toBe(assertsBefore)
+    expect(auditRows('auth:resume').length).toBeGreaterThan(resumesBefore)
     expect(auditRows('auth:policy-change').length).toBe(policyRowsBefore + 1)
-    note(`step 5: re-authenticated with a fresh ceremony; audit auth:policy-change +1 → ${shot9}`)
+    note(
+      `step 5: re-admitted on the resumption token, no ceremony; audit auth:policy-change +1 → ${shot9}`
+    )
 
     // Restore, and let the resulting second 4009 settle before step 6.
     await setConfig({ passwordBreakGlass: true })
-    await waitForTestId(loginPage!.page, 'PasskeyLogin', 60_000)
+    await until('all remote clients to be dropped', () => status().connectedClients === 0, 20_000)
+    await until('the client to be re-admitted', () => status().connectedClients >= 1, 30_000)
   }, 300_000)
 
   it('6. off-mode warns EVERY connected client with a non-dismissible banner', async () => {
@@ -897,17 +947,24 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
     note('step 6: policy set to off (master switch) via the desktop-only remote:set-config')
 
     // 6a. The tailnet origin, no credential of any kind — i.e. the owner's own
-    // phone, which `tailscale serve` identifies at CONNECTION time. REGRESSION
-    // GUARD: this connection is admitted as `tailnet-identity`, never `none`, so
-    // a banner keyed on the method alone would leave the single most important
-    // client unwarned. `auth-response.authDisabled` is what must carry it
-    // (security.md §Policy modes, hard requirement 2: "every connected web
-    // client").
+    // phone. This leg used to assert the ambient `tailnet-identity` admission,
+    // and that admission is GONE (ADR-056: a network fact is not a person), so a
+    // fresh browser context now lands on the one-tap screen here like anywhere
+    // else — discovery still advertises the enrolled passkey. Under `off` the
+    // tap only CONNECTS: the server accepts the bare auth frame before any
+    // ceremony could start, which is why this page deliberately has NO
+    // authenticator at all and still gets in. What survives of the old
+    // regression guard is the half that still exists to guard:
+    // `auth-response.authDisabled` must carry the banner to every client on
+    // every origin (security.md §Policy modes, hard requirement 2), the tailnet
+    // one included.
     offTailnetPage = await openWalkPage(browser, { virtualAuthenticator: false })
     await offTailnetPage.page.goto(`${TAILNET_ORIGIN}/remote`, {
       waitUntil: 'domcontentloaded',
       timeout: 60_000
     })
+    await waitForTestId(offTailnetPage.page, 'PasskeyLogin')
+    await offTailnetPage.page.locator('[data-testid="PasskeyLogin.submit"]').click()
     await waitForSurface(offTailnetPage, 'SessionView', {
       timeoutMs: APP_SURFACE_TIMEOUT_MS,
       label: 'step6a-app-surface'
@@ -916,13 +973,14 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
       timeoutMs: 15_000,
       label: 'step6a-banner'
     })
-    // …and it really was the ambient-identity path: the server named this
-    // connection after the tailnet owner, which only `accept('tailnet-identity')`
-    // does.
-    expect(status().clientLogins).toContain(ownerLogin)
+    // …and it really was the no-auth accept: under `off` every admission is
+    // `none`, labelled with the literal `unauthenticated` — the honest answer,
+    // since no credential was checked (the retired ambient path would have named
+    // the node owner here).
+    expect(status().clientLogins).toContain('unauthenticated')
     const shotA = await shot(offTailnetPage.page, '10-off-mode-tailnet-origin')
     note(
-      `step 6a: a TAILNET-IDENTIFIED client under off (login = the node owner, not "none") renders NoAuthBanner → ${shotA}`
+      `step 6a: a TAILNET-ORIGIN client under off connects on a bare tap (no authenticator) and renders NoAuthBanner → ${shotA}`
     )
 
     // 6b. A connection the server admits as `none` — the older signal, kept as
@@ -991,8 +1049,16 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
     // Every prompt below therefore runs on a server offering no shell at all.
     await setConfig({ stepUpMutationIdleMinutes: 1, allowTerminal: false })
 
-    // Step 6 left the tab on the one-tap screen (its 4009), and the dial write
-    // above put it back there if it had recovered in between. Get back in.
+    // Step 6's `off` ROUND-TRIP is why this tab is reliably on the one-tap
+    // screen despite ADR-063: the flip to `off` swept the server's resumption
+    // tokens (§Invalidation — nothing minted before the flip survives it), so
+    // the restore-to-AUTO 4009 refused this tab's cached token, fell through to
+    // `passkey-required`, and the client dropped its dead copy. The tap below is
+    // therefore a REAL ceremony — which is exactly the premise 7a needs, since
+    // its claim is that even a freshly-ARMED ceremony login cannot write
+    // settings without unlocking the editor, and a resume would have armed
+    // nothing. (An ordinary 4009, like the dial write above, would have
+    // re-admitted the tab silently on its token — step 5 proves that half.)
     await signInOnLoginPage('step7-resume')
     await until('exactly one client to remain connected', () => status().connectedClients === 1)
 
@@ -1158,7 +1224,26 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
     // assertion about a SHELL, and the toggle is a different gate from the tier
     // (capability arming, not a freshness claim).
     await setConfig({ stepUpTier: 'off', allowTerminal: true })
-    await signInOnLoginPage('step7d-tier-off')
+    // No tap here since ADR-063, and that is not a weaker assertion — it is the
+    // one 7d is about. The 4009 drops the socket; the fresh handshake presents
+    // the token minted by 7c's recovery ceremony; the tier is `off` now, so the
+    // strong-tier age check does not apply and the resume is accepted. The
+    // waiver below is then measured on a connection that armed NOTHING at login,
+    // which is the harder version of the case.
+    await until(
+      'the tier-off sweep to drop the client',
+      () => status().connectedClients === 0,
+      20_000
+    )
+    await until(
+      'the client to be re-admitted under tier off',
+      () => status().connectedClients === 1,
+      30_000
+    )
+    await waitForSurface(loginPage!, 'SessionView', {
+      timeoutMs: APP_SURFACE_TIMEOUT_MS,
+      label: 'step7d-tier-off'
+    })
     const availability = await evalOnPage<Record<string, unknown>>(loginPage!, (api) =>
       api.terminalAvailability()
     )

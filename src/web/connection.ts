@@ -64,19 +64,21 @@ export type ConnectionState =
 
 /**
  * Exactly one field is honoured by the server, which branches on `pwProof`
- * first and then `enrollToken` — this client sends them in the same order for
- * the same reason. `pwProof` is `hex(scrypt(...))` derived from the user's
- * password (see password-proof.ts); `enrollToken` comes from the `#enroll=`
- * fragment of a minted "add this device" link.
+ * first, then `enrollToken`, then `resumeToken` — this client sends them in the
+ * same order for the same reason. `pwProof` is `hex(scrypt(...))` derived from
+ * the user's password (see password-proof.ts); `enrollToken` comes from the
+ * `#enroll=` fragment of a minted "add this device" link; `resumeToken`
+ * (ADR-063) is what an earlier passkey ceremony on this origin left behind.
  *
  * The bearer `token` is GONE (ADR-056): a link is a CHANNEL now (`#k=`), never
- * an identity. Both surviving fields are SECRETS — they ride the fragment or the
- * user's typing, never the request line, and must never reach a log line, an
- * error message, or a state label.
+ * an identity. All three surviving fields are SECRETS — they ride the fragment,
+ * the user's typing or `sessionStorage`, never the request line, and must never
+ * reach a log line, an error message, or a state label.
  */
 export interface RemoteCredential {
   pwProof?: string
   enrollToken?: string
+  resumeToken?: string
 }
 
 /** Close codes that mean "this credential will not work again as-is". */
@@ -321,6 +323,17 @@ export class RemoteConnection {
    * a genuinely fresh start.
    */
   private registeredOnThisSocket = false
+  /**
+   * The auth frame this socket sent carried a RESUMPTION TOKEN (ADR-063).
+   *
+   * Per-socket like {@link RemoteConnection.registeredOnThisSocket}, and for the
+   * same reason: it describes one handshake. A non-ok `auth-response` for such a
+   * frame is the server saying that token is dead — so the cached copy has to go
+   * — while the identical frame from a credential-less client means nothing of
+   * the sort. Without the flag the two are indistinguishable at the point the
+   * answer arrives.
+   */
+  private presentedResumeToken = false
   private pendingAssertion: PendingAssertion | null = null
   private pendingStepUpChallenge: PendingStepUpChallenge | null = null
   /** Mockup-scoped token delivered over the authenticated WS (see sync-full). */
@@ -356,6 +369,8 @@ export class RemoteConnection {
   private onSessionExpired: (() => void) | null = null
   /** Close-4008 waiters — see {@link RemoteConnection.whenCredentialsChanged}. */
   private credentialsChangedWaiters: (() => void)[] = []
+  /** Resumption-token notice — see {@link RemoteConnection.setResumeTokenHandler}. */
+  private onResumeToken: ((token: string | null) => void) | null = null
 
   constructor(url: string, credential: RemoteCredential, e2eKeyHex?: string) {
     // Convert http(s) URL to ws(s), strip path and fragment
@@ -446,9 +461,20 @@ export class RemoteConnection {
    * A completed handshake assertion is proof; otherwise the auth-info
    * advertisement is the best a client can know. Purely an affordance hint —
    * the server is still the authority and refuses what it does not accept.
+   *
+   * `webauthn-resumed` counts (ADR-063): the question is whether a passkey
+   * IDENTITY is available on this connection, and a resumed session is one by
+   * construction — it descends from a credential that is still enrolled, which
+   * the server re-checked against the live table to accept the token at all.
+   * It is also the connection that most NEEDS the offer, since a resume arms
+   * nothing and therefore meets the step-up on its first act.
    */
   passkeyAvailable(): boolean {
-    return this.authMethodValue === 'webauthn' || this.webauthnAdvertised
+    return (
+      this.authMethodValue === 'webauthn' ||
+      this.authMethodValue === 'webauthn-resumed' ||
+      this.webauthnAdvertised
+    )
   }
 
   /**
@@ -571,6 +597,24 @@ export class RemoteConnection {
    */
   setSessionExpiredHandler(cb: (() => void) | null): void {
     this.onSessionExpired = cb
+  }
+
+  /**
+   * The passkey RESUMPTION TOKEN moved (ADR-063).
+   *
+   * Fired with a token when an accept carried a fresh one (a ceremony just
+   * happened), and with `null` when a token this client PRESENTED was not
+   * accepted — the cached copy is then dead and must go, or every reconnect for
+   * the rest of the session would spend a round trip and an audit row proving it
+   * again.
+   *
+   * Reported through a handler rather than written from here because persistence
+   * is the page's business, not the transport's: `web/main.tsx` owns the
+   * `sessionStorage` half (`resume-cache.ts`), exactly as it owns the password
+   * proof's.
+   */
+  setResumeTokenHandler(cb: ((token: string | null) => void) | null): void {
+    this.onResumeToken = cb
   }
 
   /**
@@ -1006,6 +1050,10 @@ export class RemoteConnection {
     this.authDisabledValue = false
     this.webauthnCapableOriginValue = false
     this.registeredOnThisSocket = false
+    // Per-socket like the flag above (ADR-063): `sendAuthFrame` sets it when it
+    // actually presents a token, and a socket that never gets that far must not
+    // inherit the previous one's answer.
+    this.presentedResumeToken = false
     // The cipher is PER SOCKET — its replay counters reset per connection on both
     // ends — so a reconnect must never inherit the previous socket's instance.
     // Explicit rather than implied by `initE2E` replacing it: between here and
@@ -1066,6 +1114,7 @@ export class RemoteConnection {
       // Per-socket, like the method above: a new socket carries a new token and
       // starts the enrollment over from registration.
       this.registeredOnThisSocket = false
+      this.presentedResumeToken = false
       // Any ceremony still in flight died with the socket. Settle it here so the
       // login screen re-offers instead of spinning to its 2-minute timeout.
       this.settleAssertion(new Error('Connection lost during passkey sign-in'))
@@ -1147,10 +1196,31 @@ export class RemoteConnection {
   private handleMessage(msg: WsServerMessage): void {
     switch (msg.type) {
       case 'auth-response':
+        // ADR-063, BEFORE the branch chain below and deliberately not inside it:
+        // a refused resume is not its own outcome. The server treated the frame
+        // as bare auth, so the answer we are about to handle is whatever a
+        // credential-less client would have got (`passkey-required` under
+        // `passkey-always`, which the tap screen recovers from) — all this
+        // client owes is to stop presenting a token the server just told us is
+        // dead, here and in the page's cache. Guarded on having actually
+        // PRESENTED one, so a passkey refusal for any other client is untouched.
+        if (!msg.ok && this.presentedResumeToken) {
+          this.credential = { ...this.credential, resumeToken: undefined }
+          this.presentedResumeToken = false
+          this.onResumeToken?.(null)
+        }
         if (msg.ok) {
           this.authMethodValue = msg.method
           this.authDisabledValue = msg.authDisabled === true
           this.webauthnCapableOriginValue = msg.webauthnCapableOrigin === true
+          // ADR-063: a ceremony just minted one. Kept on the credential so THIS
+          // instance's own reconnects present it without waiting for the page to
+          // route it back through `setCredential`, and reported so the page can
+          // cache it for the next tab-discard/restore.
+          if (msg.resumeToken) {
+            this.credential = { ...this.credential, resumeToken: msg.resumeToken }
+            this.onResumeToken?.(msg.resumeToken)
+          }
           this.settleAssertion(null)
           if (msg.method === 'enroll-token') {
             // The server consumed the token to answer this frame — it is
@@ -1416,10 +1486,18 @@ export class RemoteConnection {
    * login screen's one tap runs the ceremony on this very socket.
    */
   private sendAuthFrame(): void {
+    this.presentedResumeToken = false
     if (this.credential.pwProof !== undefined) {
       this.send({ type: 'auth', pwProof: this.credential.pwProof })
     } else if (this.credential.enrollToken !== undefined) {
       this.send({ type: 'auth', enrollToken: this.credential.enrollToken })
+    } else if (this.credential.resumeToken !== undefined) {
+      // ADR-063. Last of the three, matching the server's own order — and the
+      // only one whose refusal is not a dead end: an invalid resume falls
+      // through server-side EXACTLY as a bare `{type:'auth'}`, so the answer is
+      // the ordinary `passkey-required` and the tap screen is the recovery.
+      this.presentedResumeToken = true
+      this.send({ type: 'auth', resumeToken: this.credential.resumeToken })
     } else {
       this.send({ type: 'auth' })
     }

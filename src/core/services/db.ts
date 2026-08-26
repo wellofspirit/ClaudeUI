@@ -2143,7 +2143,7 @@ export interface AuditLogRow {
   connectionId: string
   /**
    * The `IdentityMethod` the connection was admitted under: 'password' |
-   * 'webauthn' | 'enroll-token' | 'none' | 'host'.
+   * 'webauthn' | 'webauthn-resumed' | 'enroll-token' | 'none' | 'host'.
    *
    * TEXT rather than an enum because it is a HISTORICAL record — rows written by
    * an older build keep whatever vocabulary that build had, and the retired

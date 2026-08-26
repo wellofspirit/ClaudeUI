@@ -93,6 +93,12 @@ const CAPABILITY_SET: ReadonlySet<string> = new Set<string>(CAPABILITIES)
  * authentication is disabled outright and the audit trail must say so rather
  * than implying a credential was checked.
  *
+ * `webauthn-resumed` (ADR-063) is a RESUMPTION of an earlier assertion — a token
+ * that ceremony minted, replayed on a later handshake. It is a distinct member
+ * rather than a relabelled `webauthn` precisely because the audit trail must be
+ * able to tell "a human touched the sensor" from "a browser presented what that
+ * touch left behind": same grants, same credential label, and no presence armed.
+ *
  * `token` and `tailnet-identity` are GONE (ADR-056). The bearer token was a link
  * carrying authority; ambient tailnet identity was a network fact standing in
  * for a person. Neither can authenticate a connection any more, so neither can
@@ -103,14 +109,16 @@ const CAPABILITY_SET: ReadonlySet<string> = new Set<string>(CAPABILITIES)
  * different axis entirely: WHICH WIRE a channel is served on (`ipcMain.handle`
  * vs the WebSocket), not who is on the far end of it.
  */
-export type IdentityMethod = 'password' | 'webauthn' | 'enroll-token' | 'none' | 'host'
+export type IdentityMethod =
+  'password' | 'webauthn' | 'webauthn-resumed' | 'enroll-token' | 'none' | 'host'
 
 export interface ConnectionIdentity {
   method: IdentityMethod
   /**
-   * Tailnet login when we have one; for `webauthn`, the credential's nickname
-   * (falling back to a short credential-id prefix, which is still a stable
-   * per-device handle); otherwise the method name. Audit-facing.
+   * Tailnet login when we have one; for `webauthn` — and for the
+   * `webauthn-resumed` descended from one — the credential's nickname (falling
+   * back to a short credential-id prefix, which is still a stable per-device
+   * handle); otherwise the method name. Audit-facing.
    */
   label: string
   connectedAt: number
@@ -150,8 +158,9 @@ export interface CommandConnection {
    * NEVER decays, deliberately. It is what unlocks terminal READS for the
    * connection's lifetime under the read/act split, while the two windows above
    * and below govern ACTING. Weaker logins (token, ambient tailnet identity,
-   * tunnel fragment, and the password — whose proof is client-cacheable, so it
-   * authenticates the browser rather than provably the human) arm nothing and
+   * tunnel fragment, the password — whose proof is client-cacheable, so it
+   * authenticates the browser rather than provably the human — and since ADR-063
+   * `webauthn-resumed`, which is that same idea for a passkey) arm nothing and
    * meet the step-up as their FIRST presence proof.
    */
   armedEver?: boolean
