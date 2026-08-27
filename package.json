@@ -7,11 +7,11 @@
   "license": "Apache-2.0",
   "homepage": "https://github.com/wellofspirit/ClaudeUI",
   "claudeCliVersion": "2.1.241",
-  "opencodeCliVersion": "1.18.10",
+  "opencodeCliVersion": "1.18.23",
   "opencodeFork": {
     "repo": "https://github.com/wellofspirit/opencode.git",
     "branch": "claudeui",
-    "tag": "v1.18.10"
+    "tag": "v1.18.23"
   },
   "piCliVersion": "0.82.1",
   "ripgrepVersion": "14.1.1",
