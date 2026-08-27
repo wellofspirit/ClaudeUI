@@ -50,9 +50,18 @@ describe.skipIf(SKIP)('opencode recycleAll smoke', () => {
   const cwd = mkdtempSync(join(tmpdir(), 'oc-recycle-'))
   let mgr: OpencodeServerManager
 
-  afterAll(() => {
+  afterAll(async () => {
     mgr?.dispose()
-    rmSync(cwd, { recursive: true, force: true })
+    // dispose() tree-kills asynchronously; on Windows the dying server still
+    // holds the cwd for a moment, so a first rmSync can EPERM. Retry briefly.
+    for (let i = 0; i < 25; i++) {
+      try {
+        rmSync(cwd, { recursive: true, force: true })
+        break
+      } catch {
+        await new Promise((r) => setTimeout(r, 200))
+      }
+    }
   })
 
   it('kills the pooled server, fans out exit, and a fresh acquire works', async () => {
