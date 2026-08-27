@@ -31,7 +31,9 @@ import { SelectMenu } from '../shared/SelectMenu'
 export type SchemaNode = Record<string, unknown>
 export type SchemaDefs = Record<string, SchemaNode>
 
-const inputClass =
+/** Shared input look. Exported so hand-written opencode panes match the
+ *  schema-driven form's fields instead of re-deriving the class string. */
+export const inputClass =
   'bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors'
 
 // ── Schema helpers ───────────────────────────────────────────────────────────
@@ -126,7 +128,16 @@ function Description({ text }: { text?: unknown }): React.JSX.Element | null {
   return <div className="text-[10px] text-text-muted/60 mt-0.5 leading-relaxed">{text}</div>
 }
 
-function RawJsonField({ fieldKey, value, onChange }: FieldProps): React.JSX.Element {
+/** The subset of `FieldProps` the raw-JSON leaf editor actually reads. Named so
+ *  call sites outside the schema form (the curated opencode panes) can use it
+ *  without fabricating a schema node. */
+export interface RawJsonFieldProps {
+  fieldKey: string
+  value: unknown
+  onChange: (v: unknown) => void
+}
+
+export function RawJsonField({ fieldKey, value, onChange }: RawJsonFieldProps): React.JSX.Element {
   // Escape hatch: edit the raw JSON value, commit (parse) on blur, inline error.
   // Absent (undefined) values start blank so a focus/blur without edits stays a
   // no-op rather than injecting `null`.
@@ -514,7 +525,7 @@ export function SchemaField(props: FieldProps): React.JSX.Element {
       return (
         <div data-testid="OpencodeSchemaForm.field" data-id={fieldKey} className="px-3 py-1.5">
           <FieldLabel name={fieldKey} description={description} />
-          <RawJsonField {...props} node={node} />
+          <RawJsonField fieldKey={fieldKey} value={value} onChange={onChange} />
         </div>
       )
   }

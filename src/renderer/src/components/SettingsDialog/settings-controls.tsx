@@ -2,22 +2,47 @@ import { useEffect, useRef, useState } from 'react'
 
 // ── Shared setting control components ────────────────────────────────
 
+/**
+ * The switch visual itself, split out of `SettingsToggle` so a READ-ONLY row —
+ * a value ClaudeUI forces and the user cannot change — can show the same
+ * affordance without pretending to be an interactive button.
+ */
+export function ToggleSwitch({ checked }: { checked: boolean }): React.JSX.Element {
+  // inline-block is load-bearing: inside SettingsToggle the span is a flex item
+  // (blockified), but a standalone use sits in inline context where a plain
+  // span ignores w-7/h-4 — the track collapses and the absolute knob overhangs.
+  return (
+    <span
+      className={`inline-block w-7 h-4 rounded-full relative transition-colors ${checked ? 'bg-accent' : 'bg-text-muted/30'}`}
+    >
+      <span
+        className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${checked ? 'left-3.5' : 'left-0.5'}`}
+      />
+    </span>
+  )
+}
+
 export function SettingsToggle({
   label,
   checked,
   onChange,
   tooltip,
-  testid
+  testid,
+  dataId
 }: {
   label: string
   checked: boolean
   onChange: (value: boolean) => void
   tooltip?: string
   testid?: string
+  /** ADR-027 discriminator for repeated instances sharing one `testid`. */
+  dataId?: string
 }): React.JSX.Element {
   return (
     <button
       data-testid={testid ?? 'SettingsToggle'}
+      data-id={dataId}
+      aria-pressed={checked}
       onClick={() => onChange(!checked)}
       className="w-full flex items-center justify-between px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover rounded transition-colors cursor-default"
     >
@@ -25,13 +50,7 @@ export function SettingsToggle({
         {label}
         {tooltip && <InfoTooltip text={tooltip} />}
       </span>
-      <span
-        className={`w-7 h-4 rounded-full relative transition-colors ${checked ? 'bg-accent' : 'bg-text-muted/30'}`}
-      >
-        <span
-          className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${checked ? 'left-3.5' : 'left-0.5'}`}
-        />
-      </span>
+      <ToggleSwitch checked={checked} />
     </button>
   )
 }
@@ -407,10 +426,14 @@ export function SandboxListSetting({
       data-testid={testid ?? 'SandboxListSetting'}
       className="px-3 py-1.5 text-[13px] text-text-secondary"
     >
-      <div className={`mb-1.5 flex items-center gap-1 ${labelColor}`}>
-        {label}
-        {tooltip && <InfoTooltip text={tooltip} />}
-      </div>
+      {/* An empty label means the caller already rendered its own label block
+          above the control — don't reserve a blank line for it. */}
+      {(label || tooltip) && (
+        <div className={`mb-1.5 flex items-center gap-1 ${labelColor}`}>
+          {label}
+          {tooltip && <InfoTooltip text={tooltip} />}
+        </div>
+      )}
       {items.length > 0 && (
         <div className="flex flex-wrap gap-1 mb-1.5">
           {items.map((item, i) => (

@@ -2,13 +2,15 @@
  * Unit tests for buildOpencodeConfigContent (OpencodeServerManager).
  *
  * Guards:
- * - Only {mcp: {claudeui: ...}} + the experimental block are emitted (no
- *   model/provider/agent fields).
+ * - Only {mcp: {claudeui: ...}} + the experimental/autoupdate blocks are
+ *   emitted (no model/provider/agent fields).
  * - MCP host port and token are wired in correctly.
  * - API keys are never injected.
  * - bridgedMcp arg merges Claude MCP servers alongside claudeui; claudeui is always first.
  * - experimental.continue_loop_on_deny keeps permission rejections non-fatal
  *   (Claude parity — Slice C).
+ * - autoupdate is forced false so the vendored fork can't replace itself with
+ *   an upstream build (ADR-037).
  *
  * Model/provider/agent fields are now written to opencode's own config file by
  * opencode-config.ts; they are no longer part of OPENCODE_CONFIG_CONTENT.
@@ -32,9 +34,9 @@ function parse(
 }
 
 describe('buildOpencodeConfigContent', () => {
-  it('emits ONLY the mcp + experimental blocks — no model/provider/agent fields', () => {
+  it('emits ONLY the mcp + experimental + autoupdate blocks — no model/provider/agent fields', () => {
     const out = parse()
-    expect(Object.keys(out)).toEqual(['mcp', 'experimental'])
+    expect(Object.keys(out)).toEqual(['mcp', 'experimental', 'autoupdate'])
     expect(out).not.toHaveProperty('model')
     expect(out).not.toHaveProperty('small_model')
     expect(out).not.toHaveProperty('provider')
@@ -75,6 +77,18 @@ describe('buildOpencodeConfigContent', () => {
   it('sets experimental.continue_loop_on_deny: true (rejections stay non-fatal)', () => {
     const out = parse()
     expect(out.experimental).toEqual({ continue_loop_on_deny: true })
+  })
+
+  // ── ADR-037: the spawned binary is the vendored FORK ──────────────────────
+
+  it('forces autoupdate: false — a self-update would drop every patch we carry', () => {
+    const out = parse()
+    expect(out.autoupdate).toBe(false)
+  })
+
+  it('still forces autoupdate: false when bridged MCP servers are present', () => {
+    const out = parse({ myServer: { type: 'local', command: ['node', 'srv.js'], enabled: true } })
+    expect(out.autoupdate).toBe(false)
   })
 
   // ── ADR-033 M2: dispatch timeout + caller-identity plugin ──────────────────

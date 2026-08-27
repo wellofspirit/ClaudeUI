@@ -14,9 +14,12 @@ import {
   SCOPES,
   SECTION_SCOPE_MAP,
   SECTION_CAPABILITY,
+  CONFIG_POINTER_KEYS,
+  CONFIG_HIDDEN_KEYS,
   scopeCapabilities,
   isSectionVisible
 } from '../settings-sections'
+import opencodeConfigSchema from '../../../../../shared/opencode-config-schema.1.18.23.json'
 import {
   CLAUDE_ENGINE_CAPABILITIES,
   OPENCODE_ENGINE_CAPABILITIES,
@@ -120,18 +123,65 @@ describe('SCOPES structure', () => {
 
     it('exists', () => expect(opencode).toBeDefined())
 
-    it('has 3 subgroups: Engine, Vendor, Agents', () => {
-      expect(opencode.subgroups.map((sg) => sg.label)).toEqual(['Engine', 'Vendor', 'Agents'])
+    it('has 4 subgroups: Engine, Configuration, Vendor, Agents', () => {
+      expect(opencode.subgroups.map((sg) => sg.label)).toEqual([
+        'Engine',
+        'Configuration',
+        'Vendor',
+        'Agents'
+      ])
     })
 
-    it('Engine subgroup contains opencode-automode, opencode-models, opencode-dispatch, opencode-config in order', () => {
+    it('Engine subgroup contains opencode-automode, opencode-models, opencode-dispatch in order', () => {
       const engine = opencode.subgroups.find((sg) => sg.label === 'Engine')!
       expect(engine.sections.map((s) => s.id)).toEqual([
         'opencode-automode',
         'opencode-models',
-        'opencode-dispatch',
+        'opencode-dispatch'
+      ])
+    })
+
+    // The curated panes over opencode's own config file, with the generic
+    // editor ("Raw config") last for everything they don't cover.
+    it('Configuration subgroup contains the 7 curated panes then opencode-config, in order', () => {
+      const configuration = opencode.subgroups.find((sg) => sg.label === 'Configuration')!
+      expect(configuration.sections.map((s) => s.id)).toEqual([
+        'opencode-session',
+        'opencode-tool-output',
+        'opencode-attachments',
+        'opencode-workspace',
+        'opencode-tools',
+        'opencode-diagnostics',
+        'opencode-managed',
         'opencode-config'
       ])
+    })
+
+    // A bad import would leave the element type `undefined` and only blow up
+    // when the user opens the section; building the element catches it here.
+    it('every Configuration section renders a defined component', () => {
+      const configuration = opencode.subgroups.find((sg) => sg.label === 'Configuration')!
+      for (const section of configuration.sections) {
+        for (const item of section.items) {
+          const el = item.render(
+            {} as Parameters<typeof item.render>[0],
+            () => {},
+            {} as never,
+            () => {},
+            {} as never,
+            () => {}
+          )
+          expect(el.type, `${section.id}/${item.key} renders an undefined component`).toBeTruthy()
+        }
+      }
+    })
+
+    it('opencode-config is labelled "Raw config" and no longer sits under Engine', () => {
+      const engine = opencode.subgroups.find((sg) => sg.label === 'Engine')!
+      expect(engine.sections.map((s) => s.id)).not.toContain('opencode-config')
+      const raw = SECTIONS.find((s) => s.id === 'opencode-config')!
+      expect(raw.label).toBe('Raw config')
+      expect(raw.items[0].label).toBe('Raw config (opencode.json)')
     })
 
     it('Vendor subgroup contains only vendor-opencode', () => {
@@ -234,6 +284,21 @@ describe('SECTION_SCOPE_MAP', () => {
     expect(SECTION_SCOPE_MAP.get('opencode-agents')).toBe('opencode')
   })
 
+  it('every Configuration-subgroup section → opencode', () => {
+    for (const id of [
+      'opencode-session',
+      'opencode-tool-output',
+      'opencode-attachments',
+      'opencode-workspace',
+      'opencode-tools',
+      'opencode-diagnostics',
+      'opencode-managed',
+      'opencode-config'
+    ]) {
+      expect(SECTION_SCOPE_MAP.get(id), `${id} should map to the opencode scope`).toBe('opencode')
+    }
+  })
+
   it('vendor-anthropic → claude', () => {
     expect(SECTION_SCOPE_MAP.get('vendor-anthropic')).toBe('claude')
   })
@@ -248,6 +313,63 @@ describe('SECTION_SCOPE_MAP', () => {
 
   it('vendor-pi → pi', () => {
     expect(SECTION_SCOPE_MAP.get('vendor-pi')).toBe('pi')
+  })
+})
+
+/**
+ * The raw editor partitions the vendored schema's top-level Config keys three
+ * ways: HIDDEN (rendered nowhere), POINTER (read-only "managed in X" row), and
+ * everything else (editable). The partition is derived, not hardcoded — but a
+ * key misspelled in either set would silently fall back into the EDITABLE
+ * bucket, giving a curated pane and the raw editor two writers for one key.
+ */
+describe('opencode raw-config key partition', () => {
+  const configProps = Object.keys(opencodeConfigSchema.$defs.Config.properties)
+
+  it('every pointer key exists in the vendored schema (catches typos)', () => {
+    for (const key of Object.keys(CONFIG_POINTER_KEYS)) {
+      expect(configProps, `pointer key "${key}" is not a Config property`).toContain(key)
+    }
+  })
+
+  it('every hidden key exists in the vendored schema (catches typos)', () => {
+    for (const key of CONFIG_HIDDEN_KEYS) {
+      expect(configProps, `hidden key "${key}" is not a Config property`).toContain(key)
+    }
+  })
+
+  it('every pointer label names a real opencode-scope section', () => {
+    const sectionLabels = new Set(
+      SCOPES.find((s) => s.id === 'opencode')!.subgroups.flatMap((sg) =>
+        sg.sections.map((s) => s.label)
+      )
+    )
+    // Pointers that name a place rather than a section stay as prose.
+    const prose = new Set(['Providers', 'Custom providers', 'injected at spawn', 'Autonomy mode'])
+    for (const [key, label] of Object.entries(CONFIG_POINTER_KEYS)) {
+      if (prose.has(label)) continue
+      expect(sectionLabels, `pointer "${key}" → "${label}" matches no section`).toContain(label)
+    }
+  })
+
+  it('no key is both hidden and a pointer', () => {
+    for (const key of Object.keys(CONFIG_POINTER_KEYS)) {
+      expect(CONFIG_HIDDEN_KEYS.has(key), `"${key}" is both hidden and a pointer`).toBe(false)
+    }
+  })
+
+  it('leaves exactly the keys no curated pane covers editable', () => {
+    const editable = configProps.filter(
+      (k) => !(k in CONFIG_POINTER_KEYS) && !CONFIG_HIDDEN_KEYS.has(k)
+    )
+    expect(editable.toSorted()).toEqual([
+      'command',
+      'enterprise',
+      'mode',
+      'reference',
+      'references',
+      'username'
+    ])
   })
 })
 

@@ -96,7 +96,7 @@ function locateBinary(): string {
 /** ~20 minutes — must exceed the dispatcher's 10-min DISPATCH_TIMEOUT_MS so a
  *  long-running Claude target never gets cut off by opencode's OWN per-server
  *  MCP callTool timeout (config default 5s — see
- *  src/shared/opencode-config-schema.1.18.9.json `McpRemoteConfig.timeout`,
+ *  src/shared/opencode-config-schema.1.18.23.json `McpRemoteConfig.timeout`,
  *  read by `requestTimeout()` in vendor/opencode-src/packages/opencode/src/mcp/index.ts:661-663).
  *  The dispatcher's own heartbeat (sendProgress) ALSO resets this — belt and
  *  suspenders, since opencode may not always ride a progressToken. */
@@ -170,6 +170,12 @@ export function buildOpencodeConfigContent(
     // permissions on any reject, which carry no message. Ephemeral env-var
     // config only — never written to a user file (ADR-031).
     experimental: { continue_loop_on_deny: true },
+    // The binary we spawn is the VENDORED FORK (ADR-037): a self-update would
+    // replace it with an upstream build and silently drop every patch we carry.
+    // Version is owned by `package.json#opencodeCliVersion` + ensure-opencode,
+    // never by the running process. Ephemeral like the block above — a user
+    // config file is never rewritten to say this (ADR-031).
+    autoupdate: false,
     // ADR-033 M2: the caller-identity plugin, loaded ONLY when vendored (dev
     // and packaged builds both resolve it via locatePluginFile()). Absent in
     // any context where the file isn't found — opencode itself never fails
@@ -198,6 +204,14 @@ function spawnServer(
       env: {
         ...process.env,
         OPENCODE_SERVER_PASSWORD: password,
+        // Hard kill switch for opencode's cloud share (share-next.ts reads
+        // OPENCODE_DISABLE_SHARE once at module load and short-circuits every
+        // create/sync/remove path). The config-level `share` key is NOT enough:
+        // it lives in opencode's own config file, which the user — or a project
+        // file — can set back to "auto", and sharing uploads whole sessions
+        // (messages, file diffs) to opencode's servers. An env var on the child
+        // we spawn cannot be overridden from a config file.
+        OPENCODE_DISABLE_SHARE: '1',
         // Inject the per-cwd in-process MCP server so opencode connects to it
         // without requiring any global plugin installation. Bridged Claude MCP
         // servers are also injected here so secrets (env/headers) never touch

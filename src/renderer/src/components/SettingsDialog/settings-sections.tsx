@@ -66,8 +66,19 @@ import {
   TrashIcon
 } from './ProviderRowIcons'
 import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
+import { useOpencodeInstalled, usePiInstalled } from './use-engine-installed'
+import {
+  OpencodeSessionBehaviorSection,
+  OpencodeToolOutputSection,
+  OpencodeAttachmentsSection,
+  OpencodeWorkspaceSection,
+  OpencodeToolsSection,
+  OpencodeDiagnosticsSection,
+  OpencodeManagedKeysSection
+} from './OpencodeConfigPanes'
+import { ModelCapabilityEditor } from './OpencodeModelCapabilities'
 import { diffToPatches } from '../../../../shared/opencode-config-diff'
-import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.18.9.json'
+import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.18.23.json'
 
 // ── Section definitions ──────────────────────────────────────────────
 
@@ -471,46 +482,13 @@ export function AutonomyModePicker(): React.JSX.Element {
 }
 
 // ── opencode availability probe ──────────────────────────────────────
-
-/**
- * Whether a given engine is installed.
- *
- * Uses `engineIsInstalled(engineId)` — a cheap, deterministic binary-on-disk
- * check that NEVER spawns a server/process. The earlier `vendorAuthProbe`/
- * `getEngineModels` approaches both required a successful server spawn + HTTP
- * round-trip, so any transient spawn failure (e.g. an opencode startup crash)
- * made the engine read as "not installed" and hid the very sections that
- * configure it. Auth/model state is a separate, allowed-to-fail concern — not
- * "installed".
- *
- * Returns null while probing, then true/false.
- */
-function useEngineInstalled(engineId: EngineId): boolean | null {
-  const [installed, setInstalled] = useState<boolean | null>(null)
-  useEffect(() => {
-    let cancelled = false
-    window.api
-      .engineIsInstalled(engineId)
-      .then((v) => {
-        if (!cancelled) setInstalled(v)
-      })
-      .catch(() => {
-        if (!cancelled) setInstalled(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [engineId])
-  return installed
-}
-
-function useOpencodeInstalled(): boolean | null {
-  return useEngineInstalled('opencode')
-}
-
-function usePiInstalled(): boolean | null {
-  return useEngineInstalled('pi')
-}
+//
+// `useEngineInstalled` / `useOpencodeInstalled` / `usePiInstalled` moved to
+// ./use-engine-installed (imported above). They gate engine-scoped sections on
+// a cheap, deterministic binary-on-disk check that NEVER spawns a
+// server/process — the earlier `vendorAuthProbe`/`getEngineModels` approaches
+// needed a successful spawn + HTTP round-trip, so any transient spawn failure
+// hid the very sections that configure the engine.
 
 // ── opencode auto-mode (Full) LLM gatekeeper settings (ADR-023) ──────
 
@@ -3014,28 +2992,19 @@ export function OpencodeProviderConfigModal({
 
 const OPENCODE_SCHEMA_DEFS = (opencodeConfigSchema as { $defs: SchemaDefs }).$defs
 const OPENCODE_CONFIG_NODE = OPENCODE_SCHEMA_DEFS.Config as SchemaNode
-/** The provider-model entry schema: $defs.ProviderConfig.properties.models.additionalProperties */
-const OPENCODE_MODEL_ENTRY_SCHEMA = (
-  ((OPENCODE_SCHEMA_DEFS.ProviderConfig as SchemaNode).properties as Record<string, SchemaNode>)
-    .models as SchemaNode
-).additionalProperties as SchemaNode
-/** Model capability fields the provider editor exposes (raw opencode names). */
-const MODEL_CAP_KEYS = [
-  'attachment',
-  'reasoning',
-  'temperature',
-  'tool_call',
-  'modalities',
-  'cost',
-  'limit'
-]
 
 /**
  * Top-level Config keys owned by a DEDICATED UI (rendered as read-only pointers in
  * the raw editor, never editable there). `provider` is patch-writable via the
  * per-model capability editor, but curated as a whole under Custom providers.
+ * The bulk of them are the curated Configuration panes (OpencodeConfigPanes.tsx);
+ * each label here must match that pane's Section label so the pointer is a
+ * usable direction and not just a "not here".
+ *
+ * Exported for the guard test: a key MISSPELLED here silently stays editable in
+ * the raw editor while its curated pane also writes it — two writers, one key.
  */
-const CONFIG_POINTER_KEYS: Record<string, string> = {
+export const CONFIG_POINTER_KEYS: Record<string, string> = {
   model: 'Models',
   small_model: 'Models',
   disabled_providers: 'Providers',
@@ -3043,117 +3012,48 @@ const CONFIG_POINTER_KEYS: Record<string, string> = {
   provider: 'Custom providers',
   agent: 'Agents',
   mcp: 'injected at spawn',
-  permission: 'Autonomy mode'
+  permission: 'Autonomy mode',
+  compaction: 'Session behavior',
+  subagent_depth: 'Session behavior',
+  snapshot: 'Session behavior',
+  tool_output: 'Tool output',
+  attachment: 'Image attachments',
+  instructions: 'Workspace',
+  default_agent: 'Workspace',
+  shell: 'Workspace',
+  watcher: 'Workspace',
+  tools: 'Tools & integrations',
+  formatter: 'Tools & integrations',
+  lsp: 'Tools & integrations',
+  plugin: 'Tools & integrations',
+  skills: 'Tools & integrations',
+  logLevel: 'Diagnostics',
+  experimental: 'Diagnostics',
+  autoupdate: 'Managed keys',
+  share: 'Managed keys'
 }
-/** Config keys the raw editor never renders as editable fields. */
-const CONFIG_EXCLUDED_KEYS = new Set(['$schema', ...Object.keys(CONFIG_POINTER_KEYS)])
-
 /**
- * Per-model capability editor. Reads the model's raw entry from opencode's config
- * file, edits it via the schema-driven form, and saves ONLY changed leaves through
- * patchOpencodeNative (e.g. ['provider','ec2','models','qwen3.6:27b','attachment']).
- * Composes with the projection writer (saveOpencodeSettings) that owns id/name —
- * both are leaf-scoped so neither clobbers the other.
+ * Keys rendered NOWHERE — not editable, not even as a pointer. `$schema` is not
+ * user config; `server.*` is overridden by the CLI flags OpencodeServerManager
+ * spawns with; `layout` and `autoshare` are deprecated upstream. Listing them as
+ * pointers would only imply a UI that owns them.
  */
-function ModelCapabilityEditor({
-  providerId,
-  modelId
-}: {
-  providerId: string
-  modelId: string
-}): React.JSX.Element {
-  const [original, setOriginal] = useState<Record<string, unknown> | null>(null)
-  const [draft, setDraft] = useState<Record<string, unknown>>({})
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [saved, setSaved] = useState(false)
-
-  const load = useCallback(() => {
-    window.api
-      .readOpencodeNativeRaw()
-      .then(({ config }) => {
-        const prov = (config.provider as Record<string, unknown> | undefined)?.[providerId] as
-          Record<string, unknown> | undefined
-        const models = prov?.models as Record<string, unknown> | undefined
-        const entry = (models?.[modelId] as Record<string, unknown> | undefined) ?? {}
-        setOriginal(entry)
-        setDraft(structuredClone(entry))
-      })
-      .catch(() => {
-        setOriginal({})
-        setDraft({})
-      })
-  }, [providerId, modelId])
-  useEffect(() => load(), [load])
-
-  if (original === null) {
-    return <div className="text-[10px] text-text-muted/60 px-1">Loading capabilities…</div>
-  }
-
-  const dirty = JSON.stringify(draft) !== JSON.stringify(original)
-  const handleSave = async (): Promise<void> => {
-    const patches = diffToPatches(original, draft, ['provider', providerId, 'models', modelId])
-    if (patches.length === 0) return
-    setSaving(true)
-    setError(null)
-    setSaved(false)
-    try {
-      await window.api.patchOpencodeNative(patches)
-      load()
-      setSaved(true)
-      setTimeout(() => setSaved(false), 1500)
-      useSessionStore.getState().reloadModels()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <div
-      data-testid="ModelCapabilityEditor"
-      data-id={`${providerId}/${modelId}`}
-      className="rounded bg-bg-primary/30 p-1.5 space-y-1"
-    >
-      <OpencodeSchemaForm
-        schema={OPENCODE_MODEL_ENTRY_SCHEMA}
-        defs={OPENCODE_SCHEMA_DEFS}
-        value={draft}
-        onChange={setDraft}
-        pickKeys={MODEL_CAP_KEYS}
-        keyPrefix={`${providerId}.${modelId}`}
-      />
-      <div className="flex items-center gap-2 px-1">
-        <button
-          type="button"
-          data-testid="ModelCapabilityEditor.save"
-          disabled={!dirty || saving}
-          onClick={() => void handleSave()}
-          className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-        >
-          {saving ? 'Saving…' : 'Save capabilities'}
-        </button>
-        {saved && <span className="text-[10px] text-success">Saved</span>}
-        {error && (
-          <span
-            data-testid="ModelCapabilityEditor.error"
-            className="text-[10px] text-red-400 truncate max-w-[240px]"
-            title={error}
-          >
-            {error}
-          </span>
-        )}
-      </div>
-    </div>
-  )
-}
+export const CONFIG_HIDDEN_KEYS = new Set(['$schema', 'layout', 'autoshare', 'server'])
+/** Config keys the raw editor never renders as editable fields. */
+const CONFIG_EXCLUDED_KEYS = new Set([...CONFIG_HIDDEN_KEYS, ...Object.keys(CONFIG_POINTER_KEYS)])
 
 /**
- * "Configuration (opencode.json)" — schema-driven editor over the top-level
- * opencode Config, EXCLUDING keys owned by dedicated UIs (rendered as pointers).
- * Loads the raw config on mount, accumulates edits locally, and on Save computes
- * a deep diff → leaf patches → patchOpencodeNative. ajv errors surface inline.
+ * "Raw config (opencode.json)" — schema-driven editor over the top-level
+ * opencode Config, EXCLUDING keys owned by dedicated UIs (rendered as pointers)
+ * and CONFIG_HIDDEN_KEYS (rendered nowhere). What's left is the long tail no
+ * curated pane covers: command, enterprise, mode, reference, references,
+ * username. Loads the raw config on mount, accumulates edits locally, and on
+ * Save computes a deep diff → leaf patches → patchOpencodeNative. ajv errors
+ * surface inline.
+ *
+ * Unlike the curated Configuration panes (OpencodeConfigPanes.tsx), this one
+ * keeps its explicit Save button: a generic form over arbitrary shapes has no
+ * per-field commit point to hang an immediate write on.
  */
 function OpencodeRawConfigSection(): React.JSX.Element {
   const installed = useOpencodeInstalled()
@@ -3202,7 +3102,9 @@ function OpencodeRawConfigSection(): React.JSX.Element {
 
   const configProps = (OPENCODE_CONFIG_NODE.properties as Record<string, SchemaNode>) ?? {}
   const pickKeys = Object.keys(configProps).filter((k) => !CONFIG_EXCLUDED_KEYS.has(k))
-  const pointerKeys = Object.keys(configProps).filter((k) => k in CONFIG_POINTER_KEYS)
+  const pointerKeys = Object.keys(configProps).filter(
+    (k) => k in CONFIG_POINTER_KEYS && !CONFIG_HIDDEN_KEYS.has(k)
+  )
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(original)
   const handleSave = async (): Promise<void> => {
@@ -4957,9 +4859,208 @@ export const SECTIONS: Section[] = [
       }
     ]
   },
+  // ── opencode > Configuration subgroup ──────────────────────────────
+  // Seven curated panes over the config keys worth a real control, plus the
+  // generic editor for the long tail. Panes live in OpencodeConfigPanes.tsx;
+  // every key they own is also listed in CONFIG_POINTER_KEYS so the raw editor
+  // points here instead of offering a second, conflicting editor for it.
+  {
+    id: 'opencode-session',
+    label: 'Session behavior',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M3 12a9 9 0 1 0 3-6.7" />
+        <path d="M3 4v5h5" />
+        <path d="M12 8v4l3 2" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeSessionBehavior',
+        label: 'Session behavior',
+        keywords:
+          'opencode compaction auto prune tail_turns preserve_recent_tokens reserved subagent_depth snapshot context window compact undo revert',
+        render: () => <OpencodeSessionBehaviorSection />
+      }
+    ]
+  },
+  {
+    id: 'opencode-tool-output',
+    label: 'Tool output',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <polyline points="4 17 10 11 4 5" />
+        <line x1="12" y1="19" x2="20" y2="19" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeToolOutput',
+        label: 'Tool output',
+        keywords: 'opencode tool_output max_lines max_bytes truncate truncation preview',
+        render: () => <OpencodeToolOutputSection />
+      }
+    ]
+  },
+  {
+    id: 'opencode-attachments',
+    label: 'Image attachments',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <rect x="3" y="3" width="18" height="18" rx="2" />
+        <circle cx="8.5" cy="8.5" r="1.5" />
+        <path d="M21 15l-5-5L5 21" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeAttachments',
+        label: 'Image attachments',
+        keywords:
+          'opencode attachment image auto_resize max_width max_height max_base64_bytes paste screenshot resize',
+        render: () => <OpencodeAttachmentsSection />
+      }
+    ]
+  },
+  {
+    id: 'opencode-workspace',
+    label: 'Workspace',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeWorkspace',
+        label: 'Workspace',
+        keywords:
+          'opencode instructions default_agent shell watcher ignore AGENTS.md context primary agent terminal bash',
+        render: () => <OpencodeWorkspaceSection />
+      }
+    ]
+  },
+  {
+    id: 'opencode-tools',
+    label: 'Tools & integrations',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M14.7 6.3a4 4 0 01-5 5L4 17v3h3l5.7-5.7a4 4 0 015-5l-2.5-2.5 2.1-2.1a4 4 0 00-2.6 1.6z" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeTools',
+        label: 'Tools & integrations',
+        keywords:
+          'opencode tools bash read glob grep edit write task webfetch websearch todowrite skill apply_patch question lsp formatter plugin skills paths disable',
+        render: () => <OpencodeToolsSection />
+      }
+    ]
+  },
+  {
+    id: 'opencode-diagnostics',
+    label: 'Diagnostics',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <polyline points="3 12 7 12 10 4 14 20 17 12 21 12" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeDiagnostics',
+        label: 'Diagnostics',
+        keywords:
+          'opencode logLevel log level debug info warn error experimental mcp_timeout batch_tool troubleshoot',
+        render: () => <OpencodeDiagnosticsSection />
+      }
+    ]
+  },
+  {
+    id: 'opencode-managed',
+    label: 'Managed keys',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <rect x="4" y="10" width="16" height="10" rx="2" />
+        <path d="M8 10V7a4 4 0 018 0v3" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeManagedKeys',
+        label: 'Managed keys',
+        keywords:
+          'opencode autoupdate share autoshare continue_loop_on_deny server layout forced managed self-update sharing cloud',
+        render: () => <OpencodeManagedKeysSection />
+      }
+    ]
+  },
   {
     id: 'opencode-config',
-    label: 'Configuration',
+    label: 'Raw config',
     icon: (
       <svg
         width="14"
@@ -4978,9 +5079,9 @@ export const SECTIONS: Section[] = [
     items: [
       {
         key: 'opencodeConfig',
-        label: 'Configuration (opencode.json)',
+        label: 'Raw config (opencode.json)',
         keywords:
-          'opencode config raw schema attachment modalities tool_call reasoning cost limit instructions layout formatter lsp advanced',
+          'opencode config raw schema command username enterprise reference references mode advanced json',
         render: () => <OpencodeRawConfigSection />
       }
     ]
@@ -5131,7 +5232,21 @@ const ENGINE_CLAUDE_SECTION_IDS = new Set(['permissions', 'sandbox', 'proxy', 'c
 const ENGINE_OPENCODE_SECTION_IDS = new Set([
   'opencode-automode',
   'opencode-models',
-  'opencode-dispatch',
+  'opencode-dispatch'
+])
+
+/**
+ * Section ids that belong to opencode > Configuration — the curated panes over
+ * opencode's own config file, then the generic editor for what they don't cover.
+ */
+const CONFIGURATION_OPENCODE_SECTION_IDS = new Set([
+  'opencode-session',
+  'opencode-tool-output',
+  'opencode-attachments',
+  'opencode-workspace',
+  'opencode-tools',
+  'opencode-diagnostics',
+  'opencode-managed',
   'opencode-config'
 ])
 
@@ -5256,7 +5371,20 @@ export const SCOPES: ScopeDef[] = [
         sections: getSectionsForIds(ENGINE_OPENCODE_SECTION_IDS, [
           'opencode-automode',
           'opencode-models',
-          'opencode-dispatch',
+          'opencode-dispatch'
+        ])
+      },
+      {
+        id: 'opencode-configuration',
+        label: 'Configuration',
+        sections: getSectionsForIds(CONFIGURATION_OPENCODE_SECTION_IDS, [
+          'opencode-session',
+          'opencode-tool-output',
+          'opencode-attachments',
+          'opencode-workspace',
+          'opencode-tools',
+          'opencode-diagnostics',
+          'opencode-managed',
           'opencode-config'
         ])
       },
