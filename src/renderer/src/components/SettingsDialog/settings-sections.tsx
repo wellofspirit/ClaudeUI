@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import { useActiveSession, useSessionStore, PI_DEFAULT_MODEL } from '../../stores/session-store'
+import { useActiveSession, useSessionStore } from '../../stores/session-store'
 import type { AppSettings } from '../../stores/session-store'
 import { PermissionsDialog } from '../PermissionsDialog'
 import {
@@ -49,13 +49,13 @@ import {
   ChatRetentionSetting,
   InfoTooltip
 } from './settings-controls'
-import { ModelPicker, type ModelDisplay } from '../shared/InlinePickers'
+import { ModelPicker } from '../shared/InlinePickers'
+import { toModelDisplays, selectedModelDisplay, StaleModelNotice } from './settings-model-display'
 import { SelectMenu } from '../shared/SelectMenu'
 import { OpencodeAgentsSection } from './OpencodeAgents'
 import { RemoteServerSettings } from './RemoteServerSettings'
 import { PiVendors } from './PiVendors'
 import { SharedProviders } from './SharedProviders'
-import { PiModelAllowlistDialog } from './PiModelAllowlistDialog'
 import { ConfirmModal } from '../shared/ConfirmModal'
 import {
   IconButton,
@@ -76,6 +76,15 @@ import {
   OpencodeDiagnosticsSection,
   OpencodeManagedKeysSection
 } from './OpencodeConfigPanes'
+import {
+  PiSessionBehaviorSection,
+  PiModelsSection,
+  PiToolsSection,
+  PiImagesSection,
+  PiWorkspaceSection,
+  PiNetworkSection,
+  PiRawConfigSection
+} from './PiConfigPanes'
 import { ModelCapabilityEditor } from './OpencodeModelCapabilities'
 import { diffToPatches } from '../../../../shared/opencode-config-diff'
 import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.18.23.json'
@@ -504,77 +513,6 @@ const JUDGE_MODEL_DEFAULT_LABEL = 'Same as session model (default)'
 const DISPATCH_MODEL_DEFAULT_LABEL = '(not set)'
 /** Label for the opencode default/small model pickers' "no explicit choice" row. */
 const OPENCODE_MODEL_DEFAULT_LABEL = 'Default (use opencode default)'
-
-/**
- * `ModelInfo` → `ModelDisplay` for the shared picker. `value` stays the picker
- * VALUE (`<provider>/<modelId>`) that `decodeModelValue` consumes.
- */
-function toModelDisplays(models: ModelInfo[]): ModelDisplay[] {
-  return models.map((m) => ({ ...m, shortName: m.displayName || m.value }))
-}
-
-/**
- * A configured value that is missing from a NON-EMPTY discovered list is STALE
- * — the engine reported its models and this one was not among them. An empty
- * list means discovery hasn't run (or nothing is authenticated), which says
- * nothing about the value, so it is never flagged.
- */
-function isStaleModelValue(models: ModelInfo[], value: string): boolean {
-  return !!value && models.length > 0 && !models.some((m) => m.value === value)
-}
-
-/** Suffix marking a configured model the engine no longer offers. */
-const UNAVAILABLE_SUFFIX = ' (unavailable)'
-
-/**
- * The `ModelDisplay` a settings ModelPicker should show as selected.
- *
- * An unset value ('') means "inherit / not set" and reads as `emptyLabel`,
- * matching the pinned empty row. A CONFIGURED-but-undiscovered model
- * (hand-edited, or a provider not authenticated yet) is shown VERBATIM rather
- * than collapsing to the empty label, which would misreport what is saved —
- * and once discovery HAS reported models without it, it is marked unavailable
- * in place. Keeping the value visible is the point: the fix is to change this
- * setting, which the user cannot do without seeing what it currently says.
- */
-function selectedModelDisplay(
-  models: ModelInfo[],
-  value: string,
-  emptyLabel: string
-): ModelDisplay {
-  const known = models.find((m) => m.value === value)
-  if (known) return { ...known, shortName: known.displayName || known.value }
-  const label = value
-    ? `${value}${isStaleModelValue(models, value) ? UNAVAILABLE_SUFFIX : ''}`
-    : emptyLabel
-  return { value, displayName: label, shortName: label }
-}
-
-/**
- * Inline warning under a settings model picker whose saved value no longer
- * exists. Rendered next to the picker rather than folded into it so the
- * warning styling does not have to leak into the shared ModelPicker.
- */
-function StaleModelNotice({
-  testid,
-  models,
-  value
-}: {
-  testid: string
-  models: ModelInfo[]
-  value: string
-}): React.JSX.Element | null {
-  if (!isStaleModelValue(models, value)) return null
-  return (
-    <div
-      data-testid={`${testid}.staleModel`}
-      data-model={value}
-      className="mt-1 text-[10px] text-yellow-400 leading-relaxed"
-    >
-      “{value}” is no longer available. Pick another model — this one will fail when it is used.
-    </div>
-  )
-}
 
 /** The `AutoModeConfig` keys that hold a classifier trust/protection list. */
 type TrustListKey = 'trustedDomains' | 'trustedRegistries' | 'protectedPatterns'
@@ -2359,217 +2297,6 @@ function OpencodeModelsSection(): React.JSX.Element {
       <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
         Changes apply on the next opencode server start for each working directory.
       </div>
-    </div>
-  )
-}
-
-// ── pi Default model section (M3) ────────────────────────────────────
-
-/**
- * pi's per-engine default model — lives in `EngineConfig.piConfig.defaultModel`
- * (engines/pi.json via loadEngineConfig/saveEngineConfig), NOT a dedicated
- * opencode.json-style settings file like OpencodeModelsSection's `cfg.model`
- * (pi has no native-config-passthrough schema to mirror in M3). Discovered
- * models use a visible select, with an explicit custom-ID escape hatch and a
- * ClaudeUI-private allowlist for picker visibility and default resolution.
- */
-function PiDefaultModelSection(): React.JSX.Element {
-  const [cfg, setCfg] = useState<EngineConfig | null>(null)
-  const [models, setModels] = useState<ModelInfo[]>([])
-  const [customMode, setCustomMode] = useState(false)
-  const [managingModels, setManagingModels] = useState(false)
-  const installed = usePiInstalled()
-
-  useEffect(() => {
-    window.api
-      .loadEngineConfig('pi')
-      .then(setCfg)
-      .catch(() => setCfg({}))
-    window.api
-      .getEngineModels()
-      .then((groups) => {
-        const pi = groups.filter((g) => g.engineId === 'pi')
-        setModels(pi.flatMap((g) => g.models))
-      })
-      .catch(() => {})
-  }, [])
-
-  if (cfg === null || installed === null) {
-    return (
-      <div data-testid="PiDefaultModelSection" className="px-3 py-1.5 text-[13px] text-text-muted">
-        Loading…
-      </div>
-    )
-  }
-  if (!installed) {
-    return (
-      <div
-        data-testid="PiDefaultModelSection"
-        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
-      >
-        pi is not installed. Model settings apply to pi sessions.
-      </div>
-    )
-  }
-
-  const current = cfg.piConfig?.defaultModel ?? ''
-  const known = current === '' || models.some((m) => m.value === current)
-  const allowlist = cfg.piConfig?.modelAllowlist
-  const defaultExcluded = !!current && allowlist !== undefined && !allowlist.includes(current)
-
-  const saveAllowlist = async (modelAllowlist: string[]): Promise<void> => {
-    const latest = await window.api.loadEngineConfig('pi')
-    const next: EngineConfig = {
-      ...latest,
-      piConfig: { ...latest.piConfig, modelAllowlist }
-    }
-    await window.api.saveEngineConfig('pi', next)
-    setCfg(next)
-    useSessionStore.getState().reloadModels()
-    window.api
-      .getEngineModels()
-      .then((groups) =>
-        setModels(
-          groups.filter((group) => group.engineId === 'pi').flatMap((group) => group.models)
-        )
-      )
-      .catch(() => {})
-  }
-
-  const update = (value: string): void => {
-    const next: EngineConfig = {
-      ...cfg,
-      piConfig: { ...cfg.piConfig, defaultModel: value || undefined }
-    }
-    setCfg(next)
-    window.api.saveEngineConfig('pi', next).catch(() => {})
-    // Mirror the default-model choice into the store so new/reopened pi
-    // sessions pick it up immediately, and refresh the picker model list.
-    // The RAW value (not the constant): an empty string is what tells the store
-    // that nothing is configured, which is what separates "the builtin default
-    // may fall back silently" from "the user named this model".
-    useSessionStore.getState().setPiDefaultModel(value)
-    useSessionStore.getState().reloadModels()
-  }
-
-  return (
-    <div data-testid="PiDefaultModelSection" className="space-y-1">
-      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-        <div className="mb-1 flex items-center gap-1">
-          Default model
-          <InfoTooltip text="The primary model for new pi sessions. Format: provider/model-id, e.g. openai-codex/gpt-5.6-luna. Free text is allowed for models pi supports locally that ClaudeUI hasn't discovered yet." />
-        </div>
-        {models.length > 0 ? (
-          // Themed ModelPicker rather than a native <select> (OS-painted option
-          // lists are unreadable in dark themes). `__custom__` stays a real
-          // selectable VALUE — it is a mode switch, not a model, so it rides
-          // the picker's pinned trailing row instead of the model groups.
-          <div
-            data-testid="PiDefaultModelSection.defaultModel"
-            data-value={customMode || !known ? '__custom__' : current}
-          >
-            <ModelPicker
-              placement="down"
-              emptyOption={{ label: `Default (${PI_DEFAULT_MODEL})` }}
-              trailingOption={{ value: '__custom__', label: 'Custom model ID...' }}
-              models={toModelDisplays(models)}
-              selectedModel={
-                customMode || !known
-                  ? {
-                      value: '__custom__',
-                      displayName: 'Custom model ID...',
-                      shortName: 'Custom model ID...'
-                    }
-                  : selectedModelDisplay(models, current, `Default (${PI_DEFAULT_MODEL})`)
-              }
-              onSelectModel={(v) => {
-                if (v === '__custom__') setCustomMode(true)
-                else {
-                  setCustomMode(false)
-                  update(v)
-                }
-              }}
-            />
-          </div>
-        ) : (
-          <div data-testid="PiDefaultModelSection.empty" className="text-[11px] text-warning">
-            No pi models discovered. Authenticate a provider, then refresh models.
-          </div>
-        )}
-        {(models.length === 0 || customMode || !known) && (
-          <input
-            data-testid="PiDefaultModelSection.customModel"
-            type="text"
-            value={current}
-            onChange={(e) => update(e.target.value)}
-            placeholder="Custom provider/model-id"
-            className="mt-1 w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary"
-          />
-        )}
-        <button
-          data-testid="PiDefaultModelSection.refresh"
-          onClick={() => {
-            window.api
-              .getEngineModels()
-              .then((groups) =>
-                setModels(groups.filter((g) => g.engineId === 'pi').flatMap((g) => g.models))
-              )
-              .catch(() => {})
-          }}
-          className="mt-1 text-[11px] text-accent"
-        >
-          Refresh models
-        </button>
-        <button
-          data-testid="PiDefaultModelSection.manageModels"
-          onClick={() => setManagingModels(true)}
-          className="mt-1 ml-3 text-[11px] text-accent"
-        >
-          Manage models (
-          {allowlist === undefined
-            ? 'all'
-            : allowlist.length === 0
-              ? 'none'
-              : `${allowlist.length} selected`}
-          )
-        </button>
-        {defaultExcluded ? (
-          <div
-            data-testid="PiDefaultModelSection.excludedDefaultWarning"
-            className="mt-1 text-[10px] text-warning/90"
-          >
-            The configured default is excluded by the model allowlist. New pi sessions will start
-            with no model selected until it is enabled or replaced.
-          </div>
-        ) : (
-          <StaleModelNotice
-            testid="PiDefaultModelSection.defaultModel"
-            models={models}
-            value={current}
-          />
-        )}
-        {!known && !defaultExcluded && (
-          <div
-            data-testid="PiDefaultModelSection.unknownWarning"
-            className="mt-1 text-[10px] text-warning/90"
-          >
-            Not in pi&rsquo;s currently-discovered model list — used as-is. Double-check the
-            provider is authenticated and the model id is spelled correctly.
-          </div>
-        )}
-      </div>
-      <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
-        Applies to new pi sessions. Falls back to pi&rsquo;s own default ({PI_DEFAULT_MODEL}) when
-        unset.
-      </div>
-      {managingModels && (
-        <PiModelAllowlistDialog
-          providerName="pi"
-          current={allowlist}
-          onClose={() => setManagingModels(false)}
-          onSave={saveAllowlist}
-        />
-      )}
     </div>
   )
 }
@@ -5147,9 +4874,45 @@ export const SECTIONS: Section[] = [
       }
     ]
   },
+  // ── pi > Configuration subgroup ────────────────────────────────────
+  // Six curated panes over pi's own settings.json plus a full-file text editor
+  // for the long tail (pi publishes no config schema, so there is no generic
+  // schema-driven form the way opencode has one). Panes live in
+  // PiConfigPanes.tsx. `pi-config-models` also carries ClaudeUI's OWN pi
+  // session-default model + allowlist, which is what the old `pi-models`
+  // ENGINE section used to be on its own.
   {
-    id: 'pi-models',
-    label: 'Models',
+    id: 'pi-config-session',
+    label: 'Session behavior',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M3 12a9 9 0 1 0 3-6.7" />
+        <path d="M3 4v5h5" />
+        <path d="M12 8v4l3 2" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piSessionBehavior',
+        label: 'Session behavior',
+        keywords:
+          'pi compaction enabled reserveTokens keepRecentTokens branchSummary retry maxRetries baseDelayMs provider timeoutMs maxRetryDelayMs backoff context window compact summarise',
+        render: () => <PiSessionBehaviorSection />
+      }
+    ]
+  },
+  {
+    id: 'pi-config-models',
+    label: 'Models & thinking',
     icon: (
       <svg
         width="14"
@@ -5168,10 +4931,149 @@ export const SECTIONS: Section[] = [
     ),
     items: [
       {
-        key: 'piDefaultModel',
-        label: 'Default model',
-        keywords: 'pi model default provider openai-codex anthropic',
-        render: () => <PiDefaultModelSection />
+        key: 'piModels',
+        label: 'Models & thinking',
+        keywords:
+          'pi model default provider openai-codex anthropic allowlist defaultProvider defaultModel defaultThinkingLevel thinkingBudgets reasoning effort',
+        render: () => <PiModelsSection />
+      }
+    ]
+  },
+  {
+    id: 'pi-config-tools',
+    label: 'Tools & shell',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M14.7 6.3a4 4 0 01-5 5L4 17v3h3l5.7-5.7a4 4 0 015-5l-2.5-2.5 2.1-2.1a4 4 0 00-2.6 1.6z" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piTools',
+        label: 'Tools & shell',
+        keywords:
+          'pi defaultTools read bash powershell edit write grep find ls shellPath shellCommandPrefix npmCommand shell prefix npm',
+        render: () => <PiToolsSection />
+      }
+    ]
+  },
+  {
+    id: 'pi-config-images',
+    label: 'Image attachments',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <rect x="3" y="3" width="18" height="18" rx="2" />
+        <circle cx="8.5" cy="8.5" r="1.5" />
+        <path d="M21 15l-5-5L5 21" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piImages',
+        label: 'Image attachments',
+        keywords: 'pi images autoResize blockImages resize paste screenshot attachment',
+        render: () => <PiImagesSection />
+      }
+    ]
+  },
+  {
+    id: 'pi-config-workspace',
+    label: 'Workspace & trust',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piWorkspace',
+        label: 'Workspace & trust',
+        keywords:
+          'pi defaultProjectTrust ask always never sessionDir enableSkillCommands packages extensions skills prompts resources trust',
+        render: () => <PiWorkspaceSection />
+      }
+    ]
+  },
+  {
+    id: 'pi-config-network',
+    label: 'Network & telemetry',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <circle cx="12" cy="12" r="9" />
+        <path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piNetwork',
+        label: 'Network & telemetry',
+        keywords:
+          'pi httpProxy transport sse websocket cached httpIdleTimeoutMs websocketConnectTimeoutMs enableInstallTelemetry enableAnalytics proxy telemetry analytics',
+        render: () => <PiNetworkSection />
+      }
+    ]
+  },
+  {
+    id: 'pi-config-raw',
+    label: 'Raw config',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M12 15a3 3 0 100-6 3 3 0 000 6z" />
+        <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piRawConfig',
+        label: 'Raw config (settings.json)',
+        keywords:
+          'pi config raw json settings theme tuiMode fullscreen markdown terminal keybindings externalEditor enabledModels warnings advanced',
+        render: () => <PiRawConfigSection />
       }
     ]
   },
@@ -5260,16 +5162,35 @@ const VENDOR_OPENCODE_SECTION_IDS = new Set(['vendor-opencode'])
 const AGENTS_OPENCODE_SECTION_IDS = new Set(['opencode-agents'])
 
 /** Section ids that belong to Engines > pi (content self-gates on install).
- *  Auto mode + default model. `pi-automode` edits the same
- *  `EngineConfig.autoMode` block opencode's does — PiSession reads
- *  `loadEngineConfig('pi').autoMode` since the phase-4 gatekeeper wiring, so
- *  the setting was live but unreachable from the UI until this section.
+ *  Auto mode alone: `pi-automode` edits the same `EngineConfig.autoMode` block
+ *  opencode's does — PiSession reads `loadEngineConfig('pi').autoMode` since the
+ *  phase-4 gatekeeper wiring, so the setting was live but unreachable from the
+ *  UI until this section. The old `pi-models` section moved INTO
+ *  `pi-config-models` below: ClaudeUI's session-default model and pi's own
+ *  `defaultProvider`/`defaultModel` fallbacks answer one question between them,
+ *  and answering it across two nav entries was the confusion.
  *  No dispatch section: the Claude/opencode dispatch sections configure
  *  dispatches INTO that engine (allowlist/default/cap for incoming targets),
  *  and pi is a dispatch SOURCE only so far — nothing to configure until
  *  pi-as-target ships (crossEngineDispatch is true for the source direction as
  *  of M4b). */
-const ENGINE_PI_SECTION_IDS = new Set(['pi-automode', 'pi-models'])
+const ENGINE_PI_SECTION_IDS = new Set(['pi-automode'])
+
+/**
+ * Section ids that belong to pi > Configuration — the curated panes over pi's
+ * own `~/.pi/agent/settings.json`, then the whole-file text editor for what they
+ * don't cover (pi ships no config schema, so there is no generic form to
+ * fall back on).
+ */
+const CONFIGURATION_PI_SECTION_IDS = new Set([
+  'pi-config-session',
+  'pi-config-models',
+  'pi-config-tools',
+  'pi-config-images',
+  'pi-config-workspace',
+  'pi-config-network',
+  'pi-config-raw'
+])
 
 /** Section ids that belong to Vendors > pi (gated: only shown when pi engine installs) */
 const VENDOR_PI_SECTION_IDS = new Set(['vendor-pi'])
@@ -5407,7 +5328,20 @@ export const SCOPES: ScopeDef[] = [
       {
         id: 'pi-engine',
         label: 'Engine',
-        sections: getSectionsForIds(ENGINE_PI_SECTION_IDS, ['pi-automode', 'pi-models'])
+        sections: getSectionsForIds(ENGINE_PI_SECTION_IDS, ['pi-automode'])
+      },
+      {
+        id: 'pi-configuration',
+        label: 'Configuration',
+        sections: getSectionsForIds(CONFIGURATION_PI_SECTION_IDS, [
+          'pi-config-session',
+          'pi-config-models',
+          'pi-config-tools',
+          'pi-config-images',
+          'pi-config-workspace',
+          'pi-config-network',
+          'pi-config-raw'
+        ])
       },
       {
         id: 'pi-vendor',

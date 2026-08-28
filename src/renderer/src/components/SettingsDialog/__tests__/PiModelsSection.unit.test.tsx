@@ -1,3 +1,14 @@
+/**
+ * The ClaudeUI half of the pi "Models & thinking" pane — the session-default
+ * model picker and the model allowlist, which live in `engines/pi.json` rather
+ * than pi's settings.json.
+ *
+ * Was `PiDefaultModelSection.unit.test.tsx`, against the standalone `pi-models`
+ * ENGINE section. That section folded into `pi-config-models`; the controls and
+ * their testids are unchanged, so this file only re-anchors on the new section
+ * id and stubs the pi settings read the surrounding pane now performs.
+ */
+
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react'
 import { SECTIONS } from '../settings-sections'
@@ -9,6 +20,12 @@ const saveEngineConfig = vi.fn(async () => {})
 const getEngineModels = vi.fn(async (): Promise<EngineModelGroup[]> => [])
 const getPiModelCatalogGroups = vi.fn(async (): Promise<EngineModelGroup[]> => [])
 const engineIsInstalled = vi.fn(async () => true)
+const readPiNativeRaw = vi.fn(async () => ({
+  config: {},
+  path: '/home/u/.pi/agent/settings.json',
+  text: ''
+}))
+const patchPiNative = vi.fn(async () => {})
 const group: EngineModelGroup = {
   engineId: 'pi',
   vendorId: 'openai-codex',
@@ -52,8 +69,8 @@ function pickModel(field: HTMLElement, value: string): void {
 }
 
 function renderSection(): void {
-  const item = SECTIONS.find((section) => section.id === 'pi-models')!.items.find(
-    (item) => item.key === 'piDefaultModel'
+  const item = SECTIONS.find((section) => section.id === 'pi-config-models')!.items.find(
+    (item) => item.key === 'piModels'
   )!
   render(
     item.render(
@@ -67,20 +84,29 @@ function renderSection(): void {
   )
 }
 
-describe('PiDefaultModelSection', () => {
+describe('pi session-default model (Models & thinking pane)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     loadEngineConfig.mockResolvedValue({})
     getEngineModels.mockResolvedValue([group])
     getPiModelCatalogGroups.mockResolvedValue([group])
     engineIsInstalled.mockResolvedValue(true)
+    readPiNativeRaw.mockResolvedValue({
+      config: {},
+      path: '/home/u/.pi/agent/settings.json',
+      text: ''
+    })
     useSessionStore.setState({ piDefaultModel: PI_DEFAULT_MODEL, modelReloadNonce: 0 })
     ;(window as unknown as { api: Record<string, unknown> }).api = {
       loadEngineConfig,
       saveEngineConfig,
       getEngineModels,
       getPiModelCatalogGroups,
-      engineIsInstalled
+      engineIsInstalled,
+      // The pane around these controls reads pi's own settings file for the
+      // "pi fallbacks" rows; without it PaneShell would never leave Loading….
+      readPiNativeRaw,
+      patchPiNative
     }
   })
   afterEach(cleanup)

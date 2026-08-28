@@ -122,10 +122,12 @@ function useOpencodeNativeConfigLeaf(): OpencodeNativeConfigLeaf {
 
 /**
  * The two-tier testid namespace these rows emit (`<prefix>.row`, `.toggle`,
- * `.number`, `.error`). Every primitive below takes it as an overridable prop:
- * the per-model capability editor (OpencodeModelCapabilities.tsx) reuses these
- * rows under its OWN prefix, so a test can address its controls without
- * disambiguating them from a Configuration pane's.
+ * `.number`, `.text`, `.error`). Every primitive below takes it as an
+ * overridable prop: the per-model capability editor
+ * (OpencodeModelCapabilities.tsx) and the pi Configuration panes
+ * (PiConfigPanes.tsx) reuse these rows under their OWN prefix, so a test can
+ * address their controls without disambiguating them from an opencode
+ * Configuration pane's.
  */
 const PANE_TESTID = 'OpencodeConfigPane'
 
@@ -183,7 +185,7 @@ interface RowProps {
 }
 
 /** Label block on the left, control on the right (toggles aside — see ToggleRow). */
-function LeafRow({
+export function LeafRow({
   configKey,
   label,
   helper,
@@ -340,18 +342,20 @@ export function LeafNumberInput({
 }
 
 /** Text input with the same draft / commit-on-blur-or-Enter contract. */
-function LeafTextInput({
+export function LeafTextInput({
   configKey,
   value,
   placeholder,
   onCommit,
-  width = 'w-44'
+  width = 'w-44',
+  testid = `${PANE_TESTID}.text`
 }: {
   configKey: string
   value: unknown
   placeholder: string
   onCommit: (v: string | undefined) => void
   width?: string
+  testid?: string
 }): React.JSX.Element {
   const committed = typeof value === 'string' ? value : ''
   const [draft, setDraft] = useState(committed)
@@ -365,7 +369,7 @@ function LeafTextInput({
   return (
     <input
       type="text"
-      data-testid="OpencodeConfigPane.text"
+      data-testid={testid}
       data-id={configKey}
       value={draft}
       placeholder={placeholder}

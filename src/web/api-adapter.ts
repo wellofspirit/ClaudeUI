@@ -844,6 +844,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // not this item's to change.)
     readPiNativeRaw: () => unwrap('config:read-pi-native-raw'),
     patchPiNative: (patches) => unwrap('config:patch-pi-native', patches),
+    writePiNativeText: (text) => unwrap('config:write-pi-native-text', text),
     listOpencodeAgents: async () => [],
     readOpencodeAgent: async () => null,
     saveOpencodeAgent: async () => {},

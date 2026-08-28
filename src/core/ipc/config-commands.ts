@@ -92,7 +92,7 @@ import {
   migrateOpencodeConfigToNative
 } from '../opencode/opencode-config'
 import { readOpencodeNativeRaw, patchOpencodeNativeRaw } from '../opencode/opencode-native-raw'
-import { readPiNativeRaw, patchPiNativeRaw } from '../pi/pi-native-raw'
+import { readPiNativeRaw, patchPiNativeRaw, writePiNativeRawText } from '../pi/pi-native-raw'
 import {
   listAgents,
   readAgent,
@@ -457,6 +457,17 @@ export function configCommands(
       kind: 'command',
       handler: safeHandler(async (patches: RawConfigPatch[]) => {
         patchPiNativeRaw(patches)
+      })
+    },
+    // The Raw config pane's whole-file write. pi has no config schema, so the
+    // pane is a text editor and this takes the user's text verbatim — the
+    // validity check inside the writer is what stops a broken file reaching pi.
+    {
+      channel: 'config:write-pi-native-text',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(async (text: string) => {
+        writePiNativeRawText(text)
       })
     },
 

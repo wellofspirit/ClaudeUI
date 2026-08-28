@@ -1522,6 +1522,7 @@ const S1B_SWEEP_CHANNELS = [
   'config:save-opencode-settings',
   'config:save-slash-commands',
   'config:save-vendor-config',
+  'config:write-pi-native-text',
   'mcp:reconnect',
   'mcp:remove-server',
   'mcp:save-servers',

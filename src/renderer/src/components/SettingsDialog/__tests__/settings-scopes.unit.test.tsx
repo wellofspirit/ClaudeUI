@@ -203,13 +203,56 @@ describe('SCOPES structure', () => {
 
     it('exists', () => expect(pi).toBeDefined())
 
-    it('has 2 subgroups: Engine, Vendor', () => {
-      expect(pi.subgroups.map((sg) => sg.label)).toEqual(['Engine', 'Vendor'])
+    it('has 3 subgroups: Engine, Configuration, Vendor', () => {
+      expect(pi.subgroups.map((sg) => sg.label)).toEqual(['Engine', 'Configuration', 'Vendor'])
     })
 
-    it('Engine subgroup contains pi-automode then pi-models (no dispatch — pi is source-only)', () => {
+    it('Engine subgroup contains only pi-automode (no dispatch — pi is source-only)', () => {
+      // `pi-models` folded into `pi-config-models`; there is no dispatch section
+      // because pi is a dispatch SOURCE only.
       const engine = pi.subgroups.find((sg) => sg.label === 'Engine')!
-      expect(engine.sections.map((s) => s.id)).toEqual(['pi-automode', 'pi-models'])
+      expect(engine.sections.map((s) => s.id)).toEqual(['pi-automode'])
+    })
+
+    // The curated panes over pi's own settings.json, with the whole-file text
+    // editor ("Raw config") last for everything they don't cover.
+    it('Configuration subgroup contains the 6 curated panes then pi-config-raw, in order', () => {
+      const configuration = pi.subgroups.find((sg) => sg.label === 'Configuration')!
+      expect(configuration.sections.map((s) => s.id)).toEqual([
+        'pi-config-session',
+        'pi-config-models',
+        'pi-config-tools',
+        'pi-config-images',
+        'pi-config-workspace',
+        'pi-config-network',
+        'pi-config-raw'
+      ])
+    })
+
+    // A bad import would leave the element type `undefined` and only blow up
+    // when the user opens the section; building the element catches it here.
+    it('every Configuration section renders a defined component', () => {
+      const configuration = pi.subgroups.find((sg) => sg.label === 'Configuration')!
+      for (const section of configuration.sections) {
+        for (const item of section.items) {
+          const el = item.render(
+            {} as Parameters<typeof item.render>[0],
+            () => {},
+            {} as never,
+            () => {},
+            {} as never,
+            () => {}
+          )
+          expect(el.type, `${section.id}/${item.key} renders an undefined component`).toBeTruthy()
+        }
+      }
+    })
+
+    it('the standalone pi-models section is gone (folded into pi-config-models)', () => {
+      expect(SECTIONS.find((s) => s.id === 'pi-models')).toBeUndefined()
+      const models = SECTIONS.find((s) => s.id === 'pi-config-models')!
+      expect(models.label).toBe('Models & thinking')
+      expect(models.items[0].key).toBe('piModels')
     })
 
     it('Vendor subgroup contains vendor-pi', () => {
@@ -303,8 +346,22 @@ describe('SECTION_SCOPE_MAP', () => {
     expect(SECTION_SCOPE_MAP.get('vendor-anthropic')).toBe('claude')
   })
 
-  it('pi-models → pi', () => {
-    expect(SECTION_SCOPE_MAP.get('pi-models')).toBe('pi')
+  it('pi-models is no longer a section (folded into pi-config-models)', () => {
+    expect(SECTION_SCOPE_MAP.has('pi-models')).toBe(false)
+  })
+
+  it('every pi Configuration-subgroup section → pi', () => {
+    for (const id of [
+      'pi-config-session',
+      'pi-config-models',
+      'pi-config-tools',
+      'pi-config-images',
+      'pi-config-workspace',
+      'pi-config-network',
+      'pi-config-raw'
+    ]) {
+      expect(SECTION_SCOPE_MAP.get(id), `${id} should map to the pi scope`).toBe('pi')
+    }
   })
 
   it('pi-automode → pi', () => {

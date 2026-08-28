@@ -60,16 +60,22 @@ function splitBom(text: string): { bom: string; body: string } {
 // ─── Read ─────────────────────────────────────────────────────────────────────
 
 /**
- * Read pi's global settings file as its RAW parsed object (no projection).
- * Returns `{}` when the file is absent / unreadable / unparseable, and NEVER
- * creates it. `path` is the resolved write target (the UI shows it).
+ * Read pi's global settings file as its RAW parsed object (no projection) AND as
+ * its raw text. Returns `{}` / `''` when the file is absent / unreadable /
+ * unparseable, and NEVER creates it. `path` is the resolved write target (the UI
+ * shows it).
+ *
+ * `text` is the BOM-stripped file content: it is what the Raw config pane edits,
+ * so an unparseable file still round-trips through the editor (its `config` is
+ * `{}`, but its bytes are all there to be fixed by hand).
  */
 export function readPiNativeRaw(): PiNativeRaw {
   const filePath = piSettingsFile()
   const text = safeRead(filePath)
-  if (text === undefined) return { config: {}, path: filePath }
-  const parsed = jsoncParseSafe(splitBom(text).body)
-  return { config: isPlainObject(parsed) ? parsed : {}, path: filePath }
+  if (text === undefined) return { config: {}, path: filePath, text: '' }
+  const body = splitBom(text).body
+  const parsed = jsoncParseSafe(body)
+  return { config: isPlainObject(parsed) ? parsed : {}, path: filePath, text: body }
 }
 
 // ─── Write (leaf patches) ─────────────────────────────────────────────────────
@@ -193,4 +199,55 @@ export function patchPiNativeRaw(patches: RawConfigPatch[]): void {
   if (!existed && !text.endsWith(eol)) text += eol
 
   writeIfChanged(filePath, bom + text, originalText)
+}
+
+// ─── Write (whole file) ───────────────────────────────────────────────────────
+
+/**
+ * Replace pi's global settings file with `text` VERBATIM — the Raw config pane's
+ * writer. pi publishes no schema for settings.json, so the pane is a plain text
+ * editor and this is a plain text write: no reserialisation, no formatting, no
+ * merging of the keys the curated panes own.
+ *
+ * Two things it does NOT take verbatim:
+ *  - **Validity.** `JSON.parse` must accept the text and its top level must be a
+ *    JSON object, or nothing is written. The renderer checks the same two things
+ *    to disable its Save button; this is the defence-in-depth half, because the
+ *    renderer is not the only possible caller of the IPC channel. The parser is
+ *    strict JSON — NOT jsonc — on purpose: pi's own loader is, so a `//` comment
+ *    that {@link patchPiNativeRaw} would happily preserve is still a file pi
+ *    cannot read, and refusing to save it is the honest answer.
+ *  - **The BOM.** A file that had one keeps it (and one pasted into the editor is
+ *    dropped rather than doubled), matching the leaf patcher: a BOM is an
+ *    encoding marker, and silently changing a file's encoding is not something
+ *    "save the text I typed" should mean.
+ *
+ * Byte-compare write gate, like every other writer here: text identical to what
+ * is on disk performs no write at all.
+ */
+export function writePiNativeRawText(text: string): void {
+  const body = splitBom(text).body
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(body)
+  } catch (e) {
+    throw new Error(
+      `Refusing to write invalid JSON to pi settings: ${e instanceof Error ? e.message : String(e)}`
+    )
+  }
+  if (!isPlainObject(parsed)) {
+    throw new Error('Refusing to write pi settings whose top level is not a JSON object')
+  }
+
+  const filePath = piSettingsFile()
+  const originalText = safeRead(filePath)
+  if (originalText === undefined && existsSync(filePath)) {
+    // Present but unreadable — the same guard as patchPiNativeRaw: we cannot
+    // know what we would be destroying, so we destroy nothing.
+    throw new Error(`Refusing to overwrite unreadable pi settings file: ${filePath}`)
+  }
+
+  const bom = originalText === undefined ? '' : splitBom(originalText).bom
+  writeIfChanged(filePath, bom + body, originalText)
 }

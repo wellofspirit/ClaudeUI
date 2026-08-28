@@ -10,6 +10,9 @@
  * Guards:
  * - read: absent / unparseable → `{}` + the resolved path, file never created
  * - read: a BOM'd file still parses
+ * - read: `text` is the BOM-stripped file bytes (what the Raw config pane edits)
+ * - write-text: invalid / non-object JSON is refused, valid text lands verbatim,
+ *   the file's BOM survives, and an unchanged save writes nothing
  * - patch: a leaf set preserves siblings AND the untouched bytes verbatim
  * - patch: nested leaves create intermediate objects
  * - patch: delete removes exactly one key; delete-of-missing is a NO-OP; the
@@ -44,7 +47,12 @@ vi.mock('os', async () => {
   }
 })
 
-import { readPiNativeRaw, patchPiNativeRaw, piSettingsFile } from '../pi-native-raw'
+import {
+  readPiNativeRaw,
+  patchPiNativeRaw,
+  writePiNativeRawText,
+  piSettingsFile
+} from '../pi-native-raw'
 
 let testHome: string
 
@@ -72,8 +80,9 @@ afterEach(() => {
 
 describe('readPiNativeRaw', () => {
   it('returns {} and the resolved path when no file exists, and does NOT create it', () => {
-    const { config, path } = readPiNativeRaw()
+    const { config, path, text } = readPiNativeRaw()
     expect(config).toEqual({})
+    expect(text).toBe('')
     expect(path).toBe(settingsPath())
     expect(path).toBe(piSettingsFile())
     expect(existsSync(path)).toBe(false)
@@ -98,8 +107,11 @@ describe('readPiNativeRaw', () => {
 
   it('returns {} for an unparseable file (and leaves it alone)', () => {
     const p = writeSettings('{ this is not json at all ')
-    const { config } = readPiNativeRaw()
+    const { config, text } = readPiNativeRaw()
     expect(config).toEqual({})
+    // The bytes still come back: the Raw config pane is how a broken file gets
+    // fixed, so it must be able to show one.
+    expect(text).toBe('{ this is not json at all ')
     expect(readFileSync(p, 'utf-8')).toBe('{ this is not json at all ')
   })
 
@@ -111,6 +123,12 @@ describe('readPiNativeRaw', () => {
   it('parses a file carrying a UTF-8 BOM', () => {
     writeSettings('\uFEFF{ "theme": "dark" }')
     expect(readPiNativeRaw().config).toEqual({ theme: 'dark' })
+  })
+
+  it('returns the file text verbatim, minus the BOM, comments and all', () => {
+    const source = `\uFEFF{\r\n  // note\r\n  "theme": "dark"\r\n}\r\n`
+    writeSettings(source)
+    expect(readPiNativeRaw().text).toBe(source.slice(1))
   })
 })
 
@@ -340,5 +358,77 @@ describe('patchPiNativeRaw — path validation', () => {
       ])
     ).toThrow(/empty path/)
     expect(readFileSync(p, 'utf-8')).toBe(before)
+  })
+})
+
+describe('writePiNativeRawText', () => {
+  it('writes the text verbatim — formatting, key order and all', () => {
+    writeSettings(`{ "theme": "dark" }`)
+    const next = `{\n    "theme":"light",\n\n    "quietStartup": true\n}\n`
+    writePiNativeRawText(next)
+    expect(readFileSync(settingsPath(), 'utf-8')).toBe(next)
+  })
+
+  it('creates the file (and its parent dir) when none exists', () => {
+    expect(existsSync(settingsPath())).toBe(false)
+    writePiNativeRawText('{"theme":"light"}')
+    expect(readFileSync(settingsPath(), 'utf-8')).toBe('{"theme":"light"}')
+    expect(readPiNativeRaw().config).toEqual({ theme: 'light' })
+  })
+
+  it('refuses invalid JSON and leaves the file untouched', () => {
+    const p = writeSettings(`{ "theme": "dark" }`)
+    const before = readFileSync(p, 'utf-8')
+    expect(() => writePiNativeRawText('{ "theme": ')).toThrow(/Refusing to write invalid JSON/)
+    expect(readFileSync(p, 'utf-8')).toBe(before)
+  })
+
+  it('refuses a valid JSON document whose top level is not an object', () => {
+    const p = writeSettings(`{ "theme": "dark" }`)
+    const before = readFileSync(p, 'utf-8')
+    for (const doc of ['[1, 2, 3]', '"dark"', 'null', '42']) {
+      expect(() => writePiNativeRawText(doc)).toThrow(/top level is not a JSON object/)
+    }
+    expect(readFileSync(p, 'utf-8')).toBe(before)
+  })
+
+  it('refuses a jsonc comment — pi reads strict JSON, so saving one would break it', () => {
+    const p = writeSettings(`{ "theme": "dark" }`)
+    const before = readFileSync(p, 'utf-8')
+    expect(() => writePiNativeRawText('{\n  // note\n  "theme": "light"\n}')).toThrow(
+      /Refusing to write invalid JSON/
+    )
+    expect(readFileSync(p, 'utf-8')).toBe(before)
+  })
+
+  it("keeps the existing file's BOM and never doubles it", () => {
+    const p = writeSettings('﻿{\n  "theme": "dark"\n}\n')
+    writePiNativeRawText('{\n  "theme": "light"\n}\n')
+    const text = readFileSync(p, 'utf-8')
+    expect(text.startsWith('﻿')).toBe(true)
+    expect(text.indexOf('﻿', 1)).toBe(-1)
+    expect(JSON.parse(text.slice(1))).toEqual({ theme: 'light' })
+  })
+
+  it('does not add a BOM to a file that had none, even if the text carries one', () => {
+    const p = writeSettings('{\n  "theme": "dark"\n}\n')
+    writePiNativeRawText('﻿{\n  "theme": "light"\n}\n')
+    expect(readFileSync(p, 'utf-8')).toBe('{\n  "theme": "light"\n}\n')
+  })
+
+  it('an unchanged save does not rewrite the file', async () => {
+    const source = `{\n  "theme": "dark"\n}\n`
+    const p = writeSettings(source)
+    const mtimeBefore = statSync(p).mtimeMs
+    await new Promise((r) => setTimeout(r, 10))
+    writePiNativeRawText(source)
+    expect(statSync(p).mtimeMs).toBe(mtimeBefore)
+  })
+
+  it('refuses to overwrite a settings.json that EXISTS but cannot be read', () => {
+    mkdirSync(settingsPath(), { recursive: true })
+    expect(() => writePiNativeRawText('{"theme":"light"}')).toThrow(
+      /Refusing to overwrite unreadable pi settings file/
+    )
   })
 })

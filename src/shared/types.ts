@@ -503,6 +503,15 @@ export interface OpencodeNativeRaw {
 export interface PiNativeRaw {
   config: Record<string, unknown>
   path: string
+  /**
+   * The file's text exactly as stored, minus any UTF-8 BOM, and '' when the file
+   * is absent or unreadable. The Raw config pane edits THIS rather than a
+   * re-serialisation of `config`, so the user's own formatting survives a round
+   * trip — and a file too broken to parse can still be shown and repaired. The
+   * BOM is stripped because it is an encoding marker rather than content the
+   * user should have to see; the writer puts the file's own BOM back.
+   */
+  text: string
 }
 
 /**
@@ -1221,6 +1230,8 @@ interface SessionAPI {
   readPiNativeRaw(): Promise<PiNativeRaw>
   /** Apply leaf patches to pi's global settings.json, preserving siblings + formatting. */
   patchPiNative(patches: RawConfigPatch[]): Promise<void>
+  /** Replace pi's global settings.json with `text` verbatim (Raw config pane). */
+  writePiNativeText(text: string): Promise<void>
   listOpencodeAgents(cwd?: string): Promise<OpencodeAgentSummary[]>
   readOpencodeAgent(
     name: string,

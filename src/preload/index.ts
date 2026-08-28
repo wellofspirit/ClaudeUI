@@ -439,6 +439,7 @@ const api: ClaudeAPI = {
   readPiNativeRaw: () => unwrap('config:read-pi-native-raw'),
   patchPiNative: (patches: import('../shared/types').RawConfigPatch[]) =>
     unwrap('config:patch-pi-native', patches),
+  writePiNativeText: (text: string) => unwrap('config:write-pi-native-text', text),
   listOpencodeAgents: (cwd?: string) => unwrap('opencode-agents:list', cwd),
   readOpencodeAgent: (
     name: string,
