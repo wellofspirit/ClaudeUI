@@ -24,6 +24,9 @@
  *   7. No Save button: every control commits immediately.
  *   8. The pinned defaults / enum / required tables still match the vendored
  *      v1.18.23 schema.
+ *   9. The editor renders in either frame — inline (how the provider dialog
+ *      mounts it today) or as a stacked DialogShell — and writes the same patch
+ *      in both, since the frame is presentation and the rows are the contract.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -82,10 +85,14 @@ function installApiStub(overrides: Record<string, unknown> = {}): void {
 }
 
 /** Mount the editor over a model entry placed in the stubbed config file. */
-async function renderEditor(entry: Record<string, unknown> = {}): Promise<void> {
+async function renderEditor(
+  entry: Record<string, unknown> = {},
+  /** Frame props. Omitted = the inline frame the provider dialog uses today. */
+  frame: { onClose?: () => void; onRemove?: () => void } = {}
+): Promise<void> {
   currentConfig = { provider: { [PROVIDER]: { models: { [MODEL]: entry } } } }
   await act(async () => {
-    render(<ModelCapabilityEditor providerId={PROVIDER} modelId={MODEL} />)
+    render(<ModelCapabilityEditor providerId={PROVIDER} modelId={MODEL} {...frame} />)
   })
   await act(async () => {
     await new Promise((r) => setTimeout(r, 0))
@@ -579,6 +586,55 @@ describe('per-model capability editor', () => {
       for (const [path, required] of Object.entries(REQUIRED_FIELDS)) {
         expect(nodeAt(path).required, `${path} required drifted`).toEqual(required)
       }
+    })
+  })
+
+  // ── 9. Frames ──────────────────────────────────────────────────────
+
+  describe('inline and dialog frames', () => {
+    it('renders inline with no dialog chrome when no close handler is given', async () => {
+      // How OpencodeProviderConfigModal mounts it today: inside that dialog's
+      // own scrolling body, behind the model row's "▸ Capabilities" link.
+      await renderEditor()
+      expect(screen.getByTestId('ModelCapabilityEditor')).toHaveAttribute(
+        'data-id',
+        `${PROVIDER}/${MODEL}`
+      )
+      expect(screen.queryByTestId('ModelCapabilityEditor.close')).toBeNull()
+      expect(screen.queryByTestId('ModelCapabilityEditor.done')).toBeNull()
+      expect(screen.queryByTestId('ModelCapabilityEditor.remove')).toBeNull()
+    })
+
+    it('wraps in the shared DialogShell when the host passes onClose', async () => {
+      const onClose = vi.fn()
+      await renderEditor({}, { onClose })
+      const root = screen.getByTestId('ModelCapabilityEditor')
+      expect(root).toHaveAttribute('data-id', `${PROVIDER}/${MODEL}`)
+      // The shell's own title/subtitle block, not a second header inside.
+      expect(root.textContent).toContain(`${PROVIDER} / ${MODEL}`)
+      expect(root.textContent).toContain("opencode's own config file")
+      await click(screen.getByTestId('ModelCapabilityEditor.close'))
+      await click(screen.getByTestId('ModelCapabilityEditor.done'))
+      expect(onClose).toHaveBeenCalledTimes(2)
+    })
+
+    it('offers the destructive footer action only when the host owns one', async () => {
+      await renderEditor({}, { onClose: vi.fn() })
+      expect(screen.queryByTestId('ModelCapabilityEditor.remove')).toBeNull()
+
+      cleanup()
+      const onRemove = vi.fn()
+      await renderEditor({}, { onClose: vi.fn(), onRemove })
+      await click(screen.getByTestId('ModelCapabilityEditor.remove'))
+      expect(onRemove).toHaveBeenCalledTimes(1)
+      // Removal rewrites the host's declaration; the editor patches nothing.
+      expect(patchOpencodeNative).not.toHaveBeenCalled()
+    })
+
+    it('writes the identical patch from either frame', async () => {
+      await renderEditor({ cost: { input: 1, output: 2 } }, { onClose: vi.fn() })
+      await typeAndBlur(costFor('input'), '3')
+      expect(onlyPatch()).toEqual({ path: P('cost', 'input'), value: 3 })
     })
   })
 })

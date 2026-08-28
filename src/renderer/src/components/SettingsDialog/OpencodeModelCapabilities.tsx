@@ -7,7 +7,14 @@
  * labelled every field with its full raw path (`my-ollama.qwen3:27b.attachment`)
  * and nested modalities/cost behind raw fieldsets; this is the curated version,
  * in the same row language as the Configuration panes (OpencodeConfigPanes.tsx,
- * whose row primitives it reuses).
+ * whose row primitives it reuses) and the same frame language as pi's model
+ * editor (provider-editor-shell.tsx — pill chips, accent disclosures, the
+ * stacked dialog).
+ *
+ * TWO FRAMES, ONE SET OF ROWS. Without `onClose` it renders inline, which is how
+ * the provider dialog mounts it today; with `onClose` it is a stacked
+ * `DialogShell` of its own, the frame the restyled provider dialog will use. The
+ * frame is presentation only — every write below is identical either way.
  *
  * WHAT IT WRITES. The model's entry lives in opencode's own config file at
  * `provider.<providerId>.models.<modelId>`. Every commit is a minimal LEAF diff
@@ -45,6 +52,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import { RawJsonField } from './OpencodeSchemaForm'
 import { StackedRow, ToggleRow, LeafNumberInput } from './OpencodeConfigPanes'
+import { DialogShell, Disclosure, pillClass } from './provider-editor-shell'
 import { diffToPatches, isPlainObject } from '../../../../shared/opencode-config-diff'
 import type { RawConfigPatch } from '../../../../shared/types'
 
@@ -371,11 +379,7 @@ function ModalityChips({
               data-id={`${direction}:${id}`}
               aria-pressed={on}
               onClick={() => toggle(id)}
-              className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
-                on
-                  ? 'bg-accent/20 text-accent border-accent/40'
-                  : 'bg-bg-hover text-text-muted border-border hover:text-text-secondary'
-              }`}
+              className={pillClass(on)}
             >
               {id}
             </button>
@@ -501,58 +505,18 @@ function AdvancedLeaf({
   )
 }
 
-function Disclosure({
-  id,
-  label,
-  open,
-  onToggle
-}: {
-  id: string
-  label: string
-  open: boolean
-  onToggle: () => void
-}): React.JSX.Element {
-  return (
-    <button
-      type="button"
-      data-testid={`${TESTID}.disclosure`}
-      data-id={id}
-      aria-expanded={open}
-      onClick={onToggle}
-      className="text-[10px] text-text-muted hover:text-text-secondary transition-colors"
-    >
-      {open ? '▾' : '▸'} {label}
-    </button>
-  )
-}
-
 // ── The editor ───────────────────────────────────────────────────────────────
 
-export function ModelCapabilityEditor({
-  providerId,
-  modelId
-}: {
-  providerId: string
-  modelId: string
-}): React.JSX.Element {
-  const api = useModelEntry(providerId, modelId)
+/**
+ * The rows. Rendered inside whichever frame `ModelCapabilityEditor` picked, so
+ * the two modes cannot drift into different field sets.
+ */
+function CapabilityRows({ api }: { api: ModelEntryApi }): React.JSX.Element {
   const [longContextOpen, setLongContextOpen] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
 
-  if (api.entry === null) {
-    return <div className="text-[10px] text-text-muted/60 px-1">Loading capabilities…</div>
-  }
-
   return (
-    <div
-      data-testid={TESTID}
-      data-id={`${providerId}/${modelId}`}
-      className="rounded bg-bg-primary/30 py-1"
-    >
-      <div className="px-3 pb-0.5 text-[11px] uppercase tracking-wider text-text-muted/60">
-        Capabilities
-      </div>
-
+    <>
       {CAPABILITY_TOGGLES.map((spec) => (
         <CapabilityToggleRow key={spec.key} api={api} spec={spec} />
       ))}
@@ -561,7 +525,7 @@ export function ModelCapabilityEditor({
         testidPrefix={TESTID}
         configKey="modalities"
         label="Modalities"
-        helper="Content types the model takes and returns —"
+        helper="Content types the model takes and returns; text only is what opencode assumes when the key is absent —"
         keyText="modalities.input / output"
         error={api.errorAt('modalities')}
       >
@@ -575,7 +539,7 @@ export function ModelCapabilityEditor({
         testidPrefix={TESTID}
         configKey="cost"
         label="Pricing"
-        helper="$ per 1M tokens. Input and output are written together —"
+        helper="$ per 1M tokens; input and output are written together —"
         error={api.errorAt('cost')}
       >
         <div className="space-y-1">
@@ -589,13 +553,18 @@ export function ModelCapabilityEditor({
             placeholder="0"
             step="any"
           />
-          <div className="px-3">
+          <div className="px-3 mt-1">
             <Disclosure
+              testid={`${TESTID}.disclosure`}
               id="context_over_200k"
-              label="Long-context pricing (>200k)"
+              label={`${longContextOpen ? '▾' : '▸'} Long-context pricing (>200k)`}
               open={longContextOpen}
               onToggle={() => setLongContextOpen((o) => !o)}
             />
+            <div className="mt-0.5 text-[10px] text-text-muted/60 leading-relaxed">
+              Alternate rates for the whole request once input exceeds 200k tokens.{' '}
+              <span className="font-mono text-text-muted/80">cost.context_over_200k</span>
+            </div>
           </div>
           {longContextOpen && (
             <LeafNumberGrid
@@ -643,8 +612,9 @@ export function ModelCapabilityEditor({
       >
         <div className="px-3">
           <Disclosure
+            testid={`${TESTID}.disclosure`}
             id="advanced"
-            label="Show raw leaves"
+            label={`${advancedOpen ? '▾' : '▸'} Show raw leaves`}
             open={advancedOpen}
             onToggle={() => setAdvancedOpen((o) => !o)}
           />
@@ -663,6 +633,99 @@ export function ModelCapabilityEditor({
           </div>
         )}
       </StackedRow>
+    </>
+  )
+}
+
+/**
+ * The per-model capability editor, in either of the two frames its hosts need.
+ *
+ * WITHOUT `onClose` it renders INLINE, which is how OpencodeProviderConfigModal
+ * mounts it today: behind each model row's "▸ Capabilities" disclosure, inside
+ * that dialog's scrolling body. WITH `onClose` it is its own stacked dialog on
+ * the shared `DialogShell` — the frame pi's model editor uses, and the one the
+ * restyled opencode provider dialog will open it in.
+ *
+ * Both frames render the SAME rows and the same `ModelCapabilityEditor` /
+ * `${providerId}/${modelId}` testid pair, so nothing that writes to the file
+ * depends on which frame is up.
+ */
+export function ModelCapabilityEditor({
+  providerId,
+  modelId,
+  onClose,
+  onRemove
+}: {
+  providerId: string
+  modelId: string
+  /** Present = render as a stacked dialog; absent = render inline. */
+  onClose?: () => void
+  /**
+   * Dialog frame only: the destructive footer action. Removing a model means
+   * rewriting the HOST's provider declaration, not patching this entry, so the
+   * host owns both the removal and its confirm; the footer just offers it.
+   */
+  onRemove?: () => void
+}): React.JSX.Element {
+  const api = useModelEntry(providerId, modelId)
+
+  const body =
+    api.entry === null ? (
+      <div className="text-[10px] text-text-muted/60 px-3 py-1">Loading capabilities…</div>
+    ) : (
+      <CapabilityRows api={api} />
+    )
+
+  if (onClose) {
+    return (
+      <DialogShell
+        testid={TESTID}
+        dataId={`${providerId}/${modelId}`}
+        title={`${providerId} / ${modelId}`}
+        subtitle="Capabilities in opencode's own config file. Unset fields use opencode's defaults."
+        // Always opened from the provider dialog, which already holds z-[100].
+        stacked
+        onClose={onClose}
+        footer={
+          <>
+            {onRemove ? (
+              <button
+                type="button"
+                data-testid={`${TESTID}.remove`}
+                onClick={onRemove}
+                className="px-2 py-1 text-[11px] rounded text-text-muted/70 hover:text-red-400 hover:bg-bg-hover transition-colors"
+              >
+                Remove model
+              </button>
+            ) : (
+              <span />
+            )}
+            <button
+              type="button"
+              data-testid={`${TESTID}.done`}
+              onClick={onClose}
+              className="px-3 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent transition-colors"
+            >
+              Done
+            </button>
+          </>
+        }
+      >
+        {body}
+      </DialogShell>
+    )
+  }
+
+  return (
+    <div
+      data-testid={TESTID}
+      data-id={`${providerId}/${modelId}`}
+      className="rounded bg-bg-primary/30 py-1"
+    >
+      <div className="px-3 pb-0.5 text-[11px] uppercase tracking-wider text-text-muted/60">
+        Capabilities
+      </div>
+      {body}
     </div>
   )
 }

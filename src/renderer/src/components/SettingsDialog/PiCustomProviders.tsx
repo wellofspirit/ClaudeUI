@@ -5,6 +5,11 @@
  * BUILT-IN OVERRIDES blocks that hang under PiVendors' authentication content,
  * plus the provider dialog and the per-model capability editor they open.
  *
+ * This pane is where the shared provider-editor LOOK was designed; the frame
+ * primitives it uses — dialog shell, block header, row card, pill row, create
+ * form, disclosure — now live in provider-editor-shell.tsx so the opencode
+ * editors wear the same frame. What stays here is pi's own semantics.
+ *
  * It edits pi's OWN model catalog (`~/.pi/agent/models.json`,
  * vendor/pi-cli/docs/models.md) through the leaf-patch IPC pair
  * (`readPiModelsRaw` / `patchPiModels`), the models twin of the settings pair
@@ -50,6 +55,14 @@ import {
   LeafNumberInput,
   LeafTextInput
 } from './OpencodeConfigPanes'
+import {
+  AddForm,
+  BlockHeader,
+  DialogShell,
+  Disclosure,
+  EntityRowCard,
+  SegmentPills
+} from './provider-editor-shell'
 import { ConfirmModal } from '../shared/ConfirmModal'
 import { deepEqual, isPlainObject } from '../../../../shared/opencode-config-diff'
 import type { RawConfigPatch } from '../../../../shared/types'
@@ -263,39 +276,7 @@ function overrideSummary(entry: Record<string, unknown>): string {
     .join(' · ')
 }
 
-// ── Shared bits ──────────────────────────────────────────────────────────────
-
-/** Small caps divider with a right-hand action, as in the mockup. */
-function BlockHeader({
-  label,
-  note,
-  actionLabel,
-  onAction,
-  actionTestid
-}: {
-  label: string
-  note: string
-  actionLabel: string
-  onAction: () => void
-  actionTestid: string
-}): React.JSX.Element {
-  return (
-    <div className="mt-3 mb-1 mx-3 pb-1 border-b border-border/20 flex items-center justify-between gap-2">
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-text-muted/70">
-        {label}
-        <span className="ml-1.5 normal-case tracking-normal font-normal">— {note}</span>
-      </div>
-      <button
-        type="button"
-        data-testid={actionTestid}
-        onClick={onAction}
-        className="shrink-0 text-[10px] text-accent hover:text-accent/80 transition-colors"
-      >
-        {actionLabel}
-      </button>
-    </div>
-  )
-}
+// ── Pi-specific bits (the frame primitives live in provider-editor-shell) ────
 
 const API_OPTIONS = [
   'openai-completions',
@@ -303,106 +284,6 @@ const API_OPTIONS = [
   'anthropic-messages',
   'google-generative-ai'
 ] as const
-
-/** Closed-set pill row. `undefined` current = nothing selected (absent key). */
-function SegmentPills({
-  testid,
-  idPrefix,
-  options,
-  current,
-  onSelect,
-  align = 'end'
-}: {
-  testid: string
-  idPrefix: string
-  options: readonly string[]
-  current: string | undefined
-  onSelect: (value: string) => void
-  /** Dialog rows right-align their control column; a create form reads left. */
-  align?: 'start' | 'end'
-}): React.JSX.Element {
-  return (
-    <div className={`flex flex-wrap gap-1 ${align === 'end' ? 'justify-end' : 'justify-start'}`}>
-      {options.map((option) => {
-        const on = current === option
-        return (
-          <button
-            key={option}
-            type="button"
-            data-testid={testid}
-            data-id={`${idPrefix}:${option}`}
-            aria-pressed={on}
-            onClick={() => onSelect(option)}
-            className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
-              on
-                ? 'bg-accent/20 text-accent border-accent/40'
-                : 'bg-bg-hover text-text-muted border-border hover:text-text-secondary'
-            }`}
-          >
-            {option}
-          </button>
-        )
-      })}
-    </div>
-  )
-}
-
-/** Modal shell shared by the provider dialog and the model editor. */
-function DialogShell({
-  testid,
-  dataId,
-  title,
-  subtitle,
-  stacked = false,
-  onClose,
-  footer,
-  children
-}: {
-  testid: string
-  dataId: string
-  title: string
-  subtitle: string
-  /** True when opened from ANOTHER dialog — must clear its z-[100]. */
-  stacked?: boolean
-  onClose: () => void
-  footer: React.ReactNode
-  children: React.ReactNode
-}): React.JSX.Element {
-  return (
-    <div
-      data-testid={testid}
-      data-id={dataId}
-      className={`fixed inset-0 ${stacked ? 'z-[105]' : 'z-[100]'} flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fade-in`}
-      onClick={onClose}
-    >
-      <div
-        className="w-[min(620px,94vw)] max-h-[85vh] flex flex-col bg-bg-primary border border-border rounded-lg shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="px-4 py-3 border-b border-border/50 flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <div className="text-[13px] font-medium text-text-primary truncate">{title}</div>
-            <div className="text-[11px] text-text-muted/70">{subtitle}</div>
-          </div>
-          <button
-            data-testid={`${testid}.close`}
-            aria-label="Close"
-            onClick={onClose}
-            className="shrink-0 text-text-muted/60 hover:text-text-primary transition-colors text-[16px] leading-none px-1"
-          >
-            ✕
-          </button>
-        </div>
-        <div className="flex-1 overflow-y-auto py-1 text-[13px] text-text-secondary">
-          {children}
-        </div>
-        <div className="px-4 py-2.5 border-t border-border/50 flex items-center justify-between gap-2">
-          {footer}
-        </div>
-      </div>
-    </div>
-  )
-}
 
 /** The read-only body a managed (projected) entry gets instead of the form. */
 function ManagedNotice({
@@ -436,81 +317,6 @@ function ManagedNotice({
       >
         Open Providers &amp; models
       </button>
-    </div>
-  )
-}
-
-/**
- * A single-column create form. Used for "+ Add override" (provider + model id)
- * and "+ Add model" (model id); the provider form needs an `api` segment row and
- * is written out separately below.
- */
-function AddForm({
-  testidPrefix,
-  fields,
-  submitLabel,
-  error,
-  onSubmit,
-  onCancel
-}: {
-  testidPrefix: string
-  fields: { key: string; label: string; placeholder: string }[]
-  submitLabel: string
-  error: string | null
-  onSubmit: (values: Record<string, string>) => void
-  onCancel: () => void
-}): React.JSX.Element {
-  const [values, setValues] = useState<Record<string, string>>({})
-  const complete = fields.every((field) => (values[field.key] ?? '').trim() !== '')
-  return (
-    <div
-      data-testid={`${testidPrefix}.form`}
-      className="mx-3 my-1 border border-border/30 rounded-md p-2 space-y-1.5"
-    >
-      {fields.map((field) => (
-        <label key={field.key} className="block">
-          <span className="block text-[10px] text-text-muted mb-0.5">{field.label}</span>
-          <input
-            type="text"
-            data-testid={`${testidPrefix}.field`}
-            data-id={field.key}
-            placeholder={field.placeholder}
-            value={values[field.key] ?? ''}
-            spellCheck={false}
-            onChange={(e) => setValues((prev) => ({ ...prev, [field.key]: e.target.value }))}
-            className={`${inputClass} w-full`}
-          />
-        </label>
-      ))}
-      {error && (
-        <div
-          data-testid={`${testidPrefix}.error`}
-          className="text-[10px] text-red-400 leading-relaxed"
-        >
-          {error}
-        </div>
-      )}
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          data-testid={`${testidPrefix}.submit`}
-          disabled={!complete}
-          onClick={() =>
-            onSubmit(Object.fromEntries(fields.map((f) => [f.key, (values[f.key] ?? '').trim()])))
-          }
-          className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-        >
-          {submitLabel}
-        </button>
-        <button
-          type="button"
-          data-testid={`${testidPrefix}.cancel`}
-          onClick={onCancel}
-          className="text-[11px] text-text-muted/70 hover:text-text-primary transition-colors"
-        >
-          Cancel
-        </button>
-      </div>
     </div>
   )
 }
@@ -554,33 +360,6 @@ const OVERRIDE_ONLY_LEAVES = [
     helper: 'Request headers for this model only —'
   }
 ]
-
-function Disclosure({
-  testid,
-  id,
-  label,
-  open,
-  onToggle
-}: {
-  testid: string
-  id: string
-  label: string
-  open: boolean
-  onToggle: () => void
-}): React.JSX.Element {
-  return (
-    <button
-      type="button"
-      data-testid={testid}
-      data-id={id}
-      aria-expanded={open}
-      onClick={onToggle}
-      className="text-[10px] text-accent hover:text-accent/80 transition-colors"
-    >
-      {label}
-    </button>
-  )
-}
 
 function AdvancedLeaf({
   api,
@@ -1251,22 +1030,15 @@ function PiProviderDialog({
               const model = isPlainObject(raw) ? raw : {}
               const id = typeof model.id === 'string' ? model.id : `#${idx}`
               return (
-                <button
+                <EntityRowCard
                   key={idx}
-                  type="button"
-                  data-testid={`${DIALOG}.modelRow`}
-                  data-id={String(idx)}
+                  testid={`${DIALOG}.modelRow`}
+                  dataId={String(idx)}
+                  title={id}
+                  subtitle={modelSummary(model)}
+                  action="Edit"
                   onClick={() => setEditingModel(idx)}
-                  className="mx-3 mb-1.5 w-[calc(100%-1.5rem)] flex items-center gap-3 rounded-md border border-border/30 px-3 py-2 text-left hover:border-accent/40 transition-colors cursor-default"
-                >
-                  <span className="min-w-0">
-                    <span className="block text-[12px] text-text-primary truncate">{id}</span>
-                    <span className="block text-[10px] text-text-muted/70 truncate">
-                      {modelSummary(model)}
-                    </span>
-                  </span>
-                  <span className="ml-auto shrink-0 text-[10px] text-accent">Edit</span>
-                </button>
+                />
               )
             })}
           </>
@@ -1506,42 +1278,33 @@ export function PiCustomProviders(): React.JSX.Element {
       )}
 
       {custom.map((row) => (
-        <button
+        <EntityRowCard
           key={row.id}
-          type="button"
-          data-testid={`${PANE}.providerRow`}
-          data-id={row.id}
-          onClick={() => setOpenProvider(row.id)}
-          className="mx-3 mb-1.5 w-[calc(100%-1.5rem)] flex items-center gap-3 rounded-md border border-border/30 px-3 py-2 text-left hover:border-accent/40 transition-colors cursor-default"
-        >
-          <span className="min-w-0">
-            <span className="flex items-center gap-2">
-              <span className="text-[12px] text-text-primary truncate">{row.id}</span>
-              {typeof row.entry.api === 'string' && (
-                <span className="font-mono text-[10px] text-text-muted/60 truncate">
-                  {row.entry.api}
-                </span>
-              )}
-              {row.managed && (
-                <span
-                  data-testid={`${PANE}.managedBadge`}
-                  data-id={row.id}
-                  className="shrink-0 text-[9px] px-1 py-0.5 rounded bg-bg-hover text-text-muted/70 uppercase tracking-wide"
-                >
-                  🔒 managed
-                </span>
-              )}
-            </span>
-            <span className="block text-[10px] text-text-muted/70 truncate">
+          testid={`${PANE}.providerRow`}
+          dataId={row.id}
+          title={row.id}
+          tag={typeof row.entry.api === 'string' ? row.entry.api : undefined}
+          badges={
+            row.managed && (
+              <span
+                data-testid={`${PANE}.managedBadge`}
+                data-id={row.id}
+                className="shrink-0 text-[9px] px-1 py-0.5 rounded bg-bg-hover text-text-muted/70 uppercase tracking-wide"
+              >
+                🔒 managed
+              </span>
+            )
+          }
+          subtitle={
+            <>
               {typeof row.entry.baseUrl === 'string' ? row.entry.baseUrl : 'no baseUrl'} ·{' '}
               {Array.isArray(row.entry.models) ? row.entry.models.length : 0} models
               {row.managed ? ' · managed by Shared Providers' : ''}
-            </span>
-          </span>
-          <span className="ml-auto shrink-0 text-[10px] text-accent">
-            {row.managed ? 'View' : 'Edit'}
-          </span>
-        </button>
+            </>
+          }
+          action={row.managed ? 'View' : 'Edit'}
+          onClick={() => setOpenProvider(row.id)}
+        />
       ))}
 
       <BlockHeader
@@ -1583,24 +1346,15 @@ export function PiCustomProviders(): React.JSX.Element {
       )}
 
       {overrides.map((row) => (
-        <button
+        <EntityRowCard
           key={`${row.providerId}/${row.modelId}`}
-          type="button"
-          data-testid={`${PANE}.overrideRow`}
-          data-id={`${row.providerId}/${row.modelId}`}
+          testid={`${PANE}.overrideRow`}
+          dataId={`${row.providerId}/${row.modelId}`}
+          title={`${row.providerId} / ${row.modelId}`}
+          subtitle={overrideSummary(row.entry)}
+          action="Edit"
           onClick={() => setOpenOverride({ providerId: row.providerId, modelId: row.modelId })}
-          className="mx-3 mb-1.5 w-[calc(100%-1.5rem)] flex items-center gap-3 rounded-md border border-border/30 px-3 py-2 text-left hover:border-accent/40 transition-colors cursor-default"
-        >
-          <span className="min-w-0">
-            <span className="block text-[12px] text-text-primary truncate">
-              {row.providerId} / {row.modelId}
-            </span>
-            <span className="block text-[10px] text-text-muted/70 truncate">
-              {overrideSummary(row.entry)}
-            </span>
-          </span>
-          <span className="ml-auto shrink-0 text-[10px] text-accent">Edit</span>
-        </button>
+        />
       ))}
 
       <div
