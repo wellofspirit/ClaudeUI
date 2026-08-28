@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import type { NetworkInterfaceInfo, RemoteConfig } from '../../../../shared/types'
 import { RemotePasskeySettings } from './RemotePasskeySettings'
+import { RemoteStatusCard } from './RemoteStatusCard'
 import { SelectMenu } from '../shared/SelectMenu'
 import { isWebClient } from './remote-settings-transport'
 import { EnrollCard } from './EnrollCard'
@@ -217,6 +218,12 @@ export function RemoteServerSettings(): React.JSX.Element {
           machine itself — the desktop app, or the server’s own configuration on a headless install.
         </div>
       )}
+
+      {/* What the desktop reads off `remote:status` and shows in the sidebar
+          pill + Remote Access modal, both of which are desktop-only. The web
+          client gets the same facts through the REDACTED `remote:status-view`
+          (owner ruling, 2026-08-28) — no link fields, and no controls. */}
+      {web && <RemoteStatusCard />}
 
       {!web && (
         <>

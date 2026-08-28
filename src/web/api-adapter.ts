@@ -709,6 +709,17 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       authMethods: []
     }),
     onRemoteStatus: () => () => {},
+    // The REDACTED status is real over remote (owner ruling, 2026-08-28):
+    // `remote:status-view`, a `config` QUERY declared for both transports in
+    // `core/ipc/remote-view-commands.ts`, carrying running state, port, the
+    // connected-client list, tunnel state, auth methods, the last listen error
+    // and a redacted `tls` — and neither `lanUrl`/`tunnelUrl` nor anything
+    // derived from them, which is why the two stubs above stay stubs.
+    //
+    // No event twin: `remote:status` is host-local by classification, so the web
+    // settings view polls this while it is on screen.
+    getRemoteStatusView: () =>
+      connection.invoke('remote:status-view') as ReturnType<ClaudeAPI['getRemoteStatusView']>,
     // The READ is real over remote as of ADR-054 decision 6: `authcfg:get`, an
     // `admin`-gated QUERY answering the same sanitized object the desktop's
     // `remote:get-config` does. Making the routine settings web-reachable is

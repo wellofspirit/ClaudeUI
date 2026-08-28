@@ -57,7 +57,6 @@ const blank = (): SharedProviderDefinition => ({
 })
 
 export function SharedProviders(): React.JSX.Element {
-  const readOnly = window.api.platform === 'web'
   const [definitions, setDefinitions] = useState<SharedProviderDefinition[] | null>(null)
   const [statuses, setStatuses] = useState<Record<string, SharedProviderStatus>>({})
   const [models, setModels] = useState<Record<string, SharedProviderModel[]>>({})
@@ -124,10 +123,7 @@ export function SharedProviders(): React.JSX.Element {
       className="px-3 py-2 space-y-3 text-[12px] text-text-secondary"
     >
       <div className="flex justify-between items-center">
-        <span>
-          Shared provider definitions are canonical for pi and opencode.
-          {readOnly && ' Open the desktop app to make changes.'}
-        </span>
+        <span>Shared provider definitions are canonical for pi and opencode.</span>
         <button
           data-testid="SharedProviders.refresh"
           onClick={() => void reload()}
@@ -153,7 +149,6 @@ export function SharedProviders(): React.JSX.Element {
           status={statuses[definition.id]}
           models={models[definition.id] ?? []}
           busy={busy !== null}
-          readOnly={readOnly}
           oauthBusy={
             vendorOAuth?.engineId === 'pi' &&
             vendorOAuth.vendorId === 'openai-codex' &&
@@ -250,7 +245,7 @@ export function SharedProviders(): React.JSX.Element {
             })
           }
         />
-      ) : readOnly ? null : (
+      ) : (
         <button
           data-testid="SharedProviders.create"
           onClick={() => {
@@ -272,7 +267,6 @@ function ProviderCard({
   status,
   models,
   busy,
-  readOnly,
   oauthBusy,
   oauthFlow,
   oauthPasteBusy,
@@ -291,7 +285,6 @@ function ProviderCard({
   status?: SharedProviderStatus
   models: SharedProviderModel[]
   busy: boolean
-  readOnly: boolean
   oauthBusy: boolean
   /** This provider's remote sign-in flow, or null (always null on desktop). */
   oauthFlow: VendorOAuthState | null
@@ -308,9 +301,16 @@ function ProviderCard({
   onEdit: () => void
   onDelete: () => void
 }): React.JSX.Element {
-  // Connecting ChatGPT is the one action a remote client CAN complete — pi's
-  // Codex `auto` method finishes through ADR-057's paste-back, unlike the API-key
-  // and definition edits `readOnly` still guards.
+  // Every write on this card is live on the web (owner ruling, 2026-08-28): all
+  // seven `shared-provider:*` mutations are declared for BOTH transports under
+  // `capability: 'config'` (core/ipc/auth-commands.ts), so the gate is the
+  // SERVER's — an authenticated connection's grant set — not a platform check
+  // here. The card used to disable everything but Connect on `platform === 'web'`,
+  // which withheld from a phone what the server would already have accepted.
+  //
+  // `isWeb` survives for the one thing that genuinely differs: the ChatGPT OAuth
+  // flow parks on `vendorOAuth` and finishes through ADR-057's paste-back form
+  // instead of driving the host browser, and that form is web-only.
   const isWeb = window.api.platform === 'web'
   return (
     <div
@@ -335,7 +335,7 @@ function ProviderCard({
         <div className="flex gap-2 shrink-0">
           <button
             data-testid="SharedProviderCard.sync"
-            disabled={busy || readOnly}
+            disabled={busy}
             onClick={onSync}
             className="rounded px-1.5 py-0.5 text-accent hover:bg-accent/10"
           >
@@ -345,7 +345,7 @@ function ProviderCard({
             <>
               <button
                 data-testid="SharedProviderCard.edit"
-                disabled={busy || readOnly}
+                disabled={busy}
                 onClick={onEdit}
                 className="rounded px-1.5 py-0.5 hover:bg-bg-hover"
               >
@@ -353,7 +353,7 @@ function ProviderCard({
               </button>
               <button
                 data-testid="SharedProviderCard.delete"
-                disabled={busy || readOnly}
+                disabled={busy}
                 onClick={onDelete}
                 className="rounded px-1.5 py-0.5 text-danger hover:bg-red-500/10"
               >
@@ -369,7 +369,7 @@ function ProviderCard({
             {status?.connected ? (
               <button
                 data-testid="SharedProviderCard.disconnect"
-                disabled={busy || readOnly}
+                disabled={busy}
                 onClick={onDisconnect}
                 className="rounded bg-white/5 px-2 py-1 text-text-muted hover:text-red-400"
               >
@@ -438,7 +438,7 @@ function ProviderCard({
                 data-harness={h}
                 type="checkbox"
                 checked={route.enabled}
-                disabled={busy || readOnly}
+                disabled={busy}
                 onChange={(e) => onRoute(h, e.target.checked)}
               />
               Share with {h}{' '}
@@ -472,7 +472,7 @@ function ProviderCard({
                   id={`${definition.id}-${h}-default`}
                   testid="SharedProviderCard.defaultModel"
                   dataAttrs={{ 'data-harness': h }}
-                  disabled={busy || readOnly}
+                  disabled={busy}
                   ariaLabel={`${h} default model`}
                   value={route.defaultModel ?? ''}
                   onChange={(v) => onDefault(h, v)}
@@ -649,16 +649,18 @@ function ProviderForm({
       </div>
       <label className="block space-y-1 text-[10px] text-text-muted">
         API key
+        {/* Web-writable since the owner ruling of 2026-08-28. The key travels as
+            an argument of `shared-provider:set-key`, inside whatever the
+            connection's channel already is (the ADR-056 E2E channel on a LAN or
+            tunnel origin, TLS on the tailnet-serve one), and is stored host-side
+            exactly as a desktop-entered one is. It is never read BACK on either
+            transport, which is why this field is write-only rather than
+            pre-filled. */}
         <input
           data-testid="SharedProviderForm.apiKey"
           type="password"
-          disabled={window.api.platform === 'web'}
           value={apiKey}
-          placeholder={
-            window.api.platform === 'web'
-              ? 'API keys can only be changed from the desktop app'
-              : 'Set or replace API key (optional)'
-          }
+          placeholder="Set or replace API key (optional)"
           onChange={(e) => onKey(e.target.value)}
           className={fieldClass}
         />

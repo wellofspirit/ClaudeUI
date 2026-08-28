@@ -132,17 +132,46 @@ describe('SharedProviders', () => {
     await screen.findByTestId('SharedProviders.error')
     expect(screen.getByTestId('SharedProviders.error')).toHaveTextContent('sync failed')
   })
-  it('is read-only in the remote web client', async () => {
+  /**
+   * The INVERSION of "is read-only in the remote web client" (owner ruling,
+   * 2026-08-28: "shared providers no longer needs to be desktop only, web is
+   * genuinely fine").
+   *
+   * All seven `shared-provider:*` mutations are declared for both transports
+   * under `capability: 'config'` (`core/ipc/auth-commands.ts`), so the gate is
+   * the server's grant check. The `readOnly` prop this card carried was a
+   * SECOND, client-side gate that refused writes the server would have accepted
+   * — the class of thing that cannot be spotted from the call site, which is why
+   * this case now asserts the controls are LIVE rather than disabled.
+   */
+  it('is fully writable in the remote web client (owner ruling, 2026-08-28)', async () => {
     ;(window.api as unknown as { platform: string }).platform = 'web'
     render(<SharedProviders />)
     await screen.findByTestId('SharedProviderCard')
 
-    expect(screen.getByTestId('SharedProviderCard.sync')).toBeDisabled()
-    for (const toggle of screen.getAllByTestId('SharedProviderCard.routeToggle')) {
-      expect(toggle).toBeDisabled()
-    }
-    expect(screen.queryByTestId('SharedProviders.create')).not.toBeInTheDocument()
-    expect(screen.getByTestId('SharedProviders')).toHaveTextContent('Open the desktop app')
+    expect(screen.getByTestId('SharedProviderCard.sync')).not.toBeDisabled()
+    // A route toggle fires its IPC from the phone, exactly as on the desktop.
+    const toggles = screen.getAllByTestId('SharedProviderCard.routeToggle')
+    for (const toggle of toggles) expect(toggle).not.toBeDisabled()
+    fireEvent.click(toggles[0])
+    await waitFor(() =>
+      expect(api.setSharedProviderRoute).toHaveBeenCalledWith('chatgpt', 'pi', false)
+    )
+    expect(screen.getByTestId('SharedProviders')).not.toHaveTextContent('Open the desktop app')
+
+    // The create button is offered, and the API-key field accepts input and
+    // saves — the two surfaces the removed gate hid outright.
+    fireEvent.click(await screen.findByTestId('SharedProviders.create'))
+    fireEvent.change(screen.getByTestId('SharedProviderForm.id'), { target: { value: 'local' } })
+    fireEvent.change(screen.getByTestId('SharedProviderForm.name'), { target: { value: 'Local' } })
+    fireEvent.change(screen.getByTestId('SharedProviderForm.modelId'), {
+      target: { value: 'local-1' }
+    })
+    const apiKey = screen.getByTestId('SharedProviderForm.apiKey')
+    expect(apiKey).not.toBeDisabled()
+    fireEvent.change(apiKey, { target: { value: 'secret' } })
+    fireEvent.click(screen.getByTestId('SharedProviderForm.save'))
+    await waitFor(() => expect(api.setSharedProviderApiKey).toHaveBeenCalledWith('local', 'secret'))
   })
   it('creates a routed custom provider with a write-only API key, then edits and deletes it', async () => {
     render(<SharedProviders />)
@@ -268,8 +297,13 @@ describe('SharedProviders', () => {
  * app", disabled) because pi's Codex login needed the host's loopback. It does
  * not any more: the host holds the PKCE verifier and completes the exchange from
  * a PASTED callback, so the button works and the card expands into the shared
- * two-step flow. Everything else `readOnly` guards — API keys, definition edits,
- * route toggles, disconnect — is deliberately still desktop-only.
+ * two-step flow.
+ *
+ * Connect was the FIRST write to reach the web client; as of the owner's ruling
+ * of 2026-08-28 it is no longer the only one — API keys, definition edits, route
+ * toggles and disconnect are live there too (see the writability case above).
+ * What remains web-SPECIFIC in this block is only the paste-back flow itself:
+ * the desktop drives the host browser and never parks a `vendorOAuth` stage.
  */
 describe('SharedProviders — remote ChatGPT connect', () => {
   const flow = {

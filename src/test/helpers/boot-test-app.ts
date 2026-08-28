@@ -341,6 +341,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     stopRemoteServer: () => ipcRenderer.invoke('remote:stop'),
     getRemoteStatus: () => ipcRenderer.invoke('remote:status'),
     onRemoteStatus: onEvent('remote:status'),
+    getRemoteStatusView: () => ipcRenderer.invoke('remote:status-view'),
     getRemoteConfig: () => ipcRenderer.invoke('remote:get-config'),
     setRemoteConfig: (partial) => ipcRenderer.invoke('remote:set-config', partial),
     setRemotePassword: (password) => ipcRenderer.invoke('remote:set-password', password),

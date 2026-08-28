@@ -103,7 +103,11 @@ const SHARED_DECLARATION_SOURCES = [
   'src/core/ipc/config-commands.ts',
   'src/core/ipc/automation-commands.ts',
   // S4 (ADR-057) — the vendor-OAuth / account / native-OAuth family.
-  'src/core/ipc/auth-commands.ts'
+  'src/core/ipc/auth-commands.ts',
+  // The redacted status read (owner ruling, 2026-08-28) — the ONE `remote:*`
+  // channel served on both transports. Every `remote:*` MUTATION is absent from
+  // this list because it is absent from the registry entirely.
+  'src/core/ipc/remote-view-commands.ts'
 ]
 
 /**
@@ -155,6 +159,22 @@ const S1B_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'que
   'automation:cancel': { capability: 'config', kind: 'command' },
   'automation:send-message': { capability: 'config', kind: 'command' },
   'automation:dismiss-run': { capability: 'config', kind: 'command' }
+}
+
+/**
+ * The 2026-08-28 status-view ruling, in the same shape as {@link S1B_SWEEP} and
+ * deliberately NOT inside it — that table is the record of one dated sweep, and
+ * folding a later decision into it would make both unreadable.
+ *
+ * ONE channel, and the reason it is worth its own table is the namespace it
+ * lives in: `remote:*` is otherwise host-anchor-only by construction, so this is
+ * the single exception and it must read as the decision it is. A `query`, and
+ * `config` rather than `admin` because it carries no credential, no key and no
+ * configuration write — the redaction (`shared/types.ts` → `RemoteStatusView`)
+ * is what makes that true, and `remote-view-commands.test.ts` pins it.
+ */
+const REMOTE_VIEW_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'query' }> = {
+  'remote:status-view': { capability: 'config', kind: 'query' }
 }
 
 /** channel → declared capability, parsed from remote-handlers.ts registrations. */
@@ -274,6 +294,35 @@ describe('remote channel parity (R5)', () => {
       .filter((c) => !AUTH_OFF_GRANTS.has(declared.get(c)!))
       .sort()
     expect(ungranted).toEqual([])
+  })
+
+  it('the status view is declared ONCE, spread by both transports, and is the only remote:* channel', () => {
+    // Same two halves as the S1b case above, applied to the one channel that
+    // widens the `remote:*` namespace (owner ruling, 2026-08-28).
+    const shared = read('src/core/ipc/remote-view-commands.ts')
+    const declRe = /channel:\s*'([^']+)',\s*capability:\s*'([^']+)',\s*kind:\s*'([^']+)'/g
+    const found = new Map<string, { capability: Capability; kind: string }>()
+    for (let m = declRe.exec(shared); m; m = declRe.exec(shared)) {
+      found.set(m[1], { capability: m[2] as Capability, kind: m[3] })
+    }
+    expect(Object.fromEntries(found)).toEqual(REMOTE_VIEW_SWEEP)
+
+    // Both transports spread it: `registerRemoteViewIpc` (desktop, called from
+    // core-services once the server exists) and `registerRemoteHandlers`.
+    expect(shared).toMatch(/for \(const cmd of remoteViewCommands\(host\)\) handleIpc\(cmd\)/)
+    expect(read('src/core/ipc/remote-handlers.ts')).toMatch(
+      /for \(const cmd of remoteViewCommands\(enrollTokens \?\? null\)\) \{\s*handleRemote\(cmd\)/
+    )
+
+    // And it is the ONLY `remote:*` channel any shared declaration or transport
+    // registrar contributes. The mutations — start/stop/set-config/set-password/
+    // clear-password/force-reserve — are raw `ipcMain.handle` on the host anchor
+    // with no registration at all, which is what stops a remote client cutting
+    // the connection it is riding. Structural, not a hidden button.
+    const declared = remoteDeclarations()
+    expect([...declared.keys()].filter((c) => c.startsWith('remote:'))).toEqual([
+      'remote:status-view'
+    ])
   })
 
   it('the passkey channels declare enroll/admin, not anything grantable (ADR-052)', () => {

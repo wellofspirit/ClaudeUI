@@ -55,6 +55,17 @@ const api = {
   getNetworkInterfaces: vi.fn(),
   detectTailscale: vi.fn(),
   onRemoteStatus: vi.fn(() => () => {}),
+  getRemoteStatusView: vi.fn(async () => ({
+    running: true,
+    port: 7365,
+    connectedClients: 1,
+    clientIps: ['100.64.0.7'],
+    clientLogins: ['owner@example.com'],
+    tunnelState: null,
+    authMethods: ['password' as const],
+    lastError: null,
+    tls: null
+  })),
   webauthnCredentials: vi.fn(async () => []),
   authcfgLanLink: vi.fn(),
   authcfgRotateLanKey: vi.fn(),
@@ -313,6 +324,31 @@ describe('Settings › Remote, web variant', () => {
         bridge.reconnectAs({ capableOrigin: false })
       })
       expect(screen.queryByTestId('EnrollCard')).toBeNull()
+    })
+  })
+
+  describe('the status view mount', () => {
+    /**
+     * The web client's answer to the sidebar pill + Remote Access modal, both of
+     * which are desktop-only: a redacted, read-only reading of the listener it
+     * is talking to (`remote:status-view`). Its own rows and its polling are
+     * pinned in `RemoteStatusCard.component.test.tsx`; what this pins is that
+     * the pane mounts it on the web transport and nowhere else.
+     */
+    it('renders the read-only status card on the web transport', async () => {
+      await renderPane()
+
+      expect(await screen.findByTestId('RemoteStatusCard')).toBeInTheDocument()
+      expect(api.getRemoteStatusView).toHaveBeenCalled()
+      expect(screen.getByTestId('RemoteStatusCard.client')).toHaveTextContent('owner@example.com')
+    })
+
+    it('is not mounted on the host anchor — it reads the full status there (GUARD)', async () => {
+      api.platform = 'darwin'
+      await renderPane()
+
+      expect(screen.queryByTestId('RemoteStatusCard')).toBeNull()
+      expect(api.getRemoteStatusView).not.toHaveBeenCalled()
     })
   })
 

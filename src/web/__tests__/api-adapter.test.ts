@@ -514,7 +514,13 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     channel: 'proxy:test-connection',
     args: [{ type: 'http', hostname: '127.0.0.1', port: 8080 }]
   },
-  { method: 'refreshPrices', channel: 'usage:refresh-prices', args: [] }
+  { method: 'refreshPrices', channel: 'usage:refresh-prices', args: [] },
+
+  // The REDACTED remote status (owner ruling, 2026-08-28). A `config` query,
+  // declared for both transports in `core/ipc/remote-view-commands.ts`. Its
+  // full-fat sibling `getRemoteStatus` stays a stub below, and must: the object
+  // it answers carries the LAN / tunnel channel keys.
+  { method: 'getRemoteStatusView', channel: 'remote:status-view', args: [] }
 ]
 
 describe('web api-adapter — wired methods reach the channel they claim', () => {
@@ -647,8 +653,8 @@ const NOT_ON_THE_WIRE: Readonly<Record<string, string>> = {
   getNetworkInterfaces: DESKTOP_ANCHOR_ONLY,
   startRemoteServer: DESKTOP_ANCHOR_ONLY,
   stopRemoteServer: DESKTOP_ANCHOR_ONLY,
-  getRemoteStatus: DESKTOP_ANCHOR_ONLY,
-  onRemoteStatus: DESKTOP_ANCHOR_ONLY,
+  getRemoteStatus: `${DESKTOP_ANCHOR_ONLY}; its lanUrl/tunnelUrl carry channel keys — the readable half is the redacted \`remote:status-view\` (getRemoteStatusView, wired above)`,
+  onRemoteStatus: `${DESKTOP_ANCHOR_ONLY}; \`remote:status\` is a host-local EVENT, so the web view polls \`remote:status-view\` instead of subscribing`,
   setRemoteConfig:
     'no remote registration: the only writer that can reach the `off` master switch, so refusing locally is what lets the pane say why',
   setRemotePassword: DESKTOP_ANCHOR_ONLY,

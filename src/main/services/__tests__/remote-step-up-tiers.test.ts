@@ -513,8 +513,9 @@ describe('ADR-054 step-up tiers over the socket', () => {
       webContents: { send: vi.fn(), executeJavaScript: vi.fn(async () => ({})) },
       on: vi.fn()
     }
-    // The server IS the auth-surface / password host, exactly as boot-core wires
-    // it — indirected because `server` is reassigned per `boot()`.
+    // The server IS the auth-surface / password / status host, exactly as
+    // boot-core wires it — indirected because `server` is reassigned per
+    // `boot()`.
     const hostStub = {
       mintEnrollToken: () => server.mintEnrollToken(),
       disconnectAuthSurfaceClients: (opts?: { exceptConnectionId?: string }) =>
@@ -522,7 +523,9 @@ describe('ADR-054 step-up tiers over the socket', () => {
       disconnectPasswordClients: () => server.disconnectPasswordClients(),
       resnapshotConnection: (id: string) => server.resnapshotConnection(id),
       lanLink: () => server.lanLink(),
-      rotateLanKey: () => server.rotateLanKey()
+      rotateLanKey: () => server.rotateLanKey(),
+      // The redacted `remote:status-view` source (2026-08-28).
+      getStatus: () => server.getStatus()
     }
     registerRemoteHandlers(dispatcher, { get: () => undefined, rekey: vi.fn() } as never, hostStub)
     registerTerminalIpc()

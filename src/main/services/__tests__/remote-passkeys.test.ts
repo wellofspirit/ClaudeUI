@@ -486,7 +486,9 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
       disconnectPasswordClients: () => server.disconnectPasswordClients(),
       resnapshotConnection: (id: string) => server.resnapshotConnection(id),
       lanLink: () => server.lanLink(),
-      rotateLanKey: () => server.rotateLanKey()
+      rotateLanKey: () => server.rotateLanKey(),
+      // The redacted `remote:status-view` source (2026-08-28).
+      getStatus: () => server.getStatus()
     }
     registerRemoteHandlers(
       dispatcherRef,

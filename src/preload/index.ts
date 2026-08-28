@@ -491,6 +491,13 @@ const api: ClaudeAPI = {
   stopRemoteServer: () => ipcRenderer.invoke('remote:stop'),
   getRemoteStatus: () => ipcRenderer.invoke('remote:status'),
   onRemoteStatus: onEvent('remote:status'),
+  // The redacted twin (owner ruling, 2026-08-28), registered for BOTH transports
+  // in `core/ipc/remote-view-commands.ts`. Real IPC here rather than a local
+  // projection, for the same reason the `authcfg:*` verbs are: one declaration,
+  // one redaction, so the desktop cannot drift from what a phone is shown. The
+  // desktop UI keeps using the full `remote:status` above — it is the host
+  // anchor, and it needs the link fields this view drops.
+  getRemoteStatusView: () => ipcRenderer.invoke('remote:status-view'),
   getRemoteConfig: () => ipcRenderer.invoke('remote:get-config'),
   setRemoteConfig: (partial) => ipcRenderer.invoke('remote:set-config', partial),
   setRemotePassword: (password: string) => ipcRenderer.invoke('remote:set-password', password),

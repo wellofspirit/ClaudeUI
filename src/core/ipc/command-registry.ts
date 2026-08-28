@@ -430,9 +430,13 @@ interface Declaration {
  * remaining guarantee is the narrower — and still load-bearing — one: a pinned
  * channel can never be RECLASSIFIED into a capability the base grant set holds.
  * The channels that must stay desktop-only are kept so by the OTHER half of the
- * reachability rule (they have no remote registration at all: `remote:*`,
- * `auth:*`, `account:*` and `window:*` are raw `ipcMain.handle` wiring in
- * boot-core.ts / index.ts). `remote-handlers.ipc.test.ts` pins that absence.
+ * reachability rule (they have no remote registration at all: the `remote:*`
+ * host-anchor verbs and `window:*` are raw `ipcMain.handle` wiring in
+ * boot-core.ts / index.ts). `remote-handlers.ipc.test.ts` pins that absence —
+ * including for the six pinned `remote:*` entries below, none of which the
+ * 2026-08-28 status-view ruling touched: what that added is `remote:status-view`,
+ * a `config` QUERY with no entry in this table because `config` is grantable and
+ * a pin whose capability is grantable would break this table's one guarantee.
  *
  * **What ADR-056 changed.** `admin` shrank to EXACTLY the session-security area
  * — the `authcfg:*` and `webauthn:*` families, plus their host-anchor twin

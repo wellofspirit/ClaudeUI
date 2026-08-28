@@ -38,6 +38,7 @@ import { registerTerminalIpc } from '../ipc/terminal.ipc'
 import { registerAutomationIpc } from '../ipc/automation.ipc'
 import { registerWebauthnIpc } from '../ipc/webauthn.ipc'
 import { registerAuthcfgIpc } from '../ipc/authcfg.ipc'
+import { registerRemoteViewIpc } from '../ipc/remote-view-commands'
 import { registerRemoteHandlers } from '../ipc/remote-handlers'
 import { RemoteServer } from '../services/remote-server'
 import { RemoteDispatcher } from '../services/remote-dispatcher'
@@ -189,6 +190,11 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // `off` master switch is NOT among them — it stays on the host anchor, which
   // has no remote registration at all.
   registerAuthcfgIpc(remoteServer)
+  // The redacted status read on the desktop transport (owner ruling,
+  // 2026-08-28). Registered here rather than inside `registerSessionIpc`
+  // because the server it reads does not exist until this point; the remote
+  // half is spread from the same declaration in `registerRemoteHandlers`.
+  registerRemoteViewIpc(remoteServer)
 
   const hostAnchor = createHostAnchor({
     remoteServer,

@@ -6,13 +6,19 @@
  *
  * Ten operations that administer the remote server itself: start/stop/status,
  * the persisted config, the password credential, the Tailscale probe and the
- * forced re-serve. They are the `remote:*` family, and they are unique in this
- * codebase for being registered on NEITHER transport — they are raw
- * `ipcMain.handle` wiring in `boot-core.ts`, with no entry in the command
- * registry at all. That is deliberate and load-bearing: a remote client must
- * never be able to read or rotate the credential it authenticated with, flip the
- * transport it is connected through, or disable authentication (ADR-039/042,
- * and `PINNED_CAPABILITIES` pins all six to `admin` as the belt).
+ * forced re-serve. They are unique in this codebase for being registered on
+ * NEITHER transport — they are raw `ipcMain.handle` wiring in `boot-core.ts`,
+ * with no entry in the command registry at all. That is deliberate and
+ * load-bearing: a remote client must never be able to read or rotate the
+ * credential it authenticated with, flip the transport it is connected through,
+ * or disable authentication (ADR-039/042, and `PINNED_CAPABILITIES` pins all six
+ * to `admin` as the belt).
+ *
+ * They are no longer the WHOLE `remote:*` namespace: `remote:status-view` (owner
+ * ruling, 2026-08-28 — `ipc/remote-view-commands.ts`) is a registered, redacted
+ * READ of `status()`'s result, with the link fields picked out. It takes nothing
+ * away from the paragraph above — every one of these ten stays unregistered, so
+ * the self-kill protection is still that there is no channel to call.
  *
  * ## Why they moved here
  *

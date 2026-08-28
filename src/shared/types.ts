@@ -1798,6 +1798,21 @@ interface RemoteAPI {
   getRemoteStatus(): Promise<RemoteStatus>
   onRemoteStatus(cb: (status: RemoteStatus) => void): () => void
   /**
+   * The REDACTED status (`remote:status-view`), on BOTH transports.
+   *
+   * `getRemoteStatus` above is host-anchor only — `RemoteStatus.lanUrl` /
+   * `tunnelUrl` carry channel keys, so it has no remote registration and the web
+   * adapter answers it with an all-null stub. This is the half a connected
+   * client may see: running state, port, who is connected, tunnel state, auth
+   * methods, the last listen error and a redacted `tls`
+   * ({@link RemoteStatusView}).
+   *
+   * There is no event twin. `remote:status` is host-local by classification, so
+   * the web view POLLS this while it is on screen; the desktop keeps its push
+   * subscription and its full-fat read.
+   */
+  getRemoteStatusView(): Promise<RemoteStatusView>
+  /**
    * The persisted remote-server config as a UI may see it (fixed port, bind
    * host, autostart, TLS, auth surface, ADR-054 tier + dials, password status;
    * never salt/hash/KDF params).
@@ -2226,6 +2241,89 @@ export interface RemoteStatus {
    *  (ADR-056). Empty when not running. Derived exactly the same way as
    *  `/remote/auth-info`'s `methods`. */
   authMethods: RemoteAuthMethod[]
+}
+
+/**
+ * The redacted half of {@link RemoteTlsStatus} — what `remote:status-view`
+ * carries about `tailscale serve` (owner ruling, 2026-08-28).
+ *
+ * Four fields, and the three that are MISSING are the point:
+ *
+ *  - `url` — `https://<dnsName>[:port]`, i.e. the node's tailnet DNS name. It is
+ *    no key, but it is the same disclosure `remote:tailscale-detect` is kept
+ *    desktop-only for ("it discloses the node's DNS name and the owner's login",
+ *    `core/boot/host-anchor.ts`), and a client on the LAN or the tunnel does not
+ *    otherwise learn the tailnet name.
+ *  - `serveError` / `detectionMessage` — FREE TEXT composed from the Tailscale
+ *    CLI's own output. The `not-ready` serve failure copies `detection.message`
+ *    verbatim, and that message embeds `status.AuthURL` on a logged-out node —
+ *    a device-authorization URL, which is capability-bearing. `detection` says
+ *    the same thing as a CLOSED union, into which nothing can be interpolated.
+ *
+ * The three kept are stable numbers/enums the web client can already read as
+ * CONFIG through `authcfg:get` (`tlsMode`, `tlsHttpsPort`), plus the live-port
+ * confirmation of the same pin.
+ */
+export interface RemoteTlsStatusView {
+  /** Mirrors {@link RemoteTlsStatus.mode} — 1 = tailscale-serve. */
+  mode: number
+  /** The HTTPS port serve is CONFIRMED listening on, null until up. */
+  httpsPort: number | null
+  /** The pinned HTTPS port this run binds (ADR-042); known even while serve is down. */
+  pinnedHttpsPort: number
+  /** Last `detect()` state — a closed union, never free text. */
+  detection: RemoteTlsDetection | null
+}
+
+/**
+ * The REDACTED, web-reachable view of {@link RemoteStatus} — what
+ * `remote:status-view` answers (`capability: 'config'`, `kind: 'query'`, both
+ * transports). Owner ruling, 2026-08-28: "a remote web view should be able to
+ * see the connected clients. though they should not be able to disable the
+ * remote mode themselves, as it will kill themselves."
+ *
+ * ## What it must never carry, and how that is enforced
+ *
+ * `lanUrl` and `tunnelUrl` carry the LAN channel key / the ephemeral tunnel key
+ * in their fragments (ADR-056 item C) — secrets, which is why `remote:status`
+ * has no remote registration at all. NOTHING derived from either may appear
+ * here: not the URLs, not their host halves, not `tunnelError` (free text from
+ * the tunnel provider, which names the tunnel hostname).
+ *
+ * The redaction is therefore an explicit FIELD PICK — `remoteStatusView()` in
+ * `core/ipc/remote-view-commands.ts` names every field it copies — never a
+ * spread-and-delete. A field added to `RemoteStatus` tomorrow does not appear
+ * here by default, which is the only version of this rule that survives future
+ * edits.
+ *
+ * ## What it deliberately DOES carry
+ *
+ * `clientIps` / `clientLogins` are the one genuinely new cross-client
+ * disclosure: a connected client learns who else is connected. That is the
+ * ruling — the operator's own devices, on the operator's own server — and it is
+ * what makes the view worth having at all.
+ *
+ * ## What it is NOT
+ *
+ * A control surface. Every remote-server MUTATION (`remote:start` / `stop` /
+ * `set-config` / `set-password` / `clear-password` / `force-reserve`) stays raw
+ * `ipcMain.handle` on the host anchor with no registration on either the remote
+ * OR the shared-declaration side, so a remote client cannot cut the connection
+ * it is talking through. That is structural, not a UI courtesy.
+ */
+export interface RemoteStatusView {
+  running: boolean
+  port: number | null
+  connectedClients: number
+  clientIps: string[]
+  /** Parallel to `clientIps`; `null` where the server has no username hint. */
+  clientLogins: (string | null)[]
+  tunnelState: TunnelState | null
+  authMethods: RemoteAuthMethod[]
+  /** Most recent failed `start()` listen attempt (e.g. EADDRINUSE), or null. */
+  lastError: string | null
+  /** {@link RemoteTlsStatusView} — null when the running server is not in TLS mode. */
+  tls: RemoteTlsStatusView | null
 }
 
 // ---------------------------------------------------------------------------

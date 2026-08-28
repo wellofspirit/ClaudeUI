@@ -1588,6 +1588,21 @@ const S4_VENDOR_CREDENTIAL_CHANNELS = [
   'vendor-auth:set-key'
 ] as const
 
+/**
+ * The redacted status READ (owner ruling, 2026-08-28) — the one `remote:*`
+ * channel with a remote registration, and the SIXTH deliberate widening.
+ *
+ * The narrowest of the six by some distance: a `query`, declaring `config`, that
+ * returns a field-PICKED subset of `RemoteStatus` (`RemoteStatusView`) with no
+ * `lanUrl` / `tunnelUrl` and nothing derived from them — the fields that carry
+ * the LAN and tunnel channel keys, and the reason the rest of this namespace has
+ * no registry entry at all. What bounds it is the pin two blocks below: every
+ * `remote:*` MUTATION is still absent from the remote surface, so a client
+ * cannot stop, reconfigure or re-serve the listener it is talking through.
+ * `ipc/__tests__/remote-view-commands.test.ts` owns the redaction itself.
+ */
+const REMOTE_VIEW_CHANNELS = ['remote:status-view'] as const
+
 /** channel → the capability it must declare (the reachability decision). */
 const PASSKEY_CAPABILITIES: Record<string, 'enroll' | 'admin'> = {
   'webauthn:register-options': 'enroll',
@@ -1630,7 +1645,8 @@ describe('remote surface parity (phase 1 port)', () => {
         ...AUTHCFG_CHANNELS,
         ...VOICE_CHANNELS,
         ...S1B_SWEEP_CHANNELS,
-        ...S4_VENDOR_CREDENTIAL_CHANNELS
+        ...S4_VENDOR_CREDENTIAL_CHANNELS,
+        ...REMOTE_VIEW_CHANNELS
       ].sort()
     )
   })
@@ -1870,7 +1886,32 @@ describe('remote surface parity (phase 1 port)', () => {
     // connection DOES hold `admin`). The settings verbs that ARE web-reachable
     // live in their own namespace, and `authcfg:apply` refuses an `off` auth-mode
     // with a typed error (asserted in authcfg-commands.test.ts).
-    expect(commandRegistry.channels('remote').filter((c) => c.startsWith('remote:'))).toEqual([])
+    //
+    // The namespace is no longer EMPTY on this transport (owner ruling,
+    // 2026-08-28): `remote:status-view` reads a redacted status. It is pinned as
+    // an exact list rather than a prefix emptiness check precisely so the next
+    // `remote:*` registration has to be argued for here — a `query` that
+    // discloses no key is a different thing from a mutation that could stop the
+    // listener the caller is riding, and only the first is sanctioned.
+    expect(commandRegistry.channels('remote').filter((c) => c.startsWith('remote:'))).toEqual([
+      ...REMOTE_VIEW_CHANNELS
+    ])
+    // Named individually, because THIS is the self-kill protection: none of the
+    // host-anchor verbs may acquire a remote handler.
+    for (const channel of [
+      'remote:start',
+      'remote:stop',
+      'remote:status',
+      'remote:interfaces',
+      'remote:get-config',
+      'remote:set-config',
+      'remote:set-password',
+      'remote:clear-password',
+      'remote:tailscale-detect',
+      'remote:force-reserve'
+    ]) {
+      expect(commandRegistry.get(channel, 'remote'), channel).toBeUndefined()
+    }
     expect(
       commandRegistry
         .channels('remote')
