@@ -8,8 +8,8 @@
  *   - vendor/pi-cli/docs/rpc.md            — commands, responses, events
  *   - vendor/pi-cli/docs/session-format.md — on-disk session entry shapes
  *
- * Verified doc drift (v0.82.1, first verified v0.80.10 — docs/protocol-pi/
- * README.md "Verified doc drift" section):
+ * Verified doc drift (v0.82.1, first verified v0.80.10; #1 re-verified v0.84.3
+ * — docs/protocol-pi/README.md "Verified doc drift" section):
  *   1. AssistantMessage.usage additionally carries `reasoning` (`totalTokens`
  *      became documented in 0.82.1).
  *   2. get_commands entries carry `sourceInfo` rather than flat path/location
@@ -191,7 +191,7 @@ export interface PiUsage {
   output: number
   cacheRead: number
   cacheWrite: number
-  /** Verified doc drift #1 (re-verified v0.82.1) — rides the wire despite the shipped docs omitting it. */
+  /** Verified doc drift #1 (re-verified v0.84.3) — rides the wire despite the shipped docs omitting it. */
   reasoning?: number
   /** Was doc drift #1 at v0.80.10; documented in the 0.82.1 rpc.md. */
   totalTokens?: number
@@ -276,15 +276,25 @@ export type PiAssistantStreamEventType =
   | 'done'
   | 'error'
 
+/**
+ * One streaming delta from `message_update`. Since 0.84.0 this is the ONLY
+ * carrier of in-flight assistant content — the cumulative `partial` snapshot
+ * was removed alongside `message_update.message` (rpc.md: "intentionally
+ * omits"). `contentIndex` orders the blocks of the in-flight message; the
+ * `*_end` events carry the block's FULL accumulated string in `content`.
+ */
 export interface PiAssistantMessageEvent {
   type: PiAssistantStreamEventType
   contentIndex?: number
   delta?: string
   content?: string
+  /** toolcall_start only — the tool call's id (0.84.3 fix; absent in 0.84.0-0.84.2). */
+  id?: string
+  /** toolcall_start only — the tool's name (same 0.84.3 fix). */
+  toolName?: string
   toolCall?: PiToolCallContent
   /** 'stop'|'length'|'toolUse' for `done`; 'aborted'|'error' for `error`. */
   reason?: string
-  partial?: PiAssistantMessage
 }
 
 export interface PiCompactionResult {
@@ -304,7 +314,14 @@ export type PiEvent =
   | { type: 'message_start'; message: PiAgentMessage }
   | {
       type: 'message_update'
-      message: PiAgentMessage
+      /**
+       * Cumulative provider-reported usage for the IN-FLIGHT message (added
+       * 0.84.2). Unconsumed — the authoritative snapshot is `message_end`'s,
+       * and providers that don't report mid-stream leave this all zeros for
+       * the whole message (verified 2026-08-28 against 0.84.3 with
+       * openai-codex/gpt-5.4-mini: zeros on every update of both turns).
+       */
+      usage?: PiUsage
       assistantMessageEvent: PiAssistantMessageEvent
     }
   | { type: 'message_end'; message: PiAgentMessage }

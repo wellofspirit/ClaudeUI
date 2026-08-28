@@ -739,25 +739,18 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
         timestamp: 1
       }
     })
+    // pi 0.84+ `message_update`: deltas only — no cumulative `message` field.
     handler({
       type: 'message_update',
-      message: {
-        role: 'assistant',
-        content: [{ type: 'text', text: 'Hi' }],
-        api: 'a',
-        provider: 'anthropic',
-        model: 'claude-sonnet-4-6',
-        usage: {
-          input: 0,
-          output: 0,
-          cacheRead: 0,
-          cacheWrite: 0,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-        },
-        stopReason: 'stop',
-        timestamp: 1
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
       },
-      assistantMessageEvent: { type: 'text_delta', delta: 'Hi' }
+      assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'Hi' }
     })
 
     expect(sentChannels(win)).toContain('session:stream')
@@ -853,8 +846,7 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
       vi.setSystemTime(10_000)
       handler({
         type: 'message_update',
-        message: message([{ type: 'thinking', thinking: 'weighing' }]),
-        assistantMessageEvent: { type: 'thinking_delta', delta: 'weighing' }
+        assistantMessageEvent: { type: 'thinking_delta', contentIndex: 0, delta: 'weighing' }
       } as never)
       expect(sentPayloads(win, 'session:stream').slice(-1)[0]).toEqual({
         type: 'thinking',

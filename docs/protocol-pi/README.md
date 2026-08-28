@@ -64,6 +64,38 @@ continuations).
 - Tool results also arrive as `message_end` with `message.role === "toolResult"`
   (`toolCallId`, `content`, `isError`).
 
+### `message_update` is deltas-only (BREAKING at 0.84.0)
+
+Probed 2026-08-28 against the vendored 0.84.3 binary with `openai-codex/gpt-5.4-mini` (wire log in
+the session scratchpad). The top-level shape is now exactly
+`{type, usage, assistantMessageEvent}` — the cumulative `message` field and
+`assistantMessageEvent.partial` are **gone** (upstream #7290; rpc.md: "intentionally omits").
+A client that needs a live partial message must assemble it itself:
+
+```json
+{"type":"message_update","usage":{…},"assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":""}}
+{"type":"message_update","usage":{…},"assistantMessageEvent":{"type":"toolcall_start","contentIndex":1,"id":"call_LIh…|fc_039…","toolName":"write"}}
+{"type":"message_update","usage":{…},"assistantMessageEvent":{"type":"toolcall_delta","contentIndex":1,"delta":"{\""}}
+{"type":"message_update","usage":{…},"assistantMessageEvent":{"type":"toolcall_end","contentIndex":1,"toolCall":{"type":"toolCall","id":"call_LIh…|fc_039…","name":"write","arguments":{"path":"hello.txt","content":"hi"}}}}
+```
+
+- `contentIndex` orders the content blocks of the in-flight assistant message.
+- `text_end.content` / `thinking_end.content` carry the block's **full accumulated string** — so
+  each `*_end` overwrites its slot rather than appending. (`thinking` may be `""` with the real
+  reasoning riding a `thinkingSignature` that only appears on `message_end`; unconsumed.)
+- `toolcall_end.toolCall` is a complete `{type:"toolCall", id, name, arguments}` — the same shape
+  `message_end`'s content array carries.
+- `toolcall_start` carries `id` + `toolName` (0.84.3 fixed this — upstream #7953; they were absent
+  in 0.84.0–0.84.2, so never resume-probe this against an older pin).
+- New top-level `usage` (0.84.2) is cumulative for the in-flight message, but **may stay all zeros
+  until completion** when the provider doesn't report mid-stream — openai-codex did exactly that on
+  every update of both probed turns. ClaudeUI ignores it; `message_end.usage` is authoritative.
+- `message_end` is unchanged and remains authoritative — its full `content` array replaces whatever
+  the client assembled.
+
+ClaudeUI's assembly lives in `src/core/pi/event-mapper.ts` (`PiMapperState.blocks`, keyed by
+`contentIndex`, reset at both ends of an assistant message's life).
+
 ## Verified doc drift (v0.82.1; first verified v0.80.10)
 
 The shipped docs lag the wire in three places we care about:
@@ -71,7 +103,8 @@ The shipped docs lag the wire in three places we care about:
 1. `AssistantMessage.usage` additionally carries `reasoning` (tokens) — e.g.
    `{"input":1119,"output":5,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":1124,"cost":{…,"total":0.001149}}`.
    (`totalTokens` was also undocumented at 0.80.10; the 0.82.1 docs now document it. `reasoning`
-   remains undocumented.)
+   remains undocumented.) Re-verified on the 0.84.3 wire (2026-08-28). #2 and #3 have NOT been
+   re-probed since 0.82.1.
 2. `get_commands` entries carry `sourceInfo: {path, source: "cli"|…, scope, origin}` rather than
    the documented flat `path`/`location` fields. Re-verified on the 0.82.1 wire (2026-07-29).
 3. `get_state` with no configured model returns a placeholder model object with

@@ -3522,10 +3522,10 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
     await tick()
 
     target.pushEvent({ type: 'message_start', message: { role: 'assistant', content: [] } })
+    // pi 0.84+ `message_update`: deltas only — no cumulative `message` field.
     target.pushEvent({
       type: 'message_update',
-      message: { role: 'assistant', content: [{ type: 'text', text: 'Hel' }] },
-      assistantMessageEvent: { type: 'text_delta', delta: 'Hello' }
+      assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'Hello' }
     })
     await tick()
 

@@ -6,6 +6,7 @@ import { mapPiEvent, createPiMapperState, buildPiChatMessage } from '../event-ma
 import type { PiMapperState } from '../event-mapper'
 import type {
   PiAssistantMessage,
+  PiAssistantMessageEvent,
   PiEvent,
   PiToolResultMessage,
   PiUserMessage
@@ -47,6 +48,28 @@ function toolResultMsg(overrides: Partial<PiToolResultMessage> = {}): PiToolResu
   }
 }
 
+/**
+ * A pi 0.84.x `message_update` — deltas only. The pre-0.84 cumulative `message`
+ * field and `assistantMessageEvent.partial` are GONE from the wire (rpc.md:
+ * "intentionally omits"), so no fixture here may carry them. The top-level
+ * `usage` is cumulative-for-the-in-flight-message and reads all zeros against
+ * providers that don't report mid-stream (openai-codex) — the mapper ignores it.
+ */
+function messageUpdate(assistantMessageEvent: PiAssistantMessageEvent): PiEvent {
+  return {
+    type: 'message_update',
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+    },
+    assistantMessageEvent
+  }
+}
+
 describe('mapPiEvent — message_start', () => {
   it('assistant role: mints a messageId in state, emits ignore', () => {
     const state = createPiMapperState()
@@ -74,43 +97,26 @@ describe('mapPiEvent — full happy turn', () => {
     const messageId = state.currentMessageId!
     expect(messageId).toBeTruthy()
 
-    // 2. text deltas
-    out = mapPiEvent(
-      {
-        type: 'message_update',
-        message: assistantMsg({ content: [{ type: 'text', text: 'Hel' }] }),
-        assistantMessageEvent: { type: 'text_delta', delta: 'Hel' }
-      },
-      state
-    )
+    // 2. text deltas, then the text_end that seals block 0
+    out = mapPiEvent(messageUpdate({ type: 'text_start', contentIndex: 0 }), state)
+    expect(out).toEqual([{ kind: 'ignore' }])
+
+    out = mapPiEvent(messageUpdate({ type: 'text_delta', contentIndex: 0, delta: 'Hel' }), state)
     expect(out).toEqual([{ kind: 'stream', streamType: 'text', delta: 'Hel', messageId }])
 
-    out = mapPiEvent(
-      {
-        type: 'message_update',
-        message: assistantMsg({ content: [{ type: 'text', text: 'Hello' }] }),
-        assistantMessageEvent: { type: 'text_delta', delta: 'lo' }
-      },
-      state
-    )
+    out = mapPiEvent(messageUpdate({ type: 'text_delta', contentIndex: 0, delta: 'lo' }), state)
     expect(out).toEqual([{ kind: 'stream', streamType: 'text', delta: 'lo', messageId }])
 
-    // 3. toolcall_end — interim message upsert built from the partial message's content
-    const partialWithToolCall = assistantMsg({
-      content: [
-        { type: 'text', text: 'Hello' },
-        { type: 'toolCall', id: 'call_1', name: 'bash', arguments: { command: 'ls' } }
-      ]
-    })
+    out = mapPiEvent(messageUpdate({ type: 'text_end', contentIndex: 0, content: 'Hello' }), state)
+    expect(out).toEqual([{ kind: 'ignore' }])
+
+    // 3. toolcall_end — interim upsert assembled from the accumulated blocks
     out = mapPiEvent(
-      {
-        type: 'message_update',
-        message: partialWithToolCall,
-        assistantMessageEvent: {
-          type: 'toolcall_end',
-          toolCall: { type: 'toolCall', id: 'call_1', name: 'bash', arguments: { command: 'ls' } }
-        }
-      },
+      messageUpdate({
+        type: 'toolcall_end',
+        contentIndex: 1,
+        toolCall: { type: 'toolCall', id: 'call_1', name: 'bash', arguments: { command: 'ls' } }
+      }),
       state
     )
     expect(out).toHaveLength(1)
@@ -180,11 +186,7 @@ describe('mapPiEvent — thinking deltas', () => {
     mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
     const messageId = state.currentMessageId!
     const out = mapPiEvent(
-      {
-        type: 'message_update',
-        message: assistantMsg({ content: [{ type: 'thinking', thinking: 'pondering' }] }),
-        assistantMessageEvent: { type: 'thinking_delta', delta: 'pondering' }
-      },
+      messageUpdate({ type: 'thinking_delta', contentIndex: 0, delta: 'pondering' }),
       state
     )
     expect(out).toEqual([{ kind: 'stream', streamType: 'thinking', delta: 'pondering', messageId }])
@@ -865,20 +867,11 @@ describe('mapPiEvent — message_end (toolResult, edit/write): rich diff fileDif
     const state = createPiMapperState()
     mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
     mapPiEvent(
-      {
-        type: 'message_update',
-        message: assistantMsg({
-          content: [
-            editToolCall('call_interim', '/src/interim.ts', [{ oldText: 'x', newText: 'y' }])
-          ]
-        }),
-        assistantMessageEvent: {
-          type: 'toolcall_end',
-          toolCall: editToolCall('call_interim', '/src/interim.ts', [
-            { oldText: 'x', newText: 'y' }
-          ])
-        }
-      },
+      messageUpdate({
+        type: 'toolcall_end',
+        contentIndex: 0,
+        toolCall: editToolCall('call_interim', '/src/interim.ts', [{ oldText: 'x', newText: 'y' }])
+      }),
       state
     )
 
@@ -1132,11 +1125,7 @@ describe('mapPiEvent — defensive fallback when message_start was missed', () =
   it('message_update still gets a messageId (minted + stored) even without a prior message_start', () => {
     const state: PiMapperState = createPiMapperState()
     const out = mapPiEvent(
-      {
-        type: 'message_update',
-        message: assistantMsg({ content: [{ type: 'text', text: 'x' }] }),
-        assistantMessageEvent: { type: 'text_delta', delta: 'x' }
-      },
+      messageUpdate({ type: 'text_delta', contentIndex: 0, delta: 'x' }),
       state
     )
     expect(state.currentMessageId).toBeTruthy()
@@ -1211,5 +1200,193 @@ describe('mapPiEvent — toolResult images', () => {
     expect(out).toEqual([
       { kind: 'tool_result', toolUseId: 'call_svg', result: '', isError: false }
     ])
+  })
+})
+
+describe('mapPiEvent — message_update block assembly (pi 0.84.x deltas-only wire)', () => {
+  const writeCall = {
+    type: 'toolCall' as const,
+    id: 'call_write',
+    name: 'write',
+    arguments: { path: 'hello.txt', content: 'hi' }
+  }
+
+  it('assembles the interim upsert from accumulated blocks, in contentIndex order', () => {
+    // The exact probed 0.84.3 sequence (wire.jsonl lines 7-21): thinking block
+    // at index 0, tool call at index 1, no cumulative `message` anywhere.
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+    const messageId = state.currentMessageId!
+
+    expect(mapPiEvent(messageUpdate({ type: 'thinking_start', contentIndex: 0 }), state)).toEqual([
+      { kind: 'ignore' }
+    ])
+    expect(
+      mapPiEvent(
+        messageUpdate({ type: 'thinking_end', contentIndex: 0, content: 'weighing options' }),
+        state
+      )
+    ).toEqual([{ kind: 'ignore' }])
+    expect(
+      mapPiEvent(
+        messageUpdate({
+          type: 'toolcall_start',
+          contentIndex: 1,
+          id: writeCall.id,
+          toolName: writeCall.name
+        }),
+        state
+      )
+    ).toEqual([{ kind: 'ignore' }])
+    expect(
+      mapPiEvent(messageUpdate({ type: 'toolcall_delta', contentIndex: 1, delta: '{"' }), state)
+    ).toEqual([{ kind: 'ignore' }])
+
+    const out = mapPiEvent(
+      messageUpdate({ type: 'toolcall_end', contentIndex: 1, toolCall: writeCall }),
+      state
+    )
+    expect(out).toHaveLength(1)
+    expect(out[0].kind).toBe('message')
+    if (out[0].kind === 'message') {
+      expect(out[0].message.id).toBe(messageId)
+      expect(out[0].message.content).toEqual([
+        { type: 'thinking', text: 'weighing options' },
+        {
+          type: 'tool_use',
+          toolUseId: 'call_write',
+          toolName: 'write',
+          toolInput: { path: 'hello.txt', content: 'hi' }
+        }
+      ])
+    }
+  })
+
+  it('multi-tool turn: each toolcall_end upserts, the later one carrying every block so far', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+
+    const first = mapPiEvent(
+      messageUpdate({
+        type: 'toolcall_end',
+        contentIndex: 0,
+        toolCall: { type: 'toolCall', id: 'c0', name: 'read', arguments: { path: '/a.ts' } }
+      }),
+      state
+    )
+    expect(first).toHaveLength(1)
+    if (first[0].kind === 'message') {
+      expect(first[0].message.content).toEqual([
+        { type: 'tool_use', toolUseId: 'c0', toolName: 'read', toolInput: { path: '/a.ts' } }
+      ])
+    }
+
+    // A text block lands BETWEEN the two calls and must keep its wire position.
+    mapPiEvent(messageUpdate({ type: 'text_end', contentIndex: 1, content: 'now writing' }), state)
+
+    const second = mapPiEvent(
+      messageUpdate({ type: 'toolcall_end', contentIndex: 2, toolCall: writeCall }),
+      state
+    )
+    expect(second).toHaveLength(1)
+    expect(second[0].kind).toBe('message')
+    if (second[0].kind === 'message') {
+      expect(second[0].message.content).toEqual([
+        { type: 'tool_use', toolUseId: 'c0', toolName: 'read', toolInput: { path: '/a.ts' } },
+        { type: 'text', text: 'now writing' },
+        {
+          type: 'tool_use',
+          toolUseId: 'call_write',
+          toolName: 'write',
+          toolInput: { path: 'hello.txt', content: 'hi' }
+        }
+      ])
+    }
+  })
+
+  it('message_end stays authoritative: it replaces the assembled approximation under the same id', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+    const messageId = state.currentMessageId!
+
+    mapPiEvent(messageUpdate({ type: 'text_end', contentIndex: 0, content: 'draft' }), state)
+    mapPiEvent(messageUpdate({ type: 'toolcall_end', contentIndex: 1, toolCall: writeCall }), state)
+
+    const out = mapPiEvent(
+      {
+        type: 'message_end',
+        message: assistantMsg({
+          content: [{ type: 'text', text: 'final answer' }],
+          stopReason: 'stop'
+        })
+      },
+      state
+    )
+    expect(out[0]).toEqual({
+      kind: 'message',
+      message: {
+        id: messageId,
+        role: 'assistant',
+        content: [{ type: 'text', text: 'final answer' }],
+        timestamp: expect.any(Number)
+      }
+    })
+  })
+
+  it('a second assistant message_start resets the accumulator — no bleed between messages', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+    mapPiEvent(messageUpdate({ type: 'text_end', contentIndex: 0, content: 'turn one' }), state)
+    mapPiEvent(messageUpdate({ type: 'toolcall_end', contentIndex: 1, toolCall: writeCall }), state)
+    mapPiEvent(
+      {
+        type: 'message_end',
+        message: assistantMsg({ content: [{ type: 'text', text: 'turn one' }] })
+      },
+      state
+    )
+
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+    const out = mapPiEvent(
+      messageUpdate({
+        type: 'toolcall_end',
+        contentIndex: 0,
+        toolCall: { type: 'toolCall', id: 'c_two', name: 'read', arguments: { path: '/b.ts' } }
+      }),
+      state
+    )
+    expect(out[0].kind).toBe('message')
+    if (out[0].kind === 'message') {
+      expect(out[0].message.content).toEqual([
+        { type: 'tool_use', toolUseId: 'c_two', toolName: 'read', toolInput: { path: '/b.ts' } }
+      ])
+    }
+  })
+
+  it('toolcall_end with no toolCall payload → ignored, no crash and no empty upsert', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+    mapPiEvent(messageUpdate({ type: 'text_end', contentIndex: 0, content: 'hi' }), state)
+    const out = mapPiEvent(messageUpdate({ type: 'toolcall_end', contentIndex: 1 }), state)
+    expect(out).toEqual([{ kind: 'ignore' }])
+  })
+
+  it('a block event with no contentIndex is appended rather than crashing the mapper', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+    mapPiEvent(messageUpdate({ type: 'text_end', contentIndex: 0, content: 'first' }), state)
+    const out = mapPiEvent(messageUpdate({ type: 'toolcall_end', toolCall: writeCall }), state)
+    expect(out[0].kind).toBe('message')
+    if (out[0].kind === 'message') {
+      expect(out[0].message.content).toEqual([
+        { type: 'text', text: 'first' },
+        {
+          type: 'tool_use',
+          toolUseId: 'call_write',
+          toolName: 'write',
+          toolInput: { path: 'hello.txt', content: 'hi' }
+        }
+      ])
+    }
   })
 })
