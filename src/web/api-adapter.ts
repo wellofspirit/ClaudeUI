@@ -837,6 +837,13 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     saveOpencodeSettings: async () => {},
     readOpencodeNativeRaw: async () => ({ config: {}, path: '' }),
     patchOpencodeNative: async () => {},
+    // pi's raw settings pair IS registered for both transports (config-commands.ts,
+    // capability `config`), so it goes over the wire rather than being stubbed:
+    // a stubbed MUTATION would let a remote user "save" a pi setting that went
+    // nowhere. (Its opencode neighbours above are still stubs — pre-existing, and
+    // not this item's to change.)
+    readPiNativeRaw: () => unwrap('config:read-pi-native-raw'),
+    patchPiNative: (patches) => unwrap('config:patch-pi-native', patches),
     listOpencodeAgents: async () => [],
     readOpencodeAgent: async () => null,
     saveOpencodeAgent: async () => {},

@@ -92,6 +92,7 @@ import {
   migrateOpencodeConfigToNative
 } from '../opencode/opencode-config'
 import { readOpencodeNativeRaw, patchOpencodeNativeRaw } from '../opencode/opencode-native-raw'
+import { readPiNativeRaw, patchPiNativeRaw } from '../pi/pi-native-raw'
 import {
   listAgents,
   readAgent,
@@ -437,6 +438,25 @@ export function configCommands(
         patchOpencodeNativeRaw(patches)
         // Capability edits (attachment/modalities/…) change model discovery.
         invalidateOpencodeModelCache()
+      })
+    },
+
+    // The same raw pair for pi's OWN global settings file (~/.pi/agent/settings.json).
+    // Global scope only — pi's project-local .pi/settings.json is not ours to edit.
+    // No cache invalidation on the write: pi model discovery reads auth.json (and
+    // the shared-provider models.json), never settings.json.
+    {
+      channel: 'config:read-pi-native-raw',
+      capability: 'config',
+      kind: 'query',
+      handler: safeHandler(async () => readPiNativeRaw())
+    },
+    {
+      channel: 'config:patch-pi-native',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(async (patches: RawConfigPatch[]) => {
+        patchPiNativeRaw(patches)
       })
     },
 

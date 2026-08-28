@@ -481,10 +481,12 @@ export interface OpencodeConfigSettings {
 }
 
 /**
- * A single leaf edit against opencode's raw config file, applied by the
- * schema-driven settings editor via jsonc-parser modify(). `value` absent (or
- * undefined) means DELETE the leaf at `path`; otherwise SET it. Paths use raw
- * opencode key names verbatim (e.g. ['provider','ec2','models','qwen3.6:27b','attachment']).
+ * A single leaf edit against an engine's OWN raw config file, applied via
+ * jsonc-parser modify() by opencode's schema-driven settings editor and by the
+ * curated pi Configuration panes. `value` absent (or undefined) means DELETE the
+ * leaf at `path`; otherwise SET it. Paths use that engine's key names verbatim
+ * (e.g. ['provider','ec2','models','qwen3.6:27b','attachment'] for opencode,
+ * ['compaction','reserveTokens'] for pi).
  */
 export interface RawConfigPatch {
   path: (string | number)[]
@@ -493,6 +495,12 @@ export interface RawConfigPatch {
 
 /** Raw (non-projected) opencode config read + its resolved file path. */
 export interface OpencodeNativeRaw {
+  config: Record<string, unknown>
+  path: string
+}
+
+/** Raw pi settings read (`~/.pi/agent/settings.json`) + its resolved file path. */
+export interface PiNativeRaw {
   config: Record<string, unknown>
   path: string
 }
@@ -1209,6 +1217,10 @@ interface SessionAPI {
   readOpencodeNativeRaw(): Promise<OpencodeNativeRaw>
   /** Apply leaf patches to opencode's config file, preserving comments + siblings. */
   patchOpencodeNative(patches: RawConfigPatch[]): Promise<void>
+  /** Read pi's global settings.json verbatim for the curated pi Configuration panes. */
+  readPiNativeRaw(): Promise<PiNativeRaw>
+  /** Apply leaf patches to pi's global settings.json, preserving siblings + formatting. */
+  patchPiNative(patches: RawConfigPatch[]): Promise<void>
   listOpencodeAgents(cwd?: string): Promise<OpencodeAgentSummary[]>
   readOpencodeAgent(
     name: string,

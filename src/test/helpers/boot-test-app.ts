@@ -320,6 +320,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     saveOpencodeSettings: (settings) => unwrap('config:save-opencode-settings', settings),
     readOpencodeNativeRaw: async () => ({ config: {}, path: '' }),
     patchOpencodeNative: async () => {},
+    readPiNativeRaw: async () => ({ config: {}, path: '' }),
+    patchPiNative: async () => {},
     listOpencodeAgents: async () => [],
     readOpencodeAgent: async () => null,
     saveOpencodeAgent: async () => {},

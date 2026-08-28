@@ -8,7 +8,10 @@
  * duplicating it.
  *
  * These are pure infrastructure — no opencode-specific projection logic lives
- * here.
+ * here. Which is why pi's raw settings writer (`core/pi/pi-native-raw.ts`)
+ * imports them too rather than growing a second copy: the file keeps its
+ * opencode-flavoured NAME and location so the two shipped writers stay where
+ * their readers expect them, but its contents are engine-neutral.
  */
 
 import * as fs from 'node:fs'
