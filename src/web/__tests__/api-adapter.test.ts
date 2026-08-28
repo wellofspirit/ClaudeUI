@@ -351,6 +351,13 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     args: [[{ path: ['thinking'], value: 'high' }]]
   },
   { method: 'writePiNativeText', channel: 'config:write-pi-native-text', args: ['{}\n'] },
+  // pi's models.json pair — the same raw shape for the model catalog file.
+  { method: 'readPiModelsRaw', channel: 'config:read-pi-models-raw', args: [] },
+  {
+    method: 'patchPiModels',
+    channel: 'config:patch-pi-models',
+    args: [[{ path: ['providers', 'my-api', 'models', 0, 'contextWindow'], value: 200_000 }]]
+  },
   // opencode agent CRUD — five `config` verbs plus one `chat` verb.
   { method: 'listOpencodeAgents', channel: 'opencode-agents:list', args: ['/repo/app'] },
   {

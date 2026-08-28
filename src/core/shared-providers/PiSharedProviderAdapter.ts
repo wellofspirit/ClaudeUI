@@ -255,6 +255,34 @@ export function nativeProviderId(definition: SharedProviderDefinition): string {
 }
 
 /**
+ * The `providers.<id>` keys in models.json that this adapter's projection
+ * CURRENTLY owns, given the shared-provider definitions on disk.
+ *
+ * The membership test is {@link PiSharedProviderAdapter.applyDefinition}'s own
+ * first three lines, in its order: ChatGPT is vended as a native credential and
+ * never projected, a disabled pi route is removed rather than written, and a
+ * non-custom provider writes no entry at all. Exported (rather than reproduced
+ * by the caller) so the raw models.json editor's ownership guard — which must
+ * refuse to hand-edit exactly these entries, since the next projection sync
+ * would clobber the edit — cannot drift from what the writer actually owns.
+ *
+ * Deduped: two definitions resolving to one native id is a collision the service
+ * rejects at save time, but a hand-written definition file can still produce it,
+ * and "which ids are managed" is a set either way.
+ */
+export function managedPiProviderIds(definitions: readonly SharedProviderDefinition[]): string[] {
+  return [
+    ...new Set(
+      definitions.flatMap((definition) =>
+        definition.id !== 'chatgpt' && definition.kind === 'custom' && definition.routes.pi.enabled
+          ? [nativeProviderId(definition)]
+          : []
+      )
+    )
+  ]
+}
+
+/**
  * True when a CUSTOM shared provider's effective pi providerId collides with a
  * built-in native pi vendor id (M-AT4). Only custom providers are checked —
  * the built-in ChatGPT provider (kind:'subscription') legitimately targets the

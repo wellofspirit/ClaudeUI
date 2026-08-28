@@ -514,6 +514,22 @@ export interface PiNativeRaw {
   text: string
 }
 
+/** Raw pi model catalog read (`~/.pi/agent/models.json`) + its resolved path. */
+export interface PiModelsRaw {
+  config: Record<string, unknown>
+  path: string
+  /** The file's bytes minus any BOM; '' when absent or unreadable. */
+  text: string
+  /**
+   * The `providers.<id>` keys the shared-provider projection currently owns
+   * (`PiSharedProviderAdapter`). The editor must show these read-only: a raw
+   * write into one is reverted by the next provider sync, and turns the user's
+   * next provider save into a "changed outside ClaudeUI" refusal. The writer
+   * rejects such a patch outright — this is what lets the UI say so first.
+   */
+  managedProviderIds: string[]
+}
+
 /**
  * One provider in the opencode catalog (the full models.dev set, ~146 providers),
  * surfaced to the settings UI so users can add any supported provider — including
@@ -1232,6 +1248,10 @@ interface SessionAPI {
   patchPiNative(patches: RawConfigPatch[]): Promise<void>
   /** Replace pi's global settings.json with `text` verbatim (Raw config pane). */
   writePiNativeText(text: string): Promise<void>
+  /** Read pi's models.json verbatim, plus the ids the shared-provider projection owns. */
+  readPiModelsRaw(): Promise<PiModelsRaw>
+  /** Apply leaf patches to pi's models.json; refuses projection-owned provider entries. */
+  patchPiModels(patches: RawConfigPatch[]): Promise<void>
   listOpencodeAgents(cwd?: string): Promise<OpencodeAgentSummary[]>
   readOpencodeAgent(
     name: string,

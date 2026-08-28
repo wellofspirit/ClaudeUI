@@ -93,6 +93,7 @@ import {
 } from '../opencode/opencode-config'
 import { readOpencodeNativeRaw, patchOpencodeNativeRaw } from '../opencode/opencode-native-raw'
 import { readPiNativeRaw, patchPiNativeRaw, writePiNativeRawText } from '../pi/pi-native-raw'
+import { readPiModelsRaw, patchPiModelsRaw } from '../pi/pi-models-raw'
 import {
   listAgents,
   readAgent,
@@ -468,6 +469,27 @@ export function configCommands(
       kind: 'command',
       handler: safeHandler(async (text: string) => {
         writePiNativeRawText(text)
+      })
+    },
+
+    // The same raw pair for pi's MODEL CATALOG (~/.pi/agent/models.json). Unlike
+    // settings.json this file has a second writer — the shared-provider
+    // projection — so the read also reports which provider entries that writer
+    // owns, and the patch refuses them. Cache invalidation lives inside
+    // patchPiModelsRaw (models.json IS the model catalog, so an edit the picker
+    // cannot see would look broken), not here.
+    {
+      channel: 'config:read-pi-models-raw',
+      capability: 'config',
+      kind: 'query',
+      handler: safeHandler(async () => readPiModelsRaw())
+    },
+    {
+      channel: 'config:patch-pi-models',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(async (patches: RawConfigPatch[]) => {
+        patchPiModelsRaw(patches)
       })
     },
 

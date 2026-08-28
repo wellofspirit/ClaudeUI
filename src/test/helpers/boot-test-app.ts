@@ -323,6 +323,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     readPiNativeRaw: async () => ({ config: {}, path: '', text: '' }),
     patchPiNative: async () => {},
     writePiNativeText: async () => {},
+    readPiModelsRaw: async () => ({ config: {}, path: '', text: '', managedProviderIds: [] }),
+    patchPiModels: async () => {},
     listOpencodeAgents: async () => [],
     readOpencodeAgent: async () => null,
     saveOpencodeAgent: async () => {},

@@ -128,6 +128,8 @@ const S1B_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'que
   'config:read-pi-native-raw': { capability: 'config', kind: 'query' },
   'config:patch-pi-native': { capability: 'config', kind: 'command' },
   'config:write-pi-native-text': { capability: 'config', kind: 'command' },
+  'config:read-pi-models-raw': { capability: 'config', kind: 'query' },
+  'config:patch-pi-models': { capability: 'config', kind: 'command' },
   'opencode-agents:list': { capability: 'config', kind: 'query' },
   'opencode-agents:read': { capability: 'config', kind: 'query' },
   'opencode-agents:save': { capability: 'config', kind: 'command' },

@@ -870,6 +870,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     readPiNativeRaw: () => unwrap('config:read-pi-native-raw'),
     patchPiNative: (patches) => unwrap('config:patch-pi-native', patches),
     writePiNativeText: (text) => unwrap('config:write-pi-native-text', text),
+    readPiModelsRaw: () => unwrap('config:read-pi-models-raw'),
+    patchPiModels: (patches) => unwrap('config:patch-pi-models', patches),
 
     // opencode agent CRUD — the same family, split across two capabilities:
     // `config` for the five file verbs, `chat` for `generate` because it spends
