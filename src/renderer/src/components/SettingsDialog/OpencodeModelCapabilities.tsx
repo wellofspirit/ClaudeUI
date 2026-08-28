@@ -1,9 +1,9 @@
 /**
  * OpencodeModelCapabilities.tsx
  *
- * The per-model capability editor behind each model row's "▸ Capabilities"
- * disclosure in the opencode provider dialog (OpencodeProviderConfigModal,
- * settings-sections.tsx). It used to be the generic schema-driven form, which
+ * The per-model capability editor behind each model row's "Capabilities" action
+ * in the opencode provider dialog (OpencodeProviderConfigModal,
+ * OpencodeProviders.tsx). It used to be the generic schema-driven form, which
  * labelled every field with its full raw path (`my-ollama.qwen3:27b.attachment`)
  * and nested modalities/cost behind raw fieldsets; this is the curated version,
  * in the same row language as the Configuration panes (OpencodeConfigPanes.tsx,
@@ -11,10 +11,11 @@
  * editor (provider-editor-shell.tsx — pill chips, accent disclosures, the
  * stacked dialog).
  *
- * TWO FRAMES, ONE SET OF ROWS. Without `onClose` it renders inline, which is how
- * the provider dialog mounts it today; with `onClose` it is a stacked
- * `DialogShell` of its own, the frame the restyled provider dialog will use. The
- * frame is presentation only — every write below is identical either way.
+ * TWO FRAMES, ONE SET OF ROWS. With `onClose` it is a stacked `DialogShell` of
+ * its own, which is how the provider dialog opens it; without one it renders
+ * inline, for a host that wants it embedded in its own scrolling body (how that
+ * dialog mounted it before the restyle). The frame is presentation only — every
+ * write below is identical either way, pinned by a patch-identity test.
  *
  * WHAT IT WRITES. The model's entry lives in opencode's own config file at
  * `provider.<providerId>.models.<modelId>`. Every commit is a minimal LEAF diff
@@ -640,11 +641,11 @@ function CapabilityRows({ api }: { api: ModelEntryApi }): React.JSX.Element {
 /**
  * The per-model capability editor, in either of the two frames its hosts need.
  *
- * WITHOUT `onClose` it renders INLINE, which is how OpencodeProviderConfigModal
- * mounts it today: behind each model row's "▸ Capabilities" disclosure, inside
- * that dialog's scrolling body. WITH `onClose` it is its own stacked dialog on
- * the shared `DialogShell` — the frame pi's model editor uses, and the one the
- * restyled opencode provider dialog will open it in.
+ * WITH `onClose` it is its own stacked dialog on the shared `DialogShell` — the
+ * frame pi's model editor uses, and the one OpencodeProviderConfigModal opens it
+ * in from a declared model's "Capabilities" action. WITHOUT `onClose` it renders
+ * INLINE, inside the host's own scrolling body (how that dialog mounted it
+ * before the restyle).
  *
  * Both frames render the SAME rows and the same `ModelCapabilityEditor` /
  * `${providerId}/${modelId}` testid pair, so nothing that writes to the file

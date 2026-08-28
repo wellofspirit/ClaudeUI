@@ -105,28 +105,52 @@ export function BlockHeader({
   note,
   actionLabel,
   onAction,
-  actionTestid
+  actionTestid,
+  secondary
 }: {
   label: string
   note: string
   actionLabel: string
   onAction: () => void
   actionTestid: string
+  /**
+   * A SECOND right-hand action, for a block with two genuinely different ways
+   * in — opencode's "+ Add from catalog" beside "+ Custom provider". Absent (the
+   * pi panes) renders the single button exactly as before, with no wrapper.
+   */
+  secondary?: { label: string; onAction: () => void; testid: string }
 }): React.JSX.Element {
+  const action = (
+    <button
+      type="button"
+      data-testid={actionTestid}
+      onClick={onAction}
+      className="shrink-0 text-[10px] text-accent hover:text-accent/80 transition-colors"
+    >
+      {actionLabel}
+    </button>
+  )
   return (
     <div className="mt-3 mb-1 mx-3 pb-1 border-b border-border/20 flex items-center justify-between gap-2">
       <div className="text-[10px] font-semibold uppercase tracking-wider text-text-muted/70">
         {label}
         <span className="ml-1.5 normal-case tracking-normal font-normal">— {note}</span>
       </div>
-      <button
-        type="button"
-        data-testid={actionTestid}
-        onClick={onAction}
-        className="shrink-0 text-[10px] text-accent hover:text-accent/80 transition-colors"
-      >
-        {actionLabel}
-      </button>
+      {secondary ? (
+        <div className="shrink-0 flex items-center gap-3">
+          {action}
+          <button
+            type="button"
+            data-testid={secondary.testid}
+            onClick={secondary.onAction}
+            className="shrink-0 text-[10px] text-accent hover:text-accent/80 transition-colors"
+          >
+            {secondary.label}
+          </button>
+        </div>
+      ) : (
+        action
+      )}
     </div>
   )
 }
@@ -139,6 +163,13 @@ export function BlockHeader({
  *
  * The whole card is the hit target — there is no second affordance to aim at —
  * and it keeps `cursor-default` like every other in-app control.
+ *
+ * ONE EXCEPTION, `actions`. opencode's provider rows keep one-click
+ * disable/remove icons beside the card (a deliberate deviation from the mockup:
+ * those two are reversible-veto and destructive, and burying them a dialog deep
+ * would cost the whole point of separating them). A `<button>` cannot legally
+ * contain buttons, so passing `actions` re-frames the card as a `<div>` holding
+ * the click target — same classes, same testid, same look.
  */
 export function EntityRowCard({
   testid,
@@ -148,7 +179,9 @@ export function EntityRowCard({
   badges,
   subtitle,
   action,
-  onClick
+  onClick,
+  actions,
+  dimmed
 }: {
   testid: string
   dataId: string
@@ -161,15 +194,24 @@ export function EntityRowCard({
   /** Right-hand affordance label. */
   action: string
   onClick: () => void
+  /**
+   * Row-level controls rendered BESIDE the click target. Their presence swaps
+   * the card's root element for a `<div>` — see the note above.
+   */
+  actions?: React.ReactNode
+  /**
+   * The entity is switched off: dims the card and marks it `data-disabled`, so
+   * "this is here but ignored" is legible structurally and not only by badge.
+   * Left undefined (every pi row) the attribute is not emitted at all.
+   */
+  dimmed?: boolean
 }): React.JSX.Element {
-  return (
-    <button
-      type="button"
-      data-testid={testid}
-      data-id={dataId}
-      onClick={onClick}
-      className="mx-3 mb-1.5 w-[calc(100%-1.5rem)] flex items-center gap-3 rounded-md border border-border/30 px-3 py-2 text-left hover:border-accent/40 transition-colors cursor-default"
-    >
+  const frame = `mx-3 mb-1.5 w-[calc(100%-1.5rem)] flex items-center gap-3 rounded-md border ${
+    dimmed ? 'border-border/20 opacity-55' : 'border-border/30'
+  } px-3 py-2 text-left hover:border-accent/40 transition-colors cursor-default`
+  const marker = dimmed === undefined ? {} : { 'data-disabled': dimmed ? 'true' : 'false' }
+  const body = (
+    <>
       <span className="min-w-0">
         <span className="flex items-center gap-2">
           <span className="text-[12px] text-text-primary truncate">{title}</span>
@@ -179,7 +221,37 @@ export function EntityRowCard({
         <span className="block text-[10px] text-text-muted/70 truncate">{subtitle}</span>
       </span>
       <span className="ml-auto shrink-0 text-[10px] text-accent">{action}</span>
-    </button>
+    </>
+  )
+
+  if (!actions) {
+    return (
+      <button
+        type="button"
+        data-testid={testid}
+        data-id={dataId}
+        {...marker}
+        onClick={onClick}
+        className={frame}
+      >
+        {body}
+      </button>
+    )
+  }
+
+  return (
+    <div data-testid={testid} data-id={dataId} {...marker} className={`${frame} group`}>
+      <button
+        type="button"
+        data-testid={`${testid}.open`}
+        data-id={dataId}
+        onClick={onClick}
+        className="min-w-0 flex-1 flex items-center gap-3 text-left cursor-default"
+      >
+        {body}
+      </button>
+      {actions}
+    </div>
   )
 }
 

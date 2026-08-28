@@ -14,7 +14,7 @@
  * Both directions of each platform branch are pinned.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { SECTIONS } from '../settings-sections'
 import { useSessionStore } from '../../../stores/session-store'
 import type { OpencodeProviderCatalogEntry } from '../../../../../shared/types'
@@ -175,6 +175,8 @@ function installOpencodeApi(platform: string, over: Record<string, unknown> = {}
     vendorAuthOauthCancel: vi.fn(async () => {}),
     getOpencodeProviderModels: vi.fn(async () => []),
     listSharedProviders: vi.fn(async () => []),
+    // The row's credential-kind badge reads opencode's auth store.
+    vendorAuthListKeys: vi.fn(async () => ({})),
     // Orphan-guard inputs (see VendorOpencodeSection.reload).
     getEngineModels: vi.fn(async () => []),
     loadEngineConfig: vi.fn(async () => ({})),
@@ -183,7 +185,7 @@ function installOpencodeApi(platform: string, over: Record<string, unknown> = {}
   ;(globalThis as unknown as { window: Record<string, unknown> }).window.open = vi.fn()
 }
 
-/** Expand the row's "Add" panel, which is where its OAuth button lives. */
+/** Expand the catalog picker's row panel, which is where its OAuth button lives. */
 async function openProviderOAuth(): Promise<void> {
   await act(async () => renderSection('vendor-opencode'))
   await act(async () => {
@@ -194,6 +196,27 @@ async function openProviderOAuth(): Promise<void> {
   })
   await act(async () => {
     fireEvent.click(screen.getByText('Sign in with Claude Pro/Max'))
+  })
+}
+
+/**
+ * The SECOND host of the same flow: an already-configured provider re-authing
+ * from its configuration dialog. That affordance used to be an inline panel on
+ * the row; the restyle moved it into the dialog, and the flow machinery is one
+ * render function shared with the picker above — so this pins that the move did
+ * not fork it.
+ */
+async function reauthFromDialog(platform: string): Promise<void> {
+  installOpencodeApi(platform, {
+    // Configured, so it is a Providers ROW rather than a catalog pick.
+    getOpencodeProviders: vi.fn(async () => [{ ...OAUTH_PROVIDER, authState: 'authenticated' }])
+  })
+  await act(async () => renderSection('vendor-opencode'))
+  await act(async () => {
+    fireEvent.click(await screen.findByTestId('VendorOpencodeSection.providerRow.open'))
+  })
+  await act(async () => {
+    fireEvent.click(await screen.findByTestId('VendorOpencodeSection.credentialOauth'))
   })
 }
 
@@ -229,5 +252,34 @@ describe('Settings › opencode providers — OAuth', () => {
     expect(screen.queryByTestId('OAuthPasteBackFlow')).toBeNull()
     expect(screen.getByPlaceholderText('Paste code here')).toBeTruthy()
     expect(window.open).toHaveBeenCalledWith(AUTHORIZE_URL, '_blank')
+  })
+
+  it('on web: re-authing from the provider dialog parks the same paste-back flow', async () => {
+    await reauthFromDialog('web')
+    // Inside the dialog, not back on the pane behind it.
+    const dialog = screen.getByTestId('OpencodeProviderConfigModal')
+    const flow = within(dialog).getByTestId('OAuthPasteBackFlow')
+    expect(flow).toHaveAttribute('data-variant', 'url')
+    expect(flow).toHaveAttribute('data-id', 'anthropic')
+
+    fireEvent.change(within(dialog).getByTestId('OAuthPasteBackFlow.input'), {
+      target: { value: 'k9' }
+    })
+    await act(async () => {
+      fireEvent.click(within(dialog).getByTestId('OAuthPasteBackFlow.submit'))
+    })
+    expect(window.api.vendorAuthOauthCallback).toHaveBeenCalledWith(
+      'opencode',
+      'anthropic',
+      0,
+      'k9'
+    )
+  })
+
+  it('on desktop: re-authing from the provider dialog keeps the local code box', async () => {
+    await reauthFromDialog('darwin')
+    const dialog = screen.getByTestId('OpencodeProviderConfigModal')
+    expect(within(dialog).queryByTestId('OAuthPasteBackFlow')).toBeNull()
+    expect(within(dialog).getByPlaceholderText('Paste code here')).toBeTruthy()
   })
 })

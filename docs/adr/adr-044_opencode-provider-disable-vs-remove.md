@@ -102,16 +102,28 @@ re-synthesizes those rows because `GET /provider` omits disabled ids entirely,
 and it no longer skips declared ids — skipping them is what made `qwen-sandbox`
 render nowhere.
 
-Row actions are icon buttons (`sliders` models, `key-round` credential, `pencil`
-configure, `power` enable/disable, `trash-2` remove), each with `aria-label` +
-`title` and two-tier `data-testid`s per ADR-027. The declaration form moved into
-`OpencodeProviderConfigModal` at `z-[100]` (settings root is `z-50`; a confirm
-opened from inside it takes `z-[110]`), which splices into the full `providers`
-record rather than rebuilding it from a local row list. A shared-provider-managed
-declaration renders read-only with a pointer to its owner — the shared-provider
-compiler owns it and would overwrite edits (ADR-037).
+The declaration form moved into `OpencodeProviderConfigModal` at `z-[100]`
+(settings root is `z-50`; a confirm opened from inside it takes `z-[110]`), which
+splices into the full `providers` record rather than rebuilding it from a local
+row list. A shared-provider-managed declaration renders read-only with a pointer
+to its owner — the shared-provider compiler owns it and would overwrite edits
+(ADR-037).
 
-Icons are hand-rolled inline SVG; no icon dependency was added for five glyphs.
+**As built, amended by the provider-editor restyle** (`OpencodeProviders.tsx`,
+extracted from settings-sections.tsx onto the shared frame in
+provider-editor-shell.tsx): the row shipped with five icon buttons (`sliders`
+models, `key-round` credential, `pencil` configure, `power` enable/disable,
+`trash-2` remove). Three of them are now the row CLICK — it opens the
+configuration dialog, which hosts the credential block (including the OAuth
+flows), the model-allowlist entry point and the declaration form, each gated on
+the same resolved `actions`. `power` and `trash-2` stay ON the row, because this
+ADR's whole point is that a reversible veto and a destructive action are
+different things: burying either behind the same gesture as "open" is what the
+split exists to prevent. Both keep their `aria-label` + `title` and their
+`VendorOpencodeSection.providerRow.disable` / `.remove` testids; the row also
+gained `.open` for its hit area, and `data-disabled` moved onto the shared row
+card. Icons are hand-rolled inline SVG; no icon dependency was added for two
+glyphs.
 
 ### 5. Shared-provider collisions are surfaced, not silently lost
 

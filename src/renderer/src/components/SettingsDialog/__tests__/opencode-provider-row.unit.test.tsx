@@ -6,11 +6,17 @@
  *  - Disable is ALWAYS available; Remove is gated on the resolved actions.
  *  - A blocked trash icon is rendered (not hidden) and carries the reason as its
  *    tooltip — a greyed control with no explanation reads as a broken button.
- *  - Credential and configure icons appear only where they apply.
+ *  - The declaration form and the credential block appear only where they apply.
  *  - Remove confirms first, names what it destroys, and passes the resolved
  *    removeKind through untouched.
  *  - A provider vended by a shared provider warns that removal will be undone —
  *    the ChatGPT case that started this whole change.
+ *
+ * WHERE THE CONTROLS LIVE. Disable and Remove stayed on the row through the
+ * restyle; manage-models, credential and configure did not — the row click opens
+ * the configuration dialog and they are gated in there instead. The three tests
+ * that used to click those icons now assert the same availability rules against
+ * the dialog's own controls.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -25,6 +31,7 @@ import type {
 const setOpencodeProviderDisabled = vi.fn(async (_id: string, _disabled: boolean) => undefined)
 const removeOpencodeProvider = vi.fn(async (_id: string, _kind: string) => undefined)
 const saveOpencodeSettings = vi.fn(async (_cfg: OpencodeConfigSettings) => undefined)
+const vendorAuthSetKey = vi.fn(async () => undefined)
 
 const actions = (over: Partial<ProviderActions> = {}): ProviderActions => ({
   canSetCredential: true,
@@ -55,7 +62,7 @@ function installApiStub(catalog: OpencodeProviderCatalogEntry[]): void {
     saveOpencodeSettings,
     vendorAuthListOptions: vi.fn(async () => ({})),
     vendorAuthListKeys: vi.fn(async () => ({})),
-    vendorAuthSetKey: vi.fn(async () => undefined),
+    vendorAuthSetKey,
     vendorAuthRemove: vi.fn(async () => undefined),
     vendorAuthOauthCancel: vi.fn(async () => undefined),
     listSharedProviders: vi.fn(async () => []),
@@ -90,11 +97,20 @@ async function row(id: string): Promise<HTMLElement> {
   return rows.find((r) => r.getAttribute('data-id') === id)!
 }
 
+/** Click the row's own hit area, which is what opens the configuration dialog. */
+async function openDialog(id: string): Promise<void> {
+  const target = await row(id)
+  await act(async () => {
+    fireEvent.click(within(target).getByTestId('VendorOpencodeSection.providerRow.open'))
+  })
+}
+
 describe('opencode provider row — actions', () => {
   beforeEach(() => {
     setOpencodeProviderDisabled.mockClear()
     removeOpencodeProvider.mockClear()
     saveOpencodeSettings.mockClear()
+    vendorAuthSetKey.mockClear()
   })
   afterEach(() => cleanup())
 
@@ -139,7 +155,7 @@ describe('opencode provider row — actions', () => {
     expect(trash).toHaveAttribute('title', expect.stringContaining('needs no credentials'))
   })
 
-  it('hides the credential and configure icons where they do not apply', async () => {
+  it('withholds the declaration form and credential block where they do not apply', async () => {
     await renderRows([
       entry({
         id: 'opencode',
@@ -148,22 +164,21 @@ describe('opencode provider row — actions', () => {
         actions: actions({ canSetCredential: false, canEditDeclaration: false })
       })
     ])
-    const zen = await row('opencode')
-    expect(
-      within(zen).queryByTestId('VendorOpencodeSection.providerRow.credential')
-    ).not.toBeInTheDocument()
-    expect(
-      within(zen).queryByTestId('VendorOpencodeSection.providerRow.edit')
-    ).not.toBeInTheDocument()
+    await openDialog('opencode')
+    // The dialog opens — a free gateway still curates which models reach the
+    // picker — but offers nothing that would declare it or key it.
+    expect(await screen.findByTestId('OpencodeProviderConfigModal')).toBeInTheDocument()
+    expect(screen.queryByTestId('OpencodeProviderConfigModal.id')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('OpencodeProviderConfigModal.apiKey')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('OpencodeProviderConfigModal.keyStatus')).not.toBeInTheDocument()
   })
 
-  it('shows the configure icon for a declaration in the file we write', async () => {
+  it('offers the declaration form for a definition in the file we write', async () => {
     await renderRows([
       entry({ id: 'mine', name: 'My Endpoint', actions: actions({ canEditDeclaration: true }) })
     ])
-    expect(
-      within(await row('mine')).getByTestId('VendorOpencodeSection.providerRow.edit')
-    ).toBeInTheDocument()
+    await openDialog('mine')
+    expect(await screen.findByTestId('OpencodeProviderConfigModal.id')).toBeInTheDocument()
   })
 
   it('disabling routes through the main-process owner, not a renderer config write', async () => {
@@ -245,15 +260,21 @@ describe('opencode provider row — actions', () => {
     expect(confirm.textContent).toMatch(/restored on the next sync/i)
   })
 
-  it('opens a credential panel that replaces the key without reseeding the allowlist', async () => {
+  it('replaces the credential from the dialog without reseeding the allowlist', async () => {
     await renderRows([entry({ id: 'openrouter', name: 'OpenRouter' })])
-    const openrouter = await row('openrouter')
+    await openDialog('openrouter')
+
+    const key = await screen.findByTestId('OpencodeProviderConfigModal.apiKey')
     await act(async () => {
-      fireEvent.click(
-        within(openrouter).getByTestId('VendorOpencodeSection.providerRow.credential')
-      )
+      fireEvent.change(key, { target: { value: 'sk-or-new' } })
     })
-    expect(await screen.findByTestId('VendorOpencodeSection.credentialPanel')).toBeInTheDocument()
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('OpencodeProviderConfigModal.saveKey'))
+    })
+
+    await waitFor(() =>
+      expect(vendorAuthSetKey).toHaveBeenCalledWith('opencode', 'openrouter', 'sk-or-new')
+    )
     // Updating a credential must not run the add-flow's allowlist seeding, which
     // would hide the models this provider already shows.
     expect(saveOpencodeSettings).not.toHaveBeenCalled()

@@ -157,6 +157,11 @@ function installApiStub(
     vendorAuthOauthCancel: vi.fn(async () => undefined),
     setOpencodeProviderDisabled,
     removeOpencodeProvider,
+    // The row's credential-kind badge and the config dialog's credential block
+    // both read opencode's auth store; the dialog also asks which declarations a
+    // shared provider owns.
+    vendorAuthListKeys: vi.fn(async () => ({})),
+    listSharedProviders: vi.fn(async () => []),
     // Orphan-guard inputs: the section loads the discovered opencode models and
     // every engine's config to refuse an edit that would strand a configured
     // model reference. Empty by default — only the guard's own tests supply data.
@@ -165,12 +170,20 @@ function installApiStub(
   }
 }
 
-/** Open the "Manage models" dialog for a provider row (now an icon button). */
+/**
+ * Open the model-allowlist dialog for a provider: click its row (which opens the
+ * configuration dialog) and then the dialog's "Manage list…" affordance. The
+ * allowlist used to hang off a row icon; the restyle moved it a dialog in, next
+ * to the credential it belongs beside.
+ */
 async function openModelDialog(providerId: string): Promise<void> {
   const rows = await screen.findAllByTestId('VendorOpencodeSection.providerRow')
   const row = rows.find((r) => r.getAttribute('data-id') === providerId)!
   await act(async () => {
-    fireEvent.click(within(row).getByTestId('VendorOpencodeSection.providerRow.models'))
+    fireEvent.click(within(row).getByTestId('VendorOpencodeSection.providerRow.open'))
+  })
+  await act(async () => {
+    fireEvent.click(await screen.findByTestId('OpencodeProviderConfigModal.manageModels'))
   })
 }
 
@@ -217,7 +230,7 @@ describe('opencode provider manager', () => {
       renderManager()
     })
     await act(async () => {
-      fireEvent.click(await screen.findByText('+ Add provider'))
+      fireEvent.click(await screen.findByTestId('VendorOpencodeSection.addProvider'))
     })
     const search = await screen.findByPlaceholderText(/Search providers/)
     await act(async () => {
@@ -233,7 +246,7 @@ describe('opencode provider manager', () => {
       renderManager()
     })
     await act(async () => {
-      fireEvent.click(await screen.findByText('+ Add provider'))
+      fireEvent.click(await screen.findByTestId('VendorOpencodeSection.addProvider'))
     })
     const search = await screen.findByPlaceholderText(/Search providers/)
     await act(async () => {
@@ -247,9 +260,8 @@ describe('opencode provider manager', () => {
     await act(async () => {
       fireEvent.change(keyInput, { target: { value: 'sk-or-test' } })
     })
-    // The save button is the only one now labelled "Add" (the row toggle shows "−").
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Add' }))
+      fireEvent.click(screen.getByTestId('VendorOpencodeSection.catalogSave'))
     })
 
     await waitFor(() =>
@@ -259,6 +271,108 @@ describe('opencode provider manager', () => {
       const last = savedConfigs[savedConfigs.length - 1]
       expect(last.modelAllowlist?.openrouter).toEqual([])
     })
+  })
+
+  // -------------------------------------------------------------------------
+  // Catalog availability. `discoverOpencodeProviderCatalog` swallows its own
+  // failures and answers [], and the server it reads may still be spawning, so
+  // the pane has to tell three states apart. They used to render one line —
+  // "No providers yet. Add a catalog provider…" — which told a user whose
+  // opencode server had not come up to go and add something.
+  // -------------------------------------------------------------------------
+  describe('catalog availability — three states, not one', () => {
+    const setCatalogFetch = (fn: () => Promise<OpencodeProviderCatalogEntry[]>): void => {
+      ;(window as unknown as { api: Record<string, unknown> }).api.getOpencodeProviders = vi.fn(fn)
+    }
+
+    it('says the server is starting while the catalog read is still in flight', async () => {
+      installApiStub({})
+      setCatalogFetch(() => new Promise<OpencodeProviderCatalogEntry[]>(() => {}))
+      await act(async () => {
+        renderManager()
+      })
+      expect(screen.getByTestId('VendorOpencodeSection.booting')).toBeTruthy()
+      expect(screen.queryByTestId('VendorOpencodeSection.noProviders')).toBeNull()
+      expect(screen.queryByTestId('VendorOpencodeSection.catalogError')).toBeNull()
+    })
+
+    it('offers Retry when the catalog read rejects, and re-reads on click', async () => {
+      installApiStub({})
+      setCatalogFetch(async () => {
+        throw new Error('opencode server did not start')
+      })
+      await act(async () => {
+        renderManager()
+      })
+
+      const error = await screen.findByTestId('VendorOpencodeSection.catalogError')
+      expect(error.textContent).toContain('opencode server did not start')
+      // A failed read must never read as "you have no providers".
+      expect(screen.queryByTestId('VendorOpencodeSection.noProviders')).toBeNull()
+
+      setCatalogFetch(async () => CATALOG)
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('VendorOpencodeSection.retry'))
+      })
+      expect(await screen.findByText('OpenAI')).toBeTruthy()
+      expect(screen.queryByTestId('VendorOpencodeSection.catalogError')).toBeNull()
+    })
+
+    it('treats a catalog with nothing in it as unreachable, not as an empty setup', async () => {
+      // opencode ships ~146 providers; zero entries means the server answered
+      // nothing (or discovery swallowed its own failure into []).
+      installApiStub({}, [])
+      await act(async () => {
+        renderManager()
+      })
+      expect(await screen.findByTestId('VendorOpencodeSection.catalogError')).toBeTruthy()
+      expect(screen.getByTestId('VendorOpencodeSection.retry')).toBeTruthy()
+      expect(screen.queryByTestId('VendorOpencodeSection.noProviders')).toBeNull()
+    })
+
+    it('shows the genuine empty state when the catalog is healthy but nothing is configured', async () => {
+      // openrouter alone: a real catalog entry, unauthenticated, so nothing is
+      // listed — the one case that really does mean "add a provider".
+      installApiStub({}, [CATALOG[2]])
+      await act(async () => {
+        renderManager()
+      })
+      expect(await screen.findByTestId('VendorOpencodeSection.noProviders')).toBeTruthy()
+      expect(screen.queryByTestId('VendorOpencodeSection.catalogError')).toBeNull()
+    })
+  })
+
+  // The restyle moved manage-models, credential and configure into the dialog
+  // and kept these two on the row — a reversible veto and a destructive action
+  // are what a list needs one click away. Both must still reach their IPC.
+  it('keeps one-click disable and remove on the row, wired to the same IPC', async () => {
+    installApiStub({})
+    await act(async () => {
+      renderManager()
+    })
+    const findRow = async (): Promise<HTMLElement> => {
+      const rows = await screen.findAllByTestId('VendorOpencodeSection.providerRow')
+      return rows.find((r) => r.getAttribute('data-id') === 'openai')!
+    }
+
+    await act(async () => {
+      fireEvent.click(
+        within(await findRow()).getByTestId('VendorOpencodeSection.providerRow.disable')
+      )
+    })
+    await waitFor(() => expect(setOpencodeProviderDisabled).toHaveBeenCalledWith('openai', true))
+
+    await act(async () => {
+      fireEvent.click(
+        within(await findRow()).getByTestId('VendorOpencodeSection.providerRow.remove')
+      )
+    })
+    // Still confirms first, and passes the resolved kind through untouched.
+    expect(removeOpencodeProvider).not.toHaveBeenCalled()
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('VendorOpencodeSection.removeConfirm.confirm'))
+    })
+    await waitFor(() => expect(removeOpencodeProvider).toHaveBeenCalledWith('openai', 'credential'))
   })
 
   describe('a disabled provider stays in the list and re-enables in place', () => {

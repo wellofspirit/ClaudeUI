@@ -456,9 +456,7 @@ describe('per-model capability editor', () => {
       expect(screen.queryAllByTestId('ModelCapabilityEditor.rawLeaf')).toHaveLength(0)
       await openAdvanced()
       expect(
-        screen
-          .getAllByTestId('ModelCapabilityEditor.rawLeaf')
-          .map((n) => n.getAttribute('data-id'))
+        screen.getAllByTestId('ModelCapabilityEditor.rawLeaf').map((n) => n.getAttribute('data-id'))
       ).toEqual(['options', 'headers', 'variants'])
     })
 
@@ -593,8 +591,9 @@ describe('per-model capability editor', () => {
 
   describe('inline and dialog frames', () => {
     it('renders inline with no dialog chrome when no close handler is given', async () => {
-      // How OpencodeProviderConfigModal mounts it today: inside that dialog's
-      // own scrolling body, behind the model row's "▸ Capabilities" link.
+      // The embedded frame: rendered inside a host's own scrolling body, which
+      // is how OpencodeProviderConfigModal mounted it before that dialog moved
+      // the model row's "Capabilities" action to the stacked frame below.
       await renderEditor()
       expect(screen.getByTestId('ModelCapabilityEditor')).toHaveAttribute(
         'data-id',
