@@ -583,10 +583,14 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
             /* scanner failed — keep existing commands */
           })
       }
-      // Best-effort host-cache write. On a remote client this now goes over the
-      // wire (a mutation), so a step-up refusal the operator dismisses rejects —
-      // swallow it: this fires on an ENGINE event, not a user gesture, and a
-      // failed cache write must never surface as an unhandled rejection.
+      // Best-effort host-cache write. On a remote client it goes over the wire,
+      // so the catch is kept for NETWORK/TRANSPORT failures — a dropped socket
+      // or a mid-flight reconnect. It is no longer a step-up refusal path:
+      // `config:save-slash-commands` is a named benign cache write and costs no
+      // freshness (`BENIGN_CACHE_WRITE_CHANNELS`, ADR-054 2026-08-28 amendment),
+      // precisely because this fires on an ENGINE event rather than a user
+      // gesture. Either way a failed cache write must never surface as an
+      // unhandled rejection.
       window.api.saveSlashCommands(commands).catch(() => {})
       return
     }

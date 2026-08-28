@@ -1,6 +1,6 @@
 # ADR-054 — Step-up policy tiers: separating login auth from presence freshness
 
-**Status:** **Implemented** (owner-ratified 2026-08-15; §6 amended and implemented 2026-08-16). Server core landed in `8a4b28d`; client UX, the `authcfg:*` read verb, the read/act client state and the docs amendment landed in the follow-on series; the settings-editing SESSION that replaced the mutation window for that area (§6 amendment) landed after it. As-built detail lives in [security.md](../architecture/security.md) — this ADR keeps the decisions and the reasoning, including the ordering clarifications ratified during implementation (§3/§6 below).
+**Status:** **Implemented** (owner-ratified 2026-08-15; §6 amended and implemented 2026-08-16; §7 added 2026-08-28). Server core landed in `8a4b28d`; client UX, the `authcfg:*` read verb, the read/act client state and the docs amendment landed in the follow-on series; the settings-editing SESSION that replaced the mutation window for that area (§6 amendment) landed after it; the benign-cache-write class (§7) followed once `config:save-slash-commands` went web-reachable. As-built detail lives in [security.md](../architecture/security.md) — this ADR keeps the decisions and the reasoning, including the ordering clarifications ratified during implementation (§3/§6 below).
 **Relates to:** ADR-051 (command registry — the `kind` field becomes security-load-bearing here), ADR-053, and **ADR-056** (the admission model), which leaves this ADR's host anchor and settings-editing session UNCHANGED and touches it in exactly three places: the auth-mode vocabulary loses `legacy` (Decision text and the §6 amendment's mode list), `authcfg:*` gains two LAN-channel verbs on the gated side of the classifier, and Decision 2's list of "weaker logins that arm nothing" shrinks to the break-glass password now that the token and ambient tailnet identity are retired.
 **Supersedes in part:** ADR-052 — its Decision 3 (`passkey-for-grants` as a mode), Decision 5 (grant-decay scope and what feeds it), and the "never reachable remotely" wording of its Decision 3 `off` clause (generalized, not weakened — see Decision 6). Everything else in ADR-052 stands.
 
@@ -84,6 +84,24 @@ What the password may **never** reach is the `off` switch — that is host-ancho
 - The **desktop** pane has the same view/edit states but unlocks without a ceremony and without a TTL (host anchor); the `off` master switch and its typed confirm remain desktop-only inside the edit mode.
 - **Tier `off` and the session:** opening the editor always costs the ceremony on the web — the pane is the only path to these settings, so the §3/§6 ordering ratification stands, re-mechanized: the ceremony moved from "every verb" to "the door."
 - **Headless bootstrap, step 2 revised:** the first passkey ceremony signs the device in; opening the settings editor then runs one deliberate unlock ceremony (rather than riding arm-on-auth's ambient window). One extra tap, and the chain's other steps stand unchanged.
+
+### 7. Benign ambient cache writes (amendment, owner-RATIFIED 2026-08-28)
+
+§1's closing paragraph makes the registry's `kind` the test for "mutating"; §4's shell read/act split and §6's `authcfg` carve-out were the only two exceptions to it. A third turned out to be needed, and the trigger was a live defect: once `config:save-slash-commands` was registered for web clients, a `strong`-tier connection with a lapsed mutation window met an **unrequested biometric ceremony on an ordinary session spawn**. That channel is the slash-menu warm cache the renderer writes when the engine _announces_ its command list — an ambient engine-event write with no user gesture behind it, so the prompt was unattributable to anything the operator did. A ceremony an operator cannot connect to an action is how a step-up surface gets trained away, which makes this a security cost, not an ergonomics one.
+
+The exemption is an **explicit named set** (`BENIGN_CACHE_WRITE_CHANNELS`), checked in `classifyDispatch` above the `kind` line and classified `read`. It is a class with an **admission bar, not a per-channel excuse** — a channel joins only when **all three** hold, plus an owner ruling:
+
+1. **Fixed host path.** The destination is a constant the caller cannot influence (here `SLASH_COMMANDS_FILE`); the caller controls content only, never where it lands.
+2. **Self-healing content.** Ordinary use overwrites it wholesale — every session spawn rewrites this cache from the engine's real list — so a hostile write survives at most until the next spawn.
+3. **Cosmetic blast radius.** Nothing executes off it. The cache seeds the composer's slash menu; execution semantics live in cli.js, which ignores names it does not know.
+
+What the amendment does **not** touch:
+
+- **Capability is unchanged.** The write still requires an authenticated connection holding `config`. Only the freshness cost moves.
+- **The audit row is unchanged**, and that is why the exemption lives in the step-up table rather than as a `kind: 'query'` relabel in the registry. `dispatch()` skips the audit row for queries, so "fixing" it there would have bought the same waiver by silently dropping the channel out of the audit log — the same trap `SHELL_READ_VERBS` exists to dodge for `terminal:attach`, which stays declared `command` so terminal lifecycle keeps auditing while classifying as a read.
+- **The classification ORDER is stated.** The shell read/act split is checked _before_ the benign set, so no future member could ever buy a shell verb its way out of the fail-closed branch by being named lower down.
+
+One deliberate **tightening** rides along: because the class is `read`, these writes now **refresh nothing** (the refresh discipline: only acting slides a window). An engine-driven write is not presence, and it previously slid the mutation window on any armed connection — so a session spawn was renewing a proof no human had given.
 
 ## Consequences
 
