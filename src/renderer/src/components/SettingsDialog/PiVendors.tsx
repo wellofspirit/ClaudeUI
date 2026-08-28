@@ -15,6 +15,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { VendorAuthMap, VendorAuthOption } from '../../../../shared/types'
 import { SelectMenu } from '../shared/SelectMenu'
+import { PiCustomProviders } from './PiCustomProviders'
 
 /** pi's auth.json key for the Codex (ChatGPT) credential — CredentialSync.PI_CODEX_VENDOR_ID. */
 const CODEX_VENDOR_ID = 'openai-codex'
@@ -310,6 +311,12 @@ export function PiVendors(): React.JSX.Element {
 
       <SharedChatgptLink />
       <SubscriptionHint />
+
+      {/* models.json — pi's own model catalog. Everything above authenticates a
+          provider pi already knows about; these two blocks DECLARE providers and
+          models that pi does not ship with. Rendered inside the install gate
+          above, so it never mounts without pi present. */}
+      <PiCustomProviders />
     </div>
   )
 }

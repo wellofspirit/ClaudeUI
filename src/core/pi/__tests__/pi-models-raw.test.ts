@@ -351,6 +351,141 @@ describe('patchPiModelsRaw — built-in vendor guard', () => {
   })
 })
 
+/**
+ * `models` is the one ARRAY the editor writes into, and the panes (C2) need to
+ * know whether jsonc-parser's modify() can APPEND and REMOVE elements by index
+ * or whether add/remove has to rewrite the whole array as one leaf. These pin
+ * what the REAL writer does end to end (index-replace is already covered above).
+ */
+describe('patchPiModelsRaw — models[] array semantics', () => {
+  const twoModels = `{
+  "providers": {
+    "mine": {
+      "baseUrl": "https://api.example.test/v1",
+      "models": [
+        { "id": "m1" },
+        { "id": "m2" }
+      ]
+    }
+  }
+}`
+
+  it('APPENDS when the index equals the array length', () => {
+    const p = writeModels(twoModels)
+    patchPiModelsRaw([{ path: ['providers', 'mine', 'models', 2], value: { id: 'm3' } }])
+    expect(jsoncParse(readFileSync(p, 'utf-8')).providers.mine.models).toEqual([
+      { id: 'm1' },
+      { id: 'm2' },
+      { id: 'm3' }
+    ])
+  })
+
+  it('append keeps comments and earlier elements verbatim, reformatting only the tail', () => {
+    // The tradeoff the pane relies on: an insert edit spans the LAST existing
+    // element through the closing bracket, so that element is re-printed expanded
+    // while everything before it — comments included — survives byte-for-byte.
+    // A whole-array leaf rewrite would have destroyed the comment (below).
+    const p = writeModels(`{
+  "providers": {
+    "mine": {
+      "models": [
+        // hand-written note
+        { "id": "m1", "contextWindow": 100000 },
+        { "id": "m2" }
+      ]
+    }
+  }
+}`)
+    patchPiModelsRaw([{ path: ['providers', 'mine', 'models', 2], value: { id: 'm3' } }])
+    const text = readFileSync(p, 'utf-8')
+    expect(text).toContain('// hand-written note')
+    expect(text).toContain(`{ "id": "m1", "contextWindow": 100000 },`)
+    expect(jsoncParse(text).providers.mine.models).toEqual([
+      { id: 'm1', contextWindow: 100_000 },
+      { id: 'm2' },
+      { id: 'm3' }
+    ])
+  })
+
+  it('a WHOLE-ARRAY leaf rewrite loses in-array comments — which is why add/remove go by index', () => {
+    const p = writeModels(`{
+  "providers": {
+    "mine": {
+      "models": [
+        // hand-written note
+        { "id": "m1" }
+      ]
+    }
+  }
+}`)
+    patchPiModelsRaw([
+      { path: ['providers', 'mine', 'models'], value: [{ id: 'm1' }, { id: 'm2' }] }
+    ])
+    expect(readFileSync(p, 'utf-8')).not.toContain('// hand-written note')
+  })
+
+  it('append leaves the provider’s sibling keys byte-identical', () => {
+    const p = writeModels(`{
+  "providers": {
+    "mine": {
+      // note about baseUrl
+      "baseUrl":    "https://api.example.test/v1",
+      "models": [{ "id": "m1" }],
+      "compat": { "supportsDeveloperRole": false }
+    }
+  }
+}`)
+    patchPiModelsRaw([{ path: ['providers', 'mine', 'models', 1], value: { id: 'm2' } }])
+    const text = readFileSync(p, 'utf-8')
+    expect(text).toContain('// note about baseUrl')
+    expect(text).toContain(`"baseUrl":    "https://api.example.test/v1",`)
+    expect(text).toContain(`"compat": { "supportsDeveloperRole": false }`)
+  })
+
+  it('creates the whole array when `models` is absent (index 0 under a missing parent)', () => {
+    // modify() THROWS deleting under a missing parent but SETS through one, so a
+    // first model can be written at index 0 — pinned because the pane relies on
+    // it rather than seeding `models: []` first.
+    const p = writeModels(`{ "providers": { "mine": { "baseUrl": "https://x" } } }`)
+    patchPiModelsRaw([{ path: ['providers', 'mine', 'models', 0], value: { id: 'm1' } }])
+    expect(jsoncParse(readFileSync(p, 'utf-8')).providers.mine.models).toEqual([{ id: 'm1' }])
+  })
+
+  it('REMOVES an element by index — it splices, it does not leave a null hole', () => {
+    const p = writeModels(twoModels)
+    patchPiModelsRaw([{ path: ['providers', 'mine', 'models', 0] }])
+    const models = jsoncParse(readFileSync(p, 'utf-8')).providers.mine.models
+    expect(models).toEqual([{ id: 'm2' }])
+    expect(models).toHaveLength(1)
+  })
+
+  it('removing the LAST element leaves an empty array, not a removed key', () => {
+    const p = writeModels(`{ "providers": { "mine": { "models": [{ "id": "m1" }] } } }`)
+    patchPiModelsRaw([{ path: ['providers', 'mine', 'models', 0] }])
+    expect(jsoncParse(readFileSync(p, 'utf-8')).providers.mine.models).toEqual([])
+  })
+
+  it('removing an OUT-OF-RANGE index is a no-op (the pathExists delete invariant)', async () => {
+    const p = writeModels(twoModels)
+    const before = readFileSync(p, 'utf-8')
+    const mtimeBefore = statSync(p).mtimeMs
+    await new Promise((r) => setTimeout(r, 10))
+    expect(() => patchPiModelsRaw([{ path: ['providers', 'mine', 'models', 7] }])).not.toThrow()
+    expect(readFileSync(p, 'utf-8')).toBe(before)
+    expect(statSync(p).mtimeMs).toBe(mtimeBefore)
+  })
+
+  it('patches a leaf INSIDE an appended element afterwards (indices stay addressable)', () => {
+    const p = writeModels(twoModels)
+    patchPiModelsRaw([{ path: ['providers', 'mine', 'models', 2], value: { id: 'm3' } }])
+    patchPiModelsRaw([{ path: ['providers', 'mine', 'models', 2, 'reasoning'], value: true }])
+    expect(jsoncParse(readFileSync(p, 'utf-8')).providers.mine.models[2]).toEqual({
+      id: 'm3',
+      reasoning: true
+    })
+  })
+})
+
 describe('patchPiModelsRaw — model cache invalidation', () => {
   it('invalidates pi model discovery after a write', () => {
     patchPiModelsRaw([{ path: ['providers', 'mine', 'api'], value: 'openai-responses' }])

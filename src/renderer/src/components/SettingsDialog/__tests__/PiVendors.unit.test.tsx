@@ -51,6 +51,17 @@ const listSharedProviders = vi.fn(async (): Promise<SharedProviderDefinition[]> 
   }
 ])
 
+// PiVendors now also renders the models.json blocks (PiCustomProviders), which
+// read the model catalog on mount. Its own behaviour is covered by
+// PiCustomProviders.component.test.tsx; here it only needs to resolve.
+const readPiModelsRaw = vi.fn(async () => ({
+  config: {},
+  path: '/fake/home/.pi/agent/models.json',
+  text: '',
+  managedProviderIds: [] as string[]
+}))
+const patchPiModels = vi.fn(async () => {})
+
 function installApiStub(): void {
   ;(window as unknown as { api: Record<string, unknown> }).api = {
     vendorAuthProbe,
@@ -59,7 +70,9 @@ function installApiStub(): void {
     vendorAuthRemove,
     engineIsInstalled,
     getPiBinaryPath,
-    listSharedProviders
+    listSharedProviders,
+    readPiModelsRaw,
+    patchPiModels
   }
 }
 
