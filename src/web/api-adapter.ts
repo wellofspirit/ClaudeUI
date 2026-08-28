@@ -822,37 +822,67 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     getVersionInfo: () =>
       connection.invoke('app:version-info') as ReturnType<ClaudeAPI['getVersionInfo']>,
 
-    // Desktop-only — no native debug window / proxy stack on the web client
+    // Desktop-only by ABSENCE of a channel: `log-viewer:open` is a raw
+    // `ipcMain.handle` registration (main/services/log-viewer.ts) with no remote
+    // twin, and a browser has no native window to open anyway.
     openLogViewer: async () => {},
+    // Stubbed even though `proxy:test-connection` IS registered for both
+    // transports (config-commands.ts, `config`): it is a probe of the HOST's
+    // egress, not a setting, so a stub misinforms without losing state — unlike
+    // the saves below, whose stubs silently discarded the user's edit. Wiring it
+    // is its own call; the local-surface table in the parity test is what keeps
+    // that a decision rather than drift.
     testProxyConnection: async () => ({
       ok: false,
       latencyMs: 0,
       error: 'Not available in remote mode'
     }),
-    loadEngineConfig: async () => ({}),
-    saveEngineConfig: async () => {},
-    loadVendorConfig: async () => ({}),
-    saveVendorConfig: async () => {},
-    loadOpencodeSettings: async () => ({}),
-    saveOpencodeSettings: async () => {},
-    readOpencodeNativeRaw: async () => ({ config: {}, path: '' }),
-    patchOpencodeNative: async () => {},
-    // pi's raw settings pair IS registered for both transports (config-commands.ts,
-    // capability `config`), so it goes over the wire rather than being stubbed:
-    // a stubbed MUTATION would let a remote user "save" a pi setting that went
-    // nowhere. (Its opencode neighbours above are still stubs — pre-existing, and
-    // not this item's to change.)
+
+    // Engine / vendor / engine-native config. Every channel below is registered
+    // for BOTH transports in core/ipc/config-commands.ts under `capability:
+    // 'config'`, so these mirror preload 1:1 instead of stubbing. Wiring them
+    // widens nothing: the capability gate is SERVER-side, in the channel
+    // registry, and it already applied to these channels whether or not this
+    // client could reach them. What the stubs broke was honest callers — every
+    // remote settings pane (auto mode, dispatch, the pi ClaudeUI half, vendor
+    // endpoints, the opencode Configuration panes) rendered and then resolved a
+    // save that went nowhere.
+    //
+    // `unwrap` appears exactly where preload uses it. The four engine/vendor
+    // channels are plain handlers, so a throw is already a rejection over the
+    // wire; the rest are safeHandler-wrapped and answer an { ok, data } envelope.
+    loadEngineConfig: (engineId) =>
+      connection.invoke('config:load-engine-config', engineId) as ReturnType<
+        ClaudeAPI['loadEngineConfig']
+      >,
+    saveEngineConfig: (engineId, config) =>
+      connection.invoke('config:save-engine-config', engineId, config) as Promise<void>,
+    loadVendorConfig: (vendorId) =>
+      connection.invoke('config:load-vendor-config', vendorId) as ReturnType<
+        ClaudeAPI['loadVendorConfig']
+      >,
+    saveVendorConfig: (vendorId, config) =>
+      connection.invoke('config:save-vendor-config', vendorId, config) as Promise<void>,
+    loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
+    saveOpencodeSettings: (settings) => unwrap('config:save-opencode-settings', settings),
+    readOpencodeNativeRaw: () => unwrap('config:read-opencode-native-raw'),
+    patchOpencodeNative: (patches) => unwrap('config:patch-opencode-native', patches),
     readPiNativeRaw: () => unwrap('config:read-pi-native-raw'),
     patchPiNative: (patches) => unwrap('config:patch-pi-native', patches),
     writePiNativeText: (text) => unwrap('config:write-pi-native-text', text),
-    listOpencodeAgents: async () => [],
-    readOpencodeAgent: async () => null,
-    saveOpencodeAgent: async () => {},
-    deleteOpencodeAgent: async () => {},
-    setOpencodeAgentDisabled: async () => {},
-    generateOpencodeAgent: async () => {
-      throw new Error('Not available in remote mode')
-    },
+
+    // opencode agent CRUD — the same family, split across two capabilities:
+    // `config` for the five file verbs, `chat` for `generate` because it spends
+    // model tokens. Both are in the base grant set, so an authenticated remote
+    // connection reaches all six.
+    listOpencodeAgents: (cwd) => unwrap('opencode-agents:list', cwd),
+    readOpencodeAgent: (name, scope, cwd) => unwrap('opencode-agents:read', name, scope, cwd),
+    saveOpencodeAgent: (input, cwd) => unwrap('opencode-agents:save', input, cwd),
+    deleteOpencodeAgent: (name, scope, cwd) => unwrap('opencode-agents:delete', name, scope, cwd),
+    setOpencodeAgentDisabled: (name, scope, cwd, disabled) =>
+      unwrap('opencode-agents:set-disabled', name, scope, cwd, disabled),
+    generateOpencodeAgent: (description, cwd) =>
+      unwrap('opencode-agents:generate', description, cwd),
 
     // Engine-routed per-vendor auth — registered on both transports since S4
     // (core/ipc/auth-commands.ts), so this mirrors preload 1:1 through `unwrap`
@@ -873,14 +903,20 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     vendorAuthRemove: (engineId, vendorId) => unwrap('vendor-auth:remove', engineId, vendorId),
     vendorAuthOauthCancel: (engineId) => unwrap('vendor-auth:oauth-cancel', engineId),
 
-    // Plugin system — desktop-only, stubbed out on web
+    // Plugin system — desktop-only by ABSENCE of a channel, like the log viewer:
+    // the four `plugin:*` handlers are raw `ipcMain.handle` registrations in
+    // main/index.ts, and a plugin view is a `<webview>` hosting a preload script
+    // from the host's disk, which a browser cannot load at all.
     listPlugins: async () => [],
     reloadPlugin: async () => {},
     getPluginViews: async () => [],
     getPluginPreloadPath: async () => '',
     onPluginViewsChanged: () => () => {},
 
-    // Desktop-only: spawns a local opencode server — not available in remote mode (Phase 9b)
+    // Stubbed even though `usage:refresh-prices` IS registered for both
+    // transports (config-commands.ts, `config`). Same reasoning as
+    // `testProxyConnection`: it refreshes a HOST-side cache rather than saving
+    // anything the user typed, so the stub costs a refusal, not an edit.
     refreshPrices: async () => ({ count: 0, refreshedAt: Date.now() })
   }
 
