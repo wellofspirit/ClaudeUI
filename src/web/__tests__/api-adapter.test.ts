@@ -402,7 +402,119 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     args: ['pi', 'openai-codex', 0, 'code-1']
   },
   { method: 'vendorAuthRemove', channel: 'vendor-auth:remove', args: ['pi', 'openai'] },
-  { method: 'vendorAuthOauthCancel', channel: 'vendor-auth:oauth-cancel', args: ['pi'] }
+  { method: 'vendorAuthOauthCancel', channel: 'vendor-auth:oauth-cancel', args: ['pi'] },
+
+  // Worktrees — `capability: 'git'`, the same one the `git:*` mutations ride.
+  // These threw "Worktrees not available in remote mode" (and `listWorktrees`
+  // answered `[]`, which the modal read as "this repo has none").
+  { method: 'createWorktree', channel: 'worktree:create', args: ['/repo/app', 'feature-x'] },
+  {
+    method: 'getWorktreeStatus',
+    channel: 'worktree:status',
+    args: ['/repo/app-feature-x', 'abc1234']
+  },
+  {
+    method: 'removeWorktree',
+    channel: 'worktree:remove',
+    args: ['/repo/app-feature-x', 'feature-x', '/repo/app']
+  },
+  { method: 'listWorktrees', channel: 'worktree:list', args: ['/repo/app'] },
+
+  // Automations — one frozen declaration shared by both transports
+  // (`core/ipc/automation-commands.ts`, `config`). Plain handlers, so preload
+  // uses a bare invoke and so does the adapter.
+  { method: 'listAutomations', channel: 'automation:list', args: [] },
+  {
+    method: 'saveAutomation',
+    channel: 'automation:save',
+    args: [{ id: 'nightly', name: 'Nightly review', schedule: '0 3 * * *' }]
+  },
+  { method: 'deleteAutomation', channel: 'automation:delete', args: ['nightly'] },
+  { method: 'runAutomationNow', channel: 'automation:run-now', args: ['nightly'] },
+  { method: 'toggleAutomation', channel: 'automation:toggle', args: ['nightly', false] },
+  { method: 'listAutomationRuns', channel: 'automation:list-runs', args: ['nightly'] },
+  {
+    method: 'loadAutomationRunHistory',
+    channel: 'automation:load-run-history',
+    args: ['nightly', 'run-1']
+  },
+  { method: 'cancelAutomationRun', channel: 'automation:cancel', args: ['nightly'] },
+  { method: 'dismissAutomationRun', channel: 'automation:dismiss-run', args: ['nightly', 'run-1'] },
+  {
+    method: 'sendAutomationMessage',
+    channel: 'automation:send-message',
+    args: ['nightly', 'stop after this step']
+  },
+
+  // MCP writes — `config`, both transports. The three LIVE verbs (a running
+  // session) are safeHandler-wrapped; the three FILE verbs are plain handlers.
+  { method: 'mcpToggleServer', channel: 'mcp:toggle', args: ['sess-1', 'lsphub', false] },
+  { method: 'mcpReconnectServer', channel: 'mcp:reconnect', args: ['sess-1', 'lsphub'] },
+  {
+    method: 'mcpSetServers',
+    channel: 'mcp:set-servers',
+    args: ['sess-1', { lsphub: { command: 'lsphub' } }]
+  },
+  {
+    method: 'saveMcpServers',
+    channel: 'mcp:save-servers',
+    args: ['project', { lsphub: { command: 'lsphub' } }, '/repo/app']
+  },
+  {
+    method: 'removeMcpServer',
+    channel: 'mcp:remove-server',
+    args: ['project', 'lsphub', '/repo/app']
+  },
+  {
+    method: 'mcpToggleDisabled',
+    channel: 'mcp:toggle-disabled',
+    args: ['/repo/app', 'lsphub', true]
+  },
+
+  // Shared-provider writes — `config` since ADR-056, registered beside the three
+  // reads that were already wired (`core/ipc/auth-commands.ts`).
+  {
+    method: 'saveSharedProvider',
+    channel: 'shared-provider:save',
+    args: [{ id: 'local', name: 'Local', kind: 'custom', models: [{ id: 'local-1' }] }]
+  },
+  { method: 'removeSharedProvider', channel: 'shared-provider:remove', args: ['local'] },
+  {
+    method: 'setSharedProviderRoute',
+    channel: 'shared-provider:set-route',
+    args: ['local', 'pi', true]
+  },
+  {
+    method: 'setSharedProviderApiKey',
+    channel: 'shared-provider:set-key',
+    args: ['local', 'sk-local']
+  },
+  { method: 'syncSharedProvider', channel: 'shared-provider:sync', args: ['local'] },
+  { method: 'disconnectSharedProvider', channel: 'shared-provider:disconnect', args: ['local'] },
+  {
+    method: 'setSharedProviderDefaultModel',
+    channel: 'shared-provider:set-default',
+    args: ['local', 'pi', 'local-1']
+  },
+
+  // The three singletons. `saveSlashCommands` is the cache write
+  // `useClaudeEvents` makes when cli.js announces the command list (plain
+  // handler, bare invoke). The other two are safeHandler-wrapped and both act on
+  // the HOST rather than this browser — `proxy:test-connection` dials through the
+  // host's proxy settings, `usage:refresh-prices` refreshes the host's price
+  // cache — which is exactly why running them there is the right answer for a
+  // remote caller, not a compromise.
+  {
+    method: 'saveSlashCommands',
+    channel: 'config:save-slash-commands',
+    args: [[{ name: 'review', description: 'Review the diff' }]]
+  },
+  {
+    method: 'testProxyConnection',
+    channel: 'proxy:test-connection',
+    args: [{ type: 'http', hostname: '127.0.0.1', port: 8080 }]
+  },
+  { method: 'refreshPrices', channel: 'usage:refresh-prices', args: [] }
 ]
 
 describe('web api-adapter — wired methods reach the channel they claim', () => {
@@ -411,11 +523,12 @@ describe('web api-adapter — wired methods reach the channel they claim', () =>
     expect(connection.invoke).toHaveBeenCalledWith(channel, ...args)
   })
 
-  it('the config/agent SAVES surface a refusal instead of resolving (GUARD)', async () => {
+  it('the SAVES surface a refusal instead of resolving — envelope half (GUARD)', async () => {
     // The half of the drift that mattered most: a stubbed mutation resolved
     // `undefined`, so a denied or failed save looked identical to a successful
-    // one. Every one of these is safeHandler-wrapped server-side, so the envelope
-    // is what carries the reason back.
+    // one. These channels are safeHandler-wrapped server-side, so the envelope is
+    // what carries the reason back — and `unwrap` is what turns it into a throw.
+    // One representative per family the wiring pass covered.
     const mutations = WIRED.filter(({ method }) =>
       [
         'saveOpencodeSettings',
@@ -423,12 +536,36 @@ describe('web api-adapter — wired methods reach the channel they claim', () =>
         'saveOpencodeAgent',
         'deleteOpencodeAgent',
         'setOpencodeAgentDisabled',
-        'generateOpencodeAgent'
+        'generateOpencodeAgent',
+        'createWorktree',
+        'mcpToggleServer',
+        'saveSharedProvider'
       ].includes(method)
     )
-    expect(mutations).toHaveLength(6)
+    expect(mutations).toHaveLength(9)
     for (const { method, args } of mutations) {
       connection.invoke.mockResolvedValueOnce({ ok: false, error: 'permission denied' })
+      await expect(callMethod(method, args)).rejects.toThrow('permission denied')
+    }
+  })
+
+  it('the SAVES surface a refusal instead of resolving — plain-handler half (GUARD)', async () => {
+    // Not every channel this family reaches is safeHandler-wrapped: the
+    // automation table and the MCP *file* verbs are plain handlers, so a refusal
+    // arrives as a rejected invoke rather than an `{ ok: false }` envelope, and
+    // preload uses a bare `ipcRenderer.invoke` for them. The property is the same
+    // one and it is the one the stubs broke — the method must RETURN the
+    // connection's promise, not fire-and-forget it and resolve.
+    //
+    // The MCP family is deliberately split across the two guards: three of its
+    // six writes are wrapped and three are not, and mirroring that split is
+    // exactly what "mirror preload 1:1" means here.
+    const mutations = WIRED.filter(({ method }) =>
+      ['saveAutomation', 'saveMcpServers', 'saveSlashCommands'].includes(method)
+    )
+    expect(mutations).toHaveLength(3)
+    for (const { method, args } of mutations) {
+      connection.invoke.mockRejectedValueOnce(new Error('permission denied'))
       await expect(callMethod(method, args)).rejects.toThrow('permission denied')
     }
   })
@@ -456,20 +593,28 @@ describe('web api-adapter — wired methods reach the channel they claim', () =>
  * until someone writes down why, and wiring one that used to be local fails it
  * until the row comes out.
  *
- * Each reason says WHICH of two very different things a stub is:
+ * This table used to hold TWO kinds of row, and the distinction was the whole
+ * point of writing it down:
  *
  *  - **No channel to invoke.** The desktop verb is a raw `ipcMain.handle` (or a
  *    `host`-capability registration) with no remote twin, so a stub is the only
  *    possible answer. Nothing to decide.
  *  - **Registered, unwired.** The channel IS declared for both transports, so
- *    the client could reach it and chooses not to. That is a live question, and
- *    {@link UNWIRED} spells the channel out so the next reader can weigh it
- *    instead of assuming, as the config family was assumed, that no twin exists.
+ *    the client could reach it and chose not to. That was a live question, and
+ *    the rows carrying it spelled the channel out so the next reader could weigh
+ *    it instead of assuming, as the config family was assumed, that no twin
+ *    exists.
+ *
+ * **The second kind is now empty**, and that is the state this file pins. The
+ * thirty rows that carried it — worktrees, automations, the MCP writes, the
+ * shared-provider writes, `config:save-slash-commands`, `proxy:test-connection`,
+ * `usage:refresh-prices` — were the pre-registry stubs the everything-remote
+ * ruling (2026-08-17) outran, and they are all in {@link WIRED} now. So every
+ * remaining row means the SAME thing: there is no channel to invoke, on either
+ * transport. If a future change ever needs the second kind back, it owes this
+ * table the channel name, the capability, and the reason a reachable channel is
+ * being answered locally anyway — the shape the retired rows used.
  */
-
-/** Channel exists on both transports; this client answers locally anyway. */
-const UNWIRED = (channel: string, capability: string, note: string): string =>
-  `REGISTERED on both transports (\`${channel}\`, \`${capability}\`) but unwired here — ${note}`
 
 const HOST_PHYSICAL =
   'host-physical (dialog/window/native shell) — capability `host`, no remote registration'
@@ -482,8 +627,6 @@ const VOICE_SERVER_VERBS =
   'no remote registration; starting cli.js’s transcription server is `voice:start`’s business'
 const NO_MAIN_LOG_FILE =
   'a `log:*` send, not an invoke — no main-process log file here, so both relays hit the console'
-/** The pre-existing desktop-first stubs the everything-remote ruling outran. */
-const WRITE_HALF_UNREVIEWED = 'the stub predates that registration and has not been re-reviewed'
 
 const NOT_ON_THE_WIRE: Readonly<Record<string, string>> = {
   pickFolder: HOST_PHYSICAL,
@@ -497,46 +640,10 @@ const NOT_ON_THE_WIRE: Readonly<Record<string, string>> = {
     'no port to acquire — the connection installed its sync client before `window.api` existed (web/main.tsx)',
   killTerminalsByCwd:
     'no remote registration: the cold-session sweep is off the remote surface so a web client never mass-kills the operator’s shells',
-  createWorktree: UNWIRED('worktree:create', 'git', WRITE_HALF_UNREVIEWED),
-  getWorktreeStatus: UNWIRED('worktree:status', 'git', WRITE_HALF_UNREVIEWED),
-  removeWorktree: UNWIRED('worktree:remove', 'git', WRITE_HALF_UNREVIEWED),
-  listWorktrees: UNWIRED('worktree:list', 'git', WRITE_HALF_UNREVIEWED),
   getSentFilePreview:
     'real client-side implementation: the src IS an authenticated same-origin /sent-file URL, so no RPC',
   getMockupPreviewUrl:
     'real client-side implementation: a same-origin URL built from `__MOCKUP_TOKEN__`',
-  saveSlashCommands: UNWIRED('config:save-slash-commands', 'config', WRITE_HALF_UNREVIEWED),
-  mcpToggleServer: UNWIRED('mcp:toggle', 'config', WRITE_HALF_UNREVIEWED),
-  mcpReconnectServer: UNWIRED('mcp:reconnect', 'config', WRITE_HALF_UNREVIEWED),
-  // The worst shape in this table: it resolves an empty SUCCESS result, so a
-  // remote caller cannot tell the write from a no-op.
-  mcpSetServers: UNWIRED('mcp:set-servers', 'config', WRITE_HALF_UNREVIEWED),
-  saveMcpServers: UNWIRED('mcp:save-servers', 'config', WRITE_HALF_UNREVIEWED),
-  removeMcpServer: UNWIRED('mcp:remove-server', 'config', WRITE_HALF_UNREVIEWED),
-  mcpToggleDisabled: UNWIRED('mcp:toggle-disabled', 'config', WRITE_HALF_UNREVIEWED),
-  // These seven at least REFUSE (one shared rejecting function) rather than
-  // resolving, so the pane can say so — the refusal copy is now the stale part.
-  saveSharedProvider: UNWIRED('shared-provider:save', 'config', WRITE_HALF_UNREVIEWED),
-  removeSharedProvider: UNWIRED('shared-provider:remove', 'config', WRITE_HALF_UNREVIEWED),
-  setSharedProviderRoute: UNWIRED('shared-provider:set-route', 'config', WRITE_HALF_UNREVIEWED),
-  setSharedProviderApiKey: UNWIRED('shared-provider:set-key', 'config', WRITE_HALF_UNREVIEWED),
-  syncSharedProvider: UNWIRED('shared-provider:sync', 'config', WRITE_HALF_UNREVIEWED),
-  disconnectSharedProvider: UNWIRED('shared-provider:disconnect', 'config', WRITE_HALF_UNREVIEWED),
-  setSharedProviderDefaultModel: UNWIRED(
-    'shared-provider:set-default',
-    'config',
-    WRITE_HALF_UNREVIEWED
-  ),
-  listAutomations: UNWIRED('automation:list', 'config', WRITE_HALF_UNREVIEWED),
-  saveAutomation: UNWIRED('automation:save', 'config', WRITE_HALF_UNREVIEWED),
-  deleteAutomation: UNWIRED('automation:delete', 'config', WRITE_HALF_UNREVIEWED),
-  runAutomationNow: UNWIRED('automation:run-now', 'config', WRITE_HALF_UNREVIEWED),
-  toggleAutomation: UNWIRED('automation:toggle', 'config', WRITE_HALF_UNREVIEWED),
-  listAutomationRuns: UNWIRED('automation:list-runs', 'config', WRITE_HALF_UNREVIEWED),
-  loadAutomationRunHistory: UNWIRED('automation:load-run-history', 'config', WRITE_HALF_UNREVIEWED),
-  cancelAutomationRun: UNWIRED('automation:cancel', 'config', WRITE_HALF_UNREVIEWED),
-  dismissAutomationRun: UNWIRED('automation:dismiss-run', 'config', WRITE_HALF_UNREVIEWED),
-  sendAutomationMessage: UNWIRED('automation:send-message', 'config', WRITE_HALF_UNREVIEWED),
   getNetworkInterfaces: DESKTOP_ANCHOR_ONLY,
   startRemoteServer: DESKTOP_ANCHOR_ONLY,
   stopRemoteServer: DESKTOP_ANCHOR_ONLY,
@@ -557,17 +664,7 @@ const NOT_ON_THE_WIRE: Readonly<Record<string, string>> = {
   reloadPlugin: NO_REMOTE_CHANNEL,
   getPluginViews: NO_REMOTE_CHANNEL,
   getPluginPreloadPath: NO_REMOTE_CHANNEL,
-  onPluginViewsChanged: NO_REMOTE_CHANNEL,
-  testProxyConnection: UNWIRED(
-    'proxy:test-connection',
-    'config',
-    'a probe of the host’s egress rather than a setting, so the stub costs a refusal, not an edit'
-  ),
-  refreshPrices: UNWIRED(
-    'usage:refresh-prices',
-    'config',
-    'refreshes a host-side price cache rather than anything the user typed'
-  )
+  onPluginViewsChanged: NO_REMOTE_CHANNEL
 }
 
 describe('web api-adapter — the local surface is an explicit list', () => {

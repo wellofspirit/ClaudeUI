@@ -583,7 +583,11 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
             /* scanner failed — keep existing commands */
           })
       }
-      void window.api.saveSlashCommands(commands)
+      // Best-effort host-cache write. On a remote client this now goes over the
+      // wire (a mutation), so a step-up refusal the operator dismisses rejects —
+      // swallow it: this fires on an ENGINE event, not a user gesture, and a
+      // failed cache write must never surface as an unhandled rejection.
+      window.api.saveSlashCommands(commands).catch(() => {})
       return
     }
 

@@ -54,10 +54,15 @@
  * service is entered at all.
  *
  * NOT here, deliberately: `session:pick-folder`, `app:open-in-vscode`,
- * `window:*` (host-physical, capability `host`), and the vendor/account
- * credential surfaces (`auth:*`, `account:*`, `vendor-auth:*`,
- * `shared-provider:*` writes) — those land with their remote OAuth handling in
- * a later series and stay desktop-registered until then.
+ * `window:*` — host-physical, capability `host`, no remote registration at all.
+ *
+ * The vendor/account credential surfaces (`auth:*`, `account:*`,
+ * `vendor-auth:*`, `shared-provider:*` writes) are not here either, but they are
+ * no longer desktop-only: the "later series" this header once deferred them to
+ * is S4 (ADR-057), and they now live in the sibling `auth-commands.ts` under the
+ * same one-declaration-both-transports rule. They are a separate file rather
+ * than a separate surface, because they need the desktop auth subsystem injected
+ * (`AuthCommandDeps`) and this family does not.
  */
 
 import type { SessionManager } from '../services/session-manager'
