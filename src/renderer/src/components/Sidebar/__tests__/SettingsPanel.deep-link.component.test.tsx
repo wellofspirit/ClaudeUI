@@ -21,7 +21,10 @@ describe('SettingsPanel deep links', () => {
     ;(window as unknown as { api: Record<string, unknown> }).api = {
       platform: 'web',
       getRemoteStatus: vi.fn(),
-      onRemoteStatus: vi.fn(() => () => {})
+      onRemoteStatus: vi.fn(() => () => {}),
+      // The web footer indicator polls this on mount (E4) — stubbed so the
+      // deep-link cases don't exercise the poll's failure path as a side effect.
+      getRemoteStatusView: vi.fn(async () => ({ running: true, connectedClients: 0 }))
     }
   })
   it('opens the Common shared providers section from an explicit target', async () => {
@@ -89,7 +92,10 @@ describe('SettingsPanel on mobile', () => {
     ;(window as unknown as { api: Record<string, unknown> }).api = {
       platform: 'web',
       getRemoteStatus: vi.fn(),
-      onRemoteStatus: vi.fn(() => () => {})
+      onRemoteStatus: vi.fn(() => () => {}),
+      // The web footer indicator polls this on mount (E4) — stubbed so the
+      // deep-link cases don't exercise the poll's failure path as a side effect.
+      getRemoteStatusView: vi.fn(async () => ({ running: true, connectedClients: 0 }))
     }
     setViewport(true)
     window.matchMedia = ((query: string) => ({
