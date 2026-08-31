@@ -58,7 +58,8 @@ import {
   stripIdeCookie,
   type VscodeWebService
 } from './vscode-web-service'
-import { ideInterstitialStyle, injectWorkbenchTheme } from './vscode-workbench-theme'
+import { injectWorkbenchTheme } from './vscode-workbench-theme'
+import { ideLaunchPageHtml } from '../../shared/ide-launch-page'
 import type { PtyRemoteSink } from './pty-manager'
 import { textToBase64, base64ToText } from '../../shared/base64-text'
 import { gitWatchRegistry } from './git-watch-registry'
@@ -2685,26 +2686,20 @@ export class RemoteServer {
   }
 
   /**
-   * The "not up yet" page: self-contained, 2-second auto-refresh, no assets.
-   *
-   * Mirrors `serve-web`'s own 202 interstitial rather than inventing a spinner,
-   * because the two situations are one situation from the operator's side — the
-   * IDE is coming — and a page that reloads itself needs no client code at all.
+   * The "not up yet" page: the shared launch page (`ide-launch-page.ts`) in
+   * `poll` mode — a centred spinner over the session's scheme, self-polling so
+   * it lands in the workbench the moment the answer stops being 503, with a
+   * `<noscript>` meta refresh as the no-JS fallback. Self-contained: inline
+   * CSS, no assets, one tiny inline script.
    */
   private serveIdeStarting(res: http.ServerResponse, themeKind: IdeThemeKind | null = null): void {
-    const body =
-      '<!doctype html><meta charset="utf-8">' +
-      '<meta http-equiv="refresh" content="2">' +
-      '<title>Starting VS Code…</title>' +
-      `<body style="font:14px system-ui,sans-serif;padding:2rem;${ideInterstitialStyle(themeKind)}">` +
-      'Starting VS Code on the host — this page refreshes itself.</body>'
     res.writeHead(503, {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store',
       'Retry-After': '2',
       ...this.securityHeaders(false)
     })
-    res.end(body)
+    res.end(ideLaunchPageHtml(themeKind, 'poll'))
   }
 
   /**

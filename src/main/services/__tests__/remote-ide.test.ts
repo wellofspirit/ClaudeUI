@@ -601,7 +601,7 @@ describe('remote IDE — /vscode proxy, gate and lifecycle (ADR-064)', () => {
     rootHtml = 'The latest version is downloading, please wait…'
     const themed = await request('/vscode/', { Cookie: dark })
     expect(themed.status).toBe(503)
-    expect(themed.body).toContain('refreshes itself')
+    expect(themed.body).toContain('Launching VS Code')
     expect(themed.body).toContain('background:#1e1e1e')
 
     const plain = await openIdeSession(client)

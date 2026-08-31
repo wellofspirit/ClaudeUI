@@ -14,6 +14,7 @@ import { useTerminalAvailability } from '../../terminal/terminal-availability'
 import { useIdeAvailability } from '../ide-availability'
 import { IdeUnavailableDialog } from '../IdeUnavailableDialog'
 import { shortModelName } from '../../usage/usage-utils'
+import { ideLaunchPageHtml } from '../../../../../shared/ide-launch-page'
 import {
   ideUnavailableReason,
   isIdeUnavailableError,
@@ -422,17 +423,11 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
     }
     try {
       // So the round-trip isn't a bare tab — and not a bare WHITE tab on a dark
-      // client: the placeholder wears the same scheme the workbench will open
-      // in, so the whole sequence reads as one surface. Best-effort by
-      // construction: a tab we cannot write to is still a tab we can navigate.
-      tab.document.write(
-        '<!doctype html><title>Opening VS Code…</title>' +
-          '<body style="margin:0;padding:2rem;font:13px system-ui,sans-serif;' +
-          (ideThemeKind === 'light'
-            ? 'background:#ffffff;color:#333333'
-            : 'background:#1e1e1e;color:#cccccc') +
-          '">Opening VS Code…</body>'
-      )
+      // client: the shared launch page (spinner + label, the session's scheme),
+      // static variant since this tab is navigated by us, not by a refresh.
+      // Best-effort by construction: a tab we cannot write to is still a tab we
+      // can navigate.
+      tab.document.write(ideLaunchPageHtml(ideThemeKind, 'static'))
       tab.document.close()
     } catch {
       /* see above */

@@ -109,20 +109,6 @@ export function normalizeIdeThemeKind(value: unknown): IdeThemeKind | undefined 
 }
 
 /**
- * Inline `<body>` style for the interstitial pages WE serve around the
- * workbench (the "Starting VS Code" page, and the substituted download
- * interstitial), matching the client's scheme so the whole opening sequence
- * reads as one surface. The colours are the workbench's own editor background
- * pair. `null` (an un-themed session, an older client) stays dark — the
- * pre-polish behaviour, and the majority scheme.
- */
-export function ideInterstitialStyle(themeKind: IdeThemeKind | null): string {
-  return themeKind === 'light'
-    ? 'background:#ffffff;color:#333333'
-    : 'background:#1e1e1e;color:#cccccc'
-}
-
-/**
  * Rewrite the workbench root HTML so it opens in `themeKind`, or answer `null`
  * when this is not markup we recognize.
  *
