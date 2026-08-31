@@ -1,4 +1,5 @@
 import * as http from 'node:http'
+import type { Duplex } from 'node:stream'
 import * as crypto from 'node:crypto'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -49,6 +50,14 @@ import {
   shellGrantIdleMs,
   type TerminalPolicy
 } from './terminal-service'
+import {
+  IDE_BASE_PATH,
+  IDE_COOKIE_NAME,
+  ideOriginPolicy,
+  readIdePolicy,
+  stripIdeCookie,
+  type VscodeWebService
+} from './vscode-web-service'
 import type { PtyRemoteSink } from './pty-manager'
 import { textToBase64, base64ToText } from '../../shared/base64-text'
 import { gitWatchRegistry } from './git-watch-registry'
@@ -74,6 +83,7 @@ import {
 } from './db'
 import {
   ENROLL_UNAVAILABLE_ERROR,
+  IDE_UNAVAILABLE_ERROR,
   CLOSE_SESSION_EXPIRED,
   NEEDS_SETTINGS_SESSION_ERROR,
   NEEDS_STEP_UP_ERROR,
@@ -567,6 +577,16 @@ interface SocketChannel {
 interface AuthenticatedClient {
   ws: WebSocket
   ip: string
+  /**
+   * The origin this socket was classified as at accept (ADR-056 item B),
+   * snapshotted for the same reason the policy and the tier are: it is a fact
+   * about the upgrade request, and nothing about a live socket can change it.
+   *
+   * Read by exactly one consumer today — `ideOriginOf`, which is how ADR-064's
+   * origin policy reaches a registry command that has only a
+   * {@link CommandConnection} to go on.
+   */
+  origin: ConnectionOrigin
   /** Which credential this socket authenticated with — a credential change
    *  disconnects the `'password'` ones only (see disconnectPasswordClients). */
   authMethod: AcceptedAuthMethod
@@ -763,6 +783,18 @@ export class RemoteServer {
   /** Callback to notify the desktop renderer of status changes. */
   private statusCallback: ((status: RemoteStatus) => void) | null = null
 
+  /**
+   * The remote-IDE service (ADR-064), or null when this process has none.
+   *
+   * Setter-injected rather than a constructor parameter, deliberately: the e2e
+   * flows SUBCLASS this server and construct it positionally, so the constructor
+   * signature is append-only at best and a new required parameter would break
+   * every one of them. It also keeps the whole feature absent-by-default — a
+   * server with no IDE service refuses `/vscode` at the door rather than
+   * branching on configuration deep inside the proxy.
+   */
+  private ide: VscodeWebService | null = null
+
   constructor(
     dispatcher: RemoteDispatcher,
     passwordAuth: PasswordAuthProvider = dbPasswordAuthProvider(),
@@ -808,6 +840,43 @@ export class RemoteServer {
   /** Get the RemoteDispatcher for handler registration. */
   getDispatcher(): RemoteDispatcher {
     return this.dispatcher
+  }
+
+  /** Install the remote-IDE service this listener proxies for (ADR-064). */
+  setIdeService(service: VscodeWebService | null): void {
+    this.ide = service
+  }
+
+  /**
+   * The installed IDE service, for the `ide:*` command declarations.
+   *
+   * They read it through HERE rather than importing the module singleton, so
+   * {@link setIdeService} is the single injection point for the whole feature:
+   * whatever this server proxies is what those commands mint against, in
+   * production and in every test.
+   */
+  ideService(): VscodeWebService | null {
+    return this.ide
+  }
+
+  /**
+   * Which origin a connection was admitted on — the `IdeOriginSource` half of
+   * `ide-commands.ts`.
+   *
+   * FAIL-CLOSED in both directions that matter. The host's own in-process
+   * surface (`method: 'host'` — the desktop renderer's MessagePort, the server
+   * console) is `localhost`: it never crossed a wire, so treating it as anything
+   * else would refuse the operator standing at their own machine. Anything the
+   * client map does not know is `null` — a socket that has already gone away, or
+   * an identity this transport never admitted — and `null` is REFUSED by the
+   * caller rather than assumed local.
+   */
+  ideOriginOf(connection: CommandConnection): ConnectionOrigin | null {
+    if (connection.identity.method === 'host') return 'localhost'
+    for (const client of this.clients.values()) {
+      if (client.connection.connectionId === connection.connectionId) return client.origin
+    }
+    return null
   }
 
   /**
@@ -882,32 +951,24 @@ export class RemoteServer {
     }
     this.httpServer.on('error', handleServerError)
 
-    // Create WebSocket server on the same HTTP server. `verifyClient` pins the
-    // Host (DNS-rebinding) AND rejects cross-origin browser upgrades — the two
-    // checks catch different attacks, so both run. `maxPayload` bounds pre-auth
-    // frame size (M-RM3).
-    this.wss = new WebSocketServer({
-      server: this.httpServer,
-      maxPayload: WS_MAX_PAYLOAD_BYTES,
-      verifyClient: (info) => {
-        // Funnel upgrades are refused for the same reason HTTP ones are: we never
-        // enable Funnel, so its header means unexpected public exposure.
-        if (headerValue(info.req.headers, H_FUNNEL) !== '') {
-          logger.warn('remote-server', 'Rejected WS upgrade carrying Tailscale-Funnel-Request')
-          return false
-        }
-        if (!this.isAllowedHost(info.req.headers.host)) {
-          logger.warn(
-            'remote-server',
-            `Rejected WS upgrade with disallowed Host: ${describeHost(info.req.headers.host)}`
-          )
-          return false
-        }
-        return this.verifyWsOrigin(info.origin, info.req)
-      }
-    })
+    // THE WS SERVER IS `noServer` SINCE ADR-064, and the upgrade is hand-routed.
+    //
+    // It used to be `server: this.httpServer` with a `verifyClient`, which is a
+    // PATHLESS attach: ws claims EVERY upgrade on the listener. That was correct
+    // while the control plane was the only upgrade path, and it stops being
+    // correct the moment a second one exists — the remote IDE's workbench opens
+    // its remote-agent WebSocket under `/vscode`, and ws would swallow it.
+    //
+    // So the gates `verifyClient` ran move into {@link handleUpgrade}, unchanged
+    // and in the same order (funnel refusal → Host allowlist → cross-origin), and
+    // the routing happens after them rather than inside ws. `maxPayload` still
+    // bounds pre-auth frame size (M-RM3) and the error wiring is unchanged.
+    this.wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD_BYTES })
     this.wss.on('error', handleServerError)
     this.wss.on('connection', (ws, req) => this.handleConnection(ws, req))
+    this.httpServer.on('upgrade', (req, socket, head) => {
+      this.handleUpgrade(req, socket as Duplex, head)
+    })
 
     // Start listening. On failure (e.g. EADDRINUSE) tear down the half-created
     // state so getStatus() doesn't report `running` with port 0 and a later
@@ -1162,6 +1223,12 @@ export class RemoteServer {
   async stop(): Promise<void> {
     // Stop tunnel first
     this.tunnel.stop()
+    // The remote IDE dies with the listener that proxies it (ADR-064): its
+    // sessions are unreachable the moment this port closes, and a `serve-web`
+    // child left running would be a localhost HTTP server with an ungated
+    // upgrade path and nothing supervising it. This is also the app-shutdown
+    // path on both hosts — `before-quit` calls `remoteServer.stop()`.
+    this.ide?.stop()
     // The tunnel key dies with the tunnel; the LAN key only leaves MEMORY here —
     // it stays in `remote_config` so tomorrow's bookmark still opens the channel.
     this.tunnelE2eKey = null
@@ -1793,6 +1860,11 @@ export class RemoteServer {
    * `close` handler — same as {@link checkIdleClients}.
    */
   disconnectPasswordClients(): void {
+    // ADR-064. An IDE session is a COOKIE, not a socket, so a 4008 sweep that
+    // only closed WebSockets would leave a browser tab editing the host with a
+    // credential the operator just rotated away. The cookie is not derived from
+    // the password, which is exactly why it has to be cleared explicitly.
+    this.ide?.clearSessions('auth-surface-changed')
     for (const [ws, client] of this.clients) {
       if (client.authMethod !== 'password') continue
       logger.info(
@@ -1833,6 +1905,13 @@ export class RemoteServer {
    * snapshot it holds is the one it just chose.
    */
   disconnectAuthSurfaceClients(opts?: { exceptConnectionId?: string }): void {
+    // ADR-064, and unconditional — BEFORE the `doomed.length === 0` early return,
+    // and with no `exceptConnectionId` carve-out. Both are deliberate. A cookie
+    // session is not attached to any socket, so "no sockets to drop" does not
+    // mean "nothing to invalidate"; and the actor spared the 4009 is spared it so
+    // it can finish administering, not so its browser can keep an editor open
+    // under rules that just changed. Re-minting costs one click.
+    this.ide?.clearSessions('auth-surface-changed')
     const doomed = [...this.clients.entries()].filter(
       ([, client]) => client.connection.connectionId !== opts?.exceptConnectionId
     )
@@ -1862,6 +1941,147 @@ export class RemoteServer {
    */
   clearResumeTokens(): void {
     this.webauthn.clearResumeTokens()
+  }
+
+  // ---------------------------------------------------------------------------
+  // Upgrade routing (ADR-064 — two upgrade paths on one listener)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The listener's ONE `'upgrade'` handler, replacing ws's pathless attach.
+   *
+   * The pre-upgrade gates are the ones `verifyClient` ran, in the same order and
+   * with the same log lines — they are what makes this a re-plumbing rather than
+   * a relaxation, and they now cover BOTH upgrade paths instead of only the
+   * control plane's. After them:
+   *
+   *  - `/vscode` and `/vscode/*` go to the IDE gate + upstream pipe;
+   *  - **everything else** goes to the control plane, exactly as the pathless
+   *    attach behaved (the web client connects to `/`, but nothing ever pinned
+   *    that, so narrowing it here would be a silent protocol change).
+   *
+   * Refusals answer with an HTTP status before destroying, mirroring ws's own
+   * `abortHandshake`: a client that gets a bare connection reset cannot tell a
+   * refusal from a crash, and the test client's `unexpected-response` path reads
+   * the status.
+   */
+  private handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
+    const wss = this.wss
+    if (!wss) {
+      socket.destroy()
+      return
+    }
+    // Funnel upgrades are refused for the same reason HTTP ones are: we never
+    // enable Funnel, so its header means unexpected public exposure.
+    if (headerValue(req.headers, H_FUNNEL) !== '') {
+      logger.warn('remote-server', 'Rejected WS upgrade carrying Tailscale-Funnel-Request')
+      abortUpgrade(socket, 403, 'Forbidden')
+      return
+    }
+    if (!this.isAllowedHost(req.headers.host)) {
+      logger.warn(
+        'remote-server',
+        `Rejected WS upgrade with disallowed Host: ${describeHost(req.headers.host)}`
+      )
+      abortUpgrade(socket, 403, 'Forbidden')
+      return
+    }
+    if (!this.verifyWsOrigin(req.headers.origin, req)) {
+      abortUpgrade(socket, 401, 'Unauthorized')
+      return
+    }
+
+    if (isIdePath(req.url)) {
+      this.proxyIdeUpgrade(req, socket, head)
+      return
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit('connection', ws, req)
+    })
+  }
+
+  /**
+   * Pipe one `/vscode/*` upgrade to the `serve-web` child.
+   *
+   * **This gate is the only one on the path.** Probed live (VS Code 1.135.0): an
+   * upgrade to `serve-web` with no credentials at all answers `101`, because its
+   * `--connection-token` is enforced at the inner-protocol level rather than at
+   * the HTTP layer. So the cookie check here is what stands between a reachable
+   * port and a remote agent channel on the host, and a refusal destroys the
+   * socket without a status — an HTTP body on an upgrade nobody may make is an
+   * oracle, and there is no client to render it.
+   */
+  private proxyIdeUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
+    const ide = this.ide
+    const port = ide?.upstreamPort() ?? null
+    if (!ide || port === null || !ide.validateCookie(req.headers.cookie)) {
+      socket.destroy()
+      return
+    }
+    ide.registerSocket(socket)
+    ide.noteRequest()
+
+    const upstream = http.request({
+      hostname: '127.0.0.1',
+      port,
+      method: req.method ?? 'GET',
+      path: req.url ?? '/',
+      // `keepUpgrade` — `Connection: Upgrade`, `Upgrade: websocket` and the
+      // `Sec-WebSocket-*` headers ARE the request here, so the hop-by-hop strip
+      // that applies to an ordinary proxied response must not reach them.
+      headers: ideUpstreamHeaders(req.headers, { keepUpgrade: true })
+    })
+
+    const cut = (): void => {
+      socket.destroy()
+      upstream.destroy()
+    }
+
+    upstream.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {
+      // Write the 101 verbatim. Node hands us a parsed response, so the status
+      // line and headers are re-serialized rather than forwarded byte-for-byte —
+      // which is exactly what a proxy must do anyway, since the hop-by-hop set on
+      // the way back differs from the way out.
+      //
+      // `Connection` and `Upgrade` are re-stated rather than relayed: they are
+      // hop-by-hop (so the shared serializer drops them), and on a 101 they are
+      // exactly the two headers that MUST be present for the browser to consider
+      // the handshake complete.
+      socket.write(
+        serializeResponseHead(upstreamRes, ['Connection: Upgrade', 'Upgrade: websocket'])
+      )
+      // Bytes either side already read past its own header block. Pushing them
+      // back in front of the pipe is what keeps a fast first frame from being
+      // silently dropped.
+      if (upstreamHead && upstreamHead.length > 0) upstreamSocket.unshift(upstreamHead)
+      if (head && head.length > 0) socket.unshift(head)
+      upstreamSocket.on('error', cut)
+      socket.on('error', cut)
+      upstreamSocket.on('close', () => socket.destroy())
+      socket.on('close', () => upstreamSocket.destroy())
+      upstreamSocket.pipe(socket)
+      socket.pipe(upstreamSocket)
+    })
+
+    // Upstream answered an ordinary response instead of upgrading (403 before the
+    // bits are ready, a 404 on a stale asset path). Relay it raw and end: there is
+    // no WebSocket to keep, and inventing one would hang the client.
+    upstream.on('response', (upstreamRes) => {
+      // `Connection: close` because there is no keep-alive to negotiate here: the
+      // client asked to upgrade and is not getting one, so the socket ends with
+      // this response.
+      socket.write(serializeResponseHead(upstreamRes, ['Connection: close']))
+      upstreamRes.on('end', () => socket.end())
+      upstreamRes.on('error', cut)
+      upstreamRes.pipe(socket, { end: false })
+    })
+
+    upstream.on('error', (err) => {
+      logger.warn('remote-server', `/vscode upgrade could not reach serve-web: ${err.message}`)
+      socket.destroy()
+    })
+    socket.on('error', () => upstream.destroy())
+    upstream.end()
   }
 
   // ---------------------------------------------------------------------------
@@ -1918,6 +2138,15 @@ export class RemoteServer {
       // Synchronous since phase 4b: the allowlist is canonical state, read
       // in-process, so there is nothing left to await.
       this.serveSentFile(url, req, res)
+    } else if (url.pathname === `${IDE_BASE_PATH}/enter`) {
+      // ADR-064. The entry route, ABOVE the general `/vscode` arm (it is the one
+      // path under the prefix that must NOT demand the cookie — it is what mints
+      // one) and above the static branch for the same reason `/remote/auth-info`
+      // is: that branch's `endsWith('.js')` catch-all would hijack every
+      // workbench bundle under `/vscode/stable-<commit>/static/…`.
+      this.serveIdeEnter(url, req, res)
+    } else if (url.pathname === IDE_BASE_PATH || url.pathname.startsWith(`${IDE_BASE_PATH}/`)) {
+      this.proxyIdeHttp(req, res)
     } else if (
       url.pathname.startsWith('/assets/') ||
       url.pathname.endsWith('.js') ||
@@ -2259,6 +2488,175 @@ export class RemoteServer {
     const stream = fs.createReadStream(check.path)
     stream.on('error', () => res.destroy())
     stream.pipe(res)
+  }
+
+  /**
+   * `GET /vscode/enter?it=<one-time token>` — the ONE unauthenticated-by-cookie
+   * route under the prefix, because it is what mints the cookie (ADR-064 §2).
+   *
+   * Refusals are a bare `403 Forbidden` with no detail: expired, already spent,
+   * never existed and wrong-origin are indistinguishable from outside, so the
+   * route is not an oracle for whether somebody else's link is still live.
+   *
+   * The throttle is CONSULTED and not SPENT, exactly like `/sent-file`: a key
+   * already locked out by failed WS auth gets nothing here either, but a failure
+   * records nothing, because the token is 256 bits of CSPRNG (brute force is a
+   * non-threat) and recording would let an unauthenticated peer lock the owner
+   * out by spraying bad entry URLs.
+   */
+  private serveIdeEnter(url: URL, req: http.IncomingMessage, res: http.ServerResponse): void {
+    const refuse = (status: number, body: string): void => {
+      res.writeHead(status, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+        ...this.securityHeaders(false)
+      })
+      res.end(body)
+    }
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.writeHead(405, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        Allow: 'GET, HEAD',
+        ...this.securityHeaders(false)
+      })
+      res.end('Method Not Allowed')
+      return
+    }
+    if (this.isAuthThrottled(this.throttleKey(req))) {
+      refuse(429, 'Too Many Requests')
+      return
+    }
+    const ide = this.ide
+    if (!ide) {
+      refuse(403, 'Forbidden')
+      return
+    }
+    // The origin is re-checked HERE as well as at mint, and it is not redundant:
+    // a token minted on the tailnet must not be spendable by pasting the link
+    // into a browser that reached this listener some other way.
+    if (!ideOriginPolicy(this.classifyOrigin(req)).allowed) {
+      logger.warn('remote-server', 'Refused /vscode/enter: origin is not allowed for the IDE')
+      refuse(403, 'Forbidden')
+      return
+    }
+    const redeemed = ide.redeemEntry(url.searchParams.get('it'))
+    if (!redeemed) {
+      refuse(403, 'Forbidden')
+      return
+    }
+    // `Secure` exactly when the request really arrived over TLS — i.e. through
+    // our own `tailscale serve` proxy. Setting it unconditionally would make the
+    // cookie unstorable on the plain-HTTP localhost origin; omitting it behind
+    // serve would let it ride a downgrade.
+    const secure = isServeProxied(req.headers, req.socket.remoteAddress, this.tlsServe !== null)
+    const cookie =
+      `${IDE_COOKIE_NAME}=${redeemed.cookieValue}; HttpOnly; SameSite=Strict; ` +
+      `Path=${IDE_BASE_PATH}${secure ? '; Secure' : ''}`
+    res.writeHead(302, {
+      Location: redeemed.redirect,
+      'Set-Cookie': cookie,
+      'Cache-Control': 'no-store',
+      ...this.securityHeaders(false)
+    })
+    res.end()
+  }
+
+  /**
+   * `/vscode` + `/vscode/*` — every method, piped to the `serve-web` child.
+   *
+   * Three things are deliberate here:
+   *
+   *  - **The client's `Host` is forwarded unchanged.** The workbench embeds it as
+   *    its `remoteAuthority`, so rewriting it to `127.0.0.1` would produce a page
+   *    that tries to open its remote channel against a host the browser cannot
+   *    reach. Verified live against a tailnet name.
+   *  - **Upstream's response headers and status pass through verbatim, with no
+   *    `securityHeaders`.** Our CSP is written for OUR bundle; applying it to the
+   *    workbench would break it, and `X-Frame-Options` / `nosniff` are upstream's
+   *    call for upstream's content.
+   *  - **A refused connection is an interstitial, not an error.** The child may be
+   *    mid-spawn or freshly dead; `serve-web` itself answers a 202 auto-refresh
+   *    page while its bits download, so mirroring that pattern keeps one
+   *    behaviour for one situation.
+   */
+  private proxyIdeHttp(req: http.IncomingMessage, res: http.ServerResponse): void {
+    const ide = this.ide
+    if (!ide || !ide.validateCookie(req.headers.cookie)) {
+      res.writeHead(403, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+        ...this.securityHeaders(false)
+      })
+      res.end('Forbidden')
+      return
+    }
+    // Liveness for the reaper is recorded as a REQUEST, and the HTTP socket is
+    // deliberately NOT registered as a proxied one. Two reasons, both real:
+    //
+    //  - a browser's keep-alive connection is SHARED. It carries `/remote`, the
+    //    bundle and `/sent-file` on the same TCP socket, so destroying it in
+    //    `clearSessions` would cut the operator's control plane to end an IDE
+    //    session — and the upgrade socket, which is exclusively the IDE's, is
+    //    what actually needs cutting;
+    //  - a keep-alive socket stays open long after the last request, so counting
+    //    it as "live" would mean `sockets.size > 0` forever and the 30-minute
+    //    reaper would never fire on a machine whose browser tab is merely open.
+    //
+    // The reaper's contract is therefore exactly as designed: no live proxied
+    // socket AND no `/vscode` request for the idle window.
+    ide.noteRequest()
+    const port = ide.upstreamPort()
+    if (port === null) {
+      this.serveIdeStarting(res)
+      return
+    }
+
+    const upstream = http.request(
+      {
+        hostname: '127.0.0.1',
+        port,
+        method: req.method ?? 'GET',
+        path: req.url ?? '/',
+        headers: ideUpstreamHeaders(req.headers, { keepUpgrade: false })
+      },
+      (upstreamRes) => {
+        res.writeHead(upstreamRes.statusCode ?? 502, ideDownstreamHeaders(upstreamRes.headers))
+        upstreamRes.pipe(res)
+      }
+    )
+    upstream.on('error', (err) => {
+      logger.warn('remote-server', `/vscode could not reach serve-web: ${err.message}`)
+      if (res.headersSent) {
+        res.destroy()
+        return
+      }
+      this.serveIdeStarting(res)
+    })
+    req.on('error', () => upstream.destroy())
+    req.pipe(upstream)
+  }
+
+  /**
+   * The "not up yet" page: self-contained, 2-second auto-refresh, no assets.
+   *
+   * Mirrors `serve-web`'s own 202 interstitial rather than inventing a spinner,
+   * because the two situations are one situation from the operator's side — the
+   * IDE is coming — and a page that reloads itself needs no client code at all.
+   */
+  private serveIdeStarting(res: http.ServerResponse): void {
+    const body =
+      '<!doctype html><meta charset="utf-8">' +
+      '<meta http-equiv="refresh" content="2">' +
+      '<title>Starting VS Code…</title>' +
+      '<body style="font:14px system-ui,sans-serif;padding:2rem;color:#ccc;background:#1e1e1e">' +
+      'Starting VS Code on the host — this page refreshes itself.</body>'
+    res.writeHead(503, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'Retry-After': '2',
+      ...this.securityHeaders(false)
+    })
+    res.end(body)
   }
 
   /**
@@ -2620,6 +3018,7 @@ export class RemoteServer {
       const newClient: AuthenticatedClient = {
         ws,
         ip,
+        origin,
         authMethod: method,
         login,
         connection: makeRemoteConnection(method, login, grantsFor(method), {
@@ -3638,6 +4037,15 @@ export class RemoteServer {
       this.revokeShellGrant(client, 'policy-off')
       throw new Error(TERMINAL_DISABLED_ERROR)
     }
+    // The IDE's twin, on its OWN toggle (ADR-064). Two capabilities, two
+    // switches: an operator who armed a remote editor has not thereby armed a
+    // pty, and the reverse. Same fail-closed shape as the line above — the toggle
+    // is checked FIRST and independently of any grant, so a grant armed before
+    // the switch moved (or one a client cached) buys nothing.
+    if (capability === 'ide' && !readIdePolicy().allowIde) {
+      this.revokeIdeGrant(client)
+      throw new Error(`${IDE_UNAVAILABLE_ERROR}:toggle-off`)
+    }
     this.applyStepUp(client, cls)
   }
 
@@ -3702,6 +4110,25 @@ export class RemoteServer {
   }
 
   /**
+   * Withdraw the `ide` capability from one connection (ADR-064).
+   *
+   * The `revokeShellGrant` twin, and deliberately NOT the same method: the two
+   * toggles are independent, so the terminal switch going off must not take a
+   * remote editor with it. It is also SMALLER, and the difference is the point —
+   * there is no attachment to drop and no window to clear, because the act window
+   * is shared (`shell-act`) and an IDE session is not a registry-visible
+   * attachment. What actually ends a live IDE is `clearSessions`, which the two
+   * callers of this method invoke alongside it.
+   */
+  private revokeIdeGrant(client: AuthenticatedClient): void {
+    const grants = client.connection.grants
+    if (!grants.has('ide')) return
+    const next = new Set<Capability>(grants)
+    next.delete('ide')
+    client.connection.grants = next
+  }
+
+  /**
    * `step-up` — the ceremony that arms the decaying `shell` grant.
    *
    * Refusals are deliberately specific: the owner needs to know whether to flip
@@ -3750,11 +4177,28 @@ export class RemoteServer {
     // with what was actually armed: the settings/mutation surface (`admin`) when
     // the toggle is off, the shell when it is on.
     const armedShell = policy.allowTerminal
-    const armedCapability: Capability = armedShell ? 'shell' : 'admin'
-    const armedDetail = (factor: string): string =>
-      armedShell
-        ? `shell + mutation grants armed via ${factor} step-up`
-        : `mutation grant armed via ${factor} step-up (terminal toggle off — no shell conferred)`
+    // ADR-064 adds a third state to the same argument: with the terminal off and
+    // the IDE on, a ceremony confers `ide` and the act window, and a row saying
+    // `admin` would tell a forensic reader the session bought nothing but a
+    // settings window. Ordered shell → ide → admin because that is the widest
+    // thing the ceremony actually conferred.
+    const armedIde = readIdePolicy().allowIde
+    const armedCapability: Capability = armedShell ? 'shell' : armedIde ? 'ide' : 'admin'
+    // The row NAMES what was conferred and only what was conferred. The two
+    // pre-ADR-064 strings are reproduced byte-for-byte when the IDE toggle is off
+    // (the default), deliberately: an audit reader's grep should not have to
+    // change because a capability they never enabled was added to the product.
+    const armedDetail = (factor: string): string => {
+      const conferred = [
+        ...(armedShell ? ['shell'] : []),
+        ...(armedIde ? ['ide'] : []),
+        'mutation'
+      ]
+      const head =
+        `${conferred.join(' + ')} grant${conferred.length > 1 ? 's' : ''} ` +
+        `armed via ${factor} step-up`
+      return armedShell ? head : `${head} (terminal toggle off — no shell conferred)`
+    }
 
     // THE SETTINGS-EDITOR UNLOCK (ADR-054 §6 amendment).
     //
@@ -4055,21 +4499,42 @@ export class RemoteServer {
     // so the capability is withheld rather than granted and immediately revoked
     // on the next dispatch.
     const withShell = opts.shell !== false
+    // The IDE rides its OWN toggle, read here rather than passed in (ADR-064).
+    //
+    // Keyed on the policy and not on `opts.shell`, deliberately: every caller
+    // that arms passes a shell decision derived from the TERMINAL toggle, and
+    // threading a second flag through all five of them would be five chances to
+    // couple two switches that must stay independent. Arming is arming — this is
+    // the one place that decides what a presence proof confers, so the IDE grant
+    // belongs here beside the shell one rather than in a sixth call site.
+    const withIde = readIdePolicy().allowIde
     const now = Date.now()
     const shellActExpiresAt = now + shellGrantIdleMs(policy)
     const mutationExpiresAt = now + mutationIdleMs(client.policyCtx.stepUpMutationIdleMinutes)
     if (withShell) {
       client.connection.grants = new Set<Capability>([...client.connection.grants, 'shell'])
     }
+    if (withIde) {
+      client.connection.grants = new Set<Capability>([...client.connection.grants, 'ide'])
+    }
     client.connection.armedEver = true
     // Remembered so a later tier change can UNDO a waiver without mistaking it
     // for a real presence proof — see {@link resnapshotConnection}.
     client.armedByWaiver = !windows
     if (windows) {
-      // The shell window is only written alongside the capability: a deadline
-      // for something this connection does not hold is state a reviewer would
-      // have to reason about for no benefit.
-      if (withShell) client.connection.shellGrantExpiresAt = shellActExpiresAt
+      // The act window is written when EITHER capability was conferred, because
+      // there is one act window and both ride it: `classifyDispatch` puts `ide`
+      // verbs in `shell-act` (ADR-064 — minting an entry opens an editor plus an
+      // integrated terminal, which is what a `terminal:create` buys). Arming
+      // `ide` without the window would have granted a capability whose every
+      // dispatch the tier table then refused, forever, on the exact configuration
+      // the feature ships for: IDE on, terminal off.
+      //
+      // The rule the original comment stated still holds — a deadline for
+      // something this connection does not hold is state nobody should have to
+      // reason about — which is why this is `withShell || withIde` and not an
+      // unconditional write.
+      if (withShell || withIde) client.connection.shellGrantExpiresAt = shellActExpiresAt
       client.connection.mutationExpiresAt = mutationExpiresAt
     }
     logger.info(
@@ -4080,10 +4545,15 @@ export class RemoteServer {
               withShell
                 ? `shell acts ${policy.shellGrantIdleMinutes}m, `
                 : 'no shell (toggle off), '
-            }mutations ${client.policyCtx.stepUpMutationIdleMinutes}m)`
-          : ', capability waiver only — no freshness windows)')
+            }${withIde ? 'ide armed, ' : 'no ide (toggle off), '}mutations ${
+              client.policyCtx.stepUpMutationIdleMinutes
+            }m)`
+          : `, capability waiver only — no freshness windows${withIde ? ', ide armed' : ''})`)
     )
-    return withShell ? shellActExpiresAt : mutationExpiresAt
+    // WHICH deadline was bought. The act window whenever an act-class capability
+    // was conferred — shell or IDE — else the mutation window, which is all a
+    // presence proof buys when both toggles are off.
+    return withShell || withIde ? shellActExpiresAt : mutationExpiresAt
   }
 
   /**
@@ -4216,6 +4686,12 @@ export class RemoteServer {
       // under a tier that exists to demand proof. Attachments go with it —
       // `grant-expired` is exactly what happened.
       this.revokeShellGrant(client, 'grant-expired')
+      // The waiver conferred `ide` too (see `armPresence`), so undoing it must
+      // take that back as well — and END the sessions it bought, because an IDE
+      // that is already open is not stopped by a grant check it will never meet
+      // again.
+      this.revokeIdeGrant(client)
+      this.ide?.clearSessions('tier-off waiver withdrawn')
       client.connection.armedEver = false
       client.connection.mutationExpiresAt = null
       client.armedByWaiver = false
@@ -4426,6 +4902,44 @@ export class RemoteServer {
   }
 
   /**
+   * Re-apply the host-side IDE posture (ADR-064) — the `applyTerminalPolicy`
+   * twin, one step wider because an IDE session is not a grant.
+   *
+   * Called after `remote:set-config` writes `allow_ide` OR `ide_cli_path`.
+   *
+   * The probe cache is invalidated on EITHER change, not only the path one: a
+   * cached `cli-not-found` from before the operator installed VS Code would
+   * otherwise survive the very flip they made to fix it, and one `--help` exec is
+   * a cheap price for the toggle telling the truth.
+   *
+   * Turning it OFF has to bite NOW, and "now" means three things, because there
+   * are three places the authority lives:
+   *
+   *  1. the `ide` CAPABILITY on every live connection — else a client that armed
+   *     before the flip could still mint;
+   *  2. the cookie SESSIONS and the sockets riding them — our gate only runs at
+   *     request and upgrade time, so an established workbench WebSocket would
+   *     otherwise keep running for as long as the tab stayed open;
+   *  3. the CHILD, killed by tree — a `serve-web` nobody may reach is a localhost
+   *     HTTP server with an ungated upgrade path, and leaving it up would be the
+   *     one piece of the feature the toggle failed to switch off.
+   *
+   * Deliberately NOT a 4009 sweep: the admission rules did not move (this is a
+   * capability, not an auth surface), so disconnecting every client to tell them
+   * about a toggle that does not concern most of them would be the wrong trade —
+   * the same call `applyTerminalPolicy` makes.
+   */
+  applyIdePolicy(): void {
+    this.ide?.invalidateProbe()
+    if (readIdePolicy().allowIde) return
+    for (const client of this.clients.values()) {
+      this.revokeIdeGrant(client)
+    }
+    this.ide?.clearSessions('policy-off')
+    this.ide?.stopChild('policy-off')
+  }
+
+  /**
    * The reconnect protocol's server half.
    *
    * **Synchronous since SyncCore phase 4b.** The snapshot is `core.getSnapshot()`
@@ -4630,6 +5144,138 @@ export class RemoteServer {
 // ---------------------------------------------------------------------------
 // Utility
 // ---------------------------------------------------------------------------
+
+/**
+ * Headers hop-by-hop by definition (RFC 7230 §6.1) plus the proxy family.
+ *
+ * They describe THIS connection, not the message, so forwarding them to a second
+ * connection is at best meaningless and at worst a request-smuggling primitive
+ * (`Transfer-Encoding` beside a `Content-Length` is the classic pair).
+ */
+const HOP_BY_HOP_HEADERS = new Set([
+  'connection',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'proxy-connection',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade'
+])
+
+/** True for `/vscode` and anything under it — the ONE proxied prefix (ADR-064). */
+function isIdePath(rawUrl: string | undefined): boolean {
+  const pathname = (rawUrl ?? '/').split('?')[0].split('#')[0]
+  return pathname === IDE_BASE_PATH || pathname.startsWith(`${IDE_BASE_PATH}/`)
+}
+
+/**
+ * Headers to forward to the `serve-web` child.
+ *
+ * Two removals and one deliberate NON-removal:
+ *
+ *  - hop-by-hop headers go (see {@link HOP_BY_HOP_HEADERS}), except on the
+ *    upgrade path where `Connection`/`Upgrade` ARE the request;
+ *  - our own `claudeui-ide` cookie goes — it is the credential for OUR gate and
+ *    a child process has no business holding it — while every other cookie,
+ *    upstream's `vscode-tkn` included, is preserved;
+ *  - **`Host` stays exactly as the client sent it.** The workbench embeds it as
+ *    its `remoteAuthority`, so rewriting it to `127.0.0.1` yields a page whose
+ *    remote channel points at a host the browser cannot reach.
+ */
+function ideUpstreamHeaders(
+  headers: http.IncomingHttpHeaders,
+  opts: { keepUpgrade: boolean }
+): http.OutgoingHttpHeaders {
+  const out: http.OutgoingHttpHeaders = {}
+  for (const [name, value] of Object.entries(headers)) {
+    if (value === undefined) continue
+    const lower = name.toLowerCase()
+    if (HOP_BY_HOP_HEADERS.has(lower)) {
+      if (!opts.keepUpgrade) continue
+      if (lower !== 'connection' && lower !== 'upgrade') continue
+    }
+    if (lower === 'cookie') {
+      const kept = stripIdeCookie(Array.isArray(value) ? value.join('; ') : value)
+      if (kept) out.cookie = kept
+      continue
+    }
+    out[lower] = value
+  }
+  return out
+}
+
+/**
+ * Refuse an upgrade with a real HTTP status, then destroy — ws's own
+ * `abortHandshake` shape.
+ *
+ * A bare `socket.destroy()` is indistinguishable from a crash on the client
+ * side, and the pre-ADR-064 `verifyClient` path answered `401` for exactly this
+ * reason. Keeping the status keeps that behaviour after the `noServer` move.
+ */
+function abortUpgrade(socket: Duplex, status: number, message: string): void {
+  try {
+    // `end()` + destroy-on-finish, not `write()` + `destroy()`: a synchronous
+    // destroy can tear the socket down before the status line is flushed, which
+    // would turn every refusal back into the bare reset this function exists to
+    // avoid. Same shape ws's own `abortHandshake` uses.
+    socket.once('finish', () => socket.destroy())
+    socket.end(
+      `HTTP/1.1 ${status} ${message}\r\n` +
+        'Connection: close\r\n' +
+        'Content-Type: text/plain; charset=utf-8\r\n' +
+        `Content-Length: ${Buffer.byteLength(message)}\r\n` +
+        '\r\n' +
+        message
+    )
+  } catch {
+    socket.destroy()
+  }
+}
+
+/**
+ * Serialize an upstream response's status line + headers for a socket we are
+ * piping by hand (the upgrade path, where there is no `ServerResponse`).
+ *
+ * Hop-by-hop headers are dropped here as well as on the way out, and on this
+ * path it is a CORRECTNESS requirement rather than hygiene: Node has already
+ * de-chunked the body by the time we see it, so relaying upstream's
+ * `Transfer-Encoding: chunked` verbatim would frame a de-chunked stream as a
+ * chunked one and corrupt it.
+ */
+function serializeResponseHead(res: http.IncomingMessage, extra: string[] = []): string {
+  const lines = [`HTTP/1.1 ${res.statusCode ?? 502} ${res.statusMessage ?? ''}`.trimEnd()]
+  for (const [name, value] of Object.entries(res.headers)) {
+    if (value === undefined) continue
+    if (HOP_BY_HOP_HEADERS.has(name.toLowerCase())) continue
+    for (const one of Array.isArray(value) ? value : [value]) lines.push(`${name}: ${one}`)
+  }
+  lines.push(...extra)
+  return `${lines.join('\r\n')}\r\n\r\n`
+}
+
+/**
+ * The upstream response headers a proxied HTTP response may carry, minus the
+ * hop-by-hop set.
+ *
+ * Those describe the connection to the CHILD, not the message: relaying
+ * upstream's `Connection: close` would tear down the browser's keep-alive
+ * connection (on which the workbench fetches hundreds of assets), and a
+ * `Transfer-Encoding` copied onto a response Node is already framing itself is
+ * the classic proxy smuggling primitive. Everything else — content type, cache
+ * headers, `Set-Cookie` for upstream's own `vscode-tkn` — passes through
+ * untouched, because it is upstream's content and upstream's call.
+ */
+function ideDownstreamHeaders(headers: http.IncomingHttpHeaders): http.OutgoingHttpHeaders {
+  const out: http.OutgoingHttpHeaders = {}
+  for (const [name, value] of Object.entries(headers)) {
+    if (value === undefined) continue
+    if (HOP_BY_HOP_HEADERS.has(name.toLowerCase())) continue
+    out[name] = value
+  }
+  return out
+}
 
 /**
  * Audit / status label for a passkey connection: the credential's nickname when

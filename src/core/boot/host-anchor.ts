@@ -41,6 +41,7 @@
  * these names in the registry.
  */
 
+import * as nodePath from 'node:path'
 import { getNetworkInterfaces, type RemoteServer } from '../services/remote-server'
 import type { TailscaleManager } from '../services/tailscale-manager'
 import {
@@ -77,12 +78,46 @@ export interface RemoteConfigPatch {
   tlsHttpsPort?: number
   allowTerminal?: boolean
   shellGrantIdleMinutes?: number
+  /** ADR-064: the remote-IDE master switch. */
+  allowIde?: boolean
+  /**
+   * ADR-064: the VS Code CLI override. `null` clears it (back to detection);
+   * `undefined` leaves it alone. The reason it is here and NOT in
+   * `authcfg:apply`'s web-reachable batch is the whole point of the column — the
+   * host spawns whatever this names.
+   */
+  ideCliPath?: string | null
   authPolicy?: RemoteAuthPolicy | null
   passwordBreakGlass?: boolean
   stepUpTier?: StepUpTier
   stepUpMutationIdleMinutes?: number
   sessionMaxAgeHours?: number
   auditRetentionDays?: number
+}
+
+/**
+ * Validate + normalize the ADR-064 CLI override.
+ *
+ * `undefined` (leave alone) passes straight through; `null` clears the override
+ * and is always legal. Anything else must be a NON-EMPTY ABSOLUTE path once
+ * trimmed — an empty string would otherwise be spawned as the CLI, and a
+ * relative one would resolve against whatever cwd the host process happens to
+ * hold, which for a value the host EXECUTES is the difference between "the
+ * operator's VS Code" and "whatever is next to the working directory".
+ *
+ * Existence is deliberately NOT checked here. That is the probe's job, and the
+ * probe answers with a typed `cli-not-found` the settings pane renders inline —
+ * whereas a throw here would refuse an entire config write over one field the
+ * operator may be part-way through typing.
+ */
+function normalizeIdeCliPath(value: string | null | undefined): string | null | undefined {
+  if (value === undefined || value === null) return value
+  const trimmed = value.trim()
+  if (trimmed === '') return null
+  if (!nodePath.isAbsolute(trimmed)) {
+    throw new Error('The VS Code CLI path must be absolute (or empty to auto-detect)')
+  }
+  return trimmed
 }
 
 /** What {@link createHostAnchor} returns — the ten host-anchor operations. */
@@ -218,6 +253,15 @@ export function createHostAnchor({
           throw new Error('Terminal grant timeout must be between 1 and 1440 minutes')
         }
       }
+      // ADR-064. An override the host will EXECUTE, so the shape is validated
+      // here even though only the anchor can write it: a stray empty string
+      // would otherwise be spawned as the CLI, and a relative path would resolve
+      // against whatever cwd the process happens to hold. `null` (clear it) and
+      // a non-empty ABSOLUTE path are the only two legal values. Existence is
+      // deliberately NOT checked — that is the probe's job, and it reports a
+      // typed `cli-not-found` the settings pane can render, whereas a throw here
+      // would refuse the whole config write over one field.
+      const ideCliPath = normalizeIdeCliPath(partial.ideCliPath)
       // Unlike the local listen port, 0 is NOT allowed: `tailscale serve` binds
       // one concrete HTTPS port and the whole point of pinning it (ADR-042) is a
       // stable bookmark. Any other uint16 is accepted — the CLI takes any port;
@@ -295,7 +339,9 @@ export function createHostAnchor({
         }
       }
       const before = sanitizedRemoteConfig()
-      dbSetRemoteConfig(partial)
+      dbSetRemoteConfig(
+        ideCliPath !== undefined ? { ...partial, ideCliPath } : partial
+      )
       const after = sanitizedRemoteConfig()
       // ANY auth-surface change — the policy mode, the step-up tier, the
       // break-glass toggle, or one of the three timing dials — is audited AND
@@ -362,6 +408,16 @@ export function createHostAnchor({
       // reconnect: every live connection loses its `shell` grant and every
       // remote attachment is dropped (ADR-052 decision 6).
       if (partial.allowTerminal !== undefined) remoteServer.applyTerminalPolicy()
+      // Same immediacy rule for the IDE (ADR-064), and one step wider than the
+      // terminal's because an IDE session is not a grant a dispatch will next
+      // meet — it is a live browser talking HTTP to a proxied child. So the
+      // reaction has to reach all three: the `ide` capability on every live
+      // connection, the cookie sessions (and the sockets they are riding), and
+      // the `serve-web` child itself. A CLI-path change reaches the same method
+      // because the cached probe now names a binary the operator replaced.
+      if (partial.allowIde !== undefined || partial.ideCliPath !== undefined) {
+        remoteServer.applyIdePolicy()
+      }
       return after
     },
 

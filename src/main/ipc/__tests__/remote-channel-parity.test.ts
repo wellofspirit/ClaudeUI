@@ -52,6 +52,11 @@ const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf
  *    session-gated anyway, because it hands out a channel key. The `off` master
  *    switch is deliberately not among them: it stays in `remote:set-config`,
  *    which has no remote registration at all.
+ *  - `ide` (ADR-064) — the remote VS Code mint. The `shell` shape on its own
+ *    toggle: no static grant set holds it, the step-up ceremony arms it iff
+ *    `allow_ide` is on, and toggle-off revokes it in place. Its sibling
+ *    `ide:availability` is deliberately ABSENT from this list — it declares
+ *    `config`, because asking "may I?" must be answerable without the grant.
  *
  * "Invoked but not grantable at connect time" is the POINT for all three, which
  * is why this list is an allowlist rather than an emptiness assertion: a new
@@ -65,6 +70,7 @@ const UNGRANTED_AT_CONNECT_REMOTE_CHANNELS = [
   'authcfg:lan-link',
   'authcfg:rotate-lan-key',
   'authcfg:set-password',
+  'ide:mint-entry',
   'terminal:attach',
   'terminal:create',
   'terminal:detach',
@@ -104,6 +110,9 @@ const SHARED_DECLARATION_SOURCES = [
   'src/core/ipc/automation-commands.ts',
   // S4 (ADR-057) — the vendor-OAuth / account / native-OAuth family.
   'src/core/ipc/auth-commands.ts',
+  // ADR-064 — the remote-IDE pair, spread by both transports from one
+  // declaration (`registerIdeIpc` on the desktop side, from core-services).
+  'src/core/ipc/ide-commands.ts',
   // The redacted status read (owner ruling, 2026-08-28) — the ONE `remote:*`
   // channel served on both transports. Every `remote:*` MUTATION is absent from
   // this list because it is absent from the registry entirely.

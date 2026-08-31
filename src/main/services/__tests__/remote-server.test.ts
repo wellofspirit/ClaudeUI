@@ -225,6 +225,9 @@ function useAuthDisabled(): void {
     authPolicy: 'off',
     passwordBreakGlass: true,
     lanE2eKey: null,
+    // ADR-064 (v14): the remote-IDE posture at its closed defaults.
+    allowIde: false,
+    ideCliPath: null,
     stepUpTier: 'medium',
     stepUpMutationIdleMinutes: 60,
     sessionMaxAgeHours: 4,
@@ -350,6 +353,9 @@ function provisionPassword(password: string, saltHex: string): string {
     authPolicy: null,
     passwordBreakGlass: true,
     lanE2eKey: null,
+    // ADR-064 (v14): the remote-IDE posture at its closed defaults.
+    allowIde: false,
+    ideCliPath: null,
     // ADR-054 (v12) step-up columns at their defaults.
     stepUpTier: 'medium',
     stepUpMutationIdleMinutes: 60,
@@ -3106,6 +3112,9 @@ function remoteConfigRow(over: Partial<RemoteConfigRow> = {}): RemoteConfigRow {
     authPolicy: null,
     passwordBreakGlass: true,
     lanE2eKey: null,
+    // ADR-064 (v14): the remote-IDE posture at its closed defaults.
+    allowIde: false,
+    ideCliPath: null,
     // ADR-054 (v12) step-up columns at their defaults.
     stepUpTier: 'medium',
     stepUpMutationIdleMinutes: 60,

@@ -202,7 +202,11 @@ export const BENIGN_CACHE_WRITE_CHANNELS: ReadonlySet<string> = new Set([
  *                 (ADR-054: reads and the sync stream are free even in
  *                 `strong`).
  * - `shell-read`— a shell verb that only watches: one arming proof ever.
- * - `shell-act` — a shell verb that acts: the 10-minute act window.
+ * - `shell-act` — a shell verb that acts: the 10-minute act window. Since
+ *                 ADR-064 the `ide` capability's verbs land here too — minting
+ *                 an IDE entry opens an editor and an integrated terminal on
+ *                 the host, so it costs what a `terminal:create` costs. The
+ *                 class keeps its name (there is one act window, not two).
  * - `authcfg`   — the settings area: a live settings-editing SESSION, on every
  *                 tier (§6 amendment — this used to be the mutation window).
  * - `mutation`  — any other `command`: free below `strong`, the mutation window
@@ -223,7 +227,8 @@ export const TERM_RESIZE_CLASS: DispatchClass = 'shell-read'
  * neither set is treated as ACTING, so the failure mode of forgetting to
  * classify a new terminal channel is "it demands freshness" rather than "it is
  * free forever". `shell-verb-sets-cover-the-registry` pins that nobody has to
- * rely on that fallback in practice.
+ * rely on that fallback in practice. The `ide` arm fails closed the same way —
+ * anything that is not a `query` acts.
  */
 export function classifyDispatch(args: {
   channel: string
@@ -236,9 +241,9 @@ export function classifyDispatch(args: {
   //     gated and so `authcfg:end` cannot be caught by a future widening of the
   //     gated set;
   //  2. the gated `authcfg` namespace;
-  //  3. `shell`, which fails CLOSED — checked BEFORE the named exemption below
-  //     so that no future member of that set could ever buy a shell verb its way
-  //     out of the read/act split by being named lower down;
+  //  3. `ide` and `shell`, both of which fail CLOSED — checked BEFORE the named
+  //     exemption below so that no future member of that set could ever buy an
+  //     IDE or shell verb its way out by being named lower down;
   //  4. the benign ambient cache writes: `command`s that meet the three
   //     admission criteria on {@link BENIGN_CACHE_WRITE_CHANNELS}. Above the
   //     `kind` line because that is the whole point — they ARE commands, and the
@@ -246,6 +251,22 @@ export function classifyDispatch(args: {
   //  5. `kind`: a `query` reads, anything else mutates.
   if (AUTHCFG_FREE_CHANNELS.has(args.channel)) return 'read'
   if (AUTHCFG_CHANNELS.has(args.channel)) return 'authcfg'
+  // The remote IDE (ADR-064), directly above the `shell` arm and sharing its
+  // fail-closed shape. An `ide` verb rides `shell-act`: minting an IDE entry is
+  // the act of opening an editor + integrated terminal on the host, which is the
+  // same authority a `terminal:create` buys and must cost the same freshness.
+  //
+  // There is no read/act VERB SET here and that is deliberate, not an omission.
+  // The terminal split exists because an ATTACHED view keeps streaming after
+  // decay — there are verbs that only watch. The IDE has no such verb: the whole
+  // surface is one mint, and everything after it is HTTP the registry never
+  // sees. So the split is by `kind`, and a `command` (the only kind that exists
+  // today) is an act. A future `ide` query would be free — which is correct for
+  // a read — while anything else fails CLOSED into the act window, so forgetting
+  // to think about a new `ide` verb costs a ceremony rather than nothing.
+  if (args.capability === 'ide') {
+    return args.kind === 'query' ? 'read' : 'shell-act'
+  }
   if (args.capability === 'shell') {
     // The explicit set wins over `kind` in BOTH directions: `terminal:attach` is
     // a `command` that reads, `terminal:pool` is a `query` that is still a shell

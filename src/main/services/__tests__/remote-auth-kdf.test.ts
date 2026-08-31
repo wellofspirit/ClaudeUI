@@ -52,6 +52,9 @@ function makeRow(over: Partial<RemoteConfigRow> = {}): RemoteConfigRow {
     passwordBreakGlass: true,
     // ADR-056 (v13): no LAN channel key on a loopback-bound test server.
     lanE2eKey: null,
+    // ADR-064 (v14): the remote-IDE posture at its closed defaults.
+    allowIde: false,
+    ideCliPath: null,
     // ADR-054 (v12) step-up columns at their defaults.
     stepUpTier: 'medium',
     stepUpMutationIdleMinutes: 60,

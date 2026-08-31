@@ -244,6 +244,13 @@ const api: ClaudeAPI = {
   // pool is main-process state, and the desktop is just as capable of reopening
   // a slot whose shell is still running as a phone is.
   terminalPool: (cwd: string) => ipcRenderer.invoke('terminal:pool', cwd),
+  // Remote IDE (ADR-064). Real IPC on the desktop too, and deliberately not a
+  // constant like `terminalAvailability` is: the answer depends on the host's
+  // toggle and on whether a VS Code CLI is actually installed, neither of which
+  // the renderer can know — and the desktop settings pane is the surface that
+  // renders the typed probe result.
+  ideAvailability: () => ipcRenderer.invoke('ide:availability'),
+  ideMintEntry: (folder: string) => ipcRenderer.invoke('ide:mint-entry', { folder }),
   // The volatile lane's subscription verb (phase 5 S1). Real IPC on the desktop
   // too: the renderer is client #1 and its deltas ride the same watched lane a
   // phone's do — there is no privileged local path any more.

@@ -512,6 +512,37 @@ export const MIGRATIONS: Migration[] = [
         UPDATE remote_config SET auth_policy = NULL WHERE auth_policy = 'legacy';
       `)
     }
+  },
+  {
+    // v14 — ADR-064: the remote-IDE posture (VS Code `serve-web`, reverse-proxied
+    // under `/vscode` behind the new `ide` capability).
+    //
+    // `allow_ide` is the host-side master switch for that capability, OFF by
+    // default. It is the v10 rule verbatim, one capability over: it lives HERE
+    // and not in settings.json because `config:save-settings` is remotely
+    // reachable (capability `config`), so a settings-blob flag would let a remote
+    // client arm its own IDE — which is shell-equivalent authority.
+    //
+    // `ide_cli_path` is the optional override for WHICH VS Code CLI to spawn, and
+    // for it the same table choice is load-bearing in a NEW way. This column is a
+    // path the host later EXECUTES. A remotely writable copy of it would not be a
+    // policy downgrade, it would be remote code execution by config write — point
+    // it at anything on disk and the next mint runs it. So it is written only
+    // through the host-anchored `remote:set-config` (pinned `admin`, registered on
+    // NEITHER transport), exactly like the toggle beside it, and reads fail closed
+    // (`readIdePolicy`).
+    //
+    // NULLABLE, and null is the normal state: with no override the service
+    // detects the CLI itself (PATH, then platform well-knowns), which is what
+    // makes the desktop host and the headless `claudeui-server` the same
+    // implementation.
+    version: 14,
+    up(db) {
+      db.exec(`
+        ALTER TABLE remote_config ADD COLUMN allow_ide INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE remote_config ADD COLUMN ide_cli_path TEXT;
+      `)
+    }
   }
 ]
 
@@ -1623,6 +1654,13 @@ interface RemoteConfigDbRow {
    * `sanitizedRemoteConfig` / `authcfg:get`.
    */
   lan_e2e_key: string | null
+  /** ADR-064 (v14). Host-side master switch for the `ide` capability, 0/1. */
+  allow_ide: number
+  /**
+   * ADR-064 (v14). Optional override for the VS Code CLI the host spawns, or
+   * NULL for auto-detection. HOST-ANCHORED because the host EXECUTES it.
+   */
+  ide_cli_path: string | null
   step_up_tier: string | null
   step_up_mutation_idle_minutes: number
   session_max_age_hours: number
@@ -1663,6 +1701,16 @@ export interface RemoteConfigRow {
    * session-gated link verbs, and never by the config sanitizer.
    */
   lanE2eKey: string | null
+  /**
+   * Host-side master switch for the remote IDE (ADR-064). Default OFF, and the
+   * same host-anchored write path as {@link RemoteConfigRow.allowTerminal}.
+   */
+  allowIde: boolean
+  /**
+   * Optional VS Code CLI override, or null for auto-detection. Host-anchored
+   * because the host SPAWNS it — see the v14 migration comment.
+   */
+  ideCliPath: string | null
   /**
    * Stored step-up tier (ADR-054 decision 1). Never null — an unrecognised
    * column value reads as `medium`. This is the RAW setting; auth-mode `off`
@@ -1710,6 +1758,11 @@ function rowToRemoteConfig(row: RemoteConfigDbRow): RemoteConfigRow {
     passwordBreakGlass: (row.password_break_glass ?? 1) === 1,
     // v13 (ADR-056). Null until the first non-loopback start generates one.
     lanE2eKey: row.lan_e2e_key ?? null,
+    // v14 (ADR-064). Same in-code COALESCE reasoning as `allow_terminal`: a row
+    // written by a build that predates v14 must read as "IDE off, no override",
+    // never as `undefined`.
+    allowIde: row.allow_ide === 1,
+    ideCliPath: row.ide_cli_path ?? null,
     // v12 (ADR-054). Same in-code COALESCE reasoning once more, plus the
     // retention CLAMP — see `RemoteConfigRow.auditRetentionDays`.
     stepUpTier: parseStepUpTier(row.step_up_tier),
@@ -1754,6 +1807,14 @@ export function setRemoteConfig(partial: {
   tlsHttpsPort?: number
   allowTerminal?: boolean
   shellGrantIdleMinutes?: number
+  /** ADR-064 host-side master switch for the remote IDE. */
+  allowIde?: boolean
+  /**
+   * ADR-064 VS Code CLI override. `null` is MEANINGFUL (clear the override and
+   * go back to auto-detection), so it is distinguished from `undefined` (leave
+   * alone) — same convention as `bindHost`.
+   */
+  ideCliPath?: string | null
   /** `null` is a MEANINGFUL value here (restore AUTO), so it is distinguished
    *  from `undefined` (leave alone) — same convention as `bindHost`. */
   authPolicy?: RemoteAuthPolicy | null
@@ -1781,6 +1842,10 @@ export function setRemoteConfig(partial: {
     partial.shellGrantIdleMinutes ??
     existing?.shell_grant_idle_minutes ??
     DEFAULT_SHELL_GRANT_IDLE_MINUTES
+  const allowIde =
+    partial.allowIde !== undefined ? (partial.allowIde ? 1 : 0) : (existing?.allow_ide ?? 0)
+  const ideCliPath =
+    partial.ideCliPath !== undefined ? partial.ideCliPath : (existing?.ide_cli_path ?? null)
   const authPolicy =
     partial.authPolicy !== undefined ? partial.authPolicy : (existing?.auth_policy ?? null)
   const passwordBreakGlass =
@@ -1807,11 +1872,12 @@ export function setRemoteConfig(partial: {
     `INSERT INTO remote_config (
        id, port, bind_host, autostart, tls_mode, tls_https_port,
        allow_terminal, shell_grant_idle_minutes,
+       allow_ide, ide_cli_path,
        auth_policy, password_break_glass,
        step_up_tier, step_up_mutation_idle_minutes, session_max_age_hours,
        audit_retention_days, updated_at
      )
-     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        port                          = excluded.port,
        bind_host                     = excluded.bind_host,
@@ -1820,6 +1886,8 @@ export function setRemoteConfig(partial: {
        tls_https_port                = excluded.tls_https_port,
        allow_terminal                = excluded.allow_terminal,
        shell_grant_idle_minutes      = excluded.shell_grant_idle_minutes,
+       allow_ide                     = excluded.allow_ide,
+       ide_cli_path                  = excluded.ide_cli_path,
        auth_policy                   = excluded.auth_policy,
        password_break_glass          = excluded.password_break_glass,
        step_up_tier                  = excluded.step_up_tier,
@@ -1835,6 +1903,8 @@ export function setRemoteConfig(partial: {
     tlsHttpsPort,
     allowTerminal,
     shellGrantIdleMinutes,
+    allowIde,
+    ideCliPath,
     authPolicy,
     passwordBreakGlass,
     stepUpTier,

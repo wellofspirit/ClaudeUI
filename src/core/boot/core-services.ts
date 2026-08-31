@@ -39,11 +39,14 @@ import { registerAutomationIpc } from '../ipc/automation.ipc'
 import { registerWebauthnIpc } from '../ipc/webauthn.ipc'
 import { registerAuthcfgIpc } from '../ipc/authcfg.ipc'
 import { registerRemoteViewIpc } from '../ipc/remote-view-commands'
+import { registerIdeIpc } from '../ipc/ide-commands'
 import { registerRemoteHandlers } from '../ipc/remote-handlers'
 import { RemoteServer } from '../services/remote-server'
 import { RemoteDispatcher } from '../services/remote-dispatcher'
 import { TailscaleManager } from '../services/tailscale-manager'
 import { terminalService } from '../services/terminal-service'
+import { vscodeWebService, type VscodeWebService } from '../services/vscode-web-service'
+import { hostConnection } from '../ipc/command-registry'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
 import { credentialSync } from '../auth/vault/CredentialSync'
@@ -63,6 +66,13 @@ export interface CoreServices {
   remoteDispatcher: RemoteDispatcher
   tailscaleManager: TailscaleManager
   automationManager: AutomationManager
+  /**
+   * The remote-IDE service (ADR-064). Handed back so a host layer can reach it
+   * for teardown or diagnostics; its lifetime is otherwise the remote server's —
+   * `RemoteServer.stop()` calls `stop()` on it, which is the app-shutdown path
+   * on both hosts.
+   */
+  vscodeWebService: VscodeWebService
   /** Remote-server administration (start/stop/config/password/tailscale). */
   hostAnchor: HostAnchor
 }
@@ -178,6 +188,14 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // Multi-attach delivery path (SyncCore phase 2): the pty manager hands frames
   // for attached remote connections to THIS server's sink.
   terminalService.setRemoteSink(remoteServer.terminalSink())
+  // The remote IDE (ADR-064). Two directions, and both are needed: the server
+  // needs the service to proxy `/vscode` and to end its sessions on a policy or
+  // auth-surface change, and the service needs the host ACTOR so its own rows
+  // (reaper, unexpected child death, shutdown) are attributed to the surface this
+  // process actually is — `server-console` on a headless box, which has no
+  // renderer for the default label to name.
+  remoteServer.setIdeService(vscodeWebService)
+  vscodeWebService.setHostActor(hostActor ?? hostConnection())
   // The 4th arg wires the vendor-OAuth / account / native-OAuth family (S4,
   // ADR-057) onto the remote transport — the desktop-auth subsystem stays in
   // `src/main`, so its registry + account manager are injected here rather than
@@ -195,6 +213,12 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // because the server it reads does not exist until this point; the remote
   // half is spread from the same declaration in `registerRemoteHandlers`.
   registerRemoteViewIpc(remoteServer)
+  // The remote-IDE channels on the desktop transport (ADR-064). Registered here
+  // for the same reason the status view is — the server that classifies a
+  // connection's origin does not exist until this point — and from the SAME
+  // declarations `registerRemoteHandlers` spreads, so the capability/kind pair is
+  // one reviewed fact rather than two.
+  registerIdeIpc(remoteServer)
 
   const hostAnchor = createHostAnchor({
     remoteServer,
@@ -237,6 +261,7 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     remoteDispatcher,
     tailscaleManager,
     automationManager,
+    vscodeWebService,
     hostAnchor
   }
 }

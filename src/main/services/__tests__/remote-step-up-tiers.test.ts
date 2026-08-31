@@ -117,7 +117,11 @@ import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
 import { terminalService } from '../../../core/services/terminal-service'
 import { registerRemoteHandlers } from '../../../core/ipc/remote-handlers'
 import { registerTerminalIpc } from '../../../core/ipc/terminal.ipc'
-import { commandRegistry, registerCommand } from '../../../core/ipc/command-registry'
+import {
+  commandRegistry,
+  registerCommand,
+  type CommandConnection
+} from '../../../core/ipc/command-registry'
 import { emitEvent, streamSubscriberCount, syncCore } from '../../../core/services/sync-host'
 import {
   MAX_STREAM_WATCH,
@@ -178,6 +182,9 @@ function makeConfigRow(over: Partial<RemoteConfigRow> = {}): RemoteConfigRow {
     authPolicy: null,
     passwordBreakGlass: true,
     lanE2eKey: null,
+    // ADR-064 (v14): the remote-IDE posture at its closed defaults.
+    allowIde: false,
+    ideCliPath: null,
     stepUpTier: 'medium',
     stepUpMutationIdleMinutes: 60,
     sessionMaxAgeHours: 4,
@@ -525,7 +532,11 @@ describe('ADR-054 step-up tiers over the socket', () => {
       lanLink: () => server.lanLink(),
       rotateLanKey: () => server.rotateLanKey(),
       // The redacted `remote:status-view` source (2026-08-28).
-      getStatus: () => server.getStatus()
+      getStatus: () => server.getStatus(),
+      // The ADR-064 origin source. Forwarded to the live server like every other
+      // member, so the stub cannot answer a question the real one would not.
+      ideOriginOf: (connection: CommandConnection) => server.ideOriginOf(connection),
+      ideService: () => server.ideService()
     }
     registerRemoteHandlers(dispatcher, { get: () => undefined, rekey: vi.fn() } as never, hostStub)
     registerTerminalIpc()

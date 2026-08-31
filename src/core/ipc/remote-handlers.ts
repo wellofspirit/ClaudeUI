@@ -72,6 +72,7 @@ import {
   type CommandRegistration
 } from './command-registry'
 import { configCommands } from './config-commands'
+import { ideCommands, type IdeCommandHost } from './ide-commands'
 import { remoteViewCommands, type RemoteStatusHost } from './remote-view-commands'
 import { authCommands, type AuthCommandDeps } from './auth-commands'
 import { AUTOMATION_COMMANDS } from './automation-commands'
@@ -315,7 +316,7 @@ export function registerRemoteHandlers(
    * channel SET must not depend on runtime configuration, or the parity pins
    * would report a different surface in tests than in production.
    */
-  enrollTokens?: RemoteAuthSurfaceHost & AuthcfgHost & RemoteStatusHost,
+  enrollTokens?: RemoteAuthSurfaceHost & AuthcfgHost & RemoteStatusHost & IdeCommandHost,
   /**
    * The desktop-auth dependencies for the vendor-OAuth / account / native-OAuth
    * command family (ADR-057, S4). Optional for the SAME reason `enrollTokens` is
@@ -1409,6 +1410,24 @@ export function registerRemoteHandlers(
     withConnection: true,
     handler: async (connection: CommandConnection) => terminalService.availability(connection)
   })
+
+  // -------------------------------------------------------------------------
+  // Remote IDE (ADR-064) — VS Code `serve-web` behind the `ide` capability
+  // -------------------------------------------------------------------------
+  //
+  // Declared in `ide-commands.ts` and spread by BOTH transports (the desktop half
+  // is `registerIdeIpc`, called from core-services once the server exists), so
+  // the capability/kind pair is one reviewed fact rather than a remote-only one.
+  // `enrollTokens` is the running `RemoteServer` and supplies both things the
+  // declarations cannot answer themselves: which origin a connection was
+  // classified as, and which IDE service this process installed (`setIdeService`
+  // is the ONE injection point — importing the module singleton here instead
+  // would make that setter a lie in any deployment or test that injected a
+  // different one). Absent (tests, remote-disabled harnesses) the channels still
+  // register and throw — the channel SET must not depend on runtime config.
+  for (const cmd of ideCommands(enrollTokens ?? null)) {
+    handleRemote(cmd)
+  }
 
   // -------------------------------------------------------------------------
   // Passkeys (ADR-052) — enrollment + credential management

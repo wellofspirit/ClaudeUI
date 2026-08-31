@@ -1,5 +1,7 @@
 import type { ResolvedCapabilities } from './model-capabilities'
 import type {
+  IdeAvailability,
+  IdeEntry,
   PublicKeyCredentialCreationOptionsJSON,
   RegistrationResponseJSON,
   RemoteKdfParams
@@ -1422,6 +1424,24 @@ interface TerminalAPI {
    */
   terminalAvailability(): Promise<TerminalAvailability>
   /**
+   * May this client open VS Code on the host, and why not (ADR-064)?
+   *
+   * Unlike {@link ClaudeAPI.terminalAvailability} the desktop answers this for
+   * real rather than with a constant: whether a usable VS Code CLI exists is a
+   * fact about the machine, not about the transport, and the desktop settings
+   * pane is the surface that renders the typed probe result.
+   */
+  ideAvailability(): Promise<IdeAvailability>
+  /**
+   * Mint a single-use IDE entry URL for `folder`, RELATIVE to this origin.
+   *
+   * Relative because the caller navigates its own page's origin with it — the
+   * host never has to guess what that origin is, and the cookie the entry sets is
+   * scoped to `/vscode` on it. Throws {@link IDE_UNAVAILABLE_ERROR} with a typed
+   * reason suffix when the toggle, the origin, the CLI or the spawn refuses.
+   */
+  ideMintEntry(folder: string): Promise<IdeEntry>
+  /**
    * Which slots of `cwd`'s terminal POOL currently hold a LIVE pty.
    *
    * Terminals are an ordered per-cwd pool shared by every surface, and closing
@@ -1659,6 +1679,20 @@ export interface RemoteConfig {
   allowTerminal: boolean
   /** Idle window before a stepped-up `shell` grant decays, in minutes. */
   shellGrantIdleMinutes: number
+  /**
+   * Host-side master switch for the remote IDE (ADR-064), OFF by default. Its
+   * own toggle rather than a rider on {@link RemoteConfig.allowTerminal}: a
+   * remote VS Code is shell-EQUIVALENT but not a pty, and an operator must be
+   * able to want one without the other.
+   */
+  allowIde: boolean
+  /**
+   * Optional path to the VS Code CLI the host spawns (`code-tunnel(.exe)` /
+   * `code`), or null to auto-detect. Host-anchored like the toggle, and for a
+   * sharper reason: the host EXECUTES this path, so a remotely writable copy
+   * would be remote code execution by config write.
+   */
+  ideCliPath: string | null
   /**
    * Stored auth policy, or `null` for AUTO (≥1 credential ⇒ `passkey-always`,
    * else `password`). Same table + same desktop-only write path as

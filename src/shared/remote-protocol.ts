@@ -415,6 +415,90 @@ export const ENROLL_UNAVAILABLE_ERROR = 'enroll-unavailable'
  */
 export const LAST_CREDENTIAL_LOCKOUT_ERROR = 'last-credential-lockout'
 
+// ---------------------------------------------------------------------------
+// Remote IDE — VS Code `serve-web`, reverse-proxied under /vscode (ADR-064)
+// ---------------------------------------------------------------------------
+
+/**
+ * Error `ide:mint-entry` throws when no entry can be handed out, with the
+ * machine-readable {@link IdeUnavailableReason} appended after a colon
+ * (`ide-unavailable:cli-not-found`).
+ *
+ * Pinned rather than free-form for the {@link ENROLL_UNAVAILABLE_ERROR} reason:
+ * invoke errors cross the wire as bare strings, so the button that raised the
+ * refusal has nothing but this text to decide between "no ceremony can fix
+ * this, explain why" and a generic failure toast. ADR-064's owner ruling is
+ * explicitly *explain, don't stonewall*, which is only possible if the reason
+ * survives the trip.
+ */
+export const IDE_UNAVAILABLE_ERROR = 'ide-unavailable'
+
+/**
+ * WHY the IDE is unavailable. Every member is a state no retry can clear on its
+ * own — a toggle to flip, an origin to change, a CLI to install, a spawn that
+ * failed — which is exactly why they are typed instead of prose.
+ */
+export type IdeUnavailableReason =
+  /** The host-anchored "Allow VS Code on the web" toggle is OFF. */
+  | 'toggle-off'
+  /** This connection's origin is not in `IDE_ALLOWED_ORIGINS` (ADR-064 §3). */
+  | 'origin-not-allowed'
+  /** No VS Code CLI was found in the override / PATH / well-known locations. */
+  | 'cli-not-found'
+  /** A candidate was found but `serve-web --help` did not succeed on it. */
+  | 'cli-invalid'
+  /** The CLI is valid but the `serve-web` child never reported a port. */
+  | 'spawn-failed'
+
+/**
+ * The CLI-detection result, cached by the service until the toggle flips, the
+ * override path changes, or a re-probe is asked for.
+ *
+ * A discriminated union rather than `string | null` so the availability answer
+ * can say WHICH failure it was without the client parsing a message: "install
+ * VS Code" and "the path you configured is not a VS Code CLI" are different
+ * instructions to a human.
+ */
+export type IdeCliProbe =
+  | { ok: true; cliPath: string }
+  | { ok: false; reason: 'cli-not-found' | 'cli-invalid'; detail?: string }
+
+/** Lifecycle of the `serve-web` child this host owns. */
+export type IdeRuntimeState = 'stopped' | 'starting' | 'running' | 'error'
+
+/**
+ * `ide:availability` — the ONLY honest answer to "may I open the IDE?", and the
+ * `terminal:availability` shape one axis wider.
+ *
+ * `allowed` is the toggle, `granted` is "holds `ide` AND the act window is
+ * fresh", `needsStepUp` is the curable gap between them, and `originAllowed` is
+ * the one thing NO ceremony can fix — which is why it is a separate boolean
+ * rather than folded into `allowed`. A client that conflated them would offer a
+ * step-up on the tunnel forever.
+ */
+export interface IdeAvailability {
+  allowed: boolean
+  granted: boolean
+  needsStepUp: boolean
+  originAllowed: boolean
+  originReason?: 'origin-not-allowed'
+  probe: IdeCliProbe
+  runtime: IdeRuntimeState
+  /** Last spawn/child failure, for the explain-why dialog. Never a host path. */
+  lastError?: string
+}
+
+/**
+ * `ide:mint-entry` — a RELATIVE, single-use URL under `/vscode`.
+ *
+ * Relative on purpose: the entry token is bound to a cookie the browser will
+ * only ever send back to this origin, so the client navigates its own page's
+ * origin and the server never has to guess (or be told) what that origin is.
+ */
+export interface IdeEntry {
+  url: string
+}
+
 /**
  * Error `authcfg:apply` throws for an `off` auth-mode — THE host-anchor rule
  * (ADR-054 decision 6).
@@ -654,6 +738,43 @@ export function isNeedsStepUpError(message: unknown): boolean {
 /** True for the error a shell dispatch throws while the terminal toggle is OFF. */
 export function isTerminalDisabledError(message: unknown): boolean {
   return messageIncludes(message, TERMINAL_DISABLED_ERROR)
+}
+
+/**
+ * True for the refusal an `ide:mint-entry` dispatch produces when the remote
+ * IDE cannot be handed out (ADR-064).
+ *
+ * A substring test like its siblings, so the reason suffix
+ * (`ide-unavailable:cli-not-found`) rides along for the caller that wants it
+ * and is ignored by the caller that only needs "this is the IDE refusal".
+ */
+export function isIdeUnavailableError(message: unknown): boolean {
+  return messageIncludes(message, IDE_UNAVAILABLE_ERROR)
+}
+
+/**
+ * The typed reason inside an {@link IDE_UNAVAILABLE_ERROR}, or null when the
+ * message is not one (or carries no suffix). Parsed here rather than at each UI
+ * call site so the wire format has exactly one reader.
+ */
+export function ideUnavailableReason(message: unknown): IdeUnavailableReason | null {
+  const text =
+    typeof message === 'string'
+      ? message
+      : message instanceof Error
+        ? message.message
+        : String(message ?? '')
+  const at = text.indexOf(`${IDE_UNAVAILABLE_ERROR}:`)
+  if (at < 0) return null
+  const rest = text.slice(at + IDE_UNAVAILABLE_ERROR.length + 1).trim()
+  const known: IdeUnavailableReason[] = [
+    'toggle-off',
+    'origin-not-allowed',
+    'cli-not-found',
+    'cli-invalid',
+    'spawn-failed'
+  ]
+  return known.find((r) => rest.startsWith(r)) ?? null
 }
 
 /**

@@ -125,7 +125,7 @@ import { RemoteServer } from '../../../core/services/remote-server'
 import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
 import { webauthnService } from '../../../core/services/webauthn-service'
 import { registerRemoteHandlers } from '../../../core/ipc/remote-handlers'
-import { commandRegistry } from '../../../core/ipc/command-registry'
+import { commandRegistry, type CommandConnection } from '../../../core/ipc/command-registry'
 import { logger } from '../../../core/services/logger'
 
 // ---------------------------------------------------------------------------
@@ -179,6 +179,9 @@ function makeConfigRow(over: Partial<RemoteConfigRow> = {}): RemoteConfigRow {
     authPolicy: null,
     passwordBreakGlass: true,
     lanE2eKey: null,
+    // ADR-064 (v14): the remote-IDE posture at its closed defaults.
+    allowIde: false,
+    ideCliPath: null,
     // ADR-054 (v12) step-up columns at their defaults.
     stepUpTier: 'medium',
     stepUpMutationIdleMinutes: 60,
@@ -488,7 +491,11 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
       lanLink: () => server.lanLink(),
       rotateLanKey: () => server.rotateLanKey(),
       // The redacted `remote:status-view` source (2026-08-28).
-      getStatus: () => server.getStatus()
+      getStatus: () => server.getStatus(),
+      // The ADR-064 origin source. Forwarded to the live server like every other
+      // member, so the stub cannot answer a question the real one would not.
+      ideOriginOf: (connection: CommandConnection) => server.ideOriginOf(connection),
+      ideService: () => server.ideService()
     }
     registerRemoteHandlers(
       dispatcherRef,

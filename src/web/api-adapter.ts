@@ -13,6 +13,7 @@ import type {
   PermissionSuggestion,
   TerminalAvailability
 } from '../shared/types'
+import type { IdeAvailability, IdeEntry } from '../shared/remote-protocol'
 import { buildMockupHttpUrl } from '../shared/mockup-url'
 import { buildSentFileUrl } from '../shared/sent-file-url'
 import { derivePasswordProof } from './password-proof'
@@ -389,6 +390,14 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // `shell` channel) until the three gates hold — the caller treats a refusal
     // as "nothing known", never as "nothing running".
     terminalPool: (cwd) => connection.invoke('terminal:pool', cwd) as Promise<number[]>,
+    // Remote IDE (ADR-064). Both go straight over the wire — unlike
+    // `terminalAvailability` there is nothing for the client to merge in, because
+    // every axis of the answer (toggle, grant, ORIGIN, CLI probe, child state) is
+    // a host fact. The entry URL comes back RELATIVE and the caller navigates its
+    // own origin with it, which is why no host or scheme is ever guessed here.
+    ideAvailability: () => connection.invoke('ide:availability') as Promise<IdeAvailability>,
+    ideMintEntry: (folder) =>
+      connection.invoke('ide:mint-entry', { folder }) as Promise<IdeEntry>,
     watchStreams: async (sessionIds, automationIds) => {
       await connection.invoke('stream:watch', { sessionIds, automationRuns: automationIds })
     },

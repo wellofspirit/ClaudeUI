@@ -1,0 +1,75 @@
+# ADR-064 — Remote VS Code: the host's own `serve-web`, reverse-proxied behind a new `ide` capability
+
+**Status:** Accepted (2026-08-31, owner-ruled in session: delivery model A, tailnet-only, toggle + explain-why dialog, keep later origins cheap to enable).
+**Relates to:** ADR-042 (`tailscale serve` — the only origin this serves), ADR-052/054 / [security.md](../architecture/security.md) (capabilities, step-up, decay, audit — the `ide` grant copies the `shell` shape), ADR-056 ([remote.md](../architecture/remote.md) — handshake, scoped tokens, origin classification), ADR-039 (the tunnel's honest-but-curious ruling that excludes it here), ADR-027 (testids).
+**Scope:** a new `src/core/services/vscode-web-service.ts`, a `/vscode/*` proxy route + upgrade path on the existing listener, the `ide` capability + two commands, one `remote_config` migration, the desktop toggle, and the web TopBar button behavior. Desktop's `vscode://` deep link is untouched.
+
+## Context
+
+The TopBar's VSCode button is host-physical: desktop resolves it to `shell.openExternal('vscode://file/…')` and the web adapter stubs it to a no-op — on web the button renders and silently does nothing. The remote arc is otherwise near-complete (terminal, git, settings, files), and the owner wants the button real on web: serve VS Code itself so a remote operator can view and edit the host's files.
+
+Bundling an IDE was ruled out. The host's **own installed VS Code** ships a CLI (`code-tunnel.exe` on Windows next to `code.cmd`; the standalone "VS Code CLI" tarball on a headless box) with a `serve-web` subcommand that serves the full workbench — real marketplace, Settings Sync, integrated terminal — from a local port. ClaudeUI spawns it and reverse-proxies it. Nothing is redistributed; the user installs and licenses VS Code themselves, which also makes the desktop host and the headless `claudeui-server` the **same implementation** (the standalone CLI is a single binary; `serve-web` needs no GUI).
+
+### Probed facts (VS Code 1.135.0, 2026-08-31 — the design leans on all of these)
+
+- Flags: `--host`, `--port` (0 = random, chosen port printed as `Web UI available at http://127.0.0.1:<port>/<base-path>?tkn=…` on stdout), `--connection-token`, `--server-base-path`, `--accept-server-license-terms`, `--disable-telemetry`. The base path is honored everywhere: workbench assets under `/<base>/stable-<commit>/static/…`, the remote-agent WebSocket on the same prefix — **one proxy prefix covers everything**.
+- Token behavior: HTTP requests without the token get 403; `?tkn=` answers 302 and exchanges into a `vscode-tkn` cookie (7 days, SameSite=Lax, **deliberately not HttpOnly** — the workbench JS reads it for its inner protocol handshake); cookie-only requests then succeed. Before the workbench bits finish downloading it serves a harmless 202 auto-refresh interstitial.
+- **The WS upgrade is not token-gated at the HTTP layer**: an upgrade with no credentials gets `101 Switching Protocols`. VS Code's inner remote protocol carries the token at message level, but nothing this feature ships may rely on that.
+- The workbench bits cache under `~/.vscode/cli/serve-web/` (per-commit, downloaded from Microsoft's update server on first run — one-time outbound need per CLI version; air-gapped hosts must pre-seed it). `--server-data-dir` controls only the served profile (settings/extensions); we do not pass it, so the profile is shared with any manual `serve-web` use.
+- Windows spawn: `code.cmd` is a batch wrapper (unusable — repo rule is `shell: false` spawns, and the `Microsoft VS Code` path space breaks naive quoting); the Rust `code-tunnel.exe` in the same `bin/` directory implements `serve-web` and spawns cleanly with an args array.
+
+## Decision
+
+### 1. Delivery: spawn the user's CLI, never bundle
+
+`VscodeWebService` (in `src/core/boot/core-services.ts`'s remote-access block, so both hosts get it) detects a usable CLI, spawns `serve-web` **bound to 127.0.0.1** with a per-spawn random `--connection-token`, `--server-base-path /vscode`, `--disable-telemetry`, `--accept-server-license-terms`, and `--port 0` (port parsed from stdout, OpencodeServerManager-style). One instance per host; workspaces are per-tab via `?folder=`. Lazy spawn on first mint; reaped after no live proxied socket for the idle window; killed via `killProcessTree` on toggle-off and shutdown; unexpected death → error status, next mint respawns (TunnelManager-style supervision).
+
+Detection order: **host-anchored override path** → `code-tunnel(.exe)` resolvable from `PATH`'s `code` location or directly → platform well-known install paths → POSIX `code` CLI. A candidate is valid iff `<candidate> serve-web --help` exits 0 (5 s timeout, `windowsHide`); on Windows only `.exe` candidates are auto-probed (running the Electron `Code.exe` by accident must not launch a GUI); an explicit override is trusted as given. The probe result is cached with a typed reason.
+
+`--accept-server-license-terms` only suppresses the interactive prompt: the settings toggle's copy links the VS Code Server license terms, and **the operator flipping the toggle on is the acceptance act**.
+
+### 2. Admission: two independent gates, ours first
+
+The serve-web token cannot be our admission secret (the workbench itself needs it client-side, and the upgrade path ignores it anyway). So:
+
+- **Gate 1 — ours, at the proxy, on every request AND every upgrade.** `ide:mint-entry` (see §4) returns a relative URL `/vscode/enter?it=<one-time token>` (single-use, 60 s TTL, constant-time compare). The entry route exchanges it for an in-memory cookie session: `Set-Cookie: claudeui-ide=<32-byte id>; HttpOnly; SameSite=Strict; Path=/vscode` (+ `Secure` when the request arrived through `tailscale serve`), then 302 → `/vscode/?tkn=<serve-web token>&folder=<path>`. Everything else under `/vscode/*` — HTTP and upgrade alike — requires a valid session cookie or is refused 403 with no detail. Sessions: absolute 24 h cap, bounded count, cleared by toggle-off, by every 4008/4009 sweep, and on server stop; clearing also destroys live proxied sockets.
+- **Gate 2 — serve-web's own token**, per-spawn random, exposed only to browsers that already passed gate 1. It remains what it is upstream: a localhost defense-in-depth layer, not our surface.
+
+The listener's existing pre-route gates (Funnel refusal, Host allowlist) already run before routing and cover `/vscode/*`; the upgrade path replicates them. The route arm sits **above** the static-asset branch (its `endsWith('.js')` catch-all would hijack workbench bundles — the `/remote/auth-info` comment already warns about exactly this). The `wss` moves from unpathed `server:` mode to `noServer: true` with a hand-routed `'upgrade'` handler: control-plane path → the existing verify gates + `handleUpgrade`; `/vscode/*` → the IDE session gate + upstream socket piping; anything else destroyed. The proxy is hand-rolled `http.request` piping (first upstream-forwarding route in the file; no new dependency).
+
+### 3. Origin policy: tailnet + localhost, and a single cheap-to-widen decision point
+
+The IDE's traffic is ordinary browser fetch/WS — it **cannot ride the E2E envelope** (that layer is our own client's JS encrypting frame payloads; a service worker cannot intercept WebSockets, and VS Code owns its SW scope regardless). Serving it over the quick tunnel would hand source and shell traffic to Cloudflare's edge in plaintext — the exact exposure ADR-039 refused; plain-HTTP LAN cannot even boot the workbench (no secure context → no service worker).
+
+So: **`ideOriginPolicy(origin: ConnectionOrigin)`** — one exported function beside the service, whose allowlist is the const `['tailnet-serve', 'localhost']` and whose refusals carry a typed reason. It is consulted at mint (the WS connection's classified origin), at `/vscode/enter`, and in the availability answer. **Widening later (owner has explicitly not ruled tunnel/LAN out) is editing that const plus a ruling** — no plumbing moves. `classifyOrigin` stays the single classifier for both transports.
+
+### 4. Capability, ceremony, decay: the `shell` shape, on its own toggle
+
+- New capability **`ide`** in the union. Like `shell`, it appears in no static grant set: the step-up ceremony's arming site grants it **iff `allow_ide` is on** (each toggle gates its own capability), and it is revoked in place by toggle-off (`applyIdePolicy`, mirroring `applyTerminalPolicy`: revoke grants + clear cookie sessions + destroy proxied sockets + kill the child) — deliberately not a 4009.
+- **`ide:availability`** — capability `config`, query, free, both transports (the terminal rule: "asking *may I?* must be answerable without holding the grant"). Answer: `{ allowed, granted, needsStepUp, originAllowed, probe }` where `probe` carries the typed CLI-detection result.
+- **`ide:mint-entry`** — capability `ide`, `kind: 'command'` (auto-audited), classified act (`classifyDispatch` gains the `ide` capability, fail-closed: unclassified `ide` verb = act), toggle re-checked at dispatch like the `shell` twin. Pinned in `PINNED_CAPABILITIES`.
+- Grant decay per ADR-054 applies to **minting**; a live IDE session is not cut by act-window decay (the read/act split's spirit: decay refuses new acts, does not sever what is attached). Revocation events above are what end it.
+- Typed error: `ide-unavailable` constant + `isIdeUnavailableError` predicate in `remote-protocol.ts`, reason union carried in the availability answer (invoke errors cross the wire as bare strings — the `ENROLL_UNAVAILABLE_ERROR` precedent).
+
+### 5. Persistence + surfaces
+
+- Migration (next `user_version`): `remote_config` gains `allow_ide INTEGER NOT NULL DEFAULT 0` and `ide_cli_path TEXT` — **both in `remote_config`, not settings.json**, and written only through the host-anchored `remote:set-config`. For the toggle that is the v10 rule verbatim; for the CLI path it is load-bearing in a new way: `config:save-settings` is remotely reachable, and a remotely writable path that the host later spawns is remote code execution by config write. Reads fail closed (`readIdePolicy` mirrors `readTerminalPolicy`). Headless administers it the way it administers the terminal toggle.
+- Desktop settings: an "Allow VS Code on the web" toggle + optional CLI-path field under the terminal toggle in `RemoteServerSettings.tsx`; flipping it on runs the probe immediately and surfaces the typed result inline, with the license-terms link in the copy.
+- Web TopBar: toggle off → button hidden (terminal precedent — the owner said no); toggle on → visible; click → step-up if `needsStepUp` (the `__STEP_UP_REQUEST__` flow), then mint, then navigate a **synchronously pre-opened tab** to the entry URL (popup blockers kill `window.open` after an await). Origin refused or probe failed → the button opens an explanatory dialog with the typed reason instead (owner ruling: explain, don't stonewall). Desktop button behavior is unchanged. While serve-web is still starting, the proxy serves its own auto-refresh interstitial, mirroring upstream's own 202 pattern.
+
+## Consequences
+
+- **The remote IDE is shell-equivalent and is treated as such** — its own opt-in toggle, ceremony-gated minting, audited spawn/mint/exit/invalidation, revoke-in-place on toggle-off. What it deliberately does not get is per-command audit of its content: edits and terminal use inside VS Code bypass the command registry entirely. Accepted with eyes open — the terminal-keystroke precedent (§Audit records lifecycle, not content), recorded here because the IDE widens it from keystrokes to a full editing surface.
+- **Any-folder scope.** `?folder=` is not a boundary; an IDE session reaches whatever the host user can. Consistent with security.md §Posture ("any authenticated remote client is already operator-level in effect") — but it also bypasses any redaction the sync layer applies, which is why the capability is separate from `shell` rather than bundled.
+- **The serve-web child is a localhost HTTP server any local process can reach**, and its upgrade path is open at the HTTP layer. Bounded by the 127.0.0.1 bind, the per-spawn random token gating the inner protocol, and the child living only while in use. Accepted; same class as running serve-web by hand.
+- **Server bits come from Microsoft's update channel**, versioned by the user's CLI, cached per-commit. We add no supply-chain surface of our own (nothing vendored, nothing downloaded by us); offline hosts fail with a typed reason.
+- **The `wss` attach changes shape** (`noServer` + hand-routed upgrades) — the one structural edit to existing transport code, needed by any second upgrade path, and it centralizes the pre-upgrade gates rather than weakening them.
+- Tunnel/LAN users see the button explain itself rather than work. Widening later is §3's one-const edit plus an ADR amendment recording the ruling (tunnel would need an explicit accepted-risk banner given ADR-039).
+- Docs amended with the change: remote.md §HTTP routes (+ `/vscode`), security.md (capability list + an §IDE posture section).
+
+## Alternatives considered
+
+- **Bundle/vendor `openvscode-server` or `code-server`** — self-contained and marketplace-degraded (Open VSX), ~200 MB per platform, a standing bump-and-audit burden, and unnecessary once the standalone CLI covers headless. Rejected; the user-installs-it model was the owner's call.
+- **VS Code Remote Tunnels + vscode.dev** — near-zero code, but identity moves to GitHub/Microsoft accounts and transport to Microsoft's relay; unintegrable with passkeys/capabilities/audit. Rejected.
+- **Rely on serve-web's own token as the admission gate** — refuted by probe: the upgrade path ignores it at the HTTP layer, and the workbench needs the token client-side. Hence gate 1.
+- **Monaco-based in-app editor** — the only shape that stays inside the E2E envelope (and the only mobile-usable one), but it is not VS Code; out of scope, revisit only if a mobile quick-edit need materializes.

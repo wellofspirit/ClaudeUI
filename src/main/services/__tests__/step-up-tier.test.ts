@@ -142,6 +142,13 @@ describe('classifyDispatch', () => {
     ['terminal:write', 'shell', 'command', 'shell-act'],
     ['terminal:kill', 'shell', 'command', 'shell-act'],
     ['terminal:kill-by-cwd', 'shell', 'command', 'shell-act'],
+    // The remote IDE (ADR-064). Minting an entry opens an editor + integrated
+    // terminal on the host, so it rides the same act window a `terminal:create`
+    // does. `ide:availability` declares `config`, not `ide`, so it classifies by
+    // `kind` like every other query — which is the whole point of the two-channel
+    // split (asking "may I?" must be free).
+    ['ide:mint-entry', 'ide', 'command', 'shell-act'],
+    ['ide:availability', 'config', 'query', 'read'],
     // The settings area.
     ['authcfg:apply', 'admin', 'command', 'authcfg'],
     ['authcfg:end', 'admin', 'command', 'read'],
@@ -201,6 +208,34 @@ describe('classifyDispatch', () => {
       (c) => !SHELL_READ_VERBS.has(c) && !SHELL_ACT_VERBS.has(c)
     )
     expect(unclassified, `unclassified shell verbs: ${unclassified.join(', ')}`).toEqual([])
+  })
+
+  it('every `ide`-PINNED channel costs the act window (ADR-064)', () => {
+    // The `ide` twin of the pin above, and it has to be phrased differently
+    // because the IDE has no read/act VERB SET to check membership in — the arm
+    // is keyed on the capability, so what this asserts is the OUTCOME: an `ide`
+    // query is a free read BY DESIGN, and everything else costs the act window.
+    // What can never come out of this arm is a plain `mutation` — an `ide`
+    // command that dodged the act window would fail here.
+    const pinnedIde = Object.entries(PINNED_CAPABILITIES)
+      .filter(([, cap]) => cap === 'ide')
+      .map(([channel]) => channel)
+    expect(pinnedIde.length, 'the ide pin table went empty').toBeGreaterThan(0)
+    for (const channel of pinnedIde) {
+      for (const kind of ['command', 'query'] as const) {
+        const cls = classifyDispatch({ channel, capability: 'ide', kind })
+        expect(cls, `${channel} (${kind})`).toBe(kind === 'query' ? 'read' : 'shell-act')
+      }
+    }
+  })
+
+  it('classifies an UNKNOWN `ide` command as ACTING (fail closed)', () => {
+    expect(
+      classifyDispatch({ channel: 'ide:brand-new', capability: 'ide', kind: 'command' })
+    ).toBe('shell-act')
+    expect(
+      classifyDispatch({ channel: 'ide:brand-new', capability: 'ide', kind: undefined })
+    ).toBe('shell-act')
   })
 
   it('the terminal FRAMES mirror their invoke twins', () => {

@@ -1603,6 +1603,23 @@ const S4_VENDOR_CREDENTIAL_CHANNELS = [
  */
 const REMOTE_VIEW_CHANNELS = ['remote:status-view'] as const
 
+/**
+ * The remote IDE (ADR-064) — the SEVENTH deliberate widening, and the second one
+ * (after the terminal) that puts a capability outside every static grant set on
+ * the remote surface.
+ *
+ * TWO channels and they are deliberately asymmetric, which is the whole design:
+ * `ide:availability` declares `config` and is reachable on the base grant set,
+ * because asking "may I?" must be answerable WITHOUT the grant (the
+ * `terminal:availability` rule); `ide:mint-entry` declares `ide`, which no login
+ * confers — the step-up ceremony arms it iff the host-anchored `allow_ide`
+ * toggle is on, and toggle-off revokes it in place.
+ */
+const IDE_CHANNELS = ['ide:availability', 'ide:mint-entry'] as const
+
+/** The half of {@link IDE_CHANNELS} that is gated by the `ide` capability. */
+const IDE_GATED_CHANNELS = ['ide:mint-entry'] as const
+
 /** channel → the capability it must declare (the reachability decision). */
 const PASSKEY_CAPABILITIES: Record<string, 'enroll' | 'admin'> = {
   'webauthn:register-options': 'enroll',
@@ -1646,7 +1663,8 @@ describe('remote surface parity (phase 1 port)', () => {
         ...VOICE_CHANNELS,
         ...S1B_SWEEP_CHANNELS,
         ...S4_VENDOR_CREDENTIAL_CHANNELS,
-        ...REMOTE_VIEW_CHANNELS
+        ...REMOTE_VIEW_CHANNELS,
+        ...IDE_CHANNELS
       ].sort()
     )
   })
@@ -1789,7 +1807,11 @@ describe('remote surface parity (phase 1 port)', () => {
     const expected = [
       ...SHELL_GATED_CHANNELS.map((c) => [c, 'shell'] as const),
       ...PASSKEY_CHANNELS.map((c) => [c, PASSKEY_CAPABILITIES[c]] as const),
-      ...AUTHCFG_CHANNELS.map((c) => [c, 'admin'] as const)
+      ...AUTHCFG_CHANNELS.map((c) => [c, 'admin'] as const),
+      // ADR-064: `ide:mint-entry` only. Its sibling `ide:availability` is
+      // deliberately absent — it declares `config` and IS reachable at connect,
+      // which is what makes the button able to explain itself.
+      ...IDE_GATED_CHANNELS.map((c) => [c, 'ide'] as const)
     ].sort(([a], [b]) => a.localeCompare(b))
     expect(
       [...unreachable].sort(([a], [b]) => a.localeCompare(b)),
@@ -1961,11 +1983,12 @@ describe('remote surface parity (phase 1 port)', () => {
   })
 
   it('exposes no channel whose capability the old denylist stood for, except the sanctioned ones', () => {
-    // THREE sanctioned widenings, each deliberate and each behind a ceremony:
-    // the terminal set (ADR-052 decision 6), the passkey set (decision 1), and
-    // the `authcfg:*` settings namespace (ADR-054 §6, extended by ADR-056 with
-    // the two LAN-channel verbs — which is also when the namespace joined the
-    // pin table, `admin` having shrunk to exactly these two families).
+    // FOUR sanctioned widenings, each deliberate and each behind a ceremony:
+    // the terminal set (ADR-052 decision 6), the passkey set (decision 1), the
+    // `authcfg:*` settings namespace (ADR-054 §6, extended by ADR-056 with the
+    // two LAN-channel verbs — which is also when the namespace joined the pin
+    // table, `admin` having shrunk to exactly these two families), and the IDE
+    // mint (ADR-064).
     // Everything else in the pin table must still be absent from the remote
     // surface — which, for `remote:set-config`, is what makes the `off` master
     // switch structurally unreachable from a remote client now that a passkey
@@ -1974,7 +1997,11 @@ describe('remote surface parity (phase 1 port)', () => {
     const sanctioned = new Set<string>([
       ...SHELL_GATED_CHANNELS,
       ...PASSKEY_CHANNELS,
-      ...AUTHCFG_CHANNELS
+      ...AUTHCFG_CHANNELS,
+      // ADR-064's widening: `ide:mint-entry` is pinned to `ide`, registered for
+      // remote, and reachable only behind the toggle + a step-up. Same shape as
+      // the terminal set above.
+      ...IDE_GATED_CHANNELS
     ])
     for (const channel of Object.keys(PINNED_CAPABILITIES)) {
       if (sanctioned.has(channel)) continue

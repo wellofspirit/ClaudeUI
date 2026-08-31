@@ -11,6 +11,9 @@ const baseConfig: RemoteConfig = {
   tlsMode: 0,
   tlsHttpsPort: 443,
   allowTerminal: false,
+  // ADR-064: the remote-IDE toggle at its closed default.
+  allowIde: false,
+  ideCliPath: null,
   shellGrantIdleMinutes: 10,
   // ADR-052 policy fields: AUTO with nothing enrolled, i.e. the legacy stack.
   authPolicy: null,

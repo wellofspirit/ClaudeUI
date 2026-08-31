@@ -25,6 +25,8 @@ import {
   CommandRegistry,
   AUTH_OFF_GRANTS,
   ALL_GRANTS,
+  ENROLL_ONLY_GRANTS,
+  FULL_REMOTE_GRANTS,
   PINNED_CAPABILITIES,
   hostConnection,
   makeRemoteConnection,
@@ -212,6 +214,35 @@ describe('capability gating', () => {
     for (const capability of Object.values(PINNED_CAPABILITIES)) {
       expect(AUTH_OFF_GRANTS.has(capability)).toBe(false)
     }
+  })
+
+  it('`ide` is in NO static grant set and its mint is pinned (ADR-064)', () => {
+    // The two halves of "the shell shape, on its own toggle". Authenticating —
+    // by any method, including a passkey — must never confer `ide`; only the
+    // step-up ceremony does, and only while the host toggle is on.
+    expect(AUTH_OFF_GRANTS.has('ide')).toBe(false)
+    expect(FULL_REMOTE_GRANTS.has('ide')).toBe(false)
+    expect(ENROLL_ONLY_GRANTS.has('ide')).toBe(false)
+    // The host's own surface holds everything, `ide` included.
+    expect(ALL_GRANTS.has('ide')).toBe(true)
+    // And the classification cannot be relaxed by a later edit.
+    expect(PINNED_CAPABILITIES['ide:mint-entry']).toBe('ide')
+    // Its sibling is deliberately NOT pinned: `config` is grantable, and a pin
+    // whose capability is grantable would break this table's one guarantee.
+    expect(PINNED_CAPABILITIES['ide:availability']).toBeUndefined()
+  })
+
+  it('refuses an `ide` dispatch from a connection that holds no `ide` grant', async () => {
+    registry.register(reg({ channel: 'ide:mint-entry', capability: 'ide', kind: 'command' }))
+    registry.register(reg({ channel: 'ide:availability', capability: 'config', kind: 'query' }))
+    await expect(registry.dispatch('ide:mint-entry', 'remote', [], remoteConn)).rejects.toThrow(
+      /Permission denied/
+    )
+    // …while the honesty query stays answerable on the base grant set, which is
+    // the entire reason it is a separate channel.
+    await expect(
+      registry.dispatch('ide:availability', 'remote', [], remoteConn)
+    ).resolves.toBeDefined()
   })
 })
 

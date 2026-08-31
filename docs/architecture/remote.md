@@ -90,6 +90,20 @@ client never needs.
   busy or absent window cannot break or widen it.
 - `GET /remote/auth-info` — which auth methods this server accepts, plus the salt/KDF
   params a password proof needs. GET-only.
+- `GET /vscode/enter?it=` — spends a one-time IDE entry token (ADR-064) minted by
+  `ide:mint-entry`, sets `claudeui-ide=<32-byte id>; HttpOnly; SameSite=Strict; Path=/vscode`
+  (+ `Secure` behind `tailscale serve`) and 302s into the workbench. Detail-free 403 on
+  anything else; the origin is re-checked here, not only at mint.
+- `/vscode` + `/vscode/*` (all methods **and the WS upgrade**) — reverse-proxied to the
+  host's own `serve-web` child on 127.0.0.1, behind that cookie. The client's `Host` is
+  forwarded **unchanged** (the workbench embeds it as its `remoteAuthority`) and upstream's
+  status/headers pass through verbatim — no `securityHeaders`, no CSP of ours. Our
+  `claudeui-ide` cookie and the hop-by-hop headers are stripped on the way out; a refused
+  upstream connection answers our own auto-refresh 503. The route arm sits **above** the
+  static branch, whose `endsWith('.js')` catch-all would otherwise hijack every workbench
+  bundle. The `wss` is `noServer` since this route exists: one hand-routed `'upgrade'`
+  handler runs the funnel/Host/Origin gates and then routes `/vscode/*` here and everything
+  else into the control plane.
 
 ## What stays through the migration
 
