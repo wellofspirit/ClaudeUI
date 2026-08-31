@@ -163,6 +163,34 @@ interface UpstreamRequest {
   headers: http.IncomingHttpHeaders
 }
 
+/**
+ * The workbench ROOT document, shaped like the real one (VS Code 1.135.0): the
+ * `data-settings` attribute is HTML-entity-encoded JSON, which is what the theme
+ * rewrite has to decode, merge and re-encode without disturbing anything else.
+ */
+const WORKBENCH_ROOT_HTML =
+  '<!DOCTYPE html>\n<html>\n<head>\n' +
+  '<meta id="vscode-workbench-web-configuration" data-settings="' +
+  '{&quot;remoteAuthority&quot;:&quot;host.tail1234.ts.net&quot;,' +
+  '&quot;serverBasePath&quot;:&quot;/vscode&quot;,' +
+  '&quot;callbackRoute&quot;:&quot;/vscode/stable-abc/callback&quot;}">\n' +
+  '</head>\n<body aria-label=""></body>\n</html>\n'
+
+/** Decode the five entities VS Code's attribute encoder emits. */
+function settingsOf(html: string): Record<string, unknown> {
+  const attr = /id="vscode-workbench-web-configuration" data-settings="([^"]*)"/.exec(html)![1]
+  const entities: Record<string, string> = {
+    quot: '"',
+    amp: '&',
+    lt: '<',
+    gt: '>',
+    '#39': "'"
+  }
+  return JSON.parse(
+    attr.replace(/&(quot|amp|lt|gt|#39);/g, (whole, name: string) => entities[name] ?? whole)
+  ) as Record<string, unknown>
+}
+
 describe('remote IDE — /vscode proxy, gate and lifecycle (ADR-064)', () => {
   let upstream: http.Server
   let upstreamWss: WebSocketServer
@@ -174,12 +202,15 @@ describe('remote IDE — /vscode proxy, gate and lifecycle (ADR-064)', () => {
   let server: RemoteServer
   let port: number
   let clients: RemoteClient[]
+  /** What the stub answers on the workbench ROOT; a test may break it. */
+  let rootHtml: string
 
   beforeEach(async () => {
     auditRows.length = 0
     clients = []
     upstreamRequests = []
     upstreamUpgrades = []
+    rootHtml = WORKBENCH_ROOT_HTML
     remoteConfigRef.current = makeConfigRow()
 
     // ── The stub `serve-web` ────────────────────────────────────────────────
@@ -194,7 +225,10 @@ describe('remote IDE — /vscode proxy, gate and lifecycle (ADR-064)', () => {
         // to every response — asserting on it would pass whatever we did.
         'Proxy-Authenticate': 'Basic realm="child"'
       })
-      res.end('<html>workbench</html>')
+      // The ROOT is the only document carrying the construction options, and the
+      // only one the proxy is ever allowed to look inside.
+      const pathname = (req.url ?? '/').split('?')[0]
+      res.end(pathname === '/vscode' || pathname === '/vscode/' ? rootHtml : '<html>workbench</html>')
     })
     upstreamWss = new WebSocketServer({ server: upstream })
     upstreamWss.on('connection', (ws, req) => {
@@ -299,9 +333,12 @@ describe('remote IDE — /vscode proxy, gate and lifecycle (ADR-064)', () => {
   }
 
   /** Full happy path: step up, mint, spend the entry, hand back the cookie. */
-  async function openIdeSession(client: RemoteClient): Promise<string> {
+  async function openIdeSession(client: RemoteClient, themeKind?: unknown): Promise<string> {
     await stepUp(client)
-    const entry = (await client.invoke('ide:mint-entry', { folder: '/home/dev/project' })) as {
+    const entry = (await client.invoke('ide:mint-entry', {
+      folder: '/home/dev/project',
+      ...(themeKind === undefined ? {} : { themeKind })
+    })) as {
       url: string
     }
     const enter = await request(entry.url)
@@ -450,6 +487,81 @@ describe('remote IDE — /vscode proxy, gate and lifecycle (ADR-064)', () => {
     expect(upstreamUpgrades.at(-1)!.url).toBe('/vscode/stable-abc/socket?type=remote')
     expect(upstreamUpgrades.at(-1)!.headers.cookie).toBeUndefined()
     ws.close()
+  })
+
+  // -------------------------------------------------------------------------
+  // The workbench-theme rewrite (ADR-064 polish)
+  // -------------------------------------------------------------------------
+
+  it('themes the workbench ROOT for a session that asked for one', async () => {
+    const client = await connect()
+    const cookie = await openIdeSession(client, 'dark')
+
+    const answer = await request('/vscode/', { Cookie: cookie })
+    expect(answer.status).toBe(200)
+    const cfg = settingsOf(answer.body)
+    expect(cfg.configurationDefaults).toEqual({ 'workbench.colorTheme': 'Default Dark Modern' })
+    expect(cfg.initialColorTheme).toEqual({ themeType: 'dark' })
+    // Everything upstream put there survives — losing `remoteAuthority` would be
+    // a workbench that loads and cannot open its remote channel.
+    expect(cfg.remoteAuthority).toBe('host.tail1234.ts.net')
+    expect(cfg.serverBasePath).toBe('/vscode')
+    expect(cfg.callbackRoute).toBe('/vscode/stable-abc/callback')
+    // The body GREW, so a relayed upstream `Content-Length` would truncate the
+    // page. Ours is the one on the wire, and it is right.
+    expect(Number(answer.headers['content-length'])).toBe(Buffer.byteLength(answer.body, 'utf-8'))
+    expect(answer.body.length).toBeGreaterThan(WORKBENCH_ROOT_HTML.length)
+    // Upstream's own headers still pass through; this is still the same proxy.
+    expect(answer.headers['x-upstream']).toBe('yes')
+    // A body we intend to rewrite must arrive as text, so THIS request (only)
+    // asks upstream for identity.
+    expect(upstreamRequests.at(-1)!.headers['accept-encoding']).toBe('identity')
+  })
+
+  it('themes light the other way', async () => {
+    const client = await connect()
+    const cookie = await openIdeSession(client, 'light')
+    const cfg = settingsOf((await request('/vscode/', { Cookie: cookie })).body)
+    expect(cfg.configurationDefaults).toEqual({ 'workbench.colorTheme': 'Default Light Modern' })
+    expect(cfg.initialColorTheme).toEqual({ themeType: 'light' })
+  })
+
+  it('leaves an UN-themed session byte-identical', async () => {
+    const client = await connect()
+    const cookie = await openIdeSession(client)
+    const answer = await request('/vscode/', { Cookie: cookie })
+    expect(answer.body).toBe(WORKBENCH_ROOT_HTML)
+    // The pre-polish path is untouched down to the negotiation it forwards.
+    expect(upstreamRequests.at(-1)!.headers['accept-encoding']).toBeUndefined()
+  })
+
+  it('normalizes a nonsense themeKind to no theme rather than refusing the mint', async () => {
+    // Cosmetic field, so it never becomes a reason a mint fails: an unknown
+    // value is simply "the client said nothing".
+    const client = await connect()
+    const cookie = await openIdeSession(client, 'monokai')
+    expect((await request('/vscode/', { Cookie: cookie })).body).toBe(WORKBENCH_ROOT_HTML)
+  })
+
+  it('NEVER rewrites an asset, even for a themed session', async () => {
+    const client = await connect()
+    const cookie = await openIdeSession(client, 'dark')
+    const answer = await request('/vscode/stable-abc/static/out/main.js', { Cookie: cookie })
+    expect(answer.body).toBe('<html>workbench</html>')
+    // The workbench bundle is hundreds of assets; the rewrite is one document
+    // per load and must not so much as touch their content negotiation.
+    expect(upstreamRequests.at(-1)!.headers['accept-encoding']).toBeUndefined()
+  })
+
+  it('fails OPEN on markup it cannot parse', async () => {
+    rootHtml = '<html><head><meta id="vscode-workbench-web-configuration" data-settings="{&quot;broken"></head></html>'
+    const client = await connect()
+    const cookie = await openIdeSession(client, 'dark')
+    const answer = await request('/vscode/', { Cookie: cookie })
+    // A themed IDE is polish; an IDE that will not load is a regression.
+    expect(answer.status).toBe(200)
+    expect(answer.body).toBe(rootHtml)
+    expect(Number(answer.headers['content-length'])).toBe(Buffer.byteLength(rootHtml, 'utf-8'))
   })
 
   it('serves a self-refreshing interstitial when the child is not up yet', async () => {

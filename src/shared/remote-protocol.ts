@@ -489,6 +489,17 @@ export interface IdeAvailability {
 }
 
 /**
+ * Which of VS Code's two colour schemes the proxied workbench should open in.
+ *
+ * Deliberately NOT ClaudeUI's `ThemeId`: the client's palette choice is a
+ * three-member union whose third member (`monokai`) is a dark scheme, and the
+ * wire carries the DERIVED answer so a future ClaudeUI theme needs no protocol
+ * change. Cosmetic end to end — an absent or unrecognized value simply leaves
+ * the workbench on its own profile's theme (ADR-064 polish).
+ */
+export type IdeThemeKind = 'dark' | 'light'
+
+/**
  * `ide:mint-entry` — a RELATIVE, single-use URL under `/vscode`.
  *
  * Relative on purpose: the entry token is bound to a cookie the browser will

@@ -2,6 +2,7 @@ import type { ResolvedCapabilities } from './model-capabilities'
 import type {
   IdeAvailability,
   IdeEntry,
+  IdeThemeKind,
   PublicKeyCredentialCreationOptionsJSON,
   RegistrationResponseJSON,
   RemoteKdfParams
@@ -1439,8 +1440,13 @@ interface TerminalAPI {
    * host never has to guess what that origin is, and the cookie the entry sets is
    * scoped to `/vscode` on it. Throws {@link IDE_UNAVAILABLE_ERROR} with a typed
    * reason suffix when the toggle, the origin, the CLI or the spawn refuses.
+   *
+   * `themeKind` is the client's own colour scheme, carried so the workbench
+   * opens matching it rather than in whatever the host profile last stored
+   * (ADR-064 polish). Purely cosmetic: omitted or unrecognized simply leaves the
+   * workbench alone, and it never affects whether an entry is handed out.
    */
-  ideMintEntry(folder: string): Promise<IdeEntry>
+  ideMintEntry(folder: string, themeKind?: IdeThemeKind): Promise<IdeEntry>
   /**
    * Which slots of `cwd`'s terminal POOL currently hold a LIVE pty.
    *

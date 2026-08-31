@@ -101,7 +101,17 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const terminalAvailability = useTerminalAvailability()
   // Null on the desktop by construction — the desktop VSCode button is the
   // `vscode://` deep link and consults no host answer (ADR-064 §5).
-  const ideAvailability = useIdeAvailability()
+  const { availability: ideAvailability, refresh: refreshIdeAvailability } = useIdeAvailability()
+  /**
+   * The colour scheme the proxied workbench should open in (ADR-064 polish).
+   *
+   * ClaudeUI's palette is a three-member union and VS Code's is two, so the
+   * mapping is here rather than on the wire: `monokai` is a dark scheme, and
+   * anything that is not explicitly `light` is dark — a future ClaudeUI theme
+   * lands on the safer side without a protocol change.
+   */
+  const ideThemeKind: 'dark' | 'light' =
+    useSessionStore((s) => s.settings.theme) === 'light' ? 'light' : 'dark'
   const isWeb = window.api?.platform === 'web'
   // Tooltip text only. `window.api.platform` is 'web' for every host OS, so the
   // UA hint is the only signal a browser client has about its keyboard. Both
@@ -338,15 +348,24 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
    *  1. **Pre-flight on the answer already held.** An excluded origin and a
    *     missing CLI are states the mint would only re-discover, and opening a
    *     tab for them would strand a blank one behind the dialog.
-   *  2. **`window.open` runs SYNCHRONOUSLY on the click.** A pop-up blocker
-   *     kills a `window.open` issued after an `await`, so the tab is claimed on
-   *     the click's own user gesture and navigated once the URL lands. This is
-   *     the regression the component test asserts by call order.
-   *  3. **The ceremony is not ours to run.** The web connection's invoke gate
-   *     intercepts `needs-step-up` on ANY invoke, runs the passkey ceremony and
-   *     retries once; a cancelled ceremony rethrows the ORIGINAL refusal, which
-   *     is not an IDE refusal and therefore closes the tab in silence — the
-   *     operator just declined, and has nothing to be told.
+   *  2. **The CEREMONY comes before the tab** (ADR-064 polish). A step-up
+   *     renders in THIS tab, so pre-opening the workbench tab first pushed the
+   *     app into the background and left the operator staring at "Opening VS
+   *     Code…" while the prompt they had to answer was somewhere behind it.
+   *     Running the ceremony first costs the click's user gesture — see (3).
+   *  3. **`window.open` runs SYNCHRONOUSLY on the click** whenever it can. A
+   *     pop-up blocker kills a `window.open` issued after an `await`, so on the
+   *     no-ceremony path (the common one) the tab is still claimed on the
+   *     click's own gesture and navigated once the URL lands — the regression
+   *     the component test asserts by call order. After a ceremony that gesture
+   *     is spent, so a refused tab there is EXPECTED and gets its own copy: the
+   *     grant is now held, and the second click takes the synchronous path.
+   *  4. **The invoke gate is still the backstop.** It intercepts `needs-step-up`
+   *     on ANY invoke and retries once, which covers the rare decay race between
+   *     the availability answer and the mint; a cancelled ceremony there rethrows
+   *     the ORIGINAL refusal, which is not an IDE refusal and therefore closes
+   *     the tab in silence — the operator just declined, and has nothing to be
+   *     told.
    */
   const handleOpenVSCode = useCallback(async (): Promise<void> => {
     if (!cwd) return
@@ -366,11 +385,39 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
       })
       return
     }
+    let ceremonyRan = false
+    if (ideAvailability?.needsStepUp) {
+      // The web bundle installs this before React mounts; the desktop build has
+      // no ceremony at all, hence the optional access rather than an import —
+      // TerminalPanel's exact idiom. A build WITHOUT the global falls through to
+      // the old order, where the invoke gate runs the ceremony instead: degrading
+      // to the previous behaviour beats a button that silently does nothing.
+      const request = (
+        window as unknown as { __STEP_UP_REQUEST__?: (channel: string) => Promise<boolean> }
+      ).__STEP_UP_REQUEST__
+      if (request) {
+        const granted = await request('ide:mint-entry')
+        // Cancelled or failed. Silent, exactly as a cancelled ceremony has always
+        // been: the operator declined, and has nothing to be told.
+        if (!granted) return
+        ceremonyRan = true
+        // The answer this flow was gated on is now stale in the one field that
+        // matters, and nothing else re-queries between here and the mint.
+        await refreshIdeAvailability()
+      }
+    }
     const tab = window.open('', '_blank')
     if (!tab) {
       // NEVER navigate this tab instead: the operator would lose the session
       // they are in to a workbench they did not ask to replace it with.
-      setIdeError('Allow pop-ups for this site to open VS Code.')
+      setIdeError(
+        ceremonyRan
+          ? // Not a pop-up-blocker problem to solve: the ceremony consumed the
+            // click's user gesture. The grant is held now, so the next click
+            // opens the tab synchronously and works.
+            'VS Code unlocked — click the button again to open it.'
+          : 'Allow pop-ups for this site to open VS Code.'
+      )
       return
     }
     try {
@@ -385,7 +432,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
       /* see above */
     }
     try {
-      const { url } = await window.api.ideMintEntry(cwd)
+      const { url } = await window.api.ideMintEntry(cwd, ideThemeKind)
       // RELATIVE by contract — this page's own origin is the one the entry
       // cookie is scoped to, so the host never has to guess what it is.
       tab.location.href = url
@@ -410,7 +457,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
       const detail = await ideFailureDetail(reason)
       setIdeDialog({ reason, ...(detail ? { detail } : {}) })
     }
-  }, [cwd, isWeb, ideAvailability])
+  }, [cwd, isWeb, ideAvailability, ideThemeKind, refreshIdeAvailability])
 
   return (
     <div

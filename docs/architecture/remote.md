@@ -97,7 +97,10 @@ client never needs.
 - `/vscode` + `/vscode/*` (all methods **and the WS upgrade**) — reverse-proxied to the
   host's own `serve-web` child on 127.0.0.1, behind that cookie. The client's `Host` is
   forwarded **unchanged** (the workbench embeds it as its `remoteAuthority`) and upstream's
-  status/headers pass through verbatim — no `securityHeaders`, no CSP of ours. Our
+  status/headers pass through verbatim — no `securityHeaders`, no CSP of ours — with ONE
+  exception: the workbench ROOT document of a session that named a `themeKind` at mint is
+  buffered and its construction-options meta tag rewritten so the IDE opens in the client's
+  colour scheme (ADR-064 amendment; fail-open to the untouched bytes on any surprise). Our
   `claudeui-ide` cookie and the hop-by-hop headers are stripped on the way out; a refused
   upstream connection answers our own auto-refresh 503. The route arm sits **above** the
   static branch, whose `endsWith('.js')` catch-all would otherwise hijack every workbench

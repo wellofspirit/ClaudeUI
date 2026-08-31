@@ -58,6 +58,7 @@ import {
   stripIdeCookie,
   type VscodeWebService
 } from './vscode-web-service'
+import { injectWorkbenchTheme } from './vscode-workbench-theme'
 import type { PtyRemoteSink } from './pty-manager'
 import { textToBase64, base64ToText } from '../../shared/base64-text'
 import { gitWatchRegistry } from './git-watch-registry'
@@ -102,6 +103,7 @@ import {
   type WsTermResize,
   type WsVoiceAudio,
   type TermDetachReason,
+  type IdeThemeKind,
   type RemoteStatus,
   type RemoteAuthInfo,
   type RemoteAuthMethod,
@@ -2578,6 +2580,12 @@ export class RemoteServer {
    *    mid-spawn or freshly dead; `serve-web` itself answers a 202 auto-refresh
    *    page while its bits download, so mirroring that pattern keeps one
    *    behaviour for one situation.
+   *
+   * The ONE exception to "verbatim" is the workbench ROOT document of a session
+   * that told us its colour scheme (ADR-064 polish): that single response is
+   * buffered and its construction-options meta tag rewritten, so the IDE opens
+   * in the client's theme. Everything about that path fails OPEN — see
+   * {@link pipeThemedWorkbench}.
    */
   private proxyIdeHttp(req: http.IncomingMessage, res: http.ServerResponse): void {
     const ide = this.ide
@@ -2611,15 +2619,37 @@ export class RemoteServer {
       return
     }
 
+    // The workbench root is the one document carrying `IWorkbenchConstructionOptions`,
+    // so it is the only response this proxy ever looks INSIDE — and only when the
+    // session named a colour scheme at mint time. Asset requests, other methods
+    // and un-themed sessions never reach the transform at all.
+    const themeKind =
+      req.method === 'GET' && isIdeWorkbenchRoot(req.url)
+        ? ide.sessionTheme(req.headers.cookie)
+        : null
+
+    const upstreamHeaders = ideUpstreamHeaders(req.headers, { keepUpgrade: false })
+    if (themeKind) {
+      // A body we intend to REWRITE has to arrive as text. The browser asks for
+      // gzip/br on every navigation, and a compressed workbench root would miss
+      // the meta tag and silently fail open to an unthemed IDE. Scoped to this
+      // one request — every other byte keeps the client's own negotiation.
+      upstreamHeaders['accept-encoding'] = 'identity'
+    }
+
     const upstream = http.request(
       {
         hostname: '127.0.0.1',
         port,
         method: req.method ?? 'GET',
         path: req.url ?? '/',
-        headers: ideUpstreamHeaders(req.headers, { keepUpgrade: false })
+        headers: upstreamHeaders
       },
       (upstreamRes) => {
+        if (themeKind !== null && isThemableWorkbenchResponse(upstreamRes)) {
+          pipeThemedWorkbench(upstreamRes, res, themeKind)
+          return
+        }
         res.writeHead(upstreamRes.statusCode ?? 502, ideDownstreamHeaders(upstreamRes.headers))
         upstreamRes.pipe(res)
       }
@@ -5275,6 +5305,110 @@ function ideDownstreamHeaders(headers: http.IncomingHttpHeaders): http.OutgoingH
     out[name] = value
   }
   return out
+}
+
+/**
+ * True for the workbench ROOT document only — `/vscode` and `/vscode/`, never
+ * anything beneath them.
+ *
+ * The distinction is the whole safety of the theme rewrite: the root is one
+ * small HTML page per load, while everything under it is the workbench bundle,
+ * hundreds of assets that must stream through byte-identical.
+ */
+function isIdeWorkbenchRoot(rawUrl: string | undefined): boolean {
+  const pathname = (rawUrl ?? '/').split('?')[0].split('#')[0]
+  return pathname === IDE_BASE_PATH || pathname === `${IDE_BASE_PATH}/`
+}
+
+/**
+ * Bound on how much we will hold in memory before giving up on theming.
+ *
+ * The real document is ~4 KB. This exists so a surprise (upstream streaming
+ * something enormous under `text/html`) degrades to a plain pipe rather than to
+ * a main-process memory spike.
+ */
+const MAX_THEMED_BODY_BYTES = 1024 * 1024
+
+/** Is this upstream response one we can rewrite as text at all? */
+function isThemableWorkbenchResponse(upstreamRes: http.IncomingMessage): boolean {
+  if (upstreamRes.statusCode !== 200) return false
+  const type = upstreamRes.headers['content-type']
+  if (typeof type !== 'string' || !type.toLowerCase().includes('text/html')) return false
+  // We asked for `identity`; if upstream compressed anyway, the bytes are not
+  // text and the transform would only fail open one layer later.
+  const encoding = upstreamRes.headers['content-encoding']
+  if (typeof encoding === 'string' && encoding.trim() !== '') {
+    if (encoding.trim().toLowerCase() !== 'identity') return false
+  }
+  return true
+}
+
+/**
+ * Buffer the workbench root, inject the client's colour scheme, and answer with
+ * a corrected `Content-Length` (ADR-064 polish).
+ *
+ * Every branch that is not "the rewrite worked" sends the ORIGINAL bytes:
+ * markup we do not recognize, JSON we cannot parse, a body past the cap, a
+ * throw of any kind. The IDE must load whatever upstream does to its markup; the
+ * theme is decoration on top of that and never a precondition for it.
+ */
+function pipeThemedWorkbench(
+  upstreamRes: http.IncomingMessage,
+  res: http.ServerResponse,
+  themeKind: IdeThemeKind
+): void {
+  const chunks: Buffer[] = []
+  let size = 0
+  let streaming = false
+
+  /** Abandon the rewrite mid-body: flush what we hold, then pipe the rest. */
+  const giveUpAndStream = (): void => {
+    streaming = true
+    res.writeHead(upstreamRes.statusCode ?? 502, ideDownstreamHeaders(upstreamRes.headers))
+    for (const chunk of chunks) res.write(chunk)
+    chunks.length = 0
+    upstreamRes.pipe(res)
+  }
+
+  upstreamRes.on('data', (chunk: Buffer) => {
+    if (streaming) return
+    chunks.push(chunk)
+    size += chunk.length
+    if (size > MAX_THEMED_BODY_BYTES) giveUpAndStream()
+  })
+
+  upstreamRes.on('end', () => {
+    if (streaming) return
+    const original = Buffer.concat(chunks)
+    let body = original
+    try {
+      const themed = injectWorkbenchTheme(original.toString('utf-8'), themeKind)
+      if (themed !== null) body = Buffer.from(themed, 'utf-8')
+    } catch {
+      /* fail open — `body` is still the original */
+    }
+    // Upstream's own `Content-Length` describes bytes we may have just changed
+    // the length of. Dropped case-insensitively and replaced with ours; every
+    // other upstream header still passes through as this proxy promises.
+    const headers = ideDownstreamHeaders(upstreamRes.headers)
+    for (const name of Object.keys(headers)) {
+      if (name.toLowerCase() === 'content-length') delete headers[name]
+    }
+    res.writeHead(upstreamRes.statusCode ?? 502, {
+      ...headers,
+      'Content-Length': body.byteLength
+    })
+    res.end(body)
+  })
+
+  upstreamRes.on('error', () => {
+    if (streaming) return
+    // Mid-body death while we were still buffering: nothing has been written to
+    // the client yet (headers are deferred to 'end' on this path), so destroy
+    // rather than leave the request hanging until the browser's own timeout — a
+    // torn connection retries; a silent stall just sits there.
+    res.destroy()
+  })
 }
 
 /**

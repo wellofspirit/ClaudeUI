@@ -1015,9 +1015,19 @@ describe('TopBar — VSCode button (remote IDE, ADR-064)', () => {
     document: { write: ReturnType<typeof vi.fn>; close: ReturnType<typeof vi.fn> }
   }
   let windowOpen: ReturnType<typeof vi.fn>
+  /**
+   * The web bundle's step-up gate (`src/web/main.tsx` installs it before React
+   * mounts). The IDE flow now drives it DIRECTLY — the ceremony has to finish
+   * before a tab exists — so it is a first-class fixture here rather than
+   * something the invoke gate hides.
+   */
+  let stepUpRequest: ReturnType<typeof vi.fn>
 
   const IDE_CWD = '/d/repo-topbar-ide'
   const originalWindowOpen = window.open
+  const stepUpGlobal = window as unknown as {
+    __STEP_UP_REQUEST__?: (channel: string) => Promise<boolean>
+  }
   /**
    * What the NEXT `ide:availability` call answers. Mutable so a test can change
    * the host's answer between the mount query (which gates the button) and the
@@ -1063,6 +1073,10 @@ describe('TopBar — VSCode button (remote IDE, ADR-064)', () => {
     }
     windowOpen = vi.fn(() => fakeTab)
     window.open = windowOpen as unknown as typeof window.open
+    stepUpRequest = vi.fn(async () => true)
+    stepUpGlobal.__STEP_UP_REQUEST__ = stepUpRequest as unknown as (
+      channel: string
+    ) => Promise<boolean>
     useSessionStore.getState().createNewSession(ROUTE, IDE_CWD)
     useSessionStore.setState({ activeSessionId: ROUTE })
   })
@@ -1071,6 +1085,10 @@ describe('TopBar — VSCode button (remote IDE, ADR-064)', () => {
     cleanup()
     app.teardown()
     window.open = originalWindowOpen
+    delete stepUpGlobal.__STEP_UP_REQUEST__
+    // Directly, not through `updateSettings`: this runs after `app.teardown()`
+    // has dropped `window.api`, and the reset is store hygiene, not a save.
+    useSessionStore.setState((s) => ({ settings: { ...s.settings, theme: 'dark' } }))
     useSessionStore.setState({ activeSessionId: null, sessions: {} })
     mirrorStoreIntoReplica()
   })
@@ -1154,8 +1172,10 @@ describe('TopBar — VSCode button (remote IDE, ADR-064)', () => {
     // `window.open` issued after an await, so the tab must be claimed on the
     // click's own gesture — i.e. BEFORE the mint has resolved.
     expect(windowOpen).toHaveBeenCalledWith('', '_blank')
-    expect(ideMintEntry).toHaveBeenCalledWith(IDE_CWD)
+    expect(ideMintEntry).toHaveBeenCalledWith(IDE_CWD, 'dark')
     expect(fakeTab.location.href).toBe('')
+    // The grant is already held, so nothing ceremonial runs on this path at all.
+    expect(stepUpRequest).not.toHaveBeenCalled()
 
     await act(async () => {
       resolveMint({ url: '/vscode/enter?it=token' })
@@ -1165,6 +1185,132 @@ describe('TopBar — VSCode button (remote IDE, ADR-064)', () => {
     expect(fakeTab.location.href).toBe('/vscode/enter?it=token')
     expect(fakeTab.close).not.toHaveBeenCalled()
     expect(screen.queryByTestId('IdeUnavailableDialog')).toBeNull()
+  })
+
+  // ── The client's colour scheme rides the mint (ADR-064 polish) ─────────────
+
+  it.each([
+    ['light', 'light'],
+    // ClaudeUI's third palette is a DARK scheme; VS Code has two, so the mapping
+    // is the client's to make and only the derived answer goes on the wire.
+    ['monokai', 'dark'],
+    ['dark', 'dark']
+  ] as const)('sends themeKind %s → %s with the mint', async (theme, expected) => {
+    app.api.platform = 'web'
+    useSessionStore.setState((s) => ({ settings: { ...s.settings, theme } }))
+    renderTopBar(false)
+    await waitFor(() => expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument())
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.openVSCode'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(ideMintEntry).toHaveBeenCalledWith(IDE_CWD, expected)
+  })
+
+  // ── Ceremony first, tab second (ADR-064 polish) ───────────────────────────
+
+  it('runs the step-up ceremony BEFORE any tab exists, then opens and mints', async () => {
+    app.api.platform = 'web'
+    answer = ok({ granted: false, needsStepUp: true })
+    let grant: (granted: boolean) => void = () => {}
+    stepUpRequest.mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        grant = resolve
+      })
+    )
+    renderTopBar(false)
+    await waitFor(() => expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument())
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.openVSCode'))
+      await Promise.resolve()
+    })
+
+    // THE regression this test exists for: the ceremony renders in THIS tab, so
+    // a tab opened first would push the app into the background and leave the
+    // operator staring at "Opening VS Code…" with the prompt behind it.
+    expect(stepUpRequest).toHaveBeenCalledWith('ide:mint-entry')
+    expect(windowOpen).not.toHaveBeenCalled()
+    expect(ideMintEntry).not.toHaveBeenCalled()
+
+    // The host's answer after the grant — the flow re-reads it before minting.
+    answer = ok()
+    await act(async () => {
+      grant(true)
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(windowOpen).toHaveBeenCalledWith('', '_blank')
+    expect(ideMintEntry).toHaveBeenCalledWith(IDE_CWD, 'dark')
+    expect(windowOpen.mock.invocationCallOrder[0]).toBeLessThan(
+      ideMintEntry.mock.invocationCallOrder[0]
+    )
+    expect(fakeTab.location.href).toBe('/vscode/enter?it=token')
+    expect(screen.queryByTestId('TopBar.openVSCodeError')).toBeNull()
+  })
+
+  it('a refused ceremony leaves nothing behind: no tab, no mint, no copy', async () => {
+    app.api.platform = 'web'
+    answer = ok({ granted: false, needsStepUp: true })
+    stepUpRequest.mockResolvedValue(false)
+    renderTopBar(false)
+    await waitFor(() => expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument())
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.openVSCode'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    // The operator declined. They know what they did; there is nothing to tell
+    // them, and a dialog explaining the security model would be noise.
+    expect(windowOpen).not.toHaveBeenCalled()
+    expect(ideMintEntry).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('IdeUnavailableDialog')).toBeNull()
+    expect(screen.queryByTestId('TopBar.openVSCodeError')).toBeNull()
+  })
+
+  it('tells the operator to click AGAIN when the post-ceremony tab is refused', async () => {
+    app.api.platform = 'web'
+    answer = ok({ granted: false, needsStepUp: true })
+    windowOpen.mockReturnValue(null)
+    renderTopBar(false)
+    await waitFor(() => expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument())
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.openVSCode'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    // Not a pop-up-blocker problem: the ceremony consumed the click's user
+    // gesture, the grant is now HELD, and the next click takes the synchronous
+    // fast path. Different situation, different words.
+    const line = screen.getByTestId('TopBar.openVSCodeError')
+    expect(line).toHaveTextContent('VS Code unlocked')
+    expect(line).toHaveTextContent('click the button again')
+    expect(line).not.toHaveTextContent('Allow pop-ups')
+    expect(ideMintEntry).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('IdeUnavailableDialog')).toBeNull()
+  })
+
+  it('falls back to the old order in a build with no step-up gate installed', async () => {
+    // The desktop build has no ceremony at all, and a web build that somehow
+    // mounted without the global must still open the IDE — the invoke gate runs
+    // the ceremony in that case, exactly as it did before this change.
+    app.api.platform = 'web'
+    answer = ok({ granted: false, needsStepUp: true })
+    delete stepUpGlobal.__STEP_UP_REQUEST__
+    renderTopBar(false)
+    await waitFor(() => expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument())
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.openVSCode'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(windowOpen).toHaveBeenCalledWith('', '_blank')
+    expect(ideMintEntry).toHaveBeenCalledWith(IDE_CWD, 'dark')
   })
 
   it('closes the pre-opened tab and explains a typed refusal in the dialog', async () => {
@@ -1265,7 +1411,11 @@ describe('TopBar — VSCode button (remote IDE, ADR-064)', () => {
 
     fireEvent.click(screen.getByTestId('TopBar.openVSCode'))
 
-    expect(screen.getByTestId('TopBar.openVSCodeError')).toHaveTextContent('Allow pop-ups')
+    const line = screen.getByTestId('TopBar.openVSCodeError')
+    expect(line).toHaveTextContent('Allow pop-ups')
+    // Distinct from the post-ceremony copy: here the operator has a blocker to
+    // fix, and telling them to click again would just fail again.
+    expect(line).not.toHaveTextContent('click the button again')
     expect(ideMintEntry).not.toHaveBeenCalled()
     expect(screen.queryByTestId('IdeUnavailableDialog')).toBeNull()
   })

@@ -250,7 +250,8 @@ const api: ClaudeAPI = {
   // the renderer can know — and the desktop settings pane is the surface that
   // renders the typed probe result.
   ideAvailability: () => ipcRenderer.invoke('ide:availability'),
-  ideMintEntry: (folder: string) => ipcRenderer.invoke('ide:mint-entry', { folder }),
+  ideMintEntry: (folder: string, themeKind?: 'dark' | 'light') =>
+    ipcRenderer.invoke('ide:mint-entry', { folder, themeKind }),
   // The volatile lane's subscription verb (phase 5 S1). Real IPC on the desktop
   // too: the renderer is client #1 and its deltas ride the same watched lane a
   // phone's do — there is no privileged local path any more.

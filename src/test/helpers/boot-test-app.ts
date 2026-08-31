@@ -187,7 +187,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     terminalPool: (cwd) => ipcRenderer.invoke('terminal:pool', cwd),
     // Remote IDE (ADR-064) — real IPC here exactly as in the preload.
     ideAvailability: () => ipcRenderer.invoke('ide:availability'),
-    ideMintEntry: (folder) => ipcRenderer.invoke('ide:mint-entry', { folder }),
+    ideMintEntry: (folder, themeKind) => ipcRenderer.invoke('ide:mint-entry', { folder, themeKind }),
     watchStreams: (sessionIds, automationIds) =>
       ipcRenderer.invoke('stream:watch', { sessionIds, automationRuns: automationIds }),
     // Mirrors preload: step-up is remote-only, but attach/detach are real on the

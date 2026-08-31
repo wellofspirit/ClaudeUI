@@ -50,7 +50,12 @@ import { killProcessTree } from './process-tree'
 import { safeHexEqual } from './remote-auth'
 import { hostConnection, type CommandConnection } from '../ipc/command-registry'
 import type { ConnectionOrigin } from './remote-server'
-import type { IdeCliProbe, IdeEntry, IdeRuntimeState } from '../../shared/remote-protocol'
+import type {
+  IdeCliProbe,
+  IdeEntry,
+  IdeRuntimeState,
+  IdeThemeKind
+} from '../../shared/remote-protocol'
 
 // ---------------------------------------------------------------------------
 // Policy
@@ -252,6 +257,18 @@ interface PendingEntry {
   token: string
   expiresAt: number
   folder: string
+  /**
+   * The client's colour scheme, carried from the mint to the cookie session so
+   * the proxy can theme the workbench root (ADR-064 polish). Cosmetic: it gates
+   * nothing, and its absence is simply "leave the workbench alone".
+   */
+  themeKind?: IdeThemeKind
+}
+
+/** One live cookie session. `createdAt` is the ABSOLUTE-cap clock, not an idle one. */
+interface IdeSession {
+  createdAt: number
+  themeKind?: IdeThemeKind
 }
 
 export class VscodeWebService {
@@ -281,8 +298,8 @@ export class VscodeWebService {
    */
   private entries: PendingEntry[] = []
 
-  /** Live cookie sessions: `id → createdAt`. In memory, dying with the process. */
-  private sessions = new Map<string, number>()
+  /** Live cookie sessions: `id → session`. In memory, dying with the process. */
+  private sessions = new Map<string, IdeSession>()
 
   /**
    * Sockets the proxy is currently piping. Held so `clearSessions` can actually
@@ -742,11 +759,16 @@ export class VscodeWebService {
    * server never has to guess (or be told) what that origin is, and the cookie
    * the entry sets is scoped to `/vscode` on it.
    */
-  mintEntry(actor: CommandConnection, folder: string): IdeEntry {
+  mintEntry(actor: CommandConnection, folder: string, themeKind?: IdeThemeKind): IdeEntry {
     this.pruneEntries()
     while (this.entries.length >= MAX_PENDING_ENTRIES) this.entries.shift()
     const token = crypto.randomBytes(32).toString('hex')
-    this.entries.push({ token, expiresAt: this.deps.now() + ENTRY_TOKEN_TTL_MS, folder })
+    this.entries.push({
+      token,
+      expiresAt: this.deps.now() + ENTRY_TOKEN_TTL_MS,
+      folder,
+      ...(themeKind ? { themeKind } : {})
+    })
     logger.info(
       'vscode-web',
       `Minted an IDE entry for ${actor.identity.label} (${this.entries.length} pending)`
@@ -784,7 +806,10 @@ export class VscodeWebService {
       if (oldest.done) break
       this.sessions.delete(oldest.value)
     }
-    this.sessions.set(cookieValue, this.deps.now())
+    this.sessions.set(cookieValue, {
+      createdAt: this.deps.now(),
+      ...(entry.themeKind ? { themeKind: entry.themeKind } : {})
+    })
     this.lastActivityAt = this.deps.now()
     const folder = encodeURIComponent(ideFolderParam(entry.folder))
     return {
@@ -803,24 +828,46 @@ export class VscodeWebService {
   // -------------------------------------------------------------------------
 
   /**
-   * Is this request carrying a live session cookie? Constant-time across the set
-   * (no early break) for the same reason the entry lookup is.
+   * The session this request is carrying, or null.
+   *
+   * THE lookup — {@link validateCookie} and {@link sessionTheme} are both this
+   * function, deliberately, so there is one scan and one discipline rather than
+   * a second call site that reaches for `Map.get` on a secret and leaks a
+   * prefix-match timing signal. Constant-time across the set (no early break)
+   * for the same reason the entry lookup is.
    */
-  validateCookie(cookieHeader: string | undefined): boolean {
+  private findSession(cookieHeader: string | undefined): IdeSession | null {
     const value = readCookie(cookieHeader, IDE_COOKIE_NAME)
-    if (!value) return false
+    if (!value) return null
     this.pruneSessions()
-    let ok = false
-    for (const id of this.sessions.keys()) {
-      if (safeHexEqual(id, value)) ok = true
+    let hit: IdeSession | null = null
+    for (const [id, session] of this.sessions) {
+      if (safeHexEqual(id, value)) hit = session
     }
-    return ok
+    return hit
+  }
+
+  /** Is this request carrying a live session cookie? */
+  validateCookie(cookieHeader: string | undefined): boolean {
+    return this.findSession(cookieHeader) !== null
+  }
+
+  /**
+   * The colour scheme this session asked for at mint time, or null.
+   *
+   * Runs on the already-validated path (the proxy checks the cookie first), and
+   * is still the same constant-time scan: a cosmetic lookup is no reason to
+   * introduce the one keyed access this class has spent its whole design
+   * avoiding.
+   */
+  sessionTheme(cookieHeader: string | undefined): IdeThemeKind | null {
+    return this.findSession(cookieHeader)?.themeKind ?? null
   }
 
   private pruneSessions(): void {
     const now = this.deps.now()
-    for (const [id, createdAt] of this.sessions) {
-      if (now - createdAt > SESSION_TTL_MS) this.sessions.delete(id)
+    for (const [id, session] of this.sessions) {
+      if (now - session.createdAt > SESSION_TTL_MS) this.sessions.delete(id)
     }
   }
 

@@ -27,6 +27,7 @@ import {
   readIdePolicy,
   type VscodeWebService
 } from '../services/vscode-web-service'
+import { normalizeIdeThemeKind } from '../services/vscode-workbench-theme'
 import { shellActAllowed } from '../services/step-up-tier'
 import type { CommandConnection, CommandRegistration } from './command-registry'
 import type { ConnectionOrigin } from '../services/remote-server'
@@ -131,7 +132,7 @@ export async function ideAvailability(
 export async function ideMintEntry(
   host: IdeCommandHost,
   connection: CommandConnection,
-  payload: { folder: string }
+  payload: { folder: string; themeKind?: unknown }
 ): Promise<IdeEntry> {
   if (!readIdePolicy().allowIde) throw unavailable('toggle-off')
 
@@ -167,7 +168,10 @@ export async function ideMintEntry(
     // connection that has not earned one.
     throw unavailable('spawn-failed')
   }
-  return service.mintEntry(connection, folder)
+  // Normalized rather than validated: the colour scheme is COSMETIC, so a client
+  // that sends nonsense (or an older client that sends nothing) gets an unthemed
+  // workbench, never a refused mint. Gate arguments throw; decoration does not.
+  return service.mintEntry(connection, folder, normalizeIdeThemeKind(payload?.themeKind))
 }
 
 /**
@@ -217,7 +221,7 @@ export function ideCommands(
       withConnection: true,
       handler: async (
         connection: CommandConnection,
-        payload: { folder: string }
+        payload: { folder: string; themeKind?: unknown }
       ): Promise<IdeEntry> => {
         if (!host) throw unavailable('cli-not-found')
         return ideMintEntry(host, connection, payload)

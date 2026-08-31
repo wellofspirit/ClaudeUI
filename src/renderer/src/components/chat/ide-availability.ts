@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { IdeAvailability } from '../../../../shared/remote-protocol'
 
 /**
@@ -18,12 +18,26 @@ const DENIED: IdeAvailability = {
 }
 
 /**
+ * What {@link useIdeAvailability} hands back.
+ *
+ * `refresh` exists because a granted step-up ceremony changes the answer and
+ * the caller has to see the new one before it acts (ADR-064 polish: the ceremony
+ * now runs BEFORE the tab is opened, so nothing else re-queries in between). It
+ * is a no-op on the desktop, which asks the host nothing at all.
+ */
+export interface IdeAvailabilityHandle {
+  availability: IdeAvailability | null
+  refresh: () => Promise<void>
+}
+
+/**
  * The host's answer to "may this client open VS Code?" — the affordance gate for
  * the TopBar button, and the web half of ADR-064 §5.
  *
  * Mirrors `useTerminalAvailability` including its desktop/web split, with
- * one deliberate difference: **on desktop this returns `null` and issues no
- * IPC**. There is no desktop constant to pin because the desktop button is not
+ * one deliberate difference: **on desktop `availability` is `null` and no IPC is
+ * ever issued** — not by the mount query and not by `refresh`. There is no
+ * desktop constant to pin because the desktop button is not
  * this feature at all — it resolves to the `vscode://` deep link, which needs no
  * host answer — and the desktop settings pane asks `ide:availability` itself,
  * on demand, to render the CLI probe. Pinning a DESKTOP_AVAILABILITY here would
@@ -32,44 +46,56 @@ const DENIED: IdeAvailability = {
  * On web: asked on mount and re-asked on window `focus`, so an owner flipping
  * the desktop-side toggle is picked up when the operator comes back to the tab.
  *
- * Returns `null` on web until the first answer lands — callers gating an
- * affordance on this must render nothing while it is null. An affordance that
+ * `availability` is `null` on web until the first answer lands — callers gating
+ * an affordance on it must render nothing while it is null. An affordance that
  * flashes in and then out is worse than one that appears a beat late.
  *
  * This is the *affordance* gate only, never authorization: `ide:mint-entry`
  * re-checks the toggle, the origin, the CLI and the grant on every call.
  */
-export function useIdeAvailability(): IdeAvailability | null {
+export function useIdeAvailability(): IdeAvailabilityHandle {
   // Optional chaining, like every other platform probe in the renderer: a
   // re-render can be flushed after a test harness (or a teardown path) has
   // dropped `window.api`, and "no api" is never "web".
   const isWeb = window.api?.platform === 'web'
   const [availability, setAvailability] = useState<IdeAvailability | null>(null)
+  // Was the mount `cancelled` flag; a ref instead because `refresh` is EXPOSED
+  // now and an answer can land after the component is gone through a caller's
+  // await, not only through the effect this hook owns.
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
+
+  const refresh = useCallback(async (): Promise<void> => {
+    // The desktop no-IPC contract, kept on the exposed path too: a desktop
+    // caller that refreshes must still not produce a single `ide:availability`.
+    if (!isWeb) return
+    try {
+      const next = await window.api.ideAvailability()
+      if (mounted.current) setAvailability(next)
+    } catch {
+      if (mounted.current) setAvailability(DENIED)
+    }
+  }, [isWeb])
 
   useEffect(() => {
     if (!isWeb) return
-    let cancelled = false
-    const refresh = async (): Promise<void> => {
-      try {
-        const next = await window.api.ideAvailability()
-        if (!cancelled) setAvailability(next)
-      } catch {
-        if (!cancelled) setAvailability(DENIED)
-      }
-    }
     void refresh()
     const onFocus = (): void => {
       void refresh()
     }
     window.addEventListener('focus', onFocus)
     return () => {
-      cancelled = true
       window.removeEventListener('focus', onFocus)
     }
-  }, [isWeb])
+  }, [isWeb, refresh])
 
   // Never leak a web answer to a desktop render: the platform flag can change
   // under a test harness, and the desktop path must see the same `null` it would
   // have seen had the query never run.
-  return isWeb ? availability : null
+  return { availability: isWeb ? availability : null, refresh }
 }

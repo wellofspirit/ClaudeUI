@@ -44,6 +44,12 @@ import {
   stripIdeCookie,
   IDE_ALLOWED_ORIGINS
 } from '../../../core/services/vscode-web-service'
+import {
+  decodeHtmlEntities,
+  encodeHtmlEntities,
+  injectWorkbenchTheme,
+  normalizeIdeThemeKind
+} from '../../../core/services/vscode-workbench-theme'
 import type { ConnectionOrigin } from '../../../core/services/remote-server'
 import { makeRemoteConnection } from '../../../core/ipc/command-registry'
 
@@ -522,6 +528,29 @@ describe('entry tokens and cookie sessions', () => {
     expect(service.validateCookie(`claudeui-ide=${fresh}`)).toBe(false)
   })
 
+  it('carries the themeKind from mint through redeem to the session', () => {
+    const dark = service.redeemEntry(tokenOf(service.mintEntry(CONNECTION, '/a', 'dark').url))!
+    const light = service.redeemEntry(tokenOf(service.mintEntry(CONNECTION, '/b', 'light').url))!
+    const plain = service.redeemEntry(tokenOf(service.mintEntry(CONNECTION, '/c').url))!
+
+    expect(service.sessionTheme(`claudeui-ide=${dark.cookieValue}`)).toBe('dark')
+    expect(service.sessionTheme(`claudeui-ide=${light.cookieValue}`)).toBe('light')
+    // An un-themed session must be indistinguishable from a pre-polish one: the
+    // proxy streams its workbench root through byte-identical.
+    expect(service.sessionTheme(`claudeui-ide=${plain.cookieValue}`)).toBeNull()
+    // And a theme is never an admission signal — a cookie nobody minted has no
+    // theme AND no session.
+    expect(service.sessionTheme('claudeui-ide=deadbeef')).toBeNull()
+    expect(service.sessionTheme(undefined)).toBeNull()
+    expect(service.validateCookie(`claudeui-ide=${dark.cookieValue}`)).toBe(true)
+  })
+
+  it('a cleared session keeps no theme behind it', () => {
+    const dark = service.redeemEntry(tokenOf(service.mintEntry(CONNECTION, '/a', 'dark').url))!
+    service.clearSessions('policy-off')
+    expect(service.sessionTheme(`claudeui-ide=${dark.cookieValue}`)).toBeNull()
+  })
+
   it('clearSessions destroys live sockets AND drops unspent tokens', () => {
     const cookie = service.redeemEntry(tokenOf(service.mintEntry(CONNECTION, '/a').url))!
       .cookieValue
@@ -568,5 +597,125 @@ describe('entry tokens and cookie sessions', () => {
     clock += 29 * 60_000
     service.maybeReap()
     expect(service.runtime()).toBe('running')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The workbench-theme transform (ADR-064 polish)
+//
+// The mechanism itself — whether a real workbench HONOURS these two fields — is
+// proved by the hermetic browser probe, not here. What this file owns is the
+// text surgery: an exact round trip through HTML entities, and a fail-open on
+// every shape we do not recognize.
+// ---------------------------------------------------------------------------
+
+/** The real thing, trimmed: the meta tag exactly as VS Code 1.135.0 emits it. */
+const WORKBENCH_HTML =
+  '<!DOCTYPE html>\n<html>\n<head>\n<meta charset="utf-8" />\n' +
+  '<meta id="vscode-workbench-web-configuration" data-settings="' +
+  '{&quot;remoteAuthority&quot;:&quot;host.tail1234.ts.net&quot;,' +
+  '&quot;serverBasePath&quot;:&quot;/vscode&quot;,' +
+  '&quot;productConfiguration&quot;:{&quot;embedderIdentifier&quot;:&quot;server-distro&quot;},' +
+  '&quot;callbackRoute&quot;:&quot;/vscode/stable-abc/callback&quot;}">\n' +
+  '<meta id="vscode-workbench-auth-session" data-settings="">\n' +
+  '</head>\n<body aria-label=""></body>\n</html>\n'
+
+function settingsOf(html: string): Record<string, unknown> {
+  const attr = /data-settings="([^"]*)"/.exec(html)![1]
+  return JSON.parse(decodeHtmlEntities(attr)) as Record<string, unknown>
+}
+
+describe('injectWorkbenchTheme', () => {
+  it('injects both fields and leaves every original one intact', () => {
+    const themed = injectWorkbenchTheme(WORKBENCH_HTML, 'dark')!
+    expect(themed).not.toBeNull()
+    const cfg = settingsOf(themed)
+    expect(cfg.configurationDefaults).toEqual({ 'workbench.colorTheme': 'Default Dark Modern' })
+    expect(cfg.initialColorTheme).toEqual({ themeType: 'dark' })
+    // The workbench's remote channel is built from `remoteAuthority`; losing it
+    // in the rewrite would be an IDE that loads and cannot connect.
+    expect(cfg.remoteAuthority).toBe('host.tail1234.ts.net')
+    expect(cfg.serverBasePath).toBe('/vscode')
+    expect(cfg.productConfiguration).toEqual({ embedderIdentifier: 'server-distro' })
+    expect(cfg.callbackRoute).toBe('/vscode/stable-abc/callback')
+    // Everything OUTSIDE the one attribute is byte-identical.
+    expect(themed.slice(0, themed.indexOf('data-settings="'))).toBe(
+      WORKBENCH_HTML.slice(0, WORKBENCH_HTML.indexOf('data-settings="'))
+    )
+    expect(themed).toContain('<body aria-label=""></body>')
+    // Re-encoded the way upstream encodes: the attribute holds no raw quote.
+    expect(/data-settings="([^"]*)"/.exec(themed)![1]).not.toContain("'")
+  })
+
+  it('maps light to the light theme', () => {
+    const cfg = settingsOf(injectWorkbenchTheme(WORKBENCH_HTML, 'light')!)
+    expect(cfg.configurationDefaults).toEqual({ 'workbench.colorTheme': 'Default Light Modern' })
+    expect(cfg.initialColorTheme).toEqual({ themeType: 'light' })
+  })
+
+  it('keeps a configurationDefaults upstream already shipped', () => {
+    const withDefaults = WORKBENCH_HTML.replace(
+      '&quot;serverBasePath&quot;',
+      '&quot;configurationDefaults&quot;:{&quot;window.density.editorTabHeight&quot;:&quot;compact&quot;},&quot;serverBasePath&quot;'
+    )
+    const cfg = settingsOf(injectWorkbenchTheme(withDefaults, 'dark')!)
+    expect(cfg.configurationDefaults).toEqual({
+      'window.density.editorTabHeight': 'compact',
+      'workbench.colorTheme': 'Default Dark Modern'
+    })
+  })
+
+  it('fails OPEN on markup it does not recognize', () => {
+    // A themed IDE is polish; an IDE that will not load is a regression — so
+    // every one of these answers null and the proxy streams the original bytes.
+    expect(injectWorkbenchTheme('<html><body>not the workbench</body></html>', 'dark')).toBeNull()
+    expect(injectWorkbenchTheme('', 'dark')).toBeNull()
+    // Present but not JSON.
+    expect(
+      injectWorkbenchTheme(
+        WORKBENCH_HTML.replace(/data-settings="[^"]*"/, 'data-settings="{&quot;broken"'),
+        'dark'
+      )
+    ).toBeNull()
+    // Present, valid JSON, but not an object.
+    expect(
+      injectWorkbenchTheme(
+        WORKBENCH_HTML.replace(/data-settings="[^"]*"/, 'data-settings="[1,2,3]"'),
+        'dark'
+      )
+    ).toBeNull()
+    expect(
+      injectWorkbenchTheme(
+        WORKBENCH_HTML.replace(/data-settings="[^"]*"/, 'data-settings="null"'),
+        'dark'
+      )
+    ).toBeNull()
+  })
+
+  it('round-trips entities in ONE pass, so an encoded ampersand stays data', () => {
+    // `&amp;quot;` is a literal `&quot;` in the JSON's own string data. Two
+    // sequential replaces would decode it twice and invent a quote.
+    const raw = 'a&quot;b&amp;quot;c&lt;d&gt;e&#39;f&amp;g'
+    expect(decodeHtmlEntities(raw)).toBe('a"b&quot;c<d>e\'f&g')
+    expect(decodeHtmlEntities(encodeHtmlEntities('a"b&quot;c<d>e\'f&g'))).toBe(
+      'a"b&quot;c<d>e\'f&g'
+    )
+    // And through the real transform: a folder name full of entities survives.
+    const hostile = WORKBENCH_HTML.replace(
+      '&quot;serverBasePath&quot;',
+      '&quot;odd&quot;:&quot;&amp;quot; &lt;script&gt; &amp;amp;&quot;,&quot;serverBasePath&quot;'
+    )
+    expect(settingsOf(injectWorkbenchTheme(hostile, 'dark')!).odd).toBe('&quot; <script> &amp;')
+  })
+})
+
+describe('normalizeIdeThemeKind', () => {
+  it('accepts exactly the two wire values and treats everything else as absent', () => {
+    expect(normalizeIdeThemeKind('dark')).toBe('dark')
+    expect(normalizeIdeThemeKind('light')).toBe('light')
+    // Cosmetic field: nonsense is "the client said nothing", never a throw.
+    for (const bad of ['monokai', 'DARK', '', 0, 1, null, undefined, {}, ['dark'], true]) {
+      expect(normalizeIdeThemeKind(bad)).toBeUndefined()
+    }
   })
 })

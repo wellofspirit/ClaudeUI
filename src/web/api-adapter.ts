@@ -396,8 +396,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // a host fact. The entry URL comes back RELATIVE and the caller navigates its
     // own origin with it, which is why no host or scheme is ever guessed here.
     ideAvailability: () => connection.invoke('ide:availability') as Promise<IdeAvailability>,
-    ideMintEntry: (folder) =>
-      connection.invoke('ide:mint-entry', { folder }) as Promise<IdeEntry>,
+    ideMintEntry: (folder, themeKind) =>
+      connection.invoke('ide:mint-entry', { folder, themeKind }) as Promise<IdeEntry>,
     watchStreams: async (sessionIds, automationIds) => {
       await connection.invoke('stream:watch', { sessionIds, automationRuns: automationIds })
     },
