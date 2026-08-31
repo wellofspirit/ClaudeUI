@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import type { NetworkInterfaceInfo, RemoteConfig } from '../../../../shared/types'
+import type { IdeAvailability } from '../../../../shared/remote-protocol'
 import { RemotePasskeySettings } from './RemotePasskeySettings'
 import { RemoteStatusCard } from './RemoteStatusCard'
 import { SelectMenu } from '../shared/SelectMenu'
@@ -37,6 +38,12 @@ export function RemoteServerSettings(): React.JSX.Element {
   const [tlsPortError, setTlsPortError] = useState<string | null>(null)
   const [confirmClear, setConfirmClear] = useState(false)
   const [busy, setBusy] = useState(false)
+  /** ADR-064 — the VS Code CLI override, edited locally, committed on blur/Enter. */
+  const [ideCliPathInput, setIdeCliPathInput] = useState('')
+  const [ideCliPathError, setIdeCliPathError] = useState<string | null>(null)
+  /** The last `ide:availability` answer, whose `probe` is the status line. */
+  const [ideProbe, setIdeProbe] = useState<IdeAvailability | null>(null)
+  const [ideProbing, setIdeProbing] = useState(false)
   /** Actionable message from the last failed `detectTailscale()` probe. */
   const [tlsDetection, setTlsDetection] = useState<string | null>(null)
   /** True once detection passed and we're waiting for the confirm click. */
@@ -56,6 +63,7 @@ export function RemoteServerSettings(): React.JSX.Element {
     setConfig(nextConfig)
     setPortInput(nextConfig.port ? String(nextConfig.port) : '')
     setTlsPortInput(String(nextConfig.tlsHttpsPort))
+    setIdeCliPathInput(nextConfig.ideCliPath ?? '')
     setInterfaces(ifaces)
   }, [])
 
@@ -157,6 +165,93 @@ export function RemoteServerSettings(): React.JSX.Element {
     setConfig(await window.api.setRemoteConfig({ allowTerminal: !config.allowTerminal }))
   }, [config])
 
+  /**
+   * Re-ask `ide:availability` for its typed CLI probe (ADR-064 §5).
+   *
+   * The desktop asks this for real rather than pinning a constant the way the
+   * terminal does: whether a usable VS Code CLI exists is a fact about the
+   * MACHINE, not about the transport, and this pane is the surface that renders
+   * it. The service caches the probe, so the cost is one `serve-web --help` exec
+   * per override change rather than per call.
+   *
+   * Never throws: an instance with remote access disabled has no IDE service and
+   * the channel refuses outright, which is simply "no status line" here.
+   */
+  const runIdeProbe = useCallback(async (): Promise<void> => {
+    setIdeProbing(true)
+    try {
+      setIdeProbe(await window.api.ideAvailability())
+    } catch {
+      setIdeProbe(null)
+    } finally {
+      setIdeProbing(false)
+    }
+  }, [])
+
+  /**
+   * Probe on mount when the toggle is already on, and on every toggle-on. Keyed
+   * on the BOOLEAN rather than on `config`, so an unrelated config write (a port
+   * commit, a policy change) does not re-exec the CLI. Toggle-off clears the
+   * line rather than leaving a stale "Using …" under a switch that is now off.
+   */
+  const allowIde = config?.allowIde ?? false
+  useEffect(() => {
+    if (allowIde) {
+      void runIdeProbe()
+    } else {
+      setIdeProbe(null)
+    }
+  }, [allowIde, runIdeProbe])
+
+  /**
+   * The remote-IDE master switch (ADR-064). Same reasoning as the terminal
+   * toggle above and the same storage: `remote_config`, written only through the
+   * host-anchored `remote:set-config`. It gates its OWN capability (`ide`) — the
+   * ceremony arms it only while this is on — and turning it off revokes in place:
+   * grants stripped, cookie sessions cleared, live sockets destroyed, the
+   * `serve-web` child killed.
+   */
+  const handleIdeToggle = useCallback(async (): Promise<void> => {
+    if (!config) return
+    setConfig(await window.api.setRemoteConfig({ allowIde: !config.allowIde }))
+  }, [config])
+
+  /**
+   * Commit the CLI override.
+   *
+   * Empty commits `null` EXPLICITLY (clear ⇒ auto-detect) rather than an empty
+   * string the host would have to normalize. A non-absolute path makes the whole
+   * write throw at the host anchor — the host EXECUTES this value, so a relative
+   * one would resolve against whatever cwd the host process happens to hold —
+   * and that refusal is rendered inline under the field, where the operator can
+   * fix the character they got wrong, rather than as a toast that outlives the
+   * field it is about.
+   *
+   * The no-change guard is what makes "blur AND Enter" one write instead of two:
+   * pressing Enter commits, and the blur that follows finds nothing to do.
+   */
+  const commitIdeCliPath = useCallback(async (): Promise<void> => {
+    if (!config) return
+    const trimmed = ideCliPathInput.trim()
+    if (trimmed === (config.ideCliPath ?? '')) {
+      setIdeCliPathError(null)
+      return
+    }
+    try {
+      const updated = await window.api.setRemoteConfig({
+        ideCliPath: trimmed === '' ? null : trimmed
+      })
+      setIdeCliPathError(null)
+      setConfig(updated)
+      setIdeCliPathInput(updated.ideCliPath ?? '')
+      // The probe is cached per override, so a fresh path is a fresh answer —
+      // and the answer is the whole reason the operator typed one.
+      void runIdeProbe()
+    } catch (err) {
+      setIdeCliPathError(err instanceof Error ? err.message : String(err))
+    }
+  }, [config, ideCliPathInput, runIdeProbe])
+
   const handleClearPassword = useCallback(async (): Promise<void> => {
     if (!confirmClear) {
       setConfirmClear(true)
@@ -196,6 +291,27 @@ export function RemoteServerSettings(): React.JSX.Element {
    */
   const web = isWebClient()
 
+  /**
+   * The one-line CLI-detection status under the IDE toggle, or null when there
+   * is nothing to say (never probed, or the channel refused). Derived here
+   * rather than inline so the discriminated `IdeCliProbe` is narrowed ONCE —
+   * "install VS Code" and "the path you configured is not a VS Code CLI" are
+   * different instructions to a human, and the union exists to keep them apart.
+   */
+  const ideProbeLine: { text: string; detail?: string } | null = ideProbing
+    ? { text: 'Checking…' }
+    : !ideProbe
+      ? null
+      : ideProbe.probe.ok
+        ? { text: `Using ${ideProbe.probe.cliPath}` }
+        : {
+            text:
+              ideProbe.probe.reason === 'cli-not-found'
+                ? 'No VS Code CLI found on this machine — install VS Code or set a path below.'
+                : 'That path did not answer as a VS Code CLI.',
+            ...(ideProbe.probe.detail ? { detail: ideProbe.probe.detail } : {})
+          }
+
   return (
     <div
       data-testid="RemoteServerSettings"
@@ -214,8 +330,9 @@ export function RemoteServerSettings(): React.JSX.Element {
           data-testid="RemoteServerSettings.hostOnlyNote"
           className="text-[10px] text-text-muted/60 leading-snug"
         >
-          Port, network interface, Tailscale HTTPS and the remote-terminal switch are set on the
-          machine itself — the desktop app, or the server’s own configuration on a headless install.
+          Port, network interface, Tailscale HTTPS and the remote-terminal and VS Code switches are
+          set on the machine itself — the desktop app, or the server’s own configuration on a
+          headless install.
         </div>
       )}
 
@@ -396,6 +513,100 @@ export function RemoteServerSettings(): React.JSX.Element {
               no per-command approval. Each client must re-enter the remote password to unlock it,
               and access ends after the terminal re-check window in the security section below. You
               can watch any remote shell live from this app.
+            </div>
+          </div>
+
+          {/* Remote VS Code (ADR-064) — deliberately its own toggle beside the
+              terminal's rather than a rider on it: the IDE is shell-equivalent
+              (editor AND integrated terminal) but it is a separate decision, and
+              each toggle gates its own capability. */}
+          <div>
+            <button
+              data-testid="RemoteServerSettings.allowIde"
+              onClick={() => void handleIdeToggle()}
+              className="w-full flex items-center justify-between py-1 text-[13px] text-text-secondary hover:bg-bg-hover rounded transition-colors cursor-default"
+            >
+              <span>Allow VS Code on the web</span>
+              <span
+                className={`w-7 h-4 rounded-full relative transition-colors ${config.allowIde ? 'bg-accent' : 'bg-text-muted/30'}`}
+              >
+                <span
+                  className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${config.allowIde ? 'left-3.5' : 'left-0.5'}`}
+                />
+              </span>
+            </button>
+            {/* Same voice as the terminal note above: say plainly what this
+                exposes. The license sentence is not boilerplate — flipping this
+                switch IS the acceptance act (ADR-064 §1), so the terms have to
+                be one click away from the switch itself. */}
+            <div
+              data-testid="RemoteServerSettings.allowIdeNote"
+              className="text-[10px] text-text-muted/60 mt-1 leading-snug"
+            >
+              Serves this machine’s own VS Code to a signed-in remote client — a full editor with an
+              integrated terminal, running as you, with no per-command approval, and reaching any
+              file you can. Each client must re-enter the remote password to unlock it, and it is
+              served only on the Tailscale HTTPS address (or on this machine itself) — never over
+              the Cloudflare tunnel or plain LAN. Enabling runs Microsoft’s VS Code Server under the{' '}
+              <a
+                data-testid="RemoteServerSettings.ideLicense"
+                href="https://aka.ms/vscode-server-license"
+                target="_blank"
+                rel="noreferrer"
+                className="text-accent hover:underline"
+              >
+                VS Code Server license terms
+              </a>
+              .
+            </div>
+
+            {ideProbeLine && (
+              <div
+                data-testid="RemoteServerSettings.ideProbe"
+                className="text-[10px] mt-1 leading-snug text-text-muted/60"
+              >
+                {ideProbeLine.text}
+                {ideProbeLine.detail && (
+                  <div
+                    data-testid="RemoteServerSettings.ideProbeDetail"
+                    className="text-text-muted/50 font-mono break-all mt-0.5"
+                  >
+                    {ideProbeLine.detail}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* The CLI override. In `remote_config` with the toggle, NOT in
+                settings.json: `config:save-settings` is remotely reachable, and
+                a remotely writable path this host later SPAWNS is remote code
+                execution by config write. */}
+            <div className="mt-2">
+              <div className="mb-1 text-[12px] text-text-secondary">VS Code CLI path</div>
+              <input
+                data-testid="RemoteServerSettings.ideCliPath"
+                type="text"
+                value={ideCliPathInput}
+                placeholder="Auto-detect"
+                onChange={(e) => setIdeCliPathInput(e.target.value)}
+                onBlur={() => void commitIdeCliPath()}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void commitIdeCliPath()
+                }}
+                className={`${inputClass} w-full`}
+              />
+              {ideCliPathError && (
+                <div
+                  data-testid="RemoteServerSettings.ideCliPathError"
+                  className="text-[10px] text-red-400 mt-0.5"
+                >
+                  {ideCliPathError}
+                </div>
+              )}
+              <div className="text-[10px] text-text-muted/60 mt-1 leading-snug">
+                Absolute path to the VS Code CLI (<code>code-tunnel.exe</code> on Windows, the
+                standalone <code>code</code> CLI elsewhere). Leave empty to detect it.
+              </div>
             </div>
           </div>
         </>

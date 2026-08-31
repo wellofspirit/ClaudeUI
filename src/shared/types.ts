@@ -1876,6 +1876,14 @@ interface RemoteAPI {
     tlsHttpsPort?: number
     allowTerminal?: boolean
     shellGrantIdleMinutes?: number
+    /** ADR-064: the remote-IDE master switch. */
+    allowIde?: boolean
+    /**
+     * ADR-064: the VS Code CLI override. `null` clears it (back to detection).
+     * A non-absolute path REJECTS the whole write — the host spawns whatever
+     * this names, so it is host-anchor only and validated at the anchor.
+     */
+    ideCliPath?: string | null
     /** `null` restores AUTO. Host-anchor only by construction (ADR-054 dec. 6). */
     authPolicy?: RemoteAuthPolicy | null
     passwordBreakGlass?: boolean

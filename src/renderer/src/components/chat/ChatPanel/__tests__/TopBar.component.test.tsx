@@ -21,6 +21,7 @@ import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { TopBar } from '../TopBar'
 import { SidebarContext } from '../../../SessionView'
 import type { GitStatusData, SessionStatus, StatusLineData } from '../../../../../../shared/types'
+import type { IdeAvailability } from '../../../../../../shared/remote-protocol'
 import { resolveClaudeCapabilities } from '../../../../../../shared/model-capabilities'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
@@ -992,5 +993,297 @@ describe('TopBar — terminal toggle button', () => {
     expect(useSessionStore.getState().terminalPanelOpen).toBe(true)
     expect(createTerminal).not.toHaveBeenCalled()
     expect(useSessionStore.getState().terminalGroups[TERM_CWD]?.tabs).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// VSCode button — ADR-064. Desktop is the `vscode://` deep link and must stay
+// byte-identical (it asks the host NOTHING). Web is an entirely different flow:
+// gated on `ide:availability`, it pre-opens a tab SYNCHRONOUSLY (the popup
+// blocker rule), mints a one-time entry and navigates the tab into the proxied
+// workbench — or explains, in a dialog, why it cannot.
+// ---------------------------------------------------------------------------
+
+describe('TopBar — VSCode button (remote IDE, ADR-064)', () => {
+  let app: TestApp
+  let ideAvailability: ReturnType<typeof vi.fn>
+  let ideMintEntry: ReturnType<typeof vi.fn>
+  let openInVSCode: ReturnType<typeof vi.fn>
+  let fakeTab: {
+    location: { href: string }
+    close: ReturnType<typeof vi.fn>
+    document: { write: ReturnType<typeof vi.fn>; close: ReturnType<typeof vi.fn> }
+  }
+  let windowOpen: ReturnType<typeof vi.fn>
+
+  const IDE_CWD = '/d/repo-topbar-ide'
+  const originalWindowOpen = window.open
+  /**
+   * What the NEXT `ide:availability` call answers. Mutable so a test can change
+   * the host's answer between the mount query (which gates the button) and the
+   * post-failure re-query (which sources the dialog's detail).
+   */
+  let answer: IdeAvailability
+
+  function ok(overrides: Partial<IdeAvailability> = {}): IdeAvailability {
+    return {
+      allowed: true,
+      granted: true,
+      needsStepUp: false,
+      originAllowed: true,
+      probe: { ok: true, cliPath: '/opt/vscode/bin/code-tunnel' },
+      runtime: 'running',
+      ...overrides
+    }
+  }
+
+  function renderTopBar(isMobile: boolean) {
+    return render(
+      <SidebarContext.Provider value={{ collapsed: false, toggle: () => {}, isMobile }}>
+        <TopBar hasContent />
+      </SidebarContext.Provider>
+    )
+  }
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    answer = ok()
+    ideAvailability = vi.fn(async () => answer)
+    ideMintEntry = vi.fn(async () => ({ url: '/vscode/enter?it=token' }))
+    openInVSCode = vi.fn(async () => {})
+    Object.assign(window.api as unknown as Record<string, unknown>, {
+      ideAvailability,
+      ideMintEntry,
+      openInVSCode
+    })
+    fakeTab = {
+      location: { href: '' },
+      close: vi.fn(),
+      document: { write: vi.fn(), close: vi.fn() }
+    }
+    windowOpen = vi.fn(() => fakeTab)
+    window.open = windowOpen as unknown as typeof window.open
+    useSessionStore.getState().createNewSession(ROUTE, IDE_CWD)
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    cleanup()
+    app.teardown()
+    window.open = originalWindowOpen
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  // ── Visibility ────────────────────────────────────────────────────────────
+
+  it('renders on desktop without ever asking the host about availability', () => {
+    renderTopBar(false)
+    expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument()
+    expect(ideAvailability).not.toHaveBeenCalled()
+  })
+
+  it('stays hidden on web while the first availability query is still in flight', async () => {
+    app.api.platform = 'web'
+    ideAvailability.mockReturnValue(new Promise(() => {}))
+    renderTopBar(false)
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(ideAvailability).toHaveBeenCalled()
+    expect(screen.queryByTestId('TopBar.openVSCode')).toBeNull()
+  })
+
+  it('stays hidden on web when the owner has the remote IDE turned off', async () => {
+    app.api.platform = 'web'
+    answer = ok({ allowed: false, granted: false })
+    renderTopBar(false)
+
+    await waitFor(() => expect(ideAvailability).toHaveBeenCalled())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.queryByTestId('TopBar.openVSCode')).toBeNull()
+  })
+
+  it('stays hidden on web when the availability query fails outright', async () => {
+    app.api.platform = 'web'
+    ideAvailability.mockRejectedValue(new Error('no handler'))
+    renderTopBar(false)
+
+    await waitFor(() => expect(ideAvailability).toHaveBeenCalled())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.queryByTestId('TopBar.openVSCode')).toBeNull()
+  })
+
+  it('renders on web once the host says the remote IDE is allowed', async () => {
+    app.api.platform = 'web'
+    renderTopBar(false)
+
+    await waitFor(() => expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument())
+  })
+
+  it('is hidden on mobile even when the host allows it (no phone entry point)', async () => {
+    app.api.platform = 'web'
+    renderTopBar(true)
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.queryByTestId('TopBar.openVSCode')).toBeNull()
+  })
+
+  // ── The click flow ────────────────────────────────────────────────────────
+
+  it('opens the tab SYNCHRONOUSLY on the click, then navigates it to the minted entry', async () => {
+    app.api.platform = 'web'
+    let resolveMint: (entry: { url: string }) => void = () => {}
+    ideMintEntry.mockReturnValue(
+      new Promise<{ url: string }>((resolve) => {
+        resolveMint = resolve
+      })
+    )
+    renderTopBar(false)
+    await waitFor(() => expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('TopBar.openVSCode'))
+
+    // THE regression this test exists for: a pop-up blocker kills a
+    // `window.open` issued after an await, so the tab must be claimed on the
+    // click's own gesture — i.e. BEFORE the mint has resolved.
+    expect(windowOpen).toHaveBeenCalledWith('', '_blank')
+    expect(ideMintEntry).toHaveBeenCalledWith(IDE_CWD)
+    expect(fakeTab.location.href).toBe('')
+
+    await act(async () => {
+      resolveMint({ url: '/vscode/enter?it=token' })
+      await Promise.resolve()
+    })
+
+    expect(fakeTab.location.href).toBe('/vscode/enter?it=token')
+    expect(fakeTab.close).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('IdeUnavailableDialog')).toBeNull()
+  })
+
+  it('closes the pre-opened tab and explains a typed refusal in the dialog', async () => {
+    app.api.platform = 'web'
+    renderTopBar(false)
+    await waitFor(() => expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument())
+
+    // The host's answer changes AFTER the mount query: the button was gated on
+    // the healthy answer, the mint refuses, and the dialog's detail comes from a
+    // fresh query rather than from the (deliberately detail-free) refusal.
+    ideMintEntry.mockRejectedValue(new Error('ide-unavailable:cli-not-found'))
+    answer = ok({
+      probe: { ok: false, reason: 'cli-not-found', detail: 'nothing on PATH or in Program Files' }
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.openVSCode'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(fakeTab.close).toHaveBeenCalled()
+    expect(screen.getByTestId('IdeUnavailableDialog')).toHaveAttribute(
+      'data-reason',
+      'cli-not-found'
+    )
+    expect(screen.getByTestId('IdeUnavailableDialog.reason')).toHaveTextContent(
+      'No VS Code CLI was found on the host'
+    )
+    expect(screen.getByTestId('IdeUnavailableDialog.detail')).toHaveTextContent(
+      'nothing on PATH or in Program Files'
+    )
+
+    fireEvent.click(screen.getByTestId('IdeUnavailableDialog.close'))
+    expect(screen.queryByTestId('IdeUnavailableDialog')).toBeNull()
+  })
+
+  it('pre-flights an excluded origin: dialog only, no tab and no mint', async () => {
+    app.api.platform = 'web'
+    answer = ok({ originAllowed: false, originReason: 'origin-not-allowed' })
+    renderTopBar(false)
+    await waitFor(() => expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('TopBar.openVSCode'))
+
+    expect(screen.getByTestId('IdeUnavailableDialog')).toHaveAttribute(
+      'data-reason',
+      'origin-not-allowed'
+    )
+    expect(screen.getByTestId('IdeUnavailableDialog.reason')).toHaveTextContent(
+      'Tailscale HTTPS address'
+    )
+    expect(ideMintEntry).not.toHaveBeenCalled()
+    expect(windowOpen).not.toHaveBeenCalled()
+  })
+
+  it('pre-flights a failed CLI probe the same way, carrying the probe detail', async () => {
+    app.api.platform = 'web'
+    answer = ok({ probe: { ok: false, reason: 'cli-invalid', detail: 'exit code 9009' } })
+    renderTopBar(false)
+    await waitFor(() => expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('TopBar.openVSCode'))
+
+    expect(screen.getByTestId('IdeUnavailableDialog')).toHaveAttribute('data-reason', 'cli-invalid')
+    expect(screen.getByTestId('IdeUnavailableDialog.detail')).toHaveTextContent('exit code 9009')
+    expect(ideMintEntry).not.toHaveBeenCalled()
+    expect(windowOpen).not.toHaveBeenCalled()
+  })
+
+  it('a cancelled step-up ceremony closes the tab in silence — no dialog', async () => {
+    app.api.platform = 'web'
+    renderTopBar(false)
+    await waitFor(() => expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument())
+
+    // What the web invoke gate rethrows when the operator dismisses the passkey
+    // prompt: the ORIGINAL refusal, which is not an IDE refusal.
+    ideMintEntry.mockRejectedValue(new Error('needs-step-up'))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('TopBar.openVSCode'))
+        await new Promise((r) => setTimeout(r, 0))
+      })
+
+      expect(fakeTab.close).toHaveBeenCalled()
+      expect(screen.queryByTestId('IdeUnavailableDialog')).toBeNull()
+      expect(screen.queryByTestId('TopBar.openVSCodeError')).toBeNull()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('surfaces a blocked pop-up inline and never navigates the app tab away', async () => {
+    app.api.platform = 'web'
+    windowOpen.mockReturnValue(null)
+    renderTopBar(false)
+    await waitFor(() => expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('TopBar.openVSCode'))
+
+    expect(screen.getByTestId('TopBar.openVSCodeError')).toHaveTextContent('Allow pop-ups')
+    expect(ideMintEntry).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('IdeUnavailableDialog')).toBeNull()
+  })
+
+  // ── Desktop stays the deep link ───────────────────────────────────────────
+
+  it('desktop click still hands the cwd to the vscode:// deep link and nothing else', async () => {
+    renderTopBar(false)
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.openVSCode'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(openInVSCode).toHaveBeenCalledWith(IDE_CWD)
+    expect(ideAvailability).not.toHaveBeenCalled()
+    expect(ideMintEntry).not.toHaveBeenCalled()
+    expect(windowOpen).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('IdeUnavailableDialog')).toBeNull()
   })
 })

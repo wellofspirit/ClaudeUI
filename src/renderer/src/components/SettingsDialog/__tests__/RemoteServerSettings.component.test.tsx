@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { RemoteServerSettings } from '../RemoteServerSettings'
 import { selectMenuValue, selectMenuOptionLabels } from '../../../../../test/helpers/select-menu'
 import type { RemoteConfig, NetworkInterfaceInfo } from '../../../../../shared/types'
+import type { IdeAvailability } from '../../../../../shared/remote-protocol'
 
 const baseConfig: RemoteConfig = {
   port: 0,
@@ -46,7 +47,22 @@ const api = {
   // `remote:status` and reads the credential list. Its own behavior is covered
   // in RemotePasskeySettings.component.test.tsx; here they only have to exist.
   onRemoteStatus: vi.fn(() => () => {}),
-  webauthnCredentials: vi.fn(async () => [])
+  webauthnCredentials: vi.fn(async () => []),
+  // ADR-064 — the pane asks this itself (rather than pinning a constant the way
+  // the terminal does) because "is there a usable VS Code CLI" is a fact about
+  // the MACHINE, and this pane is the surface that renders it.
+  ideAvailability: vi.fn<() => Promise<IdeAvailability>>()
+}
+
+function ideAnswer(probe: IdeAvailability['probe']): IdeAvailability {
+  return {
+    allowed: true,
+    granted: false,
+    needsStepUp: true,
+    originAllowed: true,
+    probe,
+    runtime: 'stopped'
+  }
 }
 
 describe('RemoteServerSettings', () => {
@@ -54,6 +70,9 @@ describe('RemoteServerSettings', () => {
     vi.clearAllMocks()
     api.getRemoteConfig.mockResolvedValue(baseConfig)
     api.getNetworkInterfaces.mockResolvedValue(interfaces)
+    api.ideAvailability.mockResolvedValue(
+      ideAnswer({ ok: true, cliPath: '/opt/vscode/bin/code-tunnel' })
+    )
     ;(window as unknown as { api: typeof api }).api = api
   })
   afterEach(cleanup)
@@ -278,6 +297,175 @@ describe('RemoteServerSettings', () => {
   // The transport-honesty note (ADR-030 spirit — a password proof is a bearer
   // secret, only as private as the network it crosses) moved with the password
   // fields into the settings editor, and is asserted there.
+
+  // ADR-064 — the remote-IDE toggle, its CLI override, and the live probe line.
+  // All three are host-anchor only, like the terminal switch beside them: the
+  // path is a value this host later SPAWNS, so a remotely writable one would be
+  // remote code execution by config write.
+  describe('remote VS Code (ADR-064)', () => {
+    it('renders the toggle from allowIde and never probes while it is off', async () => {
+      render(<RemoteServerSettings />)
+      const toggle = await screen.findByTestId('RemoteServerSettings.allowIde')
+      expect(toggle).toHaveTextContent('Allow VS Code on the web')
+      // The license link is what makes flipping the switch the acceptance act.
+      expect(screen.getByTestId('RemoteServerSettings.ideLicense')).toHaveAttribute(
+        'href',
+        'https://aka.ms/vscode-server-license'
+      )
+      expect(screen.getByTestId('RemoteServerSettings.allowIdeNote')).toHaveTextContent(
+        /integrated terminal/i
+      )
+      expect(screen.queryByTestId('RemoteServerSettings.ideProbe')).toBeNull()
+      expect(api.ideAvailability).not.toHaveBeenCalled()
+    })
+
+    it('turning it on writes allowIde and renders the CLI the host found', async () => {
+      api.setRemoteConfig.mockResolvedValue({ ...baseConfig, allowIde: true })
+      render(<RemoteServerSettings />)
+      fireEvent.click(await screen.findByTestId('RemoteServerSettings.allowIde'))
+
+      await waitFor(() => expect(api.setRemoteConfig).toHaveBeenCalledWith({ allowIde: true }))
+      await waitFor(() =>
+        expect(screen.getByTestId('RemoteServerSettings.ideProbe')).toHaveTextContent(
+          'Using /opt/vscode/bin/code-tunnel'
+        )
+      )
+    })
+
+    it('says what to do when the host has no VS Code CLI at all', async () => {
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, allowIde: true })
+      api.ideAvailability.mockResolvedValue(
+        ideAnswer({
+          ok: false,
+          reason: 'cli-not-found',
+          detail: 'No VS Code CLI was found on PATH or in the usual install locations.'
+        })
+      )
+      render(<RemoteServerSettings />)
+
+      await waitFor(() =>
+        expect(screen.getByTestId('RemoteServerSettings.ideProbe')).toHaveTextContent(
+          'No VS Code CLI found on this machine — install VS Code or set a path below.'
+        )
+      )
+      expect(screen.getByTestId('RemoteServerSettings.ideProbeDetail')).toHaveTextContent(
+        'usual install locations'
+      )
+    })
+
+    it('distinguishes a configured path that is not a VS Code CLI', async () => {
+      api.getRemoteConfig.mockResolvedValue({
+        ...baseConfig,
+        allowIde: true,
+        ideCliPath: '/opt/nope'
+      })
+      api.ideAvailability.mockResolvedValue(
+        ideAnswer({ ok: false, reason: 'cli-invalid', detail: 'exited with code 9009' })
+      )
+      render(<RemoteServerSettings />)
+
+      const input = await screen.findByTestId('RemoteServerSettings.ideCliPath')
+      expect(input).toHaveValue('/opt/nope')
+      await waitFor(() =>
+        expect(screen.getByTestId('RemoteServerSettings.ideProbe')).toHaveTextContent(
+          'That path did not answer as a VS Code CLI.'
+        )
+      )
+    })
+
+    it('commits the trimmed CLI path on blur and re-probes', async () => {
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, allowIde: true })
+      api.setRemoteConfig.mockResolvedValue({
+        ...baseConfig,
+        allowIde: true,
+        ideCliPath: '/opt/vscode/bin/code-tunnel'
+      })
+      render(<RemoteServerSettings />)
+      const input = await screen.findByTestId('RemoteServerSettings.ideCliPath')
+      await waitFor(() => expect(api.ideAvailability).toHaveBeenCalledTimes(1))
+
+      fireEvent.change(input, { target: { value: '  /opt/vscode/bin/code-tunnel  ' } })
+      fireEvent.blur(input)
+
+      await waitFor(() =>
+        expect(api.setRemoteConfig).toHaveBeenCalledWith({
+          ideCliPath: '/opt/vscode/bin/code-tunnel'
+        })
+      )
+      await waitFor(() => expect(input).toHaveValue('/opt/vscode/bin/code-tunnel'))
+      await waitFor(() => expect(api.ideAvailability).toHaveBeenCalledTimes(2))
+    })
+
+    it('commits Enter as well as blur, and writes exactly once for the pair', async () => {
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, allowIde: true })
+      api.setRemoteConfig.mockResolvedValue({
+        ...baseConfig,
+        allowIde: true,
+        ideCliPath: '/usr/local/bin/code'
+      })
+      render(<RemoteServerSettings />)
+      const input = await screen.findByTestId('RemoteServerSettings.ideCliPath')
+
+      fireEvent.change(input, { target: { value: '/usr/local/bin/code' } })
+      fireEvent.keyDown(input, { key: 'Enter' })
+      await waitFor(() =>
+        expect(api.setRemoteConfig).toHaveBeenCalledWith({ ideCliPath: '/usr/local/bin/code' })
+      )
+      // The blur that follows an Enter finds nothing left to do — one operator
+      // action must not produce two writes (and two audit rows).
+      fireEvent.blur(input)
+      await waitFor(() => expect(api.setRemoteConfig).toHaveBeenCalledTimes(1))
+    })
+
+    it('clears the override with an explicit null rather than an empty string', async () => {
+      api.getRemoteConfig.mockResolvedValue({
+        ...baseConfig,
+        allowIde: true,
+        ideCliPath: '/opt/vscode/bin/code-tunnel'
+      })
+      api.setRemoteConfig.mockResolvedValue({ ...baseConfig, allowIde: true, ideCliPath: null })
+      render(<RemoteServerSettings />)
+      const input = await screen.findByTestId('RemoteServerSettings.ideCliPath')
+
+      fireEvent.change(input, { target: { value: '   ' } })
+      fireEvent.blur(input)
+
+      await waitFor(() => expect(api.setRemoteConfig).toHaveBeenCalledWith({ ideCliPath: null }))
+      await waitFor(() => expect(input).toHaveValue(''))
+    })
+
+    it('surfaces the host-anchor validation refusal inline under the field', async () => {
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, allowIde: true })
+      api.setRemoteConfig.mockRejectedValue(
+        new Error('The VS Code CLI path must be absolute (or empty to auto-detect)')
+      )
+      render(<RemoteServerSettings />)
+      const input = await screen.findByTestId('RemoteServerSettings.ideCliPath')
+
+      fireEvent.change(input, { target: { value: 'bin/code' } })
+      fireEvent.blur(input)
+
+      await screen.findByTestId('RemoteServerSettings.ideCliPathError')
+      expect(screen.getByTestId('RemoteServerSettings.ideCliPathError')).toHaveTextContent(
+        'must be absolute'
+      )
+      // The refused value stays in the field so the operator can fix it.
+      expect(input).toHaveValue('bin/code')
+    })
+
+    it('a refused availability query leaves no status line rather than an error', async () => {
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, allowIde: true })
+      api.ideAvailability.mockRejectedValue(
+        new Error('The remote IDE is unavailable in this instance')
+      )
+      render(<RemoteServerSettings />)
+
+      await waitFor(() => expect(api.ideAvailability).toHaveBeenCalled())
+      await waitFor(() =>
+        expect(screen.queryByTestId('RemoteServerSettings.ideProbe')).not.toBeInTheDocument()
+      )
+    })
+  })
 
   it('clear password requires a confirm click before calling the IPC', async () => {
     api.getRemoteConfig.mockResolvedValue({
