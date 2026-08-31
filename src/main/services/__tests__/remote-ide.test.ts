@@ -204,6 +204,8 @@ describe('remote IDE — /vscode proxy, gate and lifecycle (ADR-064)', () => {
   let clients: RemoteClient[]
   /** What the stub answers on the workbench ROOT; a test may break it. */
   let rootHtml: string
+  /** Status the stub answers the ROOT with — 202 simulates the download interstitial. */
+  let rootStatus: number
 
   beforeEach(async () => {
     auditRows.length = 0
@@ -211,12 +213,17 @@ describe('remote IDE — /vscode proxy, gate and lifecycle (ADR-064)', () => {
     upstreamRequests = []
     upstreamUpgrades = []
     rootHtml = WORKBENCH_ROOT_HTML
+    rootStatus = 200
     remoteConfigRef.current = makeConfigRow()
 
     // ── The stub `serve-web` ────────────────────────────────────────────────
     upstream = http.createServer((req, res) => {
       upstreamRequests.push({ url: req.url ?? '', headers: { ...req.headers } })
-      res.writeHead(200, {
+      // The ROOT is the only document carrying the construction options, and the
+      // only one the proxy is ever allowed to look inside.
+      const pathname = (req.url ?? '/').split('?')[0]
+      const isRoot = pathname === '/vscode' || pathname === '/vscode/'
+      res.writeHead(isRoot ? rootStatus : 200, {
         'Content-Type': 'text/html',
         'X-Upstream': 'yes',
         // A hop-by-hop header, deliberately: it describes the connection to the
@@ -225,10 +232,7 @@ describe('remote IDE — /vscode proxy, gate and lifecycle (ADR-064)', () => {
         // to every response — asserting on it would pass whatever we did.
         'Proxy-Authenticate': 'Basic realm="child"'
       })
-      // The ROOT is the only document carrying the construction options, and the
-      // only one the proxy is ever allowed to look inside.
-      const pathname = (req.url ?? '/').split('?')[0]
-      res.end(pathname === '/vscode' || pathname === '/vscode/' ? rootHtml : '<html>workbench</html>')
+      res.end(isRoot ? rootHtml : '<html>workbench</html>')
     })
     upstreamWss = new WebSocketServer({ server: upstream })
     upstreamWss.on('connection', (ws, req) => {
@@ -573,6 +577,37 @@ describe('remote IDE — /vscode proxy, gate and lifecycle (ADR-064)', () => {
     const answer = await request('/vscode/', { Cookie: cookie })
     expect(answer.status).toBe(503)
     expect(answer.body).toContain('http-equiv="refresh"')
+    // An un-themed session keeps the pre-polish dark page.
+    expect(answer.body).toContain('background:#1e1e1e')
+  })
+
+  it('the interstitial wears the SESSION theme — light client, light page', async () => {
+    const client = await connect()
+    const cookie = await openIdeSession(client, 'light')
+    ide.stopChild('test')
+    const answer = await request('/vscode/', { Cookie: cookie })
+    expect(answer.status).toBe(503)
+    expect(answer.body).toContain('background:#ffffff')
+  })
+
+  it("substitutes upstream's 202 download page for a themed session, verbatim for an un-themed one", async () => {
+    // `serve-web` answers the root with a bare unstyled 202 while its bits
+    // download — a WHITE page. A session that named a scheme gets OUR
+    // interstitial (same self-refresh contract, right colours); a session that
+    // named nothing keeps upstream's page byte-identical, like everything else.
+    const client = await connect()
+    const dark = await openIdeSession(client, 'dark')
+    rootStatus = 202
+    rootHtml = 'The latest version is downloading, please wait…'
+    const themed = await request('/vscode/', { Cookie: dark })
+    expect(themed.status).toBe(503)
+    expect(themed.body).toContain('refreshes itself')
+    expect(themed.body).toContain('background:#1e1e1e')
+
+    const plain = await openIdeSession(client)
+    const passthrough = await request('/vscode/', { Cookie: plain })
+    expect(passthrough.status).toBe(202)
+    expect(passthrough.body).toBe(rootHtml)
   })
 
   // -------------------------------------------------------------------------

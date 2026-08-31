@@ -1207,6 +1207,10 @@ describe('TopBar — VSCode button (remote IDE, ADR-064)', () => {
     })
 
     expect(ideMintEntry).toHaveBeenCalledWith(IDE_CWD, expected)
+    // The pre-opened placeholder wears the same scheme, so a dark client never
+    // sees a white flash while the mint round-trips.
+    const written = String(fakeTab.document.write.mock.calls[0]?.[0] ?? '')
+    expect(written).toContain(expected === 'light' ? 'background:#ffffff' : 'background:#1e1e1e')
   })
 
   // ── Ceremony first, tab second (ADR-064 polish) ───────────────────────────

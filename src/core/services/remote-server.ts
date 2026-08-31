@@ -58,7 +58,7 @@ import {
   stripIdeCookie,
   type VscodeWebService
 } from './vscode-web-service'
-import { injectWorkbenchTheme } from './vscode-workbench-theme'
+import { ideInterstitialStyle, injectWorkbenchTheme } from './vscode-workbench-theme'
 import type { PtyRemoteSink } from './pty-manager'
 import { textToBase64, base64ToText } from '../../shared/base64-text'
 import { gitWatchRegistry } from './git-watch-registry'
@@ -2613,9 +2613,13 @@ export class RemoteServer {
     // The reaper's contract is therefore exactly as designed: no live proxied
     // socket AND no `/vscode` request for the idle window.
     ide.noteRequest()
+    // Read once for the whole request: the workbench-root transform gate below,
+    // and every interstitial this request might be answered with — our own
+    // pages should read as the same surface the client asked for.
+    const sessionTheme = ide.sessionTheme(req.headers.cookie)
     const port = ide.upstreamPort()
     if (port === null) {
-      this.serveIdeStarting(res)
+      this.serveIdeStarting(res, sessionTheme)
       return
     }
 
@@ -2623,10 +2627,7 @@ export class RemoteServer {
     // so it is the only response this proxy ever looks INSIDE — and only when the
     // session named a colour scheme at mint time. Asset requests, other methods
     // and un-themed sessions never reach the transform at all.
-    const themeKind =
-      req.method === 'GET' && isIdeWorkbenchRoot(req.url)
-        ? ide.sessionTheme(req.headers.cookie)
-        : null
+    const themeKind = req.method === 'GET' && isIdeWorkbenchRoot(req.url) ? sessionTheme : null
 
     const upstreamHeaders = ideUpstreamHeaders(req.headers, { keepUpgrade: false })
     if (themeKind) {
@@ -2646,6 +2647,23 @@ export class RemoteServer {
         headers: upstreamHeaders
       },
       (upstreamRes) => {
+        // `serve-web`'s own "downloading, please wait" interstitial is a bare
+        // unstyled (WHITE) page it answers with `202` while the workbench bits
+        // download. For a session that named a colour scheme, substitute OUR
+        // interstitial — same self-refresh contract, right colours — so the
+        // first-ever load doesn't open with a bright flash on a dark client.
+        // Un-themed sessions keep upstream's page verbatim, like everything else.
+        if (
+          themeKind !== null &&
+          upstreamRes.statusCode === 202 &&
+          String(upstreamRes.headers['content-type'] ?? '')
+            .toLowerCase()
+            .includes('text/html')
+        ) {
+          upstreamRes.resume()
+          this.serveIdeStarting(res, themeKind)
+          return
+        }
         if (themeKind !== null && isThemableWorkbenchResponse(upstreamRes)) {
           pipeThemedWorkbench(upstreamRes, res, themeKind)
           return
@@ -2660,7 +2678,7 @@ export class RemoteServer {
         res.destroy()
         return
       }
-      this.serveIdeStarting(res)
+      this.serveIdeStarting(res, sessionTheme)
     })
     req.on('error', () => upstream.destroy())
     req.pipe(upstream)
@@ -2673,12 +2691,12 @@ export class RemoteServer {
    * because the two situations are one situation from the operator's side — the
    * IDE is coming — and a page that reloads itself needs no client code at all.
    */
-  private serveIdeStarting(res: http.ServerResponse): void {
+  private serveIdeStarting(res: http.ServerResponse, themeKind: IdeThemeKind | null = null): void {
     const body =
       '<!doctype html><meta charset="utf-8">' +
       '<meta http-equiv="refresh" content="2">' +
       '<title>Starting VS Code…</title>' +
-      '<body style="font:14px system-ui,sans-serif;padding:2rem;color:#ccc;background:#1e1e1e">' +
+      `<body style="font:14px system-ui,sans-serif;padding:2rem;${ideInterstitialStyle(themeKind)}">` +
       'Starting VS Code on the host — this page refreshes itself.</body>'
     res.writeHead(503, {
       'Content-Type': 'text/html; charset=utf-8',
