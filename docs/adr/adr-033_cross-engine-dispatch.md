@@ -1,6 +1,7 @@
 # ADR-033: Cross-engine agent dispatch — hosted `dispatch_agent` tool, headless subtask-style targets
 
-**Status:** Accepted (M4 claude-target usage-capture cost semantics amended by ADR-034)
+**Status:** Accepted (M4 claude-target usage-capture cost semantics amended by ADR-034; M1's
+synchronous opencode turn transport superseded by the 2026-09-01 amendment below)
 **Date:** 2026-07-14
 **Relates to:** ADR-018/019 (engine model), ADR-020 (config plane), ADR-022/023 (opencode permissions), ADR-026 (workflow), ADR-030 (capability honesty), ADR-032 (non-fatal denials)
 
@@ -48,8 +49,10 @@ De-risked against opencode v1.17.14 source (pinned clone in git-ignored `vendor/
 3. **Targets are headless dispatcher-owned mini-sessions built on engine client primitives, not
    `SessionManager`/`ISession`**: opencode targets use `OpencodeClient` directly (create session →
    patch ruleset → synchronous `POST /session/{id}/message` — the `askSideQuestion`/judge
-   precedent); Claude targets use `sdkQuery()` directly (the `service-session.ts` precedent) with a
-   `canUseTool` callback. No sidebar entry, no renderer session, no rekey/lifecycle coupling.
+   precedent; **superseded by the 2026-09-01 amendment**, which drives the turn with `prompt_async`
+   plus SSE completion); Claude targets use `sdkQuery()` directly (the `service-session.ts`
+   precedent) with a `canUseTool` callback. No sidebar entry, no renderer session, no
+   rekey/lifecycle coupling.
 4. **Recursion is structurally impossible**: dispatcher-created targets never get the collab server
    registered (and opencode targets additionally get a deny rule for `claudeui_dispatch_agent*`).
    No depth counters. The tool is main-agent-only by policy; Claude-native subagents share the
@@ -162,6 +165,69 @@ matter for maintenance are folded in below.)
   tool_use ids (partial/re-emitted messages re-carry the same blocks — a counter overcounts).
   Recording is failure-isolated (`safeRecordUsage`) — a DB error drops the row with a warn, never
   fails the dispatch.
+
+## Amendment (2026-09-01) — the opencode direction moves to `prompt_async` + SSE completion
+
+**M1's synchronous `POST /session/{id}/message` per turn (Decision §3) is superseded for the
+opencode direction.** Claude and pi dispatch are unchanged.
+
+**Root cause.** The endpoint sends no response headers until the whole turn finishes. In Electron
+main, global `fetch` is Node's undici, whose default `headersTimeout`/`bodyTimeout` are 300 s
+(`node_modules/undici/lib/dispatcher/client.js`, same default in Node's bundled copy) — so EVERY
+dispatched turn longer than five minutes died client-side with a bare `TypeError: fetch failed`,
+regardless of `OpencodeClient`'s own 15-minute cap or the dispatcher's 10-minute one. Live evidence:
+three dispatched qwen3.8:27b turns failed at 5m02–03s each. Worse, the error path never called
+`abortSession`, so the SERVER-side turn kept running — and editing files — unsupervised.
+
+**As built.**
+
+- **Turn start** is `POST /session/{id}/prompt_async` → 204 No Content, turn forked server-side
+  (`startImmediately: true`). **Turn end** is the shared per-cwd SSE loop: `session.idle` settles it
+  (the same completion signal the interactive `OpencodeSession` has always used), `session.error`
+  fails it. Neither is routed through `mapEvent` — the dispatcher's tap passes a DUMMY cost ref and
+  start time, so it settles `OpencodeTargetEntry.settled` directly and mirrors event-mapper's
+  message derivation by hand.
+- **Result + usage** come from `GET /session/{id}/message`'s LAST assistant `StoredMessage` — its
+  `{info, parts}` is exactly what the synchronous prompt used to resolve with, so the turn-error /
+  cost-cap / usage-record handling is unchanged. A turn that idles with no assistant message gets
+  the pre-existing empty-text fallback.
+- **Liveness** replaces the fixed absolute cap with a polled watchdog (10 s, on the injectable
+  clock): an INACTIVITY cap (no SSE event at all for that session — default 15 min) plus an ABSOLUTE
+  cap (default 60 min), both configurable per engine as `DispatchConfig.idleTimeoutMs` /
+  `turnTimeoutMs` (ms; `0` disables; edited in MINUTES in Settings › opencode › Cross-engine
+  dispatch). A slow-but-alive local model can now finish; a wedged one still dies. `DISPATCH_TIMEOUT_MS`
+  stays as the claude/pi directions' cap, and the timeout editors are opencode-only in the UI.
+- **Reconnect reconcile.** Completion now rides the event stream, so a `session.idle` published
+  while the subscription was down would strand the turn. Every (re)connect reconciles this
+  connection's busy targets against `GET /session/status`, where **absence means idle** (the fork's
+  `SessionStatus.set` deletes the entry when a session goes idle) — an absent session settles as a
+  normal completion; a present one just bumps the activity clock. Best-effort and fully swallowed: a
+  failed reconcile must never break the loop that also carries approval forwarding.
+  **Ordering is load-bearing**: the reconcile hangs off a new
+  `OpencodeClient.subscribeEvents(signal, onConnected)` callback, which fires once the subscription
+  is provably receiving — reconciling _before_ subscribing would leave its own per-reconnect window
+  (status says busy → turn goes idle → stream only then goes live → that idle is lost by both
+  paths). After connection-live the coverage is exhaustive: an idle before it is visible in the
+  status map, an idle after it arrives as an event, and the overlap where both see it is absorbed by
+  settle-once.
+- **Zombie guard.** A rejected `promptAsync` now also fires a best-effort `abortSession` (the fork
+  starts the turn before responding, and a dropped socket on an accepted request is
+  indistinguishable out here), and every give-up path nulls `settled` so the `session.idle` opencode
+  publishes after our own abort is a no-op.
+- **`disposeFor` settles in-flight turns.** With the synchronous prompt, disposing a dispatching
+  session while a turn ran let the pending POST reject and end the dispatch. `prompt_async` has no
+  such promise, and the disposed entry is out of `this.targets` before its `session.idle` could
+  arrive — so `disposeFor` now settles the turn itself, rather than leaving it to hang on its
+  concurrency slot until the watchdog fires.
+- **Tool results.** The opencode stream tap now forwards `session:subagent-tool-result`
+  (`extractToolResult` + a per-turn `${messageId}:${partId}` dedup Set, since the rebuilt message
+  re-emits on every part update) — parity with the Claude and pi taps, which always did. Without it
+  the dispatch TaskCard's tool chips spun forever. `message.updated` is now routed into the tap too,
+  because `mapEvent` needs it to record the message role on the accumulator.
+- **`OpencodeClient.prompt()` is deliberately retained** for judge / `askSideQuestion` /
+  agent-generate / `runCommand`. Those are short single-shot turns, so the same undici 300 s ceiling
+  is latent there rather than live; it is documented on the client so the next long-turn caller does
+  not rediscover it the hard way.
 
 ## Still-open questions
 

@@ -252,4 +252,13 @@ describe('ClaudeDispatchSection — saves merge, never clobber', () => {
     expect(savedConfigs[1].dispatch?.maxCostUsd).toBeUndefined()
     expect(savedConfigs[1].dispatch?.defaultModel).toBe('sonnet')
   })
+
+  it('does NOT offer the turn/inactivity timeouts — they govern the opencode direction only', async () => {
+    // The Claude direction still runs on the fixed 10-minute DISPATCH_TIMEOUT_MS
+    // (ADR-033's 2026-09-01 amendment); rendering the editors here would write
+    // config nothing reads.
+    await renderLoaded()
+    expect(screen.queryByTestId('ClaudeDispatchSection.turnTimeout')).toBeNull()
+    expect(screen.queryByTestId('ClaudeDispatchSection.idleTimeout')).toBeNull()
+  })
 })

@@ -47,6 +47,7 @@ import type {
   SpawnPiTargetFn
 } from '../../../core/services/cross-engine-dispatcher'
 import type { QueryHandle, ResultMessage, SDKMessage, SdkToolExtra } from '../../../core/sdk'
+import type { StoredMessage } from '../../../core/opencode/protocol/types'
 import type { EngineId } from '../../../shared/types'
 import type { PiRpcClient } from '../../../core/pi/PiRpcClient'
 import type { PiBridgeHost, PiBridgeHandler } from '../../../core/pi/PiBridgeHost'
@@ -57,7 +58,10 @@ import type { PiBridgeHost, PiBridgeHandler } from '../../../core/pi/PiBridgeHos
 
 /** Push-driven fake of the /event SSE stream (UNFILTERED, like the real one). */
 function makeEventStream(): {
-  subscribe: (signal?: AbortSignal) => AsyncGenerator<{
+  subscribe: (
+    signal?: AbortSignal,
+    onConnected?: () => void
+  ) => AsyncGenerator<{
     id: string
     type: string
     properties: Record<string, unknown>
@@ -69,8 +73,13 @@ function makeEventStream(): {
   let seq = 0
 
   async function* subscribe(
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onConnected?: () => void
   ): AsyncGenerator<{ id: string; type: string; properties: Record<string, unknown> }> {
+    // Fired where the real client fires it: the connection is now RECEIVING —
+    // anything queued from here on is delivered as an event. The dispatcher's
+    // reconnect reconcile hangs off this.
+    onConnected?.()
     while (!signal?.aborted) {
       if (queue.length === 0) {
         await new Promise<void>((resolve) => {
@@ -93,11 +102,34 @@ function makeEventStream(): {
   }
 }
 
+/**
+ * One assistant `StoredMessage` as `GET /session/{id}/message` returns it —
+ * where an opencode dispatch turn's text and usage now come from (prompt_async
+ * has no result body; ADR-033's 2026-09-01 amendment). Same `{info, parts}`
+ * shape the old synchronous `prompt()` resolved with, so the fixtures below
+ * read almost identically to the ones they replaced.
+ */
+function storedAssistant(
+  overrides: { text?: string; info?: Record<string, unknown>; id?: string } = {}
+): StoredMessage {
+  return {
+    info: {
+      id: overrides.id ?? 'msg-stored-1',
+      role: 'assistant',
+      ...overrides.info
+    },
+    parts: [{ type: 'text', text: overrides.text ?? 'target answer' }]
+  }
+}
+
 function makeFakeClient(stream = makeEventStream()): {
   client: {
     createSession: ReturnType<typeof vi.fn<DispatchTargetClient['createSession']>>
     patchSession: ReturnType<typeof vi.fn<DispatchTargetClient['patchSession']>>
     prompt: ReturnType<typeof vi.fn<DispatchTargetClient['prompt']>>
+    promptAsync: ReturnType<typeof vi.fn<DispatchTargetClient['promptAsync']>>
+    listMessages: ReturnType<typeof vi.fn<DispatchTargetClient['listMessages']>>
+    getSessionStatus: ReturnType<typeof vi.fn<DispatchTargetClient['getSessionStatus']>>
     deleteSession: ReturnType<typeof vi.fn<DispatchTargetClient['deleteSession']>>
     abortSession: ReturnType<typeof vi.fn<DispatchTargetClient['abortSession']>>
     replyPermission: ReturnType<typeof vi.fn<DispatchTargetClient['replyPermission']>>
@@ -111,13 +143,29 @@ function makeFakeClient(stream = makeEventStream()): {
       id: `oc-sess-${++sessionSeq}`
     })),
     patchSession: vi.fn<DispatchTargetClient['patchSession']>(async () => ({})),
-    prompt: vi.fn<DispatchTargetClient['prompt']>(async () => ({
-      parts: [{ type: 'text', text: 'target answer' }]
-    })),
+    // GUARD: the opencode dispatch direction must never go back to the
+    // synchronous prompt — it dies at undici's 300 s headersTimeout on any long
+    // turn (the bug the prompt_async rework fixed). Loud, not silent.
+    prompt: vi.fn<DispatchTargetClient['prompt']>(async () => {
+      throw new Error('the opencode dispatch direction must not call the synchronous prompt()')
+    }),
+    // Default: the server accepts the prompt AND the turn finishes immediately —
+    // `session.idle` is what actually completes a dispatch turn now, so the fake
+    // publishes it exactly like the real server does. Tests that need a turn to
+    // stay in flight override this with an accept-only implementation
+    // (`async () => {}`) and push `session.idle` by hand when they're ready.
+    promptAsync: vi.fn<DispatchTargetClient['promptAsync']>(async (sessionId) => {
+      stream.push('session.idle', { sessionID: sessionId })
+    }),
+    listMessages: vi.fn<DispatchTargetClient['listMessages']>(async () => [storedAssistant()]),
+    // Empty map = every session idle (absence means idle) — only ever read by
+    // the reconnect reconcile, which no test reaches without opting in.
+    getSessionStatus: vi.fn<DispatchTargetClient['getSessionStatus']>(async () => ({})),
     deleteSession: vi.fn<DispatchTargetClient['deleteSession']>(async () => true),
     abortSession: vi.fn<DispatchTargetClient['abortSession']>(async () => true),
     replyPermission: vi.fn<DispatchTargetClient['replyPermission']>(async () => ({})),
-    subscribeEvents: (signal?: AbortSignal) => stream.subscribe(signal)
+    subscribeEvents: (signal?: AbortSignal, onConnected?: () => void) =>
+      stream.subscribe(signal, onConnected)
   }
   return { client, stream }
 }
@@ -186,6 +234,31 @@ function makeExtra(overrides: Partial<SdkToolExtra> = {}): SdkToolExtra {
 
 const tick = (): Promise<void> => new Promise((r) => setImmediate(r))
 
+/**
+ * Hold an opencode dispatch turn open: the server ACCEPTS the prompt (202) but
+ * the turn never goes idle on its own — the replacement for the old
+ * `client.prompt.mockImplementation(() => new Promise(() => {}))`.
+ */
+function holdTurn(client: FakeClient): void {
+  client.promptAsync.mockImplementation(async () => {})
+}
+
+/** End the in-flight turn on `sessionId` the way opencode does — the SSE
+ *  `session.idle` the dispatcher settles on. */
+function completeTurn(stream: ReturnType<typeof makeEventStream>, sessionId = 'oc-sess-1'): void {
+  stream.push('session.idle', { sessionID: sessionId })
+}
+
+/**
+ * Advance FAKE timers (and flush the microtasks in between) — the watchdog
+ * that governs opencode turn timeouts polls on a 10 s interval against the
+ * injectable clock, so its tests run on fake timers and use this instead of
+ * `tick()` (which is `setImmediate` — itself faked, hence never firing).
+ */
+const advance = async (ms: number): Promise<void> => {
+  await vi.advanceTimersByTimeAsync(ms)
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
 })
@@ -217,13 +290,9 @@ describe('CrossEngineDispatcher — guards', () => {
   })
 
   it('enforces the global concurrency cap', async () => {
-    const { dispatcher, client } = makeHarness({ maxConcurrent: 2 })
-    // Hang the prompt so dispatches stay in flight.
-    let release!: () => void
-    const gate = new Promise<unknown>((r) => {
-      release = (): void => r({ parts: [{ type: 'text', text: 'done' }] })
-    })
-    client.prompt.mockImplementation(() => gate)
+    const { dispatcher, client, stream } = makeHarness({ maxConcurrent: 2 })
+    // Hold both turns open so the dispatches stay in flight.
+    holdTurn(client)
 
     const d1 = dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx())
     const d2 = dispatcher.dispatch({ engine: 'opencode', prompt: 'b' }, makeCtx())
@@ -234,7 +303,8 @@ describe('CrossEngineDispatcher — guards', () => {
     expect(d3.isError).toBe(true)
     expect(d3.text).toContain('concurrent dispatches')
 
-    release()
+    completeTurn(stream, 'oc-sess-1')
+    completeTurn(stream, 'oc-sess-2')
     const [r1, r2] = await Promise.all([d1, d2])
     expect(r1.isError).toBeUndefined()
     expect(r2.isError).toBeUndefined()
@@ -286,7 +356,7 @@ describe('CrossEngineDispatcher — model resolution', () => {
     const { dispatcher, client } = makeHarness()
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
     expect(result.isError).toBeUndefined()
-    expect(client.prompt).toHaveBeenCalledWith(
+    expect(client.promptAsync).toHaveBeenCalledWith(
       expect.any(String),
       expect.objectContaining({ model: { providerID: 'openai', modelID: 'gpt-5' } })
     )
@@ -303,7 +373,7 @@ describe('CrossEngineDispatcher — model resolution', () => {
       makeCtx()
     )
     expect(result.isError).toBeUndefined()
-    expect(client.prompt).toHaveBeenCalledWith(
+    expect(client.promptAsync).toHaveBeenCalledWith(
       expect.any(String),
       expect.objectContaining({ model: { providerID: 'google', modelID: 'gemini-3' } })
     )
@@ -370,7 +440,7 @@ describe('CrossEngineDispatcher — target lifecycle', () => {
     expect(rules).toContainEqual({ permission: 'bash', pattern: '*', action: 'ask' })
 
     // Prompt carried the task text.
-    expect(client.prompt).toHaveBeenCalledWith('oc-sess-1', {
+    expect(client.promptAsync).toHaveBeenCalledWith('oc-sess-1', {
       model: { providerID: 'openai', modelID: 'gpt-5' },
       parts: [{ type: 'text', text: 'review this' }]
     })
@@ -386,8 +456,8 @@ describe('CrossEngineDispatcher — target lifecycle', () => {
     expect(second.isError).toBeUndefined()
     expect(second.sessionId).toBe(first.sessionId)
     expect(client.createSession).toHaveBeenCalledTimes(1)
-    expect(client.prompt).toHaveBeenCalledTimes(2)
-    expect(client.prompt).toHaveBeenLastCalledWith(
+    expect(client.promptAsync).toHaveBeenCalledTimes(2)
+    expect(client.promptAsync).toHaveBeenLastCalledWith(
       first.sessionId,
       expect.objectContaining({ parts: [{ type: 'text', text: 'two' }] })
     )
@@ -401,27 +471,27 @@ describe('CrossEngineDispatcher — target lifecycle', () => {
     )
     expect(result.isError).toBe(true)
     expect(result.text).toContain('no-such-session')
-    expect(client.prompt).not.toHaveBeenCalled()
+    expect(client.promptAsync).not.toHaveBeenCalled()
   })
 
   it('M-XE1 busy target: a concurrent same-session_id opencode dispatch is REJECTED without disturbing the running turn', async () => {
     // Two dispatch_agent calls with the same session_id can run concurrently
     // (their MCP handlers overlap within one assistant turn). opencode drives
     // one turn per session over a single busy-gated SSE tap; letting the second
-    // through would prompt() the same session twice and reset turnToolUseIds /
-    // flip busy off under the still-running first turn. So the second must
-    // busy-reject (M-XE1 — the opencode branch previously lacked this check
-    // that the Claude/pi branches already had).
-    const { dispatcher, client } = makeHarness()
+    // through would promptAsync() the same session twice and reset
+    // turnToolUseIds / flip busy off / null the settle resolver under the
+    // still-running first turn. So the second must busy-reject (M-XE1 — the
+    // opencode branch previously lacked this check that the Claude/pi branches
+    // already had).
+    const { dispatcher, client, stream } = makeHarness()
     const ctx = makeCtx()
 
-    // Turn 1: establish the session_id (default mock prompt resolves at once).
+    // Turn 1: establish the session_id (the default fake idles immediately).
     const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
     expect(first.sessionId).toBe('oc-sess-1')
 
-    // Turn 2: continuation left in flight — its prompt() never resolves.
-    let releaseSecond: (v: unknown) => void = () => {}
-    client.prompt.mockImplementationOnce(() => new Promise((resolve) => (releaseSecond = resolve)))
+    // Turn 2: continuation left in flight — accepted, but never goes idle.
+    client.promptAsync.mockImplementationOnce(async () => {})
     const second = dispatcher.dispatch(
       { engine: 'opencode', prompt: 'two', sessionId: 'oc-sess-1' },
       ctx
@@ -439,10 +509,11 @@ describe('CrossEngineDispatcher — target lifecycle', () => {
 
     // The busy-reject never issued a prompt: still exactly turn1 + turn2 = 2
     // (pre-fix this would be 3 — the guard assertion).
-    expect(client.prompt).toHaveBeenCalledTimes(2)
+    expect(client.promptAsync).toHaveBeenCalledTimes(2)
 
     // The in-flight turn still completes normally with ITS OWN result.
-    releaseSecond({ parts: [{ type: 'text', text: 'second answer' }] })
+    client.listMessages.mockResolvedValueOnce([storedAssistant({ text: 'second answer' })])
+    completeTurn(stream, 'oc-sess-1')
     const secondResult = await second
     expect(secondResult.isError).toBeUndefined()
     expect(secondResult.text).toBe('second answer')
@@ -469,23 +540,30 @@ describe('CrossEngineDispatcher — target lifecycle', () => {
     expect(stolen.isError).toBe(true)
   })
 
-  it('a failed prompt turn → isError text, never a throw', async () => {
+  it('a REJECTED promptAsync → isError text (never a throw) AND the target turn is aborted (zombie guard)', async () => {
     const { dispatcher, client } = makeHarness()
-    client.prompt.mockRejectedValueOnce(new Error('server exploded'))
+    client.promptAsync.mockRejectedValueOnce(new Error('server exploded'))
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
     expect(result.isError).toBe(true)
     expect(result.text).toContain('server exploded')
+    // The fork starts the turn BEFORE responding, so a rejection (or a dropped
+    // socket on an accepted request) can still leave one running — the old
+    // code's missing abort is exactly how a dispatched agent kept editing files
+    // after its caller had given up.
+    expect(client.abortSession).toHaveBeenCalledWith('oc-sess-1')
   })
 
-  it('a RESOLVED turn carrying info.error → isError with the error detail (session stays alive)', async () => {
-    // opencode's POST /session/{id}/message resolves even on turn failure — the
-    // error lives on info.error, not a rejection. This must surface as isError,
-    // NOT the empty-text success fallback.
+  it('a turn that idles carrying info.error on its final assistant message → isError with the error detail (session stays alive)', async () => {
+    // A turn can END (session.idle) having reported a failure — the error lives
+    // on the stored assistant message's info.error. This must surface as
+    // isError, NOT the empty-text success fallback.
     const { dispatcher, client } = makeHarness()
-    client.prompt.mockResolvedValueOnce({
-      info: { error: { name: 'UnknownError', data: { message: 'Key limit exceeded' } } },
-      parts: []
-    })
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({
+        text: '',
+        info: { error: { name: 'UnknownError', data: { message: 'Key limit exceeded' } } }
+      })
+    ])
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
     expect(result.isError).toBe(true)
     expect(result.text).toContain('Key limit exceeded')
@@ -495,32 +573,33 @@ describe('CrossEngineDispatcher — target lifecycle', () => {
 
   it('a turn error with only a name (no data.message) → isError with the name', async () => {
     const { dispatcher, client } = makeHarness()
-    client.prompt.mockResolvedValueOnce({
-      info: { error: { name: 'ContextOverflowError' } },
-      parts: []
-    })
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({ text: '', info: { error: { name: 'ContextOverflowError' } } })
+    ])
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
     expect(result.isError).toBe(true)
     expect(result.text).toContain('ContextOverflowError')
     expect(result.sessionId).toBe('oc-sess-1')
   })
 
-  it('a RESOLVED info.error turn still records its real spend and folds it into the dispatching session', async () => {
-    // opencode resolves the prompt with real info.tokens/info.cost even when the
-    // turn errors (the turn ran, it just failed). Pre-fix that branch recorded
+  it('an info.error turn still records its real spend and folds it into the dispatching session', async () => {
+    // The stored message carries real info.tokens/info.cost even when the turn
+    // errors (the turn ran, it just failed). Pre-fix that branch recorded
     // costUsd/tokens as null and never folded the spend — a target whose turns
     // keep erroring spent real money that escaped the cap AND the dispatching
-    // session's breakdown. Must now capture it (parity with Claude failed-subtype).
+    // session's breakdown. Must capture it (parity with Claude failed-subtype).
     const recordDispatchedUsage = vi.fn()
     const { dispatcher, client } = makeHarness({ recordDispatchedUsage })
-    client.prompt.mockResolvedValueOnce({
-      info: {
-        error: { name: 'UnknownError', data: { message: 'Key limit exceeded' } },
-        tokens: { input: 200, output: 80, reasoning: 20 },
-        cost: 0.05
-      },
-      parts: []
-    })
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({
+        text: '',
+        info: {
+          error: { name: 'UnknownError', data: { message: 'Key limit exceeded' } },
+          tokens: { input: 200, output: 80, reasoning: 20 },
+          cost: 0.05
+        }
+      })
+    ])
     const ctx = makeCtx({ toolUseId: 'toolu_err_cost' })
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
     expect(result.isError).toBe(true)
@@ -581,19 +660,32 @@ describe('CrossEngineDispatcher — target lifecycle', () => {
 // ---------------------------------------------------------------------------
 
 describe('CrossEngineDispatcher — timeout, abort, heartbeat', () => {
-  it('per-dispatch timeout aborts the target session and returns isError', async () => {
-    const { dispatcher, client } = makeHarness({ dispatchTimeoutMs: 30 })
-    client.prompt.mockImplementation(() => new Promise(() => {}))
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('timed out')
-    expect(client.abortSession).toHaveBeenCalledWith('oc-sess-1')
-    expect(dispatcher.inFlightCount).toBe(0)
+  it('the absolute turn timeout aborts the target session and returns isError', async () => {
+    vi.useFakeTimers()
+    try {
+      const { dispatcher, client } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai/gpt-5', turnTimeoutMs: 60_000 }
+        })),
+        heartbeatMs: 30_000
+      })
+      holdTurn(client)
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+      await advance(0)
+      await advance(70_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('timed out')
+      expect(client.abortSession).toHaveBeenCalledWith('oc-sess-1')
+      expect(dispatcher.inFlightCount).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('extra.signal abort cancels the dispatch and aborts the target session', async () => {
     const { dispatcher, client } = makeHarness()
-    client.prompt.mockImplementation(() => new Promise(() => {}))
+    holdTurn(client)
     const abort = new AbortController()
     const pending = dispatcher.dispatch(
       { engine: 'opencode', prompt: 'x' },
@@ -608,27 +700,323 @@ describe('CrossEngineDispatcher — timeout, abort, heartbeat', () => {
   })
 
   it('sends progress heartbeats through extra while the turn is in flight', async () => {
-    const { dispatcher, client } = makeHarness({ heartbeatMs: 20 })
-    let release!: () => void
-    client.prompt.mockImplementation(
-      () =>
-        new Promise((r) => {
-          release = (): void => r({ parts: [{ type: 'text', text: 'ok' }] })
-        })
-    )
+    const { dispatcher, client, stream } = makeHarness({ heartbeatMs: 20 })
+    holdTurn(client)
     const sendNotification = vi.fn<SdkToolExtra['sendNotification']>(async () => {})
     const pending = dispatcher.dispatch(
       { engine: 'opencode', prompt: 'x' },
       makeCtx({ extra: makeExtra({ progressToken: 7, sendNotification }) })
     )
     await new Promise((r) => setTimeout(r, 70))
-    release()
+    completeTurn(stream)
     await pending
 
     expect(sendNotification).toHaveBeenCalled()
     const note = sendNotification.mock.calls[0][0]
     expect(note.method).toBe('notifications/progress')
     expect(note.params?.progressToken).toBe(7)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Turn completion over prompt_async + SSE (ADR-033's 2026-09-01 amendment).
+// The synchronous POST /session/{id}/message died at undici's 300 s
+// headersTimeout on any long turn; the turn is now forked server-side and
+// completed by session.idle / session.error, with text + usage read back from
+// stored history — and governed by an inactivity + absolute watchdog instead of
+// the fixed 10-minute cap.
+// ---------------------------------------------------------------------------
+
+describe('CrossEngineDispatcher — opencode turn completion (prompt_async + SSE)', () => {
+  it('completes on session.idle, taking text + usage from the LAST assistant message in stored history', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const { dispatcher, client, stream } = makeHarness({ recordDispatchedUsage })
+    holdTurn(client)
+    // A multi-turn target's history holds every earlier turn too — only the
+    // trailing assistant message belongs to the turn that just ended.
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({ id: 'msg-old', text: 'a previous turn', info: { cost: 1 } }),
+      { info: { id: 'msg-user', role: 'user' }, parts: [{ type: 'text', text: 'the prompt' }] },
+      storedAssistant({
+        id: 'msg-new',
+        text: 'this turn',
+        info: { tokens: { input: 7, output: 3, reasoning: 1 }, cost: 0.02 }
+      })
+    ])
+    const ctx = makeCtx({ toolUseId: 'toolu_idle_done' })
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await tick()
+    // promptAsync only ACCEPTS the turn — nothing has completed yet.
+    expect(client.promptAsync).toHaveBeenCalledTimes(1)
+    expect(client.listMessages).not.toHaveBeenCalled()
+
+    completeTurn(stream)
+    const result = await pending
+
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('this turn')
+    expect(result.sessionId).toBe('oc-sess-1')
+    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    expect(notif?.[1]).toMatchObject({ status: 'completed' })
+    expect((notif![1] as { usage?: { totalTokens: number } }).usage).toMatchObject({
+      totalTokens: 11,
+      toolUses: 0
+    })
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect.objectContaining({ totalTokens: 11, costUsd: 0.02 })
+    )
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', 'openai/gpt-5', 0.02)
+  })
+
+  it('a turn that idles with NO assistant message returns the empty-text fallback with zero usage', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const { dispatcher, client, stream } = makeHarness({ recordDispatchedUsage })
+    holdTurn(client)
+    client.listMessages.mockResolvedValueOnce([])
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+    await tick()
+    completeTurn(stream)
+    const result = await pending
+
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('(the dispatched agent returned no text)')
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect.objectContaining({ totalTokens: 0, costUsd: 0 })
+    )
+  })
+
+  it('a failing listMessages after idle → isError (no abort: the turn already ended server-side)', async () => {
+    const { dispatcher, client, stream } = makeHarness()
+    holdTurn(client)
+    client.listMessages.mockRejectedValueOnce(new Error('history unavailable'))
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+    await tick()
+    completeTurn(stream)
+    const result = await pending
+
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('history unavailable')
+    expect(client.abortSession).not.toHaveBeenCalled()
+  })
+
+  it('session.error settles the turn as isError with the vendor message + a "failed" notification', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const { dispatcher, client, stream } = makeHarness({ recordDispatchedUsage })
+    holdTurn(client)
+    // A turn that dies mid-flight can still have burned tokens — recovered
+    // best-effort from stored history and folded into the cap/breakdown.
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({ text: 'partial', info: { tokens: { input: 40, output: 10 }, cost: 0.004 } })
+    ])
+    const ctx = makeCtx({ toolUseId: 'toolu_sse_err' })
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await tick()
+
+    stream.push('session.error', {
+      sessionID: 'oc-sess-1',
+      error: { name: 'UnknownError', data: { message: 'model stream aborted' } }
+    })
+    const result = await pending
+
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('model stream aborted')
+    expect(result.sessionId).toBe('oc-sess-1')
+    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    expect(notif?.[1]).toMatchObject({ status: 'failed' })
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect.objectContaining({ totalTokens: 50, costUsd: 0.004 })
+    )
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', 'openai/gpt-5', 0.004)
+  })
+
+  it('a ProviderAuthError session.error surfaces the re-authorize hint (a dispatch has no vendor-auth card)', async () => {
+    const { dispatcher, client, stream } = makeHarness()
+    holdTurn(client)
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+    await tick()
+    stream.push('session.error', {
+      sessionID: 'oc-sess-1',
+      error: { name: 'ProviderAuthError', data: { providerID: 'openai' } }
+    })
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('Authentication required')
+    expect(result.text).toContain('openai')
+  })
+
+  it('a session.error for a FOREIGN session never settles our turn', async () => {
+    const { dispatcher, client, stream } = makeHarness()
+    holdTurn(client)
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+    await tick()
+    stream.push('session.error', {
+      sessionID: 'someone-elses-session',
+      error: { name: 'UnknownError', data: { message: 'not ours' } }
+    })
+    await tick()
+    // Still running: only the real completion ends it.
+    completeTurn(stream)
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('target answer')
+  })
+
+  it('the post-abort session.idle opencode publishes for a STOPPED turn is a no-op (settle-once)', async () => {
+    const { dispatcher, client, stream } = makeHarness()
+    holdTurn(client)
+    const ctx = makeCtx({ toolUseId: 'toolu_settle_once' })
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await tick()
+    expect(dispatcher.stopDispatch('toolu_settle_once')).toBe(true)
+    const result = await pending
+    expect(result.text).toContain('stopped')
+
+    // The server publishes session.idle for the aborted turn too — it must not
+    // resurrect anything (no second notification, no listMessages read).
+    completeTurn(stream)
+    await tick()
+    expect(client.listMessages).not.toHaveBeenCalled()
+    expect(ctx.emit.mock.calls.filter((c) => c[0] === 'session:task-notification')).toHaveLength(1)
+  })
+
+  it('disposeFor settles a turn still in flight instead of leaking its concurrency slot', async () => {
+    // Nothing else can settle it afterwards: the entry leaves this.targets (so
+    // the SSE branches can no longer find it) and prompt_async has no pending
+    // promise to reject the way the synchronous prompt did.
+    const { dispatcher, client } = makeHarness()
+    holdTurn(client)
+    const ctx = makeCtx({ fromRoutingId: 'routing-doomed', toolUseId: 'toolu_disposed' })
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await tick()
+    expect(dispatcher.inFlightCount).toBe(1)
+
+    dispatcher.disposeFor('routing-doomed')
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('disposed')
+    expect(dispatcher.inFlightCount).toBe(0)
+  })
+
+  it('the INACTIVITY watchdog aborts a silent turn (reason-specific text, "failed" notification)', async () => {
+    vi.useFakeTimers()
+    try {
+      const recordDispatchedUsage = vi.fn()
+      const { dispatcher, client } = makeHarness({
+        recordDispatchedUsage,
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai/gpt-5', idleTimeoutMs: 120_000, turnTimeoutMs: 0 }
+        })),
+        heartbeatMs: 30_000
+      })
+      holdTurn(client)
+      const ctx = makeCtx({ toolUseId: 'toolu_idle_watchdog' })
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+      await advance(0)
+      await advance(130_000)
+      const result = await pending
+
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('no activity')
+      expect(result.text).toContain('2 minutes')
+      expect(client.abortSession).toHaveBeenCalledWith('oc-sess-1')
+      const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+      expect(notif?.[1]).toMatchObject({ status: 'failed' })
+      expect(recordDispatchedUsage).toHaveBeenCalledWith(
+        expect.objectContaining({ totalTokens: null, costUsd: null })
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('SSE activity RESETS the inactivity clock — a busy-but-slow turn is never aborted', async () => {
+    vi.useFakeTimers()
+    try {
+      const { dispatcher, client, stream } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai/gpt-5', idleTimeoutMs: 120_000, turnTimeoutMs: 0 }
+        })),
+        heartbeatMs: 30_000
+      })
+      holdTurn(client)
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+      await advance(0)
+
+      // Four 90 s stretches — 6 minutes total, well past the 2-minute idle cap
+      // — each punctuated by one event, so the clock keeps resetting.
+      for (let i = 0; i < 4; i++) {
+        await advance(90_000)
+        stream.push('message.part.updated', {
+          sessionID: 'oc-sess-1',
+          part: { id: `part-${i}`, messageID: 'msg-1', type: 'text', text: `chunk ${i}` }
+        })
+        await advance(0)
+      }
+      expect(client.abortSession).not.toHaveBeenCalled()
+
+      completeTurn(stream)
+      await advance(0)
+      const result = await pending
+      expect(result.isError).toBeUndefined()
+      expect(result.text).toBe('target answer')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('the ABSOLUTE cap still fires on a continuously-active turn (the runaway backstop)', async () => {
+    vi.useFakeTimers()
+    try {
+      const { dispatcher, client, stream } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai/gpt-5', turnTimeoutMs: 120_000, idleTimeoutMs: 0 }
+        })),
+        heartbeatMs: 30_000
+      })
+      holdTurn(client)
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+      await advance(0)
+
+      for (let i = 0; i < 3; i++) {
+        await advance(50_000)
+        stream.push('message.part.updated', {
+          sessionID: 'oc-sess-1',
+          part: { id: `part-${i}`, messageID: 'msg-1', type: 'text', text: `chunk ${i}` }
+        })
+        await advance(0)
+      }
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('timed out')
+      expect(result.text).toContain('2 minutes')
+      expect(client.abortSession).toHaveBeenCalledWith('oc-sess-1')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('both caps disabled (0) → a silent turn runs indefinitely and still completes on session.idle', async () => {
+    vi.useFakeTimers()
+    try {
+      const { dispatcher, client, stream } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai/gpt-5', turnTimeoutMs: 0, idleTimeoutMs: 0 }
+        })),
+        heartbeatMs: 30_000
+      })
+      holdTurn(client)
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+      await advance(0)
+      await advance(6 * 60 * 60_000) // six silent hours
+      expect(client.abortSession).not.toHaveBeenCalled()
+
+      completeTurn(stream)
+      await advance(0)
+      const result = await pending
+      expect(result.isError).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -767,21 +1155,35 @@ describe('CrossEngineDispatcher — approval forwarding', () => {
   })
 
   it('dispatch timeout dismisses forwarded approvals still pending for that target', async () => {
-    const { dispatcher, client, stream } = makeHarness({ dispatchTimeoutMs: 60 })
-    client.prompt.mockImplementation(() => new Promise(() => {}))
-    const ctx = makeCtx()
-    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    await tick()
+    vi.useFakeTimers()
+    try {
+      // The ABSOLUTE cap, deliberately: a pending approval keeps arriving as
+      // SSE traffic for the session, which bumps the inactivity clock — a turn
+      // parked on a human is not an inactive turn.
+      const { dispatcher, client, stream } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai/gpt-5', turnTimeoutMs: 60_000 }
+        })),
+        heartbeatMs: 30_000
+      })
+      holdTurn(client)
+      const ctx = makeCtx()
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+      await advance(0)
 
-    stream.push('permission.asked', { id: 'perm-1', sessionID: 'oc-sess-1', permission: 'bash' })
-    await tick()
-    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
+      stream.push('permission.asked', { id: 'perm-1', sessionID: 'oc-sess-1', permission: 'bash' })
+      await advance(0)
+      expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
 
-    const result = await pending
-    expect(result.isError).toBe(true)
-    const dismiss = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-dismiss')
-    expect(dismiss).toBeTruthy()
-    expect(dismiss![1]).toEqual({ requestId: `${XENG_REQUEST_PREFIX}perm-1` })
+      await advance(70_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      const dismiss = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-dismiss')
+      expect(dismiss).toBeTruthy()
+      expect(dismiss![1]).toEqual({ requestId: `${XENG_REQUEST_PREFIX}perm-1` })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('disposeFor dismisses pending forwarded approvals of the disposed session', async () => {
@@ -797,55 +1199,76 @@ describe('CrossEngineDispatcher — approval forwarding', () => {
 })
 
 describe('CrossEngineDispatcher — SSE reconnect (opencode approval forwarding)', () => {
-  it('re-subscribes after a dropped SSE stream so a later permission.asked still forwards', async () => {
-    // opencode holds /event open for the server's lifetime; a non-aborted end is
-    // a transport DROP. Pre-fix runSseLoop exited on that first end and never
-    // re-subscribed, silently killing approval forwarding for the whole cwd. The
-    // stream below DROPS on its first subscription, then behaves normally — a
-    // permission.asked that arrives after the reconnect must still forward.
+  /**
+   * A client whose /event subscription DROPS on its first attempt (ends without
+   * being aborted — opencode holds the stream open for the server's lifetime,
+   * so an end is a transport drop) and behaves normally afterwards. `push`
+   * feeds the reconnected stream.
+   */
+  function makeDroppingClient(): {
+    client: FakeClient
+    /** Publish an event as the server would. NO REPLAY: published while no
+     *  subscription is live, it is GONE — see the ordering test. */
+    publish: (type: string, properties: Record<string, unknown>) => void
+    subscribeCount: () => number
+    liveCount: () => number
+  } {
     let subscribeCount = 0
+    let liveCount = 0
+    let live = false
     const queue: Array<{ id: string; type: string; properties: Record<string, unknown> }> = []
     let notify: (() => void) | null = null
-    async function* subscribeEvents(
-      signal?: AbortSignal
-    ): AsyncGenerator<{ id: string; type: string; properties: Record<string, unknown> }> {
-      subscribeCount++
-      if (subscribeCount === 1) return // simulate a dropped stream (ends, not aborted)
-      while (!signal?.aborted) {
-        if (queue.length === 0) {
-          await new Promise<void>((resolve) => {
-            notify = resolve
-            signal?.addEventListener('abort', () => resolve(), { once: true })
-          })
-          continue
-        }
-        yield queue.shift()!
-      }
-    }
-    const push = (type: string, properties: Record<string, unknown>): void => {
+    const publish = (type: string, properties: Record<string, unknown>): void => {
+      if (!live) return
       queue.push({ id: `e-${queue.length}`, type, properties })
       notify?.()
       notify = null
     }
-
-    const client = { ...makeFakeClient().client, subscribeEvents }
-    // Hang the prompt so the target + its connection record stay alive across
-    // the reconnect (a resolved dispatch would tear the record down).
-    let releasePrompt!: () => void
-    client.prompt = vi.fn(
-      () =>
-        new Promise((r) => {
-          releasePrompt = (): void =>
-            r({ parts: [{ type: 'text', text: 'done' }], info: { cost: 0 } })
-        })
-    ) as typeof client.prompt
-
-    const serverManager = {
-      acquire: vi.fn(async () => ({ baseUrl: 'http://127.0.0.1:1', authHeader: 'Basic x' })),
-      release: vi.fn()
+    async function* subscribeEvents(
+      signal?: AbortSignal,
+      onConnected?: () => void
+    ): AsyncGenerator<{ id: string; type: string; properties: Record<string, unknown> }> {
+      subscribeCount++
+      // A stream that drops before connecting never reaches `onConnected` —
+      // like the real client, which fires it only after the response is
+      // accepted. So the reconcile hangs off the SECOND (live) subscription.
+      if (subscribeCount === 1) return // simulate a dropped stream (ends, not aborted)
+      liveCount++
+      live = true
+      try {
+        onConnected?.()
+        while (!signal?.aborted) {
+          if (queue.length === 0) {
+            await new Promise<void>((resolve) => {
+              notify = resolve
+              signal?.addEventListener('abort', () => resolve(), { once: true })
+            })
+            continue
+          }
+          yield queue.shift()!
+        }
+      } finally {
+        live = false
+      }
     }
+    const client = { ...makeFakeClient().client, subscribeEvents }
+    // Hold the turn open so the target + its connection record stay alive
+    // across the reconnect (a resolved dispatch would tear the record down).
+    holdTurn(client)
+    return {
+      client,
+      publish,
+      subscribeCount: () => subscribeCount,
+      liveCount: () => liveCount
+    }
+  }
+
+  function makeReconnectDispatcher(client: FakeClient): CrossEngineDispatcher {
     const deps: DispatcherDeps = {
-      serverManager,
+      serverManager: {
+        acquire: vi.fn(async () => ({ baseUrl: 'http://127.0.0.1:1', authHeader: 'Basic x' })),
+        release: vi.fn()
+      },
       makeClient: () => client,
       loadEngineConfig: () => ({ dispatch: { defaultModel: 'openai/gpt-5' } }),
       dispatchTimeoutMs: 2000,
@@ -853,21 +1276,155 @@ describe('CrossEngineDispatcher — SSE reconnect (opencode approval forwarding)
       piAbortSettleGraceMs: 20,
       sseReconnectDelayMs: 5
     }
-    const dispatcher = new CrossEngineDispatcher(deps)
+    return new CrossEngineDispatcher(deps)
+  }
+
+  it('re-subscribes after a dropped SSE stream so a later permission.asked still forwards', async () => {
+    // Pre-fix runSseLoop exited on that first end and never re-subscribed,
+    // silently killing approval forwarding for the whole cwd. A
+    // permission.asked that arrives after the reconnect must still forward.
+    const { client, publish, subscribeCount, liveCount } = makeDroppingClient()
+    // The turn is genuinely still running server-side, so the reconnect's
+    // reconcile must LEAVE IT ALONE (the next test covers the other verdict).
+    client.getSessionStatus.mockResolvedValue({ 'oc-sess-1': { type: 'busy' } })
+    const dispatcher = makeReconnectDispatcher(client)
     const ctx = makeCtx()
     const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
 
     // The loop must reconnect (second subscription) after the drop + delay.
-    await vi.waitFor(() => expect(subscribeCount).toBeGreaterThanOrEqual(2))
+    await vi.waitFor(() => expect(subscribeCount()).toBeGreaterThanOrEqual(2))
 
     // A permission.asked delivered on the reconnected stream forwards as before.
-    push('permission.asked', { id: 'perm-recon', sessionID: 'oc-sess-1', permission: 'bash' })
+    publish('permission.asked', { id: 'perm-recon', sessionID: 'oc-sess-1', permission: 'bash' })
     await vi.waitFor(() =>
       expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
     )
 
-    releasePrompt()
-    await pending
+    // The reconcile ran once per LIVE connection — never for the dropped one (a
+    // subscription that never connected never fires `onConnected`).
+    expect(liveCount()).toBe(1)
+    expect(client.getSessionStatus).toHaveBeenCalledTimes(1)
+
+    publish('session.idle', { sessionID: 'oc-sess-1' })
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+  })
+
+  it('an idle published DURING the reconcile is delivered, not lost — the subscription is live before the status read (ordering guard)', async () => {
+    // THE ORDERING THIS PINS. Reconciling BEFORE subscribing leaves a real
+    // window: the status read answers "busy", the turn goes idle, and only THEN
+    // does the stream go live — nobody ever sees that idle and the turn falsely
+    // dies of inactivity much later. The fake below publishes the completion at
+    // the exact instant the status read answers, and (like a real SSE stream)
+    // DROPS anything published while no subscription is live. So with the old
+    // ordering this turn never settles; with the reconcile hanging off
+    // `onConnected` the stream is already receiving and the event lands.
+    const { client, publish, subscribeCount } = makeDroppingClient()
+    client.getSessionStatus.mockImplementation(async () => {
+      publish('session.idle', { sessionID: 'oc-sess-1' })
+      return { 'oc-sess-1': { type: 'busy' } }
+    })
+    const dispatcher = makeReconnectDispatcher(client)
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+
+    expect(subscribeCount()).toBeGreaterThanOrEqual(2)
+    // The reconcile itself said "still busy" — the EVENT is what settled it.
+    expect(client.getSessionStatus).toHaveBeenCalled()
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('target answer')
+  })
+
+  it('reconciles a busy turn on reconnect: a session ABSENT from the status map settles as a normal completion (the idle event was lost in the gap)', async () => {
+    // Completion now rides the SSE stream, so a `session.idle` published while
+    // the subscription was down is gone forever — without this reconcile the
+    // dispatch would hang until the watchdog aborted an already-finished turn.
+    // Absence from GET /session/status IS idle (the server deletes the entry).
+    const { client, subscribeCount } = makeDroppingClient()
+    client.getSessionStatus.mockResolvedValue({ 'some-other-session': { type: 'busy' } })
+    client.listMessages.mockResolvedValue([
+      storedAssistant({ text: 'finished during the blackout', info: { cost: 0.03 } })
+    ])
+    const dispatcher = makeReconnectDispatcher(client)
+    const ctx = makeCtx({ toolUseId: 'toolu_reconcile' })
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+
+    expect(subscribeCount()).toBeGreaterThanOrEqual(2)
+    expect(client.getSessionStatus).toHaveBeenCalled()
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('finished during the blackout')
+    // A reconciled completion is a completion — same notification/cost path.
+    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    expect(notif?.[1]).toMatchObject({ status: 'completed' })
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', 'openai/gpt-5', 0.03)
+  })
+
+  it('a stale "absent" verdict never settles a CONTINUATION turn started while the status GET was in flight (resolver-identity guard)', async () => {
+    // The snapshot is taken before the status GET; the GET is an await. In that
+    // window turn A can settle on the live stream AND turn B can start on the
+    // same entry with a FRESH resolver — while the status map, snapshotted
+    // server-side before B existed, still reports the session absent (= idle).
+    // Settling on that verdict would hand B the stored assistant message of A.
+    const { client, publish, subscribeCount } = makeDroppingClient()
+    let releaseStatus!: (value: Record<string, { type?: string }>) => void
+    client.getSessionStatus.mockImplementation(
+      () =>
+        new Promise<Record<string, { type?: string }>>((resolve) => {
+          releaseStatus = resolve
+        })
+    )
+    client.listMessages.mockResolvedValue([storedAssistant({ text: 'turn A text' })])
+    const dispatcher = makeReconnectDispatcher(client)
+    const ctx = makeCtx()
+
+    // Turn A, held open. The reconnect's reconcile snapshots it, then parks on
+    // the (manually released) status GET.
+    const turnA = dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
+    await vi.waitFor(() => expect(subscribeCount()).toBeGreaterThanOrEqual(2))
+    await vi.waitFor(() => expect(client.getSessionStatus).toHaveBeenCalled())
+
+    // A settles on the LIVE stream while the GET is still pending.
+    publish('session.idle', { sessionID: 'oc-sess-1' })
+    const resultA = await turnA
+    expect(resultA.text).toBe('turn A text')
+
+    // Turn B starts on the same target — a new resolver on the same entry.
+    let bSettled = false
+    const turnB = dispatcher
+      .dispatch({ engine: 'opencode', prompt: 'two', sessionId: 'oc-sess-1' }, ctx)
+      .then((r) => {
+        bSettled = true
+        return r
+      })
+    await tick()
+
+    // The stale verdict lands: absent = idle. Pre-guard, B settles right here
+    // with A's stored text.
+    releaseStatus({})
+    await tick()
+    await tick()
+    await tick()
+    expect(bSettled).toBe(false)
+
+    // B completes only on ITS OWN idle, with ITS OWN result.
+    client.listMessages.mockResolvedValue([storedAssistant({ text: 'turn B text' })])
+    publish('session.idle', { sessionID: 'oc-sess-1' })
+    const resultB = await turnB
+    expect(resultB.isError).toBeUndefined()
+    expect(resultB.text).toBe('turn B text')
+  })
+
+  it('a failing getSessionStatus never breaks the reconnect loop — the turn stays live and still settles on a later session.idle', async () => {
+    const { client, publish, subscribeCount } = makeDroppingClient()
+    client.getSessionStatus.mockRejectedValue(new Error('status unavailable'))
+    const dispatcher = makeReconnectDispatcher(client)
+    const ctx = makeCtx()
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+
+    await vi.waitFor(() => expect(subscribeCount()).toBeGreaterThanOrEqual(2))
+    publish('session.idle', { sessionID: 'oc-sess-1' })
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('target answer')
   })
 })
 
@@ -1638,13 +2195,7 @@ describe('CrossEngineDispatcher — M3 (Claude direction: streaming/progress/not
 describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/notification/stop)', () => {
   it('forwards message.part.updated as a subagent-message while the turn is busy, plus a final "completed" notification', async () => {
     const { dispatcher, client, stream } = makeHarness({ heartbeatMs: 20 })
-    let releasePrompt!: () => void
-    client.prompt.mockImplementation(
-      () =>
-        new Promise((r) => {
-          releasePrompt = (): void => r({ parts: [{ type: 'text', text: 'done' }] })
-        })
-    )
+    holdTurn(client)
     const ctx = makeCtx({ toolUseId: 'toolu_oc_1' })
     const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
     await tick()
@@ -1664,7 +2215,7 @@ describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/n
     const progressCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-progress')
     expect(progressCall?.[1]).toMatchObject({ toolUseId: 'toolu_oc_1', toolName: 'dispatch_agent' })
 
-    releasePrompt()
+    completeTurn(stream)
     const result = await pending
     expect(result.isError).toBeUndefined()
 
@@ -1678,13 +2229,7 @@ describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/n
 
   it('forwards message.part.delta as a subagent-stream text delta', async () => {
     const { dispatcher, client, stream } = makeHarness()
-    let releasePrompt!: () => void
-    client.prompt.mockImplementation(
-      () =>
-        new Promise((r) => {
-          releasePrompt = (): void => r({ parts: [{ type: 'text', text: 'done' }] })
-        })
-    )
+    holdTurn(client)
     const ctx = makeCtx({ toolUseId: 'toolu_oc_2' })
     const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
     await tick()
@@ -1711,7 +2256,149 @@ describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/n
       text: 'streaming chunk'
     })
 
-    releasePrompt()
+    completeTurn(stream)
+    await pending
+  })
+
+  it('forwards a completed tool part as ONE session:subagent-tool-result (dedup across the re-emitted message), with fileDiffs + images', async () => {
+    // opencode ChatMessages carry `tool_use` blocks only — results are a
+    // separate channel. Without this forwarding the dispatch TaskCard's tool
+    // chips spin forever (the Claude/pi taps have always emitted them).
+    const { dispatcher, client, stream } = makeHarness()
+    holdTurn(client)
+    const ctx = makeCtx({ toolUseId: 'toolu_oc_toolres' })
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await tick()
+
+    // Still running — nothing to report yet.
+    stream.push('message.part.updated', {
+      sessionID: 'oc-sess-1',
+      part: {
+        id: 'part-tool-1',
+        messageID: 'msg-1',
+        type: 'tool',
+        tool: 'edit',
+        callID: 'call-1',
+        state: { status: 'running', input: { filePath: '/repo/a.ts' } }
+      }
+    })
+    await tick()
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:subagent-tool-result')).toBe(false)
+
+    stream.push('message.part.updated', {
+      sessionID: 'oc-sess-1',
+      part: {
+        id: 'part-tool-1',
+        messageID: 'msg-1',
+        type: 'tool',
+        tool: 'edit',
+        callID: 'call-1',
+        state: {
+          status: 'completed',
+          input: { filePath: '/repo/a.ts' },
+          output: 'edited 1 file',
+          metadata: {
+            filediff: { file: '/repo/a.ts', patch: '@@ -1 +1 @@', additions: 1, deletions: 0 }
+          },
+          attachments: [
+            {
+              type: 'file',
+              mime: 'image/png',
+              url: 'data:image/png;base64,QUJD',
+              filename: 'shot.png'
+            }
+          ]
+        }
+      }
+    })
+    await tick()
+    // A SIBLING part updating re-emits the WHOLE rebuilt message (the mapper's
+    // upsert-by-message-id model) — the tool result must not repeat.
+    stream.push('message.part.updated', {
+      sessionID: 'oc-sess-1',
+      part: { id: 'part-text-1', messageID: 'msg-1', type: 'text', text: 'and done' }
+    })
+    await tick()
+
+    const results = ctx.emit.mock.calls.filter((c) => c[0] === 'session:subagent-tool-result')
+    expect(results).toHaveLength(1)
+    expect(results[0][1]).toMatchObject({
+      toolUseId: 'toolu_oc_toolres',
+      toolResultToolUseId: 'call-1',
+      result: 'edited 1 file',
+      isError: false,
+      fileDiffs: [expect.objectContaining({ path: '/repo/a.ts', patch: '@@ -1 +1 @@' })],
+      images: [
+        expect.objectContaining({
+          mediaType: 'image/png',
+          base64Data: 'QUJD',
+          fileName: 'shot.png'
+        })
+      ]
+    })
+
+    completeTurn(stream)
+    await pending
+  })
+
+  it('a tool part that ENDED IN ERROR forwards its failure text with isError true', async () => {
+    const { dispatcher, client, stream } = makeHarness()
+    holdTurn(client)
+    const ctx = makeCtx({ toolUseId: 'toolu_oc_toolerr' })
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await tick()
+
+    stream.push('message.part.updated', {
+      sessionID: 'oc-sess-1',
+      part: {
+        id: 'part-tool-9',
+        messageID: 'msg-9',
+        type: 'tool',
+        tool: 'bash',
+        callID: 'call-9',
+        state: { status: 'error', input: { command: 'false' }, error: 'user denied: use git clean' }
+      }
+    })
+    await tick()
+
+    const results = ctx.emit.mock.calls.filter((c) => c[0] === 'session:subagent-tool-result')
+    expect(results).toHaveLength(1)
+    expect(results[0][1]).toMatchObject({
+      toolResultToolUseId: 'call-9',
+      result: 'user denied: use git clean',
+      isError: true
+    })
+
+    completeTurn(stream)
+    await pending
+  })
+
+  it('message.updated is routed into the tap (mapEvent needs it for the role) but emits nothing itself', async () => {
+    const { dispatcher, client, stream } = makeHarness()
+    holdTurn(client)
+    const ctx = makeCtx({ toolUseId: 'toolu_oc_msgupd' })
+    const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await tick()
+
+    stream.push('message.updated', {
+      sessionID: 'oc-sess-1',
+      info: { id: 'msg-1', role: 'assistant', cost: 0.01, tokens: { input: 5, output: 1 } }
+    })
+    await tick()
+    // cost_update / ignore outputs are the tap's explicit no-op default.
+    expect(
+      ctx.emit.mock.calls.filter((c) => RELEVANT_SUBAGENT_CHANNELS.includes(c[0]))
+    ).toHaveLength(0)
+
+    // ...and the role it recorded is what lets the message's parts render.
+    stream.push('message.part.updated', {
+      sessionID: 'oc-sess-1',
+      part: { id: 'part-1', messageID: 'msg-1', type: 'text', text: 'assistant text' }
+    })
+    await tick()
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:subagent-message')).toBe(true)
+
+    completeTurn(stream)
     await pending
   })
 
@@ -1735,13 +2422,7 @@ describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/n
 
   it('a foreign session id (not a registered target) never emits stream/message events', async () => {
     const { dispatcher, client, stream } = makeHarness()
-    let releasePrompt!: () => void
-    client.prompt.mockImplementation(
-      () =>
-        new Promise((r) => {
-          releasePrompt = (): void => r({ parts: [{ type: 'text', text: 'done' }] })
-        })
-    )
+    holdTurn(client)
     const ctx = makeCtx({ toolUseId: 'toolu_oc_3' })
     const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
     await tick()
@@ -1753,7 +2434,7 @@ describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/n
     await tick()
     expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:subagent-message')).toBe(false)
 
-    releasePrompt()
+    completeTurn(stream)
     await pending
   })
 
@@ -1774,7 +2455,7 @@ describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/n
 
   it('stopDispatch aborts the target session server-side, emits a "stopped" notification, and the dispatch resolves isError', async () => {
     const { dispatcher, client } = makeHarness()
-    client.prompt.mockImplementation(() => new Promise(() => {}))
+    holdTurn(client)
     const ctx = makeCtx({ toolUseId: 'toolu_oc_stop' })
     const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
     await tick()
@@ -1804,7 +2485,7 @@ describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/n
     )
     // Deterministic race outcome: the (never-reached-in-reality) instant turn
     // must not beat the pre-resolved stop arm.
-    client.prompt.mockImplementation(() => new Promise(() => {}))
+    holdTurn(client)
     const ctx = makeCtx({ fromRoutingId: 'routing-owner', toolUseId: 'toolu_oc_create_stop' })
     const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
     await tick()
@@ -1835,9 +2516,9 @@ describe('CrossEngineDispatcher — durable stop-intent (armIfUnknown)', () => {
   it('arm on an unknown id returns true; the NEXT dispatch with that id+routingId stops at start; the intent is consumed', async () => {
     const { dispatcher, client } = makeHarness()
     // Realistic: the first turn would take a while (also keeps the race
-    // deterministic — the instant default prompt mock must not beat the
+    // deterministic — the instant default turn mock must not beat the
     // pre-resolved stop arm).
-    client.prompt.mockImplementationOnce(() => new Promise(() => {}))
+    client.promptAsync.mockImplementationOnce(async () => {})
 
     // Stop clicked before the dispatch reached the main process.
     expect(dispatcher.stopDispatch('toolu_pre_stop', 'routing-owner', { armIfUnknown: true })).toBe(
@@ -1959,13 +2640,15 @@ describe('crossEngineDispatchAvailable (ADR-030/M4-A)', () => {
 // ---------------------------------------------------------------------------
 
 describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', () => {
-  it('captures tokens/cost from resp.info on success — populates notification.usage and records a row', async () => {
+  it("captures tokens/cost from the final assistant message's info on success — populates notification.usage and records a row", async () => {
     const recordDispatchedUsage = vi.fn()
     const { dispatcher, client } = makeHarness({ recordDispatchedUsage })
-    client.prompt.mockResolvedValueOnce({
-      parts: [{ type: 'text', text: 'ok' }],
-      info: { tokens: { input: 100, output: 50, reasoning: 10 }, cost: 0.02 }
-    })
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({
+        text: 'ok',
+        info: { tokens: { input: 100, output: 50, reasoning: 10 }, cost: 0.02 }
+      })
+    ])
     const ctx = makeCtx({ toolUseId: 'toolu_usage_1' })
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
     expect(result.isError).toBeUndefined()
@@ -1997,14 +2680,7 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
   it('counts DISTINCT tool_use ids as toolUses — repeated part updates for the same call do not double-count', async () => {
     const recordDispatchedUsage = vi.fn()
     const { dispatcher, client, stream } = makeHarness({ recordDispatchedUsage })
-    let releasePrompt!: () => void
-    client.prompt.mockImplementation(
-      () =>
-        new Promise((r) => {
-          releasePrompt = (): void =>
-            r({ parts: [{ type: 'text', text: 'done' }], info: { cost: 0 } })
-        })
-    )
+    holdTurn(client)
     const ctx = makeCtx({ toolUseId: 'toolu_usage_tools' })
     const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
     await tick()
@@ -2028,7 +2704,7 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
     stream.push('message.part.updated', toolPartEvent)
     await tick()
 
-    releasePrompt()
+    completeTurn(stream)
     await pending
 
     const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
@@ -2044,10 +2720,12 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
       throw new Error('SQLITE_BUSY: database is locked')
     })
     const { dispatcher, client } = makeHarness({ recordDispatchedUsage })
-    client.prompt.mockResolvedValueOnce({
-      parts: [{ type: 'text', text: 'the successful answer' }],
-      info: { tokens: { input: 10, output: 5 }, cost: 0.001 }
-    })
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({
+        text: 'the successful answer',
+        info: { tokens: { input: 10, output: 5 }, cost: 0.001 }
+      })
+    ])
     const ctx = makeCtx({ toolUseId: 'toolu_throwing_recorder' })
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
 
@@ -2062,7 +2740,7 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
   it('a turn stopped by the user is NOT recorded (no usage numbers for a turn that never returned)', async () => {
     const recordDispatchedUsage = vi.fn()
     const { dispatcher, client } = makeHarness({ recordDispatchedUsage })
-    client.prompt.mockImplementation(() => new Promise(() => {}))
+    holdTurn(client)
     const ctx = makeCtx({ toolUseId: 'toolu_stopped_norecord' })
     const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
     await tick()
@@ -2073,22 +2751,33 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
   })
 
   it('a timed-out turn IS recorded (status "failed") with null usage numbers', async () => {
-    const recordDispatchedUsage = vi.fn()
-    const { dispatcher, client } = makeHarness({
-      recordDispatchedUsage,
-      dispatchTimeoutMs: 30
-    })
-    client.prompt.mockImplementation(() => new Promise(() => {}))
-    const ctx = makeCtx({ toolUseId: 'toolu_timeout_record' })
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    expect(result.isError).toBe(true)
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        toolUseId: 'toolu_timeout_record',
-        totalTokens: null,
-        costUsd: null
+    vi.useFakeTimers()
+    try {
+      const recordDispatchedUsage = vi.fn()
+      const { dispatcher, client } = makeHarness({
+        recordDispatchedUsage,
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai/gpt-5', turnTimeoutMs: 60_000 }
+        })),
+        heartbeatMs: 30_000
       })
-    )
+      holdTurn(client)
+      const ctx = makeCtx({ toolUseId: 'toolu_timeout_record' })
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+      await advance(0)
+      await advance(70_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(recordDispatchedUsage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolUseId: 'toolu_timeout_record',
+          totalTokens: null,
+          costUsd: null
+        })
+      )
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('the real default (no recordDispatchedUsage injected) does not throw', async () => {
@@ -2104,10 +2793,9 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
 
   it('calls ctx.addDispatchedCost with the target engine/model/cost on a successful turn', async () => {
     const { dispatcher, client } = makeHarness()
-    client.prompt.mockResolvedValueOnce({
-      parts: [{ type: 'text', text: 'ok' }],
-      info: { tokens: { input: 10, output: 5 }, cost: 0.31 }
-    })
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({ text: 'ok', info: { tokens: { input: 10, output: 5 }, cost: 0.31 } })
+    ])
     const ctx = makeCtx()
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
     expect(result.isError).toBeUndefined()
@@ -2116,30 +2804,41 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
 
   it('does NOT call ctx.addDispatchedCost when turn cost is zero/absent', async () => {
     const { dispatcher, client } = makeHarness()
-    client.prompt.mockResolvedValueOnce({
-      parts: [{ type: 'text', text: 'ok' }],
-      info: { tokens: { input: 10, output: 5 }, cost: 0 }
-    })
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({ text: 'ok', info: { tokens: { input: 10, output: 5 }, cost: 0 } })
+    ])
     const ctx = makeCtx()
     await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
     expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
   })
 
   it('does NOT call ctx.addDispatchedCost when the dispatch fails (a timed-out turn)', async () => {
-    const { dispatcher, client } = makeHarness({ dispatchTimeoutMs: 30 })
-    client.prompt.mockImplementation(() => new Promise(() => {}))
-    const ctx = makeCtx()
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
-    expect(result.isError).toBe(true)
-    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+    vi.useFakeTimers()
+    try {
+      const { dispatcher, client } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai/gpt-5', turnTimeoutMs: 60_000 }
+        })),
+        heartbeatMs: 30_000
+      })
+      holdTurn(client)
+      const ctx = makeCtx()
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+      await advance(0)
+      await advance(70_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('never fails the dispatch when ctx.addDispatchedCost is not provided', async () => {
     const { dispatcher, client } = makeHarness()
-    client.prompt.mockResolvedValueOnce({
-      parts: [{ type: 'text', text: 'ok' }],
-      info: { cost: 0.02 }
-    })
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({ text: 'ok', info: { cost: 0.02 } })
+    ])
     const ctx = makeCtx()
     // Simulate a caller that never wired the field (spec: optional, never
     // fail a dispatch over a missing capability).
@@ -2434,10 +3133,9 @@ describe('CrossEngineDispatcher — M4-C cost cap (opencode direction)', () => {
         dispatch: { defaultModel: 'openai/gpt-5', maxCostUsd: 0.05 }
       }))
     })
-    client.prompt.mockResolvedValueOnce({
-      parts: [{ type: 'text', text: 'first' }],
-      info: { cost: 0.05 }
-    })
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({ text: 'first', info: { cost: 0.05 } })
+    ])
     const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, makeCtx())
     expect(first.isError).toBeUndefined()
 
@@ -2448,8 +3146,8 @@ describe('CrossEngineDispatcher — M4-C cost cap (opencode direction)', () => {
     expect(second.isError).toBe(true)
     expect(second.text).toContain('cost cap')
     expect(second.sessionId).toBe(first.sessionId)
-    // Rejected BEFORE running a turn — no second prompt() call.
-    expect(client.prompt).toHaveBeenCalledTimes(1)
+    // Rejected BEFORE running a turn — no second promptAsync() call.
+    expect(client.promptAsync).toHaveBeenCalledTimes(1)
   })
 
   it('a completing turn that crosses the cap appends the warning note to the returned text', async () => {
@@ -2458,10 +3156,9 @@ describe('CrossEngineDispatcher — M4-C cost cap (opencode direction)', () => {
         dispatch: { defaultModel: 'openai/gpt-5', maxCostUsd: 0.05 }
       }))
     })
-    client.prompt.mockResolvedValueOnce({
-      parts: [{ type: 'text', text: 'the answer' }],
-      info: { cost: 0.06 }
-    })
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({ text: 'the answer', info: { cost: 0.06 } })
+    ])
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
     expect(result.isError).toBeUndefined()
     expect(result.text).toContain('the answer')
@@ -2470,10 +3167,9 @@ describe('CrossEngineDispatcher — M4-C cost cap (opencode direction)', () => {
 
   it('no cap configured → unlimited, no note ever appended regardless of cost', async () => {
     const { dispatcher, client } = makeHarness()
-    client.prompt.mockResolvedValueOnce({
-      parts: [{ type: 'text', text: 'the answer' }],
-      info: { cost: 999 }
-    })
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({ text: 'the answer', info: { cost: 999 } })
+    ])
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
     expect(result.isError).toBeUndefined()
     expect(result.text).toBe('the answer')

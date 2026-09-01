@@ -8,8 +8,11 @@
  * Targets are headless dispatcher-owned mini-sessions built on engine client
  * primitives — NOT SessionManager/ISession. Two directions are supported:
  *  - Claude → opencode (M1): targets use OpencodeClient directly (the
- *    askSideQuestion / judge precedent), with a synchronous
- *    `POST /session/{id}/message` per turn.
+ *    askSideQuestion / judge precedent). A turn is `POST /session/{id}/
+ *    prompt_async` (204-and-forget) completed by the shared per-cwd SSE loop's
+ *    `session.idle`/`session.error`, with the final text/usage read back from
+ *    the stored last assistant message — see `resolveAndRunOpencode` for why
+ *    the original synchronous `POST /session/{id}/message` had to go.
  *  - opencode → Claude (M2): targets use a raw `sdkQuery()` (the
  *    service-session.ts precedent) kept alive across turns via a pushable
  *    streaming-input channel, driven by a manual iterator loop (see the
@@ -39,9 +42,9 @@ import { extractToolResultContent } from './tool-result-content'
 // opencode-target streaming tap (ADR-033 M3) shares the exact same
 // message.part.delta/updated → {stream|message} logic OpencodeSession.ts uses
 // for its own turns, instead of a second hand-rolled implementation.
-import { mapEvent } from '../opencode/event-mapper'
+import { mapEvent, extractToolResult } from '../opencode/event-mapper'
 import type { MessageAccumulator } from '../opencode/event-mapper'
-import type { OpencodeEvent } from '../opencode/protocol/types'
+import type { OpencodeEvent, StoredMessage } from '../opencode/protocol/types'
 // pi target primitives (ADR-033 M4c — pi as a dispatch TARGET). None of these
 // leaf modules import THIS file (or PiSession.ts, which does), so — same
 // reasoning as the opencode imports above — this is a one-way edge, not a
@@ -185,6 +188,28 @@ export interface DispatchTargetClient {
       parts: Array<{ type: 'text'; text: string }>
     }
   ): Promise<unknown>
+  /**
+   * The dispatcher's ACTUAL turn driver for opencode targets (`prompt` above is
+   * only still in this interface because the structural type mirrors
+   * OpencodeClient, whose other callers still use it). Returns as soon as the
+   * server has FORKED the turn — completion arrives on the SSE stream. See
+   * `resolveAndRunOpencode`.
+   */
+  promptAsync(
+    sessionId: string,
+    req: {
+      model?: { providerID: string; modelID: string }
+      parts: Array<{ type: 'text'; text: string }>
+    }
+  ): Promise<unknown>
+  /** Stored history for a target session — the dispatcher reads the LAST
+   *  assistant message from it for a completed turn's text + usage (the
+   *  fire-and-forget prompt has no response body to carry them). */
+  listMessages(sessionId: string): Promise<StoredMessage[]>
+  /** Live per-session status map — ABSENCE MEANS IDLE (see
+   *  `OpencodeClient.getSessionStatus`). Used to reconcile busy turns after an
+   *  SSE reconnect, where a `session.idle` may have been missed. */
+  getSessionStatus(): Promise<Record<string, { type?: string }>>
   deleteSession(sessionId: string): Promise<boolean>
   abortSession(sessionId: string): Promise<boolean>
   replyPermission(
@@ -192,8 +217,12 @@ export interface DispatchTargetClient {
     reply: 'once' | 'always' | 'reject',
     message?: string
   ): Promise<unknown>
+  /** `onConnected` fires once the subscription is provably receiving — see
+   *  `OpencodeClient.subscribeEvents` for why the reconnect reconcile has to
+   *  hang off it rather than run before the subscribe. */
   subscribeEvents(
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onConnected?: () => void
   ): AsyncGenerator<{ id: string; type: string; properties: Record<string, unknown> }>
 }
 
@@ -255,6 +284,13 @@ export interface DispatcherDeps {
   /** Defaults to the real PiRpcClient + PiBridgeHost construction (ADR-033 M4c). */
   spawnPiTarget?: SpawnPiTargetFn
   maxConcurrent?: number
+  /**
+   * Absolute per-turn cap for the CLAUDE and PI directions. The opencode
+   * direction deliberately does NOT read this — it runs on the configurable
+   * inactivity + absolute watchdog (`DispatchConfig.idleTimeoutMs` /
+   * `turnTimeoutMs`, defaults `DISPATCH_IDLE_TIMEOUT_MS`/
+   * `DISPATCH_TURN_TIMEOUT_MS`) instead.
+   */
   dispatchTimeoutMs?: number
   heartbeatMs?: number
   /**
@@ -303,8 +339,38 @@ export const XENG_REQUEST_PREFIX = 'xeng:'
 const EMPTY_PI_SESSION_ALLOWS: ReadonlySet<string> = new Set()
 
 const MAX_CONCURRENT = 3
+/** Absolute per-turn cap for the CLAUDE and PI directions only — the opencode
+ *  direction is governed by `DISPATCH_TURN_TIMEOUT_MS`/`DISPATCH_IDLE_TIMEOUT_MS`
+ *  below (ADR-033's 2026-09-01 amendment). */
 const DISPATCH_TIMEOUT_MS = 10 * 60 * 1000
 const HEARTBEAT_MS = 15 * 1000
+/**
+ * Default absolute cap on ONE opencode dispatch turn (`DispatchConfig.
+ * turnTimeoutMs` overrides; `0` disables). Deliberately an order of magnitude
+ * above the claude/pi directions' fixed 10 minutes: a dispatched local model
+ * (the reason this rework exists) can legitimately grind for the better part of
+ * an hour, and a slow-but-ALIVE turn should be allowed to finish — liveness is
+ * policed by the inactivity watchdog below, this is only the backstop against a
+ * turn that never ends at all.
+ */
+const DISPATCH_TURN_TIMEOUT_MS = 60 * 60_000
+/**
+ * Default inactivity cap for an opencode dispatch turn (`DispatchConfig.
+ * idleTimeoutMs` overrides; `0` disables): how long the target may go without
+ * producing ANY SSE event for its session before the turn is aborted. This —
+ * not the absolute cap — is the real liveness signal, because a working target
+ * emits message/part events continuously.
+ */
+const DISPATCH_IDLE_TIMEOUT_MS = 15 * 60_000
+/**
+ * How often the opencode turn watchdog re-checks the two caps above. A polling
+ * interval rather than two `setTimeout`s because the inactivity deadline MOVES
+ * (every SSE event for a busy target bumps `lastActivityAt`) — re-arming a
+ * timer on every event would be far more churn for no extra precision at this
+ * granularity. All the arithmetic goes through `this.now()` so fake-timer tests
+ * control it.
+ */
+const DISPATCH_WATCHDOG_INTERVAL_MS = 10_000
 /** How long an armed stop-intent (see `pendingStops`) stays valid. Generous —
  *  it only needs to outlive the MCP tools/call round-trip + handler prelude. */
 const PENDING_STOP_TTL_MS = 60 * 1000
@@ -342,12 +408,58 @@ interface OpencodeTargetEntry {
   /** Latest dispatching context — used to forward approvals mid-turn. */
   ctx: DispatchContext
   /**
-   * True while a `prompt()` turn is in flight (ADR-033 M3). Gates the SSE
-   * stream tap (`handleOpencodeTargetStream`) — stray events from a PRIOR
-   * turn (or the server's own trailing chatter) must never emit stream
-   * deltas for a turn that already returned its result.
+   * True while a turn is in flight (ADR-033 M3). Gates the SSE stream tap
+   * (`handleOpencodeTargetStream`) — stray events from a PRIOR turn (or the
+   * server's own trailing chatter) must never emit stream deltas for a turn
+   * that already returned its result.
    */
   busy: boolean
+  /**
+   * Resolver for the turn CURRENTLY in flight; null when idle. Same
+   * event-driven settle shape as `PiTargetEntry.settled` (read that field's
+   * doc for the general pattern) — installed by `resolveAndRunOpencode`
+   * SYNCHRONOUSLY before `promptAsync` is even called, invoked EXACTLY ONCE by
+   * `handleSseEvent`'s `session.idle`/`session.error` branches or by
+   * `reconcileBusyTargets` after an SSE reconnect.
+   *
+   * SETTLE-ONCE DISCIPLINE: every settler READS-AND-NULLS this field before
+   * invoking it, and every give-up path (timeout/abort/stop) plus the turn's
+   * `finally` nulls it too. That is what makes the `session.idle` opencode
+   * publishes AFTER our own `abortSession` a harmless no-op instead of a
+   * second settle landing on an already-returned turn.
+   *
+   * UNLIKE pi, no post-abort DRAIN WINDOW is installed. opencode's events carry
+   * their `sessionID` and a session runs at most one turn at a time
+   * (busy-reject), so a stale event is always attributable to the session — but
+   * not to the TURN. One narrow residual window therefore remains, and is
+   * accepted deliberately: if a continuation turn starts before the previous
+   * (aborted) turn's own `session.idle` has been consumed off the stream, that
+   * idle settles the NEW turn early, which would then return the PREVIOUS
+   * turn's stored text. It takes the dispatching model re-dispatching the same
+   * session_id inside the abort's own round-trip. The opposite failure — a
+   * completion we never see, which HANGS a dispatch — is the one worth
+   * engineering against, and it is covered twice (the inactivity/absolute
+   * watchdog and `reconcileBusyTargets`).
+   */
+  settled: ((outcome: OpencodeTurnOutcome) => void) | null
+  /**
+   * `this.now()` at the last SSE event seen for this session while busy — the
+   * inactivity watchdog's clock (see `DISPATCH_IDLE_TIMEOUT_MS`). Bumped in
+   * `handleSseEvent` for EVERY event type, not just streamed content: a target
+   * waiting on a permission reply, a tool part update, or a cost snapshot is
+   * demonstrably alive. Reset to turn start at every turn start.
+   */
+  lastActivityAt: number
+  /**
+   * Per-turn dedup for tool-result forwarding, keyed `${messageId}:${partId}`
+   * — mirrors `OpencodeSession.emittedToolResults` exactly. The SSE tap re-emits
+   * the WHOLE rebuilt assistant message on every part update, so without this
+   * a completed tool part would re-emit its `session:subagent-tool-result` on
+   * every subsequent update of any sibling part. A fresh Set at every turn
+   * start (message ids never repeat across turns, so this is pure hygiene —
+   * the same reason `turnToolUseIds` is reset).
+   */
+  emittedToolResults: Set<string>
   /**
    * Per-messageId part accumulators for the SSE streaming tap — same shape
    * `OpencodeSession` keeps for its own turns (event-mapper.ts's
@@ -366,6 +478,14 @@ interface OpencodeTargetEntry {
    *  end for the notification/usage-record `toolUses` figure. */
   turnToolUseIds: Set<string>
 }
+
+/**
+ * What an opencode dispatch turn settles with — see `OpencodeTargetEntry.settled`.
+ * Only the two SSE-borne outcomes live here; every other way a turn can end
+ * (promptAsync rejection, watchdog, user stop, caller abort) is a race arm in
+ * `resolveAndRunOpencode`, not a settle.
+ */
+type OpencodeTurnOutcome = { kind: 'idle' } | { kind: 'sseError'; message: string }
 
 /**
  * A live Claude dispatch target (ADR-033 M2). The `sdkQuery()` process stays
@@ -572,6 +692,11 @@ interface ConnRecord {
   client: DispatchTargetClient
   sseAbort: AbortController
   targetCount: number
+  /** The resolved cwd this record is keyed by (`this.connections`' key). Stored
+   *  ON the record — not just threaded to `createOpencodeTarget` — so
+   *  `runSseLoop`'s reconnect reconcile can select exactly the targets served by
+   *  THIS connection (`entry.cwdKey === rec.cwdKey`) without a reverse lookup. */
+  cwdKey: string
 }
 
 interface OpencodePendingApproval {
@@ -610,6 +735,37 @@ type PendingForwardedApproval = OpencodePendingApproval | ClaudePendingApproval 
 
 function errorResult(text: string, sessionId = ''): DispatchResult {
   return { text, sessionId, isError: true }
+}
+
+/**
+ * The LAST assistant message in a target session's stored history — an opencode
+ * dispatch turn's result, now that `promptAsync` returns nothing but a 204
+ * (ADR-033's 2026-09-01 amendment). Scanning BACKWARDS for `role === 'assistant'`
+ * is what makes this the turn's OWN result on a multi-turn target: every turn
+ * appends a fresh user + assistant pair, so the tail is always the turn that
+ * just ended. The shape it returns (`{info, parts}`) is byte-identical to what
+ * the old synchronous `prompt()` resolved with, so the result-processing below
+ * maps onto it 1:1.
+ */
+function lastAssistantMessage(messages: StoredMessage[]): StoredMessage | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    if (msg?.info?.role === 'assistant') return msg
+  }
+  return undefined
+}
+
+/**
+ * Sum of a stored message's `info.tokens` — the same per-MESSAGE (i.e.
+ * per-turn) cumulative snapshot `event-mapper.ts` reads for OpencodeSession's
+ * own metering, and the same three fields the old synchronous path summed.
+ * `cache` is deliberately excluded (parity with the pre-amendment code and
+ * with the Claude direction's input+output).
+ */
+function storedMessageTotalTokens(info: StoredMessage['info'] | undefined): number {
+  const tokens = info?.tokens
+  if (!tokens) return 0
+  return (tokens.input ?? 0) + (tokens.output ?? 0) + (tokens.reasoning ?? 0)
 }
 
 /**
@@ -1139,6 +1295,16 @@ export class CrossEngineDispatcher {
       this.targets.delete(sessionId)
       this.dismissPendingForTarget(sessionId)
       if (entry.kind === 'opencode') {
+        // Settle a turn still in flight (ADR-033's 2026-09-01 amendment). The
+        // entry has just left `this.targets` and its session is about to be
+        // deleted, so NOTHING can settle it afterwards — the SSE branches look
+        // targets up by session id, and `promptAsync` has no pending promise to
+        // reject the way the old synchronous prompt did. Without this the
+        // dispatch would hang, holding its `activeDispatches` slot, until the
+        // inactivity watchdog eventually fired.
+        const settle = entry.settled
+        entry.settled = null
+        settle?.({ kind: 'sseError', message: 'the dispatching session was disposed' })
         entry.client.deleteSession(sessionId).catch(() => {})
         this.releaseConnection(entry)
       } else if (entry.kind === 'claude') {
@@ -1162,7 +1328,11 @@ export class CrossEngineDispatcher {
   /** Everything past the guards for engine:'opencode' — runs with an
    *  activeDispatches slot held and the Stop handle already registered
    *  (`stopController` is created + registered in dispatchInner, BEFORE any
-   *  await, so a Stop click during target creation is not lost). */
+   *  await, so a Stop click during target creation is not lost).
+   *
+   *  The turn itself is `promptAsync` + SSE-driven completion (ADR-033's
+   *  2026-09-01 amendment) — see the block comment at the promptAsync call for
+   *  the undici-headersTimeout failure that retired the synchronous prompt. */
   private async resolveAndRunOpencode(
     req: DispatchRequest,
     ctx: DispatchContext,
@@ -1205,10 +1375,11 @@ export class CrossEngineDispatcher {
       // ambient SSE tap gated by `entry.busy`; two concurrent same-session_id
       // dispatch_agent calls (their MCP handlers overlap within one assistant
       // turn) would both clear the cost-cap check before either records spend,
-      // both prompt() the same session, and the first finisher's `finally`
-      // would flip `busy` off and reset `turnToolUseIds` out from under the
-      // still-running second turn. Reject the second call; the running turn is
-      // left completely undisturbed (no abort, no removal, no ctx swap).
+      // both promptAsync() the same session, and the first finisher's `finally`
+      // would flip `busy` off, reset `turnToolUseIds` and NULL `settled` out
+      // from under the still-running second turn (whose completion would then
+      // never settle at all). Reject the second call; the running turn is left
+      // completely undisturbed (no abort, no removal, no ctx swap).
       if (existing.busy) {
         return errorResult(
           `Dispatch session "${req.sessionId}" is already running a turn — wait for it to finish before continuing it.`,
@@ -1251,7 +1422,7 @@ export class CrossEngineDispatcher {
       emitDispatchProgress(ctx, (beats * this.heartbeatMs) / 1000)
     }, this.heartbeatMs)
 
-    let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+    let watchdogTimer: ReturnType<typeof setInterval> | undefined
     const signal = ctx.extra?.signal
     let abortListener: (() => void) | undefined
 
@@ -1261,26 +1432,80 @@ export class CrossEngineDispatcher {
     // Per-turn distinct tool_use id set (ADR-033 M4-B) — fresh at the start of
     // every turn, populated by the SSE streaming tap, .size read at turn end.
     entry.turnToolUseIds = new Set()
+    // Per-turn tool-result dedup — see the field's doc comment.
+    entry.emittedToolResults = new Set()
     const turnStartedAt = this.now()
+    entry.lastActivityAt = turnStartedAt
 
     type Raced =
-      | { kind: 'ok'; resp: unknown }
+      | { kind: 'sse-idle' }
+      | { kind: 'sse-error'; message: string }
       | { kind: 'err'; err: unknown }
-      | { kind: 'timeout' }
+      | { kind: 'timeout'; reason: 'absolute' | 'inactivity' }
       | { kind: 'abort' }
       | { kind: 'stop' }
 
+    // Install the settle resolver BEFORE the prompt is sent — synchronously, so
+    // no `session.idle`/`session.error` can possibly arrive first and find a
+    // null `settled` (the SSE loop is already running for this cwd, and a fast
+    // local model can idle within milliseconds of the fork).
+    const settledPromise = new Promise<Raced>((resolve) => {
+      entry.settled = (outcome): void =>
+        resolve(
+          outcome.kind === 'idle'
+            ? { kind: 'sse-idle' }
+            : { kind: 'sse-error', message: outcome.message }
+        )
+    })
+
+    /*
+     * WHY prompt_async AND NOT prompt (ADR-033's 2026-09-01 amendment):
+     * `POST /session/{id}/message` sends NO response headers until the whole
+     * turn finishes, and in Electron main the global `fetch` is Node's undici,
+     * whose default `headersTimeout` is 300 s. Every dispatched turn longer
+     * than five minutes therefore died client-side with a bare
+     * `TypeError: fetch failed` (live-reproduced on three ~5m02s local-model
+     * turns) while the SERVER-side turn kept running, unsupervised and still
+     * editing files. `prompt_async` returns 204 the moment the turn is forked
+     * server-side, so nothing is waiting on a silent socket; completion comes
+     * from the SSE stream this cwd is already subscribed to — the exact shape
+     * the interactive OpencodeSession has always used.
+     *
+     * A RESOLVED promptAsync must NOT settle the race (the turn has only just
+     * STARTED), hence the never-resolving promise on the success branch; only a
+     * rejection — the server refused the prompt outright — is a race outcome.
+     */
     const promptPromise: Promise<Raced> = entry.client
-      .prompt(entry.sessionId, {
+      .promptAsync(entry.sessionId, {
         model: parseModelString(model),
         parts: [{ type: 'text', text: req.prompt }]
       })
       .then(
-        (resp): Raced => ({ kind: 'ok', resp }),
+        () => new Promise<Raced>(() => {}),
         (err): Raced => ({ kind: 'err', err })
       )
+    /*
+     * Turn liveness (ADR-033's 2026-09-01 amendment) — the fixed absolute
+     * `dispatchTimeoutMs` of the claude/pi directions is the WRONG shape here:
+     * a slow-but-alive local model should be allowed to finish, and a wedged
+     * one should not have to burn a whole hour first. Two caps, both
+     * configurable per engine (`0` disables either):
+     *   - inactivity: no SSE event at all for this session for `idleTimeoutMs`;
+     *   - absolute:   the turn has simply run for `turnTimeoutMs`.
+     * Polled (rather than two timers) because the inactivity deadline moves on
+     * every event — see `DISPATCH_WATCHDOG_INTERVAL_MS`.
+     */
+    const turnTimeoutMs = dispatchCfg?.turnTimeoutMs ?? DISPATCH_TURN_TIMEOUT_MS
+    const idleTimeoutMs = dispatchCfg?.idleTimeoutMs ?? DISPATCH_IDLE_TIMEOUT_MS
     const timeoutPromise = new Promise<Raced>((resolve) => {
-      timeoutTimer = setTimeout(() => resolve({ kind: 'timeout' }), this.dispatchTimeoutMs)
+      watchdogTimer = setInterval(() => {
+        const now = this.now()
+        if (turnTimeoutMs > 0 && now - turnStartedAt > turnTimeoutMs) {
+          resolve({ kind: 'timeout', reason: 'absolute' })
+        } else if (idleTimeoutMs > 0 && now - entry.lastActivityAt > idleTimeoutMs) {
+          resolve({ kind: 'timeout', reason: 'inactivity' })
+        }
+      }, DISPATCH_WATCHDOG_INTERVAL_MS)
     })
     const abortPromise: Promise<Raced> = signal
       ? signal.aborted
@@ -1299,12 +1524,21 @@ export class CrossEngineDispatcher {
         })
 
     try {
-      const winner = await Promise.race([promptPromise, timeoutPromise, abortPromise, stopPromise])
+      const winner = await Promise.race([
+        settledPromise,
+        promptPromise,
+        timeoutPromise,
+        abortPromise,
+        stopPromise
+      ])
 
       if (winner.kind === 'stop') {
         // Session survives (parity with the timeout path) — abortSession
-        // only interrupts THIS turn server-side; the still-pending prompt
-        // promise settles via its own handlers (no unhandled rejection).
+        // only interrupts THIS turn server-side. Drop the settle resolver
+        // FIRST: opencode publishes `session.idle` for the aborted turn too,
+        // and that must land on a null `settled` (this call has already
+        // returned its result) — see OpencodeTargetEntry.settled.
+        entry.settled = null
         entry.client.abortSession(entry.sessionId).catch(() => {})
         this.dismissPendingForTarget(entry.sessionId)
         emitDispatchNotification(ctx, entry.sessionId, 'stopped', 'Dispatch stopped by user.')
@@ -1312,14 +1546,17 @@ export class CrossEngineDispatcher {
       }
 
       if (winner.kind === 'timeout' || winner.kind === 'abort') {
-        // Interrupt the target turn server-side; the still-pending prompt
-        // promise settles via its own handlers (no unhandled rejection).
+        // Same settle-first ordering as the stop branch above.
+        entry.settled = null
+        // Interrupt the target turn server-side.
         entry.client.abortSession(entry.sessionId).catch(() => {})
         this.dismissPendingForTarget(entry.sessionId)
         const text =
-          winner.kind === 'timeout'
-            ? `Dispatch timed out after ${Math.round(this.dispatchTimeoutMs / 60000)} minutes — the target agent was aborted.`
-            : 'Dispatch cancelled.'
+          winner.kind === 'abort'
+            ? 'Dispatch cancelled.'
+            : winner.reason === 'absolute'
+              ? `Dispatch timed out after ${Math.round(turnTimeoutMs / 60000)} minutes — the target agent was aborted.`
+              : `Dispatch aborted after ${Math.round(idleTimeoutMs / 60000)} minutes with no activity from the target agent.`
         const status = winner.kind === 'timeout' ? 'failed' : 'stopped'
         emitDispatchNotification(ctx, entry.sessionId, status, text)
         // Recorded for 'failed' (timeout) only — 'stopped' (abort/cancel) is
@@ -1342,7 +1579,17 @@ export class CrossEngineDispatcher {
         return errorResult(text, entry.sessionId)
       }
       if (winner.kind === 'err') {
+        // promptAsync itself was refused (the server never accepted the turn).
         this.dismissPendingForTarget(entry.sessionId)
+        // ZOMBIE GUARD: the refusal may still have left a turn running — the
+        // fork's `promptAsync` handler forks the prompt with
+        // `startImmediately: true` and only THEN returns, and a transport-level
+        // failure (a dropped socket on an accepted request) is indistinguishable
+        // from a rejected one out here. An abort against a session that never
+        // started anything is a harmless no-op; the reverse — a dispatched agent
+        // left editing files with nobody watching — is exactly the bug this
+        // rework closes.
+        entry.client.abortSession(entry.sessionId).catch(() => {})
         const msg = winner.err instanceof Error ? winner.err.message : String(winner.err)
         emitDispatchNotification(ctx, entry.sessionId, 'failed', `Dispatched turn failed: ${msg}`)
         this.safeRecordUsage({
@@ -1360,23 +1607,91 @@ export class CrossEngineDispatcher {
         return errorResult(`Dispatched turn failed: ${msg}`, entry.sessionId)
       }
 
-      const resp = winner.resp as
-        | {
-            info?: {
-              error?: { name?: string; data?: { message?: string } }
-              tokens?: { input?: number; output?: number; reasoning?: number }
-              cost?: number
-            }
-            parts?: Array<{ type?: string; text?: string }>
-          }
-        | undefined
-      // opencode's POST /session/{id}/message RESOLVES even when the model turn
-      // errors — the failure lives on info.error (a named-error union, each
-      // { name, data?: { message? } }). Surface it as an isError instead of
-      // silently returning the empty-text fallback (hiding a hard failure like
-      // "Key limit exceeded" as an apparent success). Target stays alive for
-      // continuation, so return its sessionId (parity with other error paths).
-      const turnError = resp?.info?.error
+      if (winner.kind === 'sse-error') {
+        // The turn RAN and failed server-side (`session.error`) — the same
+        // class of outcome as the stored `info.error` below, just delivered on
+        // the event stream instead (a turn that dies before writing a final
+        // assistant message only ever surfaces here). No abort: it already
+        // ended.
+        this.dismissPendingForTarget(entry.sessionId)
+        // Best-effort spend recovery — a turn that errored mid-flight can still
+        // have burned real tokens, and that spend must count toward the cap +
+        // the dispatching session's breakdown exactly like the `info.error`
+        // path's does. Purely additive: a failed read leaves the row's numbers
+        // null rather than failing an already-failed turn twice.
+        let errTotalTokens = 0
+        let errTurnCostUsd = 0
+        try {
+          const info = lastAssistantMessage(await entry.client.listMessages(entry.sessionId))?.info
+          errTotalTokens = storedMessageTotalTokens(info)
+          errTurnCostUsd = info?.cost ?? 0
+        } catch (err) {
+          logger.debug(
+            'CrossEngineDispatcher',
+            `usage recovery after session.error failed: ${err instanceof Error ? err.message : String(err)}`
+          )
+        }
+        emitDispatchNotification(
+          ctx,
+          entry.sessionId,
+          'failed',
+          `Dispatched turn failed: ${winner.message}`
+        )
+        this.safeRecordUsage({
+          ts: this.now(),
+          fromRoutingId: ctx.fromRoutingId,
+          fromEngine: ctx.fromEngine,
+          targetEngine: req.engine,
+          targetModel: model,
+          targetSessionId: entry.sessionId,
+          toolUseId: ctx.toolUseId ?? null,
+          totalTokens: errTotalTokens > 0 ? errTotalTokens : null,
+          costUsd: errTurnCostUsd > 0 ? errTurnCostUsd : null,
+          durationMs: this.now() - turnStartedAt
+        })
+        if (Number.isFinite(errTurnCostUsd) && errTurnCostUsd > 0) {
+          ctx.addDispatchedCost?.(req.engine, model, errTurnCostUsd)
+          entry.cumulativeCostUsd += errTurnCostUsd
+        }
+        return errorResult(`Dispatched turn failed: ${winner.message}`, entry.sessionId)
+      }
+
+      // ── The turn ended cleanly (`session.idle`) ─────────────────────────
+      // `prompt_async` carried no result body, so the turn's own output is read
+      // back from stored history. No abort on a failed read: the turn DID end
+      // server-side, there is nothing left to interrupt.
+      let messages: StoredMessage[]
+      try {
+        messages = await entry.client.listMessages(entry.sessionId)
+      } catch (err) {
+        this.dismissPendingForTarget(entry.sessionId)
+        const msg = err instanceof Error ? err.message : String(err)
+        emitDispatchNotification(ctx, entry.sessionId, 'failed', `Dispatched turn failed: ${msg}`)
+        this.safeRecordUsage({
+          ts: this.now(),
+          fromRoutingId: ctx.fromRoutingId,
+          fromEngine: ctx.fromEngine,
+          targetEngine: req.engine,
+          targetModel: model,
+          targetSessionId: entry.sessionId,
+          toolUseId: ctx.toolUseId ?? null,
+          totalTokens: null,
+          costUsd: null,
+          durationMs: this.now() - turnStartedAt
+        })
+        return errorResult(`Dispatched turn failed: ${msg}`, entry.sessionId)
+      }
+      const finalMessage = lastAssistantMessage(messages)
+      // A turn can go idle having reported a failure — opencode records it on
+      // the assistant message's `info.error` (a named-error union, each
+      // { name, data?: { message? } }) rather than on the event stream. Rides
+      // through StoredMessage['info']'s index signature, so it needs the cast.
+      // Surface it as an isError instead of silently returning the empty-text
+      // fallback (hiding a hard failure like "Key limit exceeded" as an apparent
+      // success). Target stays alive for continuation, so return its sessionId
+      // (parity with other error paths).
+      const turnError = finalMessage?.info.error as
+        { name?: string; data?: { message?: string } } | undefined
       if (turnError) {
         this.dismissPendingForTarget(entry.sessionId)
         const detail =
@@ -1387,19 +1702,14 @@ export class CrossEngineDispatcher {
           'failed',
           `Dispatched turn failed: ${detail}`
         )
-        // opencode RESOLVES the prompt with real `info.tokens`/`info.cost` even
-        // when the turn reports an error (the turn ran, it just didn't finish
+        // The stored message carries real `info.tokens`/`info.cost` even when
+        // the turn reports an error (the turn ran, it just didn't finish
         // cleanly) — capture that spend instead of fabricating nulls, and fold
         // it into the cap + Slice-C breakdown. Mirrors the Claude failed-subtype
         // path; without it a target whose turns keep erroring spends real tokens
         // that never count toward maxCostUsd or the dispatching session's cost.
-        const errInfoTokens = resp?.info?.tokens
-        const errTotalTokens = errInfoTokens
-          ? (errInfoTokens.input ?? 0) +
-            (errInfoTokens.output ?? 0) +
-            (errInfoTokens.reasoning ?? 0)
-          : 0
-        const errTurnCostUsd = resp?.info?.cost ?? 0
+        const errTotalTokens = storedMessageTotalTokens(finalMessage?.info)
+        const errTurnCostUsd = finalMessage?.info.cost ?? 0
         this.safeRecordUsage({
           ts: this.now(),
           fromRoutingId: ctx.fromRoutingId,
@@ -1418,7 +1728,10 @@ export class CrossEngineDispatcher {
         }
         return errorResult(`Dispatched turn failed: ${detail}`, entry.sessionId)
       }
-      const text = (resp?.parts ?? [])
+      // No assistant message at all (a turn that idled without producing one)
+      // falls through here to the empty-text fallback with zero usage — the
+      // same result the old synchronous path produced for an empty `parts`.
+      const text = (finalMessage?.parts ?? [])
         .filter((p) => p?.type === 'text')
         .map((p) => p?.text ?? '')
         .join('')
@@ -1428,11 +1741,8 @@ export class CrossEngineDispatcher {
       // opencode's `info.tokens`/`info.cost` are a per-MESSAGE (i.e. per-turn
       // — each turn creates a new message id) cumulative snapshot, same shape
       // event-mapper.ts reads for OpencodeSession's own metering.
-      const infoTokens = resp?.info?.tokens
-      const totalTokens = infoTokens
-        ? (infoTokens.input ?? 0) + (infoTokens.output ?? 0) + (infoTokens.reasoning ?? 0)
-        : 0
-      const turnCostUsd = resp?.info?.cost ?? 0
+      const totalTokens = storedMessageTotalTokens(finalMessage?.info)
+      const turnCostUsd = finalMessage?.info.cost ?? 0
       const durationMs = this.now() - turnStartedAt
 
       // ── Cost cap crossing note (ADR-033 M4-C) ───────────────────────────
@@ -1470,8 +1780,12 @@ export class CrossEngineDispatcher {
       return { text: outText, sessionId: entry.sessionId }
     } finally {
       entry.busy = false
+      // Belt-and-suspenders settle-once (the winner branches already null it on
+      // the give-up paths, and the settlers null it before invoking): whatever
+      // happened, no LATER SSE event may resolve a turn that has returned.
+      entry.settled = null
       clearInterval(heartbeat)
-      if (timeoutTimer) clearTimeout(timeoutTimer)
+      if (watchdogTimer) clearInterval(watchdogTimer)
       if (signal && abortListener) signal.removeEventListener('abort', abortListener)
     }
   }
@@ -1485,7 +1799,8 @@ export class CrossEngineDispatcher {
       rec = {
         client: this.deps.makeClient(conn.baseUrl, conn.authHeader),
         sseAbort: new AbortController(),
-        targetCount: 0
+        targetCount: 0,
+        cwdKey
       }
       this.connections.set(cwdKey, rec)
       void this.runSseLoop(rec)
@@ -1511,6 +1826,9 @@ export class CrossEngineDispatcher {
         client: rec.client,
         ctx,
         busy: false,
+        settled: null,
+        lastActivityAt: 0,
+        emittedToolResults: new Set(),
         accumulators: new Map(),
         cumulativeCostUsd: 0,
         turnToolUseIds: new Set()
@@ -1547,8 +1865,29 @@ export class CrossEngineDispatcher {
     // both ends the for-await and breaks this loop.
     while (!rec.sseAbort.signal.aborted) {
       try {
+        // A turn's COMPLETION now rides this stream (`session.idle`), so a gap
+        // in it is no longer merely a UX problem: a turn that finished while we
+        // were disconnected would otherwise hang until the watchdog fired an
+        // abort at an already-finished turn and threw its result away. Hence the
+        // per-(re)connect reconcile against the server's own status map.
+        //
+        // It hangs off `onConnected` — which fires once the subscription is
+        // provably RECEIVING — and NOT before the subscribe, because the two
+        // orderings are not equivalent. Reconciling first leaves a real window:
+        // the status read says "busy", the turn goes idle, and only THEN does
+        // the stream go live, so nobody ever sees that idle. Reconciling after
+        // connection-live closes it exhaustively:
+        //   · an idle published BEFORE the connection is live → the session is
+        //     already absent from the status map the reconcile reads;
+        //   · an idle published AFTER  → delivered as an event on this stream;
+        //   · the overlap where BOTH see it → absorbed by settle-once
+        //     (read-and-null `entry.settled`; the loser is a no-op).
+        // Fire-and-forget is fine: `reconcileBusyTargets` swallows everything
+        // and no-ops when this connection has no turn in flight — which is
+        // always the case on the very first connection.
+        const onConnected = (): void => void this.reconcileBusyTargets(rec)
         // subscribeEvents is UNFILTERED — we filter by registered target ids.
-        for await (const ev of rec.client.subscribeEvents(rec.sseAbort.signal)) {
+        for await (const ev of rec.client.subscribeEvents(rec.sseAbort.signal, onConnected)) {
           if (rec.sseAbort.signal.aborted) break
           this.handleSseEvent(ev)
         }
@@ -1565,6 +1904,77 @@ export class CrossEngineDispatcher {
       // re-subscribing so a genuinely dead server can't hot-spin the loop (the
       // pending dispatches' own 10-min timeouts still bound the worst case).
       await this.sseReconnectDelay(rec.sseAbort.signal)
+    }
+  }
+
+  /**
+   * Close the SSE-gap hole for turns in flight on `rec`'s connection: a
+   * `session.idle` published while the subscription was down is GONE (opencode
+   * does not replay), so a turn whose completion landed in the gap would sit
+   * `busy` with a live `settled` until the inactivity watchdog eventually
+   * aborted an already-finished turn. `GET /session/status` is the
+   * authoritative catch-up — ABSENCE MEANS IDLE there (the server deletes a
+   * session's entry the moment it goes idle; see
+   * `OpencodeClient.getSessionStatus`), so a busy target missing from the map
+   * has provably finished and is settled exactly as if its event had arrived.
+   * A target still listed is simply alive — bump its activity clock so the
+   * blackout itself never counts as inactivity.
+   *
+   * CALLED ONLY FROM `runSseLoop`'s `onConnected`, i.e. once the replacement
+   * subscription is already receiving — see that call site for why the ordering
+   * is load-bearing and why the resulting double-delivery is safe.
+   *
+   * Wholly best-effort: ONE request, only when this connection actually has a
+   * turn in flight, and every failure is swallowed with a debug line — a
+   * reconcile that throws must never break the reconnect loop it runs beside
+   * (that would take approval forwarding down with it).
+   */
+  private async reconcileBusyTargets(rec: ConnRecord): Promise<void> {
+    // The snapshot carries each entry's CURRENT resolver alongside it — see the
+    // identity check below for why the entry alone is not enough.
+    const pending: Array<{
+      entry: OpencodeTargetEntry
+      settled: NonNullable<OpencodeTargetEntry['settled']>
+    }> = []
+    for (const entry of this.targets.values()) {
+      if (entry.kind !== 'opencode') continue
+      const settled = entry.settled
+      if (!entry.busy || settled === null) continue
+      if (entry.cwdKey !== rec.cwdKey) continue
+      pending.push({ entry, settled })
+    }
+    if (pending.length === 0) return
+    try {
+      const status = await rec.client.getSessionStatus()
+      for (const { entry, settled } of pending) {
+        const info = status[entry.sessionId]
+        if (!info || info.type === 'idle') {
+          // RESOLVER-IDENTITY GUARD — the same pattern the pi direction uses
+          // (`drivePiTurn`/`forwardPiTargetMessage` compare `entry.settled ===
+          // resolve` before settling). The status GET is an await: during it the
+          // snapshotted turn can settle on the live stream AND a continuation
+          // turn can start on the same entry, installing a FRESH resolver. The
+          // status map — snapshotted server-side before that new turn existed —
+          // may then report the session absent, i.e. "idle", and settling on
+          // that verdict would hand the NEW turn the PREVIOUS turn's stored
+          // assistant message as its result. A changed resolver means the turn
+          // this verdict describes is already over: skip, and let the live
+          // turn's own `session.idle` (or the watchdog) settle it.
+          if (entry.settled !== settled) continue
+          entry.settled = null
+          settled({ kind: 'idle' })
+        } else {
+          // Unguarded on purpose: bumping a newer turn's activity clock is
+          // harmless — it only ever says "this session was alive just now",
+          // which is true for whichever turn is running.
+          entry.lastActivityAt = this.now()
+        }
+      }
+    } catch (err) {
+      logger.debug(
+        'CrossEngineDispatcher',
+        `busy-target reconcile failed (turn stays on the watchdog): ${err instanceof Error ? err.message : String(err)}`
+      )
     }
   }
 
@@ -1589,8 +1999,64 @@ export class CrossEngineDispatcher {
   private handleSseEvent(ev: OpencodeEvent): void {
     const props = ev.properties
 
-    if (ev.type === 'message.part.delta' || ev.type === 'message.part.updated') {
+    // Liveness FIRST, before any type dispatch: ANY event carrying a busy
+    // target's sessionID proves that target is alive — a tool part updating, a
+    // cost snapshot, a permission being asked (a turn parked on a human is not
+    // an inactive turn). The inactivity watchdog reads this clock.
+    const eventSessionId = props.sessionID as string | undefined
+    if (eventSessionId) {
+      const active = this.targets.get(eventSessionId)
+      if (active && active.kind === 'opencode' && active.busy) active.lastActivityAt = this.now()
+    }
+
+    if (
+      ev.type === 'message.part.delta' ||
+      ev.type === 'message.part.updated' ||
+      // `message.updated` carries no renderable delta of its own, but mapEvent
+      // needs it to record the message's ROLE on the accumulator — without it
+      // the very first `message.part.updated` of a turn is dropped as
+      // not-yet-known-to-be-assistant. It was never routed here while the
+      // synchronous prompt owned completion; now that the tap is also the
+      // tool-result source, the accumulators must be complete.
+      ev.type === 'message.updated'
+    ) {
       this.handleOpencodeTargetStream(ev)
+      return
+    }
+
+    if (ev.type === 'session.idle') {
+      // TURN COMPLETION (see resolveAndRunOpencode). Published for a normal
+      // finish AND after our own `abortSession` — the read-and-null makes the
+      // second case a no-op, since the give-up branches already nulled it.
+      const entry = this.targets.get(eventSessionId ?? '')
+      if (!entry || entry.kind !== 'opencode') return
+      const settle = entry.settled
+      entry.settled = null
+      settle?.({ kind: 'idle' })
+      return
+    }
+
+    if (ev.type === 'session.error') {
+      // TURN FAILURE. Message derivation mirrors event-mapper.ts's own
+      // `session.error` case (`{ name, data: { providerID?, message? } }`), with
+      // the auth branch folded into plain error text: a dispatch target has no
+      // vendor-auth card to raise — the dispatching model gets the hint as the
+      // tool's error text instead.
+      const entry = this.targets.get(eventSessionId ?? '')
+      if (!entry || entry.kind !== 'opencode') return
+      const err = props.error as { name?: string; data?: Record<string, unknown> } | undefined
+      const name = err?.name
+      const data = err?.data ?? {}
+      const detail = typeof data.message === 'string' ? data.message : undefined
+      const vendorId = typeof data.providerID === 'string' ? data.providerID : undefined
+      const message =
+        name === 'ProviderAuthError'
+          ? `Authentication required${vendorId ? ` for "${vendorId}"` : ''}` +
+            `${detail ? `: ${detail}` : ''} — re-authorize in Settings › Vendors.`
+          : (detail ?? name ?? 'the dispatched agent reported an error')
+      const settle = entry.settled
+      entry.settled = null
+      settle?.({ kind: 'sseError', message })
       return
     }
 
@@ -1642,8 +2108,9 @@ export class CrossEngineDispatcher {
    * Forward an opencode dispatch target's live turn output as engine-neutral
    * subagent events (ADR-033 M3). Reuses `mapEvent` (event-mapper.ts) by
    * treating the TARGET's session id as the "own" session — the exact same
-   * message.part.delta/updated → {stream|message} logic OpencodeSession.ts
-   * uses for its own turns, just re-keyed to the dispatching tool_use id.
+   * message.updated/part.delta/part.updated → {stream|message} logic
+   * OpencodeSession.ts uses for its own turns, just re-keyed to the dispatching
+   * tool_use id.
    *
    * Gated on `entry.busy` (a completed/aborted turn's trailing SSE chatter
    * must never emit) and `entry.ctx.toolUseId` (no id → no way to key the
@@ -1657,19 +2124,56 @@ export class CrossEngineDispatcher {
     const toolUseId = entry.ctx.toolUseId
     if (!toolUseId) return
 
-    // startTimeMs/totalCostUsd are only consumed by mapEvent's cost_update /
-    // result branches — irrelevant here (completion comes from the `prompt()`
-    // promise, not SSE), so dummy values are fine.
+    // DUMMY startTimeMs/totalCostUsd — they are consumed ONLY by mapEvent's
+    // cost_update / result branches, which this tap deliberately ignores:
+    // completion is settled directly from `session.idle` (never routed through
+    // mapEvent, precisely because these refs are fake) and metering is read
+    // from stored history at turn end.
     const output = mapEvent(ev, sessionID, entry.accumulators, Date.now(), { value: 0 })
-    if (output.kind === 'stream') {
-      entry.ctx.emit('session:subagent-stream', {
-        toolUseId,
-        type: output.streamType,
-        text: output.delta
-      })
-    } else if (output.kind === 'message') {
-      collectToolUseIds(output.message, entry.turnToolUseIds)
-      entry.ctx.emit('session:subagent-message', { toolUseId, message: output.message })
+    switch (output.kind) {
+      case 'stream':
+        entry.ctx.emit('session:subagent-stream', {
+          toolUseId,
+          type: output.streamType,
+          text: output.delta
+        })
+        break
+      case 'message': {
+        collectToolUseIds(output.message, entry.turnToolUseIds)
+        entry.ctx.emit('session:subagent-message', { toolUseId, message: output.message })
+        // Tool RESULTS are a separate channel from the message's `tool_use`
+        // blocks — an opencode ChatMessage never carries them, so without this
+        // the dispatch TaskCard's tool chips spin forever (the Claude tap has
+        // always forwarded results via the `user`/tool_result branch, and the pi
+        // tap via its mapper's `tool_result` output; the opencode tap was the
+        // only one missing it). Byte-parallel to OpencodeSession's own
+        // subagent-message case: walk the rebuilt message's parts, emit each
+        // newly-completed tool part ONCE (`emittedToolResults` — the whole
+        // message re-emits on every part update).
+        const acc = entry.accumulators.get(output.message.id)
+        if (!acc) break
+        for (const [partId, snap] of acc.parts) {
+          const cacheKey = `${output.message.id}:${partId}`
+          if (entry.emittedToolResults.has(cacheKey)) continue
+          const toolRes = extractToolResult(partId, snap)
+          if (!toolRes) continue
+          entry.emittedToolResults.add(cacheKey)
+          entry.ctx.emit('session:subagent-tool-result', {
+            toolUseId,
+            toolResultToolUseId: toolRes.toolUseId,
+            result: toolRes.result,
+            isError: toolRes.isError,
+            ...(toolRes.fileDiffs ? { fileDiffs: toolRes.fileDiffs } : {}),
+            ...(toolRes.images ? { images: toolRes.images } : {})
+          })
+        }
+        break
+      }
+      default:
+        // cost_update / result / approval / approval-resolved / ignore / … —
+        // this tap owns neither completion nor metering (see the DUMMY note
+        // above), and approvals ride handleSseEvent's own branches.
+        break
     }
   }
 

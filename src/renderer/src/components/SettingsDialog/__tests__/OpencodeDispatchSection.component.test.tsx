@@ -251,3 +251,74 @@ describe('OpencodeDispatchSection — saves merge, never clobber', () => {
     expect(savedConfigs[1].dispatch?.defaultModel).toBe('openai/gpt-5')
   })
 })
+
+/**
+ * The turn/inactivity watchdog knobs (ADR-033's 2026-09-01 amendment). Edited
+ * in MINUTES, stored in MILLISECONDS; blank = the built-in default, 0 =
+ * disabled. Opencode-only — the Claude direction still runs on the fixed
+ * 10-minute cap, so its section must not offer them (asserted in
+ * ClaudeDispatchSection.component.test.tsx).
+ */
+describe('OpencodeDispatchSection — dispatch turn timeouts', () => {
+  it('renders stored millisecond values as minutes', async () => {
+    installApiStub({
+      loadEngineConfig: vi.fn(async () => ({
+        dispatch: { defaultModel: 'openai/gpt-5', turnTimeoutMs: 5_400_000, idleTimeoutMs: 300_000 }
+      }))
+    })
+    await renderLoaded()
+
+    expect(
+      (screen.getByTestId('OpencodeDispatchSection.turnTimeout') as HTMLInputElement).value
+    ).toBe('90')
+    expect(
+      (screen.getByTestId('OpencodeDispatchSection.idleTimeout') as HTMLInputElement).value
+    ).toBe('5')
+  })
+
+  it('an unset timeout renders blank (the built-in default applies)', async () => {
+    await renderLoaded()
+    expect(
+      (screen.getByTestId('OpencodeDispatchSection.turnTimeout') as HTMLInputElement).value
+    ).toBe('')
+    expect(
+      (screen.getByTestId('OpencodeDispatchSection.idleTimeout') as HTMLInputElement).value
+    ).toBe('')
+  })
+
+  it('saves minutes as milliseconds, merging into the rest of the config', async () => {
+    await renderLoaded()
+
+    fireEvent.change(screen.getByTestId('OpencodeDispatchSection.turnTimeout'), {
+      target: { value: '90' }
+    })
+    fireEvent.change(screen.getByTestId('OpencodeDispatchSection.idleTimeout'), {
+      target: { value: '5' }
+    })
+
+    expect(savedConfigs[1]).toEqual({
+      autoMode: { enabled: true, judgeModel: 'openai/gpt-5-mini' },
+      dispatch: {
+        defaultModel: 'openai/gpt-5',
+        allowedModels: ['openai/gpt-5'],
+        turnTimeoutMs: 5_400_000,
+        idleTimeoutMs: 300_000
+      }
+    })
+  })
+
+  it('0 minutes saves 0 (disabled), and clearing drops the key (back to the default)', async () => {
+    await renderLoaded()
+
+    fireEvent.change(screen.getByTestId('OpencodeDispatchSection.idleTimeout'), {
+      target: { value: '0' }
+    })
+    expect(savedConfigs[0].dispatch?.idleTimeoutMs).toBe(0)
+
+    fireEvent.change(screen.getByTestId('OpencodeDispatchSection.idleTimeout'), {
+      target: { value: '' }
+    })
+    expect(savedConfigs[1].dispatch?.idleTimeoutMs).toBeUndefined()
+    expect(savedConfigs[1].dispatch?.defaultModel).toBe('openai/gpt-5')
+  })
+})

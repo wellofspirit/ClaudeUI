@@ -18,11 +18,21 @@ import type {
  * M-OC5: every request gets a timeout + AbortSignal so a dead/hung opencode
  * server can never block a caller forever. Two tiers:
  *  - control-plane calls (create/patch/list/reply/…) — fast; 60 s is generous.
- *  - `prompt()`/`runCommand()` run a whole model turn — a much larger cap, set
- *    ABOVE the cross-engine dispatcher's own 10-min DISPATCH_TIMEOUT so a
- *    client timeout never pre-empts the dispatcher's timeout/abort handling; it
- *    is purely the network-level backstop for a genuinely wedged server
- *    (the synchronous judge/askSideQuestion/agent-generate prompts).
+ *  - `prompt()`/`runCommand()` run a whole model turn — a much larger cap; it
+ *    is purely the network-level backstop for a genuinely wedged server on the
+ *    remaining SHORT-turn synchronous callers (judge / askSideQuestion /
+ *    agent-generate / runCommand).
+ *
+ * CEILING HAZARD on the synchronous `prompt()`: this timeout is NOT the only
+ * one in play. `POST /session/{id}/message` sends no response headers until the
+ * whole turn finishes, and in Electron main global `fetch` is Node's undici,
+ * whose DEFAULT `headersTimeout` is 300 s — so a synchronous prompt turn that
+ * runs longer than 5 minutes dies with a bare `TypeError: fetch failed`,
+ * whatever this value says. That is why the cross-engine dispatcher's opencode
+ * direction no longer uses `prompt()` at all (it drives `promptAsync()` +
+ * SSE `session.idle` completion — ADR-033's 2026-09-01 amendment); the callers
+ * left on `prompt()` are all short single-shot turns where the ceiling is
+ * latent rather than live.
  */
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000
 const PROMPT_TIMEOUT_MS = 15 * 60_000
@@ -209,6 +219,24 @@ export class OpencodeClient {
     return this.get(`/session/${encodeURIComponent(sessionId)}/message`)
   }
 
+  /**
+   * GET /session/status — the server's live per-session status map, keyed by
+   * session id.
+   *
+   * ABSENCE MEANS IDLE. Verified against the pinned fork
+   * (packages/opencode/src/session/status.ts `SessionStatus.set`): a session
+   * whose status goes idle is DELETED from the map (right after publishing
+   * `session.status` + `session.idle`), so the map only ever lists sessions
+   * that are currently doing something. A caller reconciling a turn it BELIEVES
+   * is still running must therefore treat "not in the map" as "already
+   * finished", not as "unknown" — which is exactly what the cross-engine
+   * dispatcher does after an SSE reconnect (a `session.idle` published during
+   * the gap is gone forever; this map is the only way to notice).
+   */
+  getSessionStatus(): Promise<Record<string, { type?: string }>> {
+    return this.get('/session/status')
+  }
+
   /** DELETE /session/{id} */
   deleteSession(sessionId: string): Promise<boolean> {
     return this.del(`/session/${encodeURIComponent(sessionId)}`)
@@ -335,8 +363,22 @@ export class OpencodeClient {
    * Returns an AsyncGenerator yielding parsed OpencodeEvent objects.
    * Handles chunked `data:` frames robustly.
    * The caller is responsible for cancellation via the AbortSignal.
+   *
+   * `onConnected` fires EXACTLY ONCE, after the response is accepted and
+   * immediately before the first event can be yielded — i.e. at the first
+   * instant the connection is provably receiving. It exists for consumers that
+   * CATCH UP on events missed while disconnected (the cross-engine dispatcher
+   * reconciles turn completions against `GET /session/status` there): such a
+   * read must not happen before the stream is live, or an event published in
+   * between is lost by both paths — the catch-up read is too early to see it
+   * and the subscription is too late to receive it. Called synchronously, so
+   * anything slow the consumer does belongs in its own task; a throw from it
+   * propagates out of the generator like any other subscription failure.
    */
-  async *subscribeEvents(signal?: AbortSignal): AsyncGenerator<OpencodeEvent> {
+  async *subscribeEvents(
+    signal?: AbortSignal,
+    onConnected?: () => void
+  ): AsyncGenerator<OpencodeEvent> {
     const res = await fetch(`${this.baseUrl}/event`, {
       headers: {
         Authorization: this.authHeader,
@@ -353,6 +395,7 @@ export class OpencodeClient {
       throw new Error('opencode GET /event: no response body')
     }
 
+    onConnected?.()
     yield* parseSSEStream(res.body, signal)
   }
 }

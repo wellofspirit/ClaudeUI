@@ -766,6 +766,9 @@ export function PiAutoModeSection(): React.JSX.Element {
  * (shows `notInstalledMessage`), true = render the editor. Claude has no
  * "not installed" state (it's the bundled default engine — `engine:is-installed`
  * always returns true for it), so `ClaudeDispatchSection` passes a literal `true`.
+ *
+ * The ONE genuinely per-direction control is `showTurnTimeouts` — see its prop
+ * doc; everything else differs only in copy.
  */
 function DispatchSection({
   engineId,
@@ -774,7 +777,8 @@ function DispatchSection({
   notInstalledMessage,
   defaultModelTooltip,
   noModelsMessage,
-  footerText
+  footerText,
+  showTurnTimeouts = false
 }: {
   engineId: EngineId
   testid: string
@@ -783,6 +787,12 @@ function DispatchSection({
   defaultModelTooltip: string
   noModelsMessage: string
   footerText: string
+  /** Render the turn/inactivity timeout editors. OPENCODE ONLY: the watchdog
+   *  they configure lives in the opencode dispatch direction (ADR-033's
+   *  2026-09-01 amendment); the Claude/pi directions still run on the fixed
+   *  10-minute `DISPATCH_TIMEOUT_MS`, so showing these there would be an inert
+   *  control that silently writes config nothing reads. */
+  showTurnTimeouts?: boolean
 }): React.JSX.Element {
   const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
@@ -823,6 +833,13 @@ function DispatchSection({
   const defaultModel = dispatch.defaultModel ?? ''
   const allowedModels = dispatch.allowedModels ?? []
   const maxCostUsd = dispatch.maxCostUsd
+  // Both timeouts are stored in MILLISECONDS (DispatchConfig) but edited in
+  // MINUTES — nobody wants to type 3600000. Blank = the built-in default,
+  // 0 = disabled; both round-trip through the same undefined-vs-number
+  // convention the maxCost input uses.
+  const toMinutes = (ms: number | undefined): number | '' => (ms === undefined ? '' : ms / 60000)
+  const fromMinutes = (raw: string): number | undefined =>
+    raw === '' ? undefined : Number(raw) * 60000
 
   const update = (patch: Partial<DispatchConfig>): void => {
     const next: EngineConfig = { ...engineCfg, dispatch: { ...dispatch, ...patch } }
@@ -913,6 +930,42 @@ function DispatchSection({
           className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
         />
       </div>
+      {showTurnTimeouts && (
+        <>
+          <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+            <div className="mb-1 flex items-center gap-1">
+              Max turn duration (minutes)
+              <InfoTooltip text="Absolute cap on one dispatched turn — it is aborted when this elapses, however busy it looks. Leave blank for the 60-minute default; 0 disables the cap entirely." />
+            </div>
+            <input
+              data-testid={`${testid}.turnTimeout`}
+              type="number"
+              min="0"
+              step="1"
+              value={toMinutes(dispatch.turnTimeoutMs)}
+              onChange={(e) => update({ turnTimeoutMs: fromMinutes(e.target.value) })}
+              placeholder="(default: 60)"
+              className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+            />
+          </div>
+          <div className="px-3 py-1.5 text-[13px] text-text-secondary">
+            <div className="mb-1 flex items-center gap-1">
+              Inactivity timeout (minutes)
+              <InfoTooltip text="How long a dispatched turn may go without producing ANY output before it is aborted. This is the liveness guard — a working agent streams continuously, so for a genuinely slow model raise the turn cap rather than this. Leave blank for the 15-minute default; 0 disables it." />
+            </div>
+            <input
+              data-testid={`${testid}.idleTimeout`}
+              type="number"
+              min="0"
+              step="1"
+              value={toMinutes(dispatch.idleTimeoutMs)}
+              onChange={(e) => update({ idleTimeoutMs: fromMinutes(e.target.value) })}
+              placeholder="(default: 15)"
+              className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+            />
+          </div>
+        </>
+      )}
       <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">{footerText}</div>
     </div>
   )
@@ -934,6 +987,7 @@ export function OpencodeDispatchSection(): React.JSX.Element {
       defaultModelTooltip="Used when the dispatching agent doesn't request a model. Format: provider/model-id. With no default set, dispatch_agent calls without an explicit model are rejected."
       noModelsMessage="No opencode models detected."
       footerText="Governs dispatch_agent calls INTO opencode (e.g. a Claude session asking a GPT-backed agent for a second opinion). Empty allowed-models list = any model may be requested."
+      showTurnTimeouts
     />
   )
 }

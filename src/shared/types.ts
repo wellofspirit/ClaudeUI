@@ -672,6 +672,22 @@ export interface DispatchConfig {
    * raising the cap or starting a fresh dispatch both work). Undefined = no cap.
    */
   maxCostUsd?: number
+  /**
+   * Absolute cap on ONE dispatched turn, in MILLISECONDS (ADR-033's 2026-09-01
+   * amendment). `0` disables it; undefined = 60 min. Consumed by the OPENCODE
+   * dispatch direction only — the Claude/pi directions keep their fixed
+   * 10-minute cap. The turn is aborted server-side when it trips.
+   */
+  turnTimeoutMs?: number
+  /**
+   * Inactivity cap for one dispatched turn, in MILLISECONDS: how long the
+   * target may produce NO events at all before the turn is aborted. `0`
+   * disables it; undefined = 15 min. Opencode direction only, same as
+   * `turnTimeoutMs`. This is the real liveness guard — a slow-but-working
+   * target streams continuously, so it should normally be the cap that fires
+   * on a genuinely wedged turn.
+   */
+  idleTimeoutMs?: number
 }
 
 /**
