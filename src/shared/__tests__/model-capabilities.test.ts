@@ -30,7 +30,8 @@ import {
 } from '../model-capabilities'
 
 describe('supportsAdaptiveThinking', () => {
-  it('is true for opus-4-8 / opus-4-7 / opus-4-6 / sonnet-4-6 / sonnet-5', () => {
+  it('is true for opus-5 / opus-4-8 / opus-4-7 / opus-4-6 / sonnet-4-6 / sonnet-5', () => {
+    expect(supportsAdaptiveThinking('claude-opus-5')).toBe(true)
     expect(supportsAdaptiveThinking('claude-opus-4-8')).toBe(true)
     expect(supportsAdaptiveThinking('claude-opus-4-7')).toBe(true)
     expect(supportsAdaptiveThinking('claude-opus-4-6')).toBe(true)
@@ -54,6 +55,7 @@ describe('supportsAdaptiveThinking', () => {
 
 describe('supportsEffort', () => {
   it('matches the adaptive-thinking model set', () => {
+    expect(supportsEffort('claude-opus-5')).toBe(true)
     expect(supportsEffort('claude-opus-4-8')).toBe(true)
     expect(supportsEffort('claude-opus-4-7')).toBe(true)
     expect(supportsEffort('claude-sonnet-4-6')).toBe(true)
@@ -64,7 +66,8 @@ describe('supportsEffort', () => {
 })
 
 describe('supportsXhighEffort', () => {
-  it('is fable-5, mythos-5, opus-4-7, opus-4-8, and sonnet-5', () => {
+  it('is fable-5, mythos-5, opus-5, opus-4-7, opus-4-8, and sonnet-5', () => {
+    expect(supportsXhighEffort('claude-opus-5')).toBe(true)
     expect(supportsXhighEffort('claude-opus-4-7')).toBe(true)
     expect(supportsXhighEffort('claude-opus-4-8')).toBe(true)
     expect(supportsXhighEffort('claude-fable-5')).toBe(true)
@@ -275,8 +278,9 @@ describe('modelDefaultEffort', () => {
     ).toBe('high')
   })
   it('does not blanket-pick xhigh just because SDK lists it as allowed', () => {
-    // The `default`/`opus` alias resolves to opus-4-8 today; xhigh in the
-    // allowed list must not be auto-selected when the id heuristic says high.
+    // The `default`/`opus` alias resolves to opus-5 today (defaults to high);
+    // xhigh in the allowed list must not be auto-selected when the id
+    // heuristic says high.
     expect(
       modelDefaultEffort({
         value: 'default',
@@ -313,9 +317,9 @@ describe('modelDefaultThinkingMode', () => {
 })
 
 describe('canonicalizeModelValue', () => {
-  it('maps known aliases to current canonical ids (mirrors cli.js i8_ 2.1.197)', () => {
-    expect(canonicalizeModelValue('opus')).toBe('claude-opus-4-8')
-    expect(canonicalizeModelValue('opus[1m]')).toBe('claude-opus-4-8')
+  it('maps known aliases to current canonical ids (mirrors cli.js alias map, 2.1.261)', () => {
+    expect(canonicalizeModelValue('opus')).toBe('claude-opus-5')
+    expect(canonicalizeModelValue('opus[1m]')).toBe('claude-opus-5')
     expect(canonicalizeModelValue('sonnet')).toBe('claude-sonnet-5')
     expect(canonicalizeModelValue('sonnet[1m]')).toBe('claude-sonnet-5')
     expect(canonicalizeModelValue('haiku')).toBe('claude-haiku-4-5')

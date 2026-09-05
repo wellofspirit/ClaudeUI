@@ -87,6 +87,33 @@ describe('equivalentCostUsd — anthropic pricing', () => {
     const cost = equivalentCostUsd('anthropic', 'fable-model', oneMTok({ inputTokens: 1_000_000 }))
     expect(cost).toBeCloseTo(10.0)
   })
+
+  it('fable-5-1: cache reads at $0.25/MTok (tier_10_50_cache_read_0_25, cli.js 2.1.261)', () => {
+    const cost = equivalentCostUsd(
+      'anthropic',
+      'claude-fable-5-1',
+      oneMTok({ cacheReadTokens: 1_000_000 })
+    )
+    expect(cost).toBeCloseTo(0.25)
+  })
+
+  it('fable-5 (non-point-release): cache reads still $1/MTok', () => {
+    const cost = equivalentCostUsd(
+      'anthropic',
+      'claude-fable-5',
+      oneMTok({ cacheReadTokens: 1_000_000 })
+    )
+    expect(cost).toBeCloseTo(1.0)
+  })
+
+  it('mythos-5-1: cache reads at $0.25/MTok', () => {
+    const cost = equivalentCostUsd(
+      'anthropic',
+      'claude-mythos-5-1',
+      oneMTok({ cacheReadTokens: 1_000_000 })
+    )
+    expect(cost).toBeCloseTo(0.25)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -660,6 +687,8 @@ describe('ANTHROPIC_MODEL_PRICING (the view block-usage derives from)', () => {
   it('preserves declared order — first substring match wins', () => {
     const order = ANTHROPIC_MODEL_PRICING.map((e) => e.match)
     expect(order).toEqual([
+      'fable-5-1',
+      'mythos-5-1',
       'fable',
       'mythos',
       'opus-4-5',
@@ -673,16 +702,18 @@ describe('ANTHROPIC_MODEL_PRICING (the view block-usage derives from)', () => {
       'haiku-3',
       'haiku'
     ])
-    // The ordering constraint that actually matters: the cheap 4.5+ entries must
-    // precede the catch-all 'opus-4' (4.0/4.1 pricing) and 'opus'.
+    // The ordering constraint that actually matters: point-release entries must
+    // precede their family catch-alls, and the cheap 4.5+ entries must precede
+    // the catch-all 'opus-4' (4.0/4.1 pricing) and 'opus'.
+    expect(order.indexOf('fable-5-1')).toBeLessThan(order.indexOf('fable'))
+    expect(order.indexOf('mythos-5-1')).toBeLessThan(order.indexOf('mythos'))
     expect(order.indexOf('opus-4-5')).toBeLessThan(order.indexOf('opus-4'))
     expect(order.indexOf('opus-4')).toBeLessThan(order.indexOf('opus'))
     expect(order.indexOf('haiku-4')).toBeLessThan(order.indexOf('haiku'))
   })
 
   it('carries the pricing numbers block-usage bills on, without a vendorId field', () => {
-    const fable = ANTHROPIC_MODEL_PRICING[0]
-    expect(fable.match).toBe('fable')
+    const fable = ANTHROPIC_MODEL_PRICING.find((e) => e.match === 'fable')!
     expect(fable.pricing).toEqual({
       inputPerMTok: 10,
       outputPerMTok: 50,
