@@ -686,6 +686,22 @@ let match, full, newFn, shape
 // falls through). The auth-identity scrub pair (`delete m.CLAUDE_CODE_SUBSCRIPTION_TYPE,
 // delete m.CLAUDE_CODE_RATE_LIMIT_TIER`) has been inside the builder since the
 // v150 shape and is unique in 2.1.241.
+//
+// 2.1.261 (chunked bundle — 1,631 ESM chunks concatenated) invalidated BOTH of
+// the first two candidates at once:
+//   - `INPUT_${` occurs 8 times (the GitHub-Actions secret-name helpers in
+//     chunk-ay65a202 / chunk-9c0rs7w4 each build their own `INPUT_`-prefixed
+//     variants) — no longer unique, so candidate 1 is skipped;
+//   - the per-var auth-identity deletes are gone entirely: the builder now
+//     collects its scrub names into a `Set` and drains it with a single
+//     `for(let o of Object.keys(d))if(F.has(o.toUpperCase()))delete d[o]`, so
+//     `delete <m>.CLAUDE_CODE_SUBSCRIPTION_TYPE,…` matches ZERO times.
+// Two OTEL landmarks survive inside the builder and are unique in 2.1.261:
+//   - the `OTEL_` strip loop (in the builder since the v129 shape — the oldest
+//     surviving landmark, hence tried first of the two);
+//   - the `delete <merged>.CLAUDE_CODE_OTEL_DIAG_STDERR` scrub (since v197).
+// Both are `delete`s on the *merged clone*, i.e. structurally welded to this
+// function's scrub pass rather than to any particular version's variable set.
 const genericAnchorFinders = [
   [
     'INPUT_${ deletion',
@@ -704,13 +720,42 @@ const genericAnchorFinders = [
       const ms = [...src.matchAll(re)]
       return ms.length === 1 ? ms[0].index : -1
     }
+  ],
+  [
+    // for(let o of Object.keys(d))if(o.startsWith("OTEL_"))delete d[o]
+    // Backreferenced so the loop var and the merged-object name must agree —
+    // keeps this from latching onto an unrelated "strip OTEL_ keys" helper.
+    'OTEL_ strip loop',
+    () => {
+      const re = new RegExp(
+        `for\\(let (${V}) of Object\\.keys\\((${V})\\)\\)` +
+          `if\\(\\1\\.startsWith\\("OTEL_"\\)\\)delete \\2\\[\\1\\]`,
+        'g'
+      )
+      const ms = [...src.matchAll(re)]
+      return ms.length === 1 ? ms[0].index : -1
+    }
+  ],
+  [
+    // if(delete d.CLAUDE_CODE_OTEL_DIAG_STDERR,…) — the guard-comma scrub.
+    'OTEL-diag scrub delete',
+    () => {
+      const re = new RegExp(`delete ${V}\\.CLAUDE_CODE_OTEL_DIAG_STDERR`, 'g')
+      const ms = [...src.matchAll(re)]
+      return ms.length === 1 ? ms[0].index : -1
+    }
   ]
 ]
 
 for (const [anchorLabel, findAnchor] of genericAnchorFinders) {
   if (shape) break
   const anchorIdx = findAnchor()
-  if (anchorIdx === -1) continue
+  if (anchorIdx === -1) {
+    // Loud, because a silent skip of every candidate is what made the 2.1.261
+    // failure read as "no shape matched" with zero diagnostic output.
+    console.log(`  [generic] anchor not usable (absent or not unique): ${anchorLabel}`)
+    continue
+  }
   console.log(`  [generic] trying anchor: ${anchorLabel} (char ${anchorIdx})`)
 
   // Innermost enclosing `function NAME(...){`: walk candidate `function`
@@ -1481,9 +1526,15 @@ if (!shape) {
       `}`
   } else {
     console.error(
-      'ERROR: Cannot locate env-builder function by v114, v118, v119, v129, v143, v150, v163, v170, v197, or v198 structural shape.'
+      'ERROR: Cannot locate env-builder function — the generic anchor walk declined ' +
+        '(see the [generic] lines above for which anchors were absent / non-unique / guard-rejected) ' +
+        'and no v114, v118, v119, v129, v143, v150, v163, v170, v197, or v198 structural shape matched.'
     )
-    console.error('The function may have been refactored by upstream. Re-run bundle-analyzer.')
+    console.error(
+      'The function may have been refactored by upstream. Find the builder again — it is the one ' +
+        'that merges {...process.env,...} and is called for every subprocess spawn — and add a new ' +
+        'unique anchor to genericAnchorFinders. See README.md "Locating the function in a new CLI version".'
+    )
     process.exit(1)
   }
 } // end version ladder

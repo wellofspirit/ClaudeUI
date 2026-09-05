@@ -53,6 +53,64 @@ console.log(`Read ${cliPath} (${(src.length / 1024 / 1024).toFixed(1)} MB)`)
 const PATCH_A1_MARKER = '/*PATCHED:queue-control-dequeue*/'
 const PATCH_A2_MARKER = '/*PATCHED:queue-control-consumed*/'
 
+// ---------------------------------------------------------------------------
+// Chunked-bundle helpers (2.1.261+)
+//
+// 2.1.261 is a code-split build: vendor/claude-cli/cli.js is the concatenation
+// of ~1.6k minified ESM chunks, each preceded by a delimiter line
+//   // @bun-chunk B:/~BUN/root/chunk-xxxxxxxx.js
+// A minified name captured in one chunk is a DIFFERENT binding (or no binding
+// at all) in another, so every name this patch injects has to be proven to
+// come from the chunk being edited. On a pre-split monolith the index is empty
+// and every "same chunk?" question answers yes.
+// ---------------------------------------------------------------------------
+
+function buildChunkIndex(text) {
+  const list = []
+  const re = /^\/\/ @bun-chunk (.+)$/gm
+  let m
+  while ((m = re.exec(text))) list.push({ name: m[1].trim(), start: m.index })
+  for (let i = 0; i < list.length; i++)
+    list[i].end = i + 1 < list.length ? list[i + 1].start : text.length
+  return list
+}
+
+function chunkAt(index, off) {
+  if (index.length === 0) return null // monolithic bundle — one implicit scope
+  let lo = 0
+  let hi = index.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if (index[mid].start <= off) lo = mid
+    else hi = mid - 1
+  }
+  return index[lo]
+}
+
+function chunkName(index, off) {
+  return chunkAt(index, off)?.name ?? '(monolithic bundle)'
+}
+
+// The stream-json control-request dispatch fallback — the injection point for
+// A1, and (in 2.1.261) the marker for which chunk holds the headless loop that
+// A2 has to patch. Both parts read it, so it lives at module scope.
+//
+// The message variable changed between versions (c in 0.2.50, e in 0.2.59), so
+// it is captured and backreferenced rather than hard-coded.
+// v2.1.219 wrapped the dispatch chain in a try/finally, so the fallback tail
+// changed from `...subtype}`);continue}else if(msg.type==="control_response")`
+// to `...subtype}`)}finally{...}continue}else if(...)`. Match the fallback call
+// itself (tail-less) — still globally unique.
+// 2.1.261 wrapped the interpolated subtype in a string sanitizer:
+//   else Be(r,`Unsupported control request subtype: ${Xn(String(r.request.subtype))}`)
+// (was `${r.request.subtype}`). Both interpolations are admitted; pinning the
+// message variable by backreference is what keeps this off the four lookalike
+// fallbacks elsewhere in the bundle — see README §"Picking the right fallback".
+const anchorRe = new RegExp(
+  `else (${V})\\((${V}),\`Unsupported control request subtype: ` +
+    `\\$\\{(?:\\2\\.request\\.subtype|${V}\\(String\\(\\2\\.request\\.subtype\\)\\))\\}\`\\)`
+)
+
 // =====================================================================
 // Part A1: dequeue_message control request (value-based matching)
 // =====================================================================
@@ -70,16 +128,6 @@ if (!skipA1) {
   // ---------------------------------------------------------------------------
   console.log('\n--- Locating control-request fallback ---')
 
-  // The message variable changed between versions (c in 0.2.50, e in 0.2.59).
-  // Use a captured group + backreference to handle any variable name.
-  // v2.1.219 wrapped the control-request dispatch chain in a try/finally, so the
-  // fallback tail changed from `...subtype}`);continue}else if(msg.type==="control_response")`
-  // to `...subtype}`)}finally{...}continue}else if(...)`. Match the fallback call
-  // itself (tail-less) — still globally unique.
-  const anchorRe = new RegExp(
-    `else (${V})\\((${V}),\`Unsupported control request subtype: \\$\\{\\2\\.request\\.subtype\\}\`\\)`
-  )
-
   const anchorMatch = anchorRe.exec(src)
   if (!anchorMatch) {
     console.error('ERROR: Cannot locate control-request fallback anchor.')
@@ -96,7 +144,19 @@ if (!skipA1) {
   }
 
   const msgVar = anchorMatch[2] // message variable (c in 0.2.50, e in 0.2.59)
-  console.log(`Found fallback anchor at char ${anchorIdx} (msgVar=${msgVar})`)
+  const chunkIndex = buildChunkIndex(src)
+  console.log(
+    `Found fallback anchor at char ${anchorIdx} (msgVar=${msgVar}) in ${chunkName(chunkIndex, anchorIdx)}`
+  )
+
+  // Start of the dispatch chain the fallback closes — every sibling handler we
+  // read names off must live between here and the anchor, which is what proves
+  // the captured locals are in scope at the injection point.
+  const chainStartIdx = src.lastIndexOf(`${msgVar}.type==="control_request"`, anchorIdx)
+  if (chainStartIdx === -1) {
+    console.error('ERROR: Cannot locate the start of the control-request dispatch chain.')
+    process.exit(1)
+  }
 
   // ---------------------------------------------------------------------------
   // Extract minified function names from content patterns
@@ -105,9 +165,12 @@ if (!skipA1) {
 
   // Window history: 5000 → 8000 (2.1.197 moved the stop_task handler holding the
   // success-response-helper anchor to 6578 chars before the fallback) → 16000
-  // (2.1.231 pushed it to 8479, outside 8000 again).
+  // (2.1.231 pushed it to 8479, outside 8000 again). 2.1.261: 13214 — still
+  // inside 16000. The window is additionally clamped to the dispatch chain, so
+  // however far it has to grow next time it can never reach another function's
+  // reply helper.
   const NEARBY_BACK = 16000
-  const nearbyCtx = src.slice(Math.max(0, anchorIdx - NEARBY_BACK), anchorIdx + 2000)
+  const nearbyCtx = src.slice(Math.max(chainStartIdx, anchorIdx - NEARBY_BACK), anchorIdx)
 
   // --- Success response helper ---
   //
@@ -140,8 +203,14 @@ if (!skipA1) {
     `  Success response helper: ${successFn} (${successNames.length}/${successNames.length} call sites agree)`
   )
 
-  // --- Queue push function (found by structural content pattern) ---
-  // The push function pushes to an array with priority??"next". Shape history:
+  // --- Queue push function (structural cross-check only; NOT injected) ---
+  //
+  // Nothing below calls pushFn/queueArr — the injected handler only removes.
+  // This match is kept as a structural assertion that the enqueue path this
+  // patch reasons about still exists and is still singular; if it ever starts
+  // costing more than it proves, delete it rather than loosening it.
+  //
+  // Shape history:
   //   ≤2.1.196  function <pushFn>(<A>){<arr>.push({...<A>,priority:<A>.priority??"next"}),...}
   //   2.1.197+  ...same, plus a trailing `timestamp:` field
   //   2.1.231   function X(ae){if(!q(ae))return;e.push({...xDd(ae),priority:ae.priority??"next",timestamp:...
@@ -150,13 +219,20 @@ if (!skipA1) {
   //   2.1.241   function ne(Ze){if(!Z(Ze))return!1;return n.push({...GPf(Ze),priority:Ze.priority??"next",timestamp:...
   //             — the guard rejects with `return!1` and the push itself is now
   //             a `return` expression (the enqueue reports success).
-  // So both the guard and the normalizer are optional (the guard's return value
-  // too), and `priority:` is pinned to the function's own parameter (the part
-  // that actually identifies this as the enqueue path). The "next" literal
-  // keeps us off its `"later"` sibling, which is otherwise identical.
+  //   2.1.261   function Cn(Fo,{receipt:Wo="coalesced"}={}){let _s=$n(Fo,Wo);
+  //               if(!_s.admitted)return _s;if(d.push({...u7t(Fo),priority:Fo.priority??"next",timestamp:...
+  //             — a second destructured options parameter, and the guard now
+  //             returns an admission RESULT OBJECT rather than a boolean, so
+  //             neither the old parameter list nor the old guard shape matches.
+  // Rather than enumerating guard shapes, admit any bounded single-line
+  // preamble between the function head and the push, and keep the two parts
+  // that actually identify the enqueue: the push spreads the function's OWN
+  // parameter (bare or normalizer-wrapped) and stamps `priority:<param>
+  // .priority??"next"`. The "next" literal keeps us off its `"later"` sibling,
+  // which is otherwise identical. `[^\n]` cannot cross a chunk delimiter.
   const pushDefRe = new RegExp(
-    `function (${V})\\((${V})\\)\\{(?:if\\(!${V}\\(\\2\\)\\)return(?:!1)?;)?` +
-      `(?:return )?(${V})\\.push\\(\\{\\.\\.\\.(?:\\2|${V}\\(\\2\\)),priority:\\2\\.priority\\?\\?"next",timestamp:`
+    `function (${V})\\((${V})[^)\\n]{0,80}\\)\\{[^\\n]{0,240}?` +
+      `(${V})\\.push\\(\\{\\.\\.\\.(?:\\2|${V}\\(\\2\\)),priority:\\2\\.priority\\?\\?"next",timestamp:`
   )
   const pushDefMatch = pushDefRe.exec(src)
   if (!pushDefMatch) {
@@ -169,7 +245,7 @@ if (!skipA1) {
   }
   const pushFn = pushDefMatch[1]
   const queueArr = pushDefMatch[3]
-  console.log(`  Queue push function: ${pushFn}`)
+  console.log(`  Queue push function: ${pushFn} (cross-check only)`)
   console.log(`  Queue array: ${queueArr}`)
 
   // --- Queue instance (derived from the sibling cancel_async_message handler) ---
@@ -192,6 +268,22 @@ if (!skipA1) {
   if (!cancelSiblingMatch) {
     console.error(
       'ERROR: Cannot find the cancel_async_message sibling handler to derive the queue instance.'
+    )
+    process.exit(1)
+  }
+  if (cancelSiblingRe.exec(src.slice(cancelSiblingMatch.index + 1))) {
+    console.error('ERROR: cancel_async_message sibling handler matched more than once. Aborting.')
+    process.exit(1)
+  }
+  // "In-scope by construction" is only true if the sibling really is a sibling:
+  // it has to sit inside the very else-if chain the fallback closes. A match
+  // anywhere else names a local from some other function — the 2.1.241
+  // misbind class (applies clean, calls a non-function at runtime).
+  if (cancelSiblingMatch.index <= chainStartIdx || cancelSiblingMatch.index >= anchorIdx) {
+    console.error(
+      `ERROR: cancel_async_message handler at ${cancelSiblingMatch.index} is outside the ` +
+        `control-request dispatch chain (${chainStartIdx}..${anchorIdx}) — its locals are not ` +
+        'in scope at the injection point. Aborting.'
     )
     process.exit(1)
   }
@@ -280,18 +372,86 @@ if (!skipA2) {
   //              own e.session_id is in scope, so no session-id generator extraction
   //              is needed; uuid uses globalThis.crypto.randomUUID (precedent:
   //              subagent-streaming).
+  // 2.1.261:     the two sites COLLAPSED BACK INTO ONE. The headless (stdin
+  //              stream-json) loop and the SDK-hosted transport now share one
+  //              normalizer, `function*Au(e,t,o,{replayUserMessages:d,includePartialMessages:y})`,
+  //              which lives in the same chunk as the control-request dispatch
+  //              (chunk-gj501zgt.js, whose only exports are runHeadless & co.):
+  //                case"attachment":if(d&&e.attachment.type==="queued_command")
+  //                  {let P=smn(e.attachment,e);if(P)yield{...P,session_id:e.session_id};return}
+  //              The builder is now NULLABLE (`smn` returns undefined for
+  //              forwarded-intent commands), hence the `let P=…;if(P)yield` shape.
   // We replace it so it:
   //   1. Always yields a system notification (regardless of replay var)
   //   2. Only yields the user message replay when replay var is true
   //   3. (switch shape) leaves the non-queued_command fallthrough and the
   //      replay-off fallthrough (yield*WTn) byte-identical to unpatched.
 
-  // Try the switch shape first (2.1.241), then the two else-if shapes.
+  // Which chunk holds the headless loop ClaudeUI drives — the A2 site has to be
+  // in it, or we are patching some other transport's normalizer (the 2.1.241
+  // failure mode: applies clean, notification never fires on the wire).
+  const chunkIndexA2 = buildChunkIndex(src)
+  const dispatchMatch = anchorRe.exec(src)
+  if (!dispatchMatch) {
+    console.error('ERROR: Cannot re-locate the control-request fallback for the A2 chunk check.')
+    process.exit(1)
+  }
+  const headlessChunk = chunkName(chunkIndexA2, dispatchMatch.index)
+
+  // --- Shape 2.1.261 (current): single normalizer, nullable replay builder ---
+  const qcRe261 = new RegExp(
+    `case"attachment":if\\((${V})&&(${V})\\.attachment\\.type==="queued_command"\\)` +
+      `\\{let (${V})=(${V})\\(\\2\\.attachment,\\2\\);if\\(\\3\\)yield\\{\\.\\.\\.\\3,` +
+      `session_id:\\2\\.session_id\\};return\\}`
+  )
+  const match261 = qcRe261.exec(src)
+  if (match261) {
+    if (qcRe261.exec(src.slice(match261.index + 1))) {
+      console.error('ERROR: queued_command normalizer matched more than once. Aborting.')
+      process.exit(1)
+    }
+    const siteChunk = chunkName(chunkIndexA2, match261.index)
+    if (siteChunk !== headlessChunk) {
+      console.error(
+        `ERROR: queued_command normalizer is in ${siteChunk}, not the headless chunk ` +
+          `${headlessChunk} that serves the stdin stream-json loop. Aborting rather than ` +
+          'patching a transport ClaudeUI does not drive.'
+      )
+      process.exit(1)
+    }
+    const [oldCode, replayVar, msgVar2, builtVar, replayBuilderFn] = match261
+    console.log(
+      `Found queued_command normalizer at char ${match261.index} in ${siteChunk}, ` +
+        `replay var: ${replayVar}, message var: ${msgVar2}, ` +
+        `replay builder: ${replayBuilderFn} -> ${builtVar}`
+    )
+    const att = `${msgVar2}.attachment`
+    // Prepend the (unconditional) notification and leave the original branch
+    // byte-identical behind it: the replay stays gated on the replay var, the
+    // nullable-builder guard and the `return` keep their exact semantics, and
+    // the replay-off fallthrough is untouched.
+    //
+    // The notification is deliberately NOT gated on the builder's own
+    // suppression rule (`smn` drops forwarded-intent commands): ClaudeUI
+    // correlates the notification against its own queue by text, so an
+    // uncorrelated one is a no-op, while a missing one strands a queue card.
+    const newCode =
+      `case"attachment":${PATCH_A2_MARKER}` +
+      `if(${att}.type==="queued_command")` +
+      `yield{type:"system",subtype:"queued_command_consumed",` +
+      `prompt:${att}.prompt,source_uuid:${att}.source_uuid,` +
+      `session_id:${msgVar2}.session_id,uuid:globalThis.crypto.randomUUID()};` +
+      oldCode.slice('case"attachment":'.length)
+    src = src.slice(0, match261.index) + newCode + src.slice(match261.index + oldCode.length)
+    console.log('Injected queued_command_consumed ahead of the normalizer branch')
+  }
+
+  // Try the switch shape next (2.1.241), then the two else-if shapes.
   const qcReSwitch = new RegExp(
     `case"attachment":if\\((${V})&&(${V})\\.attachment\\.type==="queued_command"\\)` +
       `\\{yield\\{\\.\\.\\.(${V})\\(\\2\\.attachment,\\2\\),session_id:\\2\\.session_id\\};return\\}`
   )
-  const switchMatch = qcReSwitch.exec(src)
+  const switchMatch = match261 ? null : qcReSwitch.exec(src)
   if (switchMatch) {
     if (qcReSwitch.exec(src.slice(switchMatch.index + 1))) {
       console.error('ERROR: queued_command switch handler matched more than once. Aborting.')
@@ -364,8 +524,8 @@ if (!skipA2) {
     console.log('Replaced stdin-loop queued_command handler with consumed notification')
   }
 
-  // Legacy else-if shapes (pre-2.1.241) — only when the switch shape is absent.
-  if (!switchMatch) {
+  // Legacy else-if shapes (pre-2.1.241) — only when neither newer shape matched.
+  if (!match261 && !switchMatch) {
     const qcReNew = new RegExp(
       `else if\\((${V})&&(${V})\\.attachment\\.type==="queued_command"\\)\\{let (${V})=\\2\\.attachment;yield\\{`
     )

@@ -10,7 +10,14 @@ Exposes the CLI's "send to background" feature (foreground → background task c
 | ---------------------- | ---------------------------- |
 | SDK package            | 0.2.63                       |
 | Bundled CLI (`cli.js`) | 2.1.63                       |
-| Last re-anchored       | 2.1.197                      |
+| Last re-anchored       | 2.1.261                      |
+
+> **2.1.261 is a code-split bundle**, and this patch is the one most exposed by
+> that. `vendor/claude-cli/cli.js` is the concatenation of ~1,631 minified ESM
+> chunks, each preceded by `// @bun-chunk B:/~BUN/root/chunk-xxxxxxxx.js`.
+> **Three of the four helpers this handler calls are defined in a chunk other
+> than the one it is injected into**, so capturing their names at the definition
+> site is no longer enough — see §"v2.1.261 changes".
 
 ## The Problem
 
@@ -96,6 +103,23 @@ These functions are **not accessible** from the control message handler's scope 
 | `Yi`     | Module scope            | Type guard: `A.type === "local_agent"`          |
 | `Ff6`    | Module scope            | `Map<taskId, resolveBackgroundSignal>`          |
 
+Same table for 2.1.261 (chunk-split; injection chunk is `chunk-gj501zgt.js`):
+
+| Variable                              | Origin chunk                           | Reaches the injection site as         |
+| ------------------------------------- | -------------------------------------- | ------------------------------------- |
+| `r` (msgVar)                          | local to the dispatch loop             | itself                                |
+| `k` (getAppState) / `w` (setAppState) | locals of the enclosing headless loop  | themselves                            |
+| `Xe` (success) / `Be` (error)         | locals of the dispatch loop            | themselves                            |
+| `Sf` (`local_bash` guard)             | `chunk-9c0rs7w4.js`                    | static import, **same name**          |
+| `nr` (`local_agent` guard)            | `chunk-9c0rs7w4.js`                    | static import, **same name**          |
+| `sr` (session-state accessor)         | `chunk-nhm4zepz.js` (read in 9c0rs7w4) | static import, **same name**          |
+| backgroundSignal Map                  | class field on `sr()`                  | `sr().agentBackgroundSignalResolvers` |
+
+The last three are **not** guaranteed to keep their names across the chunk
+boundary; `apply.mjs` resolves each one through the import/export graph rather
+than assuming, and falls back to `await import("<chunk>")` when a helper is
+exported but not statically imported by the injection chunk.
+
 ## The Patches
 
 ### Part A: `background_task` control request handler (cli.js)
@@ -107,13 +131,21 @@ These functions are **not accessible** from the control message handler's scope 
 The "Unsupported control request subtype" fallback at the end of the control request if-else chain:
 
 ```
+// 2.1.261
+else Be(r,`Unsupported control request subtype: ${Xn(String(r.request.subtype))}`)
+// ≤2.1.241
 else O6(r,`Unsupported control request subtype: ${r.request.subtype}`)
 ```
 
 Tail-less since v2.1.219 (the dispatch chain is now wrapped in `try/finally`; ≤ v2.1.207 the
-anchor included `;continue}else if(r.type==="control_response")`). Do not confuse with v2.1.219's
-second class-based dispatcher (`processControlRequest`, `throw Error(...)` fallback) — that serves
-the SDK Query transport, not the stream-json stdin loop ClaudeUI drives; the app-state helpers
+anchor included `;continue}else if(r.type==="control_response")`). 2.1.261 wrapped the
+interpolated subtype in a sanitizer; `anchorRe` admits both forms.
+
+Four lookalike fallbacks exist elsewhere in the bundle — the class-based SDK Query dispatcher
+(`throw Error("Unsupported control request subtype: "+e.request.subtype)`), `RemoteSessionManager`,
+`DirectConnect`, and the device-hooks `default:` case. Only the stdin loop's is
+`else <fn>(<msgVar>,` **with the same `<msgVar>` backreferenced inside the template**, which is
+what the regex pins. Getting this wrong is not merely cosmetic: the app-state helpers
 (`getAppState`/`setAppState`) this patch needs are only in scope in the stream-json loop.
 
 Note: After `queue-control` patch is applied, the actual anchor shifts slightly because `queue-control-dequeue` is injected before the fallback. The patch script uses the full anchor pattern which matches regardless of what's injected before it.
@@ -176,16 +208,16 @@ else O6(r,`Unsupported control request subtype: ${r.request.subtype}`)
 
 Six symbols are extracted at apply time from content patterns:
 
-| Symbol          | Pattern                                                                                                      | Example (v2.1.63) | Example (v2.1.197) |
-| --------------- | ------------------------------------------------------------------------------------------------------------ | ----------------- | ------------------ |
-| `errorFn`       | From anchor: `else <fn>(<msg>,\`Unsupported...`                                                              | `O6`              | `qn`               |
-| `msgVar`        | From anchor: backreference `\2`                                                                              | `r`               | `Ht`               |
-| `successFn`     | `),<fn>(<msg>,{})}catch` near anchor                                                                         | `t`               | `$t`               |
-| `getAppStateFn` | `getAppState:<var>,setAppState:<var>`                                                                        | `$`               | (varies)           |
-| `setAppStateFn` | Same pattern, second capture                                                                                 | `f`               | (varies)           |
-| `wiFn`          | `function <fn>(...){...A.type==="local_bash"}`                                                               | `wi`              | (varies)           |
-| `yiFn`          | `function <fn>(...){...A.type==="local_agent"}`                                                              | `Yi`              | (varies)           |
-| `bgSignalMap`   | `<map>.set(A,<var>),<fn>(<state>,<setter>);let <var>;if(<var>!==void 0&&<var>>0)` + verified `<map>=new Map` | `Ff6`             | (varies)           |
+| Symbol          | Pattern                                                                                                                                      | v2.1.63 | v2.1.197 | v2.1.261                              |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ------- | -------- | ------------------------------------- |
+| `errorFn`       | From anchor: `else <fn>(<msg>,\`Unsupported...`                                                                                              | `O6`    | `qn`     | `Be`                                  |
+| `msgVar`        | From anchor: backreference `\2`                                                                                                              | `r`     | `Ht`     | `r`                                   |
+| `successFn`     | `),<fn>(<msg>,{})}catch` **inside the dispatch chain**                                                                                       | `t`     | `$t`     | `Xe`                                  |
+| `getAppStateFn` | `getAppState:<var>,setAppState:<var>` — all mentions in the window must agree                                                                | `$`     | (varies) | `k`                                   |
+| `setAppStateFn` | Same pattern, second capture                                                                                                                 | `f`     | (varies) | `w`                                   |
+| `wiFn`          | `function <fn>(...){...A.type==="local_bash"}`, then resolved into the injection chunk                                                       | `wi`    | (varies) | `Sf`                                  |
+| `yiFn`          | `function <fn>(...){...A.type==="local_agent"}` + guard disambiguation, then resolved                                                        | `Yi`    | (varies) | `nr`                                  |
+| `bgSignalMap`   | 2.1.261+: `<accessor>().agentBackgroundSignalResolvers.set(` (accessor captured, then resolved). Legacy: `<map>.set(A,<var>),…` + `=new Map` | `Ff6`   | (varies) | `sr().agentBackgroundSignalResolvers` |
 
 **v2.1.197 change:** The search window for the success-response helper was extended from 5000 → 8000 characters before the anchor. In v2.1.197 the `stop_task` handler (which contains the `),<fn>(<msg>,{})}}catch` pattern used to find `successFn`) moved to 5647 chars before the fallback anchor, just outside the old 5000-char window. The 8000-char margin accommodates this and future similar drift.
 
@@ -198,6 +230,117 @@ The patch now collects all candidate definitions first, then filters to the one 
 guard anywhere in the bundle, and requires exactly one survivor.
 
 Known names in v2.1.197: `errorFn=qn`, `msgVar=Ht`, `successFn=$t`.
+
+### v2.1.261 changes
+
+**0. The bundle is code-split, and this patch calls across chunk boundaries**
+
+`vendor/claude-cli/cli.js` is now the concatenation of 1,631 minified ESM chunks
+in module-graph order, each preceded by `// @bun-chunk B:/~BUN/root/chunk-….js`.
+Regexes still run over the whole concat, but **module scope is per chunk**: a
+name captured where it is defined is not a binding where we inject.
+
+The injection site is in `chunk-gj501zgt.js` (exports `runHeadless`,
+`endHeadlessSessionOnEscapedError`, `explicitMcpConfigRequestsWait` — i.e. the
+stdin stream-json loop). `Sf`, `nr` and `sr` all come from elsewhere.
+`apply.mjs` now resolves each captured helper through the chunk graph:
+
+1. Where is the name **referenced**? (a capture site is often a _use_ site in a
+   chunk that itself imported the binding — `sr` is read in `chunk-9c0rs7w4.js`
+   but defined in `chunk-nhm4zepz.js`.)
+2. Follow that chunk's `import{…}from"chunk-….js"` to the owning chunk and the
+   **exported** name.
+3. Look for that exported name in the injection chunk's own imports → use the
+   local alias.
+4. If the injection chunk does not import it, emit
+   `let <tmp>=(await import("<owning chunk>")).<exported>;` at the top of the
+   handler's `try` block — the form the bundle itself uses in this very chunk
+   (`await import("B:/~BUN/root/chunk-wdwcp2mj.js")` in the `workflow_launch`
+   branch).
+5. If the owning chunk does not export it at all → **abort loudly** rather than
+   inject a name that throws at runtime.
+
+On 2.1.261 all three resolve to identical names via static imports, so no
+dynamic-import hoist is emitted. The machinery exists so the next rename cannot
+silently produce a ReferenceError.
+
+Dump a chunk's import surface with:
+
+```bash
+node -e 'const s=require("fs").readFileSync("vendor/claude-cli/cli.js","utf8");
+const i=s.indexOf("// @bun-chunk B:/~BUN/root/chunk-gj501zgt.js");
+const j=s.indexOf("// @bun-chunk", i+1);
+for (const m of s.slice(i,j).matchAll(/import\{([^}]*)\}from"([^"]+)"/g))
+  if (/\bSf\b|\bnr\b|\bsr\b/.test(m[1])) console.log(m[2], "->", m[1].slice(0,200))'
+```
+
+**1. The fallback anchor gained a sanitizer — this is what broke the patch**
+
+```js
+// 2.1.241
+else Be(r,`Unsupported control request subtype: ${r.request.subtype}`)
+// 2.1.261
+else Be(r,`Unsupported control request subtype: ${Xn(String(r.request.subtype))}`)
+```
+
+`anchorRe` admits either interpolation. Still exactly 1 match.
+
+**2. The backgroundSignal Map moved onto a session-state object — and the old regex MISBOUND it silently**
+
+```js
+// ≤2.1.241 — a module-level Map identifier
+Ff6.set(taskId, resolve), registry.register(…);let t;if(ms!==void 0&&ms>0)
+// 2.1.261 — a class field reached through a zero-arg accessor
+sr().agentBackgroundSignalResolvers.set(e,re),v.register(q);let de;if(P!==void 0&&P>0)
+```
+
+The old regex `(<V>)\.set\(<V>,<V>\),…` **still matched** — it captured the
+_property_ `agentBackgroundSignalResolvers`, and even its `<map>=new Map`
+sanity check passed, because the class field is literally declared
+`agentBackgroundSignalResolvers=new Map` in `chunk-nhm4zepz.js`. The patch
+would have applied clean and injected a bare, undefined identifier: the same
+"applies-but-misbinds" class as 2.1.241's `dequeueAllMatching` bug, invisible
+until an agent is actually backgrounded live.
+
+The new anchor keys on the **unminified property name** and captures the
+accessor instead:
+
+```js
+;`(${V})\\(\\)\\.agentBackgroundSignalResolvers\\.set\\(${V},${V}\\),`
+```
+
+with two corroborations: the same accessor must also appear with `.get(` and
+`.delete(` (the CLI's own `_Y` backgrounding helper uses all three), and
+`agentBackgroundSignalResolvers=new Map` must exist. The captured accessor is
+then chunk-resolved like any other helper. The legacy bare-Map shape remains as
+a fallback for older bundles.
+
+```bash
+rg -o '.{80}agentBackgroundSignalResolvers.{60}' vendor/claude-cli/cli.js
+```
+
+**3. `getAppState`/`setAppState` now require unanimity**
+
+The window search took whatever matched first. It now requires every
+`getAppState:<a>,setAppState:<b>` pair in the window to name the same two
+locals (4/4 agree on 2.1.261: `k`, `w`). Same reasoning as the reply helper:
+a window that has had to grow twice must not be allowed to adopt a nested
+callback's accessors.
+
+**4. The reply-helper window is clamped to the dispatch chain**
+
+`successFn` is now searched only between the nearest
+`<msgVar>.type==="control_request"` before the anchor and the anchor itself, so
+however far the `stop_task` handler drifts, the search cannot leave the chain.
+
+**5. `local_agent` disambiguation survived unchanged**
+
+Two definitions still exist (`nr` in `chunk-9c0rs7w4.js`, `Rke` in
+`chunk-bab5vngb.js`); only `nr` appears in a
+`<fn>(x)&&x.agentType!=="main-session"` guard, so the existing filter still
+returns exactly one survivor. Note a third name, `td`, also appears in such a
+guard (`!td(e)&&e.agentType!=="main-session"`) but is not a candidate
+definition, so it is correctly ignored.
 
 ### Part B: `backgroundTask()` method (sdk.mjs)
 
@@ -231,9 +374,15 @@ This adds a new method to the `U4` (Query) class. It follows the identical patte
 
 ```bash
 bundle-analyzer find cli.js "Unsupported control request subtype" --compact
+# or, tool-free:
+rg -o '.{60}Unsupported control request subtype.{60}' vendor/claude-cli/cli.js
 ```
 
-The match inside the `async()=>` function (~char 11.3M) is the main SDK query loop. The other matches are the DirectConnect WebSocket handler and the remote REPL bridge handler.
+On 2.1.261 there are 10 hits across 8 sites; the one you want is the only
+`else <fn>(<msgVar>,\`…${…<msgVar>.request.subtype…}\`)`— in`chunk-gj501zgt.js`, the headless stdin loop. The decoys are the class-based SDK
+Query dispatcher (`throw Error(…)`), `RemoteSessionManager`, `DirectConnect`,
+the device-hooks `default:`case, and several call-site error classifiers that
+merely`startsWith("Unsupported control request subtype")`.
 
 ### `stop_task` handler (reference pattern for the injection)
 
@@ -254,11 +403,14 @@ bundle-analyzer find cli.js '"local_bash"' --compact
 bundle-analyzer find cli.js '"local_agent"' --compact
 ```
 
-### `Ff6` — backgroundSignal resolver Map
+### backgroundSignal resolver Map
 
 ```bash
+# 2.1.261+ — the property name survives minification, so search for it directly
+rg -o '.{80}agentBackgroundSignalResolvers.{60}' vendor/claude-cli/cli.js
+# 5 hits: `=new Map` (declaration), `.set(` (agent task factory), `.get(`/`.delete(` (native _Y), `.delete(` (cleanup)
+# Legacy bundles:
 bundle-analyzer find cli.js "backgroundSignal" --compact
-# Returns the agent task factory (Wo4) where the Map is populated
 ```
 
 ### `mpY` — CLI's native bash background function (reference only)
@@ -305,9 +457,35 @@ f((C6)=>{...})let C6=Ff6.get(Z6);if(C6)C6(),Ff6.delete(Z6)
 
 ### Pitfall: Variable name collisions
 
-The control message handler loop uses many single-letter and two-letter variable names (`r`, `Z6`, `S6`, `C6`, `d6`). The injected code reuses these names but with `let` declarations inside the `else if` block, so they're block-scoped and don't collide. **Do not use `var`** — it would hoist and collide.
+The control message handler loop uses many single-letter and two-letter variable names (`r`, `Z6`, `S6`, `C6`, `d6`). The injected code reuses these names but with `let` declarations inside the `else if` block, so they're block-scoped and don't collide. **Do not use `var`** — it would hoist and collide. The dynamic-import hoist names (`v6`, `x6`, `y6`) follow the same rule.
 
-**Always run `node --check cli.js` after applying patches.**
+### Pitfall (2.1.261+): `node --check` cannot validate the concat
+
+The patch target is a concatenation of ESM chunks, so `node --check cli.js` on
+the whole file is meaningless — it is not one valid module. Extract the chunk
+you edited and check that instead:
+
+```bash
+node -e 'const fs=require("fs");const s=fs.readFileSync("vendor/claude-cli/cli.js","utf8");
+const i=s.indexOf("// @bun-chunk B:/~BUN/root/chunk-gj501zgt.js");
+const j=s.indexOf("// @bun-chunk", i+1);
+fs.writeFileSync("/tmp/c.mjs", s.slice(s.indexOf("\n",i)+1, j))'
+node --check /tmp/c.mjs
+```
+
+(The rebundler does this for every modified chunk with esbuild, so a bad edit
+fails the build — but catching it here is much faster.)
+
+### Pitfall (2.1.261+): a helper name that resolves is not a helper name that BINDS
+
+Three of this handler's helpers live in other chunks. A regex that finds
+`function Sf(e){…"local_bash"}` proves the guard exists; it does **not** prove
+`Sf` is a binding at the injection point. Always resolve through the chunk's
+import list (or emit a dynamic import) — see §"v2.1.261 changes" note 0. The
+`agentBackgroundSignalResolvers` regression in note 2 is the same mistake in a
+different disguise, and neither is caught by any syntax check.
+
+**Always syntax-check the modified chunk after applying patches.**
 
 ## What's NOT Changed
 
@@ -349,10 +527,14 @@ renderer: window.api.backgroundTask(routingId, toolUseId)
 
 1. `node patch/background-task/apply.mjs` — should apply both parts
 2. Run again — should report "already applied" for both
-3. `node --check node_modules/@anthropic-ai/claude-agent-sdk/cli.js` — no syntax errors
-4. `node patch/apply-all.mjs` — all patches pass
-5. Start ClaudeUI, begin a long-running Bash command (e.g., `sleep 30`) → "Background" button appears → click it → task should move to background
-6. Start a foreground Agent task → "Background" button appears → click it → agent should background
+3. **Read the apply log's resolution lines** — every helper must print
+   `<name> -> <binding> [read in <chunk>]`, and any `(via dynamic import)`
+   should have a matching `let …=(await import(…))` in the injected code
+4. Syntax-check the modified chunk (see Syntax Pitfalls) — the whole-file
+   `node --check` is not a valid test on a chunked bundle
+5. `node patch/apply-all.mjs` — all patches pass
+6. Start ClaudeUI, begin a long-running Bash command (e.g., `sleep 30`) → "Background" button appears → click it → task should move to background
+7. Start a foreground Agent task → "Background" button appears → click it → agent should background
 
 ## Discovery Method
 
@@ -366,6 +548,27 @@ renderer: window.api.backgroundTask(routingId, toolUseId)
 8. **Studied `Ff6` (backgroundSignal Map)**: Agent tasks store a resolve function in this Map. Calling it signals the agent to enter background mode
 9. **Modeled after `stop_task`**: Used the exact same injection pattern — `else if` before the "Unsupported" fallback, same error handling, same success response
 10. **Patched sdk.mjs**: Added `backgroundTask()` method adjacent to `stopTask()`, same pattern
+
+### 2.1.261 re-anchor (the chunked-bundle round)
+
+11. **Symptom**: `ERROR: Cannot locate control-request fallback anchor.` —
+    shared with `queue-control` and `usage-relay`, all three anchored on the
+    same fallback. Cause: a sanitizer wrapper around the interpolated subtype.
+12. **First trap avoided**: after widening the anchor, every other extraction
+    "passed" — including `bgSignalMap`, which reported the plausible-looking
+    `agentBackgroundSignalResolvers`. Only reading the captured value in
+    context (`sr().agentBackgroundSignalResolvers.set(…)`) showed the capture
+    was a **property name**, not an identifier, and that its `=new Map`
+    verification passed for the wrong reason. Lesson: on a green apply run,
+    still print and eyeball each captured name against its surrounding bytes.
+13. **Second trap avoided**: `Sf`/`nr` were found and looked fine, but they are
+    defined in `chunk-9c0rs7w4.js` while the injection lands in
+    `chunk-gj501zgt.js`. Checked the injection chunk's import list before
+    trusting the names — they happen to be imported unaliased, but
+    `usage-relay`'s fetcher (`SD`) is **not** imported at all, proving the
+    check is not academic.
+14. **Verified** by reading the patched bytes, extracting the modified chunk and
+    `node --check`ing it, and re-running the whole ordered chain from pristine.
 
 ## Key Functions Reference
 
