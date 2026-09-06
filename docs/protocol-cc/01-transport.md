@@ -408,6 +408,8 @@ The 2.1.261 binary ships `flags = 0x3ff`. Our writer emits none of the optional 
 
 The delimiter is `// @bun-chunk ` + the exact module name + `\n`, nothing else on the line. Chunk bytes are copied verbatim with no separator of their own — every chunk already ends with `\n`, so the next delimiter always starts at column 0. Extraction fails loudly if any JS module violates the assumptions that makes the split lossless: contents empty, not newline-terminated, containing a byte ≥ 0x80, `encoding != 1` (latin1), a duplicate module name, or a `// @bun-chunk ` line of its own. At 2.1.261 the win32-x64 binary yields 1,631 chunks / 32.4 MB.
 
+Module names are **host-specific**: Bun mounts its standalone FS at `B:/~BUN/root/` on Windows and `/$bunfs/root/` on macOS and Linux, and the chunk set differs per platform too (2.1.261: 1,631 chunks on win32-x64, 1,650 on darwin-arm64). Nothing downstream may key on the prefix — matching `// @bun-chunk B:` is what red-lighted every non-Windows job on the 2.1.261 bump, with extraction and all 14 patches succeeding and only the guard failing. The delimiter and its header predicate are defined once, in `scripts/lib/chunk-format.mjs`, imported by extract-cli, apply-all and rebundle-cli; `src/main/__tests__/chunk-format.test.ts` pins both namespaces.
+
 Native `.node` addons are still extracted separately to `vendor/claude-cli/vendor/<addon>/<arch>-<platform>/<addon>.node` — `voice-capture.ts` in the Electron main process needs a loose copy on disk. They also stay inside the Bun binary and get re-injected intact.
 
 `version.json` records `{ version, source, sourceBinary, extractedAt, cliSize, cliSha256, form: "chunked", chunkCount }` (`cliSize`/`cliSha256` describe the concat file).
@@ -424,7 +426,7 @@ The **source binary** is cached under `.cache/claude-cli/claude-<version>-<platf
 
 1. Parse the container to locate the Bun section (PE `.bun` or Mach-O `__BUN,__bun`).
 2. Read the existing `[u64 blobLen][blob]`, parse the module graph into an editable structure.
-3. Split `vendor/claude-cli/cli.js` on its `// @bun-chunk <name>` delimiter lines into a `name → contents` map, and replace the `contents` of every `loader == 1` module with its entry. A guardrail rejects an input whose first line isn't `// @bun-chunk B:` (catches a stale wrapped-form file from a pre-2.1.261 extractor). The chunk-name set must match the binary's JS-module name set **exactly** — missing/extra names are reported and abort the rebundle, because a silent mismatch would ship an unpatched or stale chunk.
+3. Split `vendor/claude-cli/cli.js` on its `// @bun-chunk <name>` delimiter lines into a `name → contents` map, and replace the `contents` of every `loader == 1` module with its entry. A guardrail rejects an input whose first line isn't a `// @bun-chunk <module>` delimiter (catches a stale wrapped-form file from a pre-2.1.261 extractor, whose header was `// @bun @bytecode`). The chunk-name set must match the binary's JS-module name set **exactly** — missing/extra names are reported and abort the rebundle, because a silent mismatch would ship an unpatched or stale chunk.
 4. **Syntax-check every changed chunk**: for each JS module whose new bytes differ from the original binary's, parse it with `esbuild --loader=js` over stdin (each chunk is standalone ESM). Failure names the chunk and prints esbuild's diagnostic. Typical patched builds change a handful of chunks, so the check costs well under a second; zero changed chunks skips it. This is the pipeline's *only* real syntax gate — `patch/apply-all.mjs` can no longer parse the concat as one program.
 5. Lay out a fresh blob:
    - Emit each module's name, contents and sourcemap back-to-back, each with a `\0` terminator.
@@ -464,7 +466,7 @@ Retired: `ci-path-remap` (obsolete once cli.js runs inside its native Bun runtim
 
 Patches operate on the chunk concat at `vendor/claude-cli/cli.js` — a plain text search-and-replace across all ~1,630 chunks at once, so a patch neither knows nor cares which chunk its anchor lives in. Two consequences of the 2.1.261 chunking worth remembering when re-anchoring: code that used to sit in one file is now split across chunks and crosses module boundaries as `import`/`export` bindings, and a single minified name may now be reused in several chunks — an anchor that was unique in the monolith may match more than once, so `verify pattern matches exactly once` earns its keep. When the minifier changes variable names between versions, a patch fails with "cannot locate anchor" — update that patch's regex using its README's bundle-analyzer anchors.
 
-`patch/apply-all.mjs` finishes with a **structure** check (starts with `// @bun-chunk B:`, more than 1,000 delimiter lines), not a parse — the concat is not a single program. Actual syntax validation is per-changed-chunk inside `scripts/rebundle-cli.mjs`, which runs immediately after in the same `ensure-cli` chain.
+`patch/apply-all.mjs` finishes with a **structure** check (starts with a `// @bun-chunk <module>` delimiter line, more than 1,000 of them), not a parse — the concat is not a single program. Actual syntax validation is per-changed-chunk inside `scripts/rebundle-cli.mjs`, which runs immediately after in the same `ensure-cli` chain.
 
 `apply.mjs` conventions:
 

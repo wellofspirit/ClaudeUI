@@ -18,6 +18,11 @@
  *         // @bun-chunk B:/~BUN/root/cli
  *         <chunk contents>
  *
+ *     Module names are HOST-SPECIFIC: Bun mounts its standalone FS at
+ *     `B:/~BUN/root/` on Windows and `/$bunfs/root/` on macOS and Linux, and
+ *     the chunk set itself differs per platform (1,631 on win32-x64 vs 1,650
+ *     on darwin-arm64 for 2.1.261). Nothing downstream may key on the prefix.
+ *
  *     `patch/apply-all.mjs` text-patches this file; `scripts/rebundle-cli.mjs`
  *     splits it back apart on the delimiters and re-injects each chunk into its
  *     own module-table slot. Every chunk's bytes are pure ASCII and end with a
@@ -64,6 +69,8 @@ import { get as httpsGet } from 'node:https'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { CHUNK_DELIM_PREFIX } from './lib/chunk-format.mjs'
+
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
 const VENDOR_DIR = join(ROOT, 'vendor', 'claude-cli')
@@ -79,7 +86,7 @@ const LOADER_JS = 1
 /** Encoding byte for latin1 text (0 = binary). */
 const ENCODING_LATIN1 = 1
 /** Delimiter that separates chunks in the concatenated patch target. */
-const DELIM_PREFIX = Buffer.from('// @bun-chunk ', 'latin1')
+const DELIM_PREFIX = Buffer.from(CHUNK_DELIM_PREFIX, 'latin1')
 const NEWLINE = Buffer.from('\n', 'latin1')
 /** A delimiter line anywhere but column 0 of the file, i.e. a collision. */
 const DELIM_INLINE = Buffer.concat([NEWLINE, DELIM_PREFIX])

@@ -12,6 +12,8 @@ import { readFileSync } from 'node:fs'
 import { basename, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { CHUNK_DELIM_PREFIX, isChunkConcat } from '../scripts/lib/chunk-format.mjs'
+
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const QUIET = process.argv.includes('--quiet')
 
@@ -98,15 +100,15 @@ function structureFail(msg) {
 }
 
 const cliBytes = readFileSync(cliPath)
-if (!cliBytes.subarray(0, 16).toString('latin1').startsWith('// @bun-chunk B:')) {
+if (!isChunkConcat(cliBytes)) {
   structureFail(
-    'file does not start with a "// @bun-chunk B:" delimiter line — ' +
+    'file does not start with a "// @bun-chunk <module>" delimiter line — ' +
       'a patch clobbered the header, or the file was produced by an old extractor. ' +
       'Re-run `node scripts/extract-cli.mjs`.'
   )
 }
 
-const DELIM = Buffer.from('\n// @bun-chunk ', 'latin1')
+const DELIM = Buffer.from(`\n${CHUNK_DELIM_PREFIX}`, 'latin1')
 let chunkCount = 1 // the leading delimiter has no preceding newline
 for (let i = cliBytes.indexOf(DELIM); i !== -1; i = cliBytes.indexOf(DELIM, i + 1)) chunkCount++
 if (chunkCount <= MIN_CHUNKS) {

@@ -54,6 +54,8 @@ import { readFileSync, writeFileSync, chmodSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { CHUNK_DELIM_RE, isChunkConcat } from './lib/chunk-format.mjs'
+
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
 
@@ -61,8 +63,6 @@ const BUN_MAGIC = Buffer.from('\n---- Bun! ----\n', 'utf8')
 const ENTRY_SIZE = 52
 /** Loader byte for JavaScript modules in Bun's standalone module table. */
 const LOADER_JS = 1
-/** Delimiter line that separates chunks in the concatenated patch target. */
-const CHUNK_DELIM_RE = /^\/\/ @bun-chunk (.+?)\r?$/gm
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -566,9 +566,9 @@ function rewritePE(buf, pe, newBlob) {
  */
 function parseChunkFile(path) {
   const raw = readFileSync(path)
-  if (!raw.subarray(0, 16).toString('latin1').startsWith('// @bun-chunk B:')) {
+  if (!isChunkConcat(raw)) {
     die(
-      `${path} is not a chunk-concat patch target (first line must start with "// @bun-chunk B:"). ` +
+      `${path} is not a chunk-concat patch target (first line must be a "// @bun-chunk <module>" delimiter). ` +
         'Re-run `node scripts/extract-cli.mjs` to regenerate it. ' +
         '(≤2.1.241 produced a single wrapped-CJS module starting with "// @bun" — that format is gone.)'
     )
