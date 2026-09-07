@@ -19,7 +19,7 @@ import { SelectMenu, type SelectMenuOption } from '../shared/SelectMenu'
 /** The three — and only three — "this applies later" phrasings (ADR-065). */
 export type AppliesOn = 'next-session' | 'next-server-start' | 'next-launch'
 
-const APPLIES_ON_LABEL: Record<AppliesOn, string> = {
+export const APPLIES_ON_LABEL: Record<AppliesOn, string> = {
   'next-session': 'Next session',
   'next-server-start': 'Next server start',
   'next-launch': 'Next launch'
@@ -27,6 +27,26 @@ const APPLIES_ON_LABEL: Record<AppliesOn, string> = {
 
 /** Which element the row renders as. `button`/`label` make the whole row a hit. */
 type RowElement = 'div' | 'button' | 'label'
+
+/** The 9px padlock of the `locked` badge. */
+function LockIcon(): React.JSX.Element {
+  return (
+    <svg
+      width="9"
+      height="9"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="shrink-0"
+    >
+      <rect x="4" y="10" width="16" height="10" rx="2" />
+      <path d="M8 10V7a4 4 0 018 0v3" />
+    </svg>
+  )
+}
 
 export interface SettingRowProps {
   /** Omit for an explanatory row: the description then occupies the label slot. */
@@ -42,6 +62,21 @@ export interface SettingRowProps {
   onReset?: () => void
   /** Validation or write failure, in the danger colour under the description. */
   error?: string
+  /**
+   * Testid for the error node, defaulting to `${testid}.error`.
+   *
+   * The engine panes namespace their error as `<pane>.error` while the ROW is
+   * `<pane>.row` / `<pane>.toggle`, and four components outside this file plus
+   * their tests address it that way. An override keeps that contract while the
+   * error itself moves onto the primitive.
+   */
+  errorTestid?: string
+  /**
+   * Lock badge after the label for a value ClaudeUI forces — "Forced off" /
+   * "Forced on" (the Managed keys pattern, ADR-065). The control still renders,
+   * so the user can see what is pinned; pair it with `disabled`.
+   */
+  locked?: string
   layout?: 'inline' | 'stacked'
   /** Dependent-disabled: 50% opacity on label, description and control. */
   dimmed?: boolean
@@ -71,6 +106,8 @@ export function SettingRow({
   modified = false,
   onReset,
   error,
+  errorTestid,
+  locked,
   layout = 'inline',
   dimmed = false,
   indent = false,
@@ -127,6 +164,15 @@ export function SettingRow({
                 {engineMeta(engine).label}
               </span>
             )}
+            {locked && (
+              <span
+                data-testid={`${tid}.locked`}
+                className="shrink-0 inline-flex items-center gap-1 border border-border rounded-full pl-1.5 pr-[7px] text-[10.5px] leading-4 text-text-secondary"
+              >
+                <LockIcon />
+                {locked}
+              </span>
+            )}
             {modified && (
               <span
                 data-testid={`${tid}.modified`}
@@ -162,7 +208,8 @@ export function SettingRow({
         )}
         {error && (
           <span
-            data-testid={`${tid}.error`}
+            data-testid={errorTestid ?? `${tid}.error`}
+            data-id={dataId}
             className="block text-[12px] leading-4 text-danger mt-1"
           >
             {error}
@@ -248,6 +295,8 @@ export function ToggleSwitch({ checked }: { checked: boolean }): React.JSX.Eleme
 export interface SegmentedOption<T extends string> {
   value: T
   label: string
+  /** Offered but unselectable — mirrors `SelectMenuOption.disabled`. */
+  disabled?: boolean
 }
 
 /**
@@ -283,9 +332,9 @@ export function Segmented<T extends string>({
           // Repeated instance: stable testid + `data-id` discriminator (ADR-027).
           data-testid={optionTestid ?? `${root}.option`}
           data-id={opt.value}
-          disabled={disabled}
+          disabled={disabled || opt.disabled}
           onClick={() => onChange(opt.value)}
-          className={`px-2.5 py-[3px] text-[12px] leading-4 rounded transition-colors cursor-default ${
+          className={`px-2.5 py-[3px] text-[12px] leading-4 rounded transition-colors cursor-default disabled:opacity-40 ${
             value === opt.value
               ? 'bg-accent/15 text-accent font-medium'
               : 'text-text-secondary hover:text-text-primary'
@@ -306,7 +355,8 @@ export function SelectField({
   placeholder,
   width = 'min-w-[150px]',
   disabled = false,
-  testid
+  testid,
+  dataId
 }: {
   value: string
   options: SelectMenuOption[]
@@ -317,6 +367,8 @@ export function SelectField({
   width?: string
   disabled?: boolean
   testid?: string
+  /** ADR-027 discriminator for repeated instances sharing one `testid`. */
+  dataId?: string
 }): React.JSX.Element {
   return (
     <SelectMenu
@@ -325,6 +377,7 @@ export function SelectField({
       onChange={onChange}
       disabled={disabled}
       testid={testid}
+      dataAttrs={dataId === undefined ? undefined : { 'data-id': dataId }}
       fallbackLabel={placeholder}
       triggerClassName={`h-7 ${width} bg-bg-input border border-border rounded-md px-2.5 text-[12px] text-text-primary outline-none focus:border-accent/50 transition-colors`}
     />
@@ -345,7 +398,8 @@ export function NumberField({
   max,
   step,
   disabled = false,
-  testid
+  testid,
+  dataId
 }: {
   value: number | undefined
   onChange: (value: number | undefined) => void
@@ -356,6 +410,8 @@ export function NumberField({
   step?: number
   disabled?: boolean
   testid?: string
+  /** ADR-027 discriminator for repeated instances sharing one `testid`. */
+  dataId?: string
 }): React.JSX.Element {
   // null = not being edited, so the prop is the truth. Anything else is the
   // draft the user is part-way through typing.
@@ -384,6 +440,7 @@ export function NumberField({
         type="text"
         inputMode="numeric"
         data-testid={testid ?? 'NumberField'}
+        data-id={dataId}
         value={shown}
         placeholder={placeholder}
         disabled={disabled}
@@ -413,7 +470,10 @@ export function TextField({
   type = 'text',
   className = 'w-full',
   disabled = false,
-  testid
+  testid,
+  dataId,
+  onBlur,
+  onKeyDown
 }: {
   value: string
   onChange: (value: string) => void
@@ -424,15 +484,27 @@ export function TextField({
   className?: string
   disabled?: boolean
   testid?: string
+  /** ADR-027 discriminator for repeated instances sharing one `testid`. */
+  dataId?: string
+  /** Commit-on-blur / commit-on-Enter callers (the record-key editor). */
+  onBlur?: React.FocusEventHandler<HTMLInputElement>
+  onKeyDown?: React.KeyboardEventHandler<HTMLInputElement>
 }): React.JSX.Element {
   return (
     <input
       type={type}
       data-testid={testid ?? 'TextField'}
+      data-id={dataId}
+      onBlur={onBlur}
+      onKeyDown={onKeyDown}
       value={value}
       placeholder={placeholder}
       disabled={disabled}
       spellCheck={false}
+      // No settings field wants autofill: a `type="password"` proxy credential
+      // would otherwise trigger the browser's save-password prompt on the web
+      // client, and a path/URL field gets the wrong suggestions everywhere.
+      autoComplete="off"
       onChange={(e) => onChange(e.target.value)}
       className={`${className} h-7 bg-bg-input border border-border rounded-md px-2.5 text-[12px] text-text-primary placeholder:text-text-muted outline-none focus:border-accent/50 transition-colors ${mono ? 'font-mono' : ''}`}
     />
@@ -495,11 +567,14 @@ export function ListEditor({
   items,
   placeholder,
   onUpdate,
+  disabled = false,
   testid
 }: {
   items: string[]
   placeholder: string
   onUpdate: (items: string[]) => void
+  /** A dependent list whose parent is off: chips stay visible, nothing edits. */
+  disabled?: boolean
   testid?: string
 }): React.JSX.Element {
   const [inputVal, setInputVal] = useState('')
@@ -529,6 +604,7 @@ export function ListEditor({
                 type="button"
                 data-testid={testid ? `${testid}.remove` : undefined}
                 data-id={item}
+                disabled={disabled}
                 onClick={() => onUpdate(items.filter((_, idx) => idx !== i))}
                 className="px-[3px] text-text-muted hover:text-danger transition-colors cursor-default"
               >
@@ -549,12 +625,13 @@ export function ListEditor({
           }}
           placeholder={placeholder}
           spellCheck={false}
+          disabled={disabled}
           className="flex-1 min-w-0 h-7 bg-bg-input border border-border rounded-md px-2.5 text-[12px] text-text-primary placeholder:text-text-muted outline-none focus:border-accent/50 transition-colors"
         />
         <Button
           testid={testid ? `${testid}.add` : undefined}
           onClick={handleAdd}
-          disabled={!inputVal.trim()}
+          disabled={disabled || !inputVal.trim()}
         >
           Add
         </Button>
@@ -712,7 +789,8 @@ export function Button({
   disabled = false,
   title,
   testid,
-  dataId
+  dataId,
+  ariaExpanded
 }: {
   children: React.ReactNode
   onClick: () => void
@@ -721,6 +799,8 @@ export function Button({
   title?: string
   testid?: string
   dataId?: string
+  /** For a button that opens a disclosure below it (the `Overrides…` leaf). */
+  ariaExpanded?: boolean
 }): React.JSX.Element {
   const look =
     variant === 'primary'
@@ -735,6 +815,7 @@ export function Button({
       type="button"
       data-testid={testid}
       data-id={dataId}
+      aria-expanded={ariaExpanded}
       onClick={onClick}
       disabled={disabled}
       title={title}
@@ -753,13 +834,18 @@ export function SettingsToggle({
   onChange,
   tooltip,
   description,
+  keyText,
   engine,
   appliesOn,
   modified,
   onReset,
+  error,
+  errorTestid,
+  locked,
   dimmed,
   indent,
   disabled,
+  labelClassName,
   testid,
   dataId
 }: {
@@ -773,13 +859,21 @@ export function SettingsToggle({
    */
   tooltip?: string
   description?: string
+  /** The engine-native config key this toggle writes (11px mono, under the text). */
+  keyText?: string
   engine?: EngineId
   appliesOn?: AppliesOn
   modified?: boolean
   onReset?: () => void
+  error?: string
+  errorTestid?: string
+  /** "Forced off" / "Forced on" — see `SettingRowProps.locked`. */
+  locked?: string
   dimmed?: boolean
   indent?: boolean
   disabled?: boolean
+  /** Overrides the label's colour class (a row whose label IS a config key). */
+  labelClassName?: string
   testid?: string
   /** ADR-027 discriminator for repeated instances sharing one `testid`. */
   dataId?: string
@@ -794,12 +888,17 @@ export function SettingsToggle({
       onClick={() => onChange(!checked)}
       label={label}
       description={description ?? tooltip}
+      keyText={keyText}
       engine={engine}
       appliesOn={appliesOn}
       modified={modified}
       onReset={onReset}
+      error={error}
+      errorTestid={errorTestid}
+      locked={locked}
       dimmed={dimmed}
       indent={indent}
+      labelClassName={labelClassName}
       className="hover:bg-bg-hover/40 transition-colors"
     >
       <ToggleSwitch checked={checked} />
@@ -1171,6 +1270,9 @@ export function SandboxListSetting({
   onUpdate,
   tooltip,
   description,
+  dimmed,
+  disabled,
+  indent,
   testid
 }: {
   label: string
@@ -1183,10 +1285,20 @@ export function SandboxListSetting({
    *  `tooltip`) when the semantics are load-bearing — e.g. what an EMPTY list
    *  means to the backend. */
   description?: string
+  /** Dependent-disabled presentation (ADR-065): 50% opacity, one nesting level. */
+  dimmed?: boolean
+  disabled?: boolean
+  indent?: boolean
   testid?: string
 }): React.JSX.Element {
   const editor = (
-    <ListEditor items={items} placeholder={placeholder} onUpdate={onUpdate} testid={testid} />
+    <ListEditor
+      items={items}
+      placeholder={placeholder}
+      onUpdate={onUpdate}
+      disabled={disabled}
+      testid={testid}
+    />
   )
 
   // An empty label means the caller already rendered its own label block above
@@ -1207,6 +1319,8 @@ export function SandboxListSetting({
       label={label}
       labelClassName={labelColor}
       description={description}
+      dimmed={dimmed}
+      indent={indent}
     >
       <span className="block">
         {/* Callers pass BOTH a description and a long tooltip (the trust lists),

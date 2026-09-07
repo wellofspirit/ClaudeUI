@@ -46,7 +46,10 @@ import {
   RadioRow,
   ActionRow,
   SelectField,
-  TextField
+  TextField,
+  NumberField,
+  Segmented,
+  Button
 } from './settings-controls'
 import type { SettingsRenderContext } from './settings-target'
 import { ModelPicker } from '../shared/InlinePickers'
@@ -75,7 +78,10 @@ import {
   PiImagesSection,
   PiWorkspaceSection,
   PiNetworkSection,
-  PiRawConfigSection
+  PiRawConfigSection,
+  PiRetrySection,
+  PiResourcesSection,
+  PiFallbacksSection
 } from './PiConfigPanes'
 import { diffToPatches } from '../../../../shared/opencode-config-diff'
 import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.18.29.json'
@@ -158,11 +164,24 @@ const DEFAULT_PROXY: ProxySettings = {
   proxySubprocesses: false
 }
 
-// ── Proxy test connection button ─────────────────────────────────────
+// ── Proxy test connection row ────────────────────────────────────────
 
+/**
+ * The "Test connection" row (ADR-065). The outcome IS the row's description,
+ * so there is no bespoke status text beside a bespoke button; a failure's
+ * message goes to the row's `error` slot and reads in the danger colour.
+ *
+ * A `SettingRow` with a `Button` rather than `ActionRow`: this is a dependent
+ * row that has to nest and dim with the rest of the proxy fields and show an
+ * error, none of which `ActionRow` takes, and its chevron link means "opens an
+ * editor" rather than "runs a check".
+ */
 function ProxyTestButton({ proxy }: { proxy: ProxySettings }): React.JSX.Element {
   const [state, setState] = useState<'idle' | 'testing' | 'success' | 'error'>('idle')
   const [result, setResult] = useState<{ latencyMs?: number; error?: string } | null>(null)
+
+  // Nothing to reach until the proxy is on and points somewhere.
+  const ready = proxy.enabled && !!proxy.hostname
 
   const handleTest = async (): Promise<void> => {
     setState('testing')
@@ -182,27 +201,32 @@ function ProxyTestButton({ proxy }: { proxy: ProxySettings }): React.JSX.Element
     }
   }
 
+  const outcome =
+    state === 'testing'
+      ? 'Testing…'
+      : state === 'success'
+        ? `Reachable · ${result?.latencyMs ?? 0} ms`
+        : state === 'error'
+          ? 'The proxy did not answer.'
+          : 'Not tested yet.'
+
   return (
-    <div data-testid="ProxyTestButton" className="px-3 py-1.5 text-[13px] text-text-secondary">
-      <div className="flex items-center gap-2">
-        <button
-          data-testid="ProxyTestButton.test"
-          onClick={handleTest}
-          disabled={state === 'testing'}
-          className="px-2.5 py-1 text-[11px] font-medium text-accent hover:text-accent-hover bg-accent/10 hover:bg-accent/15 rounded-md transition-colors cursor-default disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {state === 'testing' ? 'Testing...' : 'Test Connection'}
-        </button>
-        {state === 'success' && result && (
-          <span className="text-[11px] text-success">Connected ({result.latencyMs}ms)</span>
-        )}
-        {state === 'error' && result && (
-          <span className="text-[11px] text-danger truncate max-w-[300px]" title={result.error}>
-            Failed: {result.error}
-          </span>
-        )}
-      </div>
-    </div>
+    <SettingRow
+      testid="ClaudeProxy.test"
+      label="Test connection"
+      description={outcome}
+      error={state === 'error' ? result?.error : undefined}
+      indent
+      dimmed={!ready}
+    >
+      <Button
+        testid="ClaudeProxy.test.action"
+        onClick={() => void handleTest()}
+        disabled={!ready || state === 'testing'}
+      >
+        Test
+      </Button>
+    </SettingRow>
   )
 }
 
@@ -1388,23 +1412,15 @@ function OpencodeRawConfigSection(): React.JSX.Element {
   useEffect(() => load(), [load])
 
   if (installed === null || original === null) {
-    return (
-      <div
-        data-testid="OpencodeRawConfigSection"
-        className="px-3 py-1.5 text-[13px] text-text-muted"
-      >
-        Loading…
-      </div>
-    )
+    return <SettingRow testid="OpencodeRawConfigSection" description="Loading…" />
   }
   if (!installed) {
     return (
-      <div
-        data-testid="OpencodeRawConfigSection"
-        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
-      >
-        opencode is not installed. This edits opencode&apos;s own config file.
-      </div>
+      <SettingRow
+        testid="OpencodeRawConfigSection"
+        dimmed
+        description="opencode is not installed. This edits opencode's own config file."
+      />
     )
   }
 
@@ -1436,14 +1452,10 @@ function OpencodeRawConfigSection(): React.JSX.Element {
   }
 
   return (
-    <div
-      data-testid="OpencodeRawConfigSection"
-      className="px-3 py-1.5 space-y-2 text-[13px] text-text-secondary"
-    >
-      <div className="text-[10px] text-text-muted/60 leading-relaxed">
-        Edit opencode&apos;s own config file directly ({filePath || 'opencode.jsonc'}). Saves touch
-        only the fields you change — comments and keys not listed here are preserved.
-      </div>
+    <div data-testid="OpencodeRawConfigSection" className="divide-y divide-border/55">
+      <SettingRow
+        description={`Edits opencode's own config file directly (${filePath || 'opencode.jsonc'}); a save touches only the fields you change and keeps comments and unlisted keys.`}
+      />
       <OpencodeSchemaForm
         schema={OPENCODE_CONFIG_NODE}
         defs={OPENCODE_SCHEMA_DEFS}
@@ -1451,42 +1463,34 @@ function OpencodeRawConfigSection(): React.JSX.Element {
         onChange={setDraft}
         pickKeys={pickKeys}
       />
-      {pointerKeys.length > 0 && (
-        <div className="border-t border-border/20 pt-1.5 space-y-0.5">
-          {pointerKeys.map((k) => (
-            <div
-              key={k}
-              data-testid="OpencodeRawConfigSection.pointer"
-              data-id={k}
-              className="flex items-center justify-between text-[10px] text-text-muted/60 px-3"
-            >
-              <span className="font-mono text-text-muted">{k}</span>
-              <span>managed in {CONFIG_POINTER_KEYS[k]}</span>
-            </div>
-          ))}
-        </div>
-      )}
-      <div className="flex items-center gap-2 px-3 pt-1">
-        <button
-          type="button"
-          data-testid="OpencodeRawConfigSection.save"
+      {/* Keys this editor deliberately does not own: each names the page that
+          does. Dimmed rows, not links — a pointer is information (ADR-065). */}
+      {pointerKeys.map((k) => (
+        <SettingRow
+          key={k}
+          testid="OpencodeRawConfigSection.pointer"
+          dataId={k}
+          dimmed
+          label={k}
+          labelClassName="font-mono text-[12px] text-text-primary"
+          description={`Managed in ${CONFIG_POINTER_KEYS[k]}.`}
+        />
+      ))}
+      <SettingRow
+        label="Save changes"
+        description={saved ? 'Saved.' : dirty ? 'Unsaved edits above.' : 'Nothing to save.'}
+        error={error ?? undefined}
+        errorTestid="OpencodeRawConfigSection.error"
+      >
+        <Button
+          variant="primary"
+          testid="OpencodeRawConfigSection.save"
           disabled={!dirty || saving}
           onClick={() => void handleSave()}
-          className="px-2.5 py-1 text-[11px] font-medium text-accent hover:text-accent-hover bg-accent/10 hover:bg-accent/15 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         >
           {saving ? 'Saving…' : 'Save'}
-        </button>
-        {saved && <span className="text-[11px] text-success">Saved</span>}
-        {error && (
-          <span
-            data-testid="OpencodeRawConfigSection.error"
-            className="text-[11px] text-red-400 truncate max-w-[360px]"
-            title={error}
-          >
-            {error}
-          </span>
-        )}
-      </div>
+        </Button>
+      </SettingRow>
     </div>
   )
 }
@@ -2454,17 +2458,13 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div>
-              <SettingsToggle
-                label="Command sandbox"
-                checked={sb.enabled}
-                onChange={(v) => ue({ sandbox: { ...sb, enabled: v } })}
-                tooltip="Uses macOS sandbox-exec (Seatbelt profiles) or Linux bubblewrap (bwrap) to restrict filesystem and process access. Commands run in a sandboxed shell with deny-by-default policies. Only macOS and Linux are supported — Windows is not."
-              />
-              <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                Run bash commands in an isolated environment
-              </div>
-            </div>
+            <SettingsToggle
+              testid="ClaudeSandbox.enabled"
+              label="Command sandbox"
+              description="Runs shell commands in an isolated environment — macOS sandbox-exec or Linux bubblewrap, deny-by-default. Not available on Windows."
+              checked={sb.enabled}
+              onChange={(v) => ue({ sandbox: { ...sb, enabled: v } })}
+            />
           )
         }
       },
@@ -2475,19 +2475,16 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4">
-                <SettingsToggle
-                  label="Auto-approve sandboxed commands"
-                  checked={sb.autoAllowBashIfSandboxed}
-                  onChange={(v) => ue({ sandbox: { ...sb, autoAllowBashIfSandboxed: v } })}
-                  tooltip="When enabled, bash commands that run inside the sandbox are automatically approved without prompting. Commands matching deny or ask permission rules are still blocked. This is the main UX benefit of sandbox mode."
-                />
-                <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                  Skip permission prompts for sandboxed bash
-                </div>
-              </div>
-            </div>
+            <SettingsToggle
+              testid="ClaudeSandbox.autoAllow"
+              label="Auto-approve sandboxed commands"
+              description="Skips the permission prompt for bash that runs inside the sandbox, though deny and ask rules still block it."
+              checked={sb.autoAllowBashIfSandboxed}
+              onChange={(v) => ue({ sandbox: { ...sb, autoAllowBashIfSandboxed: v } })}
+              indent
+              dimmed={!sb.enabled}
+              disabled={!sb.enabled}
+            />
           )
         }
       },
@@ -2498,19 +2495,16 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4">
-                <SettingsToggle
-                  label="Allow unsandboxed escape"
-                  checked={sb.allowUnsandboxedCommands}
-                  onChange={(v) => ue({ sandbox: { ...sb, allowUnsandboxedCommands: v } })}
-                  tooltip="When a sandboxed command fails due to restrictions, the model can retry it outside the sandbox. You'll still be prompted to approve the unsandboxed execution. Disable this to enforce strict sandbox-only execution."
-                />
-                <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                  Let the model retry outside sandbox on failure
-                </div>
-              </div>
-            </div>
+            <SettingsToggle
+              testid="ClaudeSandbox.allowUnsandboxed"
+              label="Allow unsandboxed escape"
+              description="Lets the model retry a command outside the sandbox when the restrictions make it fail, with a permission prompt each time."
+              checked={sb.allowUnsandboxedCommands}
+              onChange={(v) => ue({ sandbox: { ...sb, allowUnsandboxedCommands: v } })}
+              indent
+              dimmed={!sb.enabled}
+              disabled={!sb.enabled}
+            />
           )
         }
       },
@@ -2521,21 +2515,18 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4">
-                <SettingsToggle
-                  label="Allow local port binding"
-                  checked={sb.network.allowLocalBinding}
-                  onChange={(v) =>
-                    ue({ sandbox: { ...sb, network: { ...sb.network, allowLocalBinding: v } } })
-                  }
-                  tooltip="Lets processes inside the sandbox listen on localhost ports (e.g. webpack-dev-server, vite, flask). Without this, dev servers started by the model will fail to bind."
-                />
-                <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                  Allow sandboxed processes to bind to local ports
-                </div>
-              </div>
-            </div>
+            <SettingsToggle
+              testid="ClaudeSandbox.localBinding"
+              label="Allow local port binding"
+              description="Lets sandboxed processes listen on localhost ports, which dev servers like vite and flask need to start."
+              checked={sb.network.allowLocalBinding}
+              onChange={(v) =>
+                ue({ sandbox: { ...sb, network: { ...sb.network, allowLocalBinding: v } } })
+              }
+              indent
+              dimmed={!sb.enabled}
+              disabled={!sb.enabled}
+            />
           )
         }
       },
@@ -2546,21 +2537,18 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4">
-                <SettingsToggle
-                  label="Restrict network access"
-                  checked={sb.network.restrictNetwork}
-                  onChange={(v) =>
-                    ue({ sandbox: { ...sb, network: { ...sb.network, restrictNetwork: v } } })
-                  }
-                  tooltip="When enabled, sandboxed commands can only reach explicitly whitelisted domains via a local proxy. All other network access is blocked. When disabled, sandboxed commands have unrestricted network access."
-                />
-                <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                  Only allow connections to whitelisted domains
-                </div>
-              </div>
-            </div>
+            <SettingsToggle
+              testid="ClaudeSandbox.restrictNetwork"
+              label="Restrict network access"
+              description="Blocks every outbound connection except the domains listed below; off leaves the sandbox's network open."
+              checked={sb.network.restrictNetwork}
+              onChange={(v) =>
+                ue({ sandbox: { ...sb, network: { ...sb.network, restrictNetwork: v } } })
+              }
+              indent
+              dimmed={!sb.enabled}
+              disabled={!sb.enabled}
+            />
           )
         }
       },
@@ -2571,24 +2559,20 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div
-              className={
-                sb.enabled && sb.network.restrictNetwork ? '' : 'opacity-40 pointer-events-none'
+            <SandboxListSetting
+              testid="ClaudeSandbox.allowedDomains"
+              label="Allowed domains"
+              labelColor="text-text-primary"
+              description="Domains sandboxed commands may reach, wildcards like *.npmjs.org included; empty blocks all outbound traffic."
+              items={sb.network.allowedDomains}
+              placeholder="e.g. registry.npmjs.org"
+              onUpdate={(items) =>
+                ue({ sandbox: { ...sb, network: { ...sb.network, allowedDomains: items } } })
               }
-            >
-              <div className="pl-8">
-                <SandboxListSetting
-                  label="Allowed domains"
-                  labelColor="text-success"
-                  items={sb.network.allowedDomains}
-                  placeholder="e.g. registry.npmjs.org"
-                  onUpdate={(items) =>
-                    ue({ sandbox: { ...sb, network: { ...sb.network, allowedDomains: items } } })
-                  }
-                  tooltip="Domains that sandboxed commands can reach. Supports wildcards like *.npmjs.org. Traffic is routed through a local HTTP/SOCKS proxy. Leave empty to block all outbound network access."
-                />
-              </div>
-            </div>
+              indent
+              dimmed={!(sb.enabled && sb.network.restrictNetwork)}
+              disabled={!(sb.enabled && sb.network.restrictNetwork)}
+            />
           )
         }
       },
@@ -2599,27 +2583,20 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div
-              className={
-                sb.enabled && sb.network.restrictNetwork ? '' : 'opacity-40 pointer-events-none'
+            <SettingsToggle
+              testid="ClaudeSandbox.managedDomainsOnly"
+              label="Managed domains only"
+              description="An enterprise policy that honours only the domains from managed settings and ignores the user, project and local ones."
+              checked={sb.network.allowManagedDomainsOnly}
+              onChange={(v) =>
+                ue({
+                  sandbox: { ...sb, network: { ...sb.network, allowManagedDomainsOnly: v } }
+                })
               }
-            >
-              <div className="pl-8">
-                <SettingsToggle
-                  label="Managed domains only"
-                  checked={sb.network.allowManagedDomainsOnly}
-                  onChange={(v) =>
-                    ue({
-                      sandbox: { ...sb, network: { ...sb.network, allowManagedDomainsOnly: v } }
-                    })
-                  }
-                  tooltip="Enterprise feature. When enabled, only allowedDomains from managed settings and WebFetch(domain:...) allow rules from managed settings are used. Domains from user, project, local, and flag settings are ignored. Denied domains are still respected from all sources."
-                />
-                <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                  Ignore user/project domain settings, only respect managed policy
-                </div>
-              </div>
-            </div>
+              indent
+              dimmed={!(sb.enabled && sb.network.restrictNetwork)}
+              disabled={!(sb.enabled && sb.network.restrictNetwork)}
+            />
           )
         }
       },
@@ -2630,21 +2607,18 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4">
-                <SettingsToggle
-                  label="Allow all Unix sockets"
-                  checked={sb.network.allowAllUnixSockets}
-                  onChange={(v) =>
-                    ue({ sandbox: { ...sb, network: { ...sb.network, allowAllUnixSockets: v } } })
-                  }
-                  tooltip="Disables Unix socket blocking on both macOS and Linux. This grants access to all Unix sockets including the Docker socket, which effectively gives full host access. Only enable if you trust the commands being run."
-                />
-                <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                  Disable Unix socket blocking (allows Docker, etc.)
-                </div>
-              </div>
-            </div>
+            <SettingsToggle
+              testid="ClaudeSandbox.allowAllUnixSockets"
+              label="Allow all Unix sockets"
+              description="Unblocks every Unix socket including Docker's, which hands sandboxed commands full host access."
+              checked={sb.network.allowAllUnixSockets}
+              onChange={(v) =>
+                ue({ sandbox: { ...sb, network: { ...sb.network, allowAllUnixSockets: v } } })
+              }
+              indent
+              dimmed={!sb.enabled}
+              disabled={!sb.enabled}
+            />
           )
         }
       },
@@ -2655,26 +2629,20 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div
-              className={
-                sb.enabled && !sb.network.allowAllUnixSockets
-                  ? ''
-                  : 'opacity-40 pointer-events-none'
+            <SandboxListSetting
+              testid="ClaudeSandbox.unixSockets"
+              label="Unix socket paths"
+              labelColor="text-text-primary"
+              description="The socket paths sandboxed commands may open on macOS; Linux filters with seccomp, which cannot match a path."
+              items={sb.network.allowUnixSockets}
+              placeholder="e.g. /var/run/docker.sock"
+              onUpdate={(items) =>
+                ue({ sandbox: { ...sb, network: { ...sb.network, allowUnixSockets: items } } })
               }
-            >
-              <div className="pl-8">
-                <SandboxListSetting
-                  label="Unix socket paths"
-                  labelColor="text-warning"
-                  items={sb.network.allowUnixSockets}
-                  placeholder="e.g. /var/run/docker.sock"
-                  onUpdate={(items) =>
-                    ue({ sandbox: { ...sb, network: { ...sb.network, allowUnixSockets: items } } })
-                  }
-                  tooltip="macOS only — specific Unix socket paths to allow. Linux uses seccomp which cannot filter by path. Allowing /var/run/docker.sock grants full host access through the Docker API."
-                />
-              </div>
-            </div>
+              indent
+              dimmed={!(sb.enabled && !sb.network.allowAllUnixSockets)}
+              disabled={!(sb.enabled && !sb.network.allowAllUnixSockets)}
+            />
           )
         }
       },
@@ -2685,22 +2653,22 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4">
-                <SandboxListSetting
-                  label="Additional write paths"
-                  labelColor="text-success"
-                  items={sb.filesystem.allowWrite}
-                  placeholder="e.g. /usr/local/bin"
-                  onUpdate={(items) =>
-                    ue({
-                      sandbox: { ...sb, filesystem: { ...sb.filesystem, allowWrite: items } }
-                    })
-                  }
-                  tooltip="Paths outside the project directory where sandboxed commands can write files. The project directory and $TMPDIR are always writable."
-                />
-              </div>
-            </div>
+            <SandboxListSetting
+              testid="ClaudeSandbox.allowWrite"
+              label="Additional write paths"
+              labelColor="text-text-primary"
+              description="Paths outside the project directory that sandboxed commands may write to."
+              items={sb.filesystem.allowWrite}
+              placeholder="e.g. /usr/local/bin"
+              onUpdate={(items) =>
+                ue({
+                  sandbox: { ...sb, filesystem: { ...sb.filesystem, allowWrite: items } }
+                })
+              }
+              indent
+              dimmed={!sb.enabled}
+              disabled={!sb.enabled}
+            />
           )
         }
       },
@@ -2711,22 +2679,22 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4">
-                <SandboxListSetting
-                  label="Read-only paths"
-                  labelColor="text-warning"
-                  items={sb.filesystem.denyWrite}
-                  placeholder="e.g. /etc"
-                  onUpdate={(items) =>
-                    ue({
-                      sandbox: { ...sb, filesystem: { ...sb.filesystem, denyWrite: items } }
-                    })
-                  }
-                  tooltip="Paths that should be read-only even within writable areas. Useful for protecting config files or build artifacts from accidental modification."
-                />
-              </div>
-            </div>
+            <SandboxListSetting
+              testid="ClaudeSandbox.denyWrite"
+              label="Read-only paths"
+              labelColor="text-text-primary"
+              description="Paths that stay read-only even when they sit inside a writable area."
+              items={sb.filesystem.denyWrite}
+              placeholder="e.g. /etc"
+              onUpdate={(items) =>
+                ue({
+                  sandbox: { ...sb, filesystem: { ...sb.filesystem, denyWrite: items } }
+                })
+              }
+              indent
+              dimmed={!sb.enabled}
+              disabled={!sb.enabled}
+            />
           )
         }
       },
@@ -2737,22 +2705,22 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4">
-                <SandboxListSetting
-                  label="Hidden paths"
-                  labelColor="text-danger"
-                  items={sb.filesystem.denyRead}
-                  placeholder="e.g. ~/.ssh"
-                  onUpdate={(items) =>
-                    ue({
-                      sandbox: { ...sb, filesystem: { ...sb.filesystem, denyRead: items } }
-                    })
-                  }
-                  tooltip="Paths completely hidden from sandboxed commands — they cannot read or detect these files exist. Good for credentials, SSH keys, cloud configs."
-                />
-              </div>
-            </div>
+            <SandboxListSetting
+              testid="ClaudeSandbox.denyRead"
+              label="Hidden paths"
+              labelColor="text-text-primary"
+              description="Paths the sandbox cannot read at all, such as ~/.ssh."
+              items={sb.filesystem.denyRead}
+              placeholder="e.g. ~/.ssh"
+              onUpdate={(items) =>
+                ue({
+                  sandbox: { ...sb, filesystem: { ...sb.filesystem, denyRead: items } }
+                })
+              }
+              indent
+              dimmed={!sb.enabled}
+              disabled={!sb.enabled}
+            />
           )
         }
       },
@@ -2761,10 +2729,10 @@ export const SECTIONS: Section[] = [
         label: 'Sandbox info',
         keywords: 'sandbox info macos linux bwrap',
         render: () => (
-          <div className="px-3 py-1.5 text-[11px] text-text-muted/60">
-            Filesystem defaults: project dir + $TMPDIR writable. Changes take effect on next session
-            start.
-          </div>
+          <SettingRow
+            testid="ClaudeSandbox.note"
+            description="Filesystem defaults: the project directory and $TMPDIR are writable."
+          />
         )
       }
     ]
@@ -2791,22 +2759,20 @@ export const SECTIONS: Section[] = [
     items: [
       {
         key: 'proxyEnabled',
-        label: 'Enable proxy',
-        keywords: 'proxy http socks5 network tunnel',
+        // The label is the search term AND the row's visible label, so it
+        // follows the row; the wording it replaces stays in the keywords.
+        label: 'Route through a proxy',
+        keywords: 'proxy enable http socks5 network tunnel',
         render: (_s, _u, e, ue) => {
           const px = e.proxy ?? DEFAULT_PROXY
           return (
-            <div>
-              <SettingsToggle
-                label="Enable proxy"
-                checked={px.enabled}
-                onChange={(v) => ue({ proxy: { ...px, enabled: v } })}
-                tooltip="Route all SDK traffic through a proxy server. Applies to new sessions."
-              />
-              <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                Route Claude API traffic through a proxy server
-              </div>
-            </div>
+            <SettingsToggle
+              testid="ClaudeProxy.enabled"
+              label="Route through a proxy"
+              description="Sends Claude API traffic through an HTTP or SOCKS5 proxy."
+              checked={px.enabled}
+              onChange={(v) => ue({ proxy: { ...px, enabled: v } })}
+            />
           )
         }
       },
@@ -2817,19 +2783,19 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const px = e.proxy ?? DEFAULT_PROXY
           return (
-            <div className={px.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4">
-                <SettingsSelect
-                  label="Proxy type"
-                  value={px.type}
-                  options={[
-                    { value: 'http' as const, label: 'HTTP' },
-                    { value: 'socks5' as const, label: 'SOCKS5' }
-                  ]}
-                  onChange={(v) => ue({ proxy: { ...px, type: v } })}
-                />
-              </div>
-            </div>
+            <SettingRow testid="ClaudeProxy.type" label="Type" indent dimmed={!px.enabled}>
+              <Segmented
+                testid="ClaudeProxy.type.segmented"
+                optionTestid="ClaudeProxy.type.option"
+                value={px.type}
+                options={[
+                  { value: 'http' as const, label: 'HTTP' },
+                  { value: 'socks5' as const, label: 'SOCKS5' }
+                ]}
+                onChange={(v) => ue({ proxy: { ...px, type: v } })}
+                disabled={!px.enabled}
+              />
+            </SettingRow>
           )
         }
       },
@@ -2840,18 +2806,21 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const px = e.proxy ?? DEFAULT_PROXY
           return (
-            <div className={px.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
-                <div className="mb-1">Hostname</div>
-                <input
-                  type="text"
-                  value={px.hostname}
-                  onChange={(ev) => ue({ proxy: { ...px, hostname: ev.target.value } })}
-                  className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-                  placeholder="e.g. proxy.company.com"
-                />
-              </div>
-            </div>
+            <SettingRow
+              testid="ClaudeProxy.hostname"
+              label="Hostname"
+              layout="stacked"
+              indent
+              dimmed={!px.enabled}
+            >
+              <TextField
+                testid="ClaudeProxy.hostname.input"
+                value={px.hostname}
+                onChange={(v) => ue({ proxy: { ...px, hostname: v } })}
+                placeholder="proxy.company.com"
+                disabled={!px.enabled}
+              />
+            </SettingRow>
           )
         }
       },
@@ -2862,23 +2831,19 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const px = e.proxy ?? DEFAULT_PROXY
           return (
-            <div className={px.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
-                <div className="mb-1">Port</div>
-                <input
-                  type="number"
-                  value={px.port}
-                  min={1}
-                  max={65535}
-                  onChange={(ev) => {
-                    const n = parseInt(ev.target.value, 10)
-                    if (!isNaN(n) && n >= 1 && n <= 65535) ue({ proxy: { ...px, port: n } })
-                  }}
-                  className="w-24 bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-                  placeholder="8080"
-                />
-              </div>
-            </div>
+            <SettingRow testid="ClaudeProxy.port" label="Port" indent dimmed={!px.enabled}>
+              <NumberField
+                testid="ClaudeProxy.port.input"
+                value={px.port}
+                min={1}
+                max={65535}
+                placeholder={String(DEFAULT_PROXY.port)}
+                // The field commits `undefined` when it is cleared, but the port
+                // is a required number: an empty field means "the default".
+                onChange={(v) => ue({ proxy: { ...px, port: v ?? DEFAULT_PROXY.port } })}
+                disabled={!px.enabled}
+              />
+            </SettingRow>
           )
         }
       },
@@ -2889,22 +2854,21 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const px = e.proxy ?? DEFAULT_PROXY
           return (
-            <div className={px.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
-                <div className="mb-1">
-                  <span>Username</span>
-                  <span className="text-[10px] text-text-muted/50 ml-1.5">optional</span>
-                </div>
-                <input
-                  type="text"
-                  value={px.username}
-                  onChange={(ev) => ue({ proxy: { ...px, username: ev.target.value } })}
-                  className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-                  placeholder="username"
-                  autoComplete="off"
-                />
-              </div>
-            </div>
+            <SettingRow
+              testid="ClaudeProxy.username"
+              label="Username"
+              description="Optional."
+              indent
+              dimmed={!px.enabled}
+            >
+              <TextField
+                testid="ClaudeProxy.username.input"
+                value={px.username}
+                onChange={(v) => ue({ proxy: { ...px, username: v } })}
+                className="w-[240px]"
+                disabled={!px.enabled}
+              />
+            </SettingRow>
           )
         }
       },
@@ -2915,22 +2879,22 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const px = e.proxy ?? DEFAULT_PROXY
           return (
-            <div className={px.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
-                <div className="mb-1">
-                  <span>Password</span>
-                  <span className="text-[10px] text-text-muted/50 ml-1.5">optional</span>
-                </div>
-                <input
-                  type="password"
-                  value={px.password}
-                  onChange={(ev) => ue({ proxy: { ...px, password: ev.target.value } })}
-                  className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-                  placeholder="password"
-                  autoComplete="off"
-                />
-              </div>
-            </div>
+            <SettingRow
+              testid="ClaudeProxy.password"
+              label="Password"
+              description="Optional."
+              indent
+              dimmed={!px.enabled}
+            >
+              <TextField
+                testid="ClaudeProxy.password.input"
+                type="password"
+                value={px.password}
+                onChange={(v) => ue({ proxy: { ...px, password: v } })}
+                className="w-[240px]"
+                disabled={!px.enabled}
+              />
+            </SettingRow>
           )
         }
       },
@@ -2940,13 +2904,7 @@ export const SECTIONS: Section[] = [
         keywords: 'test verify check ping connectivity',
         render: (_s, _u, e) => {
           const px = e.proxy ?? DEFAULT_PROXY
-          return (
-            <div className={px.enabled && px.hostname ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4">
-                <ProxyTestButton proxy={px} />
-              </div>
-            </div>
-          )
+          return <ProxyTestButton proxy={px} />
         }
       },
       {
@@ -2956,17 +2914,16 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const px = e.proxy ?? DEFAULT_PROXY
           return (
-            <div className={px.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <SettingsToggle
-                label="Also proxy shell commands"
-                checked={px.proxySubprocesses === true}
-                onChange={(v) => ue({ proxy: { ...px, proxySubprocesses: v } })}
-                tooltip="When on, git/curl/npm and other commands Claude runs in the shell also route through the proxy. When off (default), only Claude's API traffic is proxied."
-              />
-              <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                Off by default — shell commands stay direct
-              </div>
-            </div>
+            <SettingsToggle
+              testid="ClaudeProxy.subprocesses"
+              label="Also proxy shell commands"
+              description="Sets HTTP_PROXY and HTTPS_PROXY for commands the agent runs; off keeps them direct."
+              checked={px.proxySubprocesses === true}
+              onChange={(v) => ue({ proxy: { ...px, proxySubprocesses: v } })}
+              indent
+              dimmed={!px.enabled}
+              disabled={!px.enabled}
+            />
           )
         }
       },
@@ -2975,9 +2932,10 @@ export const SECTIONS: Section[] = [
         label: 'Proxy info',
         keywords: 'proxy info env environment variable',
         render: () => (
-          <div className="px-3 py-1.5 text-[11px] text-text-muted/60">
-            Sets HTTP_PROXY/HTTPS_PROXY environment variables. Changes apply to new sessions.
-          </div>
+          <SettingRow
+            testid="ClaudeProxy.note"
+            description="Applies to the Claude API connection; shell commands only when the toggle above is on."
+          />
         )
       }
     ]
@@ -3498,6 +3456,34 @@ export const SECTIONS: Section[] = [
     ]
   },
   {
+    id: 'pi-config-retry',
+    label: 'Automatic retry',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <polyline points="23 4 23 10 17 10" />
+        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piRetry',
+        label: 'Automatic retry',
+        keywords:
+          'pi retry enabled maxRetries baseDelayMs provider timeoutMs maxRetryDelayMs backoff transient errors',
+        render: () => <PiRetrySection />
+      }
+    ]
+  },
+  {
     id: 'pi-config-models',
     label: 'Models & thinking',
     icon: (
@@ -3523,6 +3509,34 @@ export const SECTIONS: Section[] = [
         keywords:
           'pi model default provider openai-codex anthropic allowlist defaultProvider defaultModel defaultThinkingLevel thinkingBudgets reasoning effort',
         render: () => <PiModelsSection />
+      }
+    ]
+  },
+  {
+    id: 'pi-config-fallbacks',
+    label: 'pi fallbacks',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M4 4v6h6" />
+        <path d="M4 10a8 8 0 1 1 2.3 5.7" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piFallbacks',
+        label: 'pi fallbacks',
+        keywords:
+          'pi defaultProvider defaultModel defaultThinkingLevel thinkingBudgets fallback standalone thinking budget reasoning',
+        render: () => <PiFallbacksSection />
       }
     ]
   },
@@ -3605,6 +3619,34 @@ export const SECTIONS: Section[] = [
         keywords:
           'pi defaultProjectTrust ask always never sessionDir enableSkillCommands packages extensions skills prompts resources trust',
         render: () => <PiWorkspaceSection />
+      }
+    ]
+  },
+  {
+    id: 'pi-config-resources',
+    label: 'Resources',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+        <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+        <line x1="12" y1="22.08" x2="12" y2="12" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piResources',
+        label: 'Resources',
+        keywords: 'pi packages extensions skills prompts paths npm git resources',
+        render: () => <PiResourcesSection />
       }
     ]
   },
@@ -3771,10 +3813,13 @@ const ENGINE_PI_SECTION_IDS = new Set(['pi-automode'])
  */
 const CONFIGURATION_PI_SECTION_IDS = new Set([
   'pi-config-session',
+  'pi-config-retry',
   'pi-config-models',
+  'pi-config-fallbacks',
   'pi-config-tools',
   'pi-config-images',
   'pi-config-workspace',
+  'pi-config-resources',
   'pi-config-network',
   'pi-config-raw'
 ])
@@ -3922,10 +3967,13 @@ export const SCOPES: ScopeDef[] = [
         label: 'Configuration',
         sections: getSectionsForIds(CONFIGURATION_PI_SECTION_IDS, [
           'pi-config-session',
+          'pi-config-retry',
           'pi-config-models',
+          'pi-config-fallbacks',
           'pi-config-tools',
           'pi-config-images',
           'pi-config-workspace',
+          'pi-config-resources',
           'pi-config-network',
           'pi-config-raw'
         ])

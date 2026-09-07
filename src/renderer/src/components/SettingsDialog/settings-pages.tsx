@@ -31,7 +31,7 @@ import {
   type SettingItem,
   type SettingsScope
 } from './settings-sections'
-import { SettingRow, ActionRow } from './settings-controls'
+import { SettingRow, ActionRow, type AppliesOn } from './settings-controls'
 import type { SettingsPageId, SettingsTarget } from './settings-target'
 
 export type { SettingsPageId, SettingsTarget } from './settings-target'
@@ -51,6 +51,13 @@ export interface SettingsGroup {
   badge?: string
   /** Capability gate, evaluated against the page's engine (sandbox/proxy). */
   requires?: 'sandbox' | 'proxy'
+  /**
+   * One line under the card, with the "applies later" badge when the whole
+   * group takes effect at a later moment (ADR-065's three-value vocabulary).
+   * Replaces the per-pane prose footers.
+   */
+  note?: string
+  appliesOn?: AppliesOn
   /** Exactly one of `items` / `byEngine`. byEngine draws an engine segment. */
   items?: SettingItem[]
   byEngine?: Partial<Record<EngineId, SettingItem[]>>
@@ -363,6 +370,14 @@ export const PAGES: SettingsPage[] = [
         }
       },
       {
+        id: 'pi-fallbacks',
+        label: 'pi fallbacks',
+        appliesOn: 'next-session',
+        note: "pi's own defaults, used when the session default above is unset and by standalone pi.",
+        storage: 'settings.json',
+        items: itemsOf('pi-config-fallbacks')
+      },
+      {
         id: 'anthropic',
         label: 'Anthropic endpoint',
         storage: 'vendors/anthropic.json',
@@ -421,6 +436,8 @@ export const PAGES: SettingsPage[] = [
         id: 'sandbox',
         label: 'Sandbox',
         requires: 'sandbox',
+        appliesOn: 'next-session',
+        note: 'Applies to new Claude sessions.',
         storage: 'engines/claude.json',
         items: itemsOf('sandbox')
       },
@@ -428,6 +445,8 @@ export const PAGES: SettingsPage[] = [
         id: 'proxy',
         label: 'Proxy',
         requires: 'proxy',
+        appliesOn: 'next-session',
+        note: 'Applies to new Claude sessions.',
         storage: 'engines/claude.json',
         items: itemsOf('proxy')
       }
@@ -445,36 +464,48 @@ export const PAGES: SettingsPage[] = [
       {
         id: 'session',
         label: 'Session behaviour',
+        appliesOn: 'next-server-start',
+        note: 'Applies when the opencode server next starts for a working directory.',
         storage: 'opencode.jsonc',
         items: itemsOf('opencode-session')
       },
       {
         id: 'tool-output',
         label: 'Tool output limits',
+        appliesOn: 'next-server-start',
+        note: 'Applies when the opencode server next starts for a working directory.',
         storage: 'opencode.jsonc',
         items: itemsOf('opencode-tool-output')
       },
       {
         id: 'attachments',
         label: 'Image attachments',
+        appliesOn: 'next-server-start',
+        note: 'Applies when the opencode server next starts for a working directory.',
         storage: 'opencode.jsonc',
         items: itemsOf('opencode-attachments')
       },
       {
         id: 'workspace',
         label: 'Workspace',
+        appliesOn: 'next-server-start',
+        note: 'Applies when the opencode server next starts for a working directory.',
         storage: 'opencode.jsonc',
         items: itemsOf('opencode-workspace')
       },
       {
         id: 'tools',
         label: 'Tools & integrations',
+        appliesOn: 'next-server-start',
+        note: 'Applies when the opencode server next starts for a working directory.',
         storage: 'opencode.jsonc',
         items: itemsOf('opencode-tools')
       },
       {
         id: 'diagnostics',
         label: 'Diagnostics',
+        appliesOn: 'next-server-start',
+        note: 'Applies when the opencode server next starts for a working directory.',
         storage: 'opencode.jsonc',
         items: itemsOf('opencode-diagnostics')
       },
@@ -493,6 +524,8 @@ export const PAGES: SettingsPage[] = [
       {
         id: 'raw',
         label: 'Raw config',
+        appliesOn: 'next-server-start',
+        note: 'Applies when the opencode server next starts for a working directory.',
         storage: 'opencode.jsonc',
         items: itemsOf('opencode-config')
       }
@@ -510,36 +543,64 @@ export const PAGES: SettingsPage[] = [
       {
         id: 'session',
         label: 'Session behaviour',
+        appliesOn: 'next-session',
+        note: 'Applies to newly started pi sessions.',
         storage: 'settings.json',
         items: itemsOf('pi-config-session')
       },
       {
+        id: 'retry',
+        label: 'Automatic retry',
+        appliesOn: 'next-session',
+        note: 'Applies to newly started pi sessions.',
+        storage: 'settings.json',
+        items: itemsOf('pi-config-retry')
+      },
+      {
         id: 'tools',
         label: 'Tools & shell',
+        appliesOn: 'next-session',
+        note: 'Applies to newly started pi sessions.',
         storage: 'settings.json',
         items: itemsOf('pi-config-tools')
       },
       {
         id: 'attachments',
         label: 'Image attachments',
+        appliesOn: 'next-session',
+        note: 'Applies to newly started pi sessions.',
         storage: 'settings.json',
         items: itemsOf('pi-config-images')
       },
       {
         id: 'workspace',
         label: 'Workspace & trust',
+        appliesOn: 'next-session',
+        note: 'Applies to newly started pi sessions.',
         storage: 'settings.json',
         items: itemsOf('pi-config-workspace')
       },
       {
+        id: 'resources',
+        label: 'Resources',
+        appliesOn: 'next-session',
+        note: 'Applies to newly started pi sessions.',
+        storage: 'settings.json',
+        items: itemsOf('pi-config-resources')
+      },
+      {
         id: 'network',
         label: 'Network & telemetry',
+        appliesOn: 'next-session',
+        note: 'Applies to newly started pi sessions.',
         storage: 'settings.json',
         items: itemsOf('pi-config-network')
       },
       {
         id: 'raw',
         label: 'Raw config',
+        appliesOn: 'next-session',
+        note: 'Applies to newly started pi sessions.',
         storage: 'settings.json',
         items: itemsOf('pi-config-raw')
       }
@@ -651,6 +712,9 @@ export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; gro
   'opencode-config': { page: 'opencode', group: 'raw' },
 
   'pi-config-session': { page: 'pi', group: 'session' },
+  'pi-config-retry': { page: 'pi', group: 'retry' },
+  'pi-config-resources': { page: 'pi', group: 'resources' },
+  'pi-config-fallbacks': { page: 'models', group: 'pi-fallbacks' },
   'pi-config-tools': { page: 'pi', group: 'tools' },
   'pi-config-images': { page: 'pi', group: 'attachments' },
   'pi-config-workspace': { page: 'pi', group: 'workspace' },

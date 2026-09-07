@@ -3,6 +3,7 @@ import { useSessionStore, type AppSettings } from '../../stores/session-store'
 import type { EngineConfig, EngineId, VendorConfig } from '../../../../shared/types'
 import { engineMeta } from '../../../../shared/engine-meta'
 import type { SettingItem } from './settings-sections'
+import { APPLIES_ON_LABEL } from './settings-controls'
 import {
   PAGES,
   RAIL_GROUPS,
@@ -643,6 +644,23 @@ export function SettingsDialogView({
                         {storage && <StorageTag file={storage} />}
                       </div>
                       <GroupCard items={itemsFor(group, engine)} render={renderItem} />
+                      {group.note && (
+                        <div
+                          data-testid="SettingsGroup.note"
+                          className="flex items-center gap-2 pt-2 px-1 text-[12px] leading-4 text-text-secondary"
+                        >
+                          {group.appliesOn && (
+                            <span
+                              data-testid="SettingsGroup.note.badge"
+                              data-id={group.appliesOn}
+                              className="shrink-0 bg-warning/15 text-warning text-[10.5px] font-semibold tracking-[0.02em] leading-4 px-[7px] rounded-full"
+                            >
+                              {APPLIES_ON_LABEL[group.appliesOn]}
+                            </span>
+                          )}
+                          <span>{group.note}</span>
+                        </div>
+                      )}
                     </div>
                   )
                 })}

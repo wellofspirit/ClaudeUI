@@ -21,7 +21,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
-import { render, screen, fireEvent, act, cleanup, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, act, cleanup, waitFor, within } from '@testing-library/react'
 import type { OpencodeAgentSummary, RawConfigPatch } from '../../../../../shared/types'
 import {
   OpencodeSessionBehaviorSection,
@@ -87,6 +87,22 @@ function numberFor(configKey: string): HTMLInputElement {
     .find((n) => n.getAttribute('data-id') === configKey)
   expect(el, `no number input for ${configKey}`).toBeTruthy()
   return el as HTMLInputElement
+}
+
+function rowFor(configKey: string): HTMLElement {
+  const el = screen
+    .getAllByTestId('OpencodeConfigPane.row')
+    .find((n) => n.getAttribute('data-id') === configKey)
+  expect(el, `no row for ${configKey}`).toBeTruthy()
+  return el as HTMLElement
+}
+
+function managedRow(configKey: string): HTMLElement {
+  const el = screen
+    .getAllByTestId('OpencodeConfigPane.managedRow')
+    .find((n) => n.getAttribute('data-id') === configKey)
+  expect(el, `no managed row for ${configKey}`).toBeTruthy()
+  return el as HTMLElement
 }
 
 function chipFor(toolId: string): HTMLElement {
@@ -172,6 +188,75 @@ describe('opencode Configuration panes', () => {
         fireEvent.click(toggleFor('snapshot'))
       })
       expect(onlyPatch()).toEqual({ path: ['snapshot'], value: false })
+    })
+  })
+
+  // ── 1b. The row vocabulary (ADR-065) ───────────────────────────────
+
+  describe('row anatomy', () => {
+    it('prints the raw config key on its own mono line under the description', async () => {
+      // The old form appended the key to the end of the helper sentence at 10px
+      // muted/60 — 1.6:1 on the dark theme, and unreadable next to the prose.
+      await renderPane(<OpencodeSessionBehaviorSection />)
+      const row = rowFor('compaction.preserve_recent_tokens')
+      const key = within(row).getByText('compaction.preserve_recent_tokens')
+      expect(key.className).toContain('font-mono')
+      expect(key.className).toContain('text-text-muted')
+      // …and the number carries its unit, so the placeholder is free to say
+      // what an EMPTY field means.
+      expect(row.textContent).toContain('tokens')
+    })
+
+    it('marks a row whose key is PRESENT as changed, and its Reset deletes the key', async () => {
+      currentConfig = { tool_output: { max_lines: 500 } }
+      await renderPane(<OpencodeToolOutputSection />)
+      const dot = (key: string): Element | null =>
+        rowFor(key).querySelector('[data-testid="OpencodeConfigPane.row.modified"]')
+      expect(dot('tool_output.max_lines')).toBeTruthy()
+      expect(dot('tool_output.max_bytes')).toBeNull()
+
+      await act(async () => {
+        fireEvent.click(
+          rowFor('tool_output.max_lines').querySelector(
+            '[data-testid="OpencodeConfigPane.row.reset"]'
+          )!
+        )
+      })
+      const patch = onlyPatch()
+      expect(patch.path).toEqual(['tool_output', 'max_lines'])
+      expect('value' in patch).toBe(false)
+    })
+
+    it('a toggle is unmarked while its key is absent, marked once it is written', async () => {
+      await renderPane(<OpencodeSessionBehaviorSection />)
+      const dot = (): Element | null =>
+        toggleFor('snapshot').querySelector('[data-testid="OpencodeConfigPane.toggle.modified"]')
+      expect(dot()).toBeNull()
+
+      cleanup()
+      currentConfig = { snapshot: true }
+      await renderPane(<OpencodeSessionBehaviorSection />)
+      expect(dot()).toBeTruthy()
+    })
+
+    it('resetting the image dimensions deletes BOTH keys in one write', async () => {
+      // Two `patch` calls in the same tick would be two concurrent
+      // read-modify-write cycles over the same file — one of them would lose.
+      currentConfig = { attachment: { image: { max_width: 1200, max_height: 900 } } }
+      await renderPane(<OpencodeAttachmentsSection />)
+      await act(async () => {
+        fireEvent.click(
+          rowFor('attachment.image.max_width').querySelector(
+            '[data-testid="OpencodeConfigPane.row.reset"]'
+          )!
+        )
+      })
+      expect(captured).toHaveLength(1)
+      expect(captured[0].map((p) => p.path)).toEqual([
+        ['attachment', 'image', 'max_width'],
+        ['attachment', 'image', 'max_height']
+      ])
+      expect(captured[0].every((p) => !('value' in p))).toBe(true)
     })
   })
 
@@ -622,14 +707,34 @@ describe('opencode Configuration panes', () => {
 
     it('badges autoupdate/share as forced off and continue_loop_on_deny as forced on', async () => {
       await renderPane(<OpencodeManagedKeysSection />)
+      // The badge is the row primitive's `locked` state now (ADR-065), so it is
+      // namespaced under the ROW's testid and scoped by the row, rather than
+      // carrying a data-id of its own.
       const badge = (id: string): string =>
-        screen
-          .getAllByTestId('OpencodeConfigPane.forcedBadge')
-          .find((n) => n.getAttribute('data-id') === id)!
+        managedRow(id)
+          .querySelector('[data-testid="OpencodeConfigPane.managedRow.locked"]')!
           .textContent!.trim()
       expect(badge('autoupdate')).toBe('Forced off')
       expect(badge('share')).toBe('Forced off')
       expect(badge('experimental.continue_loop_on_deny')).toBe('Forced on')
+    })
+
+    it('shows each forced value as a switch the user cannot move', async () => {
+      await renderPane(<OpencodeManagedKeysSection />)
+      // Shown, not hidden: a value ClaudeUI pins is more honest visible.
+      expect((managedRow('share') as HTMLButtonElement).disabled).toBe(true)
+      expect(
+        managedRow('experimental.continue_loop_on_deny').querySelector(
+          '[data-testid="ToggleSwitch"]'
+        )!.className
+      ).toContain('bg-accent')
+    })
+
+    it('points at the keys that live on other pages, as one explanatory row', async () => {
+      await renderPane(<OpencodeManagedKeysSection />)
+      const row = screen.getByTestId('OpencodeConfigPane.elsewhere')
+      expect(row.textContent).toContain('small_model')
+      expect(row.textContent).toContain('autoshare')
     })
 
     it('renders even when opencode is not installed (it describes ClaudeUI, not the file)', async () => {

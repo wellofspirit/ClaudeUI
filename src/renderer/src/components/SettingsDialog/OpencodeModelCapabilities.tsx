@@ -526,7 +526,7 @@ function CapabilityRows({ api }: { api: ModelEntryApi }): React.JSX.Element {
         testidPrefix={TESTID}
         configKey="modalities"
         label="Modalities"
-        helper="Content types the model takes and returns; text only is what opencode assumes when the key is absent —"
+        helper="Content types the model takes and returns; text only is what opencode assumes when the key is absent."
         keyText="modalities.input / output"
         error={api.errorAt('modalities')}
       >
@@ -540,7 +540,7 @@ function CapabilityRows({ api }: { api: ModelEntryApi }): React.JSX.Element {
         testidPrefix={TESTID}
         configKey="cost"
         label="Pricing"
-        helper="$ per 1M tokens; input and output are written together —"
+        helper="$ per 1M tokens; input and output are written together."
         error={api.errorAt('cost')}
       >
         <div className="space-y-1">
@@ -586,7 +586,7 @@ function CapabilityRows({ api }: { api: ModelEntryApi }): React.JSX.Element {
         testidPrefix={TESTID}
         configKey="limit"
         label="Limits"
-        helper="Tokens. Context window and max output are written together —"
+        helper="Tokens. Context window and max output are written together."
         error={api.errorAt('limit')}
       >
         <LeafNumberGrid
@@ -604,7 +604,7 @@ function CapabilityRows({ api }: { api: ModelEntryApi }): React.JSX.Element {
         testidPrefix={TESTID}
         configKey="advanced"
         label="Advanced"
-        helper="Free-form JSON leaves —"
+        helper="Free-form JSON leaves."
         keyText="options / headers / variants"
         error={
           // One shared slot: only one raw leaf can be in flight at a time.

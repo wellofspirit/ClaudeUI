@@ -1,7 +1,7 @@
 /**
- * Layer 2: Component tests for the curated pi Configuration panes.
+ * Layer 2: Component tests for the pi engine-page group bodies.
  *
- * As with their opencode twins, the invariants worth guarding are all about
+ * As with their opencode twins, the invariants worth guarding are mostly about
  * WHAT LANDS IN THE FILE, not what the pane looks like:
  *
  *   1. Absent-default toggles: absent reads as pi's default; leaving it writes
@@ -15,25 +15,33 @@
  *      writes `[]`; "Use pi defaults" deletes the key.
  *   5. `thinkingBudgets` is per-level, and clearing the LAST level removes the
  *      whole object rather than leaving `{}` behind.
- *   6. Segmented rows delete when the chosen value is the one pi already
+ *   6. Closed-set rows delete when the chosen value is the one pi already
  *      assumes (`defaultThinkingLevel` unset, `defaultProjectTrust: ask`).
  *   7. `packages` object-form entries survive an edit of the string entries.
  *   8. The Raw pane refuses to save invalid JSON and writes the text verbatim.
  *   9. `trackingId` is never surfaced (pi generates it).
  *  10. Every pane self-gates on pi being installed.
  *  11. A rejected patch surfaces inline instead of being swallowed.
+ *
+ * ADR-065 split the three panes that used to carry an in-pane sub-header into
+ * separate sections (`PiRetrySection`, `PiResourcesSection`,
+ * `PiFallbacksSection`), so §12 also pins that each half renders its own rows
+ * and none of its sibling's.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
-import { render, screen, fireEvent, act, cleanup, waitFor } from '@testing-library/react'
-import type { RawConfigPatch } from '../../../../../shared/types'
+import { render, screen, fireEvent, act, cleanup, waitFor, within } from '@testing-library/react'
+import type { EngineConfig, RawConfigPatch } from '../../../../../shared/types'
 import {
   PiSessionBehaviorSection,
+  PiRetrySection,
   PiModelsSection,
+  PiFallbacksSection,
   PiToolsSection,
   PiImagesSection,
   PiWorkspaceSection,
+  PiResourcesSection,
   PiNetworkSection,
   PiRawConfigSection
 } from '../PiConfigPanes'
@@ -55,7 +63,7 @@ const readPiNativeRaw = vi.fn(async () => ({
   text: currentText
 }))
 const writePiNativeText = vi.fn(async () => {})
-const loadEngineConfig = vi.fn(async () => ({}))
+const loadEngineConfig = vi.fn(async (): Promise<EngineConfig> => ({}))
 const saveEngineConfig = vi.fn(async () => {})
 const getEngineModels = vi.fn(async () => [])
 
@@ -100,9 +108,41 @@ const numberFor = (key: string): HTMLInputElement =>
 const textFor = (key: string): HTMLInputElement =>
   byId('PiConfigPane.text', key) as HTMLInputElement
 const chipFor = (id: string): HTMLElement => byId('PiConfigPane.chip', id)
-const segmentFor = (key: string, value: string): HTMLElement =>
-  byId('PiConfigPane.segment', `${key}:${value}`)
 const rowFor = (key: string): HTMLElement => byId('PiConfigPane.row', key)
+
+/**
+ * The segmented control's options carry the raw config VALUE as their
+ * discriminator (that is what the shared `Segmented` emits), so the row is what
+ * scopes them to one setting.
+ */
+function segmentFor(key: string, value: string): HTMLElement {
+  const el = rowFor(key).querySelector<HTMLElement>(
+    `[data-testid="PiConfigPane.segment"][data-id="${value}"]`
+  )
+  expect(el, `no segment ${key}:${value}`).toBeTruthy()
+  return el as HTMLElement
+}
+
+const selectValue = (key: string): string | null =>
+  rowFor(key)
+    .querySelector<HTMLElement>('[data-testid="PiConfigPane.select"]')!
+    .getAttribute('data-value')
+
+/** Open the row's select and click one option. */
+async function pickSelect(key: string, value: string): Promise<void> {
+  const row = rowFor(key)
+  await act(async () => {
+    fireEvent.click(row.querySelector('[data-testid="PiConfigPane.select.trigger"]')!)
+  })
+  const option = row.querySelector(`[data-testid="PiConfigPane.select.option"][data-id="${value}"]`)
+  expect(option, `no option ${key}:${value}`).toBeTruthy()
+  await act(async () => {
+    fireEvent.click(option!)
+  })
+}
+
+const rowIds = (): (string | null)[] =>
+  screen.queryAllByTestId('PiConfigPane.row').map((n) => n.getAttribute('data-id'))
 
 describe('pi Configuration panes', () => {
   beforeEach(() => {
@@ -112,6 +152,8 @@ describe('pi Configuration panes', () => {
     patchPiNative.mockClear()
     readPiNativeRaw.mockClear()
     writePiNativeText.mockClear()
+    saveEngineConfig.mockClear()
+    loadEngineConfig.mockResolvedValue({})
     installApiStub()
   })
 
@@ -123,6 +165,8 @@ describe('pi Configuration panes', () => {
     it('reads ON when the key is absent and pi defaults it on', async () => {
       await renderPane(<PiSessionBehaviorSection />)
       expect(toggleFor('compaction.enabled').getAttribute('aria-pressed')).toBe('true')
+      cleanup()
+      await renderPane(<PiRetrySection />)
       expect(toggleFor('retry.enabled').getAttribute('aria-pressed')).toBe('true')
     })
 
@@ -221,7 +265,7 @@ describe('pi Configuration panes', () => {
 
     it('a blur with no edit writes nothing', async () => {
       currentConfig = { retry: { maxRetries: 3 } }
-      await renderPane(<PiSessionBehaviorSection />)
+      await renderPane(<PiRetrySection />)
       await act(async () => {
         fireEvent.blur(numberFor('retry.maxRetries'))
       })
@@ -230,7 +274,7 @@ describe('pi Configuration panes', () => {
 
     it('retry.provider.* patches THREE segments, never the whole retry object', async () => {
       currentConfig = { retry: { enabled: true, provider: { maxRetryDelayMs: 60000 } } }
-      await renderPane(<PiSessionBehaviorSection />)
+      await renderPane(<PiRetrySection />)
       const input = numberFor('retry.provider.maxRetries')
       await act(async () => {
         fireEvent.change(input, { target: { value: '2' } })
@@ -279,7 +323,7 @@ describe('pi Configuration panes', () => {
     })
 
     it('the pi fallback provider/model are top-level leaves', async () => {
-      await renderPane(<PiModelsSection />)
+      await renderPane(<PiFallbacksSection />)
       const provider = textFor('defaultProvider')
       await act(async () => {
         fireEvent.change(provider, { target: { value: 'anthropic' } })
@@ -386,8 +430,22 @@ describe('pi Configuration panes', () => {
   // ── 5. thinkingBudgets ─────────────────────────────────────────────
 
   describe('thinkingBudgets', () => {
+    it('renders one number field per documented level', async () => {
+      await renderPane(<PiFallbacksSection />)
+      const ids = screen
+        .getAllByTestId('PiConfigPane.number')
+        .map((n) => n.getAttribute('data-id'))
+        .filter((id) => id?.startsWith('thinkingBudgets.'))
+      expect(ids).toEqual([
+        'thinkingBudgets.minimal',
+        'thinkingBudgets.low',
+        'thinkingBudgets.medium',
+        'thinkingBudgets.high'
+      ])
+    })
+
     it('writes one leaf per level', async () => {
-      await renderPane(<PiModelsSection />)
+      await renderPane(<PiFallbacksSection />)
       const input = numberFor('thinkingBudgets.low')
       await act(async () => {
         fireEvent.change(input, { target: { value: '4096' } })
@@ -398,7 +456,7 @@ describe('pi Configuration panes', () => {
 
     it('clearing ONE level with siblings deletes just that level', async () => {
       currentConfig = { thinkingBudgets: { low: 4096, high: 32768 } }
-      await renderPane(<PiModelsSection />)
+      await renderPane(<PiFallbacksSection />)
       const input = numberFor('thinkingBudgets.low')
       expect(input.value).toBe('4096')
       await act(async () => {
@@ -412,7 +470,7 @@ describe('pi Configuration panes', () => {
 
     it('clearing the LAST level deletes the thinkingBudgets object itself', async () => {
       currentConfig = { thinkingBudgets: { high: 32768 } }
-      await renderPane(<PiModelsSection />)
+      await renderPane(<PiFallbacksSection />)
       const input = numberFor('thinkingBudgets.high')
       await act(async () => {
         fireEvent.change(input, { target: { value: '' } })
@@ -426,7 +484,7 @@ describe('pi Configuration panes', () => {
     it('a level this grid does not render still counts as a sibling', async () => {
       // `xhigh` has no input here, but deleting the object would take it with it.
       currentConfig = { thinkingBudgets: { high: 32768, xhigh: 60000 } }
-      await renderPane(<PiModelsSection />)
+      await renderPane(<PiFallbacksSection />)
       const input = numberFor('thinkingBudgets.high')
       await act(async () => {
         fireEvent.change(input, { target: { value: '' } })
@@ -436,42 +494,35 @@ describe('pi Configuration panes', () => {
     })
   })
 
-  // ── 6. Segmented rows ──────────────────────────────────────────────
+  // ── 6. Closed-set rows (segmented + select) ────────────────────────
 
-  describe('segmented rows', () => {
+  describe('closed-set rows', () => {
     it('defaultThinkingLevel writes the chosen level and deletes on "default"', async () => {
-      await renderPane(<PiModelsSection />)
-      expect(segmentFor('defaultThinkingLevel', '').getAttribute('aria-pressed')).toBe('true')
-      await act(async () => {
-        fireEvent.click(segmentFor('defaultThinkingLevel', 'high'))
-      })
+      await renderPane(<PiFallbacksSection />)
+      expect(selectValue('defaultThinkingLevel')).toBe('')
+      await pickSelect('defaultThinkingLevel', 'high')
       expect(onlyPatch()).toEqual({ path: ['defaultThinkingLevel'], value: 'high' })
 
       cleanup()
       captured = []
       currentConfig = { defaultThinkingLevel: 'high' }
-      await renderPane(<PiModelsSection />)
-      expect(segmentFor('defaultThinkingLevel', 'high').getAttribute('aria-pressed')).toBe('true')
-      await act(async () => {
-        fireEvent.click(segmentFor('defaultThinkingLevel', ''))
-      })
+      await renderPane(<PiFallbacksSection />)
+      expect(selectValue('defaultThinkingLevel')).toBe('high')
+      await pickSelect('defaultThinkingLevel', '')
       const patch = onlyPatch()
       expect(patch.path).toEqual(['defaultThinkingLevel'])
       expect('value' in patch).toBe(false)
     })
 
     it('"off" is a real value, distinct from absent', async () => {
-      await renderPane(<PiModelsSection />)
-      await act(async () => {
-        fireEvent.click(segmentFor('defaultThinkingLevel', 'off'))
-      })
+      await renderPane(<PiFallbacksSection />)
+      await pickSelect('defaultThinkingLevel', 'off')
       expect(onlyPatch()).toEqual({ path: ['defaultThinkingLevel'], value: 'off' })
     })
 
     it('defaultProjectTrust reads ask when absent and DELETES when set back to ask', async () => {
       currentConfig = { defaultProjectTrust: 'always' }
       await renderPane(<PiWorkspaceSection />)
-      expect(segmentFor('defaultProjectTrust', 'always').getAttribute('aria-pressed')).toBe('true')
       await act(async () => {
         fireEvent.click(segmentFor('defaultProjectTrust', 'ask'))
       })
@@ -482,7 +533,6 @@ describe('pi Configuration panes', () => {
 
     it('defaultProjectTrust writes a non-default choice', async () => {
       await renderPane(<PiWorkspaceSection />)
-      expect(segmentFor('defaultProjectTrust', 'ask').getAttribute('aria-pressed')).toBe('true')
       await act(async () => {
         fireEvent.click(segmentFor('defaultProjectTrust', 'never'))
       })
@@ -500,7 +550,7 @@ describe('pi Configuration panes', () => {
     }
 
     it('adding a package writes the whole array at its leaf path', async () => {
-      await renderPane(<PiWorkspaceSection />)
+      await renderPane(<PiResourcesSection />)
       const input = listInput('packages')
       await act(async () => {
         fireEvent.change(input, { target: { value: 'pi-skills' } })
@@ -511,7 +561,7 @@ describe('pi Configuration panes', () => {
 
     it('emptying a list DELETES the key', async () => {
       currentConfig = { skills: ['/opt/skills'] }
-      await renderPane(<PiWorkspaceSection />)
+      await renderPane(<PiResourcesSection />)
       const remove = rowFor('skills').querySelector<HTMLElement>(
         '[data-testid="PiConfigPane.list.remove"]'
       )!
@@ -527,7 +577,7 @@ describe('pi Configuration panes', () => {
       currentConfig = {
         packages: ['pi-skills', { source: 'pi-extras', skills: ['brave-search'] }]
       }
-      await renderPane(<PiWorkspaceSection />)
+      await renderPane(<PiResourcesSection />)
       const chips = rowFor('packages').querySelectorAll('[data-testid="PiConfigPane.list.item"]')
       expect(Array.from(chips).map((c) => c.getAttribute('data-id'))).toEqual(['pi-skills'])
       expect(byId('PiConfigPane.opaqueNote', 'packages').textContent).toContain('Raw config')
@@ -544,7 +594,7 @@ describe('pi Configuration panes', () => {
     })
 
     it('extensions / skills / prompts each patch their own key', async () => {
-      await renderPane(<PiWorkspaceSection />)
+      await renderPane(<PiResourcesSection />)
       for (const key of ['extensions', 'skills', 'prompts']) {
         expect(rowFor(key)).toBeTruthy()
       }
@@ -573,26 +623,16 @@ describe('pi Configuration panes', () => {
   // ── 8. transport select ────────────────────────────────────────────
 
   describe('transport select', () => {
-    async function pick(value: string): Promise<void> {
-      const select = byId('PiConfigPane.select', 'transport')
-      await act(async () => {
-        fireEvent.click(select.querySelector('[data-testid$=".trigger"]')!)
-      })
-      await act(async () => {
-        fireEvent.click(byId('PiConfigPane.select.option', value))
-      })
-    }
-
     it('writes the chosen transport', async () => {
       await renderPane(<PiNetworkSection />)
-      await pick('websocket-cached')
+      await pickSelect('transport', 'websocket-cached')
       expect(onlyPatch()).toEqual({ path: ['transport'], value: 'websocket-cached' })
     })
 
     it('choosing auto (pi\u2019s default) deletes the key', async () => {
       currentConfig = { transport: 'sse' }
       await renderPane(<PiNetworkSection />)
-      await pick('')
+      await pickSelect('transport', '')
       const patch = onlyPatch()
       expect(patch.path).toEqual(['transport'])
       expect('value' in patch).toBe(false)
@@ -604,9 +644,7 @@ describe('pi Configuration panes', () => {
   it('never surfaces trackingId — pi generates it, so Raw config is its only home', async () => {
     currentConfig = { enableAnalytics: true, trackingId: 'abc-123' }
     await renderPane(<PiNetworkSection />)
-    expect(
-      screen.queryAllByTestId('PiConfigPane.row').map((n) => n.getAttribute('data-id'))
-    ).not.toContain('trackingId')
+    expect(rowIds()).not.toContain('trackingId')
     expect(screen.getByTestId('PiNetworkSection').textContent).not.toContain('abc-123')
   })
 
@@ -623,6 +661,15 @@ describe('pi Configuration panes', () => {
       currentConfig = { theme: 'dark' }
       await renderPane(<PiRawConfigSection />)
       expect(textarea().value).toBe(currentText)
+    })
+
+    it('Save is the pane\u2019s primary button', async () => {
+      currentText = '{"theme":"dark"}'
+      await renderPane(<PiRawConfigSection />)
+      // Filled = the one primary action (ADR-065's button vocabulary); the
+      // tinted variant keeps the accent as its TEXT colour, never as the ink on
+      // an accent fill.
+      expect(saveButton().className).toContain('text-bg-secondary')
     })
 
     it('invalid JSON blocks Save and shows the parser error', async () => {
@@ -698,12 +745,15 @@ describe('pi Configuration panes', () => {
   describe('not-installed gate', () => {
     const panes: [string, React.ReactElement][] = [
       ['PiSessionBehaviorSection', <PiSessionBehaviorSection key="a" />],
-      ['PiModelsSection', <PiModelsSection key="b" />],
-      ['PiToolsSection', <PiToolsSection key="c" />],
-      ['PiImagesSection', <PiImagesSection key="d" />],
-      ['PiWorkspaceSection', <PiWorkspaceSection key="e" />],
-      ['PiNetworkSection', <PiNetworkSection key="f" />],
-      ['PiRawConfigSection', <PiRawConfigSection key="g" />]
+      ['PiRetrySection', <PiRetrySection key="b" />],
+      ['PiModelsSection', <PiModelsSection key="c" />],
+      ['PiFallbacksSection', <PiFallbacksSection key="d" />],
+      ['PiToolsSection', <PiToolsSection key="e" />],
+      ['PiImagesSection', <PiImagesSection key="f" />],
+      ['PiWorkspaceSection', <PiWorkspaceSection key="g" />],
+      ['PiResourcesSection', <PiResourcesSection key="h" />],
+      ['PiNetworkSection', <PiNetworkSection key="i" />],
+      ['PiRawConfigSection', <PiRawConfigSection key="j" />]
     ]
 
     it.each(panes)('%s renders the not-installed copy and no controls', async (testid, node) => {
@@ -716,7 +766,87 @@ describe('pi Configuration panes', () => {
     })
   })
 
-  // ── 12. Patch failures ─────────────────────────────────────────────
+  // ── 12. Section splits (ADR-065: no sub-headers inside a pane) ──────
+
+  describe('section splits', () => {
+    it('Session behaviour keeps compaction and hands retry to its own section', async () => {
+      await renderPane(<PiSessionBehaviorSection />)
+      expect(rowIds()).toEqual([
+        'compaction.enabled',
+        'compaction.reserveTokens',
+        'compaction.keepRecentTokens',
+        'branchSummary.reserveTokens'
+      ])
+      cleanup()
+      await renderPane(<PiRetrySection />)
+      expect(rowIds()).toEqual([
+        'retry.enabled',
+        'retry.maxRetries',
+        'retry.baseDelayMs',
+        'retry.provider.timeoutMs',
+        'retry.provider.maxRetryDelayMs',
+        'retry.provider.maxRetries'
+      ])
+    })
+
+    it('Workspace keeps trust and hands the resource lists to its own section', async () => {
+      await renderPane(<PiWorkspaceSection />)
+      expect(rowIds()).toEqual(['defaultProjectTrust', 'sessionDir', 'enableSkillCommands'])
+      cleanup()
+      await renderPane(<PiResourcesSection />)
+      expect(rowIds()).toEqual(['packages', 'extensions', 'skills', 'prompts'])
+    })
+
+    it('Models keeps ClaudeUI\u2019s own default and hands pi\u2019s fallbacks to its own section', async () => {
+      await renderPane(<PiModelsSection />)
+      expect(screen.getByTestId('PiDefaultModelSection')).toBeTruthy()
+      expect(rowIds()).not.toContain('defaultProvider')
+      expect(rowIds()).not.toContain('thinkingBudgets')
+      cleanup()
+      await renderPane(<PiFallbacksSection />)
+      expect(screen.queryByTestId('PiDefaultModelSection')).toBeNull()
+      expect(rowIds()).toEqual([
+        'defaultProvider',
+        'defaultModel',
+        'defaultThinkingLevel',
+        'thinkingBudgets'
+      ])
+    })
+  })
+
+  // ── 13. Changed-from-default ───────────────────────────────────────
+
+  // The leaf rows get their dot and Reset from the SHARED row primitives
+  // (OpencodeConfigPanes.tsx) — the panes only pass `modified` / `onReset`, and
+  // the rendering contract is pinned by that file's own tests. The pi-owned row
+  // below is the one built on `SettingRow` directly, so it is pinned here.
+  describe('changed-from-default', () => {
+    it('a configured pi default model shows the dot, and Reset clears the key', async () => {
+      loadEngineConfig.mockResolvedValue({
+        piConfig: { defaultModel: 'openai-codex/gpt-5.6-luna' }
+      })
+      await renderPane(<PiModelsSection />)
+      const row = rowFor('piConfig.defaultModel')
+      expect(within(row).getByTestId('PiConfigPane.row.modified')).toBeTruthy()
+
+      await act(async () => {
+        fireEvent.click(within(row).getByTestId('PiConfigPane.row.reset'))
+      })
+      expect(saveEngineConfig).toHaveBeenCalled()
+      expect(
+        rowFor('piConfig.defaultModel').querySelector('[data-testid="PiConfigPane.row.modified"]')
+      ).toBeNull()
+    })
+
+    it('an unset default model has no dot to reset', async () => {
+      await renderPane(<PiModelsSection />)
+      const row = rowFor('piConfig.defaultModel')
+      expect(row.querySelector('[data-testid="PiConfigPane.row.modified"]')).toBeNull()
+      expect(row.querySelector('[data-testid="PiConfigPane.row.reset"]')).toBeNull()
+    })
+  })
+
+  // ── 14. Patch failures ─────────────────────────────────────────────
 
   describe('patch errors', () => {
     it('shows a rejected patch inline under its row', async () => {

@@ -89,6 +89,7 @@ describe('PAGES structure', () => {
         'providers-opencode',
         'providers-pi',
         'defaults',
+        'pi-fallbacks',
         'anthropic',
         'accounts'
       ],
@@ -107,9 +108,24 @@ describe('PAGES structure', () => {
         'agents',
         'raw'
       ],
-      pi: ['session', 'tools', 'attachments', 'workspace', 'network', 'raw']
+      pi: ['session', 'retry', 'tools', 'attachments', 'workspace', 'resources', 'network', 'raw']
     }
     for (const page of PAGES) expect(page.groups.map((g) => g.id)).toEqual(expected[page.id])
+  })
+
+  it('engine-native groups say when they apply, with the three-value badge vocabulary', () => {
+    for (const g of pageOf('opencode').groups) {
+      if (g.id === 'managed' || g.id === 'agents') continue
+      expect(g.appliesOn, `opencode/${g.id}`).toBe('next-server-start')
+      expect(g.note, `opencode/${g.id}`).toBeTruthy()
+    }
+    for (const g of pageOf('pi').groups) {
+      expect(g.appliesOn, `pi/${g.id}`).toBe('next-session')
+      expect(g.note, `pi/${g.id}`).toBeTruthy()
+    }
+    for (const g of pageOf('claude').groups) expect(g.appliesOn).toBe('next-session')
+    // ClaudeUI's own settings apply at once — no badge, no note.
+    for (const g of pageOf('appearance').groups) expect(g.appliesOn).toBeUndefined()
   })
 
   it('group ids are unique within their page', () => {
@@ -138,7 +154,12 @@ describe('PAGES structure', () => {
     expect(storageOf(judge, 'opencode')).toBe('engines/opencode.json')
     expect(storageOf(judge, 'pi')).toBe('engines/pi.json')
     // A fixed tag ignores the engine.
-    expect(storageOf(pageOf('models').groups[4], 'claude')).toBe('vendors/anthropic.json')
+    expect(
+      storageOf(
+        pageOf('models').groups.find((g) => g.id === 'anthropic')!,
+        'claude'
+      )
+    ).toBe('vendors/anthropic.json')
     // No tag = the group writes ClaudeUI's own settings.json.
     expect(storageOf(pageOf('appearance').groups[0], undefined)).toBeUndefined()
   })

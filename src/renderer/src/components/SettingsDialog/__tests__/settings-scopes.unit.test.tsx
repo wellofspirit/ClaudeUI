@@ -216,14 +216,17 @@ describe('SCOPES structure', () => {
 
     // The curated panes over pi's own settings.json, with the whole-file text
     // editor ("Raw config") last for everything they don't cover.
-    it('Configuration subgroup contains the 6 curated panes then pi-config-raw, in order', () => {
+    it('Configuration subgroup contains the 9 curated panes then pi-config-raw, in order', () => {
       const configuration = pi.subgroups.find((sg) => sg.label === 'Configuration')!
       expect(configuration.sections.map((s) => s.id)).toEqual([
         'pi-config-session',
+        'pi-config-retry',
         'pi-config-models',
+        'pi-config-fallbacks',
         'pi-config-tools',
         'pi-config-images',
         'pi-config-workspace',
+        'pi-config-resources',
         'pi-config-network',
         'pi-config-raw'
       ])
@@ -353,10 +356,13 @@ describe('SECTION_SCOPE_MAP', () => {
   it('every pi Configuration-subgroup section → pi', () => {
     for (const id of [
       'pi-config-session',
+      'pi-config-retry',
       'pi-config-models',
+      'pi-config-fallbacks',
       'pi-config-tools',
       'pi-config-images',
       'pi-config-workspace',
+      'pi-config-resources',
       'pi-config-network',
       'pi-config-raw'
     ]) {

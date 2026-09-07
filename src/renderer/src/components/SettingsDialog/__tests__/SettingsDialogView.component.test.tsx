@@ -150,6 +150,19 @@ describe('the page pane', () => {
     expect(screen.getAllByTestId('SettingsGroup.storage')[0]).toHaveTextContent('settings.json')
   })
 
+  it('renders a group note with the applies-later badge under the card', () => {
+    renderView({ activePage: 'opencode' })
+    const notes = screen.getAllByTestId('SettingsGroup.note')
+    expect(notes.length).toBeGreaterThan(0)
+    expect(notes[0]).toHaveTextContent('Applies when the opencode server next starts')
+    expect(screen.getAllByTestId('SettingsGroup.note.badge')[0]).toHaveTextContent(
+      'Next server start'
+    )
+    cleanup()
+    renderView({ activePage: 'appearance' })
+    expect(screen.queryByTestId('SettingsGroup.note')).not.toBeInTheDocument()
+  })
+
   it('shows the group badge', () => {
     renderView({ activePage: 'sessions' })
     expect(screen.getAllByTestId('SettingsGroup.badge')[0]).toHaveTextContent('All engines')

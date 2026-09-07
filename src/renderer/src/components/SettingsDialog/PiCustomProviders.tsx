@@ -510,7 +510,7 @@ export function PiModelEditor({
           testidPrefix={EDITOR}
           configKey="name"
           label="Display name"
-          helper="Used for --model matching and secondary detail text; the id is still what pi shows —"
+          helper="Used for --model matching and secondary detail text; the id is still what pi shows."
           error={api.errorAt([...scope, 'name'])}
         >
           <LeafTextInput
@@ -526,7 +526,7 @@ export function PiModelEditor({
           testidPrefix={EDITOR}
           configKey="reasoning"
           label="Extended thinking"
-          helper="Model supports reasoning —"
+          helper="Model supports reasoning."
           checked={api.read([...scope, 'reasoning']) === true}
           onChange={(next) => api.commit([...scope, 'reasoning'], next ? true : undefined)}
           error={api.errorAt([...scope, 'reasoning'])}
@@ -536,7 +536,7 @@ export function PiModelEditor({
           testidPrefix={EDITOR}
           configKey="input"
           label="Image input"
-          helper="Off = text only, which is what pi assumes when the key is absent —"
+          helper="Off = text only, which is what pi assumes when the key is absent."
           checked={imageOn}
           onChange={(next) => api.commit(inputPath, next ? ['text', 'image'] : undefined)}
           error={api.errorAt(inputPath)}
@@ -546,7 +546,7 @@ export function PiModelEditor({
           testidPrefix={EDITOR}
           configKey="contextWindow"
           label="Context window"
-          helper="Tokens; pi assumes 128000 when unset —"
+          helper="Tokens; pi assumes 128000 when unset."
           error={api.errorAt([...scope, 'contextWindow'])}
         >
           <LeafNumberInput
@@ -562,7 +562,7 @@ export function PiModelEditor({
           testidPrefix={EDITOR}
           configKey="maxTokens"
           label="Max output tokens"
-          helper="pi assumes 16384 when unset —"
+          helper="pi assumes 16384 when unset."
           error={api.errorAt([...scope, 'maxTokens'])}
         >
           <LeafNumberInput
@@ -578,7 +578,7 @@ export function PiModelEditor({
           testidPrefix={EDITOR}
           configKey="cost"
           label="Pricing"
-          helper="$ per million tokens; every rate absent = free, which is what a local server wants —"
+          helper="$ per million tokens; every rate absent = free, which is what a local server wants."
           error={
             // One shared slot: only one price field can be in flight at a time,
             // and clearing the last one reports against the block it deleted.
@@ -686,7 +686,7 @@ export function PiModelEditor({
           testidPrefix={EDITOR}
           configKey="advanced"
           label="Advanced"
-          helper="Free-form JSON leaves —"
+          helper="Free-form JSON leaves."
           keyText={advanced.map((leaf) => leaf.key).join(' / ')}
           error={null}
         >
@@ -858,7 +858,7 @@ function PiProviderDialog({
               testidPrefix={DIALOG}
               configKey="id"
               label="Provider id"
-              helper={`Key under providers; its models appear as ${providerId}/<model id>. Fixed after creation —`}
+              helper={`Key under providers; its models appear as ${providerId}/<model id>. Fixed after creation.`}
               keyText="providers.<id>"
               error={null}
             >
@@ -874,7 +874,7 @@ function PiProviderDialog({
               testidPrefix={DIALOG}
               configKey="baseUrl"
               label="Base URL"
-              helper="API endpoint —"
+              helper="API endpoint."
               error={api.errorAt([...base, 'baseUrl'])}
             >
               <LeafTextInput
@@ -891,7 +891,7 @@ function PiProviderDialog({
               testidPrefix={DIALOG}
               configKey="api"
               label="API"
-              helper="Wire protocol pi speaks to this endpoint. A model may override it —"
+              helper="Wire protocol pi speaks to this endpoint. A model may override it."
               error={api.errorAt([...base, 'api'])}
             >
               <div className="px-3">
@@ -928,7 +928,7 @@ function PiProviderDialog({
               testidPrefix={DIALOG}
               configKey="authHeader"
               label="Authorization header"
-              helper="Send the API key as Authorization: Bearer. Off is pi’s default —"
+              helper="Send the API key as Authorization: Bearer. Off is pi’s default."
               checked={provider.authHeader === true}
               onChange={(next) => api.commit([...base, 'authHeader'], next ? true : undefined)}
               error={api.errorAt([...base, 'authHeader'])}
@@ -938,7 +938,7 @@ function PiProviderDialog({
               testidPrefix={DIALOG}
               configKey="headers"
               label="Extra headers"
-              helper="Sent with every request; values support $ENV_VAR and !command —"
+              helper="Sent with every request; values support $ENV_VAR and !command."
               error={api.errorAt([...base, 'headers'])}
             >
               <div className="px-3">
@@ -972,7 +972,7 @@ function PiProviderDialog({
               testidPrefix={DIALOG}
               configKey="compat"
               label="Compatibility (raw)"
-              helper="The whole compat object, including the two toggles above —"
+              helper="The whole compat object, including the two toggles above."
               error={api.errorAt(compatPath)}
             >
               <div className="px-3">

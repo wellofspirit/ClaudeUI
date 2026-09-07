@@ -676,7 +676,7 @@ export function OpencodeProviderConfigModal({
                   testidPrefix={DIALOG}
                   configKey="id"
                   label="Provider id"
-                  helper="Its models read <id>/<model id> —"
+                  helper="Its models read <id>/<model id>."
                   keyText="provider.<id>"
                   error={null}
                 >
@@ -695,7 +695,7 @@ export function OpencodeProviderConfigModal({
                   testidPrefix={DIALOG}
                   configKey="name"
                   label="Display name"
-                  helper="Shown in the model picker; optional —"
+                  helper="Shown in the model picker; optional."
                   keyText="provider.<id>.name"
                   error={null}
                 >
@@ -714,7 +714,7 @@ export function OpencodeProviderConfigModal({
                   testidPrefix={DIALOG}
                   configKey="baseURL"
                   label="Base URL"
-                  helper="OpenAI-compatible endpoint —"
+                  helper="OpenAI-compatible endpoint."
                   keyText="provider.<id>.baseURL"
                   error={null}
                 >
@@ -736,7 +736,7 @@ export function OpencodeProviderConfigModal({
                 testidPrefix={DIALOG}
                 configKey="credential"
                 label="Credential"
-                helper="Held by opencode in its own auth store, never in ClaudeUI’s config —"
+                helper="Held by opencode in its own auth store, never in ClaudeUI’s config."
                 keyText="auth.json"
                 error={keyError}
               >
