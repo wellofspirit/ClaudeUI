@@ -57,7 +57,12 @@ import { toModelDisplays, selectedModelDisplay, StaleModelNotice } from './setti
 import { SelectMenu } from '../shared/SelectMenu'
 import { OpencodeAgentsSection } from './OpencodeAgents'
 import { TrustListsSection } from './TrustLists'
-import { RemoteServerSettings } from './RemoteServerSettings'
+import {
+  RemoteAccessSection,
+  RemoteLinksSection,
+  RemoteSecuritySection,
+  RemoteServerSection
+} from './RemoteServerSettings'
 import { PiVendors } from './PiVendors'
 import { SharedProviders } from './SharedProviders'
 import { VendorOpencodeSection } from './OpencodeProviders'
@@ -2149,12 +2154,33 @@ export const SECTIONS: Section[] = [
           />
         )
       },
+      // Four items, one per Remote-access group (ADR-065 phase 3B). The item
+      // key `remoteServerConfig` predates the split and stays, so the deep
+      // links and the inventory guard that name it keep resolving.
       {
         key: 'remoteServerConfig',
         label: 'Remote server',
+        keywords: 'remote port autostart bind interface server listen tailscale https tls',
+        render: () => <RemoteServerSection />
+      },
+      {
+        key: 'remoteAccess',
+        label: 'Remote terminal and VS Code',
+        keywords: 'remote terminal shell vs code ide cli path license serve-web',
+        render: () => <RemoteAccessSection />
+      },
+      {
+        key: 'remoteSecurity',
+        label: 'Sign-in and passkeys',
         keywords:
-          'remote port password autostart bind interface server passkey webauthn biometric fingerprint face authentication sign-in enroll device credential',
-        render: () => <RemoteServerSettings />
+          'remote password passkey webauthn biometric fingerprint face authentication sign-in enroll device credential step-up session security break-glass',
+        render: () => <RemoteSecuritySection />
+      },
+      {
+        key: 'remoteLinks',
+        label: 'Access links',
+        keywords: 'remote access links url qr code rotate status connected devices tunnel',
+        render: () => <RemoteLinksSection />
       }
     ]
   },

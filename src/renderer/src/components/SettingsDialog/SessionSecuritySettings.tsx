@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { isNeedsSettingsSessionError } from '../../../../shared/remote-protocol'
 import type { RemoteAuthPolicy, RemoteConfig, StepUpTier } from '../../../../shared/types'
-import { SelectMenu } from '../shared/SelectMenu'
 import { StepUpPrompt } from '../shared/StepUpPrompt'
+import { Button, SelectField, TextField, ToggleSwitch } from './settings-controls'
 import {
   endSettingsSession,
   isWebClient,
@@ -11,8 +11,10 @@ import {
   type SettingsDraft
 } from './remote-settings-transport'
 
-const inputClass =
-  'bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[12px] text-text-secondary outline-none focus:border-accent/50 transition-colors'
+/** The caption above a field in the editor grid — a row label, at row size. */
+const FIELD_LABEL = 'block text-[12px] leading-4 text-text-secondary mb-1'
+/** A field's one-line explanation, at the row description's size and contrast. */
+const FIELD_HINT = 'block text-[12px] leading-4 text-text-secondary mt-1'
 
 /**
  * The exact words the operator must type to disable authentication
@@ -219,6 +221,18 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
   const [numericText, setNumericText] = useState<Partial<Record<NumericField, string>>>({})
 
   /**
+   * Focus the new-password field the moment the affordance opens it.
+   *
+   * Through the wrapper rather than an `autoFocus` prop: the field is the shared
+   * `TextField`, which owns its own DOM node and forwards no ref. Querying for
+   * the input INSIDE our own wrapper is a structural lookup, not a testid hook.
+   */
+  const passwordRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (changingPassword) passwordRef.current?.querySelector('input')?.focus()
+  }, [changingPassword])
+
+  /**
    * Closing the session when the pane goes away, without making the effect
    * depend on the mode (which would fire `authcfg:end` on every state change).
    * A ref, read only by the unmount cleanup.
@@ -388,19 +402,24 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
     [draft, numericText]
   )
 
-  /** The card shell: same chrome in every state, so unlocking does not re-layout. */
+  /**
+   * The block shell: same chrome in every state, so unlocking does not
+   * re-layout.
+   *
+   * No border and no radius of its own (ADR-065): this is a body inside the
+   * group CARD, and the card is the border. Edit mode tints instead, so the one
+   * state where typing changes something still announces itself.
+   */
   const card = (state: Mode['kind'], action: React.ReactNode, body: React.ReactNode) => (
     <div
       data-testid="SessionSecuritySettings"
       data-state={state}
-      className={`rounded-lg border p-4 ${
-        state === 'edit' ? 'border-accent/40 bg-bg-secondary/40' : 'border-border/60'
-      }`}
+      className={`px-3.5 py-3 ${state === 'edit' ? 'bg-accent/5' : ''}`}
     >
       <div className="flex items-start justify-between gap-3 mb-4">
         <div>
-          <div className="text-[13px] font-semibold text-text-primary">Session security</div>
-          <div className="text-[10px] text-text-muted/70 mt-0.5">
+          <div className="text-[13px] leading-[18px] text-text-primary">Session security</div>
+          <div className="text-[12px] leading-4 text-text-secondary mt-px">
             How signing in and staying signed in works for remote devices.
           </div>
         </div>
@@ -495,15 +514,10 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
 
     return card(
       'view',
-      <button
-        data-testid="SessionSecuritySettings.edit"
-        disabled={busy}
-        onClick={handleEditClick}
-        className="shrink-0 flex items-center gap-1.5 rounded bg-accent/15 px-2.5 py-1 text-accent hover:bg-accent/25 disabled:opacity-40 text-[11px]"
-      >
-        <LockIcon />
+      <Button testid="SessionSecuritySettings.edit" disabled={busy} onClick={handleEditClick}>
+        <LockIcon size={11} />
         Edit settings
-      </button>,
+      </Button>,
       <>
         <dl
           data-testid="SessionSecuritySettings.summary"
@@ -517,10 +531,10 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
               data-testid="SessionSecuritySettings.summaryRow"
               data-field={row.field}
             >
-              <dt className="text-[10px] text-text-muted/70 mb-0.5">{row.label}</dt>
-              <dd className="text-[12px] text-text-secondary">
+              <dt className="text-[12px] leading-4 text-text-secondary">{row.label}</dt>
+              <dd className="text-[13px] leading-[18px] text-text-primary mt-px">
                 {row.value}
-                {row.muted && <span className="text-text-muted/60"> {row.muted}</span>}
+                {row.muted && <span className="text-text-secondary"> {row.muted}</span>}
               </dd>
             </div>
           ))}
@@ -530,7 +544,7 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
           <div
             data-testid="SessionSecuritySettings.notice"
             role="status"
-            className="text-[10px] text-amber-400/80 leading-snug mt-4"
+            className="text-[12px] leading-4 text-warning mt-4"
           >
             {notice}
           </div>
@@ -538,32 +552,20 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
         {dirty && (
           <div
             data-testid="SessionSecuritySettings.pendingEdits"
-            className="text-[10px] text-text-muted/70 mt-2"
+            className="text-[12px] leading-4 text-text-secondary mt-2"
           >
             Unsaved changes kept
           </div>
         )}
 
+        {/* No ⓘ (ADR-065): an explanation belongs in visible text at the
+            description's size and contrast. */}
         <div
           data-testid="SessionSecuritySettings.footnote"
-          className="text-[10px] text-text-muted/60 leading-snug mt-4 flex items-start gap-1.5"
+          className="text-[12px] leading-4 text-text-secondary mt-4"
         >
-          <svg
-            width="11"
-            height="11"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            className="mt-[3px] shrink-0"
-          >
-            <circle cx="12" cy="12" r="10" />
-            <path d="M12 8v4M12 16h.01" />
-          </svg>
-          <span>
-            Changing these from a browser asks for your passkey first. Turning authentication off
-            entirely is only possible on the desktop app.
-          </span>
+          Changing these from a browser asks for your passkey first, and turning authentication off
+          entirely is only possible on the desktop app.
         </div>
       </>
     )
@@ -572,19 +574,26 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
   // ---------------------------------------------------------------------------
   // 3. EDIT
   // ---------------------------------------------------------------------------
+  /**
+   * A dial, held as TEXT.
+   *
+   * Not `NumberField`: that control owns its own draft and commits it on blur,
+   * and this editor is a BATCH — nothing is parsed, clamped or rejected until
+   * Save, which is what lets one refused field leave every other field alone and
+   * one Save be one audit row.
+   */
   const numericField = (field: NumericField, label: string, hint?: string): React.JSX.Element => (
     <div>
-      <label className="block text-[10px] text-text-muted/70 mb-1">{label}</label>
-      <input
-        data-testid={`SessionSecuritySettings.${field}`}
-        type="text"
+      <label className={FIELD_LABEL}>{label}</label>
+      <TextField
+        testid={`SessionSecuritySettings.${field}`}
+        mono={false}
         inputMode="numeric"
         value={numericValue(field)}
         disabled={busy}
-        onChange={(e) => setNumericText((prev) => ({ ...prev, [field]: e.target.value }))}
-        className={`${inputClass} w-full`}
+        onChange={(value) => setNumericText((prev) => ({ ...prev, [field]: value }))}
       />
-      {hint && <div className="text-[10px] text-text-muted/50 mt-1 leading-snug">{hint}</div>}
+      {hint && <span className={FIELD_HINT}>{hint}</span>}
     </div>
   )
 
@@ -596,24 +605,20 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
     hint: string
   ): React.JSX.Element => (
     <div>
-      <label className="block text-[10px] text-text-muted/70 mb-1">{label}</label>
+      <label className={FIELD_LABEL}>{label}</label>
       <button
+        type="button"
         data-testid={testid}
         data-checked={value ? 'true' : 'false'}
+        aria-pressed={value}
         disabled={busy}
         onClick={onToggle}
-        className={`${inputClass} w-full flex items-center justify-between disabled:opacity-40`}
+        className="w-full h-7 flex items-center justify-between bg-bg-input border border-border rounded-md px-2.5 text-[12px] text-text-primary transition-colors disabled:opacity-40 cursor-default"
       >
         <span>{value ? 'On' : 'Off'}</span>
-        <span
-          className={`w-7 h-4 rounded-full relative transition-colors ${value ? 'bg-accent' : 'bg-text-muted/30'}`}
-        >
-          <span
-            className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${value ? 'left-3.5' : 'left-0.5'}`}
-          />
-        </span>
+        <ToggleSwitch checked={value} />
       </button>
-      <div className="text-[10px] text-text-muted/50 mt-1 leading-snug">{hint}</div>
+      <span className={FIELD_HINT}>{hint}</span>
     </div>
   )
 
@@ -622,7 +627,7 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
     mode.expiresAt !== null ? (
       <span
         data-testid="SessionSecuritySettings.countdown"
-        className="shrink-0 flex items-center gap-1.5 rounded-full border border-accent/40 bg-accent/10 px-2.5 py-1 text-[10px] text-accent"
+        className="shrink-0 flex items-center gap-1.5 rounded-full border border-accent/40 bg-accent/10 px-2.5 py-0.5 text-[10.5px] leading-4 text-accent"
       >
         <LockIcon size={11} />
         Editing ·{' '}
@@ -633,9 +638,10 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4">
         {/* Sign-in requirement */}
         <div>
-          <label className="block text-[10px] text-text-muted/70 mb-1">Sign-in requirement</label>
-          <SelectMenu
+          <label className={FIELD_LABEL}>Sign-in requirement</label>
+          <SelectField
             testid="SessionSecuritySettings.authMode"
+            width="w-full"
             value={offDraft !== null ? 'off' : policyChoice}
             disabled={busy}
             onChange={(value) => {
@@ -653,37 +659,28 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
               }))
             }}
             options={web ? WEB_POLICY_OPTIONS : POLICY_OPTIONS}
-            triggerClassName={`${inputClass} w-full`}
           />
           {web && (
-            <div
-              data-testid="SessionSecuritySettings.authModeHint"
-              className="text-[10px] text-text-muted/50 mt-1 leading-snug"
-            >
+            <span data-testid="SessionSecuritySettings.authModeHint" className={FIELD_HINT}>
               “No authentication” is only available on the desktop app.
-            </div>
+            </span>
           )}
         </div>
 
         {/* Step-up tier */}
         <div>
-          <label className="block text-[10px] text-text-muted/70 mb-1">
-            Re-check that it is you
-          </label>
-          <SelectMenu
+          <label className={FIELD_LABEL}>Re-check that it is you</label>
+          <SelectField
             testid="SessionSecuritySettings.tier"
+            width="w-full"
             value={tierValue}
             disabled={busy}
             onChange={(value) => setDraft((prev) => ({ ...prev, stepUpTier: value as StepUpTier }))}
             options={TIER_OPTIONS}
-            triggerClassName={`${inputClass} w-full`}
           />
-          <div
-            data-testid="SessionSecuritySettings.tierHint"
-            className="text-[10px] text-text-muted/50 mt-1 leading-snug"
-          >
+          <span data-testid="SessionSecuritySettings.tierHint" className={FIELD_HINT}>
             {TIER_HINTS[tierValue]}
-          </div>
+          </span>
         </div>
 
         {numericField('stepUpMutationIdleMinutes', 'Re-check after idle (minutes)')}
@@ -696,44 +693,40 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
 
         {/* Break-glass password */}
         <div>
-          <label className="block text-[10px] text-text-muted/70 mb-1">Backup password</label>
+          <label className={FIELD_LABEL}>Backup password</label>
           {changingPassword ? (
-            <div className="space-y-1">
-              <input
-                data-testid="SessionSecuritySettings.password"
+            <div ref={passwordRef} className="space-y-1">
+              <TextField
+                testid="SessionSecuritySettings.password"
                 type="password"
-                autoComplete="new-password"
+                mono={false}
                 placeholder="New password"
                 value={draft.password ?? ''}
                 disabled={busy}
-                autoFocus
-                onChange={(e) => setDraft((prev) => ({ ...prev, password: e.target.value }))}
-                className={`${inputClass} w-full`}
+                onChange={(password) => setDraft((prev) => ({ ...prev, password }))}
               />
-              <input
-                data-testid="SessionSecuritySettings.passwordConfirm"
+              <TextField
+                testid="SessionSecuritySettings.passwordConfirm"
                 type="password"
-                autoComplete="new-password"
+                mono={false}
                 placeholder="Confirm password"
                 value={passwordConfirm}
                 disabled={busy}
-                onChange={(e) => setPasswordConfirm(e.target.value)}
-                className={`${inputClass} w-full`}
+                onChange={setPasswordConfirm}
               />
             </div>
           ) : (
-            <button
-              data-testid="SessionSecuritySettings.changePassword"
+            <Button
+              testid="SessionSecuritySettings.changePassword"
               disabled={busy}
               onClick={() => setChangingPassword(true)}
-              className={`${inputClass} w-full text-left disabled:opacity-40`}
             >
               {config.passwordSet ? 'Change password…' : 'Set a password…'}
-            </button>
+            </Button>
           )}
-          <div className="text-[10px] text-text-muted/50 mt-1 leading-snug">
+          <span className={FIELD_HINT}>
             Only as private as the network between your browser and this machine.
-          </div>
+          </span>
         </div>
 
         {numericField('auditRetentionDays', 'Audit history kept for (days)')}
@@ -748,26 +741,25 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
       </div>
 
       {offDraft !== null && (
-        <div className="mt-4 space-y-1">
+        <div className="mt-4 space-y-2">
           <div
             data-testid="SessionSecuritySettings.offConfirmPrompt"
-            className="text-[10px] text-red-300 leading-snug"
+            className="text-[12px] leading-4 text-danger"
           >
             Type <span className="font-mono">{DISABLE_AUTH_PHRASE}</span> to confirm you want every
             reachable client to have operator-level access to this machine.
           </div>
-          <input
-            data-testid="SessionSecuritySettings.offConfirmInput"
-            type="text"
-            autoComplete="off"
+          <TextField
+            testid="SessionSecuritySettings.offConfirmInput"
+            mono={false}
             value={offDraft}
-            onChange={(e) => setOffDraft(e.target.value)}
+            onChange={setOffDraft}
             placeholder={DISABLE_AUTH_PHRASE}
-            className={`${inputClass} w-full`}
           />
           <div className="flex items-center gap-2">
-            <button
-              data-testid="SessionSecuritySettings.offConfirmSubmit"
+            <Button
+              testid="SessionSecuritySettings.offConfirmSubmit"
+              variant="danger"
               disabled={busy || offDraft !== DISABLE_AUTH_PHRASE}
               onClick={() => {
                 // Stages it like every other field — the write happens on Save,
@@ -776,17 +768,16 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
                 setOffDraft(null)
                 setDraft((prev) => ({ ...prev, authMode: 'off' }))
               }}
-              className="rounded bg-red-500/15 px-2 py-1 text-red-400 hover:bg-red-500/25 disabled:opacity-40 text-[11px]"
             >
               Turn authentication off
-            </button>
-            <button
-              data-testid="SessionSecuritySettings.offConfirmCancel"
+            </Button>
+            <Button
+              testid="SessionSecuritySettings.offConfirmCancel"
+              variant="link"
               onClick={() => setOffDraft(null)}
-              className="rounded px-2 py-1 text-text-muted hover:text-text-secondary text-[11px]"
             >
               Cancel
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -794,7 +785,7 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
       {error && (
         <div
           data-testid="SessionSecuritySettings.error"
-          className="text-[10px] text-red-400 leading-snug mt-3"
+          className="text-[12px] leading-4 text-danger mt-3"
         >
           {error}
         </div>
@@ -804,27 +795,27 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
       <div className="flex items-center justify-between gap-3 mt-5 pt-3 border-t border-border/50">
         <div
           data-testid="SessionSecuritySettings.editFootnote"
-          className="text-[10px] text-text-muted/60 leading-snug"
+          className="text-[12px] leading-4 text-text-secondary"
         >
-          Changes apply together when you save. Everyone else signed in re-authenticates.
+          Changes apply together when you save, and everyone else signed in re-authenticates.
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <button
-            data-testid="SessionSecuritySettings.cancel"
+          <Button
+            testid="SessionSecuritySettings.cancel"
+            variant="link"
             disabled={busy}
             onClick={handleCancel}
-            className="rounded px-2 py-1 text-text-muted hover:text-text-secondary disabled:opacity-40 text-[11px]"
           >
             Cancel
-          </button>
-          <button
-            data-testid="SessionSecuritySettings.save"
+          </Button>
+          <Button
+            testid="SessionSecuritySettings.save"
+            variant="primary"
             disabled={busy}
             onClick={() => void handleSave()}
-            className="rounded bg-accent/15 px-3 py-1 text-accent hover:bg-accent/25 disabled:opacity-40 text-[11px]"
           >
             {busy ? 'Saving…' : 'Save changes'}
-          </button>
+          </Button>
         </div>
       </div>
     </>

@@ -205,6 +205,25 @@ describe('SessionSecuritySettings', () => {
       expect(screen.getByTestId('SessionSecuritySettings.countdown')).toHaveTextContent(/2:0\d/)
     })
 
+    it('gives every dial the numeric keyboard (ADR-065 restyle regression)', async () => {
+      // The dials moved onto the shared `TextField` in the row-vocabulary
+      // restyle and silently lost `inputMode="numeric"` — on a phone that is the
+      // difference between a number pad and a QWERTY keyboard for a minutes field.
+      renderPane()
+      await openEditor(false)
+      for (const field of [
+        'stepUpMutationIdleMinutes',
+        'shellGrantIdleMinutes',
+        'sessionMaxAgeHours',
+        'auditRetentionDays'
+      ]) {
+        expect(screen.getByTestId(`SessionSecuritySettings.${field}`)).toHaveAttribute(
+          'inputmode',
+          'numeric'
+        )
+      }
+    })
+
     it('offers the tier and, on the desktop, the `off` master switch', async () => {
       renderPane()
       await openEditor(false)

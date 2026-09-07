@@ -95,7 +95,7 @@ describe('PAGES structure', () => {
       ],
       dispatch: ['into'],
       mockups: ['network'],
-      remote: ['follow', 'server'],
+      remote: ['follow', 'server', 'access', 'security', 'links'],
       claude: ['sandbox', 'proxy'],
       opencode: [
         'session',

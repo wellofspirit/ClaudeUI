@@ -473,13 +473,20 @@ export function TextField({
   testid,
   dataId,
   onBlur,
-  onKeyDown
+  onKeyDown,
+  inputMode
 }: {
   value: string
   onChange: (value: string) => void
   placeholder?: string
   mono?: boolean
   type?: 'text' | 'password'
+  /**
+   * `numeric` for a dial held as TEXT (the batch-edited auth timings): the
+   * phone keyboard is the whole reason the hint exists, and `NumberField`
+   * cannot be used there because it commits per field.
+   */
+  inputMode?: 'text' | 'numeric'
   /** A literal Tailwind width class — Tailwind v4 cannot see built strings. */
   className?: string
   disabled?: boolean
@@ -493,6 +500,7 @@ export function TextField({
   return (
     <input
       type={type}
+      inputMode={inputMode}
       data-testid={testid ?? 'TextField'}
       data-id={dataId}
       onBlur={onBlur}

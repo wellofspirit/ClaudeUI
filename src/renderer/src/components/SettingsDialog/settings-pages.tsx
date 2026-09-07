@@ -434,7 +434,30 @@ export const PAGES: SettingsPage[] = [
     description: "Reach this machine's sessions from a phone or browser.",
     groups: [
       { id: 'follow', label: 'Follow', items: itemsOf('remote', ['remoteFollowActions']) },
-      { id: 'server', label: 'Server', items: itemsOf('remote', ['remoteServerConfig']) }
+      {
+        id: 'server',
+        label: 'Server',
+        storage: 'remote_config',
+        appliesOn: 'next-server-start',
+        note: 'Applies the next time the server starts.',
+        items: itemsOf('remote', ['remoteServerConfig'])
+      },
+      {
+        id: 'access',
+        label: 'Remote access',
+        storage: 'remote_config',
+        note: 'Takes effect on live connections immediately.',
+        items: itemsOf('remote', ['remoteAccess'])
+      },
+      {
+        id: 'security',
+        label: 'Sign-in & passkeys',
+        storage: 'remote_config',
+        items: itemsOf('remote', ['remoteSecurity'])
+      },
+      // BELOW security on purpose: the locked-state copy inside AccessLinks
+      // reads "Unlock in Session security above".
+      { id: 'links', label: 'Access links', items: itemsOf('remote', ['remoteLinks']) }
     ]
   },
   {
