@@ -23,7 +23,7 @@
  *   6. Advanced raw leaves commit valid JSON and fire nothing on invalid JSON.
  *   7. No Save button: every control commits immediately.
  *   8. The pinned defaults / enum / required tables still match the vendored
- *      v1.18.23 schema.
+ *      v1.18.29 schema.
  *   9. The editor renders in either frame — inline (how the provider dialog
  *      mounts it today) or as a stacked DialogShell — and writes the same patch
  *      in both, since the frame is presentation and the rows are the contract.
@@ -38,7 +38,7 @@ import {
   MODALITIES,
   REQUIRED_FIELDS
 } from '../OpencodeModelCapabilities'
-import opencodeConfigSchema from '../../../../../shared/opencode-config-schema.1.18.23.json'
+import opencodeConfigSchema from '../../../../../shared/opencode-config-schema.1.18.29.json'
 
 const PROVIDER = 'my-ollama'
 const MODEL = 'llama3.2'

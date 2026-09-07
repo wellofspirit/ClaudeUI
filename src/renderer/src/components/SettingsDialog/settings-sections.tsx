@@ -72,7 +72,7 @@ import {
   PiRawConfigSection
 } from './PiConfigPanes'
 import { diffToPatches } from '../../../../shared/opencode-config-diff'
-import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.18.23.json'
+import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.18.29.json'
 
 // ── Section definitions ──────────────────────────────────────────────
 

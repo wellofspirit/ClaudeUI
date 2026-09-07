@@ -96,7 +96,7 @@ function locateBinary(): string {
 /** ~20 minutes — must exceed the dispatcher's 10-min DISPATCH_TIMEOUT_MS so a
  *  long-running Claude target never gets cut off by opencode's OWN per-server
  *  MCP callTool timeout (config default 5s — see
- *  src/shared/opencode-config-schema.1.18.23.json `McpRemoteConfig.timeout`,
+ *  src/shared/opencode-config-schema.1.18.29.json `McpRemoteConfig.timeout`,
  *  read by `requestTimeout()` in vendor/opencode-src/packages/opencode/src/mcp/index.ts:661-663).
  *  The dispatcher's own heartbeat (sendProgress) ALSO resets this — belt and
  *  suspenders, since opencode may not always ride a progressToken. */

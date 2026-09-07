@@ -79,7 +79,7 @@ function readAt(root: unknown, path: EntryPath): unknown {
 // ── Schema-required blocks ───────────────────────────────────────────────────
 
 /**
- * Fields the v1.18.23 schema marks `required` inside a model entry, by the
+ * Fields the v1.18.29 schema marks `required` inside a model entry, by the
  * dotted path of the block that requires them
  * ($defs.ProviderConfig.properties.models.additionalProperties).
  *
@@ -331,7 +331,7 @@ function CapabilityToggleRow({
 
 // ── Row 7 · modalities ───────────────────────────────────────────────────────
 
-/** `modalities.input` / `.output` item enum, v1.18.23. Exported for the guard test. */
+/** `modalities.input` / `.output` item enum, v1.18.29. Exported for the guard test. */
 export const MODALITIES = ['text', 'audio', 'image', 'video', 'pdf'] as const
 /**
  * opencode's reading of an ABSENT modality list: text on, everything else off

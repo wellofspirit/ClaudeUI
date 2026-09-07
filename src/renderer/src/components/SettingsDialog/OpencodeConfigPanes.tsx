@@ -751,7 +751,7 @@ export function OpencodeWorkspaceSection(): React.JSX.Element {
 // ── 2e · Tools & integrations ────────────────────────────────────────────────
 
 /**
- * opencode's built-in tool ids, from the v1.18.23 registry
+ * opencode's built-in tool ids, from the v1.18.29 registry
  * (`packages/opencode/src/tool/registry.ts` builtin list; `bash` is ShellTool's
  * id). MCP tools and plugin tools also live under `tools` as globs — those keys
  * are NOT rendered here and never touched, since only their owner knows them.

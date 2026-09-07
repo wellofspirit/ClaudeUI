@@ -19,7 +19,7 @@ import {
   scopeCapabilities,
   isSectionVisible
 } from '../settings-sections'
-import opencodeConfigSchema from '../../../../../shared/opencode-config-schema.1.18.23.json'
+import opencodeConfigSchema from '../../../../../shared/opencode-config-schema.1.18.29.json'
 import {
   CLAUDE_ENGINE_CAPABILITIES,
   OPENCODE_ENGINE_CAPABILITIES,
