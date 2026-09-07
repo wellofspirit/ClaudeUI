@@ -108,17 +108,49 @@ function makeEventStream(): {
  * has no result body; ADR-033's 2026-09-01 amendment). Same `{info, parts}`
  * shape the old synchronous `prompt()` resolved with, so the fixtures below
  * read almost identically to the ones they replaced.
+ *
+ * `createdAt` defaults to one second AHEAD of construction, because these
+ * fixtures are built BEFORE the dispatch they describe and the reconcile's
+ * completion-evidence check compares strictly against the turn's start
+ * (`CLOCK_SKEW_ALLOWANCE_MS` is 0): a plain `Date.now()` here would be
+ * marginally EARLIER than `turnStartedAt` and correctly read as a previous
+ * turn's message — deterministically so under load, which is exactly the
+ * ambiguity the strict comparison exists to catch. The default therefore stands
+ * for "written during the turn under test". Tests that mean "this belongs to an
+ * OLD turn" pass an explicit past timestamp.
  */
 function storedAssistant(
-  overrides: { text?: string; info?: Record<string, unknown>; id?: string } = {}
+  overrides: {
+    text?: string
+    info?: Record<string, unknown>
+    id?: string
+    createdAt?: number
+  } = {}
 ): StoredMessage {
   return {
     info: {
       id: overrides.id ?? 'msg-stored-1',
       role: 'assistant',
+      time: { created: overrides.createdAt ?? Date.now() + 1_000 },
       ...overrides.info
     },
     parts: [{ type: 'text', text: overrides.text ?? 'target answer' }]
+  }
+}
+
+/** A stored USER message — the one the fork's `createUserMessage` writes BEFORE
+ *  the turn is marked busy, i.e. the tail of history in the pre-busy window the
+ *  reconcile's completion-evidence check exists to reject. */
+function storedUser(
+  overrides: { text?: string; id?: string; createdAt?: number } = {}
+): StoredMessage {
+  return {
+    info: {
+      id: overrides.id ?? 'msg-user-1',
+      role: 'user',
+      time: { created: overrides.createdAt ?? Date.now() }
+    },
+    parts: [{ type: 'text', text: overrides.text ?? 'the prompt' }]
   }
 }
 
@@ -995,6 +1027,80 @@ describe('CrossEngineDispatcher — opencode turn completion (prompt_async + SSE
     }
   })
 
+  it('a turn PARKED on an unanswered approval is not killed by the inactivity watchdog, and answering starts a fresh window', async () => {
+    // A target blocked on ctx.ask emits no session events at all until the human
+    // answers (the server's keepalives carry no sessionID), so before the fix a
+    // user slower than idleTimeoutMs had the dispatch aborted and the approval
+    // card they were reading dismissed out from under them.
+    vi.useFakeTimers()
+    try {
+      const { dispatcher, client, stream } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai/gpt-5', idleTimeoutMs: 120_000, turnTimeoutMs: 0 }
+        })),
+        heartbeatMs: 30_000
+      })
+      holdTurn(client)
+      const ctx = makeCtx({ toolUseId: 'toolu_parked' })
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+      await advance(0)
+
+      stream.push('permission.asked', {
+        id: 'perm-slow',
+        sessionID: 'oc-sess-1',
+        permission: 'bash'
+      })
+      await advance(0)
+      expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
+
+      // Ten minutes of silence — five times the inactivity cap.
+      await advance(600_000)
+      expect(client.abortSession).not.toHaveBeenCalled()
+      expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-dismiss')).toBe(false)
+
+      // Answering it starts a FRESH window rather than leaving a stale clock.
+      dispatcher.resolveApproval(`${XENG_REQUEST_PREFIX}perm-slow`, 'allow')
+      await advance(60_000)
+      expect(client.abortSession).not.toHaveBeenCalled()
+
+      completeTurn(stream)
+      await advance(0)
+      const result = await pending
+      expect(result.isError).toBeUndefined()
+      expect(result.text).toBe('target answer')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('the approval refresh is scoped to the ask: once answered, ordinary silence still times the turn out', async () => {
+    vi.useFakeTimers()
+    try {
+      const { dispatcher, client, stream } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai/gpt-5', idleTimeoutMs: 120_000, turnTimeoutMs: 0 }
+        })),
+        heartbeatMs: 30_000
+      })
+      holdTurn(client)
+      const ctx = makeCtx({ toolUseId: 'toolu_parked_then_silent' })
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+      await advance(0)
+      stream.push('permission.asked', { id: 'perm-x', sessionID: 'oc-sess-1', permission: 'bash' })
+      await advance(0)
+      await advance(300_000)
+      expect(client.abortSession).not.toHaveBeenCalled()
+
+      dispatcher.resolveApproval(`${XENG_REQUEST_PREFIX}perm-x`, 'allow')
+      await advance(130_000) // silence past the cap, with nothing pending now
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('no activity')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('both caps disabled (0) → a silent turn runs indefinitely and still completes on session.idle', async () => {
     vi.useFakeTimers()
     try {
@@ -1205,17 +1311,22 @@ describe('CrossEngineDispatcher — SSE reconnect (opencode approval forwarding)
    * so an end is a transport drop) and behaves normally afterwards. `push`
    * feeds the reconnected stream.
    */
-  function makeDroppingClient(): {
+  function makeDroppingClient(opts: { dropFirst?: boolean } = {}): {
     client: FakeClient
     /** Publish an event as the server would. NO REPLAY: published while no
      *  subscription is live, it is GONE — see the ordering test. */
     publish: (type: string, properties: Record<string, unknown>) => void
+    /** Drop the CURRENTLY live subscription, so the loop reconnects (and
+     *  reconciles) at a moment of the test's choosing. */
+    endStream: () => void
     subscribeCount: () => number
     liveCount: () => number
   } {
+    const dropFirst = opts.dropFirst ?? true
     let subscribeCount = 0
     let liveCount = 0
     let live = false
+    let ended = false
     const queue: Array<{ id: string; type: string; properties: Record<string, unknown> }> = []
     let notify: (() => void) | null = null
     const publish = (type: string, properties: Record<string, unknown>): void => {
@@ -1232,12 +1343,13 @@ describe('CrossEngineDispatcher — SSE reconnect (opencode approval forwarding)
       // A stream that drops before connecting never reaches `onConnected` —
       // like the real client, which fires it only after the response is
       // accepted. So the reconcile hangs off the SECOND (live) subscription.
-      if (subscribeCount === 1) return // simulate a dropped stream (ends, not aborted)
+      if (dropFirst && subscribeCount === 1) return // dropped stream (ends, not aborted)
       liveCount++
       live = true
+      ended = false
       try {
         onConnected?.()
-        while (!signal?.aborted) {
+        while (!signal?.aborted && !ended) {
           if (queue.length === 0) {
             await new Promise<void>((resolve) => {
               notify = resolve
@@ -1258,6 +1370,11 @@ describe('CrossEngineDispatcher — SSE reconnect (opencode approval forwarding)
     return {
       client,
       publish,
+      endStream: (): void => {
+        ended = true
+        notify?.()
+        notify = null
+      },
       subscribeCount: () => subscribeCount,
       liveCount: () => liveCount
     }
@@ -1356,6 +1473,149 @@ describe('CrossEngineDispatcher — SSE reconnect (opencode approval forwarding)
     const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
     expect(notif?.[1]).toMatchObject({ status: 'completed' })
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', 'openai/gpt-5', 0.03)
+  })
+
+  it("an ABSENT verdict in the pre-busy window (history tail is THIS turn's user message) does NOT settle — the turn has not started server-side yet", async () => {
+    // THE RACE. `prompt_async` returns 204 at FORK time; the forked prompt first
+    // writes the user message and only then does runLoop mark the session busy.
+    // A reconcile landing in between sees "absent" for a turn that is about to
+    // run — settling there returns the PREVIOUS turn's assistant text and
+    // orphans the real turn. Note the history below is exactly that window:
+    // newest message = this turn's USER message, newer than turn start; the
+    // only assistant message predates the turn. A "newest message of ANY role"
+    // evidence rule passes here and settles — which is why the check reads the
+    // newest ASSISTANT message.
+    const { client, publish, subscribeCount } = makeDroppingClient()
+    client.getSessionStatus.mockResolvedValue({})
+    client.listMessages.mockResolvedValue([
+      storedAssistant({ text: 'a PREVIOUS turn', createdAt: Date.now() - 60_000 }),
+      storedUser({ createdAt: Date.now() + 5 })
+    ])
+    const dispatcher = makeReconnectDispatcher(client)
+    let settled = false
+    const pending = dispatcher
+      .dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+      .then((r) => {
+        settled = true
+        return r
+      })
+
+    await vi.waitFor(() => expect(subscribeCount()).toBeGreaterThanOrEqual(2))
+    await vi.waitFor(() => expect(client.getSessionStatus).toHaveBeenCalled())
+    await tick()
+    await tick()
+    // Pre-fix (and with a newest-message-of-any-role rule) the turn is already
+    // finished here, carrying 'a PREVIOUS turn' as its result.
+    expect(settled).toBe(false)
+
+    // The real turn then runs and ends normally, with ITS OWN result.
+    client.listMessages.mockResolvedValue([storedAssistant({ text: 'this turn, for real' })])
+    publish('session.idle', { sessionID: 'oc-sess-1' })
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('this turn, for real')
+  })
+
+  it('an ABSENT verdict with NO assistant message in history does not settle either (no evidence at all)', async () => {
+    const { client, publish, subscribeCount } = makeDroppingClient()
+    client.getSessionStatus.mockResolvedValue({})
+    client.listMessages.mockResolvedValue([storedUser()])
+    const dispatcher = makeReconnectDispatcher(client)
+    let settled = false
+    const pending = dispatcher
+      .dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+      .then((r) => {
+        settled = true
+        return r
+      })
+
+    await vi.waitFor(() => expect(subscribeCount()).toBeGreaterThanOrEqual(2))
+    await vi.waitFor(() => expect(client.getSessionStatus).toHaveBeenCalled())
+    await tick()
+    await tick()
+    expect(settled).toBe(false)
+
+    client.listMessages.mockResolvedValue([storedAssistant({ text: 'eventually' })])
+    publish('session.idle', { sessionID: 'oc-sess-1' })
+    expect((await pending).text).toBe('eventually')
+  })
+
+  it("a RAPID continuation is not settled by the PREVIOUS turn's assistant message (the evidence comparison is strict)", async () => {
+    // The realistic shape of the pre-busy race: a dispatching model re-dispatches
+    // the same session_id within one MCP round-trip, so turn 2 starts a second or
+    // two after turn 1's assistant message was written. A reconcile landing in
+    // turn 2's pre-busy window sees "absent" and finds turn 1's assistant as the
+    // newest one — evidence ONLY if the comparison tolerates the continuation
+    // gap. This test fails with any allowance >= that gap (it was written against
+    // CLOCK_SKEW_ALLOWANCE_MS = 2_000, gap 1.5 s): turn 2 settles instantly
+    // carrying 'turn ONE text'.
+    const { client, publish, endStream, subscribeCount } = makeDroppingClient({ dropFirst: false })
+    client.getSessionStatus.mockResolvedValue({}) // absent = idle
+    const dispatcher = makeReconnectDispatcher(client)
+    const ctx = makeCtx()
+
+    // ── Turn 1 runs and completes normally.
+    client.listMessages.mockResolvedValue([storedAssistant({ text: 'turn ONE text' })])
+    const turn1 = dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
+    await vi.waitFor(() => expect(subscribeCount()).toBeGreaterThanOrEqual(1))
+    publish('session.idle', { sessionID: 'oc-sess-1' })
+    expect((await turn1).text).toBe('turn ONE text')
+
+    // ── Turn 2, 1.5 s later by the clock the evidence check compares against.
+    // History at reconcile time: turn 1's assistant (1.5 s OLD — before turn 2
+    // started) followed by turn 2's own freshly written user message.
+    client.listMessages.mockResolvedValue([
+      storedAssistant({ id: 'msg-turn-1', text: 'turn ONE text', createdAt: Date.now() - 1_500 }),
+      storedUser({ id: 'msg-user-2', createdAt: Date.now() + 5 })
+    ])
+    let settled2 = false
+    const turn2 = dispatcher
+      .dispatch({ engine: 'opencode', prompt: 'two', sessionId: 'oc-sess-1' }, ctx)
+      .then((r) => {
+        settled2 = true
+        return r
+      })
+    await tick()
+
+    // Drop the stream so the loop reconnects and reconciles INSIDE turn 2's
+    // pre-busy window.
+    const before = subscribeCount()
+    endStream()
+    await vi.waitFor(() => expect(subscribeCount()).toBeGreaterThan(before))
+    await vi.waitFor(() => expect(client.getSessionStatus).toHaveBeenCalled())
+    await tick()
+    await tick()
+    expect(settled2).toBe(false)
+
+    // Turn 2 ends on ITS OWN idle, with ITS OWN result.
+    client.listMessages.mockResolvedValue([storedAssistant({ text: 'turn TWO text' })])
+    publish('session.idle', { sessionID: 'oc-sess-1' })
+    const result2 = await turn2
+    expect(result2.isError).toBeUndefined()
+    expect(result2.text).toBe('turn TWO text')
+  })
+
+  it('a failing evidence read is treated as NO evidence — the turn stays on the watchdog rather than settling on a guess', async () => {
+    const { client, publish, subscribeCount } = makeDroppingClient()
+    client.getSessionStatus.mockResolvedValue({})
+    client.listMessages.mockRejectedValueOnce(new Error('history unavailable'))
+    const dispatcher = makeReconnectDispatcher(client)
+    let settled = false
+    const pending = dispatcher
+      .dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+      .then((r) => {
+        settled = true
+        return r
+      })
+
+    await vi.waitFor(() => expect(subscribeCount()).toBeGreaterThanOrEqual(2))
+    await vi.waitFor(() => expect(client.listMessages).toHaveBeenCalled())
+    await tick()
+    await tick()
+    expect(settled).toBe(false)
+
+    publish('session.idle', { sessionID: 'oc-sess-1' })
+    expect((await pending).text).toBe('target answer')
   })
 
   it('a stale "absent" verdict never settles a CONTINUATION turn started while the status GET was in flight (resolver-identity guard)', async () => {
@@ -2400,6 +2660,113 @@ describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/n
 
     completeTurn(stream)
     await pending
+  })
+
+  it("a PRIOR turn's republished parts never leak into a continuation turn's card (post-abort interrupted-part rewrite)", async () => {
+    // Verified fork behaviour: aborting a turn does not silence it. The
+    // processor waits 250 ms for in-flight tool calls, then rewrites each one as
+    // status:'error' / interrupted — publishing message.part.updated for the OLD
+    // turn's message, which can land inside a quick continuation's busy window.
+    // Pre-fix all three assertions below fail: the old message re-emits as a
+    // subagent-message on the NEW card, its (already reported) tool result
+    // re-emits with it — `emittedToolResults` used to reset per turn — and its
+    // tool_use id inflates the new turn's toolUses to 1.
+    const { dispatcher, client, stream } = makeHarness()
+    holdTurn(client)
+    const ctx = makeCtx({ toolUseId: 'toolu_turn_1' })
+
+    // ── Turn 1: one completed tool call, then a normal completion.
+    const turn1 = dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
+    await tick()
+    stream.push('message.part.updated', {
+      sessionID: 'oc-sess-1',
+      part: {
+        id: 'part-tool-1',
+        messageID: 'msg-turn-1',
+        type: 'tool',
+        tool: 'bash',
+        callID: 'call-1',
+        state: { status: 'completed', input: { command: 'ls' }, output: 'a.ts' }
+      }
+    })
+    await tick()
+    expect(ctx.emit.mock.calls.filter((c) => c[0] === 'session:subagent-tool-result')).toHaveLength(
+      1
+    )
+    completeTurn(stream)
+    await turn1
+
+    // ── Turn 2 on the same target, held open.
+    const ctx2 = makeCtx({ toolUseId: 'toolu_turn_2' })
+    const turn2 = dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'two', sessionId: 'oc-sess-1' },
+      ctx2
+    )
+    await tick()
+
+    // The abandoned turn-1 tool part, republished as interrupted, arrives now.
+    stream.push('message.part.updated', {
+      sessionID: 'oc-sess-1',
+      part: {
+        id: 'part-tool-1',
+        messageID: 'msg-turn-1',
+        type: 'tool',
+        tool: 'bash',
+        callID: 'call-1',
+        state: {
+          status: 'error',
+          input: { command: 'ls' },
+          error: 'Tool execution aborted',
+          metadata: { interrupted: true }
+        }
+      }
+    })
+    await tick()
+
+    expect(ctx2.emit.mock.calls.some((c) => c[0] === 'session:subagent-message')).toBe(false)
+    expect(ctx2.emit.mock.calls.some((c) => c[0] === 'session:subagent-tool-result')).toBe(false)
+
+    completeTurn(stream)
+    await turn2
+    const notif2 = ctx2.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+    expect(notif2?.[1]).toMatchObject({ status: 'completed' })
+    expect((notif2![1] as { usage?: { toolUses: number } }).usage?.toolUses).toBe(0)
+  })
+
+  it("a continuation turn's OWN new message still streams normally (the prior-message gate is not a blanket mute)", async () => {
+    const { dispatcher, client, stream } = makeHarness()
+    holdTurn(client)
+    const ctx = makeCtx({ toolUseId: 'toolu_gate_1' })
+    const turn1 = dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
+    await tick()
+    stream.push('message.part.updated', {
+      sessionID: 'oc-sess-1',
+      part: { id: 'part-1', messageID: 'msg-turn-1', type: 'text', text: 'turn one' }
+    })
+    await tick()
+    completeTurn(stream)
+    await turn1
+
+    const ctx2 = makeCtx({ toolUseId: 'toolu_gate_2' })
+    const turn2 = dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'two', sessionId: 'oc-sess-1' },
+      ctx2
+    )
+    await tick()
+    stream.push('message.part.updated', {
+      sessionID: 'oc-sess-1',
+      part: { id: 'part-2', messageID: 'msg-turn-2', type: 'text', text: 'turn two' }
+    })
+    await tick()
+
+    const msg = ctx2.emit.mock.calls.find((c) => c[0] === 'session:subagent-message')
+    expect(msg?.[1]).toMatchObject({ toolUseId: 'toolu_gate_2' })
+    expect((msg![1] as { message: { content: unknown[] } }).message.content).toEqual([
+      { type: 'text', text: 'turn two' }
+    ])
+
+    completeTurn(stream)
+    await turn2
   })
 
   it('toolUseId ABSENT: zero subagent/task emits, dispatch still succeeds', async () => {

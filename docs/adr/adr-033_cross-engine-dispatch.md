@@ -192,16 +192,22 @@ three dispatched qwen3.8:27b turns failed at 5m02–03s each. Worse, the error p
   cost-cap / usage-record handling is unchanged. A turn that idles with no assistant message gets
   the pre-existing empty-text fallback.
 - **Liveness** replaces the fixed absolute cap with a polled watchdog (10 s, on the injectable
-  clock): an INACTIVITY cap (no SSE event at all for that session — default 15 min) plus an ABSOLUTE
+  clock): an INACTIVITY cap (no sign of life from that session — default 15 min) plus an ABSOLUTE
   cap (default 60 min), both configurable per engine as `DispatchConfig.idleTimeoutMs` /
   `turnTimeoutMs` (ms; `0` disables; edited in MINUTES in Settings › opencode › Cross-engine
   dispatch). A slow-but-alive local model can now finish; a wedged one still dies. `DISPATCH_TIMEOUT_MS`
   stays as the claude/pi directions' cap, and the timeout editors are opencode-only in the UI.
+  **A turn parked on an unanswered approval counts as alive**: a target blocked on `ctx.ask` emits no
+  session events whatsoever (the server's keepalives carry no sessionID), so the watchdog refreshes
+  the inactivity clock for as long as a forwarded approval for that target is outstanding —
+  otherwise a human slower than the cap had the dispatch aborted and their own approval card
+  dismissed. Refreshing (rather than suspending the check) also gives the resumed turn a fresh
+  window. The absolute cap keeps running while parked, deliberately: an ask nobody ever answers
+  still ends the turn.
 - **Reconnect reconcile.** Completion now rides the event stream, so a `session.idle` published
   while the subscription was down would strand the turn. Every (re)connect reconciles this
   connection's busy targets against `GET /session/status`, where **absence means idle** (the fork's
-  `SessionStatus.set` deletes the entry when a session goes idle) — an absent session settles as a
-  normal completion; a present one just bumps the activity clock. Best-effort and fully swallowed: a
+  `SessionStatus.set` deletes the entry when a session goes idle). Best-effort and fully swallowed: a
   failed reconcile must never break the loop that also carries approval forwarding.
   **Ordering is load-bearing**: the reconcile hangs off a new
   `OpencodeClient.subscribeEvents(signal, onConnected)` callback, which fires once the subscription
@@ -210,6 +216,28 @@ three dispatched qwen3.8:27b turns failed at 5m02–03s each. Worse, the error p
   paths). After connection-live the coverage is exhaustive: an idle before it is visible in the
   status map, an idle after it arrives as an event, and the overlap where both see it is absorbed by
   settle-once.
+  **Absent ≠ finished**, which is the reconcile's sharpest edge. `prompt_async` returns 204 at FORK
+  time; the forked `prompt()` writes the user message (`createUserMessage`) and only then enters
+  `runLoop`, whose first act is `status.set(busy)` — so a reconcile landing in that window sees an
+  absent session for a turn that is about to run. Settling there would return the PREVIOUS turn's
+  assistant message and orphan the real turn. The verdict is therefore three-way: present = alive
+  (bump the clock); absent + **completion evidence** = ran and ended (settle); absent + no evidence =
+  not started yet (skip, leave it to the live stream and the watchdog). Evidence is the newest
+  ASSISTANT message in stored history being at least as new as `turnStartedAt`, compared STRICTLY
+  (`CLOCK_SKEW_ALLOWANCE_MS` is 0): both timestamps come from the same host clock (the server is a
+  local child process) and this turn's assistant message is always written after `turnStartedAt`, so
+  a zero allowance never rejects genuine evidence — while any positive allowance admits the PREVIOUS
+  turn's assistant on every continuation whose gap is shorter than it (i.e. most of them, one MCP
+  round-trip apart), trading a bounded watchdog delay for a silently wrong result plus an orphaned
+  live turn. A remote opencode server would need a clock-free anchor rather than a wider allowance.
+  The newest message of ANY role would not do either: the pre-busy window already contains this
+  turn's own user message. Accepted residual — a turn
+  that goes idle without producing an assistant message leaves no evidence and falls to the
+  inactivity watchdog; disambiguating it would cost a second delayed status read for a vanishingly
+  rare case. Two further guards on the same path: the busy snapshot captures each entry's RESOLVER
+  and only settles if it is still installed (a continuation turn started during the status GET must
+  not be settled by a verdict about its predecessor — the pi direction's `entry.settled === resolve`
+  pattern), re-checked after the evidence read's own await.
 - **Zombie guard.** A rejected `promptAsync` now also fires a best-effort `abortSession` (the fork
   starts the turn before responding, and a dropped socket on an accepted request is
   indistinguishable out here), and every give-up path nulls `settled` so the `session.idle` opencode
@@ -220,10 +248,19 @@ three dispatched qwen3.8:27b turns failed at 5m02–03s each. Worse, the error p
   arrive — so `disposeFor` now settles the turn itself, rather than leaving it to hang on its
   concurrency slot until the watchdog fires.
 - **Tool results.** The opencode stream tap now forwards `session:subagent-tool-result`
-  (`extractToolResult` + a per-turn `${messageId}:${partId}` dedup Set, since the rebuilt message
-  re-emits on every part update) — parity with the Claude and pi taps, which always did. Without it
-  the dispatch TaskCard's tool chips spun forever. `message.updated` is now routed into the tap too,
-  because `mapEvent` needs it to record the message role on the accumulator.
+  (`extractToolResult` + a `${messageId}:${partId}` dedup Set, since the rebuilt message re-emits on
+  every part update) — parity with the Claude and pi taps, which always did. Without it the dispatch
+  TaskCard's tool chips spun forever. `message.updated` is now routed into the tap too, because
+  `mapEvent` needs it to record the message role on the accumulator.
+- **Stale-message gate on the tap.** Aborting a turn does not silence it: the processor waits 250 ms
+  for in-flight tool calls and then rewrites each as `status:'error'` / `interrupted`, publishing
+  `message.part.updated` for the OLD turn's message — which can land inside a quick continuation
+  turn's busy window. The tap therefore snapshots the target's known message ids at turn start
+  (`priorMessageIds`) and ignores any output belonging to one, keeping the stale message, its
+  already-reported tool results and its tool_use ids off the new turn's card. The dedup Set is
+  target-lifetime for the same reason (a per-turn Set would have forgotten those results were
+  already reported), matching `OpencodeSession.emittedToolResults`; message ids never repeat, so it
+  stays bounded by target life.
 - **`OpencodeClient.prompt()` is deliberately retained** for judge / `askSideQuestion` /
   agent-generate / `runCommand`. Those are short single-shot turns, so the same undici 300 s ceiling
   is latent there rather than live; it is documented on the client so the next long-turn caller does

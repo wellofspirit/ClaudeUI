@@ -836,10 +836,17 @@ function DispatchSection({
   // Both timeouts are stored in MILLISECONDS (DispatchConfig) but edited in
   // MINUTES — nobody wants to type 3600000. Blank = the built-in default,
   // 0 = disabled; both round-trip through the same undefined-vs-number
-  // convention the maxCost input uses.
+  // convention the maxCost input uses. Anything a `type="number"` field can
+  // still yield that is NOT a usable duration — a typed "-5", "e", a stray "-"
+  // mid-edit — drops the key instead of persisting negative/NaN milliseconds
+  // (the watchdog's `> 0` gates read a persisted negative as "cap disabled",
+  // silently — not what someone fumbling a keystroke meant to configure).
   const toMinutes = (ms: number | undefined): number | '' => (ms === undefined ? '' : ms / 60000)
-  const fromMinutes = (raw: string): number | undefined =>
-    raw === '' ? undefined : Number(raw) * 60000
+  const fromMinutes = (raw: string): number | undefined => {
+    const minutes = Number(raw)
+    if (raw === '' || !Number.isFinite(minutes) || minutes < 0) return undefined
+    return minutes * 60000
+  }
 
   const update = (patch: Partial<DispatchConfig>): void => {
     const next: EngineConfig = { ...engineCfg, dispatch: { ...dispatch, ...patch } }

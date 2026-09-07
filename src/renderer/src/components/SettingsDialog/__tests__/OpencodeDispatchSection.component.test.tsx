@@ -307,6 +307,20 @@ describe('OpencodeDispatchSection — dispatch turn timeouts', () => {
     })
   })
 
+  it('a negative value drops the key rather than persisting a negative duration', async () => {
+    // `type="number"` still hands us "-5" (and mid-edit garbage like "-" or
+    // "e"); the watchdog's `> 0` gates would read a persisted negative as
+    // "cap disabled" — a silent surprise, not a usable duration.
+    await renderLoaded()
+
+    fireEvent.change(screen.getByTestId('OpencodeDispatchSection.turnTimeout'), {
+      target: { value: '-5' }
+    })
+
+    expect(savedConfigs[0].dispatch?.turnTimeoutMs).toBeUndefined()
+    expect(savedConfigs[0].dispatch?.defaultModel).toBe('openai/gpt-5')
+  })
+
   it('0 minutes saves 0 (disabled), and clearing drops the key (back to the default)', async () => {
     await renderLoaded()
 

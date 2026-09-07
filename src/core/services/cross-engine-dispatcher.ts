@@ -371,6 +371,38 @@ const DISPATCH_IDLE_TIMEOUT_MS = 15 * 60_000
  * control it.
  */
 const DISPATCH_WATCHDOG_INTERVAL_MS = 10_000
+/**
+ * Slack allowed when `reconcileBusyTargets` compares a stored message's
+ * server-written `info.time.created` against the dispatcher's own
+ * `entry.turnStartedAt` (see that comparison for what it decides).
+ *
+ * ZERO, deliberately — the comparison is strict. Two reasons it can afford to
+ * be, and one reason it must be:
+ *  - SAME CLOCK. The opencode server is ALWAYS a local child of this process
+ *    (`OpencodeServerManager` spawns the vendored binary and talks to it over
+ *    127.0.0.1), so both timestamps come from the same host clock and cannot
+ *    genuinely disagree.
+ *  - STRICT ORDERING. `turnStartedAt` is taken BEFORE the `prompt_async` POST;
+ *    THIS turn's assistant message is created inside `runLoop`, i.e. strictly
+ *    later in real time. Genuine evidence is therefore never rejected by a zero
+ *    allowance (barring a backwards clock step between the two reads).
+ *  - ASYMMETRIC FAILURE. A false NEGATIVE (evidence wrongly rejected) costs a
+ *    bounded watchdog delay on an already-rare path. A false POSITIVE (the
+ *    PREVIOUS turn's assistant admitted as this turn's evidence) is a silently
+ *    wrong result handed to the caller plus a live turn left orphaned. Any
+ *    positive allowance buys the second failure to insure against a clock
+ *    artifact that a shared clock cannot produce — and buys it constantly, not
+ *    rarely: a dispatching model typically re-dispatches the same session_id
+ *    within one MCP round-trip (1–3 s), so an allowance of N seconds
+ *    false-positives on EVERY continuation whose gap is under N.
+ *
+ * Kept as a named constant rather than inlined because it is the seam a future
+ * REMOTE opencode-server deployment would have to revisit — and the answer
+ * there is not to widen it but to replace the comparison with a clock-free
+ * anchor (e.g. snapshot the session's message ids before the turn and test for
+ * a NEW id).
+ */
+const CLOCK_SKEW_ALLOWANCE_MS = 0
 /** How long an armed stop-intent (see `pendingStops`) stays valid. Generous —
  *  it only needs to outlive the MCP tools/call round-trip + handler prelude. */
 const PENDING_STOP_TTL_MS = 60 * 1000
@@ -443,23 +475,59 @@ interface OpencodeTargetEntry {
    */
   settled: ((outcome: OpencodeTurnOutcome) => void) | null
   /**
-   * `this.now()` at the last SSE event seen for this session while busy — the
-   * inactivity watchdog's clock (see `DISPATCH_IDLE_TIMEOUT_MS`). Bumped in
-   * `handleSseEvent` for EVERY event type, not just streamed content: a target
-   * waiting on a permission reply, a tool part update, or a cost snapshot is
-   * demonstrably alive. Reset to turn start at every turn start.
+   * `this.now()` at turn start — the ABSOLUTE watchdog's baseline, and the
+   * "is this stored history evidence of THIS turn?" cut-off
+   * `reconcileBusyTargets` compares message timestamps against. 0 until the
+   * target's first turn.
+   */
+  turnStartedAt: number
+  /**
+   * `this.now()` at the last sign of life from this session while busy — the
+   * inactivity watchdog's clock (see `DISPATCH_IDLE_TIMEOUT_MS`). Two feeds:
+   *  - `handleSseEvent` bumps it for EVERY event type carrying this sessionID,
+   *    not just streamed content — a tool part updating or a cost snapshot is
+   *    proof of life just as much as a text delta;
+   *  - the watchdog itself refreshes it while a forwarded approval for this
+   *    target is still unanswered. A target BLOCKED on `ctx.ask` emits no
+   *    session events at all (the server's keepalives carry no sessionID), so
+   *    without that refresh a human slower than `idleTimeoutMs` would have the
+   *    dispatch aborted out from under them. Refreshing (rather than skipping
+   *    the check) also means answering the approval starts a FRESH inactivity
+   *    window for the resumed turn.
+   * Reset to turn start at every turn start.
    */
   lastActivityAt: number
   /**
-   * Per-turn dedup for tool-result forwarding, keyed `${messageId}:${partId}`
-   * — mirrors `OpencodeSession.emittedToolResults` exactly. The SSE tap re-emits
-   * the WHOLE rebuilt assistant message on every part update, so without this
-   * a completed tool part would re-emit its `session:subagent-tool-result` on
-   * every subsequent update of any sibling part. A fresh Set at every turn
-   * start (message ids never repeat across turns, so this is pure hygiene —
-   * the same reason `turnToolUseIds` is reset).
+   * Dedup for tool-result forwarding, keyed `${messageId}:${partId}`. TARGET-
+   * lifetime, never cleared — a genuine mirror of
+   * `OpencodeSession.emittedToolResults` (session-lifetime there, likewise never
+   * cleared). Two jobs:
+   *  - the SSE tap re-emits the WHOLE rebuilt assistant message on every part
+   *    update, so a completed tool part would otherwise re-emit its
+   *    `session:subagent-tool-result` on every subsequent update of a sibling;
+   *  - across turns, opencode's post-abort cleanup republishes an INTERRUPTED
+   *    turn's tool parts (see `priorMessageIds`), and a per-turn Set would have
+   *    forgotten they were already reported.
+   * Message ids never repeat, so the set is naturally bounded by target life.
    */
   emittedToolResults: Set<string>
+  /**
+   * Message ids that already existed on this target when the CURRENT turn
+   * started — snapshotted from `accumulators` at turn start (empty on the
+   * first turn), and the gate the streaming tap applies before emitting
+   * anything.
+   *
+   * WHY (verified against the fork): aborting a turn does not stop its parts
+   * from being republished. `processor.ts`'s abort path waits 250 ms for
+   * in-flight tool calls, then rewrites each one as `status: 'error'` /
+   * `interrupted: true` — which publishes `message.part.updated` events for the
+   * OLD turn's message. A quick continuation turn is already `busy` by then, so
+   * the tap would attribute the old message to the NEW turn's card: re-emitting
+   * it as a `session:subagent-message`, re-reporting its tool results, and
+   * inflating the new turn's `toolUses`. A dispatch turn never legitimately
+   * updates a PRIOR turn's message, so ignoring known-prior ids is exact.
+   */
+  priorMessageIds: Set<string>
   /**
    * Per-messageId part accumulators for the SSE streaming tap — same shape
    * `OpencodeSession` keeps for its own turns (event-mapper.ts's
@@ -1432,9 +1500,12 @@ export class CrossEngineDispatcher {
     // Per-turn distinct tool_use id set (ADR-033 M4-B) — fresh at the start of
     // every turn, populated by the SSE streaming tap, .size read at turn end.
     entry.turnToolUseIds = new Set()
-    // Per-turn tool-result dedup — see the field's doc comment.
-    entry.emittedToolResults = new Set()
+    // Everything this target has already streamed belongs to a PREVIOUS turn —
+    // see `priorMessageIds`. (`emittedToolResults` is deliberately NOT reset:
+    // it is target-lifetime, see its own doc.)
+    entry.priorMessageIds = new Set(entry.accumulators.keys())
     const turnStartedAt = this.now()
+    entry.turnStartedAt = turnStartedAt
     entry.lastActivityAt = turnStartedAt
 
     type Raced =
@@ -1490,7 +1561,7 @@ export class CrossEngineDispatcher {
      * a slow-but-alive local model should be allowed to finish, and a wedged
      * one should not have to burn a whole hour first. Two caps, both
      * configurable per engine (`0` disables either):
-     *   - inactivity: no SSE event at all for this session for `idleTimeoutMs`;
+     *   - inactivity: no sign of life from this session for `idleTimeoutMs`;
      *   - absolute:   the turn has simply run for `turnTimeoutMs`.
      * Polled (rather than two timers) because the inactivity deadline moves on
      * every event — see `DISPATCH_WATCHDOG_INTERVAL_MS`.
@@ -1500,6 +1571,16 @@ export class CrossEngineDispatcher {
     const timeoutPromise = new Promise<Raced>((resolve) => {
       watchdogTimer = setInterval(() => {
         const now = this.now()
+        // A target BLOCKED on a forwarded approval is alive but SILENT: opencode
+        // publishes `permission.asked` once and then nothing at all for that
+        // session until the human answers (its keepalives carry no sessionID),
+        // so the inactivity clock would otherwise run out on a turn whose only
+        // fault is that its user is slow — aborting the turn and dismissing the
+        // very card they were reading. Keep the clock rolling while the ask is
+        // outstanding; answering it therefore also starts a FRESH inactivity
+        // window for the resumed turn. The ABSOLUTE cap deliberately keeps
+        // running: an approval nobody ever answers still ends the turn.
+        if (this.hasPendingApprovalFor(entry.sessionId)) entry.lastActivityAt = now
         if (turnTimeoutMs > 0 && now - turnStartedAt > turnTimeoutMs) {
           resolve({ kind: 'timeout', reason: 'absolute' })
         } else if (idleTimeoutMs > 0 && now - entry.lastActivityAt > idleTimeoutMs) {
@@ -1580,6 +1661,10 @@ export class CrossEngineDispatcher {
       }
       if (winner.kind === 'err') {
         // promptAsync itself was refused (the server never accepted the turn).
+        // Null the resolver first, like every other give-up path — there is no
+        // real window here (nothing awaits before the `finally` that nulls it
+        // anyway), this is the invariant on `settled` holding uniformly.
+        entry.settled = null
         this.dismissPendingForTarget(entry.sessionId)
         // ZOMBIE GUARD: the refusal may still have left a turn running — the
         // fork's `promptAsync` handler forks the prompt with
@@ -1827,8 +1912,10 @@ export class CrossEngineDispatcher {
         ctx,
         busy: false,
         settled: null,
+        turnStartedAt: 0,
         lastActivityAt: 0,
         emittedToolResults: new Set(),
+        priorMessageIds: new Set(),
         accumulators: new Map(),
         cumulativeCostUsd: 0,
         turnToolUseIds: new Set()
@@ -1915,10 +2002,18 @@ export class CrossEngineDispatcher {
    * aborted an already-finished turn. `GET /session/status` is the
    * authoritative catch-up — ABSENCE MEANS IDLE there (the server deletes a
    * session's entry the moment it goes idle; see
-   * `OpencodeClient.getSessionStatus`), so a busy target missing from the map
-   * has provably finished and is settled exactly as if its event had arrived.
-   * A target still listed is simply alive — bump its activity clock so the
-   * blackout itself never counts as inactivity.
+   * `OpencodeClient.getSessionStatus`) — but NOT that a missing session has
+   * finished, which is the subtlety this method is built around. Three-way
+   * disambiguation, see the branches below:
+   *   · present in the map              → alive; bump the activity clock so the
+   *                                        blackout itself never reads as
+   *                                        inactivity.
+   *   · absent + completion evidence    → the turn ran and ENDED during the
+   *                                        gap; settle it as if its
+   *                                        `session.idle` had arrived.
+   *   · absent + no completion evidence → the turn has not STARTED server-side
+   *                                        yet; skip and let the now-live
+   *                                        stream (or the watchdog) handle it.
    *
    * CALLED ONLY FROM `runSseLoop`'s `onConnected`, i.e. once the replacement
    * subscription is already receiving — see that call site for why the ordering
@@ -1960,6 +2055,68 @@ export class CrossEngineDispatcher {
           // assistant message as its result. A changed resolver means the turn
           // this verdict describes is already over: skip, and let the live
           // turn's own `session.idle` (or the watchdog) settle it.
+          if (entry.settled !== settled) continue
+
+          /*
+           * COMPLETION-EVIDENCE CHECK. "Absent from the status map" alone does
+           * NOT mean the turn finished — it also covers a turn that has not
+           * STARTED yet. Verified against the fork: `prompt_async` returns 204
+           * at FORK time, and the forked `prompt()` first runs
+           * `createUserMessage` (a storage write) and only then enters
+           * `runLoop`, whose first act is `status.set(sessionID, {type:'busy'})`.
+           * A reconcile landing in that window sees an absent session for a
+           * turn that is about to run: settling there would hand the caller the
+           * PREVIOUS turn's assistant message as this turn's result AND leave
+           * the real turn running unsupervised (resolver nulled, watchdog
+           * cleared, its eventual `session.idle` a no-op). The resolver-identity
+           * guard above cannot see this — the resolver IS current; it is the
+           * VERDICT that is stale.
+           *
+           * Evidence = the newest ASSISTANT message in stored history is at
+           * least as new as this turn. Assistant messages are created inside
+           * `runLoop`, i.e. strictly AFTER `status.set(busy)`, so one that is
+           * newer than turn start proves this turn both ran and got far enough
+           * to produce output — whereas the pre-busy window has, at most, this
+           * turn's own USER message. (Which is exactly why "newest message of
+           * ANY role" would NOT discriminate: `createUserMessage` runs BEFORE
+           * busy, so the user message alone satisfies it.)
+           *
+           * The comparison is STRICT (`CLOCK_SKEW_ALLOWANCE_MS` is 0 — see its
+           * doc). A positive allowance would admit the PREVIOUS turn's
+           * assistant message as this turn's evidence on every continuation
+           * whose gap is under the allowance, which is most of them: a
+           * dispatching model re-dispatches within one MCP round-trip.
+           *
+           * ACCEPTED RESIDUAL: a turn that goes idle WITHOUT producing an
+           * assistant message (the empty-text-fallback case) leaves no
+           * evidence, so a blackout-spanning reconcile will not settle it and
+           * it falls to the inactivity watchdog. Deliberate — absent +
+           * tail-is-user-message is genuinely ambiguous between "pre-busy
+           * window" and "ended with no output", and disambiguating would cost a
+           * delayed second status read for a vanishingly rare case.
+           *
+           * A read failure is simply no evidence: skip (the turn stays on the
+           * watchdog), never settle on a guess.
+           */
+          let evidenceAt: number | undefined
+          try {
+            const messages = await rec.client.listMessages(entry.sessionId)
+            evidenceAt = lastAssistantMessage(messages)?.info.time?.created
+          } catch (err) {
+            logger.debug(
+              'CrossEngineDispatcher',
+              `reconcile evidence read failed (turn stays on the watchdog): ${err instanceof Error ? err.message : String(err)}`
+            )
+            continue
+          }
+          if (
+            evidenceAt === undefined ||
+            evidenceAt < entry.turnStartedAt - CLOCK_SKEW_ALLOWANCE_MS
+          ) {
+            continue
+          }
+          // The evidence read is an await of its own — re-check identity before
+          // settling, same reasoning as the guard above.
           if (entry.settled !== settled) continue
           entry.settled = null
           settled({ kind: 'idle' })
@@ -2113,8 +2270,11 @@ export class CrossEngineDispatcher {
    * tool_use id.
    *
    * Gated on `entry.busy` (a completed/aborted turn's trailing SSE chatter
-   * must never emit) and `entry.ctx.toolUseId` (no id → no way to key the
-   * event on the renderer side — never fail the dispatch over it, just skip).
+   * must never emit), on `entry.ctx.toolUseId` (no id → no way to key the
+   * event on the renderer side — never fail the dispatch over it, just skip),
+   * and on `entry.priorMessageIds` (a PREVIOUS turn's message must never land
+   * on this turn's card — see that field's doc for the post-abort republish
+   * that makes this reachable).
    */
   private handleOpencodeTargetStream(ev: OpencodeEvent): void {
     const sessionID = ev.properties.sessionID as string | undefined
@@ -2132,6 +2292,8 @@ export class CrossEngineDispatcher {
     const output = mapEvent(ev, sessionID, entry.accumulators, Date.now(), { value: 0 })
     switch (output.kind) {
       case 'stream':
+        // A delta against a prior turn's message is that turn's, not ours.
+        if (output.messageId !== undefined && entry.priorMessageIds.has(output.messageId)) break
         entry.ctx.emit('session:subagent-stream', {
           toolUseId,
           type: output.streamType,
@@ -2139,6 +2301,13 @@ export class CrossEngineDispatcher {
         })
         break
       case 'message': {
+        // A message this target streamed in an EARLIER turn is not this turn's
+        // output, however it got republished (the post-abort interrupted-part
+        // rewrite is the live case — see `priorMessageIds`). Skipping the whole
+        // branch keeps three things out of the new turn's card at once: the
+        // stale message itself, its already-reported tool results, and its
+        // tool_use ids in `turnToolUseIds`.
+        if (entry.priorMessageIds.has(output.message.id)) break
         collectToolUseIds(output.message, entry.turnToolUseIds)
         entry.ctx.emit('session:subagent-message', { toolUseId, message: output.message })
         // Tool RESULTS are a separate channel from the message's `tool_use`
@@ -2672,6 +2841,21 @@ export class CrossEngineDispatcher {
         { once: true }
       )
     })
+  }
+
+  /**
+   * Is an opencode dispatch target's forwarded approval still awaiting a human?
+   * Read by the turn watchdog to keep an approval-PARKED turn's inactivity clock
+   * rolling (see the watchdog's own comment). Scoped to `kind: 'opencode'`
+   * because only that direction's turns are policed by this watchdog — the
+   * claude/pi directions run on the fixed `dispatchTimeoutMs`. A plain scan: the
+   * map holds at most a handful of live approvals.
+   */
+  private hasPendingApprovalFor(targetSessionId: string): boolean {
+    for (const pending of this.pendingApprovals.values()) {
+      if (pending.kind === 'opencode' && pending.targetSessionId === targetSessionId) return true
+    }
+    return false
   }
 
   /** Dismiss all forwarded approvals for one target (timeout/abort/dispose).
