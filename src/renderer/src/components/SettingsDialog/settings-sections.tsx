@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { useActiveSession, useSessionStore } from '../../stores/session-store'
+import { DEFAULT_SETTINGS, useActiveSession, useSessionStore } from '../../stores/session-store'
 import type { AppSettings } from '../../stores/session-store'
 import { PermissionsDialog } from '../PermissionsDialog'
 import {
@@ -41,8 +41,14 @@ import {
   SettingsTextarea,
   SandboxListSetting,
   ChatRetentionSetting,
-  InfoTooltip
+  InfoTooltip,
+  SettingRow,
+  RadioRow,
+  ActionRow,
+  SelectField,
+  TextField
 } from './settings-controls'
+import type { SettingsRenderContext } from './settings-target'
 import { ModelPicker } from '../shared/InlinePickers'
 import { toModelDisplays, selectedModelDisplay, StaleModelNotice } from './settings-model-display'
 import { SelectMenu } from '../shared/SelectMenu'
@@ -86,7 +92,14 @@ export interface SettingItem {
     engineConfig: EngineConfig,
     updateEngineConfig: (p: Partial<EngineConfig>) => void,
     vendorConfig: VendorConfig,
-    updateVendorConfig: (p: Partial<VendorConfig>) => void
+    updateVendorConfig: (p: Partial<VendorConfig>) => void,
+    /**
+     * Shell context (ADR-065): app metadata and cross-page navigation. Kept
+     * POSITIONAL and last so the ~130 existing bodies — which declare fewer
+     * parameters and ignore it — did not have to be touched. Optional because
+     * a caller outside the dialog (the mobile view) has no shell to provide.
+     */
+    ctx?: SettingsRenderContext
   ) => React.JSX.Element
 }
 
@@ -95,6 +108,26 @@ export interface Section {
   label: string
   icon: React.JSX.Element
   items: SettingItem[]
+}
+
+/**
+ * The changed-from-default state of a row backed by ClaudeUI's own settings
+ * (ADR-065): an accent dot after the label, and a Reset link on row hover.
+ *
+ * Scalars only — comparison is by identity, so an object-valued key (e.g.
+ * `modelEffortDefaults`) would read as permanently modified. Engine-native keys
+ * get the same treatment in phase 2, where "modified" means "present in the
+ * engine's own config file" rather than "differs from a constant".
+ */
+function appDefault<K extends keyof AppSettings>(
+  settings: AppSettings,
+  update: (p: Partial<AppSettings>) => void,
+  key: K
+): { modified: boolean; onReset: () => void } {
+  return {
+    modified: !Object.is(settings[key], DEFAULT_SETTINGS[key]),
+    onReset: () => update({ [key]: DEFAULT_SETTINGS[key] } as Partial<AppSettings>)
+  }
 }
 
 // ── Default engine/vendor config values ─────────────────────────────
@@ -189,38 +222,39 @@ function GlobalPermissionsSummary(): React.JSX.Element {
 
   const totalRules = perms ? perms.allow.length + perms.ask.length + perms.deny.length : 0
 
+  // The counts ARE the description (the board): "58 allow · 3 ask · 7 deny".
+  const summary = !perms
+    ? undefined
+    : totalRules === 0 && perms.additionalDirectories.length === 0
+      ? 'No rules configured'
+      : [
+          `${perms.allow.length} allow`,
+          `${perms.ask.length} ask`,
+          `${perms.deny.length} deny`,
+          ...(perms.additionalDirectories.length > 0
+            ? [
+                `${perms.additionalDirectories.length} dir${perms.additionalDirectories.length !== 1 ? 's' : ''}`
+              ]
+            : [])
+        ].join(' · ')
+
   return (
-    <div
-      data-testid="GlobalPermissionsSummary"
-      className="px-3 py-1.5 text-[13px] text-text-secondary"
-    >
-      <div className="flex items-center justify-between">
-        <div>
-          <div className="text-text-secondary mb-0.5">Global permission rules</div>
-          {perms && (
-            <div className="text-[11px] text-text-muted">
-              {perms.allow.length} allow · {perms.ask.length} ask · {perms.deny.length} deny
-              {perms.additionalDirectories.length > 0 &&
-                ` · ${perms.additionalDirectories.length} dir${perms.additionalDirectories.length !== 1 ? 's' : ''}`}
-              {totalRules === 0 && 'No rules configured'}
-            </div>
-          )}
-        </div>
-        <button
-          data-testid="GlobalPermissionsSummary.edit"
-          onClick={() => setDialogOpen(true)}
-          className="px-2.5 py-1 text-[11px] font-medium text-accent hover:text-accent-hover bg-accent/10 hover:bg-accent/15 rounded-md transition-colors cursor-default"
-        >
-          Edit...
-        </button>
-      </div>
+    <>
+      <ActionRow
+        testid="GlobalPermissionsSummary"
+        label="Permission rules"
+        description={summary}
+        engine="claude"
+        action="Edit rules"
+        onAction={() => setDialogOpen(true)}
+      />
       <PermissionsDialog
         open={dialogOpen}
         onClose={() => setDialogOpen(false)}
         cwd={cwd}
         initialTab="user"
       />
-    </div>
+    </>
   )
 }
 
@@ -429,6 +463,18 @@ function AccountsSetting(): React.JSX.Element {
 
 // ── Autonomy mode picker ─────────────────────────────────────────────
 
+/**
+ * One sentence per mode, so the choice is legible without a tooltip (ADR-065).
+ * Kept next to the picker rather than in `shared/permission-modes.ts`: the mode
+ * PILL next to the composer shows the label alone and has no room for these.
+ */
+const AUTONOMY_DESCRIPTIONS: Record<AutonomyMode, string> = {
+  plan: 'Explore and plan. Never edits or runs anything.',
+  ask: 'Confirms every tool call with you.',
+  autoEdit: 'Edits freely, asks before running commands.',
+  full: 'A judge model approves routine calls; risky ones still ask you.'
+}
+
 export function AutonomyModePicker(): React.JSX.Element {
   const setDefaultPermissionMode = useSessionStore((s) => s.setDefaultPermissionMode)
   const currentMode = useSessionStore((s) => s.settings.defaultAutonomyMode)
@@ -447,29 +493,27 @@ export function AutonomyModePicker(): React.JSX.Element {
   }
 
   return (
-    <div data-testid="AutonomyModePicker" className="px-3 py-1.5 text-[13px] text-text-secondary">
-      <div className="mb-0.5">Autonomy mode</div>
-      <div className="mb-1.5 text-[11px] text-text-muted">
+    <div data-testid="AutonomyModePicker" className="divide-y divide-border/55">
+      {availableModes.map((mode) => (
+        <RadioRow
+          key={mode}
+          testid="AutonomyModePicker.mode"
+          dataId={mode}
+          name="autonomyMode"
+          value={mode}
+          label={AUTONOMY_LABELS[mode]}
+          description={AUTONOMY_DESCRIPTIONS[mode]}
+          checked={currentMode === mode}
+          onSelect={() => handleChange(mode)}
+        />
+      ))}
+      {/* The group's closing note. It stays INSIDE this component rather than
+          becoming a card-level note so the copy guard in
+          AutonomyModePicker.component.test.tsx keeps testing the thing that
+          must not overclaim: this setting governs NEW sessions only. */}
+      <div className="px-3.5 py-2.5 text-[12px] leading-4 text-text-secondary">
         Applies to new sessions on every engine. Running sessions keep their own mode — change it
         from the mode control next to the chat input.
-      </div>
-      <div className="space-y-1">
-        {availableModes.map((mode) => (
-          <label
-            key={mode}
-            className="flex items-center gap-2 cursor-pointer rounded-md px-2 py-1 hover:bg-bg-hover"
-          >
-            <input
-              type="radio"
-              name="autonomyMode"
-              value={mode}
-              checked={currentMode === mode}
-              onChange={() => handleChange(mode)}
-              className="accent-accent"
-            />
-            <span className="text-[12px] text-text-secondary">{AUTONOMY_LABELS[mode]}</span>
-          </label>
-        ))}
       </div>
     </div>
   )
@@ -1484,6 +1528,7 @@ export const SECTIONS: Section[] = [
           <SettingsSelect
             testid="SettingsTheme"
             label="Theme"
+            {...appDefault(s, u, 'theme')}
             value={s.theme}
             options={[
               { value: 'dark' as const, label: 'Dark' },
@@ -1501,6 +1546,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSlider
             label="UI font size"
+            {...appDefault(s, u, 'uiFontScale')}
             value={s.uiFontScale}
             min={1}
             max={1.5}
@@ -1517,6 +1563,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSlider
             label="Chat font size"
+            {...appDefault(s, u, 'chatFontScale')}
             value={s.chatFontScale}
             min={1}
             max={1.5}
@@ -1533,6 +1580,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSelect
             label="Mermaid diagram theme"
+            {...appDefault(s, u, 'mermaidTheme')}
             value={s.mermaidTheme}
             options={[
               { value: 'auto' as const, label: 'Auto' },
@@ -1572,6 +1620,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSelect
             label="Chat width"
+            {...appDefault(s, u, 'chatWidthMode')}
             value={s.chatWidthMode}
             options={[
               { value: 'px' as const, label: 'Pixels' },
@@ -1590,6 +1639,7 @@ export const SECTIONS: Section[] = [
             <SettingsSlider
               label="Width"
               value={s.chatWidthPx}
+              {...appDefault(s, u, 'chatWidthPx')}
               min={500}
               max={3420}
               step={10}
@@ -1600,6 +1650,7 @@ export const SECTIONS: Section[] = [
             <SettingsSlider
               label="Width"
               value={s.chatWidthPercent}
+              {...appDefault(s, u, 'chatWidthPercent')}
               min={60}
               max={100}
               step={1}
@@ -1615,6 +1666,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSlider
             label="Recent sessions"
+            {...appDefault(s, u, 'maxRecentSessions')}
             value={s.maxRecentSessions}
             min={1}
             max={10}
@@ -1650,12 +1702,13 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSelect
             label="Idle timeout"
+            {...appDefault(s, u, 'sessionTimeoutMins')}
             value={String(s.sessionTimeoutMins)}
             options={[
-              { value: '5', label: '5 min' },
-              { value: '15', label: '15 min' },
-              { value: '30', label: '30 min' },
-              { value: '60', label: '1 hour' },
+              { value: '5', label: '5m' },
+              { value: '15', label: '15m' },
+              { value: '30', label: '30m' },
+              { value: '60', label: '1h' },
               { value: '0', label: 'Never' }
             ]}
             onChange={(v) => u({ sessionTimeoutMins: Number(v) })}
@@ -1697,6 +1750,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsToggle
             label="Expand tool calls"
+            {...appDefault(s, u, 'expandToolCalls')}
             checked={s.expandToolCalls}
             onChange={(v) => u({ expandToolCalls: v })}
           />
@@ -1706,16 +1760,19 @@ export const SECTIONS: Section[] = [
         key: 'expandReadResults',
         label: 'Include read results',
         keywords: 'file content tool',
+        // Dependent rows nest exactly one level and stay READABLE when
+        // disabled (ADR-065) — the old 40%-opacity wrapper did not.
         render: (s, u) => (
-          <div className={s.expandToolCalls ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="pl-4">
-              <SettingsToggle
-                label="Include read results"
-                checked={s.expandReadResults}
-                onChange={(v) => u({ expandReadResults: v })}
-              />
-            </div>
-          </div>
+          <SettingsToggle
+            label="Include read results"
+            {...appDefault(s, u, 'expandReadResults')}
+            description="File contents of Read calls, inside the expanded call."
+            checked={s.expandReadResults}
+            onChange={(v) => u({ expandReadResults: v })}
+            indent
+            dimmed={!s.expandToolCalls}
+            disabled={!s.expandToolCalls}
+          />
         )
       },
       {
@@ -1725,6 +1782,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsToggle
             label="Hide tool input"
+            {...appDefault(s, u, 'hideToolInput')}
             checked={s.hideToolInput}
             onChange={(v) => u({ hideToolInput: v })}
           />
@@ -1737,6 +1795,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsToggle
             label="Expand thinking"
+            {...appDefault(s, u, 'expandThinking')}
             checked={s.expandThinking}
             onChange={(v) => u({ expandThinking: v })}
           />
@@ -1749,6 +1808,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSlider
             label="Max output chars"
+            {...appDefault(s, u, 'toolOutputMaxChars')}
             value={s.toolOutputMaxChars}
             min={500}
             max={50000}
@@ -1786,6 +1846,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsToggle
             label="Split diff view"
+            {...appDefault(s, u, 'diffViewSplit')}
             checked={s.diffViewSplit}
             onChange={(v) => u({ diffViewSplit: v })}
           />
@@ -1798,6 +1859,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsToggle
             label="Ignore whitespace"
+            {...appDefault(s, u, 'diffIgnoreWhitespace')}
             checked={s.diffIgnoreWhitespace}
             onChange={(v) => u({ diffIgnoreWhitespace: v })}
           />
@@ -1810,6 +1872,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsToggle
             label="Wrap lines"
+            {...appDefault(s, u, 'diffWrapLines')}
             checked={s.diffWrapLines}
             onChange={(v) => u({ diffWrapLines: v })}
           />
@@ -1844,6 +1907,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSelect
             label="Default commit"
+            {...appDefault(s, u, 'gitCommitMode')}
             value={s.gitCommitMode}
             options={[
               { value: 'commit' as const, label: 'Commit' },
@@ -1860,6 +1924,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSelect
             label="Panel layout"
+            {...appDefault(s, u, 'gitPanelLayout')}
             value={s.gitPanelLayout}
             options={[
               { value: 'single' as const, label: 'Single' },
@@ -1899,6 +1964,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSelect
             label="Alignment"
+            {...appDefault(s, u, 'statusLineAlign')}
             value={s.statusLineAlign}
             options={[
               { value: 'left' as const, label: 'Left' },
@@ -1914,20 +1980,20 @@ export const SECTIONS: Section[] = [
         label: 'Status line template',
         keywords: 'format tokens cost context',
         render: (s, u) => (
-          <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-            <div className="mb-1">Template</div>
-            <input
-              type="text"
+          <SettingRow
+            testid="StatusLineTemplateSetting"
+            {...appDefault(s, u, 'statusLineTemplate')}
+            layout="stacked"
+            label="Template"
+            description="Tokens: {in} {out} {total} · Cost: {cost} · Context: {used} {remaining} · Lines: {lines+} {lines-} · Time: {duration}"
+          >
+            <TextField
+              testid="StatusLineTemplateSetting.input"
               value={s.statusLineTemplate}
-              onChange={(e) => u({ statusLineTemplate: e.target.value })}
-              className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+              onChange={(v) => u({ statusLineTemplate: v })}
               placeholder="{in} / {out} / {total} · {used}%"
             />
-            <div className="text-[9px] text-text-muted/60 mt-0.5">
-              Tokens: {'{in} {out} {total}'} · Cost: {'{cost}'} · Context: {'{used} {remaining}'} ·
-              Lines: {'{lines+} {lines-}'} · Time: {'{duration}'}
-            </div>
-          </div>
+          </SettingRow>
         )
       }
     ]
@@ -1955,23 +2021,19 @@ export const SECTIONS: Section[] = [
         label: 'API polling interval',
         keywords: 'polling rate limit 5hr refresh update frequency api',
         render: (s, u) => (
-          <div>
-            <SettingsSlider
-              label="API polling interval"
-              value={s.usageRefreshSecs}
-              min={60}
-              max={3600}
-              step={60}
-              onChange={(v) => u({ usageRefreshSecs: v })}
-              formatValue={(v) =>
-                v >= 60 ? `${Math.floor(v / 60)}m${v % 60 ? ` ${v % 60}s` : ''}` : `${v}s`
-              }
-            />
-            <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-              How often to call the usage API for detailed plan data. Rate limits update in
-              real-time from inference headers.
-            </div>
-          </div>
+          <SettingsSlider
+            label="API polling interval"
+            {...appDefault(s, u, 'usageRefreshSecs')}
+            description="How often to call the usage API for detailed plan data. Rate limits update in real-time from inference headers."
+            value={s.usageRefreshSecs}
+            min={60}
+            max={3600}
+            step={60}
+            onChange={(v) => u({ usageRefreshSecs: v })}
+            formatValue={(v) =>
+              v >= 60 ? `${Math.floor(v / 60)}m${v % 60 ? ` ${v % 60}s` : ''}` : `${v}s`
+            }
+          />
         )
       },
       {
@@ -1979,20 +2041,17 @@ export const SECTIONS: Section[] = [
         label: 'Analytics refresh interval',
         keywords: 'analytics token recalculate jsonl refresh block usage',
         render: (s, u) => (
-          <div>
-            <SettingsSlider
-              label="Analytics refresh interval"
-              value={s.analyticsRefreshSecs}
-              min={10}
-              max={120}
-              step={5}
-              onChange={(v) => u({ analyticsRefreshSecs: v })}
-              formatValue={(v) => `${v}s`}
-            />
-            <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-              How often to recalculate token analytics from session transcripts.
-            </div>
-          </div>
+          <SettingsSlider
+            label="Analytics refresh interval"
+            {...appDefault(s, u, 'analyticsRefreshSecs')}
+            description="How often to recalculate token analytics from session transcripts."
+            value={s.analyticsRefreshSecs}
+            min={10}
+            max={120}
+            step={5}
+            onChange={(v) => u({ analyticsRefreshSecs: v })}
+            formatValue={(v) => `${v}s`}
+          />
         )
       }
     ]
@@ -2026,6 +2085,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSelect
             label="Log level"
+            {...appDefault(s, u, 'logLevel')}
             value={s.logLevel}
             options={[
               { value: 'debug' as const, label: 'Debug' },
@@ -2042,26 +2102,20 @@ export const SECTIONS: Section[] = [
         label: 'Source filter',
         keywords: 'debug log filter sources verbose',
         render: (s, u) => (
-          <div className="px-3 py-1.5">
-            <div className="text-[13px] text-text-secondary mb-1.5">Per-source overrides</div>
-            <input
-              type="text"
+          <SettingRow
+            testid="LogFilterSetting"
+            {...appDefault(s, u, 'logFilter')}
+            layout="stacked"
+            label="Per-source overrides"
+            description="Comma-separated. A bare name enables debug for that source; use source:level for an explicit one. Logs are written to ~/.claude/ui/logs/."
+          >
+            <TextField
+              testid="LogFilterSetting.input"
               value={s.logFilter}
-              onChange={(e) => u({ logFilter: e.target.value })}
-              className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[12px] font-mono text-text-secondary outline-none focus:border-accent/50 transition-colors"
+              onChange={(v) => u({ logFilter: v })}
               placeholder="UsageFetcher,BlockUsage:debug"
-              spellCheck={false}
             />
-            <div className="text-[10px] text-text-muted/60 mt-1.5 space-y-0.5">
-              <div>Comma-separated. Bare names enable debug for that source.</div>
-              <div>
-                Use <span className="font-mono">source:level</span> for explicit levels.
-              </div>
-              <div>
-                Logs are written to <span className="font-mono">~/.claude/ui/logs/</span>
-              </div>
-            </div>
-          </div>
+          </SettingRow>
         )
       }
     ]
@@ -2092,17 +2146,13 @@ export const SECTIONS: Section[] = [
         label: 'Enable voice input',
         keywords: 'voice microphone speech dictation audio',
         render: (s, u) => (
-          <div>
-            <SettingsToggle
-              label="Enable voice input"
-              checked={s.voiceEnabled}
-              onChange={(v) => u({ voiceEnabled: v })}
-              tooltip="Show a microphone button in the input box. Hold to record, release to transcribe."
-            />
-            <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-              Hold the mic button to dictate messages
-            </div>
-          </div>
+          <SettingsToggle
+            label="Enable voice input"
+            {...appDefault(s, u, 'voiceEnabled')}
+            description="Shows a microphone button in the input box. Hold to record, release to transcribe."
+            checked={s.voiceEnabled}
+            onChange={(v) => u({ voiceEnabled: v })}
+          />
         )
       },
       {
@@ -2110,17 +2160,21 @@ export const SECTIONS: Section[] = [
         label: 'Voice language',
         keywords: 'voice language speech locale',
         render: (s, u) => (
-          <div className={s.voiceEnabled ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-              <div className="mb-1">Language</div>
-              <SelectMenu
-                testid="VoiceLanguageSetting.language"
-                value={s.voiceLanguage}
-                onChange={(v) => u({ voiceLanguage: v as VoiceLanguageCode })}
-                options={VOICE_LANGUAGES.map((lang) => ({ value: lang.code, label: lang.label }))}
-              />
-            </div>
-          </div>
+          <SettingRow
+            testid="VoiceLanguageSetting"
+            {...appDefault(s, u, 'voiceLanguage')}
+            label="Language"
+            description="What the transcriber expects to hear."
+            dimmed={!s.voiceEnabled}
+          >
+            <SelectField
+              testid="VoiceLanguageSetting.language"
+              value={s.voiceLanguage}
+              disabled={!s.voiceEnabled}
+              onChange={(v) => u({ voiceLanguage: v as VoiceLanguageCode })}
+              options={VOICE_LANGUAGES.map((lang) => ({ value: lang.code, label: lang.label }))}
+            />
+          </SettingRow>
         )
       }
     ]
@@ -2337,13 +2391,13 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsTextarea
             label="Network allowlist"
+            {...appDefault(s, u, 'mockupConnectAllowlist')}
             value={s.mockupConnectAllowlist}
             onChange={(v) => u({ mockupConnectAllowlist: v })}
             placeholder={'api.openweathermap.org\n*.my-startup.com'}
             rows={4}
             monospace
-            tooltip="Extends the mockup iframe's CSP connect-src directive. By default mockups can only talk to the pinned CDN allowlist (jsDelivr, cdnjs, Tailwind Play, unpkg, jQuery) plus their own origin. Add one origin per line to permit additional fetch/XHR/WebSocket targets."
-            description="One origin per line (no scheme prefix needed, no quotes). Only turn this on for endpoints you trust — a compromised or prompt-injected mockup could exfiltrate to entries on this list."
+            description="Extends the iframe's CSP connect-src, which otherwise allows only the pinned CDNs and the mockup's own origin. One origin per line, no scheme and no quotes. Add only endpoints you trust — a prompt-injected mockup could exfiltrate to anything on this list."
           />
         )
       },
@@ -2352,17 +2406,13 @@ export const SECTIONS: Section[] = [
         label: 'Allow plaintext (http://) connections',
         keywords: 'mockup http plaintext insecure localhost',
         render: (s, u) => (
-          <div>
-            <SettingsToggle
-              label="Allow plaintext (http:// & ws://) connections"
-              checked={s.mockupAllowHttp}
-              onChange={(v) => u({ mockupAllowHttp: v })}
-              tooltip="When on, mockups may fetch from http:// and ws:// URLs in addition to https:// / wss://. Useful for demoing local APIs (http://localhost:8080) or legacy internal services without TLS. Off by default."
-            />
-            <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-              Needed for localhost APIs and legacy non-TLS services
-            </div>
-          </div>
+          <SettingsToggle
+            label="Allow plaintext (http:// & ws://) connections"
+            {...appDefault(s, u, 'mockupAllowHttp')}
+            description="Lets a mockup reach http:// and ws:// URLs as well as TLS ones — needed for localhost APIs and legacy internal services."
+            checked={s.mockupAllowHttp}
+            onChange={(v) => u({ mockupAllowHttp: v })}
+          />
         )
       },
       {
@@ -2370,10 +2420,10 @@ export const SECTIONS: Section[] = [
         label: 'Mockup security info',
         keywords: 'mockup info csp security',
         render: () => (
-          <div className="px-3 py-1.5 text-[11px] text-text-muted/60 leading-relaxed">
-            Mockups render in a sandboxed iframe on a per-mockup origin. Changes apply when the
-            mockup is next loaded or reloaded — open mockups keep the CSP they were served with.
-          </div>
+          <SettingRow
+            testid="MockupSecurityNote"
+            description="Mockups render in a sandboxed iframe on a per-mockup origin. Changes apply when the mockup is next loaded or reloaded — open mockups keep the CSP they were served with."
+          />
         )
       }
     ]
@@ -3060,7 +3110,7 @@ export const SECTIONS: Section[] = [
         key: 'opencodeAutoMode',
         label: 'Auto mode',
         keywords:
-          'opencode auto mode full autonomy classifier gatekeeper judge llm permission bash security monitor',
+          'opencode auto mode full autonomy classifier gatekeeper judge model llm permission bash security monitor',
         render: () => <OpencodeAutoModeSection />
       }
     ]
@@ -3406,7 +3456,7 @@ export const SECTIONS: Section[] = [
         key: 'piAutoMode',
         label: 'Auto mode',
         keywords:
-          'pi auto mode full autonomy classifier gatekeeper judge llm permission bash security monitor',
+          'pi auto mode full autonomy classifier gatekeeper judge model llm permission bash security monitor',
         render: () => <PiAutoModeSection />
       }
     ]

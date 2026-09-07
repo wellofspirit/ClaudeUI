@@ -80,8 +80,9 @@ describe('OpencodeSchemaForm rendering', () => {
   it('toggling a boolean updates the value', () => {
     render(<Harness initial={{}} />)
     const toggle = screen.getByTestId('OpencodeSchemaForm.bool')
-    // The toggle track (2nd span) carries the muted background while off.
-    const track = () => toggle.querySelectorAll('span')[1]
+    // The switch track carries the muted background while off. Found by testid
+    // rather than span index: the row primitive owns how many spans precede it.
+    const track = (): Element => toggle.querySelector('[data-testid="ToggleSwitch"]')!
     expect(track().className).toContain('bg-text-muted')
     fireEvent.click(toggle)
     // After toggling, the controlled state flips the track to the accent colour.

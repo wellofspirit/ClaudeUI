@@ -197,11 +197,11 @@ describe('RemoteAccessModal FC', () => {
     expect(viewProps.tunnelMode).toBe(true)
   })
 
-  it('onSetPassword closes the modal and deep-links to the remote settings section', async () => {
+  it('onSetPassword closes the modal and deep-links to the remote settings page', async () => {
     statusQueue = [makeStatus({ running: true, port: 5123 })]
-    const events: Array<{ section?: string }> = []
+    const events: Array<{ page?: string; group?: string }> = []
     const listener = (e: Event): void => {
-      events.push((e as CustomEvent<{ section?: string }>).detail)
+      events.push((e as CustomEvent<{ page?: string; group?: string }>).detail)
     }
     window.addEventListener('open-settings', listener)
     try {
@@ -212,7 +212,7 @@ describe('RemoteAccessModal FC', () => {
         viewProps.onSetPassword()
       })
       expect(onClose).toHaveBeenCalled()
-      expect(events).toEqual([{ section: 'remote' }])
+      expect(events).toEqual([{ page: 'remote', group: 'server' }])
     } finally {
       window.removeEventListener('open-settings', listener)
     }

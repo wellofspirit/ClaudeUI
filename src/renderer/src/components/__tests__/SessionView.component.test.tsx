@@ -80,9 +80,9 @@ vi.mock('../QuitWorktreeModal', () => ({
 // hosts it on desktop is unmounted when it closes, so it cannot both dismiss the
 // drawer and survive). Stubbed so the assertion is about the routing, not about
 // the ~200KB settings-sections tree.
-let settingsProps: { initialScope?: string; initialSection?: string } | undefined
+let settingsProps: { initialTarget?: { page?: string; group?: string } } | undefined
 vi.mock('../SettingsDialog', () => ({
-  SettingsDialog: (props: { initialScope?: string; initialSection?: string }) => {
+  SettingsDialog: (props: { initialTarget?: { page?: string; group?: string } }) => {
     settingsProps = props
     return <div data-testid="SettingsDialog" />
   }
@@ -270,12 +270,16 @@ describe('SessionView — mobile task takeover', () => {
     expect(screen.queryByTestId('SettingsDialog')).not.toBeInTheDocument()
 
     await act(async () => {
-      window.dispatchEvent(new CustomEvent('open-settings', { detail: { section: 'sandbox' } }))
+      window.dispatchEvent(
+        new CustomEvent('open-settings', { detail: { page: 'claude', group: 'sandbox' } })
+      )
     })
 
     expect(screen.getByTestId('SettingsDialog')).toBeInTheDocument()
-    // The owning scope is inferred from the section, as SettingsPanel does.
-    expect(settingsProps).toMatchObject({ initialScope: 'claude', initialSection: 'sandbox' })
+    // The target is forwarded verbatim, as SettingsPanel does on desktop.
+    expect(settingsProps).toMatchObject({
+      initialTarget: { page: 'claude', group: 'sandbox' }
+    })
   })
 
   it('desktop: SessionView ignores open-settings (SettingsPanel still owns it)', async () => {
@@ -283,7 +287,9 @@ describe('SessionView — mobile task takeover', () => {
     await renderSessionView()
 
     await act(async () => {
-      window.dispatchEvent(new CustomEvent('open-settings', { detail: { section: 'sandbox' } }))
+      window.dispatchEvent(
+        new CustomEvent('open-settings', { detail: { page: 'claude', group: 'sandbox' } })
+      )
     })
 
     expect(screen.queryByTestId('SettingsDialog')).not.toBeInTheDocument()

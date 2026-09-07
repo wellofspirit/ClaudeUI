@@ -25,11 +25,11 @@ The reason it exists: better-sqlite3 does not merely fail under bun, it takes th
 
 ## Settings & config
 
-`SettingsDialog/` renders **scope tabs** — Common / Claude / opencode — each with a scoped section list and a single focused section pane (`settings-sections.tsx` exports `SECTIONS` + `SCOPES`; the old tier-tree/scroll-spy IA is gone). Sections are **capability-gated** per scope engine (`SECTION_CAPABILITY` + `isSectionVisible`; e.g. sandbox/proxy hide for engines without them).
+`SettingsDialog/` renders the **ADR-065 page model**: eleven pages in three rail groups (App / Features / Engines), each page an ordered list of groups, each group a card of rows built from one `SettingRow` vocabulary (`settings-pages.tsx` exports `PAGES`, `RAIL_GROUPS`, `SECTION_TARGET`; `settings-sections.tsx` still holds the per-item render bodies as `SECTIONS`, which the mobile view consumes through a legacy adapter until its own phase lands). The old scope tabs (Common / Claude / opencode / pi) are gone from the desktop dialog; a group whose values differ per engine declares `byEngine` item lists and renders an engine segment, a setting that exists for some engines only carries an engine chip, and groups gated on a capability declare `requires: 'sandbox' | 'proxy'` (evaluated against the page's engine). Where a group writes lives on its header as a storage tag; it is information, never navigation. Deep links are `open-settings` events with `{ page, group? }`.
 
 - **Neutral autonomy modes** — `AutonomyMode = 'plan' | 'ask' | 'autoEdit' | 'full'`, mapped per engine (Claude permission modes; opencode rulesets per ADR-022), gated on `capabilities.autonomyModes`.
-- **Claude scope** — permission rules (allow/deny/ask at user/project/local scope), sandbox, proxy, dispatch config.
-- **opencode scope** — native opencode config edited in the UI and written to opencode's own files (models, custom providers, agents — ADR-028/029/031), plus dispatch config.
+- **Claude-owned config** (Sessions & autonomy + Engines › Claude pages) — permission rules (allow/deny/ask at user/project/local scope), sandbox, proxy, dispatch config.
+- **opencode-owned config** (Engines › opencode + Models & providers pages) — native opencode config edited in the UI and written to opencode's own files (models, custom providers, agents — ADR-028/029/031), plus dispatch config.
 - **Vendors** — the Anthropic form (endpoint + model override) is editable; writes go to `vendors/anthropic.json` and apply at spawn.
 - **Spawn wiring** — `session:create` sources launch params from the engine/vendor stores; the vendor derives from the active model's `ModelRef`. `config:save-settings` strips engine/vendor-owned fields from incoming payloads.
 - A read-time, idempotent migration (`ui-config.migrateConfigPlane()`) moved legacy flat-settings fields into the engine/vendor stores.

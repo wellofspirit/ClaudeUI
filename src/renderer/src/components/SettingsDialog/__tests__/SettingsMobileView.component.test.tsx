@@ -88,9 +88,9 @@ describe('SettingsDialog mobile fork', () => {
 
     expect(screen.getByTestId('SettingsDialog')).toBeInTheDocument()
     expect(screen.queryByTestId('SettingsMobileView')).not.toBeInTheDocument()
-    // The desktop structure is the side nav + a single focused section pane —
-    // no accordions, and the search input still autofocuses.
-    expect(screen.getAllByTestId('SettingsDialog.navItem').length).toBeGreaterThan(0)
+    // The desktop structure is the page rail + one scrolling page of group
+    // cards — no accordions, and the search input still autofocuses.
+    expect(screen.getAllByTestId('SettingsDialog.railItem').length).toBeGreaterThan(0)
     expect(screen.queryAllByTestId('SettingsMobileView.section')).toHaveLength(0)
     expect(screen.getByTestId('SettingsDialog.search')).toHaveFocus()
   })
@@ -222,7 +222,7 @@ describe('SettingsDialog mobile fork', () => {
     })
 
     it('a deep-linked section opens expanded, on its owning tab', async () => {
-      await renderDialog({ onClose, initialSection: 'sandbox' })
+      await renderDialog({ onClose, initialTarget: { page: 'claude', group: 'sandbox' } })
       expect(
         screen.getAllByTestId('SettingsMobileView.tab').find((t) => t.dataset.id === 'claude')
       ).toHaveAttribute('data-active', 'true')

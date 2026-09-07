@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { SettingsDialogViewProps } from './View'
+import type { AppSettings } from '../../stores/session-store'
+import type { EngineConfig, VendorConfig } from '../../../../shared/types'
 import {
   SCOPES,
   firstSectionOfScope,
@@ -8,14 +9,38 @@ import {
   type Section,
   type SettingsScope
 } from './settings-sections'
+import { targetToLegacy } from './settings-pages'
+import type { SettingsTarget, VersionInfo } from './settings-target'
 import { useSwipeTabs } from '../../hooks/useSwipeTabs'
+
+/**
+ * The phone's props. Deliberately NOT the desktop view's: this view runs on the
+ * legacy scope/section model and owns that navigation state itself, so neither
+ * fork carries the other's (ADR-065 phase 5 puts mobile on the page model).
+ */
+export interface SettingsMobileViewProps {
+  settings: AppSettings
+  updateSettings: (patch: Partial<AppSettings>) => void
+  engineConfig: EngineConfig
+  updateEngineConfig: (patch: Partial<EngineConfig>) => void
+  vendorConfig: VendorConfig
+  updateVendorConfig: (patch: Partial<VendorConfig>) => void
+  versionInfo: VersionInfo | null
+  search: string
+  onSearchChange: (value: string) => void
+  onClose: () => void
+  /** A page/group deep link, mapped onto the owning tab + section. */
+  initialTarget?: SettingsTarget
+}
 
 /**
  * Mobile (viewport ≤768px) settings UI — ADR-048's content-takeover pattern.
  *
- * The desktop dialog is a fixed 760×540 box: a 178px section nav on the left, a
- * single focused section on the right. Neither half survives a 360px phone, so
- * this view re-presents the SAME data with the same container behind it:
+ * The desktop dialog is a 1040×700 modal: a 204px page rail on the left, one
+ * scrolling page of group cards on the right. Neither half survives a 360px
+ * phone, so this view re-presents the SAME settings with the same container
+ * behind it — still on the legacy scope/section model, which ADR-065 phase 5
+ * replaces with the page model:
  *
  *   • a 4-scope tab bar (the desktop segmented control, widened to fill), with a
  *     horizontal swipe on the content area as the second way to move between
@@ -41,11 +66,11 @@ const SCOPE_LABEL: Record<SettingsScope, string> = Object.fromEntries(
 ) as Record<SettingsScope, string>
 
 /**
- * The desktop View's search predicate, applied per section.
+ * The search predicate, applied per SECTION.
  *
- * Duplicated rather than lifted because `View.tsx` must stay byte-identical in
- * this change; if it is ever touched, this and the inline copy there should
- * become one exported helper.
+ * Not shared with the desktop `searchSettings`: that one matches per ITEM
+ * against the page model, and this view has no pages yet. The two converge in
+ * ADR-065 phase 5, when mobile moves onto the page model too.
  */
 function sectionMatches(section: Section, q: string): boolean {
   if (section.label.toLowerCase().includes(q)) return true
@@ -100,7 +125,7 @@ function ChevronIcon({ open }: { open: boolean }): React.JSX.Element {
 
 /** Props every accordion needs to render its pane, forwarded unchanged. */
 type RenderProps = Pick<
-  SettingsDialogViewProps,
+  SettingsMobileViewProps,
   | 'settings'
   | 'updateSettings'
   | 'engineConfig'
@@ -170,13 +195,44 @@ export function SettingsMobileView({
   vendorConfig,
   updateVendorConfig,
   versionInfo,
-  activeScope,
-  onSelectScope,
-  activeSectionId,
   search,
   onSearchChange,
-  onClose
-}: SettingsDialogViewProps): React.JSX.Element {
+  onClose,
+  initialTarget
+}: SettingsMobileViewProps): React.JSX.Element {
+  /**
+   * Tab + section, in the legacy vocabulary. A `{ page, group }` deep link is
+   * translated once by `targetToLegacy`, which resolves to the section that now
+   * lives in that group — so the composer's sandbox pill still lands on the
+   * Claude tab with Sandbox unfolded, exactly as before ADR-065.
+   */
+  const seed = useMemo(
+    () => (initialTarget ? targetToLegacy(initialTarget) : { scope: 'common' as SettingsScope }),
+    [initialTarget]
+  )
+  const [activeScope, setActiveScope] = useState<SettingsScope>(seed.scope)
+  const [activeSectionId, setActiveSectionId] = useState<string>(
+    seed.section ?? firstSectionOfScope(seed.scope)
+  )
+
+  const targetPage = initialTarget?.page
+  const targetGroup = initialTarget?.group
+  useEffect(() => {
+    if (!targetPage) return
+    const next = targetToLegacy({ page: targetPage, group: targetGroup })
+    setActiveScope(next.scope)
+    setActiveSectionId(next.section ?? firstSectionOfScope(next.scope))
+  }, [targetPage, targetGroup])
+
+  /**
+   * Switching tab always selects that scope's FIRST section — the rule the
+   * deep-link effect below uses to tell a tab switch apart from a link.
+   */
+  const onSelectScope = useCallback((scope: SettingsScope): void => {
+    setActiveScope(scope)
+    setActiveSectionId(firstSectionOfScope(scope))
+  }, [])
+
   /**
    * Which sections are unfolded. One flat set of section ids rather than a
    * per-scope map, because a section id belongs to exactly one scope (guarded in
@@ -196,9 +252,9 @@ export function SettingsMobileView({
   }, [])
 
   /**
-   * A deep link (`initialSection`, e.g. the composer's sandbox pill) lands on
+   * A deep link (`initialTarget`, e.g. the composer's sandbox pill) lands on
    * the owning tab AND should unfold the section it named. It is told apart from
-   * an ordinary tab switch by the container's own rule: switching scope always
+   * an ordinary tab switch by this view's own rule: switching scope always
    * selects that scope's FIRST section, so anything else was asked for.
    */
   useEffect(() => {

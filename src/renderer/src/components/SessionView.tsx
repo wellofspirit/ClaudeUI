@@ -20,7 +20,7 @@ import { useIsMobile, useVisualViewportHeight } from '../hooks/useIsMobile'
 import { QuitWorktreeModal } from './QuitWorktreeModal'
 import { RemoteServeBanner } from './RemoteServeBanner'
 import { SettingsDialog } from './SettingsDialog'
-import { SECTION_SCOPE_MAP, type SettingsScope } from './SettingsDialog/settings-sections'
+import type { SettingsTarget } from './SettingsDialog/settings-target'
 import { nextPermissionMode, autoModeAvailableForEngine } from '../../../shared/permission-modes'
 
 export const SidebarContext = createContext<{
@@ -184,10 +184,8 @@ export function SessionView(): React.JSX.Element {
    * Settings dismiss the drawer. Desktop is untouched: `SettingsPanel` still
    * owns the dialog there, and this branch never renders.
    */
-  const [mobileSettings, setMobileSettings] = useState<{
-    scope?: SettingsScope
-    section?: string
-  } | null>(null)
+  // null = closed. `{}`-shaped detail opens with no target (the last page).
+  const [mobileSettings, setMobileSettings] = useState<{ target?: SettingsTarget } | null>(null)
 
   // Git repo detection and polling
   useGitWatcher()
@@ -225,11 +223,9 @@ export function SessionView(): React.JSX.Element {
       return
     }
     const handler = (event: Event): void => {
-      const detail = (event as CustomEvent<{ scope?: SettingsScope; section?: string }>).detail
+      const detail = (event as CustomEvent<Partial<SettingsTarget> | undefined>).detail
       setMobileSettings({
-        scope:
-          detail?.scope ?? (detail?.section ? SECTION_SCOPE_MAP.get(detail.section) : undefined),
-        section: detail?.section
+        target: detail?.page ? { page: detail.page, group: detail.group } : undefined
       })
       setSidebarCollapsed(true)
     }
@@ -405,8 +401,7 @@ export function SessionView(): React.JSX.Element {
       {isMobile && mobileSettings && (
         <SettingsDialog
           onClose={() => setMobileSettings(null)}
-          initialScope={mobileSettings.scope}
-          initialSection={mobileSettings.section}
+          initialTarget={mobileSettings.target}
         />
       )}
       {/* App-level (not per-session) notice: `tailscale serve` failed while TLS

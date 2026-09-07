@@ -262,7 +262,7 @@ describe('PiVendors', () => {
   })
 
   it('renders only the shared ChatGPT settings link and never removes its pi credential directly', async () => {
-    const opened: Array<{ scope?: string; section?: string }> = []
+    const opened: Array<{ page?: string; group?: string }> = []
     const listener = (event: Event): void => {
       opened.push((event as CustomEvent).detail)
     }
@@ -272,7 +272,7 @@ describe('PiVendors', () => {
     expect(screen.getByTestId('PiVendors.sharedChatgpt')).toBeInTheDocument()
     expect(screen.queryByTestId('PiVendors.disconnectCodex')).not.toBeInTheDocument()
     fireEvent.click(screen.getByTestId('PiVendors.openSharedProviders'))
-    expect(opened).toEqual([{ scope: 'common', section: 'shared-providers' }])
+    expect(opened).toEqual([{ page: 'models', group: 'providers' }])
     expect(vendorAuthRemove).not.toHaveBeenCalledWith('pi', 'openai-codex')
     window.removeEventListener('open-settings', listener)
   })

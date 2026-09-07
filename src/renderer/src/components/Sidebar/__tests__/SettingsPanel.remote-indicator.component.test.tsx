@@ -14,9 +14,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { RemoteStatusView } from '../../../../../shared/types'
-import type { SettingsScope } from '../../SettingsDialog/settings-sections'
+import type { SettingsTarget } from '../../SettingsDialog/settings-target'
 
-let dialogProps: { initialScope?: SettingsScope; initialSection?: string } | undefined
+let dialogProps: { initialTarget?: SettingsTarget } | undefined
 vi.mock('../../SettingsDialog', () => ({
   SettingsDialog: (props: typeof dialogProps) => {
     dialogProps = props
@@ -175,7 +175,7 @@ describe('SettingsPanel remote indicator — web', () => {
     fireEvent.click(screen.getByTestId('WebRemoteStatusModal.openSettings'))
 
     await waitFor(() =>
-      expect(dialogProps).toMatchObject({ initialScope: 'common', initialSection: 'remote' })
+      expect(dialogProps).toMatchObject({ initialTarget: { page: 'remote', group: 'server' } })
     )
     // Left mounted, the overlay would cover the dialog it just opened.
     expect(screen.queryByTestId('WebRemoteStatusModal')).toBeNull()
@@ -246,7 +246,7 @@ describe('SettingsPanel remote indicator — web, mobile viewport', () => {
       fireEvent.click(screen.getByTestId('WebRemoteStatusModal.openSettings'))
 
       expect(seen).toHaveLength(1)
-      expect(seen[0].detail).toEqual({ scope: 'common', section: 'remote' })
+      expect(seen[0].detail).toEqual({ page: 'remote', group: 'server' })
       expect(screen.queryByTestId('SettingsDialog')).toBeNull()
       expect(dialogProps).toBeUndefined()
       expect(screen.queryByTestId('WebRemoteStatusModal')).toBeNull()

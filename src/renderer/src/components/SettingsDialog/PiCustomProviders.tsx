@@ -309,7 +309,7 @@ function ManagedNotice({
         onClick={() =>
           window.dispatchEvent(
             new CustomEvent('open-settings', {
-              detail: { scope: 'common', section: 'shared-providers' }
+              detail: { page: 'models', group: 'providers' }
             })
           )
         }

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { SettingsDialog, SettingsToggle } from '../SettingsDialog'
-import { SECTION_SCOPE_MAP, type SettingsScope } from '../SettingsDialog/settings-sections'
+import type { SettingsTarget } from '../SettingsDialog/settings-target'
 import { UsageRing } from './UsagePanel'
 
 // Lazy: the modal tree + qrcode must not ride the eager App chunk — the mount
@@ -40,10 +40,8 @@ export function SettingsPanel(): React.JSX.Element {
   const isMobile = useIsMobile()
   const [open, setOpen] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
-  const [settingsTarget, setSettingsTarget] = useState<{
-    scope?: SettingsScope
-    section?: string
-  }>({})
+  // undefined = no target; the dialog opens on its last page for this app run.
+  const [settingsTarget, setSettingsTarget] = useState<SettingsTarget | undefined>(undefined)
   const [remoteModalOpen, setRemoteModalOpen] = useState(false)
   const [remoteRunning, setRemoteRunning] = useState(false)
   const [remoteClients, setRemoteClients] = useState(0)
@@ -109,16 +107,12 @@ export function SettingsPanel(): React.JSX.Element {
   useEffect(() => {
     if (isMobile) {
       setDialogOpen(false)
-      setSettingsTarget({})
+      setSettingsTarget(undefined)
       return
     }
     const handler = (event: Event): void => {
-      const detail = (event as CustomEvent<{ scope?: SettingsScope; section?: string }>).detail
-      setSettingsTarget({
-        scope:
-          detail?.scope ?? (detail?.section ? SECTION_SCOPE_MAP.get(detail.section) : undefined),
-        section: detail?.section
-      })
+      const detail = (event as CustomEvent<Partial<SettingsTarget> | undefined>).detail
+      setSettingsTarget(detail?.page ? { page: detail.page, group: detail.group } : undefined)
       setDialogOpen(true)
     }
     window.addEventListener('open-settings', handler)
@@ -143,11 +137,11 @@ export function SettingsPanel(): React.JSX.Element {
     setOpen(false)
     if (isMobile) {
       window.dispatchEvent(
-        new CustomEvent('open-settings', { detail: { scope: 'common', section: 'remote' } })
+        new CustomEvent('open-settings', { detail: { page: 'remote', group: 'server' } })
       )
       return
     }
-    setSettingsTarget({ scope: 'common', section: 'remote' })
+    setSettingsTarget({ page: 'remote', group: 'server' })
     setDialogOpen(true)
   }, [isMobile])
 
@@ -218,7 +212,7 @@ export function SettingsPanel(): React.JSX.Element {
                 window.dispatchEvent(new CustomEvent('open-settings', { detail: {} }))
                 return
               }
-              setSettingsTarget({})
+              setSettingsTarget(undefined)
               setDialogOpen(true)
             }}
             className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 mt-1 mb-0.5 text-[12px] text-text-muted hover:text-accent transition-colors cursor-default border-t border-border/30 pt-2"
@@ -305,11 +299,7 @@ export function SettingsPanel(): React.JSX.Element {
         </button>
       </div>
       {dialogOpen && (
-        <SettingsDialog
-          onClose={() => setDialogOpen(false)}
-          initialScope={settingsTarget.scope}
-          initialSection={settingsTarget.section}
-        />
+        <SettingsDialog onClose={() => setDialogOpen(false)} initialTarget={settingsTarget} />
       )}
       {remoteModalOpen && (
         <Suspense fallback={null}>
