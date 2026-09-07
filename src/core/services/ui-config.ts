@@ -14,6 +14,8 @@ const SLASH_COMMANDS_FILE = path.join(CONFIG_DIR, 'slash-commands.json')
 const LEGACY_CONFIG_FILE = path.join(CONFIG_DIR, 'config.json')
 const ENGINES_DIR = path.join(CONFIG_DIR, 'engines')
 const VENDORS_DIR = path.join(CONFIG_DIR, 'vendors')
+/** The engine-shared classifier trust lists (ADR-065 § Shared trust lists). */
+const SHARED_AUTOMODE_FILE = path.join(CONFIG_DIR, 'automode.json')
 
 export interface UISettings {
   [key: string]: unknown
@@ -167,9 +169,140 @@ function migrateConfigPlane(): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Shared classifier trust lists — ~/.claude/ui/automode.json (ADR-065 phase 4)
+// ---------------------------------------------------------------------------
+
+/** The three keys that moved out of `engines/<engine>.json#autoMode`. */
+const TRUST_LIST_KEYS = ['trustedDomains', 'trustedRegistries', 'protectedPatterns'] as const
+type TrustListKey = (typeof TRUST_LIST_KEYS)[number]
+
+/** The engines that ever wrote a trust list — Claude runs cli.js's classifier. */
+const TRUST_LIST_ENGINES = ['opencode', 'pi'] as const
+
+/**
+ * The one on-disk representation of a list entry: trimmed and non-empty. The
+ * IPC perimeter enforces the same shape on writes, so a value that survives the
+ * migration is always a value the settings UI can save back.
+ */
+function normalizeTrustEntries(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null
+  const out: string[] = []
+  for (const entry of value) {
+    if (typeof entry !== 'string') continue
+    const trimmed = entry.trim()
+    if (trimmed) out.push(trimmed)
+  }
+  return out
+}
+
+let sharedTrustListsMigrated = false
+
+/**
+ * Union the two engines' old trust lists into `automode.json`, ONCE.
+ *
+ * Read-time and idempotent, like {@link migrateConfigPlane}. UNION rather than
+ * "first one wins" because the lists are permissions in reverse: dropping a
+ * trusted host from one engine's judge would silently make that judge stricter
+ * than the user configured it, and there is no UI left to notice with. Order is
+ * existing shared → opencode → pi, deduped on the exact string; nothing is ever
+ * dropped.
+ *
+ * The engine files are then stripped of the three keys and rewritten, so the
+ * next `loadEngineConfig` sees the block `AutoModeConfig` now describes. A
+ * second run finds no key to strip and writes nothing — including on a fresh
+ * install, which must NOT gain an empty `automode.json`.
+ */
+function migrateSharedTrustLists(): void {
+  if (sharedTrustListsMigrated) return
+  sharedTrustListsMigrated = true
+
+  try {
+    const shared =
+      readJson<import('../../shared/types').SharedAutoModeConfig>(SHARED_AUTOMODE_FILE) ?? {}
+    const merged: Record<TrustListKey, string[]> = {
+      trustedDomains: normalizeTrustEntries(shared.trustedDomains) ?? [],
+      trustedRegistries: normalizeTrustEntries(shared.trustedRegistries) ?? [],
+      protectedPatterns: normalizeTrustEntries(shared.protectedPatterns) ?? []
+    }
+
+    // True once any engine file actually CARRIED one of the keys. It is what
+    // gates the write, so a re-run (nothing left to strip) touches no file.
+    let stripped = false
+
+    for (const engineId of TRUST_LIST_ENGINES) {
+      const filePath = path.join(ENGINES_DIR, `${engineId}.json`)
+      const raw = readJson<Record<string, unknown>>(filePath)
+      if (!raw || typeof raw !== 'object') continue
+      const auto = raw.autoMode
+      if (!auto || typeof auto !== 'object' || Array.isArray(auto)) continue
+      const autoBlock = auto as Record<string, unknown>
+
+      let engineChanged = false
+      for (const key of TRUST_LIST_KEYS) {
+        if (!(key in autoBlock)) continue
+        const entries = normalizeTrustEntries(autoBlock[key])
+        if (entries === null) {
+          // A hand-edited non-array. Nothing to union; the key is dead once
+          // `AutoModeConfig` stops declaring it, so it goes too.
+          logger.warn(
+            'UIConfig',
+            `engines/${engineId}.json autoMode.${key} is not an array — dropped by the shared-trust-list migration`
+          )
+        } else {
+          for (const entry of entries) {
+            if (!merged[key].includes(entry)) merged[key].push(entry)
+          }
+        }
+        delete autoBlock[key]
+        engineChanged = true
+        stripped = true
+      }
+      if (engineChanged) writeJson(filePath, raw)
+    }
+
+    if (!stripped) return
+
+    const next: import('../../shared/types').SharedAutoModeConfig = {}
+    for (const key of TRUST_LIST_KEYS) {
+      if (merged[key].length > 0) next[key] = merged[key]
+    }
+    writeJson(SHARED_AUTOMODE_FILE, next)
+  } catch (err) {
+    logger.warn('UIConfig', 'Shared trust-list migration failed', err)
+  }
+}
+
+/**
+ * The shared trust lists. Runs the migration first: a session can read these
+ * before anything has called {@link loadSettings}, and reading a not-yet-created
+ * `automode.json` would hand the judge empty lists while the values still sat in
+ * the engine file.
+ */
+export function loadSharedAutoModeConfig(): import('../../shared/types').SharedAutoModeConfig {
+  migrateSharedTrustLists()
+  return readJson<import('../../shared/types').SharedAutoModeConfig>(SHARED_AUTOMODE_FILE) ?? {}
+}
+
+/** Replaces the shared trust lists. An empty list is written as an ABSENT key. */
+export function saveSharedAutoModeConfig(
+  config: import('../../shared/types').SharedAutoModeConfig
+): void {
+  // The migration must not run AFTER this write and re-union stale engine
+  // entries on top of a list the user just emptied.
+  migrateSharedTrustLists()
+  const next: import('../../shared/types').SharedAutoModeConfig = {}
+  for (const key of TRUST_LIST_KEYS) {
+    const entries = normalizeTrustEntries(config[key])
+    if (entries && entries.length > 0) next[key] = entries
+  }
+  writeJson(SHARED_AUTOMODE_FILE, next)
+}
+
 export function loadSettings(): UISettings {
   ensureMigrated()
   migrateConfigPlane()
+  migrateSharedTrustLists()
   return readJson<UISettings>(SETTINGS_FILE) ?? {}
 }
 

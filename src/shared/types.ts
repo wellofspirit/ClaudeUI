@@ -708,11 +708,33 @@ export interface AutoModeConfig {
   judgeModel?: string
   /** Two-stage classifier mode. Defaults to 'both'. */
   twoStageMode?: 'both' | 'fast' | 'thinking'
-  /** Trust lists fed to the classifier's Environment section (phase 2 of
-   *  `docs/automode-rework-plan.md`). Every slot defaults to EMPTY, and an empty
-   *  slot means "nothing is trusted" rather than "anything goes" — the policy
-   *  renders the restrictive fallback text for it (see `EnvironmentInfo`).
-   *  External domains/services the agent may send data to. */
+  // The three trust lists that used to live here moved to
+  // {@link SharedAutoModeConfig} in ADR-065 phase 4 — they are the same values
+  // for every engine, and keeping a copy per engine meant dropping a trusted
+  // host from one judge and not the other. A read-time migration in
+  // `ui-config.ts` unions the two engines' old lists into the shared file once.
+}
+
+/**
+ * The classifier trust lists, shared by every engine that runs ClaudeUI's own
+ * judge — ONE file, `~/.claude/ui/automode.json` (ADR-065 § Shared trust lists).
+ *
+ * These are not per-engine settings and never were: they describe the user's
+ * environment (which hosts, registries and resources are trusted), not how a
+ * particular engine judges. OpencodeSession and PiSession DERIVE them into the
+ * classifier environment at session start, alongside the per-engine
+ * `AutoModeConfig` (judge model, two-stage mode, master switch), which stays in
+ * `engines/<engineId>.json`. Claude cannot consume them — cli.js ships its own
+ * classifier — which is why the settings badge reads "opencode · pi".
+ *
+ * Every slot defaults to EMPTY, and an empty slot means "nothing is trusted"
+ * rather than "anything goes": the policy renders the restrictive fallback text
+ * for it (see `EnvironmentInfo`). An empty list is therefore stored as an ABSENT
+ * key — the sessions read them behind `?.length`, so `[]` is not a distinct
+ * state and storing it would invent a second encoding of one meaning.
+ */
+export interface SharedAutoModeConfig {
+  /** External domains/services the agent may send data to or fetch from. */
   trustedDomains?: string[]
   /** Package registries beyond the project manifest's default. */
   trustedRegistries?: string[]
@@ -1253,6 +1275,10 @@ interface SessionAPI {
   saveEngineConfig(engineId: string, config: EngineConfig): Promise<void>
   loadVendorConfig(vendorId: string): Promise<VendorConfig>
   saveVendorConfig(vendorId: string, config: VendorConfig): Promise<void>
+  /** The engine-shared classifier trust lists (`~/.claude/ui/automode.json`). */
+  loadSharedAutoMode(): Promise<SharedAutoModeConfig>
+  /** Replaces the shared trust lists wholesale; an empty list is stored absent. */
+  saveSharedAutoMode(config: SharedAutoModeConfig): Promise<void>
   /** Load opencode's engine-native config from opencode's own global config file. */
   loadOpencodeSettings(): Promise<OpencodeConfigSettings>
   /** Save opencode's engine-native config to opencode's own global config file. */

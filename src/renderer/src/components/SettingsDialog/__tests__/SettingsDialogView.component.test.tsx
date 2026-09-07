@@ -6,7 +6,7 @@
  * explicit props and asserts what it renders and which callbacks it fires.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, act, within } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { SettingsDialogView, type SettingsDialogViewProps } from '../View'
 import { DEFAULT_SETTINGS, useSessionStore } from '../../../stores/session-store'
@@ -166,6 +166,30 @@ describe('the page pane', () => {
   it('shows the group badge', () => {
     renderView({ activePage: 'sessions' })
     expect(screen.getAllByTestId('SettingsGroup.badge')[0]).toHaveTextContent('All engines')
+  })
+
+  it('gives the shared trust lists their own group after the judge (ADR-065 phase 4)', async () => {
+    renderView({ activePage: 'sessions' })
+
+    // Its own card, badged for the two engines that can consume it and tagged
+    // with the ONE file it writes — not `engines/<engine>.json` like the judge
+    // group above it.
+    const group = byId('SettingsGroup', 'trust')
+    expect(group).toBeInTheDocument()
+    const header = within(group)
+    expect(header.getByTestId('SettingsGroup.badge')).toHaveTextContent('opencode · pi')
+    expect(header.getByTestId('SettingsGroup.storage')).toHaveTextContent('automode.json')
+    // No engine segment: one set of values, not one per engine — unlike the
+    // judge group directly above it, which has one.
+    expect(header.queryByTestId('SettingsGroup.engineSegment')).not.toBeInTheDocument()
+    expect(
+      byId('SettingsGroup', 'judge').querySelector('[data-testid="SettingsGroup.engineSegment"]')
+    ).not.toBeNull()
+
+    // The real editor mounts and reaches its own channel.
+    await screen.findByTestId('TrustListsSection.trustedDomains')
+    expect(screen.getByTestId('TrustListsSection.trustedRegistries')).toBeInTheDocument()
+    expect(screen.getByTestId('TrustListsSection.protectedPatterns')).toBeInTheDocument()
   })
 
   it('hides a capability-gated group when the page engine lacks it', () => {

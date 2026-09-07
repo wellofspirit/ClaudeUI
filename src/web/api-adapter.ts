@@ -930,6 +930,12 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       >,
     saveVendorConfig: (vendorId, config) =>
       connection.invoke('config:save-vendor-config', vendorId, config) as Promise<void>,
+    loadSharedAutoMode: () =>
+      connection.invoke('config:load-shared-automode') as ReturnType<
+        ClaudeAPI['loadSharedAutoMode']
+      >,
+    saveSharedAutoMode: (config) =>
+      connection.invoke('config:save-shared-automode', config) as Promise<void>,
     loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
     saveOpencodeSettings: (settings) => unwrap('config:save-opencode-settings', settings),
     readOpencodeNativeRaw: () => unwrap('config:read-opencode-native-raw'),

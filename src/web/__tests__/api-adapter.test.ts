@@ -324,6 +324,12 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     channel: 'config:save-engine-config',
     args: ['opencode', { autoMode: { enabled: true } }]
   },
+  { method: 'loadSharedAutoMode', channel: 'config:load-shared-automode', args: [] },
+  {
+    method: 'saveSharedAutoMode',
+    channel: 'config:save-shared-automode',
+    args: [{ trustedDomains: ['files.acme.com'] }]
+  },
   { method: 'loadVendorConfig', channel: 'config:load-vendor-config', args: ['anthropic'] },
   {
     method: 'saveVendorConfig',

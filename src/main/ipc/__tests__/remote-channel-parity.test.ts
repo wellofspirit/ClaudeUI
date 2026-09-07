@@ -171,6 +171,26 @@ const S1B_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'que
 }
 
 /**
+ * ADR-065 phase 4 — the shared classifier trust lists, declared in the same
+ * shared module as the S1b family and therefore checked by the same equality.
+ *
+ * Its own table for the reason {@link REMOTE_VIEW_SWEEP} has one: S1B_SWEEP is
+ * the record of ONE dated sweep, and folding a later decision into it would
+ * make both unreadable. `config` because it is engine configuration like every
+ * other `config:*` verb here — what it writes is the judge's view of which
+ * hosts, registries and resources the user trusts, so the shape is validated at
+ * the perimeter (`config-commands-shared-automode.test.ts`) rather than by the
+ * id-segment guard the engine/vendor pairs use: this path carries no id.
+ */
+const TRUST_LIST_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'query' }> = {
+  'config:load-shared-automode': { capability: 'config', kind: 'query' },
+  'config:save-shared-automode': { capability: 'config', kind: 'command' }
+}
+
+/** Every channel the two shared config modules declare: S1b plus what followed. */
+const SHARED_CONFIG_SWEEP = { ...S1B_SWEEP, ...TRUST_LIST_SWEEP }
+
+/**
  * The 2026-08-28 status-view ruling, in the same shape as {@link S1B_SWEEP} and
  * deliberately NOT inside it — that table is the record of one dated sweep, and
  * folding a later decision into it would make both unreadable.
@@ -257,14 +277,14 @@ describe('remote channel parity (R5)', () => {
       found.set(m[1], { capability: m[2] as Capability, kind: m[3] })
     }
     expect(Object.fromEntries([...found].sort())).toEqual(
-      Object.fromEntries(Object.entries(S1B_SWEEP).sort())
+      Object.fromEntries(Object.entries(SHARED_CONFIG_SWEEP).sort())
     )
 
     const registrars = [
       read('src/core/ipc/session.ipc.ts'),
       read('src/core/ipc/remote-handlers.ts')
     ].join('\n')
-    const inline = Object.keys(S1B_SWEEP)
+    const inline = Object.keys(SHARED_CONFIG_SWEEP)
       .filter((c) => registrars.includes(`channel: '${c}'`))
       .sort()
     expect(
@@ -295,11 +315,11 @@ describe('remote channel parity (R5)', () => {
     // from the remote UI. `git`, `config` and `chat` are all in AUTH_OFF_GRANTS,
     // so an ordinary authenticated connection reaches every one of them.
     const declared = remoteDeclarations()
-    const missing = Object.keys(S1B_SWEEP)
+    const missing = Object.keys(SHARED_CONFIG_SWEEP)
       .filter((c) => !declared.has(c))
       .sort()
     expect(missing, `S1b channels with no remote registration: ${missing.join(', ')}`).toEqual([])
-    const ungranted = Object.keys(S1B_SWEEP)
+    const ungranted = Object.keys(SHARED_CONFIG_SWEEP)
       .filter((c) => !AUTH_OFF_GRANTS.has(declared.get(c)!))
       .sort()
     expect(ungranted).toEqual([])

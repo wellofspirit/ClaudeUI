@@ -82,7 +82,7 @@ describe('PAGES structure', () => {
     const expected: Record<string, string[]> = {
       appearance: ['theme', 'layout', 'diff', 'status-line', 'git-panel'],
       chat: ['tool-output', 'thinking', 'voice', 'git-actions'],
-      sessions: ['autonomy', 'permissions', 'judge', 'retention'],
+      sessions: ['autonomy', 'permissions', 'judge', 'trust', 'retention'],
       advanced: ['logging', 'usage', 'about'],
       models: [
         'providers',

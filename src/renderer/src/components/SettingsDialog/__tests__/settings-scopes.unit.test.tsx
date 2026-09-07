@@ -50,13 +50,14 @@ describe('SCOPES structure', () => {
       expect(common.subgroups[0].label).toBeUndefined()
     })
 
-    it('contains the 14 app sections in order', () => {
+    it('contains the 15 app sections in order', () => {
       const ids = common.subgroups.flatMap((sg) => sg.sections.map((s) => s.id))
       expect(ids).toEqual([
         'appearance',
         'chat',
         'session',
         'autonomy',
+        'trust-lists',
         'shared-providers',
         'tool-output',
         'diff',

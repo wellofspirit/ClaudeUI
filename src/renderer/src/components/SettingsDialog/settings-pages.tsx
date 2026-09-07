@@ -324,10 +324,23 @@ export const PAGES: SettingsPage[] = [
         id: 'judge',
         label: 'Auto-mode judge',
         storage: engineFile,
+        appliesOn: 'next-session',
+        note: 'The judge sees tool calls, not their output. Read once per session — reopen a session to pick up a change.',
         byEngine: {
           opencode: itemsOf('opencode-automode'),
           pi: itemsOf('pi-automode')
         }
+      },
+      {
+        // Its own group, after the judge it feeds: one shared file, derived into
+        // whichever engine's judge runs (ADR-065 § Shared trust lists). Claude
+        // runs cli.js's own classifier and cannot consume these, which is what
+        // the badge says.
+        id: 'trust',
+        label: 'Trust & protection',
+        badge: 'opencode · pi',
+        storage: 'automode.json',
+        items: itemsOf('trust-lists')
       },
       { id: 'retention', label: 'Idle & retention', items: itemsOf('session') }
     ]
@@ -677,6 +690,7 @@ export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; gro
   permissions: { page: 'sessions', group: 'permissions' },
   'opencode-automode': { page: 'sessions', group: 'judge' },
   'pi-automode': { page: 'sessions', group: 'judge' },
+  'trust-lists': { page: 'sessions', group: 'trust' },
   session: { page: 'sessions', group: 'retention' },
 
   logging: { page: 'advanced', group: 'logging' },

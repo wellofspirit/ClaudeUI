@@ -43,7 +43,9 @@ const uiConfigMocks = vi.hoisted(() => ({
   saveSessionConfig: vi.fn(),
   loadSlashCommands: vi.fn(() => []),
   loadEngineConfig: vi.fn(() => ({})),
-  loadVendorConfig: vi.fn(() => ({}))
+  loadVendorConfig: vi.fn(() => ({})),
+  loadSharedAutoModeConfig: vi.fn(() => ({})),
+  saveSharedAutoModeConfig: vi.fn()
 }))
 
 vi.mock('../../../core/services/ui-config', () => uiConfigMocks)
@@ -1546,6 +1548,18 @@ const S1B_SWEEP_CHANNELS = [
 ] as const
 
 /**
+ * ADR-065 phase 4 — the engine-SHARED classifier trust lists.
+ *
+ * Their own pair rather than two more lines in {@link S1B_SWEEP_CHANNELS},
+ * which is the record of one dated sweep. Same reachability decision as that
+ * sweep's `config:*` half, for the same reason: this is engine configuration,
+ * and the phone must be able to edit it. What is different is where the guard
+ * sits — the path carries no id to traverse with, so the payload SHAPE is the
+ * perimeter (`config-commands-shared-automode.test.ts`).
+ */
+const TRUST_LIST_CHANNELS = ['config:load-shared-automode', 'config:save-shared-automode'] as const
+
+/**
  * S4 — the vendor-OAuth / account-mutation / native-OAuth family (ADR-057).
  *
  * The FIFTH deliberate widening, and like the S1b sweep it declares `config`
@@ -1662,6 +1676,7 @@ describe('remote surface parity (phase 1 port)', () => {
         ...AUTHCFG_CHANNELS,
         ...VOICE_CHANNELS,
         ...S1B_SWEEP_CHANNELS,
+        ...TRUST_LIST_CHANNELS,
         ...S4_VENDOR_CREDENTIAL_CHANNELS,
         ...REMOTE_VIEW_CHANNELS,
         ...IDE_CHANNELS
@@ -1674,7 +1689,7 @@ describe('remote surface parity (phase 1 port)', () => {
     // authenticated connection reaches these. Asserted through the CAPABILITY
     // (what dispatch actually checks) rather than by calling every handler —
     // most of them would touch the real filesystem.
-    const caps = S1B_SWEEP_CHANNELS.map(
+    const caps = [...S1B_SWEEP_CHANNELS, ...TRUST_LIST_CHANNELS].map(
       (c) => [c, commandRegistry.declaration(c)?.capability] as const
     )
     const ungranted = caps.filter(([, cap]) => !cap || !AUTH_OFF_GRANTS.has(cap))

@@ -56,6 +56,7 @@ import { ModelPicker } from '../shared/InlinePickers'
 import { toModelDisplays, selectedModelDisplay, StaleModelNotice } from './settings-model-display'
 import { SelectMenu } from '../shared/SelectMenu'
 import { OpencodeAgentsSection } from './OpencodeAgents'
+import { TrustListsSection } from './TrustLists'
 import { RemoteServerSettings } from './RemoteServerSettings'
 import { PiVendors } from './PiVendors'
 import { SharedProviders } from './SharedProviders'
@@ -567,49 +568,10 @@ const DISPATCH_MODEL_DEFAULT_LABEL = '(not set)'
 /** Label for the opencode default/small model pickers' "no explicit choice" row. */
 const OPENCODE_MODEL_DEFAULT_LABEL = 'Default (use opencode default)'
 
-/** The `AutoModeConfig` keys that hold a classifier trust/protection list. */
-type TrustListKey = 'trustedDomains' | 'trustedRegistries' | 'protectedPatterns'
-
-/**
- * The three trust lists spliced into the classifier environment
- * (src/main/automode/rules/policy.ts). Each `description` states what an EMPTY
- * list means, because for all three that is the load-bearing, non-obvious half
- * of the semantics — and for `protectedPatterns` a non-empty list REPLACES a
- * built-in heuristic rather than adding to it.
- */
-const TRUST_LISTS: ReadonlyArray<{
-  key: TrustListKey
-  label: string
-  placeholder: string
-  tooltip: string
-  description: string
-}> = [
-  {
-    key: 'trustedDomains',
-    label: 'Trusted domains',
-    placeholder: 'files.example.com',
-    tooltip:
-      'External destinations the judge may treat as safe to reach or send data to (web fetch, uploads, curl targets). Host names, not URLs.',
-    description: 'Empty = no external destination is trusted.'
-  },
-  {
-    key: 'trustedRegistries',
-    label: 'Trusted package registries',
-    placeholder: 'https://npm.internal.example',
-    tooltip:
-      'Registries the judge may treat as safe to install from. Anything else is an untrusted supply-chain source.',
-    description: "Empty = only the project manifest's default registry."
-  },
-  {
-    key: 'protectedPatterns',
-    label: 'Production / protected patterns',
-    placeholder: 'acme-live-*',
-    tooltip:
-      'Names, hosts, or resource patterns the judge must treat as production and refuse to mutate without a human. Setting any pattern REPLACES the built-in heuristic entirely.',
-    description:
-      "Empty = built-in heuristic: 'prod'/'production' as a whole word or segment. Setting this REPLACES the heuristic."
-  }
-]
+// The three classifier trust lists are NOT here any more: they are the same
+// values for every engine, so ADR-065 phase 4 moved them out of
+// `engines/<engine>.json#autoMode` into one shared file, edited by
+// `TrustLists.tsx` under Sessions & autonomy › Trust & protection.
 
 /**
  * Shared render/load/save core for the per-engine auto-mode editor.
@@ -631,30 +593,26 @@ const TRUST_LISTS: ReadonlyArray<{
  * exactly what both sessions feed to `engineMeta(<engine>).decodeModelValue()`
  * when resolving `autoMode.judgeModel`.
  *
- * `AutoModeConfig`'s trust lists (trustedDomains / trustedRegistries /
- * protectedPatterns) are edited here too, and are engine-neutral for the same
- * reason: both sessions splice them into the classifier environment with the
- * SAME `?.length` guard, so an EMPTY array and an ABSENT key are
- * indistinguishable to the backend. `updateList` therefore deletes the key
- * rather than storing `[]` — one on-disk representation for one meaning, and
- * `engines/<engine>.json` stays clean for hand-editing.
+ * What this editor does NOT own is the three trust lists: they are the same
+ * values for every engine, so ADR-065 phase 4 moved them to one shared file with
+ * its own group (`TrustLists.tsx`). Judge model, two-stage mode and the master
+ * switch are genuinely per engine and stay here.
  */
 function AutoModeSection({
   engineId,
   testid,
   installed,
   notInstalledMessage,
-  toggleTooltip,
-  judgeModelTooltip,
-  footerText
+  toggleDescription,
+  judgeModelDescription
 }: {
   engineId: EngineId
   testid: string
   installed: boolean | null
   notInstalledMessage: string
-  toggleTooltip: string
-  judgeModelTooltip: string
-  footerText: string
+  /** One sentence under the master switch — the ⓘ is gone (ADR-065). */
+  toggleDescription: string
+  judgeModelDescription: string
 }): React.JSX.Element {
   const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
@@ -673,20 +631,20 @@ function AutoModeSection({
       .catch(() => {})
   }, [engineId])
 
+  // Both gated states are description-only ROWS, not bespoke markup: a card of
+  // rows that sometimes isn't one was three of the six row grammars ADR-065
+  // counted. Same testid on every branch, per ADR-027.
   if (engineCfg === null || installed === null) {
     return (
-      <div data-testid={testid} className="px-3 py-1.5 text-[13px] text-text-muted">
-        Loading…
+      <div data-testid={testid}>
+        <SettingRow description="Loading…" />
       </div>
     )
   }
   if (!installed) {
     return (
-      <div
-        data-testid={testid}
-        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
-      >
-        {notInstalledMessage}
+      <div data-testid={testid}>
+        <SettingRow description={notInstalledMessage} />
       </div>
     )
   }
@@ -705,42 +663,30 @@ function AutoModeSection({
     window.api.saveEngineConfig(engineId, next).catch(() => {})
   }
 
-  // Trust lists: an empty list is written as an ABSENT key, never `[]`. The
-  // classifier reads them behind `?.length`, so `[]` is not a distinct state —
-  // storing it would invent a second encoding of "restrictive default".
-  const updateList = (key: TrustListKey, items: string[]): void => {
-    const nextAuto: AutoModeConfig = { ...auto }
-    if (items.length > 0) nextAuto[key] = items
-    else delete nextAuto[key]
-    const next: EngineConfig = { ...engineCfg, autoMode: nextAuto }
-    setEngineCfg(next)
-    window.api.saveEngineConfig(engineId, next).catch(() => {})
-  }
-
   return (
-    <div data-testid={testid} className="space-y-1">
+    <div data-testid={testid} className="divide-y divide-border/55">
       <SettingsToggle
         testid={`${testid}.enabled`}
         label="Auto mode (LLM gatekeeper)"
         checked={enabled}
         onChange={(v) => update({ enabled: v })}
-        tooltip={toggleTooltip}
+        description={toggleDescription}
       />
       {enabled && (
         <>
-          <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-            <div className="mb-1 flex items-center gap-1">
-              Judge model
-              <InfoTooltip text={judgeModelTooltip} />
-            </div>
-            {/* Themed dropdown, not a native <select>: a native option list is
-                painted by the OS with UA colors, so the inherited light-on-dark
-                text was unreadable under Monokai. ModelPicker (the InputBox /
-                AutomationConfig picker) renders options as real DOM styled from
-                the same theme tokens as everything else. The section-scoped
-                `.judgeModel` testid moves to this wrapper; the picker keeps its
-                own `ModelPicker.trigger` / `ModelPicker.option` ids. */}
-            <div data-testid={`${testid}.judgeModel`} data-value={judgeModel}>
+          {/* Themed dropdown, not a native <select>: a native option list is
+              painted by the OS with UA colors, so the inherited light-on-dark
+              text was unreadable under Monokai. ModelPicker (the InputBox /
+              AutomationConfig picker) renders options as real DOM styled from
+              the same theme tokens as everything else. The section-scoped
+              `.judgeModel` testid stays on the wrapper; the picker keeps its
+              own `ModelPicker.trigger` / `ModelPicker.option` ids. */}
+          <SettingRow
+            testid={`${testid}.judgeModelRow`}
+            label="Judge model"
+            description={judgeModelDescription}
+          >
+            <span data-testid={`${testid}.judgeModel`} data-value={judgeModel}>
               <ModelPicker
                 placement="down"
                 emptyOption={{ label: JUDGE_MODEL_DEFAULT_LABEL }}
@@ -748,32 +694,20 @@ function AutoModeSection({
                 selectedModel={selectedJudgeModel}
                 onSelectModel={(v) => update({ judgeModel: v || undefined })}
               />
-            </div>
-            <StaleModelNotice testid={`${testid}.judgeModel`} models={models} value={judgeModel} />
-          </div>
+            </span>
+          </SettingRow>
+          <StaleModelNotice testid={`${testid}.judgeModel`} models={models} value={judgeModel} />
+          {/* `SettingsSelect` IS a `SettingRow` + `Segmented` (settings-controls),
+              so using it keeps the row vocabulary and the `.twoStageMode` /
+              `.twoStageMode.option` testids the call sites already assert. */}
           <SettingsSelect
             testid={`${testid}.twoStageMode`}
             label="Two-stage judging"
+            description="Fast pass first, thinking pass only when it is unsure."
             value={twoStageMode}
             options={TWO_STAGE_OPTIONS}
             onChange={(v) => update({ twoStageMode: v })}
           />
-          {TRUST_LISTS.map((f) => (
-            <SandboxListSetting
-              key={f.key}
-              testid={`${testid}.${f.key}`}
-              label={f.label}
-              labelColor="text-text-secondary"
-              items={auto[f.key] ?? []}
-              placeholder={f.placeholder}
-              onUpdate={(items) => updateList(f.key, items)}
-              tooltip={f.tooltip}
-              description={f.description}
-            />
-          ))}
-          <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
-            {footerText}
-          </div>
         </>
       )}
     </div>
@@ -792,9 +726,8 @@ function OpencodeAutoModeSection(): React.JSX.Element {
       testid="OpencodeAutoModeSection"
       installed={installed}
       notInstalledMessage="opencode is not installed. Auto mode gates risky tool calls for opencode sessions in Full autonomy."
-      toggleTooltip="In Full autonomy, an LLM judges each risky tool call (bash / web fetch) instead of prompting you; reads and edits are auto-allowed. Fails closed to a human prompt when unsure or unavailable. When off, Full prompts you like Ask mode. See ADR-023."
-      judgeModelTooltip="The model that decides allow/block. Defaults to the session's own model. Pick a cheaper model to reduce cost, or a stronger one for safety-critical work."
-      footerText="Applies to Full autonomy on opencode. The judge sees tool calls, not their output. No per-turn call cap (parity with Claude) — pick a cheaper judge model if cost matters."
+      toggleDescription="In Full autonomy a judge model approves each risky tool call instead of prompting you, and asks you when it is unsure; off, Full prompts you like Ask."
+      judgeModelDescription="Sees each tool call and decides whether to allow it; unset uses the session's own model."
     />
   )
 }
@@ -814,9 +747,8 @@ export function PiAutoModeSection(): React.JSX.Element {
       testid="PiAutoModeSection"
       installed={installed}
       notInstalledMessage="pi is not installed. Auto mode gates risky tool calls for pi sessions in Auto and Full autonomy."
-      toggleTooltip="In Auto and Full autonomy, an LLM judges each risky tool call (bash / web fetch) instead of prompting you; reads and edits are auto-allowed. Fails closed to a human prompt when unsure or unavailable. When off, Auto/Full prompt you like Ask mode. See ADR-023."
-      judgeModelTooltip="The model that decides allow/block. Format: provider/model-id. Defaults to the session's own model. Pick a cheaper model to reduce cost, or a stronger one for safety-critical work."
-      footerText="Applies to Auto and Full autonomy on pi. The judge runs in its own short-lived pi process. It sees tool calls, not their output. Config is read once per session — reopen a session to pick up changes."
+      toggleDescription="In Auto and Full autonomy a judge model approves each risky tool call instead of prompting you, and asks you when it is unsure; off, both prompt you like Ask."
+      judgeModelDescription="Sees each tool call and decides whether to allow it, in its own short-lived pi process; unset uses the session's own model."
     />
   )
 }
@@ -2284,6 +2216,39 @@ export const SECTIONS: Section[] = [
     ]
   },
   {
+    // The classifier trust lists, ONCE for every engine (ADR-065 phase 4).
+    // Its own section rather than three rows inside each engine's auto-mode
+    // pane: they are stored in one shared file and derived into whichever
+    // engine's judge runs, so an engine-scoped home would misdescribe them.
+    id: 'trust-lists',
+    label: 'Trust & protection',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        <line x1="12" y1="8" x2="12" y2="12" />
+        <line x1="12" y1="16" x2="12.01" y2="16" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'trustLists',
+        label: 'Trust & protection',
+        keywords:
+          'trusted domains registries production protected patterns judge auto mode classifier supply chain hosts allowlist',
+        render: () => <TrustListsSection />
+      }
+    ]
+  },
+  {
     id: 'accounts',
     label: 'Accounts',
     icon: (
@@ -3744,6 +3709,7 @@ const APP_SECTION_IDS = new Set([
   'chat',
   'session',
   'autonomy',
+  'trust-lists',
   'shared-providers',
   'tool-output',
   'diff',
@@ -3871,6 +3837,7 @@ export const SCOPES: ScopeDef[] = [
           'chat',
           'session',
           'autonomy',
+          'trust-lists',
           'shared-providers',
           'tool-output',
           'diff',

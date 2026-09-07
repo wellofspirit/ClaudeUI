@@ -9,6 +9,7 @@ Two planes of on-disk state (ADR-020):
 - **Config = plain-text files** (hand-editable, no private copies of engine-native config):
   - `~/.claude/ui/settings.json` — APP-tier settings (plane ①).
   - `~/.claude/ui/engines/<id>.json` / `vendors/<id>.json` — launch params: sandbox/proxy, endpoint/modelOverride, dispatch config (plane ③).
+  - `~/.claude/ui/automode.json` — the engine-SHARED classifier trust lists (`trustedDomains` / `trustedRegistries` / `protectedPatterns`, ADR-065). OpencodeSession and PiSession derive them into the judge environment at session start; Claude runs cli.js's own classifier and cannot consume them. An empty list is an absent key. A read-time, run-once migration (`ui-config.migrateSharedTrustLists()`) unioned the two engines' old `autoMode` lists into it and stripped them from the engine files.
   - Claude's own `settings.json` / `.mcp.json` and opencode's `opencode.jsonc` / agent files — edited **in place**, never copied (plane ②; ADR-009, ADR-028/031).
 - **Operational/derived = SQLite** (`~/.claude/ui/operational.db`, WAL, `user_version` migrations): `session_meta` (per-session engine+model), `account` (metadata), `usage_event` / `usage_window_sample` / `daily_usage` (metering), `dispatched_usage` (cross-engine spend), plus the remote layer's `remote_config`, `webauthn_credential` and the append-only `audit_log`. `src/core/services/db.ts` owns the migrations and the typed repositories; it reaches the engine only through the driver seam below.
 - **Credentials = file-based** per-account dirs (ADR-015) — never in the DB.
