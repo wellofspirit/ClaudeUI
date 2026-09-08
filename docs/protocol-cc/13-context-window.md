@@ -19,14 +19,14 @@ catalog** — a hand-maintained literal object (search
 tables. The resolver consults it in this order (first match wins; behavior of
 the pre-2.1.261 `DR(model, betas)` chain, now catalog-driven):
 
-| #   | Condition                                                                                     | Window       |
-| --- | --------------------------------------------------------------------------------------------- | ------------ |
-| 0   | `DISABLE_COMPACT` set **and** `CLAUDE_CODE_MAX_CONTEXT_TOKENS` parses to > 0                  | env value    |
-| 1   | `/\[1m\]/i.test(modelName)`                                                                   | 1,000,000    |
-| 2   | request betas include `context-1m-2025-08-07` **and** catalog `supports_1m_beta`              | 1,000,000    |
-| 3   | catalog `context.native_1m` (see 13.2)                                                        | 1,000,000    |
-| 4   | `claude-sonnet-4-6` + remote config `clientDataCache.kelp_forest_sonnet` parses to > 0        | remote value |
-| 5   | fallback                                                                                      | 200,000      |
+| #   | Condition                                                                              | Window       |
+| --- | -------------------------------------------------------------------------------------- | ------------ |
+| 0   | `DISABLE_COMPACT` set **and** `CLAUDE_CODE_MAX_CONTEXT_TOKENS` parses to > 0           | env value    |
+| 1   | `/\[1m\]/i.test(modelName)`                                                            | 1,000,000    |
+| 2   | request betas include `context-1m-2025-08-07` **and** catalog `supports_1m_beta`       | 1,000,000    |
+| 3   | catalog `context.native_1m` (see 13.2)                                                 | 1,000,000    |
+| 4   | `claude-sonnet-4-6` + remote config `clientDataCache.kelp_forest_sonnet` parses to > 0 | remote value |
+| 5   | fallback                                                                               | 200,000      |
 
 All 1M paths (1–3) are killed by `CLAUDE_CODE_DISABLE_1M_CONTEXT` (truthy per
 boolean-env semantics: `1`/`true`/`yes`/`on`, case-insensitive). All three
@@ -58,13 +58,13 @@ Picker aliases resolve to concrete models via the catalog's `aliases` table
 (`default` + `per_provider` overrides) before the window resolver ever sees
 them. In 2.1.261:
 
-| Alias         | Resolves to (first-party default)                                     | Window |
-| ------------- | --------------------------------------------------------------------- | ------ |
-| `fable`       | `claude-fable-5-1` (gateway: `claude-fable-5`)                        | 1M     |
-| `opus`        | `claude-opus-5` (foundry: `claude-opus-4-6`, gateway: `claude-opus-4-7`) | 1M  |
-| `sonnet`      | `claude-sonnet-5` (bedrock/vertex/foundry/mantle: `claude-sonnet-4-5`, anthropic_aws/gateway: `claude-sonnet-4-6`) | 1M¹ |
-| `haiku`       | `claude-haiku-4-5`                                                    | 200K   |
-| `<alias>[1m]` | resolved model + `[1m]` suffix                                        | 1M     |
+| Alias         | Resolves to (first-party default)                                                                                  | Window |
+| ------------- | ------------------------------------------------------------------------------------------------------------------ | ------ |
+| `fable`       | `claude-fable-5-1` (gateway: `claude-fable-5`)                                                                     | 1M     |
+| `opus`        | `claude-opus-5` (foundry: `claude-opus-4-6`, gateway: `claude-opus-4-7`)                                           | 1M     |
+| `sonnet`      | `claude-sonnet-5` (bedrock/vertex/foundry/mantle: `claude-sonnet-4-5`, anthropic_aws/gateway: `claude-sonnet-4-6`) | 1M¹    |
+| `haiku`       | `claude-haiku-4-5`                                                                                                 | 200K   |
+| `<alias>[1m]` | resolved model + `[1m]` suffix                                                                                     | 1M     |
 
 ¹ first-party; the per-provider sonnet targets are 200K models (row 4's
 kelp_forest override may apply to sonnet-4-6).

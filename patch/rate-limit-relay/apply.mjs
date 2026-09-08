@@ -364,9 +364,7 @@ const replacement =
 // Replace by offset, not by String#replace: `original` contains no `$`-escapes
 // hazard today, but offset splicing is exact and cannot hit a different site.
 src =
-  src.slice(0, callSiteMatch.index) +
-  replacement +
-  src.slice(callSiteMatch.index + original.length)
+  src.slice(0, callSiteMatch.index) + replacement + src.slice(callSiteMatch.index + original.length)
 
 // ---------------------------------------------------------------------------
 // Step 7: Write and verify

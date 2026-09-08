@@ -185,9 +185,7 @@ export async function ideMintEntry(
  */
 function isAbsoluteHostPath(candidate: string): boolean {
   return (
-    candidate.startsWith('/') ||
-    candidate.startsWith('\\\\') ||
-    /^[a-zA-Z]:[\\/]/.test(candidate)
+    candidate.startsWith('/') || candidate.startsWith('\\\\') || /^[a-zA-Z]:[\\/]/.test(candidate)
   )
 }
 

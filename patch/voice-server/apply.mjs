@@ -186,7 +186,9 @@ if (src.includes(PATCH_A_MARKER)) {
     )
     process.exit(1)
   }
-  console.log(`  Timeouts are a plain top-level binding in ${timeoutsChunk.spec} — no lazy trigger needed`)
+  console.log(
+    `  Timeouts are a plain top-level binding in ${timeoutsChunk.spec} — no lazy trigger needed`
+  )
 
   // -------------------------------------------------------------------------
   // Step 3: Find the control request anchor
@@ -338,7 +340,7 @@ if (src.includes(PATCH_A_MARKER)) {
   for (const [label, name] of [
     ['msgVar', msgVar],
     ['successFn', successFn],
-    ['voiceCallExpr', voiceCallExpr],
+    ['voiceCallExpr', voiceCallExpr]
   ]) {
     if (name !== '__vfn' && /^__/.test(name)) {
       console.error(
