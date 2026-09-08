@@ -130,8 +130,7 @@ export function injectWorkbenchTheme(html: string, themeKind: IdeThemeKind): str
       ...(existingDefaults !== null && typeof existingDefaults === 'object'
         ? (existingDefaults as Record<string, unknown>)
         : {}),
-      'workbench.colorTheme':
-        themeKind === 'light' ? 'Default Light Modern' : 'Default Dark Modern'
+      'workbench.colorTheme': themeKind === 'light' ? 'Default Light Modern' : 'Default Dark Modern'
     }
     config.initialColorTheme = { themeType: themeKind }
     const encoded = encodeHtmlEntities(JSON.stringify(config))

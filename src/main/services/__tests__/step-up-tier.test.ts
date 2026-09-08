@@ -230,12 +230,12 @@ describe('classifyDispatch', () => {
   })
 
   it('classifies an UNKNOWN `ide` command as ACTING (fail closed)', () => {
-    expect(
-      classifyDispatch({ channel: 'ide:brand-new', capability: 'ide', kind: 'command' })
-    ).toBe('shell-act')
-    expect(
-      classifyDispatch({ channel: 'ide:brand-new', capability: 'ide', kind: undefined })
-    ).toBe('shell-act')
+    expect(classifyDispatch({ channel: 'ide:brand-new', capability: 'ide', kind: 'command' })).toBe(
+      'shell-act'
+    )
+    expect(classifyDispatch({ channel: 'ide:brand-new', capability: 'ide', kind: undefined })).toBe(
+      'shell-act'
+    )
   })
 
   it('the terminal FRAMES mirror their invoke twins', () => {

@@ -339,9 +339,7 @@ export function createHostAnchor({
         }
       }
       const before = sanitizedRemoteConfig()
-      dbSetRemoteConfig(
-        ideCliPath !== undefined ? { ...partial, ideCliPath } : partial
-      )
+      dbSetRemoteConfig(ideCliPath !== undefined ? { ...partial, ideCliPath } : partial)
       const after = sanitizedRemoteConfig()
       // ANY auth-surface change — the policy mode, the step-up tier, the
       // break-glass toggle, or one of the three timing dials — is audited AND
