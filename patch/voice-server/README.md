@@ -46,8 +46,8 @@ Consequences that shape this patch:
 
 ### Chunk map for 2.1.261
 
-| Chunk                            | Contains                                                                    |
-| -------------------------------- | --------------------------------------------------------------------------- |
+| Chunk                            | Contains                                                                     |
+| -------------------------------- | ---------------------------------------------------------------------------- |
 | `B:/~BUN/root/chunk-01qep85r.js` | Voice pipeline. `export{_nn,bnn,Snn}` — probe, availability check, stream fn |
 | `B:/~BUN/root/chunk-gj501zgt.js` | The stream-json stdin loop (`[print.ts]` logs) and its control-request chain |
 
@@ -219,7 +219,7 @@ Sites that must **not** match, all present in 2.1.261:
 | SDK Query transport: `throw Error("Unsupported control request subtype: "+…)` | string concat, no `else X(…,` |
 | `[DirectConnect] Unsupported control request subtype: …`                      | bracketed tag before the text |
 | `[RemoteSessionManager] Unsupported control request subtype: …`               | bracketed tag, no `else `     |
-| device-hooks `switch` default: `` error:`Unsupported control request…` ``      | object property, no `else `   |
+| device-hooks `switch` default: `` error:`Unsupported control request…` ``     | object property, no `else `   |
 
 #### Dynamic name extraction
 
@@ -240,7 +240,7 @@ the match; the exported name comes from parsing that chunk's `export{…}` list 
 local name (2.1.261: `export{_nn,bnn,Snn}` → `Snn` is exported under its own name).
 
 **successFn** — found globally by `),X(MSG,{})}catch` (2 sites in 2.1.261, both `Xe`; the script
-requires all sites to agree on the name *and* to live in the anchor's chunk):
+requires all sites to agree on the name _and_ to live in the anchor's chunk):
 
 ```js
 const successRe = /\),([\w$]+)\(r,\{\}\)\}catch/ // "r" = the captured msgVar
@@ -443,12 +443,16 @@ but the next rename could land on `m`, `b`, `s`, `l` or `o`.
 
 ```js
 // WRONG — `r` shadows msgVar, `text`/`isFinal` shorthand pins the param names
-onTranscript:(text,isFinal)=>{__send({type:"transcript",text,isFinal})}
-await new Promise(r=>__s.listen(0,"127.0.0.1",r));
+onTranscript: (text, isFinal) => {
+  __send({ type: 'transcript', text, isFinal })
+}
+await new Promise((r) => __s.listen(0, '127.0.0.1', r))
 
 // CORRECT — every injected identifier is `__`-prefixed, shorthand expanded
-onTranscript:(__t,__f)=>{__send({type:"transcript",text:__t,isFinal:__f})}
-await new Promise((__res)=>__s.listen(0,"127.0.0.1",__res));
+onTranscript: (__t, __f) => {
+  __send({ type: 'transcript', text: __t, isFinal: __f })
+}
+await new Promise((__res) => __s.listen(0, '127.0.0.1', __res))
 ```
 
 `apply.mjs` enforces this: it aborts if a captured name (`msgVar`, `successFn`) starts with `__`.
@@ -600,16 +604,16 @@ surfaced:
 
 ## Key Functions Reference
 
-| Name (2.1.261) | Chunk                | Purpose                                            |
-| -------------- | -------------------- | -------------------------------------------------- |
-| `Snn`          | `chunk-01qep85r.js`  | Voice stream function (Deepgram WS client)         |
-| `bnn`          | `chunk-01qep85r.js`  | "Is voice available?" (OAuth + gate check)         |
-| `_nn`          | `chunk-01qep85r.js`  | `/api/hello` connectivity probe                    |
-| `b`            | `chunk-01qep85r.js`  | `{safety:5000,noData:1500}` — finalize timeouts    |
-| `r`            | `chunk-gj501zgt.js`  | Message variable in the control request handler    |
-| `Xe`           | `chunk-gj501zgt.js`  | Success response helper (`control_response`)       |
-| `Be`           | `chunk-gj501zgt.js`  | Error response helper                              |
-| `Xn`           | `chunk-gj501zgt.js`  | Subtype sanitiser used in the fallback message     |
+| Name (2.1.261) | Chunk               | Purpose                                         |
+| -------------- | ------------------- | ----------------------------------------------- |
+| `Snn`          | `chunk-01qep85r.js` | Voice stream function (Deepgram WS client)      |
+| `bnn`          | `chunk-01qep85r.js` | "Is voice available?" (OAuth + gate check)      |
+| `_nn`          | `chunk-01qep85r.js` | `/api/hello` connectivity probe                 |
+| `b`            | `chunk-01qep85r.js` | `{safety:5000,noData:1500}` — finalize timeouts |
+| `r`            | `chunk-gj501zgt.js` | Message variable in the control request handler |
+| `Xe`           | `chunk-gj501zgt.js` | Success response helper (`control_response`)    |
+| `Be`           | `chunk-gj501zgt.js` | Error response helper                           |
+| `Xn`           | `chunk-gj501zgt.js` | Subtype sanitiser used in the fallback message  |
 
 **Note:** all minified names and chunk hashes change in every SDK version. Use content patterns
 (string literals, structural shapes) to relocate code.

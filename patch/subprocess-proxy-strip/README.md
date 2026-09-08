@@ -47,7 +47,7 @@ function <fn>() {
 Which return fires is not something to rely on, and the patch does not: **every** return
 is wrapped. That matters more with each release — 2.1.261's early-bail guard has thirteen
 terms (`if(!n&&!c&&!_&&!R&&!s&&!f.length&&!K.length&&!X&&!p&&!M&&!W&&!D&&!L)`), several of
-which sniff the *ambient* environment (`s` is true if any `process.env` key matches a
+which sniff the _ambient_ environment (`s` is true if any `process.env` key matches a
 credential-shaped deny-set), so a real user's shell can easily push execution onto the
 merged path. See the verbatim 2.1.261 shape at the bottom for how far the body has drifted
 from the skeleton above; the skeleton is a mental model, not a matching target.
@@ -93,7 +93,7 @@ let __cuPS = (E) => {
    rather than guess. **This is where a re-anchor belongs: add a new anchor candidate to
    `genericAnchorFinders`, not a new regex.**
 2. **The `fnReV*` version ladder (legacy fallback).** Ten regexes, each transcribing one
-   version's *entire* function body verbatim and rebuilding it identifier-by-identifier.
+   version's _entire_ function body verbatim and rebuilding it identifier-by-identifier.
    Any upstream edit anywhere inside the body — even one irrelevant to proxy stripping —
    invalidates a rung. This is exactly why the generic path exists. The last rung is
    v198; **2.1.231, 2.1.241 and 2.1.261 all went through the generic path and deliberately
@@ -119,12 +119,12 @@ The generic path refuses (and falls through to the ladder) unless **all** hold:
 
 ### Anchor candidates (`genericAnchorFinders`, tried in order)
 
-| # | Anchor | Lived in the builder | Status |
-| - | ------ | -------------------- | ------ |
-| 1 | `` INPUT_${ `` deletion | ≤ 2.1.231 | **dead** — 8 occurrences in 2.1.261 |
-| 2 | `delete <m>.CLAUDE_CODE_SUBSCRIPTION_TYPE,delete <m>.CLAUDE_CODE_RATE_LIMIT_TIER` | v150 – 2.1.241 | **dead** — 0 occurrences in 2.1.261 |
-| 3 | `for(let o of Object.keys(d))if(o.startsWith("OTEL_"))delete d[o]` | v129 – 2.1.261 | **live** — hits in 2.1.261 |
-| 4 | `delete <m>.CLAUDE_CODE_OTEL_DIAG_STDERR` | v197 – 2.1.261 | live (spare) |
+| #   | Anchor                                                                            | Lived in the builder | Status                              |
+| --- | --------------------------------------------------------------------------------- | -------------------- | ----------------------------------- |
+| 1   | `INPUT_${` deletion                                                               | ≤ 2.1.231            | **dead** — 8 occurrences in 2.1.261 |
+| 2   | `delete <m>.CLAUDE_CODE_SUBSCRIPTION_TYPE,delete <m>.CLAUDE_CODE_RATE_LIMIT_TIER` | v150 – 2.1.241       | **dead** — 0 occurrences in 2.1.261 |
+| 3   | `for(let o of Object.keys(d))if(o.startsWith("OTEL_"))delete d[o]`                | v129 – 2.1.261       | **live** — hits in 2.1.261          |
+| 4   | `delete <m>.CLAUDE_CODE_OTEL_DIAG_STDERR`                                         | v197 – 2.1.261       | live (spare)                        |
 
 Candidates 3 and 4 are `delete`s on the **merged clone**, i.e. welded to this function's
 scrub pass rather than to any one version's variable set — that is what makes them
@@ -359,7 +359,7 @@ From 2.1.261 the patch target `vendor/claude-cli/cli.js` is a **concatenation of
 minified ESM chunks**, each preceded by a `// @bun-chunk B:/~BUN/root/chunk-xxxxxxxx.js`
 delimiter line. `bundle-analyzer` and plain `rg` work on it unchanged (it is just JS
 text), but **uniqueness is now much weaker** — helpers get duplicated across chunks, which
-is precisely how the `` INPUT_${ `` anchor died.
+is precisely how the `INPUT_${` anchor died.
 
 ```bash
 # The two live anchors (both are deletes on the merged clone — see the candidates table):
@@ -423,7 +423,7 @@ destructuring.
 1. `node patch/subprocess-proxy-strip/apply.mjs` — on 2.1.261 reports
    `Found Pi() [generic shape] at char 2902824` / `Wrapped 3 return(s) with __cuPS()`
    (older pinned CLIs report `[v198 shape]`, `[v197 shape]`, …). Two `[generic] anchor
-   not usable` lines before it are expected — candidates 1 and 2 are dead on 2.1.261.
+not usable` lines before it are expected — candidates 1 and 2 are dead on 2.1.261.
 2. Run again — reports "Patch already applied. Nothing to do."
 3. `node patch/apply-all.mjs` — the rebundler splits the concat back into chunks and
    esbuild-syntax-checks every chunk that changed.
@@ -497,13 +497,13 @@ because a green exit code only proves the marker landed, not that it landed corr
 ## Discovery Method (2.1.261 re-anchor — chunked bundle, both anchors died at once)
 
 1. **Apply failed** with `Cannot locate env-builder function by v114 … v198 structural
-   shape` and — the real tell — **zero `[generic]` output**, because the anchor loop
+shape` and — the real tell — **zero `[generic]` output**, because the anchor loop
    `continue`d silently on both candidates. (Fixed: dead candidates now log.)
 2. **Both anchors were invalid, for different reasons:**
-   - `` INPUT_${ `` → **8** occurrences. 2.1.261 splits the bundle into 1,631 ESM chunks,
+   - `INPUT_${` → **8** occurrences. 2.1.261 splits the bundle into 1,631 ESM chunks,
      and the GitHub-Actions secret-name helpers in `chunk-ay65a202.js` and
      `chunk-9c0rs7w4.js` each build their own `INPUT_`-prefixed name lists
-     (`` Tge=Or.flatMap((e)=>[e,`INPUT_${e}`]) ``, plus `B8t`, `$Kr`, `jKr`, `di`, `qCe`).
+     (``Tge=Or.flatMap((e)=>[e,`INPUT_${e}`])``, plus `B8t`, `$Kr`, `jKr`, `di`, `qCe`).
      None are in the builder.
    - `delete <m>.CLAUDE_CODE_SUBSCRIPTION_TYPE,delete <m>.CLAUDE_CODE_RATE_LIMIT_TIER` →
      **0** occurrences. The builder no longer deletes auth-identity vars one by one; it
@@ -524,7 +524,7 @@ because a green exit code only proves the marker landed, not that it landed corr
    `delete <m>.CLAUDE_CODE_OTEL_DIAG_STDERR` scrub (since v197). No new ladder rung.
 6. **Verified**: `Found Pi() [generic shape] at char 2902824, wrapped 3 return(s)`;
    re-run reports "Patch already applied"; `node --check` passes on the modified chunk
-   in isolation (the *concat as a whole* is not parseable as one script — check the chunk,
+   in isolation (the _concat as a whole_ is not parseable as one script — check the chunk,
    not the file); and a round-trip proof — stripping the marker, the helper and the three
    `__cuPS(...)` wrappers reproduces the pristine function **byte-for-byte**, with the
    other 30.9 MB of bundle byte-identical and a total delta of +306 bytes.
@@ -605,8 +605,8 @@ function Pi() {
 
 ## Files
 
-| File        | Purpose                                                                            |
-| ----------- | ---------------------------------------------------------------------------------- |
-| `README.md` | This document                                                                      |
+| File        | Purpose                                                                             |
+| ----------- | ----------------------------------------------------------------------------------- |
+| `README.md` | This document                                                                       |
 | `apply.mjs` | Patch script — generic anchor path first, legacy `fnReV114`…`fnReV198` ladder after |
 | `test.mjs`  | Behavioral harness (spawns the REAL rebundled `bun-claude`; needs the main repo)    |

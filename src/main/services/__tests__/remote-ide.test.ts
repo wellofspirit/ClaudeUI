@@ -272,14 +272,18 @@ describe('remote IDE — /vscode proxy, gate and lifecycle (ADR-064)', () => {
     const dispatcher = new RemoteDispatcher()
     server = new RemoteServer(dispatcher, passwordProvider() as never, tailscaleStub as never)
     server.setIdeService(ide)
-    registerRemoteHandlers(dispatcher, { get: () => undefined, rekey: vi.fn() } as never, {
-      ideOriginOf: (connection: CommandConnection) => server.ideOriginOf(connection),
-      // Through the SERVER, not the module singleton: `setIdeService` is the one
-      // injection point, so the commands mint against the very service this test
-      // installed (a fake-spawn one) rather than against whatever VS Code happens
-      // to be installed on the machine running the suite.
-      ideService: () => server.ideService()
-    } as never)
+    registerRemoteHandlers(
+      dispatcher,
+      { get: () => undefined, rekey: vi.fn() } as never,
+      {
+        ideOriginOf: (connection: CommandConnection) => server.ideOriginOf(connection),
+        // Through the SERVER, not the module singleton: `setIdeService` is the one
+        // injection point, so the commands mint against the very service this test
+        // installed (a fake-spawn one) rather than against whatever VS Code happens
+        // to be installed on the machine running the suite.
+        ideService: () => server.ideService()
+      } as never
+    )
 
     port = await ephemeralPort()
     await server.start(port, '127.0.0.1')
@@ -326,9 +330,7 @@ describe('remote IDE — /vscode proxy, gate and lifecycle (ADR-064)', () => {
         (res) => {
           let body = ''
           res.on('data', (c) => (body += c.toString()))
-          res.on('end', () =>
-            resolve({ status: res.statusCode ?? 0, headers: res.headers, body })
-          )
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body }))
         }
       )
       req.on('error', reject)
@@ -558,7 +560,8 @@ describe('remote IDE — /vscode proxy, gate and lifecycle (ADR-064)', () => {
   })
 
   it('fails OPEN on markup it cannot parse', async () => {
-    rootHtml = '<html><head><meta id="vscode-workbench-web-configuration" data-settings="{&quot;broken"></head></html>'
+    rootHtml =
+      '<html><head><meta id="vscode-workbench-web-configuration" data-settings="{&quot;broken"></head></html>'
     const client = await connect()
     const cookie = await openIdeSession(client, 'dark')
     const answer = await request('/vscode/', { Cookie: cookie })
@@ -720,14 +723,18 @@ describe('remote IDE — /vscode proxy, gate and lifecycle (ADR-064)', () => {
     const dispatcher = new RemoteDispatcher()
     server = new TunnelServer(dispatcher, passwordProvider() as never, tailscaleStub as never)
     server.setIdeService(ide)
-    registerRemoteHandlers(dispatcher, { get: () => undefined, rekey: vi.fn() } as never, {
-      ideOriginOf: (connection: CommandConnection) => server.ideOriginOf(connection),
-      // Through the SERVER, not the module singleton: `setIdeService` is the one
-      // injection point, so the commands mint against the very service this test
-      // installed (a fake-spawn one) rather than against whatever VS Code happens
-      // to be installed on the machine running the suite.
-      ideService: () => server.ideService()
-    } as never)
+    registerRemoteHandlers(
+      dispatcher,
+      { get: () => undefined, rekey: vi.fn() } as never,
+      {
+        ideOriginOf: (connection: CommandConnection) => server.ideOriginOf(connection),
+        // Through the SERVER, not the module singleton: `setIdeService` is the one
+        // injection point, so the commands mint against the very service this test
+        // installed (a fake-spawn one) rather than against whatever VS Code happens
+        // to be installed on the machine running the suite.
+        ideService: () => server.ideService()
+      } as never
+    )
     port = await ephemeralPort()
     await server.start(port, '127.0.0.1')
 

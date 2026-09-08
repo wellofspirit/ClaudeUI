@@ -6,10 +6,10 @@ Live Bash command output never reaches the stream-json consumer until the comman
 
 `vendor/claude-cli/cli.js` — the vendored Claude Code bundle (`bun-claude`).
 
-| Component            | Version                                                          |
-| -------------------- | ---------------------------------------------------------------- |
-| Original discovery   | SDK 0.2.97 → 0.2.105 / bundled `cli.js` 2.1.97 → 2.1.105         |
-| Last verified anchor | **2.1.261** (chunked bundle — see "Bundle shape" below)          |
+| Component            | Version                                                  |
+| -------------------- | -------------------------------------------------------- |
+| Original discovery   | SDK 0.2.97 → 0.2.105 / bundled `cli.js` 2.1.97 → 2.1.105 |
+| Last verified anchor | **2.1.261** (chunked bundle — see "Bundle shape" below)  |
 
 ### Bundle shape (changed in 2.1.261)
 
@@ -28,7 +28,7 @@ Consequences for this patch:
   end of the enclosing chunk for exactly this reason.
 - **A helper you inject a call to must be bound in the target chunk's scope.** Post-split, a class
   can reach a chunk as an imported binding under a chunk-local alias. Part B therefore reads the
-  TaskOutput class name off an existing call site *inside the same chunk* rather than searching
+  TaskOutput class name off an existing call site _inside the same chunk_ rather than searching
   globally for the class declaration.
 
 Everything this patch touches lives in one chunk: **`chunk-9c0rs7w4.js`** (~5.6 MB, the tool
@@ -50,7 +50,7 @@ Both foreground and background bash redirect stdout to an output file at the OS 
 `["pipe", fd, fd]`), so `TaskOutput.writeStdout()` is never called from process output. The **only**
 thing that ever fires `onProgress` is `TaskOutput.pollProgress()`, driven by a 1-second interval
 (`ISr=1000`) that the generator starts with `aI.startPolling(...)` — and it starts that call only
-*after* the 2-second race returns.
+_after_ the 2-second race returns.
 
 Measured on 2.1.105: spawn 868 ms + HEK 2004 ms + first poll 1013 ms = **~3.9 s** before the first
 byte of output was observable.
@@ -104,39 +104,39 @@ Part A and Part B are a pair: Part B makes `onProgress` fire early, Part A is wh
 
 ### Key classes and functions (v2.1.261, all in `chunk-9c0rs7w4.js` unless noted)
 
-| Name    | Kind     | Purpose                                                                                |
-| ------- | -------- | -------------------------------------------------------------------------------------- |
-| `ats`   | fn\*     | Bash async generator — orchestrates the command, owns the progress loop                |
-| `w6`    | async fn | Command runner — builds the exec command, spawns, returns a ShellCommand               |
-| `aI`    | class    | **TaskOutput** — output ring buffers, file spill, `static startPolling/stopPolling`     |
-| `hWe`   | class    | **ShellCommand** — real spawned command; `cleanup()` → `taskOutput.clear()`             |
-| `lAt`   | class    | Aborted-before-exec ShellCommand stub (`status:"killed"`) — still has `taskOutput`      |
-| `cD`    | fn       | Pre-spawn-error ShellCommand stub (`status:"completed"`) — still has `taskOutput`       |
-| `oAt`   | class    | Poll registry — `#e` registered instances, `#t` polling set, one shared `setInterval`   |
-| `lhe`   | fn       | Host-scoped accessor for the `oAt` singleton                                            |
-| `rnr`   | fn       | Background-task watcher — on `result`, calls `snr` → `shellCommand.cleanup()`           |
-| `Hnr`   | const    | HEK timeout, `2000`                                                                    |
-| `ISr`   | const    | Poll interval, `1000`                                                                  |
-| `yl`    | fn       | `taskId` → `<sessions-dir>/<taskId>.output` (imported from another chunk)               |
+| Name  | Kind     | Purpose                                                                               |
+| ----- | -------- | ------------------------------------------------------------------------------------- |
+| `ats` | fn\*     | Bash async generator — orchestrates the command, owns the progress loop               |
+| `w6`  | async fn | Command runner — builds the exec command, spawns, returns a ShellCommand              |
+| `aI`  | class    | **TaskOutput** — output ring buffers, file spill, `static startPolling/stopPolling`   |
+| `hWe` | class    | **ShellCommand** — real spawned command; `cleanup()` → `taskOutput.clear()`           |
+| `lAt` | class    | Aborted-before-exec ShellCommand stub (`status:"killed"`) — still has `taskOutput`    |
+| `cD`  | fn       | Pre-spawn-error ShellCommand stub (`status:"completed"`) — still has `taskOutput`     |
+| `oAt` | class    | Poll registry — `#e` registered instances, `#t` polling set, one shared `setInterval` |
+| `lhe` | fn       | Host-scoped accessor for the `oAt` singleton                                          |
+| `rnr` | fn       | Background-task watcher — on `result`, calls `snr` → `shellCommand.cleanup()`         |
+| `Hnr` | const    | HEK timeout, `2000`                                                                   |
+| `ISr` | const    | Poll interval, `1000`                                                                 |
+| `yl`  | fn       | `taskId` → `<sessions-dir>/<taskId>.output` (imported from another chunk)             |
 
 ### Variable mapping (inside `ats`)
 
-| Variable | Meaning                                                                 |
-| -------- | ------------------------------------------------------------------------ |
-| `ke`     | command string                                                          |
-| `Me`     | description                                                             |
-| `M`      | `toolUseId` (destructured from the generator's single options object)    |
-| `F`      | `agentId`                                                               |
-| `De`     | `run_in_background` flag                                                |
-| `tn`     | ShellCommand instance returned by `w6`                                  |
-| `gn`     | `tn.result` — resolves when the command finishes                        |
-| `Wt`     | progress-loop resolver (`null` when the loop is not waiting)            |
-| `je`     | last-5-lines window (the callback's 1st param)                          |
-| `He`     | last-100-lines window (the callback's 2nd param)                        |
-| `Ve`     | total lines                                                             |
-| `et`     | total bytes                                                             |
-| `Pt`     | "background forbidden" flag                                             |
-| `ut`     | background task id, once backgrounded                                   |
+| Variable | Meaning                                                               |
+| -------- | --------------------------------------------------------------------- |
+| `ke`     | command string                                                        |
+| `Me`     | description                                                           |
+| `M`      | `toolUseId` (destructured from the generator's single options object) |
+| `F`      | `agentId`                                                             |
+| `De`     | `run_in_background` flag                                              |
+| `tn`     | ShellCommand instance returned by `w6`                                |
+| `gn`     | `tn.result` — resolves when the command finishes                      |
+| `Wt`     | progress-loop resolver (`null` when the loop is not waiting)          |
+| `je`     | last-5-lines window (the callback's 1st param)                        |
+| `He`     | last-100-lines window (the callback's 2nd param)                      |
+| `Ve`     | total lines                                                           |
+| `et`     | total bytes                                                           |
+| `Pt`     | "background forbidden" flag                                           |
+| `ut`     | background task id, once backgrounded                                 |
 
 ### `onProgress` callback contract
 
@@ -168,19 +168,19 @@ onProgress(<p1>,<p2>,<p3>,<p4>,<p5>){<a>=<p1>,<b>=<p2>,<c>=<p3>,<d>=<p5>?<p4>:0;
 Regex in `apply.mjs`:
 
 ```js
-`onProgress\\((${V}),(${V}),(${V}),(${V}),(${V})\\)\\{` +
+;`onProgress\\((${V}),(${V}),(${V}),(${V}),(${V})\\)\\{` +
   `(${V})=\\1,(${V})=\\2,(${V})=\\3,(${V})=\\5\\?\\4:0;` +
   `let (${V})=(${V});if\\(\\10\\)\\11=null,\\10\\(\\)\\}`
 ```
 
 **Why it is unique.** 2.1.261 has exactly four `onProgress(` occurrences in the whole concat:
 
-| Offset     | Chunk               | Shape                                                                      |
-| ---------- | ------------------- | -------------------------------------------------------------------------- |
-| ~9,070,524 | `chunk-9c0rs7w4.js` | **the target** — bash, with the `let Br=Wt;if(Br)Wt=null,Br()` resolver     |
-| ~20,004,080| `chunk-98vnsjhm.js` | PowerShell tool — same 4 assignments, **no resolver tail**                  |
-| ~15,891,569| `chunk-jkzh538b.js` | `de.onProgress(ge.data)` — an agent-runner call, not a method definition   |
-| ~19,657,603| `chunk-f8rcj764.js` | `this.sink?.onProgress(w)` — same                                          |
+| Offset      | Chunk               | Shape                                                                    |
+| ----------- | ------------------- | ------------------------------------------------------------------------ |
+| ~9,070,524  | `chunk-9c0rs7w4.js` | **the target** — bash, with the `let Br=Wt;if(Br)Wt=null,Br()` resolver  |
+| ~20,004,080 | `chunk-98vnsjhm.js` | PowerShell tool — same 4 assignments, **no resolver tail**               |
+| ~15,891,569 | `chunk-jkzh538b.js` | `de.onProgress(ge.data)` — an agent-runner call, not a method definition |
+| ~19,657,603 | `chunk-f8rcj764.js` | `this.sink?.onProgress(w)` — same                                        |
 
 The `let <e>=<r>;if(<e>)<r>=null,<e>()` resolver tail is what excludes PowerShell. **PowerShell is
 deliberately not patched** — its generator has no resolver promise and a different progress loop.
@@ -189,10 +189,10 @@ loudly rather than patch the wrong one; do not weaken it to "first match wins".
 
 #### toolUseId capture
 
-`M` is read out of the 2,000 chars *before* the anchor with `toolUseId:(V)[,}]`. In 2.1.261 that
+`M` is read out of the 2,000 chars _before_ the anchor with `toolUseId:(V)[,}]`. In 2.1.261 that
 window contains exactly one match — the generator's own parameter destructuring
 (`...,toolUseId:M,attributionMessageId:N,agentId:F,...` at anchor −723). Note the same window later
-contains `sandboxAttributionId:M`, which is the *same variable* but would not match the pattern.
+contains `sandboxAttributionId:M`, which is the _same variable_ but would not match the pattern.
 
 #### Before (2.1.261, pristine)
 
@@ -225,7 +225,7 @@ tool use so a chatty command can't flood stdout.
 
 #### Why it's safe
 
-- The injected block is a bare `{...}` statement placed *before* the original body; every original
+- The injected block is a bare `{...}` statement placed _before_ the original body; every original
   assignment and the resolver call still run, unchanged.
 - `process.stdout.write` is inside try/catch — a closed/blocked stdout can't take down the CLI.
 - `_bo_`-prefixed globals avoid collisions with the bundle and with other patches.
@@ -242,7 +242,7 @@ This is the part that actually removes the delay. Part A alone only fires once t
 
 Two-step capture, in this order:
 
-1. **The CLI's own call**, which yields *both* the TaskOutput class binding and the ShellCommand
+1. **The CLI's own call**, which yields _both_ the TaskOutput class binding and the ShellCommand
    variable — `.startPolling(` and `.taskOutput.taskId` are property names and survive minification:
 
    ```js
@@ -250,7 +250,7 @@ Two-step capture, in this order:
    // 2.1.261 → aI.startPolling(tn.taskOutput.taskId)
    ```
 
-   Taking the class name from a call site *inside the target chunk* is what guarantees the
+   Taking the class name from a call site _inside the target chunk_ is what guarantees the
    identifier we inject is in scope there (post-split it might be an imported alias).
 
 2. **The result-promise assignment for that same variable**, which is the injection point:
@@ -329,16 +329,16 @@ task. That is what the GUI's background bash cards want.
 }
 ```
 
-| Field         | Type   | Description                                    |
-| ------------- | ------ | ---------------------------------------------- |
-| `tool_use_id` | string | tool_use block ID for this Bash invocation     |
-| `output`      | string | last ~100 lines (callback param 2)             |
-| `full_output` | string | last ~5 lines (callback param 1)               |
-| `total_lines` | number | total line count so far                        |
-| `total_bytes` | number | total byte count so far                        |
+| Field         | Type   | Description                                |
+| ------------- | ------ | ------------------------------------------ |
+| `tool_use_id` | string | tool_use block ID for this Bash invocation |
+| `output`      | string | last ~100 lines (callback param 2)         |
+| `full_output` | string | last ~5 lines (callback param 1)           |
+| `total_lines` | number | total line count so far                    |
+| `total_bytes` | number | total byte count so far                    |
 
-**The `output` / `full_output` names are backwards** and always have been: `output` is the *larger*
-(~100-line) window and `full_output` the *smaller* (~5-line) one, because the patch maps callback
+**The `output` / `full_output` names are backwards** and always have been: `output` is the _larger_
+(~100-line) window and `full_output` the _smaller_ (~5-line) one, because the patch maps callback
 param 2 → `output` and param 1 → `full_output`. The consumer only reads `output`, so this is a
 naming wart, not a bug. Don't "fix" it without changing `BashOutputMessage` in
 `src/core/sdk/types.ts` and `handleBashOutput` together.
@@ -358,7 +358,7 @@ cli.js Part A stdout
 ```
 
 `BashOutputMessage` is declared in `src/core/sdk/types.ts`; the field names there must match the
-JSON emitted by Part A. `session:bash-output` is a *volatile* sync lane — it has no snapshot field
+JSON emitted by Part A. `session:bash-output` is a _volatile_ sync lane — it has no snapshot field
 and is listed in `sealed-fields.ts` as `bashOutputs`, so dropped frames are acceptable by design.
 
 `src/main/__tests__/patches.test.ts` asserts that **both** markers
@@ -367,7 +367,7 @@ binary. Renaming a marker breaks that test.
 
 ## How to Find This Code
 
-`bundle-analyzer.cmd` (global, at `C:\Users\why20\.local\bin\bundle-analyzer.cmd`; call it *with*
+`bundle-analyzer.cmd` (global, at `C:\Users\why20\.local\bin\bundle-analyzer.cmd`; call it _with_
 the `.cmd` extension from Git Bash) works on the concat. Plain `rg` / a `node -e` offset script is
 an equally good fallback and is what was used for the 2.1.261 re-anchor.
 
@@ -444,7 +444,7 @@ statement boundary. Keep it that way.
 ### Pitfall: literal newlines in injected source
 
 Chunk bodies are one enormous line each. A real newline inside injected code changes nothing
-semantically here, but a newline inside a *string literal* is a parse error:
+semantically here, but a newline inside a _string literal_ is a parse error:
 
 ```js
 // WRONG — literal newline inside the source string
@@ -457,7 +457,7 @@ process.stdout.write(JSON.stringify(x)+"\\n")
 process.stdout.write(s+String.fromCharCode(10))
 ```
 
-Note that a real newline in *injected code* would also split the concat's chunk reconstruction if
+Note that a real newline in _injected code_ would also split the concat's chunk reconstruction if
 it happened to look like a delimiter — never emit a line starting with `// @bun-chunk`.
 
 ### Pitfall: regexes that bridge chunks
@@ -489,8 +489,8 @@ resolver call are untouched.
 not move or remove one. `bash_output` is a side channel, not a replacement for `yield
 {type:"progress"}`.
 
-**The 2-second HEK race (`Hnr`).** Deliberately left alone — it gates when the tool *result* path
-gives up waiting, and shortening it would change tool semantics. The patch removes the *output*
+**The 2-second HEK race (`Hnr`).** Deliberately left alone — it gates when the tool _result_ path
+gives up waiting, and shortening it would change tool semantics. The patch removes the _output_
 delay without touching it.
 
 **The PowerShell tool.** `chunk-98vnsjhm.js` has a near-identical `onProgress`, but no resolver
@@ -531,7 +531,7 @@ through Node pipes — a much larger behavioral change (it also changes what end
    made the main process responsible for a path the CLI owns. Superseded by Part B; **no
    `bash_output_init` consumer exists in the app** — if you find that message type described
    anywhere else, it is stale.
-7. **Part B**: call the CLI's *own* `startPolling` as soon as the runner returns. One statement, no
+7. **Part B**: call the CLI's _own_ `startPolling` as soon as the runner returns. One statement, no
    new message type, no consumer changes, and every existing stop path already covers it.
 
 ### 2.1.261 re-anchor (chunked bundle)
@@ -550,18 +550,18 @@ through Node pipes — a much larger behavioral change (it also changes what end
 
 ## Key Functions Reference
 
-| Name (v2.1.261) | Purpose                     | Char offset (pristine concat) | Chunk               |
-| --------------- | --------------------------- | ----------------------------- | ------------------- |
-| `ats`           | Bash async generator        | ~9,069,640                    | `chunk-9c0rs7w4.js` |
-| `onProgress`    | Part A anchor               | ~9,070,524                    | `chunk-9c0rs7w4.js` |
-| `;let gn=tn.result;` | Part B match start (inject after its `;`) | ~9,071,051 (anchor +527) | `chunk-9c0rs7w4.js` |
-| `aI.startPolling(...)` | CLI's own late call  | ~9,072,299 (anchor +1,775)    | `chunk-9c0rs7w4.js` |
-| `aI.stopPolling(...)`  | the `finally` stop   | ~9,073,784 (anchor +3,260)    | `chunk-9c0rs7w4.js` |
-| `w6`            | Command runner              | ~6,599,698                    | `chunk-9c0rs7w4.js` |
-| `aI`            | TaskOutput class            | ~5,413,043                    | `chunk-9c0rs7w4.js` |
-| `oAt`           | Poll registry               | ~5,412,488                    | `chunk-9c0rs7w4.js` |
-| `hWe`           | ShellCommand class          | ~5,417,792                    | `chunk-9c0rs7w4.js` |
-| `Hnr=2000`      | HEK timeout                 | ~9,049,694                    | `chunk-9c0rs7w4.js` |
+| Name (v2.1.261)        | Purpose                                   | Char offset (pristine concat) | Chunk               |
+| ---------------------- | ----------------------------------------- | ----------------------------- | ------------------- |
+| `ats`                  | Bash async generator                      | ~9,069,640                    | `chunk-9c0rs7w4.js` |
+| `onProgress`           | Part A anchor                             | ~9,070,524                    | `chunk-9c0rs7w4.js` |
+| `;let gn=tn.result;`   | Part B match start (inject after its `;`) | ~9,071,051 (anchor +527)      | `chunk-9c0rs7w4.js` |
+| `aI.startPolling(...)` | CLI's own late call                       | ~9,072,299 (anchor +1,775)    | `chunk-9c0rs7w4.js` |
+| `aI.stopPolling(...)`  | the `finally` stop                        | ~9,073,784 (anchor +3,260)    | `chunk-9c0rs7w4.js` |
+| `w6`                   | Command runner                            | ~6,599,698                    | `chunk-9c0rs7w4.js` |
+| `aI`                   | TaskOutput class                          | ~5,413,043                    | `chunk-9c0rs7w4.js` |
+| `oAt`                  | Poll registry                             | ~5,412,488                    | `chunk-9c0rs7w4.js` |
+| `hWe`                  | ShellCommand class                        | ~5,417,792                    | `chunk-9c0rs7w4.js` |
+| `Hnr=2000`             | HEK timeout                               | ~9,049,694                    | `chunk-9c0rs7w4.js` |
 
 **Note:** all minified names and offsets change on every bump. Use the string literals and
 structural shapes in "How to Find This Code" to relocate.

@@ -1024,7 +1024,8 @@ export function OpencodeManagedKeysSection(): React.JSX.Element {
                 </span>
               </div>
               <div className="text-[11px] text-text-muted/60 leading-relaxed">
-                {k.why} <span className="font-mono break-all text-text-muted/80">{k.configKey}</span>
+                {k.why}{' '}
+                <span className="font-mono break-all text-text-muted/80">{k.configKey}</span>
               </div>
             </div>
             <span

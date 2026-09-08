@@ -4232,11 +4232,7 @@ export class RemoteServer {
     // (the default), deliberately: an audit reader's grep should not have to
     // change because a capability they never enabled was added to the product.
     const armedDetail = (factor: string): string => {
-      const conferred = [
-        ...(armedShell ? ['shell'] : []),
-        ...(armedIde ? ['ide'] : []),
-        'mutation'
-      ]
+      const conferred = [...(armedShell ? ['shell'] : []), ...(armedIde ? ['ide'] : []), 'mutation']
       const head =
         `${conferred.join(' + ')} grant${conferred.length > 1 ? 's' : ''} ` +
         `armed via ${factor} step-up`

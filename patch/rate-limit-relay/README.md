@@ -31,7 +31,7 @@ Two consequences this patch has to respect:
    `apply.mjs` bars `\n` from every argument/parameter span (`argPat`, `paramPat`). That
    makes bridging structurally impossible rather than merely unlikely.
 2. **Each chunk is its own module scope.** The injected code calls the utilization getter by
-   name, so that name must be bound *in the chunk being edited* — either because the getter
+   name, so that name must be bound _in the chunk being edited_ — either because the getter
    is declared there, or via that chunk's `import{…}from"<defining chunk>"` (possibly under
    an alias). `apply.mjs` builds a chunk index, resolves the local binding, and **aborts** if
    the getter is not reachable rather than emitting a call that would `ReferenceError`.
@@ -48,7 +48,7 @@ The 5-hour rate limit utilization bar in ClaudeUI's sidebar stays at 0% and only
 
 ### Root cause
 
-> Names in this section are the v2.1.97 ones from the original investigation. The *shape* of
+> Names in this section are the v2.1.97 ones from the original investigation. The _shape_ of
 > the problem has not changed since; only the minified names and their container have. See
 > [Key functions](#key-functions) for the current mapping — the class-based 2.1.231+ layout
 > reads `kh8`→`QS.rawUtilization`, `LR4()`→`SL()`, `pF1`→`Iot`, `hR4`→`Dwn`,
@@ -131,7 +131,7 @@ Anthropic API response
 
 **2.1.261 note — the getter now filters.** `SL()` is no longer a raw store read: it is
 `eEn(QS.rawUtilization)`, and `eEn` keeps only windows that pass `g6` (finite `utilization`
-*and* `resets_at`) **and** whose `resets_at` is in the future and less than a year out.
+_and_ `resets_at`) **and** whose `resets_at` is in the future and less than a year out.
 So a window whose reset time has already passed is dropped instead of relayed stale — an
 improvement, and harmless downstream (`updateFromHeaderUtilization` skips absent windows,
 and an all-empty payload sets `updated = false` so nothing is pushed).
@@ -195,19 +195,19 @@ concluding a listener-based approach would be simpler.**
 
 ### Variable mapping at injection site (v2.1.261 names)
 
-| Variable | Source                            | Value                                                           |
-| -------- | --------------------------------- | --------------------------------------------------------------- |
-| `Sp`     | `let Sp = zs`                     | Raw `Response` object from `fetch()` in the API client          |
-| `zs`     | set when the stream response lands | Response stored for post-streaming header access                |
-| `Lb`     | local to the stream generator     | Cached headers (used elsewhere in the function)                 |
-| `Iot`    | module-level fn (same chunk)      | Header-ingest wrapper → `QS.extractQuotaStatusFromHeaders`      |
-| `SL`     | module-level fn (same chunk)      | Getter: `function SL(){return eEn(QS.rawUtilization)}`          |
-| `QS`     | module-level `var QS = new Xwn`   | Rate limit state singleton                                      |
-| `eEn`    | module-level fn (same chunk)      | Validity filter over the window map (see below)                 |
-| `Xwn`    | class                             | Holds `rawUtilization`, `currentLimits`, `lastSeenWindows`, …   |
+| Variable | Source                             | Value                                                         |
+| -------- | ---------------------------------- | ------------------------------------------------------------- |
+| `Sp`     | `let Sp = zs`                      | Raw `Response` object from `fetch()` in the API client        |
+| `zs`     | set when the stream response lands | Response stored for post-streaming header access              |
+| `Lb`     | local to the stream generator      | Cached headers (used elsewhere in the function)               |
+| `Iot`    | module-level fn (same chunk)       | Header-ingest wrapper → `QS.extractQuotaStatusFromHeaders`    |
+| `SL`     | module-level fn (same chunk)       | Getter: `function SL(){return eEn(QS.rawUtilization)}`        |
+| `QS`     | module-level `var QS = new Xwn`    | Rate limit state singleton                                    |
+| `eEn`    | module-level fn (same chunk)       | Validity filter over the window map (see below)               |
+| `Xwn`    | class                              | Holds `rawUtilization`, `currentLimits`, `lastSeenWindows`, … |
 
 All of the above live in `chunk-9c0rs7w4.js` in 2.1.261, which is why the injected
-`SL()` call resolves. `SL` is a function *declaration*, so it is hoisted to the top of the
+`SL()` call resolves. `SL` is a function _declaration_, so it is hoisted to the top of the
 chunk's module scope and is callable from the injection site regardless of source order.
 
 ### `Dwn` — header parser (what feeds `QS.rawUtilization`)
@@ -282,12 +282,12 @@ chain, on both sides of the ingest call:
 - v2.1.219 **prepended** a call, so `if(<resp>)` is no longer directly followed by the
   ingest call (`if(as)EDu(as.headers,ke,Qe),hpo(as.headers,...)`). The anchor dropped the
   leading `if(<resp>)` at that point.
-- v2.1.261 also **appended** one *between* the ingest call and the headers assignment
+- v2.1.261 also **appended** one _between_ the ingest call and the headers assignment
   (`Iar(Sp.headers,f,Zw)`), so neither neighbour is contiguous with the ingest call any
   more. Hence the bounded run of intervening sibling calls.
 
 The combination is still unique: the other ingest call site (the non-streaming interceptor
-path, ~char 9441894 in 2.1.261) passes a headers *object* directly — `Iot(ke,t.model,…)` —
+path, ~char 9441894 in 2.1.261) passes a headers _object_ directly — `Iot(ke,t.model,…)` —
 so it has neither `<var>.headers` as the first argument nor a trailing assignment.
 `apply.mjs` asserts exactly 1 match and aborts otherwise.
 
@@ -297,18 +297,18 @@ so it has neither `<var>.headers` as the first argument nor a trailing assignmen
 let Sp = zs
 if (Sp)
   (Gie(Ru, bf),
-  rEn(Sp.headers, xs, bf, tl),
-  Iot(
-    Sp.headers,
-    f.model,
-    (tc(f.model) || gg(f.model)) &&
-      Ll.input_tokens + Ll.cache_read_input_tokens + Ll.cache_creation_input_tokens > UN,
-    bf,
-    tl,
-    f.storageV5
-  ),
-  Iar(Sp.headers, f, Zw),
-  (Lb = Sp.headers))
+    rEn(Sp.headers, xs, bf, tl),
+    Iot(
+      Sp.headers,
+      f.model,
+      (tc(f.model) || gg(f.model)) &&
+        Ll.input_tokens + Ll.cache_read_input_tokens + Ll.cache_creation_input_tokens > UN,
+      bf,
+      tl,
+      f.storageV5
+    ),
+    Iar(Sp.headers, f, Zw),
+    (Lb = Sp.headers))
 ```
 
 ### After
@@ -340,7 +340,7 @@ keeps the older ones so a rolled-back `claudeCliVersion` still builds.
    new `eEn` validity filter. The `rawUtilization` **property name survives minification**,
    which is what makes these anchors durable. Asserted unique.
 
-2. **Header-ingest fn** — the anchor for the call site. Bound to the *same* singleton the
+2. **Header-ingest fn** — the anchor for the call site. Bound to the _same_ singleton the
    getter reads, so the two can never drift apart:
 
    ```js
@@ -547,7 +547,7 @@ unconditional and execute it even when the response is null.
 
 Each chunk in the concat is an independent ES module. Emitting `SL()` into a chunk that
 neither declares nor imports `SL` produces a `ReferenceError` at runtime — and it will
-*not* be caught by a syntax check, because the code parses fine. `apply.mjs` resolves the
+_not_ be caught by a syntax check, because the code parses fine. `apply.mjs` resolves the
 local binding (or aborts) before emitting; do not shortcut that if you re-anchor by hand.
 
 ### Pitfall (2.1.261+): regexes that bridge a chunk boundary
@@ -557,7 +557,7 @@ an edit that the rebundler then writes into the wrong chunk. Every argument/para
 in `apply.mjs` excludes `\n` for exactly this reason (chunk bodies are single lines).
 
 **Always syntax-check after applying.** The full concat is not valid standalone JS, so
-`node --check` on it is meaningless — check the *chunk* instead: slice from the marker's
+`node --check` on it is meaningless — check the _chunk_ instead: slice from the marker's
 `// @bun-chunk` delimiter to the next one, write it to a `.mjs`, and run `node --check` on
 that. The repo's rebundler does the equivalent with esbuild for every modified chunk.
 
@@ -662,12 +662,12 @@ credentials, so it is not runnable from a bare patch worktree.
 
 ### 2.1.261 re-anchor (chunked bundle)
 
-8. **Failure**: `apply.mjs` aborted with *"Cannot locate the header utilization getter in
-   either shape"* — both the 2.1.231 class shape and the ≤2.1.220 module-var shape missed.
+8. **Failure**: `apply.mjs` aborted with _"Cannot locate the header utilization getter in
+   either shape"_ — both the 2.1.231 class shape and the ≤2.1.220 module-var shape missed.
 
 9. **The literals still existed**: `rg -c rawUtilization` → 21 hits,
    `rg -c extractQuotaStatusFromHeaders` → 3. So the feature was intact and only the
-   *shapes* had moved. Never conclude "removed upstream" from a failing regex when the
+   _shapes_ had moved. Never conclude "removed upstream" from a failing regex when the
    property names are still there.
 
 10. **Two independent shape changes**, both found by printing ±400 chars around the literals:
@@ -679,7 +679,7 @@ credentials, so it is not runnable from a bare patch worktree.
       arity has changed in 4 consecutive versions and pinning it is a recurring trap.
 
 11. **Third change, found only by running the fixed script**: with the getter and ingest fn
-    resolved, the *call site* regex still missed. Diffing the region showed upstream had
+    resolved, the _call site_ regex still missed. Diffing the region showed upstream had
     inserted `Iar(Sp.headers,f,Zw)` between the ingest call and `Lb=Sp.headers` — so the
     anchor's two halves were no longer adjacent. Fixed with a bounded run of intervening
     sibling calls (`(?:,fn(...)){0,8}`), keeping the whole thing a single unique match.
@@ -698,34 +698,34 @@ credentials, so it is not runnable from a bare patch worktree.
 
 ## Version Progression
 
-| What changed             | v2.1.97                      | v2.1.197                                     | v2.1.231                                   | v2.1.261                                                            |
-| ------------------------ | ---------------------------- | -------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------- |
-| Bundle shape             | one CJS bundle               | one CJS bundle                                | one CJS bundle                             | **1,631 ESM chunks**, concatenated with `// @bun-chunk` delimiters   |
-| State storage            | module var `kh8`             | module var `n5e`                              | class field `bne.rawUtilization`           | class field `QS.rawUtilization` (class `Xwn`)                       |
-| Getter                   | `LR4(){return kh8}`          | `r5e(){return n5e}`                           | `lCn(){return bne.rawUtilization}`         | `SL(){return eEn(QS.rawUtilization)}` — **filters expired windows**  |
-| Ingest fn arity          | 1 (`(q)`)                    | 4 (`(e,t,n=!1,r=Date.now())`)                 | 5 (`…,o`)                                  | 6 (`(e,t,r=!1,o=Date.now(),d,f)`) → apply.mjs stopped pinning arity  |
-| Windows tracked          | 5h, 7d                       | 5h, 7d                                        | + overage                                  | 5h, 7d, 7d_oi, overage                                              |
-| Comma chain at call site | `pF1(…),k8=…`                | `pF1(…,args),Je=…`                            | `EDu(…),pF1(…),…=…` (prepend)              | `Gie(…),rEn(…),Iot(…),Iar(…),Lb=…` (**prepend + append**)           |
-| Patch injection shape    | trailing `,process.stdout.write(…)` | same                                   | same                                       | same, plus a chunk-scope check on the emitted getter name           |
+| What changed             | v2.1.97                             | v2.1.197                      | v2.1.231                           | v2.1.261                                                            |
+| ------------------------ | ----------------------------------- | ----------------------------- | ---------------------------------- | ------------------------------------------------------------------- |
+| Bundle shape             | one CJS bundle                      | one CJS bundle                | one CJS bundle                     | **1,631 ESM chunks**, concatenated with `// @bun-chunk` delimiters  |
+| State storage            | module var `kh8`                    | module var `n5e`              | class field `bne.rawUtilization`   | class field `QS.rawUtilization` (class `Xwn`)                       |
+| Getter                   | `LR4(){return kh8}`                 | `r5e(){return n5e}`           | `lCn(){return bne.rawUtilization}` | `SL(){return eEn(QS.rawUtilization)}` — **filters expired windows** |
+| Ingest fn arity          | 1 (`(q)`)                           | 4 (`(e,t,n=!1,r=Date.now())`) | 5 (`…,o`)                          | 6 (`(e,t,r=!1,o=Date.now(),d,f)`) → apply.mjs stopped pinning arity |
+| Windows tracked          | 5h, 7d                              | 5h, 7d                        | + overage                          | 5h, 7d, 7d_oi, overage                                              |
+| Comma chain at call site | `pF1(…),k8=…`                       | `pF1(…,args),Je=…`            | `EDu(…),pF1(…),…=…` (prepend)      | `Gie(…),rEn(…),Iot(…),Iar(…),Lb=…` (**prepend + append**)           |
+| Patch injection shape    | trailing `,process.stdout.write(…)` | same                          | same                               | same, plus a chunk-scope check on the emitted getter name           |
 
 ## Key Functions Reference (v2.1.261, all in `chunk-9c0rs7w4.js`)
 
-| Name                                     | Purpose                                                                       | Char offset |
-| ---------------------------------------- | ----------------------------------------------------------------------------- | ----------- |
-| `class Xwn`                              | Rate limit state: `currentLimits`, `rawUtilization`, `lastSeenWindows`, …     | ~7109819    |
-| `var QS = new Xwn`                       | The module singleton every wrapper delegates to                               | ~7118949    |
-| `SL()`                                   | Getter the patch calls → `eEn(QS.rawUtilization)`                             | ~7119002    |
-| `eEn(e)` / `g6(e)`                       | Validity filter / finite-fields predicate                                     | ~7119261 / ~7103340 |
-| `qdn()`                                  | **Not** the one we want — `lastSeenWindows` within a 30-min staleness budget  | ~7119062    |
-| `Dwn(e)`                                 | Header parser → `{ <window>: { utilization, resets_at } }`                    | ~7103022    |
-| `var YPe`                                | Window list `[["five_hour","5h"],…]` — the durable string anchor              | ~7102913    |
-| `Iot(e,t,r,o,d,f)`                       | Header-ingest wrapper (our anchor) → `QS.extractQuotaStatusFromHeaders`       | ~7119828    |
-| `QS.extractQuotaStatusFromHeaders`       | The ingest itself: scope check → parse → record → maybe emit                  | ~7112475    |
-| `KPe(e,t)`                               | Unified status parser → `{ status, resetsAt, rateLimitType, … }`              | ~7104843    |
-| `QS.emitStatusChange(e)`                 | Broadcaster + `tengu_claudeai_limits_status_changed` telemetry                | ~7111113    |
-| `Qs`                                     | Deep equality gating the broadcast (imported into this chunk)                 | —           |
-| stream loop injection site               | Unnamed async generator; `let Sp=zs;if(Sp)…,Lb=Sp.headers`                    | ~9506089    |
-| non-streaming ingest call (do not patch) | `if(ke)Iot(ke,t.model,…)` — headers passed directly, no trailing assignment   | ~9441894    |
+| Name                                     | Purpose                                                                      | Char offset         |
+| ---------------------------------------- | ---------------------------------------------------------------------------- | ------------------- |
+| `class Xwn`                              | Rate limit state: `currentLimits`, `rawUtilization`, `lastSeenWindows`, …    | ~7109819            |
+| `var QS = new Xwn`                       | The module singleton every wrapper delegates to                              | ~7118949            |
+| `SL()`                                   | Getter the patch calls → `eEn(QS.rawUtilization)`                            | ~7119002            |
+| `eEn(e)` / `g6(e)`                       | Validity filter / finite-fields predicate                                    | ~7119261 / ~7103340 |
+| `qdn()`                                  | **Not** the one we want — `lastSeenWindows` within a 30-min staleness budget | ~7119062            |
+| `Dwn(e)`                                 | Header parser → `{ <window>: { utilization, resets_at } }`                   | ~7103022            |
+| `var YPe`                                | Window list `[["five_hour","5h"],…]` — the durable string anchor             | ~7102913            |
+| `Iot(e,t,r,o,d,f)`                       | Header-ingest wrapper (our anchor) → `QS.extractQuotaStatusFromHeaders`      | ~7119828            |
+| `QS.extractQuotaStatusFromHeaders`       | The ingest itself: scope check → parse → record → maybe emit                 | ~7112475            |
+| `KPe(e,t)`                               | Unified status parser → `{ status, resetsAt, rateLimitType, … }`             | ~7104843            |
+| `QS.emitStatusChange(e)`                 | Broadcaster + `tengu_claudeai_limits_status_changed` telemetry               | ~7111113            |
+| `Qs`                                     | Deep equality gating the broadcast (imported into this chunk)                | —                   |
+| stream loop injection site               | Unnamed async generator; `let Sp=zs;if(Sp)…,Lb=Sp.headers`                   | ~9506089            |
+| non-streaming ingest call (do not patch) | `if(ke)Iot(ke,t.model,…)` — headers passed directly, no trailing assignment  | ~9441894            |
 
 **Note:** All minified names will change in future SDK versions, and offsets shift with any
 upstream edit. Use content patterns (property names, string literals, structural shapes) to
@@ -757,8 +757,8 @@ through the status parser. `apply.mjs` keeps that shape as a fallback.
 
 ## Files
 
-| File        | Purpose                                                                                              |
-| ----------- | ---------------------------------------------------------------------------------------------------- |
-| `README.md` | This document                                                                                        |
+| File        | Purpose                                                                                               |
+| ----------- | ----------------------------------------------------------------------------------------------------- |
+| `README.md` | This document                                                                                         |
 | `apply.mjs` | Patch script — single injection; extracts the getter + ingest fn names and the getter's chunk binding |
-| `test.mjs`  | Behavioural test — needs a rebundled binary and live credentials                                     |
+| `test.mjs`  | Behavioural test — needs a rebundled binary and live credentials                                      |
