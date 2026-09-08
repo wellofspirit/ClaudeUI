@@ -15,6 +15,7 @@ import { ENGINE_META, engineMeta } from '../../../../shared/engine-meta'
 import { ChevronIcon } from './ChevronIcon'
 import { EngineLogo } from './EngineLogo'
 import { useAnchoredMenu } from './use-anchored-menu'
+import { useEscapeLayer } from './use-escape-layer'
 
 export interface ModelDisplay {
   value: string
@@ -191,6 +192,12 @@ export function ModelPicker({
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
   useClickOutside(ref, open, () => setOpen(false))
+
+  // BOTH VARIANTS: an open menu is the top Escape layer, so the key closes the
+  // menu and stops there instead of falling through to the sheet or dialog
+  // behind it (see use-escape-layer). A closed picker registers nothing, which
+  // is what lets a settings page hold a dozen of them.
+  useEscapeLayer(() => setOpen(false), true, open)
 
   const field = variant === 'field'
 

@@ -14,10 +14,14 @@
  *      group card it is drawn in is `overflow-hidden` and clipped an absolute
  *      one — and a scroll therefore has to close it, since a fixed menu cannot
  *      follow its trigger
+ *   8. an OPEN menu is an Escape layer (use-escape-layer): Escape closes the
+ *      menu and stops there, so the sheet the select sits in survives the
+ *      press — a closed select is invisible to the stack
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
 import { SelectMenu } from '../SelectMenu'
+import { useEscapeLayer, __escapeLayerCount } from '../use-escape-layer'
 import {
   chooseSelectMenuOption,
   selectMenuOptionValues,
@@ -39,7 +43,18 @@ function renderMenu(props: Partial<React.ComponentProps<typeof SelectMenu>> = {}
   return { onChange, root: screen.getByTestId('Demo') }
 }
 
-afterEach(cleanup)
+/** Stands in for the sheet or dialog a select is drawn inside. */
+function SheetLayer({ onClose }: { onClose: () => void }): React.JSX.Element {
+  useEscapeLayer(onClose)
+  return <div />
+}
+
+afterEach(() => {
+  cleanup()
+  // A closed select must leave no token behind, or the NEXT overlay's Escape
+  // becomes a silent no-op.
+  expect(__escapeLayerCount(), 'a layer leaked past unmount').toBe(0)
+})
 
 describe('SelectMenu', () => {
   it('shows the selected option label and exposes the value as data-value', () => {
@@ -136,6 +151,37 @@ describe('SelectMenu', () => {
     fireEvent.click(within(root).getByTestId('Demo.trigger'))
     fireEvent.mouseDown(document.body)
     expect(within(root).queryByRole('listbox')).toBeNull()
+  })
+
+  it('is an Escape layer only while open, so a closed select never eats the key', () => {
+    const closeSheet = vi.fn()
+    render(
+      <>
+        <SheetLayer onClose={closeSheet} />
+        <SelectMenu testid="Demo" value="a" options={OPTIONS} onChange={vi.fn()} />
+      </>
+    )
+    const root = screen.getByTestId('Demo')
+    // The sheet mounted FIRST and the select is closed: only the sheet is a
+    // layer, so the press is the sheet's.
+    expect(__escapeLayerCount()).toBe(1)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(closeSheet).toHaveBeenCalledTimes(1)
+
+    // Opening the select puts it on top of the sheet even though the sheet
+    // registered earlier. Escape closes ONLY the menu — a bubble-phase
+    // listener could not manage that, because the sheet's capture-phase layer
+    // had already stopped the event and closed the sheet under the menu.
+    fireEvent.click(within(root).getByTestId('Demo.trigger'))
+    expect(__escapeLayerCount()).toBe(2)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(within(root).queryByRole('listbox')).toBeNull()
+    expect(closeSheet).toHaveBeenCalledTimes(1)
+
+    // …and the next press falls through to the sheet again.
+    expect(__escapeLayerCount()).toBe(1)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(closeSheet).toHaveBeenCalledTimes(2)
   })
 
   it('draws the list as a fixed overlay so no overflow ancestor clips it', () => {

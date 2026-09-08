@@ -6,11 +6,13 @@
  *   - activating the filter hides non-free models AND groups that become empty
  *   - a stale active filter is ignored when the list loses all free models
  *     (chip unmounts → user can't un-toggle → must not dead-end empty)
+ *   - an OPEN menu (both variants) is an Escape layer, and a CLOSED one is not
  */
 
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent, within } from '@testing-library/react'
 import { EnginePicker, ModelPicker, type ModelDisplay } from '../InlinePickers'
+import { __escapeLayerCount } from '../use-escape-layer'
 
 const claudeModel: ModelDisplay = {
   value: 'claude-opus-4-7',
@@ -357,5 +359,63 @@ describe('ModelPicker — pinned non-model rows', () => {
     expect(onSelectModel).toHaveBeenCalledWith('__custom__')
     // …and the menu closes, like any other row.
     expect(screen.queryByTestId('ModelPicker.option')).toBeNull()
+  })
+})
+
+describe('ModelPicker — Escape', () => {
+  // A menu is a layer only while it is open (use-escape-layer). Before this the
+  // picker ignored Escape entirely, so inside a settings sheet the press closed
+  // the SHEET with the menu still on screen.
+  it('closes an open FIELD menu and stops the key there', () => {
+    const behind = vi.fn()
+    document.addEventListener('keydown', behind)
+    try {
+      render(
+        <ModelPicker
+          variant="field"
+          models={[claudeModel]}
+          selectedModel={claudeModel}
+          onSelectModel={vi.fn()}
+        />
+      )
+      openDropdown()
+      expect(__escapeLayerCount()).toBe(1)
+
+      fireEvent.keyDown(document, { key: 'Escape' })
+      expect(screen.queryByTestId('ModelPicker.option')).toBeNull()
+      expect(screen.getByTestId('ModelPicker.trigger').getAttribute('aria-expanded')).toBe('false')
+      // The layer stopped the event, so nothing behind the menu (a sheet, the
+      // SettingsDialog's own bubble-phase listener) sees the press.
+      expect(behind).not.toHaveBeenCalled()
+      expect(__escapeLayerCount()).toBe(0)
+    } finally {
+      document.removeEventListener('keydown', behind)
+    }
+  })
+
+  it('closes an open COMPACT menu too — a menu is a menu', () => {
+    render(
+      <ModelPicker models={[claudeModel]} selectedModel={claudeModel} onSelectModel={vi.fn()} />
+    )
+    openDropdown()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByTestId('ModelPicker.option')).toBeNull()
+  })
+
+  it('registers nothing while closed, and lets the key through', () => {
+    // The composer binds Escape to "interrupt the run" and a settings page
+    // holds a dozen pickers: a closed one must be completely invisible.
+    const behind = vi.fn()
+    document.addEventListener('keydown', behind)
+    try {
+      render(
+        <ModelPicker models={[claudeModel]} selectedModel={claudeModel} onSelectModel={vi.fn()} />
+      )
+      expect(__escapeLayerCount()).toBe(0)
+      fireEvent.keyDown(document, { key: 'Escape' })
+      expect(behind).toHaveBeenCalledTimes(1)
+    } finally {
+      document.removeEventListener('keydown', behind)
+    }
   })
 })

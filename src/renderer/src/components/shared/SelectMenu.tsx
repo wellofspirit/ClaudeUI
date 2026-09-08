@@ -27,6 +27,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ChevronIcon } from './ChevronIcon'
 import { useAnchoredMenu } from './use-anchored-menu'
+import { useEscapeLayer } from './use-escape-layer'
 
 export interface SelectMenuOption {
   value: string
@@ -83,20 +84,21 @@ export function SelectMenu({
     onClose: () => setOpen(false)
   })
 
+  // An OPEN menu is the top Escape layer, so the key closes the menu and stops
+  // there. Its own bubble-phase listener could not do that: a sheet's
+  // capture-phase layer (use-escape-layer) had already stopped the event and
+  // closed the SHEET under the open select. A closed menu registers nothing.
+  useEscapeLayer(() => setOpen(false), true, open)
+
   useEffect(() => {
     if (!open) return
     const onDown = (e: MouseEvent): void => {
       const node = ref.current
       if (node && e.target instanceof Node && !node.contains(e.target)) setOpen(false)
     }
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') setOpen(false)
-    }
     document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
     return () => {
       document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
     }
   }, [open])
 

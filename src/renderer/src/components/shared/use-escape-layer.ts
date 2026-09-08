@@ -22,6 +22,15 @@
  * `document` — the lower layers — still fire, which is why each one checks that
  * it is on top and otherwise says nothing at all, INCLUDING not stopping the
  * event: stopping it is the top layer's job.
+ *
+ * A MENU IS A LAYER ONLY WHILE IT IS OPEN. Dropdown menus (`SelectMenu`,
+ * `ModelPicker`) are mounted the whole time their row is on screen, so they
+ * cannot register on mount the way an overlay does — a settings page holds a
+ * dozen of them and the last-mounted one would swallow every press. They pass
+ * their `open` flag as `active` instead: while the menu is closed the hook
+ * registers NOTHING (no token, no listener) and the sheet behind keeps
+ * answering; the moment the menu opens it becomes the top layer, so Escape
+ * closes the menu and stops there rather than closing the sheet under it.
  */
 
 import { useEffect, useRef } from 'react'
@@ -38,12 +47,17 @@ const LAYERS: object[] = []
  * must not fall through to whatever is under it — but swallows Escape without
  * closing: a confirm whose action is mid-flight must not be dismissed under the
  * user.
+ *
+ * `active=false` is the opposite: NOTHING is registered, so the layer is not in
+ * the stack at all and whatever is under it answers Escape. Overlays leave it
+ * at the default (they exist only while they are up); a menu passes its `open`
+ * flag, because a closed menu must be invisible to the stack.
  */
-export function useEscapeLayer(onClose: () => void, enabled = true): void {
+export function useEscapeLayer(onClose: () => void, enabled = true, active = true): void {
   /**
-   * Both read through refs so the registration below can depend on NOTHING.
-   * Callers pass inline arrows (the endpoint sheet's `onClose`) whose identity
-   * changes on every render of their parent, and re-registering means
+   * Both read through refs so the registration below depends on `active`
+   * ALONE. Callers pass inline arrows (the endpoint sheet's `onClose`) whose
+   * identity changes on every render of their parent, and re-registering means
    * re-pushing — which would make whichever layer last re-rendered the "top"
    * one regardless of mount order.
    */
@@ -53,6 +67,8 @@ export function useEscapeLayer(onClose: () => void, enabled = true): void {
   enabledRef.current = enabled
 
   useEffect(() => {
+    // Not a layer at all: a closed menu must let the sheet behind it answer.
+    if (!active) return
     const token = {}
     LAYERS.push(token)
     const handler = (e: KeyboardEvent): void => {
@@ -68,7 +84,7 @@ export function useEscapeLayer(onClose: () => void, enabled = true): void {
       const at = LAYERS.indexOf(token)
       if (at !== -1) LAYERS.splice(at, 1)
     }
-  }, [])
+  }, [active])
 }
 
 /**

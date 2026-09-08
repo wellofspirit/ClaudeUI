@@ -10,6 +10,11 @@
  * Registration is module-level and the layers are siblings rather than nested
  * components, so a leaked token is invisible from any one component's tests —
  * `__escapeLayerCount` is here for exactly that.
+ *
+ * `active` is the menu case: a dropdown is mounted the whole time its row is on
+ * screen, so it is a layer only while it is OPEN. While it is closed the hook
+ * must register NOTHING — not a swallowing layer, not a token — or a settings
+ * page full of pickers would leave every press to the last one mounted.
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest'
@@ -23,12 +28,14 @@ afterEach(() => {
 
 function Layer({
   onClose,
-  enabled
+  enabled,
+  active
 }: {
   onClose: () => void
   enabled?: boolean
+  active?: boolean
 }): React.JSX.Element {
-  useEscapeLayer(onClose, enabled)
+  useEscapeLayer(onClose, enabled, active)
   return <div />
 }
 
@@ -152,5 +159,64 @@ describe('useEscapeLayer', () => {
     expect(__escapeLayerCount()).toBe(0)
     escape()
     expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('an inactive layer registers NOTHING and the layer below answers', () => {
+    // A closed dropdown. `enabled=false` would have been wrong here: that
+    // swallows the key on behalf of a layer that is still on top. An inactive
+    // layer is not on the stack at all.
+    const below = vi.fn()
+    const closedMenu = vi.fn()
+    render(
+      <>
+        <Layer onClose={below} />
+        <Layer onClose={closedMenu} active={false} />
+      </>
+    )
+    expect(__escapeLayerCount()).toBe(1)
+    escape()
+    expect(closedMenu).not.toHaveBeenCalled()
+    expect(below).toHaveBeenCalledTimes(1)
+  })
+
+  it('registers when active turns true and unregisters when it turns false', () => {
+    const onClose = vi.fn()
+    const tree = (active: boolean): React.JSX.Element => <Layer onClose={onClose} active={active} />
+    const { rerender } = render(tree(false))
+    expect(__escapeLayerCount()).toBe(0)
+
+    rerender(tree(true))
+    expect(__escapeLayerCount()).toBe(1)
+    escape()
+    expect(onClose).toHaveBeenCalledTimes(1)
+
+    rerender(tree(false))
+    expect(__escapeLayerCount()).toBe(0)
+    escape()
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('an open menu above a sheet answers first, and the next press reaches the sheet', () => {
+    // The whole point of follow-up H: a select opened inside a sheet used to
+    // lose the key to the sheet's capture-phase layer, which closed the SHEET.
+    const sheet = vi.fn()
+    const menu = vi.fn()
+    const tree = (menuOpen: boolean): React.JSX.Element => (
+      <>
+        <Layer onClose={sheet} />
+        <Layer onClose={menu} active={menuOpen} />
+      </>
+    )
+    const { rerender } = render(tree(true))
+    expect(__escapeLayerCount()).toBe(2)
+    escape()
+    expect(menu).toHaveBeenCalledTimes(1)
+    expect(sheet).not.toHaveBeenCalled()
+
+    // The menu closed itself in response; the next press is the sheet's.
+    rerender(tree(false))
+    escape()
+    expect(sheet).toHaveBeenCalledTimes(1)
+    expect(menu).toHaveBeenCalledTimes(1)
   })
 })
