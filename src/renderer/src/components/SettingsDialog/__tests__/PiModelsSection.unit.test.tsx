@@ -103,8 +103,8 @@ describe('pi session-default model (Models & thinking pane)', () => {
       getEngineModels,
       getPiModelCatalogGroups,
       engineIsInstalled,
-      // The pane around these controls reads pi's own settings file for the
-      // "pi fallbacks" rows; without it PaneShell would never leave Loading….
+      // The `PaneShell` around these controls reads pi's own settings file as
+      // its load gate; without it the pane would never leave Loading….
       readPiNativeRaw,
       patchPiNative
     }

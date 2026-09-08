@@ -16,17 +16,22 @@
  *   5. `thinkingBudgets` is per-level, and clearing the LAST level removes the
  *      whole object rather than leaving `{}` behind.
  *   6. Closed-set rows delete when the chosen value is the one pi already
- *      assumes (`defaultThinkingLevel` unset, `defaultProjectTrust: ask`).
+ *      assumes (`defaultProjectTrust: ask`, `transport` auto).
  *   7. `packages` object-form entries survive an edit of the string entries.
  *   8. The Raw pane refuses to save invalid JSON and writes the text verbatim.
  *   9. `trackingId` is never surfaced (pi generates it).
  *  10. Every pane self-gates on pi being installed.
  *  11. A rejected patch surfaces inline instead of being swallowed.
  *
- * ADR-065 split the three panes that used to carry an in-pane sub-header into
- * separate sections (`PiRetrySection`, `PiResourcesSection`,
- * `PiFallbacksSection`), so §12 also pins that each half renders its own rows
- * and none of its sibling's.
+ * ADR-065 split the panes that used to carry an in-pane sub-header into separate
+ * sections (`PiRetrySection`, `PiResourcesSection`), so §12 also pins that each
+ * half renders its own rows and none of its sibling's. The third of them,
+ * `PiFallbacksSection`, went away on 2026-09-08: `defaultProvider` /
+ * `defaultModel` / `defaultThinkingLevel` apply only to a session started
+ * without a `set_model`, which ClaudeUI never creates, so the Raw pane is now
+ * their only home and nothing here covers them. Its fourth row,
+ * `thinkingBudgets`, is not TUI-only and moved to Session behaviour — §5 pins
+ * it there.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -37,7 +42,6 @@ import {
   PiSessionBehaviorSection,
   PiRetrySection,
   PiModelsSection,
-  PiFallbacksSection,
   PiToolsSection,
   PiImagesSection,
   PiWorkspaceSection,
@@ -321,16 +325,6 @@ describe('pi Configuration panes', () => {
       expect(patch.path).toEqual(['shellPath'])
       expect('value' in patch).toBe(false)
     })
-
-    it('the pi fallback provider/model are top-level leaves', async () => {
-      await renderPane(<PiFallbacksSection />)
-      const provider = textFor('defaultProvider')
-      await act(async () => {
-        fireEvent.change(provider, { target: { value: 'anthropic' } })
-        fireEvent.blur(provider)
-      })
-      expect(onlyPatch()).toEqual({ path: ['defaultProvider'], value: 'anthropic' })
-    })
   })
 
   // ── 4. defaultTools: absent / seeded / [] / reset ──────────────────
@@ -428,10 +422,14 @@ describe('pi Configuration panes', () => {
   })
 
   // ── 5. thinkingBudgets ─────────────────────────────────────────────
+  //
+  // Session behaviour renders this row as of 2026-09-08 — it moved there when
+  // the "pi fallbacks" section it used to share was deleted. The row itself, its
+  // testids and its leaf / parent-collapse contract are unchanged.
 
   describe('thinkingBudgets', () => {
     it('renders one number field per documented level', async () => {
-      await renderPane(<PiFallbacksSection />)
+      await renderPane(<PiSessionBehaviorSection />)
       const ids = screen
         .getAllByTestId('PiConfigPane.number')
         .map((n) => n.getAttribute('data-id'))
@@ -445,7 +443,7 @@ describe('pi Configuration panes', () => {
     })
 
     it('writes one leaf per level', async () => {
-      await renderPane(<PiFallbacksSection />)
+      await renderPane(<PiSessionBehaviorSection />)
       const input = numberFor('thinkingBudgets.low')
       await act(async () => {
         fireEvent.change(input, { target: { value: '4096' } })
@@ -456,7 +454,7 @@ describe('pi Configuration panes', () => {
 
     it('clearing ONE level with siblings deletes just that level', async () => {
       currentConfig = { thinkingBudgets: { low: 4096, high: 32768 } }
-      await renderPane(<PiFallbacksSection />)
+      await renderPane(<PiSessionBehaviorSection />)
       const input = numberFor('thinkingBudgets.low')
       expect(input.value).toBe('4096')
       await act(async () => {
@@ -470,7 +468,7 @@ describe('pi Configuration panes', () => {
 
     it('clearing the LAST level deletes the thinkingBudgets object itself', async () => {
       currentConfig = { thinkingBudgets: { high: 32768 } }
-      await renderPane(<PiFallbacksSection />)
+      await renderPane(<PiSessionBehaviorSection />)
       const input = numberFor('thinkingBudgets.high')
       await act(async () => {
         fireEvent.change(input, { target: { value: '' } })
@@ -484,7 +482,7 @@ describe('pi Configuration panes', () => {
     it('a level this grid does not render still counts as a sibling', async () => {
       // `xhigh` has no input here, but deleting the object would take it with it.
       currentConfig = { thinkingBudgets: { high: 32768, xhigh: 60000 } }
-      await renderPane(<PiFallbacksSection />)
+      await renderPane(<PiSessionBehaviorSection />)
       const input = numberFor('thinkingBudgets.high')
       await act(async () => {
         fireEvent.change(input, { target: { value: '' } })
@@ -494,32 +492,9 @@ describe('pi Configuration panes', () => {
     })
   })
 
-  // ── 6. Closed-set rows (segmented + select) ────────────────────────
+  // ── 6. Closed-set rows (segmented) ─────────────────────────────────
 
   describe('closed-set rows', () => {
-    it('defaultThinkingLevel writes the chosen level and deletes on "default"', async () => {
-      await renderPane(<PiFallbacksSection />)
-      expect(selectValue('defaultThinkingLevel')).toBe('')
-      await pickSelect('defaultThinkingLevel', 'high')
-      expect(onlyPatch()).toEqual({ path: ['defaultThinkingLevel'], value: 'high' })
-
-      cleanup()
-      captured = []
-      currentConfig = { defaultThinkingLevel: 'high' }
-      await renderPane(<PiFallbacksSection />)
-      expect(selectValue('defaultThinkingLevel')).toBe('high')
-      await pickSelect('defaultThinkingLevel', '')
-      const patch = onlyPatch()
-      expect(patch.path).toEqual(['defaultThinkingLevel'])
-      expect('value' in patch).toBe(false)
-    })
-
-    it('"off" is a real value, distinct from absent', async () => {
-      await renderPane(<PiFallbacksSection />)
-      await pickSelect('defaultThinkingLevel', 'off')
-      expect(onlyPatch()).toEqual({ path: ['defaultThinkingLevel'], value: 'off' })
-    })
-
     it('defaultProjectTrust reads ask when absent and DELETES when set back to ask', async () => {
       currentConfig = { defaultProjectTrust: 'always' }
       await renderPane(<PiWorkspaceSection />)
@@ -632,6 +607,10 @@ describe('pi Configuration panes', () => {
     it('choosing auto (pi\u2019s default) deletes the key', async () => {
       currentConfig = { transport: 'sse' }
       await renderPane(<PiNetworkSection />)
+      // The last select row in these panes, so it also carries the "a select
+      // shows the value already in the file" assertion that the deleted pi
+      // fallbacks rows used to hold.
+      expect(selectValue('transport')).toBe('sse')
       await pickSelect('transport', '')
       const patch = onlyPatch()
       expect(patch.path).toEqual(['transport'])
@@ -747,7 +726,6 @@ describe('pi Configuration panes', () => {
       ['PiSessionBehaviorSection', <PiSessionBehaviorSection key="a" />],
       ['PiRetrySection', <PiRetrySection key="b" />],
       ['PiModelsSection', <PiModelsSection key="c" />],
-      ['PiFallbacksSection', <PiFallbacksSection key="d" />],
       ['PiToolsSection', <PiToolsSection key="e" />],
       ['PiImagesSection', <PiImagesSection key="f" />],
       ['PiWorkspaceSection', <PiWorkspaceSection key="g" />],
@@ -766,7 +744,7 @@ describe('pi Configuration panes', () => {
     })
   })
 
-  // ── 12. Section splits (ADR-065: no sub-headers inside a pane) ──────
+  // ── 12. Section splits (ADR-065: no sub-headers inside a pane) ─────
 
   describe('section splits', () => {
     it('Session behaviour keeps compaction and hands retry to its own section', async () => {
@@ -775,7 +753,8 @@ describe('pi Configuration panes', () => {
         'compaction.enabled',
         'compaction.reserveTokens',
         'compaction.keepRecentTokens',
-        'branchSummary.reserveTokens'
+        'branchSummary.reserveTokens',
+        'thinkingBudgets'
       ])
       cleanup()
       await renderPane(<PiRetrySection />)
@@ -795,22 +774,6 @@ describe('pi Configuration panes', () => {
       cleanup()
       await renderPane(<PiResourcesSection />)
       expect(rowIds()).toEqual(['packages', 'extensions', 'skills', 'prompts'])
-    })
-
-    it('Models keeps ClaudeUI\u2019s own default and hands pi\u2019s fallbacks to its own section', async () => {
-      await renderPane(<PiModelsSection />)
-      expect(screen.getByTestId('PiDefaultModelSection')).toBeTruthy()
-      expect(rowIds()).not.toContain('defaultProvider')
-      expect(rowIds()).not.toContain('thinkingBudgets')
-      cleanup()
-      await renderPane(<PiFallbacksSection />)
-      expect(screen.queryByTestId('PiDefaultModelSection')).toBeNull()
-      expect(rowIds()).toEqual([
-        'defaultProvider',
-        'defaultModel',
-        'defaultThinkingLevel',
-        'thinkingBudgets'
-      ])
     })
   })
 

@@ -17,8 +17,18 @@
  * `PiConfigPane` testid prefix, or `SettingRow` itself for the few controls that
  * are pi-only. There are no sub-headers and no per-pane footers: a divider
  * inside a pane is a GROUP boundary, so each former sub-header is now its own
- * exported section (PiRetrySection, PiResourcesSection, PiFallbacksSection), and
- * "saved immediately / applies to new sessions" is the group card's note.
+ * exported section (PiRetrySection, PiResourcesSection), and "saved immediately
+ * / applies to new sessions" is the group card's note.
+ *
+ * There was a third, `PiFallbacksSection` (Models & providers › "pi
+ * fallbacks"); it is GONE as of 2026-09-08, and its four rows went two ways.
+ * `defaultProvider` / `defaultModel` / `defaultThinkingLevel` only take effect
+ * for a pi session started without a `set_model`, and ClaudeUI names a model for
+ * every session it creates, so they governed standalone pi's TUI alone and are
+ * now reachable only from the Raw config pane. `thinkingBudgets` MOVED to
+ * Session behaviour instead of following them: it is read whenever a session runs
+ * at a thinking level, and ClaudeUI's effort chip sets that level on every pi
+ * session, so it is one of ours.
  *
  * Behavioural conventions are unchanged, and they are what the tests pin:
  *
@@ -475,6 +485,72 @@ function StringListRow({
 
 // ── Session behaviour ────────────────────────────────────────────────────────
 
+/**
+ * The thinking levels pi documents a budget for. Each is its own leaf, so a
+ * level the user has not set stays absent; clearing the LAST one removes the
+ * `thinkingBudgets` object rather than leaving `{}` behind.
+ */
+const THINKING_BUDGET_LEVELS = ['minimal', 'low', 'medium', 'high'] as const
+
+/**
+ * Lives in Session behaviour since 2026-09-08, not with the deleted "pi
+ * fallbacks" rows it used to share a pane with: a budget is not a fallback. pi
+ * reads it whenever a session runs at that thinking level, and ClaudeUI's effort
+ * chip drives the level on every pi session (`set_thinking_level`), so this key
+ * shapes OUR sessions and belongs on a page that governs them.
+ */
+function ThinkingBudgetsRow({ api }: { api: PiNativeConfigLeaf }): React.JSX.Element {
+  const raw = api.read(['thinkingBudgets'])
+  const budgets = isPlainObject(raw) ? raw : {}
+
+  const commit = (level: string, value: number | undefined): void => {
+    if (value !== undefined) {
+      api.patch(['thinkingBudgets', level], value)
+      return
+    }
+    // Clearing the last remaining budget deletes the whole object: the writer
+    // leaves an emptied parent alone, so collapsing it is the pane's job. Every
+    // OTHER key counts, including levels this grid doesn't render.
+    const others = Object.keys(budgets).filter((k) => k !== level)
+    if (others.length === 0) api.patch(['thinkingBudgets'], undefined)
+    else api.patch(['thinkingBudgets', level], undefined)
+  }
+
+  return (
+    <StackedRow
+      testidPrefix={PANE}
+      configKey="thinkingBudgets"
+      label="Thinking budgets"
+      helper="Token budgets per thinking level. ClaudeUI's effort chip maps to these on Anthropic, Google and Bedrock; OpenAI-compatible models need compat support."
+      error={
+        // One shared row error: only one field can be in flight at a time.
+        THINKING_BUDGET_LEVELS.map((l) => api.errorAt(['thinkingBudgets', l])).find(Boolean) ??
+        api.errorAt(['thinkingBudgets'])
+      }
+      modified={raw !== undefined}
+      onReset={() => api.patch(['thinkingBudgets'], undefined)}
+    >
+      <span className="grid grid-cols-4 gap-x-4 gap-y-2">
+        {THINKING_BUDGET_LEVELS.map((level) => (
+          <span key={level} className="block min-w-0">
+            <span className="block text-[12px] leading-4 text-text-secondary mb-1">{level}</span>
+            <span className="flex items-center gap-2">
+              <LeafNumberInput
+                testid={`${PANE}.number`}
+                configKey={`thinkingBudgets.${level}`}
+                value={budgets[level]}
+                placeholder="default"
+                unit="tokens"
+                onCommit={(v) => commit(level, v)}
+              />
+            </span>
+          </span>
+        ))}
+      </span>
+    </StackedRow>
+  )
+}
+
 export function PiSessionBehaviorSection(): React.JSX.Element {
   const api = usePiNativeConfigLeaf()
   return (
@@ -510,6 +586,7 @@ export function PiSessionBehaviorSection(): React.JSX.Element {
         placeholder="16384"
         unit="tokens"
       />
+      <ThinkingBudgetsRow api={api} />
     </PaneShell>
   )
 }
@@ -792,118 +869,6 @@ export function PiModelsSection(): React.JSX.Element {
   return (
     <PaneShell testid="PiModelsSection" api={api}>
       <PiSessionDefaultModel />
-    </PaneShell>
-  )
-}
-
-/**
- * The thinking levels pi documents a budget for. Each is its own leaf, so a
- * level the user has not set stays absent; clearing the LAST one removes the
- * `thinkingBudgets` object rather than leaving `{}` behind.
- */
-const THINKING_BUDGET_LEVELS = ['minimal', 'low', 'medium', 'high'] as const
-
-/**
- * `defaultThinkingLevel`'s closed set, plus the pinned "absent" choice. Eight
- * options is past the segmented limit (ADR-065: five), so this is a select.
- * Labels are the literal config values — these rows write pi's own enum.
- */
-const THINKING_LEVEL_OPTIONS = [
-  { value: '', label: 'default' },
-  { value: 'off', label: 'off' },
-  { value: 'minimal', label: 'minimal' },
-  { value: 'low', label: 'low' },
-  { value: 'medium', label: 'medium' },
-  { value: 'high', label: 'high' },
-  { value: 'xhigh', label: 'xhigh' },
-  { value: 'max', label: 'max' }
-]
-
-function ThinkingBudgetsRow({ api }: { api: PiNativeConfigLeaf }): React.JSX.Element {
-  const raw = api.read(['thinkingBudgets'])
-  const budgets = isPlainObject(raw) ? raw : {}
-
-  const commit = (level: string, value: number | undefined): void => {
-    if (value !== undefined) {
-      api.patch(['thinkingBudgets', level], value)
-      return
-    }
-    // Clearing the last remaining budget deletes the whole object: the writer
-    // leaves an emptied parent alone, so collapsing it is the pane's job. Every
-    // OTHER key counts, including levels this grid doesn't render.
-    const others = Object.keys(budgets).filter((k) => k !== level)
-    if (others.length === 0) api.patch(['thinkingBudgets'], undefined)
-    else api.patch(['thinkingBudgets', level], undefined)
-  }
-
-  return (
-    <StackedRow
-      testidPrefix={PANE}
-      configKey="thinkingBudgets"
-      label="Thinking budgets"
-      helper="Per-level token budgets, native on Anthropic, Google and Bedrock; OpenAI-compatible models need compat support."
-      error={
-        // One shared row error: only one field can be in flight at a time.
-        THINKING_BUDGET_LEVELS.map((l) => api.errorAt(['thinkingBudgets', l])).find(Boolean) ??
-        api.errorAt(['thinkingBudgets'])
-      }
-      modified={raw !== undefined}
-      onReset={() => api.patch(['thinkingBudgets'], undefined)}
-    >
-      <span className="grid grid-cols-4 gap-x-4 gap-y-2">
-        {THINKING_BUDGET_LEVELS.map((level) => (
-          <span key={level} className="block min-w-0">
-            <span className="block text-[12px] leading-4 text-text-secondary mb-1">{level}</span>
-            <span className="flex items-center gap-2">
-              <LeafNumberInput
-                testid={`${PANE}.number`}
-                configKey={`thinkingBudgets.${level}`}
-                value={budgets[level]}
-                placeholder="default"
-                unit="tokens"
-                onCommit={(v) => commit(level, v)}
-              />
-            </span>
-          </span>
-        ))}
-      </span>
-    </StackedRow>
-  )
-}
-
-/**
- * Was the "pi fallbacks" sub-header inside Models & thinking: pi's OWN
- * settings.json defaults, used when the ClaudeUI session default is unset and by
- * standalone pi. Its own group (ADR-065) because it writes a different file from
- * the rows above it.
- */
-export function PiFallbacksSection(): React.JSX.Element {
-  const api = usePiNativeConfigLeaf()
-  return (
-    <PaneShell testid="PiFallbacksSection" api={api}>
-      <TextRow
-        api={api}
-        path={['defaultProvider']}
-        label="Default provider"
-        helper="Used when no model is picked."
-        placeholder="unset"
-      />
-      <TextRow
-        api={api}
-        path={['defaultModel']}
-        label="Default model"
-        helper="Model id used with that provider."
-        placeholder="unset"
-      />
-      <SelectRow
-        api={api}
-        path={['defaultThinkingLevel']}
-        label="Default thinking level"
-        helper="Reasoning effort pi starts a session with."
-        options={THINKING_LEVEL_OPTIONS}
-        defaultValue=""
-      />
-      <ThinkingBudgetsRow api={api} />
     </PaneShell>
   )
 }

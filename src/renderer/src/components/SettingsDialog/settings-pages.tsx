@@ -471,14 +471,6 @@ export const PAGES: SettingsPage[] = [
         }
       },
       {
-        id: 'pi-fallbacks',
-        label: 'pi fallbacks',
-        appliesOn: 'next-session',
-        note: "pi's own defaults, used when the session default above is unset and by standalone pi.",
-        storage: 'settings.json',
-        items: itemsOf('pi-config-fallbacks')
-      },
-      {
         id: 'anthropic',
         label: 'Anthropic endpoint',
         storage: 'vendors/anthropic.json',
@@ -841,6 +833,15 @@ export function appliesOnOf(
  * with phase 5. It stays as the COVERAGE map: the model test walks it to prove
  * no pre-arc section lost its home, which is the inventory guard phase 7 keeps
  * exact.
+ *
+ * One pre-arc section is absent on purpose: `pi-config-fallbacks` (the "pi
+ * fallbacks" group) was DELETED on 2026-09-08, not re-homed — its keys
+ * (`defaultProvider` / `defaultModel` / `defaultThinkingLevel`) only apply to a
+ * pi session started without a `set_model`, which ClaudeUI never does, so they
+ * governed standalone pi's TUI alone. They stay reachable from Engines › pi ›
+ * Raw config. Its fourth row, `thinkingBudgets`, is not TUI-only and moved to
+ * Engines › pi › Session behaviour rather than going with them. The guard is
+ * exact both ways, so this is a removal, not an omission.
  */
 export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; group: string }>> = {
   appearance: { page: 'appearance', group: 'theme' },
@@ -893,7 +894,6 @@ export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; gro
   'pi-config-session': { page: 'pi', group: 'session' },
   'pi-config-retry': { page: 'pi', group: 'retry' },
   'pi-config-resources': { page: 'pi', group: 'resources' },
-  'pi-config-fallbacks': { page: 'models', group: 'pi-fallbacks' },
   'pi-config-tools': { page: 'pi', group: 'tools' },
   'pi-config-images': { page: 'pi', group: 'attachments' },
   'pi-config-workspace': { page: 'pi', group: 'workspace' },

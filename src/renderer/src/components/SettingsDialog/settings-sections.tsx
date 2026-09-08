@@ -81,8 +81,7 @@ import {
   PiNetworkSection,
   PiRawConfigSection,
   PiRetrySection,
-  PiResourcesSection,
-  PiFallbacksSection
+  PiResourcesSection
 } from './PiConfigPanes'
 import { diffToPatches } from '../../../../shared/opencode-config-diff'
 import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.18.29.json'
@@ -3795,7 +3794,7 @@ export const SECTIONS: Section[] = [
         key: 'piSessionBehavior',
         label: 'Session behavior',
         keywords:
-          'pi compaction enabled reserveTokens keepRecentTokens branchSummary retry maxRetries baseDelayMs provider timeoutMs maxRetryDelayMs backoff context window compact summarise',
+          'pi compaction enabled reserveTokens keepRecentTokens branchSummary retry maxRetries baseDelayMs provider timeoutMs maxRetryDelayMs backoff context window compact summarise thinkingBudgets thinking budget tokens effort',
         render: () => <PiSessionBehaviorSection />
       }
     ]
@@ -3852,36 +3851,8 @@ export const SECTIONS: Section[] = [
         key: 'piModels',
         label: 'Models & thinking',
         keywords:
-          'pi model default provider openai-codex anthropic allowlist defaultProvider defaultModel defaultThinkingLevel thinkingBudgets reasoning effort',
+          'pi model default provider openai-codex anthropic allowlist defaultModel reasoning effort',
         render: () => <PiModelsSection />
-      }
-    ]
-  },
-  {
-    id: 'pi-config-fallbacks',
-    label: 'pi fallbacks',
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <path d="M4 4v6h6" />
-        <path d="M4 10a8 8 0 1 1 2.3 5.7" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'piFallbacks',
-        label: 'pi fallbacks',
-        keywords:
-          'pi defaultProvider defaultModel defaultThinkingLevel thinkingBudgets fallback standalone thinking budget reasoning',
-        render: () => <PiFallbacksSection />
       }
     ]
   },
@@ -4046,7 +4017,7 @@ export const SECTIONS: Section[] = [
         key: 'piRawConfig',
         label: 'Raw config (settings.json)',
         keywords:
-          'pi config raw json settings theme tuiMode fullscreen markdown terminal keybindings externalEditor enabledModels warnings advanced',
+          'pi config raw json settings theme tuiMode fullscreen markdown terminal keybindings externalEditor enabledModels warnings defaultProvider defaultThinkingLevel advanced',
         render: () => <PiRawConfigSection />
       }
     ]

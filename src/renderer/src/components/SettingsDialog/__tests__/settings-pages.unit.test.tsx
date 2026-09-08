@@ -94,7 +94,6 @@ describe('PAGES structure', () => {
         // shared vault's bridge folded into the list and its two sheets.
         'providers',
         'defaults',
-        'pi-fallbacks',
         'anthropic',
         'accounts'
       ],
