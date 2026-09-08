@@ -721,15 +721,27 @@ const CURATED_COMPAT_FLAGS = [
  * the entry declares a provider or overrides a built-in one — a key, whether to
  * send it as `Authorization: Bearer`, and the headers that go with every request
  * — so they are written once rather than twice with a chance to drift.
+ *
+ * The API-key COPY is the caller's, because the same leaf answers two different
+ * questions. On a declared provider the key is how pi reaches an endpoint it
+ * knows nothing else about, and a keyless local server still wants a
+ * placeholder; on a built-in it is an override of a credential pi already holds,
+ * so blank is the normal, working state and the placeholder has to say so.
  */
 function CredentialLeaves({
   api,
   base,
-  provider
+  provider,
+  apiKeyHelper,
+  apiKeyPlaceholder
 }: {
   api: PiModelsLeaf
   base: LeafPath
   provider: Record<string, unknown>
+  /** What an API key MEANS for this variant — see the note above. */
+  apiKeyHelper: string
+  /** What an empty field falls back to for this variant. */
+  apiKeyPlaceholder: string
 }): React.JSX.Element {
   return (
     <>
@@ -737,16 +749,14 @@ function CredentialLeaves({
         testidPrefix={DIALOG}
         configKey="apiKey"
         label="API key"
-        helper={
-          'Optional — /login or auth.json works too. Keyless local servers keep a placeholder, since pi gates models on auth either way. Supports $ENV_VAR and !command —'
-        }
+        helper={apiKeyHelper}
         error={api.errorAt([...base, 'apiKey'])}
       >
         <LeafTextInput
           testid={`${DIALOG}.text`}
           configKey="apiKey"
           value={provider.apiKey}
-          placeholder="ollama"
+          placeholder={apiKeyPlaceholder}
           width="w-64"
           onCommit={(v) => api.commit([...base, 'apiKey'], v)}
         />
@@ -932,7 +942,15 @@ function PiCustomProviderDialog({
               </div>
             </StackedRow>
 
-            <CredentialLeaves api={api} base={base} provider={provider} />
+            <CredentialLeaves
+              api={api}
+              base={base}
+              provider={provider}
+              apiKeyHelper={
+                'Optional — /login or auth.json works too. Keyless local servers keep a placeholder, since pi gates models on auth either way. Supports $ENV_VAR and !command —'
+              }
+              apiKeyPlaceholder="ollama"
+            />
 
             {CURATED_COMPAT_FLAGS.map((flag) => (
               <ToggleRow
@@ -1199,7 +1217,15 @@ function PiBuiltinProviderDialog({
             />
           </LeafRow>
 
-          <CredentialLeaves api={api} base={base} provider={provider} />
+          <CredentialLeaves
+            api={api}
+            base={base}
+            provider={provider}
+            apiKeyHelper={
+              'Optional — a key for this entry only. Unset keeps the credential pi already holds for this provider (auth.json or /login). Supports $ENV_VAR and !command.'
+            }
+            apiKeyPlaceholder="unset — pi’s own credential"
+          />
 
           <BlockHeader
             label="Model overrides"

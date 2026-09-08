@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useEscapeLayer } from './use-escape-layer'
 
 /**
  * Generic destructive-action confirmation. Extracted from
@@ -9,6 +10,10 @@ import { useState } from 'react'
  * `stackedAbove` raises the z-index for a confirm opened from INSIDE another
  * dialog — the settings dialog root is z-50 and nested dialogs sit at z-[100],
  * so a confirm launched from one of those must clear it.
+ *
+ * ESCAPE IS CANCEL, on the same terms as the scrim: never while the action is in
+ * flight, and it dismisses the confirm ONLY — whatever opened it stays open for
+ * the next press (`useEscapeLayer`).
  */
 export function ConfirmModal({
   title,
@@ -39,6 +44,8 @@ export function ConfirmModal({
 }): React.JSX.Element {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  useEscapeLayer(onCancel, !busy)
 
   const handleConfirm = async (): Promise<void> => {
     setBusy(true)

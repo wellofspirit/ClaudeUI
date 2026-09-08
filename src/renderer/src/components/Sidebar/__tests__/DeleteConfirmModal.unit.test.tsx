@@ -42,6 +42,31 @@ describe('DeleteConfirmModal (session)', () => {
     expect(props.onCancel).toHaveBeenCalledOnce()
   })
 
+  it('Escape cancels, but not while the delete is in flight', async () => {
+    // Every ConfirmModal in the app is an `useEscapeLayer` layer as of the
+    // ADR-065 follow-up: Escape is Cancel, on the same terms as the scrim
+    // click. Mid-flight it is swallowed — the dialog must not vanish under the
+    // user while the delete is still running.
+    let resolve!: () => void
+    const onConfirm = vi.fn(
+      () =>
+        new Promise<void>((r) => {
+          resolve = r
+        })
+    )
+    const { props } = renderModal({ onConfirm })
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(props.onCancel).toHaveBeenCalledOnce()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    expect(await screen.findByRole('button', { name: 'Deleting...' })).toBeDisabled()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(props.onCancel).toHaveBeenCalledOnce()
+    await act(async () => {
+      resolve()
+    })
+  })
+
   it('shows Deleting... state while onConfirm is pending and disables buttons', async () => {
     let resolve!: () => void
     const onConfirm = vi.fn(

@@ -437,6 +437,26 @@ describe('closing', () => {
     })
     expect(screen.queryByTestId('ProviderSheet')).not.toBeInTheDocument()
   })
+
+  it('Escape closes a dialog opened FROM the sheet, and only then the sheet', async () => {
+    // Owner ruling 2026-09-08: Escape goes one level up. The sheet's frame and
+    // the dialog it opens are both `useEscapeLayer` layers, so the first press
+    // must not take the sheet — and the dialog — with it.
+    await openSheet('pi:groq')
+    await click(screen.getByTestId('ProviderSheet.piOverrides'))
+    expect(await screen.findByTestId('PiProviderDialog')).toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.keyDown(document, { key: 'Escape' })
+    })
+    expect(screen.queryByTestId('PiProviderDialog')).not.toBeInTheDocument()
+    expect(screen.getByTestId('ProviderSheet')).toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.keyDown(document, { key: 'Escape' })
+    })
+    expect(screen.queryByTestId('ProviderSheet')).not.toBeInTheDocument()
+  })
 })
 
 // ── Models in the picker ─────────────────────────────────────────────

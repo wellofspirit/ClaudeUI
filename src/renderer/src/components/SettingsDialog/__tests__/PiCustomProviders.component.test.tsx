@@ -101,6 +101,13 @@ async function click(el: HTMLElement): Promise<void> {
   })
 }
 
+/** One Escape, on `document`, where every layer listens (`useEscapeLayer`). */
+async function escape(): Promise<void> {
+  await act(async () => {
+    fireEvent.keyDown(document, { key: 'Escape' })
+  })
+}
+
 /** Commit a draft input the way the leaf controls expect (change + blur). */
 async function commitInput(el: HTMLElement, value: string): Promise<void> {
   await act(async () => {
@@ -676,6 +683,66 @@ describe('pi provider dialog (models.json)', () => {
       expect(patch.path).toEqual(['providers', 'openai'])
       expect('value' in patch).toBe(false)
       await waitFor(() => expect(onClose).toHaveBeenCalled())
+    })
+
+    /**
+     * ESCAPE GOES ONE LEVEL UP (owner ruling 2026-09-08). Every overlay here is
+     * an `useEscapeLayer` layer, so a press with the override editor open over
+     * the dialog closes the EDITOR and leaves the dialog — before the shared
+     * hook only `SheetFrame` listened, and the key fell through both dialogs to
+     * the Manage sheet, which closed the sheet and unmounted everything on it.
+     */
+    it('Escape closes the override editor, then the dialog — one layer per press', async () => {
+      currentConfig = {
+        providers: { openai: { modelOverrides: { 'gpt-5.6-sol': { contextWindow: 1050000 } } } }
+      }
+      await renderDialog('openai', { builtin: true })
+      await click(byId('PiProviderDialog.overrideRow', 'gpt-5.6-sol'))
+      expect(screen.getByTestId('PiModelEditor')).toBeInTheDocument()
+
+      await escape()
+      expect(screen.queryByTestId('PiModelEditor')).not.toBeInTheDocument()
+      expect(screen.getByTestId('PiProviderDialog')).toBeInTheDocument()
+      // The dialog does not close itself — it asks its owner to, and that ask
+      // must not have happened yet.
+      expect(onClose).not.toHaveBeenCalled()
+
+      await escape()
+      expect(onClose).toHaveBeenCalledTimes(1)
+    })
+
+    it('Escape on the remove-overrides confirm cancels it and writes nothing', async () => {
+      currentConfig = { providers: { openai: { baseUrl: 'https://my-proxy.example.com/v1' } } }
+      await renderDialog('openai', { builtin: true })
+      await click(screen.getByTestId('PiProviderDialog.removeOverrides'))
+      expect(screen.getByTestId('PiProviderDialog.confirmRemoveOverrides')).toBeInTheDocument()
+
+      await escape()
+      expect(
+        screen.queryByTestId('PiProviderDialog.confirmRemoveOverrides')
+      ).not.toBeInTheDocument()
+      expect(screen.getByTestId('PiProviderDialog')).toBeInTheDocument()
+      expect(onClose).not.toHaveBeenCalled()
+      expect(patchPiModels).not.toHaveBeenCalled()
+    })
+
+    it('says what an API key means HERE — an override, not the only credential', async () => {
+      // On a built-in, blank is the normal working state: pi already holds a
+      // credential for the provider. The custom form's "ollama" placeholder
+      // would read as "you must put something here".
+      currentConfig = {}
+      await renderDialog('openai', { builtin: true })
+      const builtinKey = byId('PiProviderDialog.text', 'apiKey')
+      expect(builtinKey).toHaveAttribute('placeholder', 'unset — pi’s own credential')
+      expect(builtinKey.getAttribute('placeholder')).not.toBe('ollama')
+      expect(byId('PiProviderDialog.row', 'apiKey').textContent).toContain(
+        'Unset keeps the credential pi already holds'
+      )
+
+      cleanup()
+      currentConfig = OLLAMA
+      await renderDialog('ollama')
+      expect(byId('PiProviderDialog.text', 'apiKey')).toHaveAttribute('placeholder', 'ollama')
     })
 
     it('throws on a MANAGED id rather than rendering an override surface', async () => {
