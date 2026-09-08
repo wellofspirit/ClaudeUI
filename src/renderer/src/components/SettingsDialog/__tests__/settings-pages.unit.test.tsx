@@ -16,7 +16,9 @@ import {
   PAGE_LOCAL_ITEMS,
   RAIL_GROUPS,
   SECTION_TARGET,
+  appliesOnOf,
   enginesOf,
+  noteOf,
   pageOf,
   searchSettings,
   storageOf,
@@ -93,7 +95,7 @@ describe('PAGES structure', () => {
         'anthropic',
         'accounts'
       ],
-      dispatch: ['into'],
+      dispatch: ['into', 'limits'],
       mockups: ['network'],
       remote: ['follow', 'server', 'access', 'security', 'links'],
       claude: ['sandbox', 'proxy'],
@@ -146,7 +148,62 @@ describe('PAGES structure', () => {
   it('byEngine groups list their engines in claude → opencode → pi order', () => {
     expect(enginesOf(pageOf('sessions').groups[2])).toEqual(['opencode', 'pi'])
     expect(enginesOf(pageOf('models').groups[3])).toEqual(['claude', 'opencode', 'pi'])
-    expect(enginesOf(pageOf('dispatch').groups[0])).toEqual(['claude', 'opencode'])
+    // pi joined as a dispatch TARGET: core has accepted it since M4c, the UI
+    // pane is what was missing (ADR-065 § Cross-engine dispatch into pi).
+    expect(enginesOf(pageOf('dispatch').groups[0])).toEqual(['claude', 'opencode', 'pi'])
+    expect(enginesOf(pageOf('dispatch').groups[1])).toEqual(['claude', 'opencode', 'pi'])
+  })
+
+  it('the Limits card follows the Dispatch-into segment instead of drawing its own', () => {
+    const [into, limits] = pageOf('dispatch').groups
+    expect(into.engineFrom).toBeUndefined()
+    // Two segments on one page would let the two cards describe DIFFERENT
+    // targets while sitting one above the other.
+    expect(limits.engineFrom).toBe('into')
+    expect(PAGES.flatMap((p) => p.groups).filter((g) => g.engineFrom).length).toBe(1)
+  })
+
+  it('a per-engine note and applies-on resolve against the selected engine', () => {
+    const defaults = pageOf('models').groups.find((g) => g.id === 'defaults')!
+    // opencode reads its config when the per-cwd SERVER restarts…
+    expect(appliesOnOf(defaults, 'opencode')).toBe('next-server-start')
+    expect(noteOf(defaults, 'opencode')).toContain('opencode server restarts')
+    // …Claude and pi at the next session. Every engine gets a SENTENCE, not
+    // just opencode: the badge only renders alongside a note, so a note-less
+    // `appliesOn` would be computed and then dropped.
+    expect(appliesOnOf(defaults, 'claude')).toBe('next-session')
+    expect(appliesOnOf(defaults, 'pi')).toBe('next-session')
+    expect(noteOf(defaults, 'claude')).toBe('Applies to new Claude sessions.')
+    expect(noteOf(defaults, 'pi')).toBe('Applies to new pi sessions.')
+
+    // The dispatch Limits note names the target and its callers.
+    const limits = pageOf('dispatch').groups[1]
+    expect(noteOf(limits, 'pi')).toContain('into pi from a Claude or opencode session')
+    expect(noteOf(limits, 'claude')).toContain('into Claude from an opencode or pi session')
+  })
+
+  it('the Limits card carries no applies-later badge and no storage tag', () => {
+    const limits = pageOf('dispatch').groups[1]
+    // The dispatcher re-reads `loadEngineConfig(engine).dispatch` on EVERY
+    // dispatch call (cross-engine-dispatcher.ts's three cost-cap gates), so a
+    // changed cap or timeout binds the very next one — "Next session" would be
+    // a false promise.
+    expect(limits.appliesOn).toBeUndefined()
+    expect(appliesOnOf(limits, 'pi')).toBeUndefined()
+    // And a follower group's header is bare: the file tag would just repeat the
+    // one on the card directly above it (`board2-Dispatch.png`).
+    expect(limits.storage).toBeUndefined()
+    expect(storageOf(limits, 'pi')).toBeUndefined()
+    expect(storageOf(pageOf('dispatch').groups[0], 'pi')).toBe('engines/pi.json')
+  })
+
+  it('a STATIC note and applies-on are returned unchanged, whatever the engine', () => {
+    const judge = pageOf('sessions').groups.find((g) => g.id === 'judge')!
+    expect(noteOf(judge, 'opencode')).toBe(noteOf(judge, 'pi'))
+    expect(appliesOnOf(judge, 'pi')).toBe('next-session')
+    // A group with neither says nothing.
+    expect(noteOf(pageOf('appearance').groups[0], undefined)).toBeUndefined()
+    expect(appliesOnOf(pageOf('appearance').groups[0], undefined)).toBeUndefined()
   })
 
   it('a per-engine storage tag resolves against the selected engine', () => {
@@ -162,6 +219,13 @@ describe('PAGES structure', () => {
     ).toBe('vendors/anthropic.json')
     // No tag = the group writes ClaudeUI's own settings.json.
     expect(storageOf(pageOf('appearance').groups[0], undefined)).toBeUndefined()
+
+    // Default models writes a different file per engine — and NONE for Claude,
+    // whose effort defaults are ClaudeUI's own settings.
+    const defaults = pageOf('models').groups.find((g) => g.id === 'defaults')!
+    expect(storageOf(defaults, 'opencode')).toBe('opencode.jsonc')
+    expect(storageOf(defaults, 'pi')).toBe('settings.json')
+    expect(storageOf(defaults, 'claude')).toBeUndefined()
   })
 })
 
@@ -213,6 +277,10 @@ describe('SECTION_TARGET', () => {
   it('names no section that does not exist', () => {
     const known = new Set(SECTIONS.map((s) => s.id))
     for (const id of Object.keys(SECTION_TARGET)) expect(known.has(id)).toBe(true)
+  })
+
+  it('gives the new pi dispatch pane a home on the dispatch page', () => {
+    expect(SECTION_TARGET['pi-dispatch']).toEqual({ page: 'dispatch', group: 'into' })
   })
 
   it('routes the four deep links the app actually fires', () => {

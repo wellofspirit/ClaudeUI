@@ -179,9 +179,11 @@ describe('SettingsDialog FC', () => {
 
     // Sessions › Auto-mode judge offers opencode and pi.
     expect(viewProps.engineByGroup['sessions/judge']).toBe('pi')
-    // Cross-engine dispatch offers claude and opencode — pi is not on offer, so
-    // the group falls back to its first engine rather than showing nothing.
-    expect(viewProps.engineByGroup['dispatch/into']).toBe('claude')
+    // Cross-engine dispatch offers all three since ADR-065 added the pi target.
+    expect(viewProps.engineByGroup['dispatch/into']).toBe('pi')
+    // Models › Default models offers all three but Claude is not the session's,
+    // so this is the fallback-to-first path the dispatch group used to prove.
+    expect(viewProps.engineByGroup['models/defaults']).toBe('pi')
   })
 
   it('onSelectEngine overrides the default pick for that group only', async () => {

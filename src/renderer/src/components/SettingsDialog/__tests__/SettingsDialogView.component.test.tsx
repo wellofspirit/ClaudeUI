@@ -60,6 +60,12 @@ beforeEach(async () => {
     ask: [],
     additionalDirectories: []
   }))
+  // The Models page mounts the Accounts pane, which reads on mount.
+  app.bridge.ipcMain.handle('account:get', async () => ({
+    enabled: false,
+    activeId: null,
+    accounts: []
+  }))
 })
 
 afterEach(() => {
@@ -239,6 +245,92 @@ describe('engine segments', () => {
     renderView({ activePage: 'sessions', engineByGroup: { 'sessions/judge': 'pi' as EngineId } })
     const tags = screen.getAllByTestId('SettingsGroup.storage').map((el) => el.textContent)
     expect(tags).toContain('engines/pi.json')
+  })
+
+  it('offers all three engines on the dispatch page (pi joined as a target)', () => {
+    renderView({ activePage: 'dispatch', engineByGroup: { 'dispatch/into': 'pi' as EngineId } })
+    expect(
+      screen.getAllByTestId('SettingsGroup.engineSegment.option').map((el) => el.dataset.id)
+    ).toEqual(['claude', 'opencode', 'pi'])
+    expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
+      'piDispatch',
+      'piDispatchLimits'
+    ])
+  })
+
+  it('draws ONE segment on the dispatch page — Limits follows Dispatch into', () => {
+    // `engineFrom` (ADR-065 amendment): two segments would let the two cards
+    // describe different targets while sitting one above the other.
+    renderView({
+      activePage: 'dispatch',
+      engineByGroup: { 'dispatch/into': 'opencode' as EngineId }
+    })
+
+    const segments = screen.getAllByTestId('SettingsGroup.engineSegment')
+    expect(segments.map((el) => el.dataset.id)).toEqual(['into'])
+    const limits = within(byId('SettingsGroup', 'limits'))
+    expect(limits.queryByTestId('SettingsGroup.engineSegment')).not.toBeInTheDocument()
+    // A follower's header is bare in every other way too: the storage tag would
+    // repeat the one on the card above, and the limits bind the next dispatch
+    // call, not the next session — so there is no applies-later badge either.
+    expect(limits.queryByTestId('SettingsGroup.storage')).not.toBeInTheDocument()
+    expect(limits.queryByTestId('SettingsGroup.note.badge')).not.toBeInTheDocument()
+    expect(limits.getByTestId('SettingsGroup.note')).toHaveTextContent(
+      'Governs dispatch_agent calls into opencode from a Claude or pi session'
+    )
+    expect(
+      within(byId('SettingsGroup', 'into')).getByTestId('SettingsGroup.storage')
+    ).toHaveTextContent('engines/opencode.json')
+
+    // …and the Limits card renders the engine the segment above it is on.
+    expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
+      'opencodeDispatch',
+      'opencodeDispatchLimits'
+    ])
+  })
+
+  it('switching the into segment swaps the Limits card with it', () => {
+    renderView({ activePage: 'dispatch', engineByGroup: { 'dispatch/into': 'claude' as EngineId } })
+    expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
+      'claudeDispatch',
+      'claudeDispatchLimits'
+    ])
+    // A stale selection on the FOLLOWER's own key must not win — the leader's
+    // is the only one `engineFrom` reads.
+    cleanup()
+    renderView({
+      activePage: 'dispatch',
+      engineByGroup: { 'dispatch/into': 'claude' as EngineId, 'dispatch/limits': 'pi' as EngineId }
+    })
+    expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
+      'claudeDispatch',
+      'claudeDispatchLimits'
+    ])
+  })
+
+  it('resolves a per-engine note and badge against the selected engine', () => {
+    // opencode's Default models are read when the per-cwd SERVER restarts…
+    renderView({
+      activePage: 'models',
+      engineByGroup: { 'models/defaults': 'opencode' as EngineId }
+    })
+    const note = within(byId('SettingsGroup', 'defaults')).getByTestId('SettingsGroup.note')
+    expect(note).toHaveTextContent('opencode server restarts for a working directory')
+    expect(within(note).getByTestId('SettingsGroup.note.badge')).toHaveTextContent(
+      'Next server start'
+    )
+
+    // …Claude's effort defaults bind the next SESSION, and say so with the
+    // other badge. No file tag though: they are ClaudeUI's own settings.
+    cleanup()
+    renderView({ activePage: 'models', engineByGroup: { 'models/defaults': 'claude' as EngineId } })
+    const claudeGroup = byId('SettingsGroup', 'defaults')
+    const claudeNote = within(claudeGroup).getByTestId('SettingsGroup.note')
+    expect(claudeNote).toHaveTextContent('Applies to new Claude sessions.')
+    expect(within(claudeNote).getByTestId('SettingsGroup.note.badge')).toHaveTextContent(
+      'Next session'
+    )
+    expect(within(claudeGroup).queryByTestId('SettingsGroup.storage')).not.toBeInTheDocument()
   })
 })
 

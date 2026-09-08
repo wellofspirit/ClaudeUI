@@ -138,6 +138,116 @@ describe('Settings › Accounts — add-account sign-in', () => {
   })
 })
 
+/**
+ * The pane's ROWS, after ADR-065 phase 3A. It was a stack of bordered cards with
+ * 12px/10px text and an icon-only trash can; it is now `SettingRow`s — a radio
+ * per account, the plan as the description, and a named destructive Button.
+ *
+ * `as="label"` rather than `as="button"` is load-bearing: the row carries a real
+ * Remove BUTTON, and a button inside a button is invalid HTML.
+ */
+describe('Settings › Accounts — the rows', () => {
+  const TWO = {
+    enabled: true,
+    activeId: 'a2',
+    accounts: [
+      {
+        id: 'a1',
+        email: 'one@example.com',
+        subscriptionType: 'Claude Team',
+        organization: null,
+        createdAt: 0
+      },
+      {
+        id: 'a2',
+        email: 'two@example.com',
+        subscriptionType: 'Claude Max',
+        organization: null,
+        createdAt: 0
+      }
+    ]
+  }
+
+  function installTwoAccounts(over: Record<string, unknown> = {}): void {
+    installAccountsApi('darwin', {
+      getAccounts: vi.fn(async () => TWO),
+      switchAccount: vi.fn(async () => TWO),
+      deleteAccount: vi.fn(async () => TWO),
+      setMultiAccountEnabled: vi.fn(async () => TWO),
+      ...over
+    })
+  }
+
+  function row(id: string): HTMLElement {
+    const found = screen
+      .getAllByTestId('AccountsSetting.accountRow')
+      .find((el) => el.getAttribute('data-id') === id)
+    expect(found, `accountRow ${id}`).toBeTruthy()
+    return found!
+  }
+
+  beforeEach(() => {
+    useSessionStore.setState({ accountsState: null, authState: null })
+  })
+
+  it('renders one row per account, the active one selected', async () => {
+    installTwoAccounts()
+    await act(async () => renderSection('accounts'))
+
+    expect(
+      screen.getAllByTestId('AccountsSetting.accountRow').map((el) => el.getAttribute('data-id'))
+    ).toEqual(['a1', 'a2'])
+    expect(row('a2').textContent).toContain('two@example.com')
+    expect(row('a2').textContent).toContain('Claude Max')
+
+    // A real radio, so the group is keyboard- and screen-reader-navigable.
+    const radios = screen.getAllByRole('radio') as HTMLInputElement[]
+    expect(radios.map((r) => r.value)).toEqual(['a1', 'a2'])
+    expect(radios.find((r) => r.value === 'a2')!.checked).toBe(true)
+  })
+
+  it('picking a row switches account; Remove deletes THAT account only', async () => {
+    installTwoAccounts()
+    await act(async () => renderSection('accounts'))
+
+    const inactive = (screen.getAllByRole('radio') as HTMLInputElement[]).find(
+      (r) => r.value === 'a1'
+    )!
+    await act(async () => {
+      fireEvent.click(inactive)
+    })
+    expect(window.api.switchAccount).toHaveBeenCalledWith('a1')
+
+    const remove = screen
+      .getAllByTestId('AccountsSetting.removeAccount')
+      .find((el) => el.getAttribute('data-id') === 'a1')!
+    await act(async () => {
+      fireEvent.click(remove)
+    })
+    expect(window.api.deleteAccount).toHaveBeenCalledWith('a1')
+  })
+
+  it('never nests a button inside a button (the Remove-in-a-row hazard)', async () => {
+    installTwoAccounts()
+    await act(async () => renderSection('accounts'))
+
+    for (const button of Array.from(document.querySelectorAll('button'))) {
+      expect(button.querySelector('button')).toBeNull()
+    }
+  })
+
+  it('shows only the master toggle while multi-account is OFF', async () => {
+    installAccountsApi('darwin', {
+      getAccounts: vi.fn(async () => ({ ...TWO, enabled: false }))
+    })
+    await act(async () => renderSection('accounts'))
+
+    expect(screen.getByTestId('AccountsSetting.multiAccount')).toBeTruthy()
+    expect(screen.queryAllByTestId('AccountsSetting.accountRow')).toHaveLength(0)
+    expect(screen.queryByTestId('AccountsSetting.addAccount')).toBeNull()
+  })
+})
+
 // ── opencode providers pane ──────────────────────────────────────────────
 
 const OAUTH_PROVIDER: OpencodeProviderCatalogEntry = {

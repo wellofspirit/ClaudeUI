@@ -208,11 +208,17 @@ describe('SCOPES structure', () => {
       expect(pi.subgroups.map((sg) => sg.label)).toEqual(['Engine', 'Configuration', 'Vendor'])
     })
 
-    it('Engine subgroup contains only pi-automode (no dispatch — pi is source-only)', () => {
-      // `pi-models` folded into `pi-config-models`; there is no dispatch section
-      // because pi is a dispatch SOURCE only.
+    it('Engine subgroup contains pi-automode then pi-dispatch, in order', () => {
+      // `pi-models` folded into `pi-config-models`. `pi-dispatch` configures
+      // dispatches INTO pi — core has accepted pi as a target since M4c
+      // (`resolveAndRunPi`), the pane is what ADR-065 added.
       const engine = pi.subgroups.find((sg) => sg.label === 'Engine')!
-      expect(engine.sections.map((s) => s.id)).toEqual(['pi-automode'])
+      expect(engine.sections.map((s) => s.id)).toEqual(['pi-automode', 'pi-dispatch'])
+    })
+
+    it('the pi dispatch section renders the INTO half then the LIMITS half', () => {
+      const dispatch = SECTIONS.find((s) => s.id === 'pi-dispatch')!
+      expect(dispatch.items.map((i) => i.key)).toEqual(['piDispatch', 'piDispatchLimits'])
     })
 
     // The curated panes over pi's own settings.json, with the whole-file text
@@ -373,6 +379,10 @@ describe('SECTION_SCOPE_MAP', () => {
 
   it('pi-automode → pi', () => {
     expect(SECTION_SCOPE_MAP.get('pi-automode')).toBe('pi')
+  })
+
+  it('pi-dispatch → pi', () => {
+    expect(SECTION_SCOPE_MAP.get('pi-dispatch')).toBe('pi')
   })
 
   it('vendor-pi → pi', () => {

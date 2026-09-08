@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useSyncExternalStore } from 'react'
 import { DEFAULT_SETTINGS, useActiveSession, useSessionStore } from '../../stores/session-store'
 import type { AppSettings } from '../../stores/session-store'
 import { PermissionsDialog } from '../PermissionsDialog'
@@ -41,7 +41,7 @@ import {
   SettingsTextarea,
   SandboxListSetting,
   ChatRetentionSetting,
-  InfoTooltip,
+  ChipSet,
   SettingRow,
   RadioRow,
   ActionRow,
@@ -54,7 +54,6 @@ import {
 import type { SettingsRenderContext } from './settings-target'
 import { ModelPicker } from '../shared/InlinePickers'
 import { toModelDisplays, selectedModelDisplay, StaleModelNotice } from './settings-model-display'
-import { SelectMenu } from '../shared/SelectMenu'
 import { OpencodeAgentsSection } from './OpencodeAgents'
 import { TrustListsSection } from './TrustLists'
 import {
@@ -306,31 +305,44 @@ const EFFORT_MODELS: ReadonlyArray<{ id: string; label: string }> = [
   { id: 'claude-fable-5', label: 'Fable 5' }
 ]
 
+/**
+ * One row per Claude model, on the ADR-065 vocabulary: the display name is the
+ * label, the canonical model id is the config key under it (11px mono, not the
+ * old 10px `text-muted/50` at the right edge), and the effort levels are a
+ * `SelectField`.
+ *
+ * `modified` is passed in rather than derived from `current`: the phase-1
+ * `appDefault` helper excludes `modelEffortDefaults` because it is object-valued,
+ * so "changed from default" for THIS row means its key is present in that
+ * object — which only the caller holding the whole object can answer.
+ */
 function ModelEffortRow({
   modelId,
   modelLabel,
   current,
+  modified,
   onChange
 }: {
   modelId: string
   modelLabel: string
   current: EffortLevel | undefined
+  modified: boolean
   onChange: (next: EffortLevel | undefined) => void
 }): React.JSX.Element {
   const levels = supportedEffortLevels(modelId)
   const fallback = defaultEffort(modelId)
   return (
-    <div
-      data-testid="ModelEffortRow"
-      data-id={modelId}
-      className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary"
+    <SettingRow
+      testid="ModelEffortRow"
+      dataId={modelId}
+      label={modelLabel}
+      keyText={modelId}
+      modified={modified}
+      onReset={() => onChange(undefined)}
     >
-      <div className="mb-1 flex items-baseline justify-between gap-2">
-        <span>{modelLabel}</span>
-        <span className="text-[10px] text-text-muted/50">{modelId}</span>
-      </div>
-      <SelectMenu
+      <SelectField
         testid="ModelEffortRow.effort"
+        dataId={modelId}
         value={current ?? ''}
         onChange={(v) => onChange(v === '' ? undefined : (v as EffortLevel))}
         options={[
@@ -338,7 +350,7 @@ function ModelEffortRow({
           ...levels.map((lvl) => ({ value: lvl, label: EFFORT_LEVEL_LABEL[lvl] }))
         ]}
       />
-    </div>
+    </SettingRow>
   )
 }
 
@@ -384,107 +396,105 @@ function AccountsSetting(): React.JSX.Element {
   }
 
   return (
-    <div data-testid="AccountsSetting" className="px-3 py-1.5 space-y-2.5">
+    <div data-testid="AccountsSetting" className="divide-y divide-border/55">
       <SettingsToggle
-        label="Enable multiple account support"
+        testid="AccountsSetting.multiAccount"
+        label="Multiple accounts"
         checked={enabled}
         onChange={(v) => void run(() => window.api.setMultiAccountEnabled(v))}
-        tooltip="Store credentials per-account in plaintext files instead of the macOS Keychain, so you can hold and switch between multiple Claude subscriptions."
+        description="Hold several Claude subscriptions and switch between them; credentials are stored per account in plaintext files rather than the macOS Keychain."
       />
 
       {enabled && isMac && (
-        <div className="text-[11px] leading-relaxed text-warning/90 bg-warning/10 border border-warning/30 rounded-md px-2.5 py-1.5">
-          Multi-account mode uses file-based credentials, separate from your macOS Keychain login.
-          You may need to <b>log in again</b> for each account.
-        </div>
+        // A real row, not an 11px callout box: the warning colour rides on the
+        // row's background rather than on a type size ADR-065 retired.
+        <SettingRow
+          testid="AccountsSetting.keychainNotice"
+          className="bg-warning/10"
+          description="Multi-account mode uses file-based credentials, separate from your macOS Keychain login — you may need to sign in again for each account."
+        />
       )}
 
-      {enabled && (
-        <div className="space-y-1">
-          {(accounts?.accounts ?? []).map((a) => {
-            const active = a.id === accounts?.activeId
-            return (
-              <div
-                key={a.id}
-                data-testid="AccountsSetting.accountRow"
-                data-id={a.id}
-                className={`flex items-center gap-2.5 rounded-md border px-2.5 py-1.5 ${
-                  active ? 'border-accent/50 bg-accent/5' : 'border-border'
-                }`}
-              >
-                <button
-                  disabled={busy || active}
-                  onClick={() => void run(() => window.api.switchAccount(a.id))}
-                  title={active ? 'Active account' : 'Switch to this account'}
-                  className="shrink-0 w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center disabled:cursor-default"
-                  style={{
-                    borderColor: active ? 'var(--color-accent)' : 'var(--color-border-bright)'
-                  }}
-                >
-                  {active && <span className="w-1.5 h-1.5 rounded-full bg-accent" />}
-                </button>
-                <div className="flex-1 min-w-0">
-                  <div className="text-[12px] text-text-primary truncate">
-                    {a.email || 'Account'}
-                  </div>
-                  {a.subscriptionType && (
-                    <div className="text-[10px] text-text-muted">{a.subscriptionType}</div>
-                  )}
-                </div>
-                <button
+      {enabled &&
+        (accounts?.accounts ?? []).map((a) => {
+          const active = a.id === accounts?.activeId
+          return (
+            // `as="label"` rather than `as="button"`: the row carries a Remove
+            // BUTTON, and a button inside a button is invalid HTML (the same
+            // reason SettingRow's own Reset is a role="button" span). A click on
+            // an interactive descendant of a <label> does not activate the
+            // label's control, so Remove never doubles as "switch to this one".
+            <SettingRow
+              key={a.id}
+              as="label"
+              testid="AccountsSetting.accountRow"
+              dataId={a.id}
+              label={a.email || 'Account'}
+              description={a.subscriptionType ?? undefined}
+              className={active ? 'bg-accent/5' : 'hover:bg-bg-hover/40'}
+              leading={
+                <input
+                  type="radio"
+                  name="claude-account"
+                  value={a.id}
+                  checked={active}
                   disabled={busy}
-                  onClick={() => void run(() => window.api.deleteAccount(a.id))}
-                  title="Delete account"
-                  className="shrink-0 text-text-muted hover:text-danger transition-colors disabled:opacity-50"
-                >
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                  >
-                    <path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6" />
-                  </svg>
-                </button>
-              </div>
-            )
-          })}
-          <button
-            data-testid="AccountsSetting.addAccount"
+                  onChange={() => void run(() => window.api.switchAccount(a.id))}
+                  className="appearance-none w-4 h-4 shrink-0 rounded-full border-[1.5px] border-border-bright bg-transparent checked:border-accent checked:bg-accent checked:shadow-[inset_0_0_0_3.5px_var(--color-bg-secondary)] cursor-pointer"
+                />
+              }
+            >
+              <Button
+                testid="AccountsSetting.removeAccount"
+                dataId={a.id}
+                variant="danger"
+                disabled={busy}
+                onClick={() => void run(() => window.api.deleteAccount(a.id))}
+              >
+                Remove
+              </Button>
+            </SettingRow>
+          )
+        })}
+
+      {enabled && (
+        <SettingRow
+          testid="AccountsSetting.addRow"
+          description="Signs in to another Claude subscription and adds it to the list."
+        >
+          <Button
+            testid="AccountsSetting.addAccount"
+            variant="tinted"
             disabled={busy}
             onClick={() => void run(() => window.api.addAccount())}
-            className="text-[12px] font-medium text-accent hover:text-accent-hover bg-accent/10 hover:bg-accent/15 rounded-md px-2.5 py-1.5 transition-colors disabled:opacity-50"
           >
             + Add account
-          </button>
+          </Button>
+        </SettingRow>
+      )}
 
-          {pasteBack && (
-            <div
-              data-testid="AccountsSetting.signInFlow"
-              className="mt-1.5 rounded-md border border-border/40 bg-bg-secondary/40 p-2.5 space-y-2"
-            >
-              <OAuthPasteBackFlow
-                variant="code"
-                url={authState?.manualUrl}
-                busy={submittingCode}
-                onSubmit={(pasted) => {
-                  setSubmittingCode(true)
-                  void submitOAuthCode(pasted)
-                    .then(() => void window.api.getAccounts().then(setAccounts))
-                    .finally(() => setSubmittingCode(false))
-                }}
-                onCancel={() => void cancelSignIn()}
-              />
-            </div>
-          )}
-          {isWeb && authState?.status === 'error' && authState.error && (
-            <OAuthOutcomeNotice
-              kind={classifyOAuthError(authState.error)}
-              message={authState.error}
-            />
-          )}
+      {enabled && pasteBack && (
+        <div data-testid="AccountsSetting.signInFlow" className="px-3.5 py-2.5">
+          <OAuthPasteBackFlow
+            variant="code"
+            url={authState?.manualUrl}
+            busy={submittingCode}
+            onSubmit={(pasted) => {
+              setSubmittingCode(true)
+              void submitOAuthCode(pasted)
+                .then(() => void window.api.getAccounts().then(setAccounts))
+                .finally(() => setSubmittingCode(false))
+            }}
+            onCancel={() => void cancelSignIn()}
+          />
+        </div>
+      )}
+      {enabled && isWeb && authState?.status === 'error' && authState.error && (
+        <div className="px-3.5 py-2.5">
+          <OAuthOutcomeNotice
+            kind={classifyOAuthError(authState.error)}
+            message={authState.error}
+          />
         </div>
       )}
     </div>
@@ -761,103 +771,214 @@ export function PiAutoModeSection(): React.JSX.Element {
 // ── cross-engine dispatch settings (ADR-033) ─────────────────────────
 
 /**
- * Shared render/load/save core for the per-engine dispatch-config editor.
- * Both `OpencodeDispatchSection` and `ClaudeDispatchSection` are thin
- * copy/gating wrappers around this — the load/merge/toggle logic and markup
- * are otherwise identical (DRY per CLAUDE.md), so they keep distinct root
- * testids via the `testid` prop while sharing everything else.
+ * The dispatch page is TWO groups (ADR-065): "Dispatch into" — what a caller
+ * may ask for — and "Limits" — what the target will spend on it. A divider is a
+ * group boundary, so the one pane that used to draw both is now two exported
+ * bodies per engine.
  *
- * `installed`: null = still probing (shows Loading), false = gate closed
- * (shows `notInstalledMessage`), true = render the editor. Claude has no
- * "not installed" state (it's the bundled default engine — `engine:is-installed`
- * always returns true for it), so `ClaudeDispatchSection` passes a literal `true`.
+ * ## Why a shared external store and not a hook-local `useState`
  *
- * The ONE genuinely per-direction control is `showTurnTimeouts` — see its prop
- * doc; everything else differs only in copy.
+ * `saveEngineConfig` takes the WHOLE `EngineConfig` and replaces the file with
+ * it — unlike `setRemoteConfig`, which takes a partial that main merges, and
+ * which is the only reason the four Remote sections can each hold their own
+ * copy. Two halves each holding their own copy of an engine's config would lose
+ * data the moment both are on screen, which on the dispatch page is always:
+ * pick a default model in "Dispatch into" (it saves A′), then commit a max cost
+ * in "Limits" (which still holds the pre-edit A, and saves A + maxCost) — and
+ * the model choice is silently reverted on disk.
+ *
+ * So there is exactly ONE config object per engine, in a module-level store the
+ * halves subscribe to through `useSyncExternalStore`:
+ *
+ *  - the entry is created by the FIRST subscriber, which starts the single
+ *    `loadEngineConfig` read; later subscribers join the entry and the in-flight
+ *    read, so mounting both halves is one IPC round trip, not two;
+ *  - every `update` writes the entry and notifies both halves before persisting,
+ *    so the second edit is always computed against the first;
+ *  - the entry is DROPPED when the last subscriber unsubscribes, so a fresh
+ *    mount re-reads the file (the behaviour every other settings pane has) and
+ *    one test cannot leak an engine's config into the next.
+ *
+ * The MODEL probe stays per-component (`useDispatchModels`) and runs in the
+ * into-half only: it is the expensive half of the load and the limits-half has
+ * no picker to fill.
  */
-function DispatchSection({
-  engineId,
-  testid,
-  installed,
-  notInstalledMessage,
-  defaultModelTooltip,
-  noModelsMessage,
-  footerText,
-  showTurnTimeouts = false
-}: {
-  engineId: EngineId
-  testid: string
-  installed: boolean | null
-  notInstalledMessage?: string
-  defaultModelTooltip: string
-  noModelsMessage: string
-  footerText: string
-  /** Render the turn/inactivity timeout editors. OPENCODE ONLY: the watchdog
-   *  they configure lives in the opencode dispatch direction (ADR-033's
-   *  2026-09-01 amendment); the Claude/pi directions still run on the fixed
-   *  10-minute `DISPATCH_TIMEOUT_MS`, so showing these there would be an inert
-   *  control that silently writes config nothing reads. */
-  showTurnTimeouts?: boolean
-}): React.JSX.Element {
-  const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
-  const [models, setModels] = useState<ModelInfo[]>([])
+interface DispatchStoreEntry {
+  /** null until the first read resolves — the halves render a Loading row. */
+  config: EngineConfig | null
+  listeners: Set<() => void>
+}
 
+const DISPATCH_STORES = new Map<EngineId, DispatchStoreEntry>()
+
+function emitDispatchConfig(entry: DispatchStoreEntry): void {
+  for (const listener of entry.listeners) listener()
+}
+
+/**
+ * The entry for one engine, creating it — and starting its single read — on
+ * first use. A late-resolving read is dropped if the entry it belongs to has
+ * since been discarded, so an unmounted pane cannot resurrect stale config.
+ */
+function dispatchEntry(engineId: EngineId): DispatchStoreEntry {
+  const existing = DISPATCH_STORES.get(engineId)
+  if (existing) return existing
+
+  const entry: DispatchStoreEntry = { config: null, listeners: new Set() }
+  DISPATCH_STORES.set(engineId, entry)
+
+  const adopt = (config: EngineConfig): void => {
+    if (DISPATCH_STORES.get(engineId) !== entry) return
+    entry.config = config
+    emitDispatchConfig(entry)
+  }
+  window.api
+    .loadEngineConfig(engineId)
+    .then(adopt)
+    .catch(() => adopt({}))
+
+  return entry
+}
+
+function subscribeDispatchConfig(engineId: EngineId, listener: () => void): () => void {
+  const entry = dispatchEntry(engineId)
+  entry.listeners.add(listener)
+  return () => {
+    entry.listeners.delete(listener)
+    // Last one out drops the entry, so the next mount re-reads the file.
+    if (entry.listeners.size === 0 && DISPATCH_STORES.get(engineId) === entry) {
+      DISPATCH_STORES.delete(engineId)
+    }
+  }
+}
+
+/**
+ * Read during render, so it must NOT create the entry (React calls this before
+ * it calls `subscribe`) and must return a stable reference between updates.
+ */
+function dispatchSnapshot(engineId: EngineId): EngineConfig | null {
+  return DISPATCH_STORES.get(engineId)?.config ?? null
+}
+
+/** Merge a patch into the engine's `dispatch` block and persist the whole file. */
+function updateDispatchConfig(engineId: EngineId, patch: Partial<DispatchConfig>): void {
+  const entry = DISPATCH_STORES.get(engineId)
+  if (!entry || entry.config === null) return
+  const next: EngineConfig = {
+    ...entry.config,
+    dispatch: { ...(entry.config.dispatch ?? {}), ...patch }
+  }
+  entry.config = next
+  emitDispatchConfig(entry)
+  window.api.saveEngineConfig(engineId, next).catch(() => {})
+}
+
+interface DispatchConfigApi {
+  /** null until the first read resolves — the halves render a Loading row. */
+  engineCfg: EngineConfig | null
+  dispatch: DispatchConfig
+  /** Merge a patch into the `dispatch` block and persist the WHOLE config. */
+  update: (patch: Partial<DispatchConfig>) => void
+}
+
+function useDispatchConfig(engineId: EngineId): DispatchConfigApi {
+  const subscribe = useCallback(
+    (listener: () => void) => subscribeDispatchConfig(engineId, listener),
+    [engineId]
+  )
+  const getSnapshot = useCallback(() => dispatchSnapshot(engineId), [engineId])
+  const engineCfg = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+
+  return {
+    engineCfg,
+    dispatch: engineCfg?.dispatch ?? {},
+    update: (patch) => updateDispatchConfig(engineId, patch)
+  }
+}
+
+/** The engine's own models, for the into-half's picker and chip set. */
+function useDispatchModels(engineId: EngineId): ModelInfo[] {
+  const [models, setModels] = useState<ModelInfo[]>([])
   useEffect(() => {
-    window.api
-      .loadEngineConfig(engineId)
-      .then(setEngineCfg)
-      .catch(() => setEngineCfg({}))
+    let cancelled = false
     window.api
       .getEngineModels()
       .then((groups) => {
-        const own = groups.filter((g) => g.engineId === engineId)
-        setModels(own.flatMap((g) => g.models))
+        if (cancelled) return
+        setModels(groups.filter((g) => g.engineId === engineId).flatMap((g) => g.models))
       })
       .catch(() => {})
+    return () => {
+      cancelled = true
+    }
   }, [engineId])
+  return models
+}
 
-  if (engineCfg === null || installed === null) {
+/**
+ * Gate shared by both halves: `null` = still probing (Loading), `false` = no
+ * possible caller / target (the explanatory row), `true` = render the rows.
+ * A gated state is a description-only ROW now, not a bare paragraph — the id is
+ * on the same root either way, so the halves stay assertable in every state
+ * (ADR-027).
+ */
+function dispatchGateRow(
+  testid: string,
+  installed: boolean | null,
+  loaded: boolean,
+  notInstalledMessage: string
+): React.JSX.Element | null {
+  if (installed === null || !loaded) {
     return (
-      <div data-testid={testid} className="px-3 py-1.5 text-[13px] text-text-muted">
-        Loading…
+      <div data-testid={testid} className="divide-y divide-border/55">
+        <SettingRow testid={`${testid}.status`} dataId="loading" description="Loading…" />
       </div>
     )
   }
   if (!installed) {
     return (
-      <div
-        data-testid={testid}
-        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
-      >
-        {notInstalledMessage}
+      <div data-testid={testid} className="divide-y divide-border/55">
+        <SettingRow
+          testid={`${testid}.status`}
+          dataId="not-installed"
+          dimmed
+          description={notInstalledMessage}
+        />
       </div>
     )
   }
+  return null
+}
 
-  const dispatch = engineCfg.dispatch ?? {}
+/** Past this many models the chip set collapses behind a "Show all N" link. */
+const DISPATCH_CHIP_PREVIEW = 8
+
+/**
+ * "Dispatch into <engine>" — the two rows that say what a calling agent may ask
+ * this target for: the model used when it names none, and the set it may name.
+ */
+function DispatchIntoSection({
+  engineId,
+  testid,
+  installed,
+  notInstalledMessage,
+  noModelsMessage
+}: {
+  engineId: EngineId
+  testid: string
+  installed: boolean | null
+  notInstalledMessage: string
+  noModelsMessage: string
+}): React.JSX.Element {
+  const { engineCfg, dispatch, update } = useDispatchConfig(engineId)
+  const models = useDispatchModels(engineId)
+  const [showAll, setShowAll] = useState(false)
+
+  const gate = dispatchGateRow(testid, installed, engineCfg !== null, notInstalledMessage)
+  if (gate) return gate
+
   const defaultModel = dispatch.defaultModel ?? ''
   const allowedModels = dispatch.allowedModels ?? []
-  const maxCostUsd = dispatch.maxCostUsd
-  // Both timeouts are stored in MILLISECONDS (DispatchConfig) but edited in
-  // MINUTES — nobody wants to type 3600000. Blank = the built-in default,
-  // 0 = disabled; both round-trip through the same undefined-vs-number
-  // convention the maxCost input uses. Anything a `type="number"` field can
-  // still yield that is NOT a usable duration — a typed "-5", "e", a stray "-"
-  // mid-edit — drops the key instead of persisting negative/NaN milliseconds
-  // (the watchdog's `> 0` gates read a persisted negative as "cap disabled",
-  // silently — not what someone fumbling a keystroke meant to configure).
-  const toMinutes = (ms: number | undefined): number | '' => (ms === undefined ? '' : ms / 60000)
-  const fromMinutes = (raw: string): number | undefined => {
-    const minutes = Number(raw)
-    if (raw === '' || !Number.isFinite(minutes) || minutes < 0) return undefined
-    return minutes * 60000
-  }
-
-  const update = (patch: Partial<DispatchConfig>): void => {
-    const next: EngineConfig = { ...engineCfg, dispatch: { ...dispatch, ...patch } }
-    setEngineCfg(next)
-    window.api.saveEngineConfig(engineId, next).catch(() => {})
-  }
 
   const toggleAllowed = (model: string): void => {
     const nextList = allowedModels.includes(model)
@@ -868,164 +989,320 @@ function DispatchSection({
     update({ allowedModels: nextList.length > 0 ? nextList : undefined })
   }
 
+  const collapsed = !showAll && models.length > DISPATCH_CHIP_PREVIEW
+  const shownModels = collapsed ? models.slice(0, DISPATCH_CHIP_PREVIEW) : models
+
   return (
-    <div data-testid={testid} className="space-y-1">
-      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-        <div className="mb-1 flex items-center gap-1">
-          Default model
-          <InfoTooltip text={defaultModelTooltip} />
-        </div>
-        {/* Themed ModelPicker, not a native <select> — see the AutoModeSection
-            judge-model note: OS-painted option lists are unreadable in dark
-            themes. The section-scoped `.defaultModel` testid moves to this
-            wrapper and carries `data-value`; the picker keeps its own
-            `ModelPicker.trigger` / `ModelPicker.option` ids. */}
-        <div data-testid={`${testid}.defaultModel`} data-value={defaultModel}>
-          <ModelPicker
-            placement="down"
-            emptyOption={{ label: DISPATCH_MODEL_DEFAULT_LABEL }}
-            models={toModelDisplays(models)}
-            selectedModel={selectedModelDisplay(models, defaultModel, DISPATCH_MODEL_DEFAULT_LABEL)}
-            onSelectModel={(v) => update({ defaultModel: v || undefined })}
-          />
-        </div>
+    <div data-testid={testid} className="divide-y divide-border/55">
+      {/* The row and its stale-value warning are ONE child of the divider, so
+          the warning reads as part of the row rather than as its own. */}
+      <div>
+        <SettingRow
+          testid={`${testid}.defaultModelRow`}
+          label="Default model"
+          description="Used when the calling agent does not name one. Required."
+          modified={dispatch.defaultModel !== undefined}
+          onReset={() => update({ defaultModel: undefined })}
+        >
+          {/* Themed ModelPicker, not a native <select> — see the AutoModeSection
+              judge-model note: OS-painted option lists are unreadable in dark
+              themes. The section-scoped `.defaultModel` testid stays on this
+              wrapper and carries `data-value`; the picker keeps its own
+              `ModelPicker.trigger` / `ModelPicker.option` ids. The wrapper draws
+              the bordered menu the row vocabulary asks for, since the shared
+              picker paints a bare caret for the composer. */}
+          <span
+            data-testid={`${testid}.defaultModel`}
+            data-value={defaultModel}
+            className="inline-flex items-center bg-bg-input border border-border rounded-md"
+          >
+            <ModelPicker
+              placement="down"
+              emptyOption={{ label: DISPATCH_MODEL_DEFAULT_LABEL }}
+              models={toModelDisplays(models)}
+              selectedModel={selectedModelDisplay(
+                models,
+                defaultModel,
+                DISPATCH_MODEL_DEFAULT_LABEL
+              )}
+              onSelectModel={(v) => update({ defaultModel: v || undefined })}
+            />
+          </span>
+        </SettingRow>
         <StaleModelNotice testid={`${testid}.defaultModel`} models={models} value={defaultModel} />
       </div>
-      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-        <div className="mb-1 flex items-center gap-1">
-          Allowed models
-          <InfoTooltip text="Models a dispatching agent may request explicitly. With NONE checked, all models are allowed." />
-        </div>
-        <div className="space-y-0.5">
-          {models.length === 0 && (
-            <div className="text-[11px] text-text-muted/70">{noModelsMessage}</div>
-          )}
-          {models.map((m) => {
-            const checked = allowedModels.includes(m.value)
-            return (
-              <button
-                key={m.value}
-                data-testid={`${testid}.allowedModel`}
-                data-id={m.value}
-                onClick={() => toggleAllowed(m.value)}
-                className="w-full flex items-center justify-between py-1 text-[12px] text-text-secondary hover:bg-bg-hover rounded transition-colors cursor-default"
-              >
-                <span className="truncate">{m.displayName || m.value}</span>
-                <span
-                  className={`w-7 h-4 shrink-0 rounded-full relative transition-colors ${checked ? 'bg-accent' : 'bg-text-muted/30'}`}
+
+      <SettingRow
+        testid={`${testid}.allowedModelsRow`}
+        layout="stacked"
+        label="Allowed models"
+        description="Empty allows any model the provider offers. Only these can be requested otherwise."
+        modified={dispatch.allowedModels !== undefined}
+        onReset={() => update({ allowedModels: undefined })}
+      >
+        {models.length === 0 ? (
+          <span className="block text-[12px] leading-4 text-text-secondary">{noModelsMessage}</span>
+        ) : (
+          <ChipSet
+            testid={`${testid}.allowedModels`}
+            chipTestid={`${testid}.allowedModel`}
+            value={allowedModels}
+            options={shownModels.map((m) => ({ value: m.value, label: m.displayName || m.value }))}
+            onToggle={toggleAllowed}
+            trailing={
+              collapsed ? (
+                <Button
+                  testid={`${testid}.showAllModels`}
+                  variant="link"
+                  onClick={() => setShowAll(true)}
                 >
-                  <span
-                    className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${checked ? 'left-3.5' : 'left-0.5'}`}
-                  />
-                </span>
-              </button>
-            )
-          })}
-        </div>
-      </div>
-      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-        <div className="mb-1 flex items-center gap-1">
-          Max cost per dispatched agent (USD)
-          <InfoTooltip text="Per-dispatch-target cumulative cost cap (ADR-033 M4-C). Once a target's tracked cost meets/exceeds this value, further continuation turns on it are rejected — the target stays alive, so raising the cap or starting a fresh dispatch both recover. Leave blank for no cap." />
-        </div>
-        <input
-          data-testid={`${testid}.maxCost`}
-          type="number"
-          min="0"
-          step="0.01"
-          value={maxCostUsd ?? ''}
-          onChange={(e) => {
-            const raw = e.target.value
-            update({ maxCostUsd: raw === '' ? undefined : Number(raw) })
-          }}
-          placeholder="(no cap)"
-          className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-        />
-      </div>
-      {showTurnTimeouts && (
-        <>
-          <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-            <div className="mb-1 flex items-center gap-1">
-              Max turn duration (minutes)
-              <InfoTooltip text="Absolute cap on one dispatched turn — it is aborted when this elapses, however busy it looks. Leave blank for the 60-minute default; 0 disables the cap entirely." />
-            </div>
-            <input
-              data-testid={`${testid}.turnTimeout`}
-              type="number"
-              min="0"
-              step="1"
-              value={toMinutes(dispatch.turnTimeoutMs)}
-              onChange={(e) => update({ turnTimeoutMs: fromMinutes(e.target.value) })}
-              placeholder="(default: 60)"
-              className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-            />
-          </div>
-          <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-            <div className="mb-1 flex items-center gap-1">
-              Inactivity timeout (minutes)
-              <InfoTooltip text="How long a dispatched turn may go without producing ANY output before it is aborted. This is the liveness guard — a working agent streams continuously, so for a genuinely slow model raise the turn cap rather than this. Leave blank for the 15-minute default; 0 disables it." />
-            </div>
-            <input
-              data-testid={`${testid}.idleTimeout`}
-              type="number"
-              min="0"
-              step="1"
-              value={toMinutes(dispatch.idleTimeoutMs)}
-              onChange={(e) => update({ idleTimeoutMs: fromMinutes(e.target.value) })}
-              placeholder="(default: 15)"
-              className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-            />
-          </div>
-        </>
-      )}
-      <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">{footerText}</div>
+                  Show all {models.length}
+                </Button>
+              ) : undefined
+            }
+          />
+        )}
+      </SettingRow>
     </div>
   )
 }
 
 /**
- * Governs `dispatch_agent` calls INTO opencode (the live Claude→opencode
- * direction). Self-contained: loads/saves its own opencode EngineConfig via
- * window.api, editing only the `dispatch` block (never clobbers autoMode etc.).
+ * "Limits" — the budget the target enforces on a dispatched agent. Its own
+ * group on the page, and its own body here, but the SAME config block: it calls
+ * `useDispatchConfig` for its own read and edits keys the into-half never
+ * touches.
  */
-export function OpencodeDispatchSection(): React.JSX.Element {
+function DispatchLimitsSection({
+  engineId,
+  testid,
+  installed,
+  notInstalledMessage,
+  showTurnTimeouts = false
+}: {
+  engineId: EngineId
+  /**
+   * The DIRECTION's namespace (`ClaudeDispatchSection`), not this half's root.
+   * The half's own root is `<testid>.limits`, but each ROW keeps the id it had
+   * before the split — `.maxCost`, `.turnTimeout`, `.idleTimeout` name parts
+   * that did not move, and ADR-027 ties an id to the part, not to whichever
+   * component happens to render it.
+   */
+  testid: string
+  installed: boolean | null
+  notInstalledMessage: string
+  /** Render the turn/inactivity timeout editors. OPENCODE ONLY: the watchdog
+   *  they configure lives in the opencode dispatch direction (ADR-033's
+   *  2026-09-01 amendment); the Claude/pi directions still run on the fixed
+   *  10-minute `DISPATCH_TIMEOUT_MS`, so showing these there would be an inert
+   *  control that silently writes config nothing reads. */
+  showTurnTimeouts?: boolean
+}): React.JSX.Element {
+  const { engineCfg, dispatch, update } = useDispatchConfig(engineId)
+  const root = `${testid}.limits`
+
+  const gate = dispatchGateRow(root, installed, engineCfg !== null, notInstalledMessage)
+  if (gate) return gate
+
+  // Both timeouts are stored in MILLISECONDS (DispatchConfig) but edited in
+  // MINUTES — nobody wants to type 3600000. Blank = the built-in default,
+  // 0 = disabled; both round-trip through the same undefined-vs-number
+  // convention the maxCost field uses. A NEGATIVE minute count drops the key
+  // rather than persisting a negative duration: the watchdog's `> 0` gates read
+  // a persisted negative as "cap disabled", silently — not what someone
+  // fumbling a keystroke meant to configure. (Which is also why these fields
+  // carry no `min`: clamping -5 to 0 would MEAN "disabled".)
+  const toMinutes = (ms: number | undefined): number | undefined =>
+    ms === undefined ? undefined : ms / 60000
+  const fromMinutes = (minutes: number | undefined): number | undefined =>
+    minutes === undefined || !Number.isFinite(minutes) || minutes < 0 ? undefined : minutes * 60000
+
+  return (
+    <div data-testid={root} className="divide-y divide-border/55">
+      <SettingRow
+        testid={`${testid}.maxCostRow`}
+        label="Max cost per dispatched agent"
+        description="A continuation past this cumulative cost is refused; the target survives."
+        modified={dispatch.maxCostUsd !== undefined}
+        onReset={() => update({ maxCostUsd: undefined })}
+      >
+        <NumberField
+          testid={`${testid}.maxCost`}
+          value={dispatch.maxCostUsd}
+          min={0}
+          unit="USD"
+          placeholder="no cap"
+          onChange={(v) => update({ maxCostUsd: v })}
+        />
+      </SettingRow>
+
+      {showTurnTimeouts && (
+        <>
+          <SettingRow
+            testid={`${testid}.turnTimeoutRow`}
+            label="Max turn duration"
+            description="One dispatched turn is cut off after this long. 0 disables."
+            modified={dispatch.turnTimeoutMs !== undefined}
+            onReset={() => update({ turnTimeoutMs: undefined })}
+          >
+            <NumberField
+              testid={`${testid}.turnTimeout`}
+              value={toMinutes(dispatch.turnTimeoutMs)}
+              unit="min"
+              placeholder="60"
+              onChange={(v) => update({ turnTimeoutMs: fromMinutes(v) })}
+            />
+          </SettingRow>
+
+          <SettingRow
+            testid={`${testid}.idleTimeoutRow`}
+            label="Inactivity timeout"
+            description="Give up on a target that stops producing output."
+            modified={dispatch.idleTimeoutMs !== undefined}
+            onReset={() => update({ idleTimeoutMs: undefined })}
+          >
+            <NumberField
+              testid={`${testid}.idleTimeout`}
+              value={toMinutes(dispatch.idleTimeoutMs)}
+              unit="min"
+              placeholder="15"
+              onChange={(v) => update({ idleTimeoutMs: fromMinutes(v) })}
+            />
+          </SettingRow>
+        </>
+      )}
+    </div>
+  )
+}
+
+// ── The six exported bodies, two per direction ───────────────────────
+//
+// Dispatch INTO Claude can only be CALLED from another engine, and opencode is
+// the only one installed separately — so both Claude halves gate on the same
+// opencode-installed probe as the opencode twin (ADR-030/ADR-033 M4-A: no
+// possible caller means the config has nothing to configure). pi gates on pi.
+
+const CLAUDE_DISPATCH_ABSENT =
+  'opencode is not installed. Cross-engine dispatch lets an opencode session delegate a task to a Claude agent — with no other engine installed, there is no possible caller.'
+const OPENCODE_DISPATCH_ABSENT =
+  'opencode is not installed. Cross-engine dispatch lets a Claude or pi session delegate a task to an opencode agent (e.g. a GPT-backed review).'
+const PI_DISPATCH_ABSENT =
+  'pi is not installed. Cross-engine dispatch lets a Claude or opencode session delegate a task to a pi agent.'
+
+export function ClaudeDispatchIntoSection(): React.JSX.Element {
   const installed = useOpencodeInstalled()
   return (
-    <DispatchSection
+    <DispatchIntoSection
+      engineId="claude"
+      testid="ClaudeDispatchSection"
+      installed={installed}
+      notInstalledMessage={CLAUDE_DISPATCH_ABSENT}
+      noModelsMessage="No Claude models detected."
+    />
+  )
+}
+
+export function ClaudeDispatchLimitsSection(): React.JSX.Element {
+  const installed = useOpencodeInstalled()
+  return (
+    <DispatchLimitsSection
+      engineId="claude"
+      testid="ClaudeDispatchSection"
+      installed={installed}
+      notInstalledMessage={CLAUDE_DISPATCH_ABSENT}
+    />
+  )
+}
+
+export function OpencodeDispatchIntoSection(): React.JSX.Element {
+  const installed = useOpencodeInstalled()
+  return (
+    <DispatchIntoSection
       engineId="opencode"
       testid="OpencodeDispatchSection"
       installed={installed}
-      notInstalledMessage="opencode is not installed. Cross-engine dispatch lets a Claude session delegate a task to an opencode agent (e.g. a GPT-backed review)."
-      defaultModelTooltip="Used when the dispatching agent doesn't request a model. Format: provider/model-id. With no default set, dispatch_agent calls without an explicit model are rejected."
+      notInstalledMessage={OPENCODE_DISPATCH_ABSENT}
       noModelsMessage="No opencode models detected."
-      footerText="Governs dispatch_agent calls INTO opencode (e.g. a Claude session asking a GPT-backed agent for a second opinion). Empty allowed-models list = any model may be requested."
+    />
+  )
+}
+
+export function OpencodeDispatchLimitsSection(): React.JSX.Element {
+  const installed = useOpencodeInstalled()
+  return (
+    <DispatchLimitsSection
+      engineId="opencode"
+      testid="OpencodeDispatchSection"
+      installed={installed}
+      notInstalledMessage={OPENCODE_DISPATCH_ABSENT}
       showTurnTimeouts
     />
   )
 }
 
 /**
- * Governs `dispatch_agent` calls INTO Claude (the M2 opencode→Claude
- * direction, plus any future engine). Self-contained: loads/saves its own
- * Claude EngineConfig via window.api, editing only the `dispatch` block
- * (never clobbers `sandbox`/`proxy`). Claude ITSELF is always installed (the
- * bundled default engine), but dispatch INTO Claude can only be CALLED from
- * opencode today — so this section gates on the same opencode-installed
- * probe as the opencode twin (ADR-030/ADR-033 M4-A: no possible caller means
- * the config has nothing to configure).
+ * pi as a dispatch TARGET. Core has accepted it since M4c —
+ * `cross-engine-dispatcher.ts`'s `resolveAndRunPi` reads
+ * `engines/pi.json#dispatch` and its error text already points at this pane —
+ * the settings UI simply never gained one (ADR-065 § Cross-engine dispatch into
+ * pi). No timeouts: the watchdog is the opencode target path's.
  */
-export function ClaudeDispatchSection(): React.JSX.Element {
-  const installed = useOpencodeInstalled()
+export function PiDispatchIntoSection(): React.JSX.Element {
+  const installed = usePiInstalled()
   return (
-    <DispatchSection
-      engineId="claude"
-      testid="ClaudeDispatchSection"
+    <DispatchIntoSection
+      engineId="pi"
+      testid="PiDispatchSection"
       installed={installed}
-      notInstalledMessage="opencode is not installed. Cross-engine dispatch lets an opencode session delegate a task to a Claude agent — with no other engine installed, there is no possible caller."
-      defaultModelTooltip="Used when the dispatching agent doesn't request a model. Claude model aliases (e.g. sonnet, haiku, opus). With no default set, dispatch_agent calls without an explicit model are rejected."
-      noModelsMessage="No Claude models detected."
-      footerText="Governs dispatch_agent calls INTO Claude from other engines (e.g. an opencode session asking Claude for a second opinion). Empty allowed-models list = any model may be requested."
+      notInstalledMessage={PI_DISPATCH_ABSENT}
+      noModelsMessage="No pi models detected."
     />
+  )
+}
+
+export function PiDispatchLimitsSection(): React.JSX.Element {
+  const installed = usePiInstalled()
+  return (
+    <DispatchLimitsSection
+      engineId="pi"
+      testid="PiDispatchSection"
+      installed={installed}
+      notInstalledMessage={PI_DISPATCH_ABSENT}
+    />
+  )
+}
+
+// ── Whole-direction compositions ─────────────────────────────────────
+//
+// One direction's two halves, in page order. The dialog mounts the halves
+// separately (one per group); these keep the pre-split name and testid so a
+// caller — or a test — that wants "the whole dispatch pane for this engine"
+// still has one thing to render.
+
+export function ClaudeDispatchSection(): React.JSX.Element {
+  return (
+    <>
+      <ClaudeDispatchIntoSection />
+      <ClaudeDispatchLimitsSection />
+    </>
+  )
+}
+
+export function OpencodeDispatchSection(): React.JSX.Element {
+  return (
+    <>
+      <OpencodeDispatchIntoSection />
+      <OpencodeDispatchLimitsSection />
+    </>
+  )
+}
+
+export function PiDispatchSection(): React.JSX.Element {
+  return (
+    <>
+      <PiDispatchIntoSection />
+      <PiDispatchLimitsSection />
+    </>
   )
 }
 
@@ -1040,6 +1317,31 @@ const DEFAULT_MODEL_OVERRIDE: ModelOverrideSettings = {
   haikuModel: ''
 }
 
+/** The four `ANTHROPIC_DEFAULT_*_MODEL` env vars claude-spawn-prep writes. */
+const MODEL_OVERRIDE_FIELDS: ReadonlyArray<{
+  field: keyof ModelOverrideSettings
+  label: string
+  placeholder: string
+}> = [
+  { field: 'model', label: 'Model id', placeholder: 'claude-3-5-sonnet-latest' },
+  { field: 'sonnetModel', label: 'Sonnet alias', placeholder: 'claude-sonnet-latest' },
+  { field: 'opusModel', label: 'Opus alias', placeholder: 'claude-opus-latest' },
+  { field: 'haikuModel', label: 'Haiku alias', placeholder: 'claude-haiku-latest' }
+]
+
+/**
+ * The Anthropic endpoint group, on the row vocabulary (ADR-065).
+ *
+ * The uppercase ENDPOINT / MODEL OVERRIDE sub-headers and the prose footer are
+ * gone: a sub-header inside a card is a group boundary the page model expresses
+ * itself, and "applies on next session start / persists to vendors/anthropic.json"
+ * is the group's `appliesOn` badge plus its storage tag. Dependent fields stay
+ * MOUNTED when their master toggle is off — indented, dimmed and disabled — so
+ * what is configured is readable without flipping the switch to find out.
+ *
+ * Every write still goes through `updateVendorConfig` with the same whole-object
+ * patch shape the pre-ADR-065 form used; nothing about the file changed.
+ */
 function VendorAnthropicEditableForm({
   vendorConfig,
   updateVendorConfig
@@ -1049,93 +1351,100 @@ function VendorAnthropicEditableForm({
 }): React.JSX.Element {
   const endpoint: AnthropicEndpointSettings = vendorConfig.endpoint ?? DEFAULT_ENDPOINT
   const modelOverride: ModelOverrideSettings = vendorConfig.modelOverride ?? DEFAULT_MODEL_OVERRIDE
+  /** Reveal is per-view and deliberately not persisted anywhere. */
+  const [revealToken, setRevealToken] = useState(false)
 
-  const inputClass =
-    'bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors'
-
-  const modelFields: { field: keyof ModelOverrideSettings; label: string }[] = [
-    { field: 'model', label: 'Model (default)' },
-    { field: 'sonnetModel', label: 'Sonnet model' },
-    { field: 'opusModel', label: 'Opus model' },
-    { field: 'haikuModel', label: 'Haiku model' }
-  ]
+  const endpointOff = !endpoint.enabled
+  const overrideOff = !modelOverride.enabled
 
   return (
-    <div
-      data-testid="VendorAnthropicEditableForm"
-      className="px-3 py-1.5 text-[13px] text-text-secondary space-y-4"
-    >
-      {/* Endpoint */}
-      <div className="space-y-2">
-        <div className="text-[11px] text-text-muted uppercase tracking-wide">Endpoint</div>
-        <SettingsToggle
-          label="Enable custom endpoint"
-          checked={endpoint.enabled}
-          onChange={(v) => updateVendorConfig({ endpoint: { ...endpoint, enabled: v } })}
-        />
-        {endpoint.enabled && (
-          <div className="space-y-1.5 pl-1">
-            <div>
-              <div className="text-[10px] text-text-muted mb-0.5">Base URL</div>
-              <input
-                type="text"
-                className={`${inputClass} w-full`}
-                placeholder="https://api.anthropic.com"
-                value={endpoint.baseUrl}
-                onChange={(e) =>
-                  updateVendorConfig({ endpoint: { ...endpoint, baseUrl: e.target.value } })
-                }
-              />
-            </div>
-            <div>
-              <div className="text-[10px] text-text-muted mb-0.5">Auth token</div>
-              <input
-                type="password"
-                className={`${inputClass} w-full`}
-                placeholder="sk-ant-..."
-                value={endpoint.authToken}
-                onChange={(e) =>
-                  updateVendorConfig({ endpoint: { ...endpoint, authToken: e.target.value } })
-                }
-              />
-            </div>
-          </div>
-        )}
-      </div>
+    <div data-testid="VendorAnthropicEditableForm" className="divide-y divide-border/55">
+      <SettingsToggle
+        testid="VendorAnthropicEditableForm.endpointEnabled"
+        label="Custom endpoint"
+        checked={endpoint.enabled}
+        description="Route Claude through a gateway or proxy instead of api.anthropic.com."
+        onChange={(v) => updateVendorConfig({ endpoint: { ...endpoint, enabled: v } })}
+      />
 
-      {/* Model override */}
-      <div className="space-y-2">
-        <div className="text-[11px] text-text-muted uppercase tracking-wide">Model override</div>
-        <SettingsToggle
-          label="Enable model override"
-          checked={modelOverride.enabled}
-          onChange={(v) => updateVendorConfig({ modelOverride: { ...modelOverride, enabled: v } })}
+      <SettingRow
+        testid="VendorAnthropicEditableForm.baseUrlRow"
+        layout="stacked"
+        indent
+        dimmed={endpointOff}
+        label="Base URL"
+        description="The gateway's Anthropic-compatible base address."
+      >
+        <TextField
+          testid="VendorAnthropicEditableForm.baseUrl"
+          value={endpoint.baseUrl}
+          placeholder="https://api.anthropic.com"
+          disabled={endpointOff}
+          onChange={(v) => updateVendorConfig({ endpoint: { ...endpoint, baseUrl: v } })}
         />
-        {modelOverride.enabled && (
-          <div className="space-y-1.5 pl-1">
-            {modelFields.map(({ field, label }) => (
-              <div key={String(field)}>
-                <div className="text-[10px] text-text-muted mb-0.5">{label}</div>
-                <input
-                  type="text"
-                  className={`${inputClass} w-full`}
-                  placeholder={`e.g. claude-${field === 'model' ? '3-5-sonnet-latest' : String(field).replace('Model', '-latest')}`}
-                  value={modelOverride[field] as string}
-                  onChange={(e) =>
-                    updateVendorConfig({
-                      modelOverride: { ...modelOverride, [field]: e.target.value }
-                    })
-                  }
-                />
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      </SettingRow>
 
-      <div className="text-[10px] text-text-muted/50 leading-relaxed">
-        Changes apply on next session start. Persists to vendors/anthropic.json.
-      </div>
+      <SettingRow
+        testid="VendorAnthropicEditableForm.authTokenRow"
+        indent
+        dimmed={endpointOff}
+        label="Auth token"
+        description="Sent as the gateway's bearer credential; leave empty to use your Claude login."
+      >
+        <TextField
+          testid="VendorAnthropicEditableForm.authToken"
+          type={revealToken ? 'text' : 'password'}
+          className="w-[184px]"
+          value={endpoint.authToken}
+          placeholder="sk-ant-…"
+          disabled={endpointOff}
+          onChange={(v) => updateVendorConfig({ endpoint: { ...endpoint, authToken: v } })}
+        />
+        <Button
+          testid="VendorAnthropicEditableForm.revealToken"
+          variant="link"
+          disabled={endpointOff}
+          onClick={() => setRevealToken((v) => !v)}
+        >
+          {revealToken ? 'Hide' : 'Reveal'}
+        </Button>
+      </SettingRow>
+
+      <SettingsToggle
+        testid="VendorAnthropicEditableForm.modelOverrideEnabled"
+        label="Model override"
+        checked={modelOverride.enabled}
+        description="Pin every session to one model id regardless of the picker."
+        onChange={(v) => updateVendorConfig({ modelOverride: { ...modelOverride, enabled: v } })}
+      />
+
+      {MODEL_OVERRIDE_FIELDS.map(({ field, label, placeholder }) => (
+        <SettingRow
+          key={String(field)}
+          testid="VendorAnthropicEditableForm.modelFieldRow"
+          dataId={String(field)}
+          indent
+          dimmed={overrideOff}
+          label={label}
+          description={
+            field === 'model'
+              ? 'Used for every session that does not hit one of the aliases below.'
+              : `Substituted wherever the ${label.replace(' alias', '')} alias is requested.`
+          }
+        >
+          <TextField
+            testid="VendorAnthropicEditableForm.modelField"
+            dataId={String(field)}
+            className="w-[240px]"
+            value={modelOverride[field] as string}
+            placeholder={placeholder}
+            disabled={overrideOff}
+            onChange={(v) =>
+              updateVendorConfig({ modelOverride: { ...modelOverride, [field]: v } })
+            }
+          />
+        </SettingRow>
+      ))}
     </div>
   )
 }
@@ -1167,18 +1476,20 @@ function OpencodeModelsSection(): React.JSX.Element {
 
   if (cfg === null || installed === null) {
     return (
-      <div data-testid="OpencodeModelsSection" className="px-3 py-1.5 text-[13px] text-text-muted">
-        Loading…
+      <div data-testid="OpencodeModelsSection" className="divide-y divide-border/55">
+        <SettingRow testid="OpencodeModelsSection.status" dataId="loading" description="Loading…" />
       </div>
     )
   }
   if (!installed) {
     return (
-      <div
-        data-testid="OpencodeModelsSection"
-        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
-      >
-        opencode is not installed. Model settings apply to opencode sessions.
+      <div data-testid="OpencodeModelsSection" className="divide-y divide-border/55">
+        <SettingRow
+          testid="OpencodeModelsSection.status"
+          dataId="not-installed"
+          dimmed
+          description="opencode is not installed. These settings apply to opencode sessions."
+        />
       </div>
     )
   }
@@ -1201,57 +1512,72 @@ function OpencodeModelsSection(): React.JSX.Element {
   const modelDisplays = toModelDisplays(models)
 
   return (
-    <div data-testid="OpencodeModelsSection" className="space-y-1">
-      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-        <div className="mb-1 flex items-center gap-1">
-          Default model
-          <InfoTooltip text="The primary model for opencode sessions. Format: provider/model-id, e.g. anthropic/claude-sonnet-4-6. Applies on next cwd spawn." />
-        </div>
-        <div data-testid="OpencodeModelsSection.model" data-value={cfg.model ?? ''}>
-          <ModelPicker
-            placement="down"
-            emptyOption={{ label: OPENCODE_MODEL_DEFAULT_LABEL }}
-            models={modelDisplays}
-            selectedModel={selectedModelDisplay(
-              models,
-              cfg.model ?? '',
-              OPENCODE_MODEL_DEFAULT_LABEL
-            )}
-            onSelectModel={(v) => update({ model: v || undefined })}
-          />
-        </div>
+    <div data-testid="OpencodeModelsSection" className="divide-y divide-border/55">
+      {/* Row + stale-value warning are ONE child of the divider, so the warning
+          reads as part of the row rather than as a row of its own. */}
+      <div>
+        <SettingRow
+          testid="OpencodeModelsSection.modelRow"
+          label="Default model"
+          description="Model a new opencode session starts with."
+          modified={cfg.model !== undefined}
+          onReset={() => update({ model: undefined })}
+        >
+          <span
+            data-testid="OpencodeModelsSection.model"
+            data-value={cfg.model ?? ''}
+            className="inline-flex items-center bg-bg-input border border-border rounded-md"
+          >
+            <ModelPicker
+              placement="down"
+              emptyOption={{ label: OPENCODE_MODEL_DEFAULT_LABEL }}
+              models={modelDisplays}
+              selectedModel={selectedModelDisplay(
+                models,
+                cfg.model ?? '',
+                OPENCODE_MODEL_DEFAULT_LABEL
+              )}
+              onSelectModel={(v) => update({ model: v || undefined })}
+            />
+          </span>
+        </SettingRow>
         <StaleModelNotice
           testid="OpencodeModelsSection.model"
           models={models}
           value={cfg.model ?? ''}
         />
       </div>
-      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-        <div className="mb-1 flex items-center gap-1">
-          Small model
-          <InfoTooltip text="A cheaper/faster model used by opencode for lightweight tasks (titles, summaries). Format: provider/model-id." />
-        </div>
-        <div data-testid="OpencodeModelsSection.smallModel" data-value={cfg.smallModel ?? ''}>
-          <ModelPicker
-            placement="down"
-            emptyOption={{ label: OPENCODE_MODEL_DEFAULT_LABEL }}
-            models={modelDisplays}
-            selectedModel={selectedModelDisplay(
-              models,
-              cfg.smallModel ?? '',
-              OPENCODE_MODEL_DEFAULT_LABEL
-            )}
-            onSelectModel={(v) => update({ smallModel: v || undefined })}
-          />
-        </div>
+      <div>
+        <SettingRow
+          testid="OpencodeModelsSection.smallModelRow"
+          label="Small model"
+          description="Cheaper model for titles, summaries and compaction."
+          modified={cfg.smallModel !== undefined}
+          onReset={() => update({ smallModel: undefined })}
+        >
+          <span
+            data-testid="OpencodeModelsSection.smallModel"
+            data-value={cfg.smallModel ?? ''}
+            className="inline-flex items-center bg-bg-input border border-border rounded-md"
+          >
+            <ModelPicker
+              placement="down"
+              emptyOption={{ label: OPENCODE_MODEL_DEFAULT_LABEL }}
+              models={modelDisplays}
+              selectedModel={selectedModelDisplay(
+                models,
+                cfg.smallModel ?? '',
+                OPENCODE_MODEL_DEFAULT_LABEL
+              )}
+              onSelectModel={(v) => update({ smallModel: v || undefined })}
+            />
+          </span>
+        </SettingRow>
         <StaleModelNotice
           testid="OpencodeModelsSection.smallModel"
           models={models}
           value={cfg.smallModel ?? ''}
         />
-      </div>
-      <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
-        Changes apply on the next opencode server start for each working directory.
       </div>
     </div>
   )
@@ -2957,7 +3283,13 @@ export const SECTIONS: Section[] = [
         label: 'Cross-engine dispatch',
         keywords:
           'claude dispatch cross engine agent delegate collab model allowlist default sonnet haiku opus',
-        render: () => <ClaudeDispatchSection />
+        render: () => <ClaudeDispatchIntoSection />
+      },
+      {
+        key: 'claudeDispatchLimits',
+        label: 'Dispatch limits',
+        keywords: 'claude dispatch cost cap budget usd limit timeout',
+        render: () => <ClaudeDispatchLimitsSection />
       }
     ]
   },
@@ -3013,6 +3345,7 @@ export const SECTIONS: Section[] = [
             modelId={m.id}
             modelLabel={m.label}
             current={s.modelEffortDefaults?.[m.id]}
+            modified={m.id in (s.modelEffortDefaults ?? {})}
             onChange={(next) => {
               const map = { ...(s.modelEffortDefaults ?? {}) }
               if (next === undefined) delete map[m.id]
@@ -3027,11 +3360,10 @@ export const SECTIONS: Section[] = [
         label: 'Effort defaults info',
         keywords: 'effort default fallback per-session',
         render: () => (
-          <div className="px-3 py-1.5 text-[11px] text-text-muted/60">
-            Picked here when starting a new session with the matching model. A per-session effort
-            choice (chip next to the input) always wins. Applies to the canonical model and its
-            aliases (e.g. selecting <code>opus</code> in the picker uses your Opus 4.8 default).
-          </div>
+          <SettingRow
+            testid="EffortDefaultsNote"
+            description="Applied when a new session starts on the matching model or one of its aliases (picking opus uses the Opus 4.8 row); the per-session effort chip always wins."
+          />
         )
       }
     ]
@@ -3118,7 +3450,13 @@ export const SECTIONS: Section[] = [
         label: 'Cross-engine dispatch',
         keywords:
           'opencode dispatch cross engine agent delegate collab gpt gemini model allowlist default',
-        render: () => <OpencodeDispatchSection />
+        render: () => <OpencodeDispatchIntoSection />
+      },
+      {
+        key: 'opencodeDispatchLimits',
+        label: 'Dispatch limits',
+        keywords: 'opencode dispatch cost cap budget usd limit turn duration inactivity timeout',
+        render: () => <OpencodeDispatchLimitsSection />
       }
     ]
   },
@@ -3407,6 +3745,42 @@ export const SECTIONS: Section[] = [
         keywords:
           'pi auto mode full autonomy classifier gatekeeper judge model llm permission bash security monitor',
         render: () => <PiAutoModeSection />
+      }
+    ]
+  },
+  {
+    id: 'pi-dispatch',
+    label: 'Cross-engine dispatch',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M17 3l4 4-4 4" />
+        <path d="M21 7H9a4 4 0 00-4 4v1" />
+        <path d="M7 21l-4-4 4-4" />
+        <path d="M3 17h12a4 4 0 004-4v-1" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piDispatch',
+        label: 'Cross-engine dispatch',
+        keywords:
+          'pi dispatch cross engine agent delegate collab model allowlist default target incoming',
+        render: () => <PiDispatchIntoSection />
+      },
+      {
+        key: 'piDispatchLimits',
+        label: 'Dispatch limits',
+        keywords: 'pi dispatch cost cap budget usd limit',
+        render: () => <PiDispatchLimitsSection />
       }
     ]
   },
@@ -3783,19 +4157,20 @@ const VENDOR_OPENCODE_SECTION_IDS = new Set(['vendor-opencode'])
 const AGENTS_OPENCODE_SECTION_IDS = new Set(['opencode-agents'])
 
 /** Section ids that belong to Engines > pi (content self-gates on install).
- *  Auto mode alone: `pi-automode` edits the same `EngineConfig.autoMode` block
- *  opencode's does — PiSession reads `loadEngineConfig('pi').autoMode` since the
- *  phase-4 gatekeeper wiring, so the setting was live but unreachable from the
- *  UI until this section. The old `pi-models` section moved INTO
- *  `pi-config-models` below: ClaudeUI's session-default model and pi's own
+ *  `pi-automode` edits the same `EngineConfig.autoMode` block opencode's does —
+ *  PiSession reads `loadEngineConfig('pi').autoMode` since the phase-4
+ *  gatekeeper wiring, so the setting was live but unreachable from the UI until
+ *  this section. The old `pi-models` section moved INTO `pi-config-models`
+ *  below: ClaudeUI's session-default model and pi's own
  *  `defaultProvider`/`defaultModel` fallbacks answer one question between them,
  *  and answering it across two nav entries was the confusion.
- *  No dispatch section: the Claude/opencode dispatch sections configure
- *  dispatches INTO that engine (allowlist/default/cap for incoming targets),
- *  and pi is a dispatch SOURCE only so far — nothing to configure until
- *  pi-as-target ships (crossEngineDispatch is true for the source direction as
- *  of M4b). */
-const ENGINE_PI_SECTION_IDS = new Set(['pi-automode'])
+ *  `pi-dispatch` configures dispatches INTO pi (allowlist/default/cap for
+ *  incoming targets), exactly as the Claude and opencode dispatch sections do
+ *  for theirs. pi has been an accepted dispatch TARGET since M4c —
+ *  `cross-engine-dispatcher.ts`'s `resolveAndRunPi` reads
+ *  `engines/pi.json#dispatch` and its refusal text already names this pane —
+ *  the UI simply never gained one (ADR-065 § Cross-engine dispatch into pi). */
+const ENGINE_PI_SECTION_IDS = new Set(['pi-automode', 'pi-dispatch'])
 
 /**
  * Section ids that belong to pi > Configuration — the curated panes over pi's
@@ -3953,7 +4328,7 @@ export const SCOPES: ScopeDef[] = [
       {
         id: 'pi-engine',
         label: 'Engine',
-        sections: getSectionsForIds(ENGINE_PI_SECTION_IDS, ['pi-automode'])
+        sections: getSectionsForIds(ENGINE_PI_SECTION_IDS, ['pi-automode', 'pi-dispatch'])
       },
       {
         id: 'pi-configuration',

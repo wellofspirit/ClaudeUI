@@ -653,23 +653,36 @@ export function ChipSet({
   value,
   options,
   onToggle,
-  testid
+  testid,
+  chipTestid,
+  trailing
 }: {
   value: string[]
   options: SegmentedOption<string>[]
   onToggle: (value: string) => void
   testid?: string
+  /**
+   * Defaults to `${testid}.chip`; set it when the CHIPS carry an id the call
+   * site already had (the dispatch allowlist's `${pane}.allowedModel`), exactly
+   * as `Segmented` takes an `optionTestid`.
+   */
+  chipTestid?: string
+  /**
+   * Rendered as the last item INSIDE the wrap flow — a "Show all 13" link that
+   * has to sit on the chips' last line rather than on a line of its own.
+   */
+  trailing?: React.ReactNode
 }): React.JSX.Element {
   const root = testid ?? 'ChipSet'
   return (
-    <span data-testid={root} className="flex flex-wrap gap-1.5">
+    <span data-testid={root} className="flex flex-wrap items-center gap-1.5">
       {options.map((opt) => {
         const on = value.includes(opt.value)
         return (
           <button
             key={opt.value}
             type="button"
-            data-testid={`${root}.chip`}
+            data-testid={chipTestid ?? `${root}.chip`}
             data-id={opt.value}
             aria-pressed={on}
             onClick={() => onToggle(opt.value)}
@@ -683,6 +696,7 @@ export function ChipSet({
           </button>
         )
       })}
+      {trailing}
     </span>
   )
 }

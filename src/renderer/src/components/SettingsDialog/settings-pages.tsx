@@ -44,9 +44,11 @@ export interface SettingsGroup {
   label: string
   /**
    * Header tag naming the file this group writes. Omit for ClaudeUI's own
-   * settings.json. A function when the file depends on the selected engine.
+   * settings.json. A function when the file depends on the selected engine —
+   * and one that may return `undefined` for the engine whose values DO live in
+   * ClaudeUI's own settings (Claude's effort defaults).
    */
-  storage?: string | ((engine: EngineId) => string)
+  storage?: string | ((engine: EngineId) => string | undefined)
   /** Header badge text (e.g. 'All engines'). */
   badge?: string
   /** Capability gate, evaluated against the page's engine (sandbox/proxy). */
@@ -55,12 +57,26 @@ export interface SettingsGroup {
    * One line under the card, with the "applies later" badge when the whole
    * group takes effect at a later moment (ADR-065's three-value vocabulary).
    * Replaces the per-pane prose footers.
+   *
+   * Both may be functions of the selected engine, resolved like `storage`:
+   * "Default models" applies on the next opencode SERVER start but the next
+   * Claude SESSION, so one static string would be wrong for two engines out of
+   * three. Returning `undefined` means the group says nothing for that engine.
    */
-  note?: string
-  appliesOn?: AppliesOn
+  note?: string | ((engine: EngineId) => string | undefined)
+  appliesOn?: AppliesOn | ((engine: EngineId) => AppliesOn | undefined)
   /** Exactly one of `items` / `byEngine`. byEngine draws an engine segment. */
   items?: SettingItem[]
   byEngine?: Partial<Record<EngineId, SettingItem[]>>
+  /**
+   * A `byEngine` group that FOLLOWS another group's segment instead of drawing
+   * its own: names a sibling group id on the same page, whose current selection
+   * picks this group's item list. The dispatch page's Limits card is the same
+   * target as the Dispatch-into card above it, so two segments on one page
+   * would let the user put them out of step (ADR-065 amendment, board
+   * `board2-Dispatch.png`).
+   */
+  engineFrom?: string
 }
 
 export interface SettingsPage {
@@ -261,6 +277,24 @@ const ICON_PI = icon(
 /** `engines/<engine>.json` — the storage tag of a per-engine group. */
 const engineFile = (engine: EngineId): string => `engines/${engine}.json`
 
+/** Who can dispatch INTO each engine — the other two, named in the Limits note. */
+const DISPATCH_CALLERS: Record<EngineId, string> = {
+  claude: 'an opencode or pi',
+  opencode: 'a Claude or pi',
+  pi: 'a Claude or opencode'
+}
+
+/**
+ * When each engine picks up a change to its default model. Every engine gets a
+ * sentence, not just opencode: the badge only renders alongside a note, so a
+ * silent `appliesOn` would be computed and then dropped.
+ */
+const DEFAULT_MODEL_NOTES: Record<EngineId, string> = {
+  claude: 'Applies to new Claude sessions.',
+  opencode: 'Changes here apply when the opencode server restarts for a working directory.',
+  pi: 'Applies to new pi sessions.'
+}
+
 // ── The 11 pages ─────────────────────────────────────────────────────
 
 export const PAGES: SettingsPage[] = [
@@ -376,6 +410,14 @@ export const PAGES: SettingsPage[] = [
       {
         id: 'defaults',
         label: 'Default models',
+        // Three engines, three answers: Claude's effort defaults are ClaudeUI's
+        // own settings.json (no tag) and apply to the next SESSION; opencode's
+        // are its own jsonc, read when the per-cwd SERVER restarts; pi's are
+        // pi's settings.json, read at session start.
+        storage: (engine) =>
+          engine === 'opencode' ? 'opencode.jsonc' : engine === 'pi' ? 'settings.json' : undefined,
+        appliesOn: (engine) => (engine === 'opencode' ? 'next-server-start' : 'next-session'),
+        note: (engine) => DEFAULT_MODEL_NOTES[engine],
         byEngine: {
           claude: itemsOf('effortDefaults'),
           opencode: itemsOf('opencode-models'),
@@ -394,6 +436,9 @@ export const PAGES: SettingsPage[] = [
         id: 'anthropic',
         label: 'Anthropic endpoint',
         storage: 'vendors/anthropic.json',
+        // The old pane footer's "applies on next session start", as the badge.
+        appliesOn: 'next-session',
+        note: 'Applies to new Claude sessions.',
         items: itemsOf('vendor-anthropic')
       },
       { id: 'accounts', label: 'Accounts', items: itemsOf('accounts') }
@@ -412,8 +457,31 @@ export const PAGES: SettingsPage[] = [
         label: 'Dispatch into',
         storage: engineFile,
         byEngine: {
-          claude: itemsOf('claude-dispatch'),
-          opencode: itemsOf('opencode-dispatch')
+          claude: itemsOf('claude-dispatch', ['claudeDispatch']),
+          opencode: itemsOf('opencode-dispatch', ['opencodeDispatch']),
+          pi: itemsOf('pi-dispatch', ['piDispatch'])
+        }
+      },
+      {
+        // The budget the SAME target enforces. Its own card (a divider is a
+        // group boundary) but not its own segment: `engineFrom` makes it follow
+        // the one above, so the two cards can never describe different engines.
+        //
+        // No storage tag and no applies-later badge. The tag would repeat the
+        // one on the card directly above (`board2-Dispatch.png` shows it on the
+        // into card alone), and a badge would be a lie: the dispatcher re-reads
+        // `loadEngineConfig(engine).dispatch` on EVERY dispatch call
+        // (cross-engine-dispatcher.ts, the three cost-cap gates), so a changed
+        // cap or timeout binds the very next one.
+        id: 'limits',
+        label: 'Limits',
+        engineFrom: 'into',
+        note: (engine) =>
+          `Governs dispatch_agent calls into ${engineMeta(engine).label} from ${DISPATCH_CALLERS[engine]} session. Each target has its own budget.`,
+        byEngine: {
+          claude: itemsOf('claude-dispatch', ['claudeDispatchLimits']),
+          opencode: itemsOf('opencode-dispatch', ['opencodeDispatchLimits']),
+          pi: itemsOf('pi-dispatch', ['piDispatchLimits'])
         }
       }
     ]
@@ -684,11 +752,36 @@ export function itemsFor(group: SettingsGroup, engine: EngineId | undefined): Se
   return (chosen && group.byEngine[chosen]) || []
 }
 
+/**
+ * Which engine a per-engine header field resolves against: the selected one if
+ * this group actually offers it, else the group's first.
+ */
+function resolvedEngine(group: SettingsGroup, engine: EngineId | undefined): EngineId | undefined {
+  return engine && group.byEngine?.[engine] ? engine : enginesOf(group)[0]
+}
+
 /** The storage tag to show, resolved against the group's selected engine. */
 export function storageOf(group: SettingsGroup, engine: EngineId | undefined): string | undefined {
   if (typeof group.storage !== 'function') return group.storage
-  const chosen = engine && group.byEngine?.[engine] ? engine : enginesOf(group)[0]
+  const chosen = resolvedEngine(group, engine)
   return chosen ? group.storage(chosen) : undefined
+}
+
+/** The group note to show, resolved against the group's selected engine. */
+export function noteOf(group: SettingsGroup, engine: EngineId | undefined): string | undefined {
+  if (typeof group.note !== 'function') return group.note
+  const chosen = resolvedEngine(group, engine)
+  return chosen ? group.note(chosen) : undefined
+}
+
+/** The applies-later badge to show, resolved against the selected engine. */
+export function appliesOnOf(
+  group: SettingsGroup,
+  engine: EngineId | undefined
+): AppliesOn | undefined {
+  if (typeof group.appliesOn !== 'function') return group.appliesOn
+  const chosen = resolvedEngine(group, engine)
+  return chosen ? group.appliesOn(chosen) : undefined
 }
 
 // ── Legacy section ↔ target mapping ──────────────────────────────────
@@ -730,6 +823,7 @@ export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; gro
 
   'claude-dispatch': { page: 'dispatch', group: 'into' },
   'opencode-dispatch': { page: 'dispatch', group: 'into' },
+  'pi-dispatch': { page: 'dispatch', group: 'into' },
 
   mockup: { page: 'mockups', group: 'network' },
 
