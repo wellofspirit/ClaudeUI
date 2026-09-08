@@ -423,10 +423,23 @@ export class VscodeWebService {
     }
   }
 
+  /**
+   * The `path` flavour of the platform being PROBED, not of the host running
+   * the code. `deps.platform()` is injected (the tests drive a win32 probe from
+   * a posix runner and vice versa), and the host module would `dirname` a
+   * `C:\vscode\bin\code.cmd` to `.` on macOS and split a `;`-joined PATH on
+   * `:` — which is exactly how the CI mac job failed the "code-tunnel BESIDE
+   * code" case while Windows passed it.
+   */
+  private pathFor(): typeof path.win32 | typeof path.posix {
+    return this.deps.platform() === 'win32' ? path.win32 : path.posix
+  }
+
   /** Ordered candidate list — see {@link probeCli} for the ordering rationale. */
   private candidatePaths(override: string | null): Array<{ path: string; trusted: boolean }> {
     const out: Array<{ path: string; trusted: boolean }> = []
     const win = this.deps.platform() === 'win32'
+    const p = this.pathFor()
     const push = (candidate: string | null | undefined, trusted = false): void => {
       if (!candidate) return
       // Windows auto-probe is `.exe`-only; an operator's own override is not.
@@ -447,7 +460,7 @@ export class VscodeWebService {
     //     that works on a machine where VS Code was installed anywhere unusual,
     //     because the user's own PATH is the answer to "where is it".
     const codeOnPath = this.resolveOnPath('code')
-    if (codeOnPath) push(path.join(path.dirname(codeOnPath), tunnel))
+    if (codeOnPath) push(p.join(p.dirname(codeOnPath), tunnel))
 
     // (3) Platform well-knowns.
     const env = this.deps.env()
@@ -455,13 +468,13 @@ export class VscodeWebService {
       const localAppData = env.LOCALAPPDATA
       const programFiles = env.ProgramFiles ?? env.PROGRAMFILES
       if (localAppData) {
-        push(path.join(localAppData, 'Programs', 'Microsoft VS Code', 'bin', tunnel))
+        push(p.join(localAppData, 'Programs', 'Microsoft VS Code', 'bin', tunnel))
       }
-      if (programFiles) push(path.join(programFiles, 'Microsoft VS Code', 'bin', tunnel))
+      if (programFiles) push(p.join(programFiles, 'Microsoft VS Code', 'bin', tunnel))
     } else if (this.deps.platform() === 'darwin') {
       const bin = '/Applications/Visual Studio Code.app/Contents/Resources/app/bin'
-      push(path.join(bin, 'code-tunnel'))
-      push(path.join(bin, 'code'))
+      push(p.join(bin, 'code-tunnel'))
+      push(p.join(bin, 'code'))
     } else {
       push('/usr/share/code/bin/code-tunnel')
       push('/usr/bin/code')
@@ -477,11 +490,12 @@ export class VscodeWebService {
   private resolveOnPath(name: string): string | null {
     const env = this.deps.env()
     const raw = env.PATH ?? env.Path ?? ''
+    const p = this.pathFor()
     const exts = this.deps.platform() === 'win32' ? ['.exe', '.cmd', '.bat', ''] : ['']
-    for (const dir of raw.split(path.delimiter)) {
+    for (const dir of raw.split(p.delimiter)) {
       if (!dir) continue
       for (const ext of exts) {
-        const candidate = path.join(dir, `${name}${ext}`)
+        const candidate = p.join(dir, `${name}${ext}`)
         if (this.deps.exists(candidate)) return candidate
       }
     }
@@ -527,7 +541,10 @@ export class VscodeWebService {
       })
       child.on('error', (err) => done(false, err.message))
       child.on('exit', (code) =>
-        done(code === 0, code === 0 ? undefined : `exit ${code}${stderr ? ` — ${stderr.trim()}` : ''}`)
+        done(
+          code === 0,
+          code === 0 ? undefined : `exit ${code}${stderr ? ` — ${stderr.trim()}` : ''}`
+        )
       )
     })
   }
