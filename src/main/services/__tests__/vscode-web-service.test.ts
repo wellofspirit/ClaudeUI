@@ -154,7 +154,9 @@ describe('ideOriginPolicy', () => {
 
 describe('cookie + folder helpers', () => {
   it('reads one cookie out of a multi-pair header', () => {
-    expect(readCookie('a=1; claudeui-ide=deadbeef; vscode-tkn=xyz', 'claudeui-ide')).toBe('deadbeef')
+    expect(readCookie('a=1; claudeui-ide=deadbeef; vscode-tkn=xyz', 'claudeui-ide')).toBe(
+      'deadbeef'
+    )
     expect(readCookie('a=1', 'claudeui-ide')).toBeNull()
     expect(readCookie(undefined, 'claudeui-ide')).toBeNull()
   })
@@ -552,8 +554,9 @@ describe('entry tokens and cookie sessions', () => {
   })
 
   it('clearSessions destroys live sockets AND drops unspent tokens', () => {
-    const cookie = service.redeemEntry(tokenOf(service.mintEntry(CONNECTION, '/a').url))!
-      .cookieValue
+    const cookie = service.redeemEntry(
+      tokenOf(service.mintEntry(CONNECTION, '/a').url)
+    )!.cookieValue
     const unspent = tokenOf(service.mintEntry(CONNECTION, '/b').url)
     const socket = Object.assign(new EventEmitter(), { destroy: vi.fn() })
     service.registerSocket(socket as never)
