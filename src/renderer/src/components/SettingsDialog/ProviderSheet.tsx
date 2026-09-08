@@ -38,11 +38,15 @@
  * mirroring the dialog's box formula separately would be two chances to get it
  * wrong.
  *
- * WHAT IT DOES NOT OWN. Two flows here are entry points into surfaces that
+ * WHAT IT DOES NOT OWN. Three flows here are entry points into surfaces that
  * already exist and are deliberately not re-implemented: opencode's per-model
  * capability editor (`OpencodeProviderConfigModal` → `ModelCapabilityEditor`)
- * and pi's models.json editor (`PiProviderDialog` → `PiModelEditor`). The sheet
- * opens each on the provider it is showing; everything they write is theirs.
+ * and pi's models.json editor (`PiProviderDialog` → `PiModelEditor`) in BOTH
+ * its variants — "pi models ›" opens the custom one on a pi-native declared
+ * provider, "pi overrides ›" the built-in one on `entry.piBuiltinId` (a pi-native
+ * built-in vendor, or a shared subscription whose enabled pi route lands on one).
+ * The sheet opens each on the provider it is showing; everything they write is
+ * theirs.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -283,7 +287,7 @@ export function ProviderSheet({
    */
   const [sharedModels, setSharedModels] = useState<SharedProviderModel[]>([])
   /** Which engine's own model editor is open over the sheet, if any. */
-  const [modelEditor, setModelEditor] = useState<'opencode' | 'pi' | null>(null)
+  const [modelEditor, setModelEditor] = useState<'opencode' | 'pi' | 'pi-builtin' | null>(null)
   /**
    * The definition being EDITED, over this sheet — a custom endpoint's base
    * URL, protocol and model list. Seeded from the definition when the editor
@@ -848,9 +852,16 @@ export function ProviderSheet({
 
   /**
    * The engine's OWN model editor for this provider, opened over the sheet.
-   * Neither is re-implemented here (see the header): opencode's declared models
+   * None is re-implemented here (see the header): opencode's declared models
    * and their capabilities live in `OpencodeProviderConfigModal`, pi's
    * models.json entry in `PiProviderDialog`.
+   *
+   * The two pi rows are mutually exclusive by construction, and the read model
+   * is what says which: a pi-native row is `builtin` XOR `custom`, only the
+   * built-in half carries `piBuiltinId`, and a shared row is never pi-native
+   * custom. Declaring a models.json provider and overriding one pi ships are
+   * different jobs on different entry shapes, so they are different rows rather
+   * than one row that changes meaning.
    */
   function modelSetupGroup(): React.ReactNode {
     if (entry.origin === 'opencode-native') {
@@ -882,7 +893,7 @@ export function ProviderSheet({
         </SheetGroup>
       )
     }
-    if (entry.origin === 'pi-native') {
+    if (entry.origin === 'pi-native' && entry.piKind === 'custom') {
       return (
         <SheetGroup testid={`${SHEET}.group`} id="model-setup" label="Model setup">
           <SettingRow
@@ -898,6 +909,27 @@ export function ProviderSheet({
               onClick={() => setModelEditor('pi')}
             >
               pi models ›
+            </Button>
+          </SettingRow>
+        </SheetGroup>
+      )
+    }
+    if (entry.piBuiltinId) {
+      return (
+        <SheetGroup testid={`${SHEET}.group`} id="model-setup" label="Model setup">
+          <SettingRow
+            testid={`${SHEET}.modelSetup`}
+            dataId="pi-builtin"
+            label="pi overrides"
+            description="Route this provider through a proxy, or change a built-in model’s context window, pricing or thinking map — in pi’s models.json."
+          >
+            <Button
+              variant="link"
+              testid={`${SHEET}.piOverrides`}
+              disabled={busy}
+              onClick={() => setModelEditor('pi-builtin')}
+            >
+              pi overrides ›
             </Button>
           </SettingRow>
         </SheetGroup>
@@ -1054,6 +1086,20 @@ export function ProviderSheet({
       {modelEditor === 'pi' && (
         <PiProviderModal
           providerId={nativeId}
+          onClose={() => {
+            setModelEditor(null)
+            void onWrote()
+          }}
+        />
+      )}
+
+      {/* `piBuiltinId`, never `nativeId`: on a shared row the native id is the
+          DEFINITION id (`chatgpt`), and `providers.chatgpt` is not the entry pi
+          reads its ChatGPT models from. */}
+      {modelEditor === 'pi-builtin' && entry.piBuiltinId && (
+        <PiProviderModal
+          providerId={entry.piBuiltinId}
+          builtin
           onClose={() => {
             setModelEditor(null)
             void onWrote()

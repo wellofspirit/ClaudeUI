@@ -223,11 +223,17 @@ on Escape (the Manage sheet mounts a second frame for Edit endpoint, and one pre
 both), and `useIsMobile` is `< 768` rather than `<= 768` so that the fork it chooses and the
 `max-md:` layout inside it agree at exactly 768px.
 
-**Residual for the owner:** editing `providers.<builtin>.modelOverrides` for a built-in pi vendor
-that has no pi-native row of its own has no entry point. It belonged to the `PiCustomProviders`
-pane, which 6c stopped mounting and phase 7 deleted; `PiModelEditor` still takes
-`variant="override"`, so whichever surface takes that job next has its editor. An "Overrides" row
-on the pi provider's Manage sheet is the obvious home if the owner wants one.
+**Post-arc follow-up (landed on `settings-v2-followups`):** editing a built-in pi vendor's
+models.json overrides (`providers.<builtin>.{baseUrl,headers,apiKey,authHeader,modelOverrides}`,
+models.md "Overriding Built-in Providers" / "Per-model Overrides") lost its entry point when 6c
+retired the `PiCustomProviders` pane. It is back as data, not as a pane: the read model gives a row
+`piBuiltinId` when its pi route lands on a vendor pi ships (a pi-native `builtin` row, or a shared
+subscription such as ChatGPT → `openai-codex`), and the Manage sheet renders a "pi overrides ›" row
+for it that opens `PiProviderModal` in its `builtin` variant — proxy leaves plus a `modelOverrides`
+list over `PiModelEditor variant="override"`. A pi-native `custom` row keeps "pi models ›" (the
+declaration form). The same slice moved the five settings model pickers onto
+`ModelPicker variant="field"` (the `SelectField` trigger and one shared `ChevronIcon`), closing
+the "ModelPicker ≠ SelectField look" deviation above.
 
 ## Alternatives considered
 

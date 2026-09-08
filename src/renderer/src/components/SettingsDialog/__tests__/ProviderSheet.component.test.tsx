@@ -34,7 +34,9 @@ const chatgpt: ProviderEntry = {
   origin: 'shared',
   credential: 'connected',
   engines: { opencode: { enabled: true, native: true }, pi: { enabled: true, native: true } },
-  detail: 'ChatGPT subscription · shared with pi and opencode'
+  detail: 'ChatGPT subscription · shared with pi and opencode',
+  // Its ENABLED pi route lands on a vendor pi ships, so the row can override it.
+  piBuiltinId: 'openai-codex'
 }
 
 const custom: ProviderEntry = {
@@ -62,7 +64,8 @@ const groq: ProviderEntry = {
   origin: 'pi-native',
   credential: 'api-key',
   engines: { pi: { enabled: true, native: true } },
-  piKind: 'builtin'
+  piKind: 'builtin',
+  piBuiltinId: 'groq'
 }
 
 const piCustom: ProviderEntry = {
@@ -610,15 +613,41 @@ describe('model setup', () => {
     expect(sent('session:get-opencode-providers').length).toBeGreaterThan(0)
   })
 
-  it('opens pi’s models.json editor on this provider', async () => {
+  it('opens pi’s models.json editor on a DECLARED pi provider', async () => {
     await openSheet('pi:my-endpoint')
+    // A declared entry is edited, not overridden: one row, and it is this one.
+    expect(screen.queryByTestId('ProviderSheet.piOverrides')).not.toBeInTheDocument()
     await click(screen.getByTestId('ProviderSheet.piModels'))
     expect(await screen.findByTestId('PiProviderDialog')).toHaveAttribute('data-id', 'my-endpoint')
   })
 
-  it('offers neither on a shared row — it owns no engine-native declaration', async () => {
+  it('opens the BUILT-IN override dialog on a built-in pi row, not the custom form', async () => {
+    // `providers.groq` overrides a provider pi ships; the custom form's models[]
+    // and API-protocol rows are the wrong shape for one, so it is a different row.
+    await openSheet('pi:groq')
+    expect(screen.queryByTestId('ProviderSheet.piModels')).not.toBeInTheDocument()
+    await click(screen.getByTestId('ProviderSheet.piOverrides'))
+    const dialog = await screen.findByTestId('PiProviderDialog')
+    expect(dialog).toHaveAttribute('data-id', 'groq')
+    expect(dialog.closest('[data-variant]')).toHaveAttribute('data-variant', 'builtin')
+  })
+
+  it('opens it on a shared row’s pi ROUTE id, never on the definition id', async () => {
+    // `providers.chatgpt` is not the entry pi reads ChatGPT's models from.
+    await openSheet('chatgpt')
+    await click(screen.getByTestId('ProviderSheet.piOverrides'))
+    expect(await screen.findByTestId('PiProviderDialog')).toHaveAttribute('data-id', 'openai-codex')
+  })
+
+  it('offers no model DECLARATION editor on a shared row — it declares nothing natively', async () => {
     await openSheet('chatgpt')
     expect(screen.queryByTestId('ProviderSheet.opencodeModels')).not.toBeInTheDocument()
     expect(screen.queryByTestId('ProviderSheet.piModels')).not.toBeInTheDocument()
+  })
+
+  it('offers neither row when the shared row has no pi route into a built-in', async () => {
+    await openSheet('ollama-local')
+    expect(screen.queryByTestId('ProviderSheet.piModels')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('ProviderSheet.piOverrides')).not.toBeInTheDocument()
   })
 })

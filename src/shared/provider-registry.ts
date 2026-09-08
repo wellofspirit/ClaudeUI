@@ -78,6 +78,18 @@ export interface ProviderEntry {
    */
   piKind?: 'builtin' | 'custom'
   /**
+   * The BUILT-IN pi provider id this row's models.json overrides live under
+   * (models.md "Overriding Built-in Providers" / "Per-model Overrides"):
+   * `providers.<piBuiltinId>.{baseUrl,headers,apiKey,authHeader,modelOverrides}`.
+   * Set on a `pi-native` row whose vendor pi ships (`piKind: 'builtin'`) and on a
+   * `shared` row whose ENABLED pi route resolves to a vendor pi ships (ChatGPT →
+   * `openai-codex`, a Claude subscription → `anthropic`). Absent when the row has
+   * no pi route, its pi route is disabled, or the pi entry is a user/ClaudeUI
+   * declared provider (custom pi-native rows; projected custom shared rows — those
+   * are edited through the sheet's endpoint editor, never overridden).
+   */
+  piBuiltinId?: string
+  /**
    * `opencode-native` rows only: what Remove would actually destroy, straight
    * from the catalog entry's resolved `actions` — the value
    * `session:remove-opencode-provider` must be given, never a widened one.

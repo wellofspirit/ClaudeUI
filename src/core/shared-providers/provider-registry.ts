@@ -48,6 +48,7 @@
 
 import { accountState, buildClaudeAccountRef } from '../host'
 import { piAuthProvider } from '../auth/PiAuthProvider'
+import { PI_NATIVE_VENDOR_IDS } from '../auth/pi-vendor-ids'
 import { readOpencodeCredentialTypes } from '../opencode/auth-store'
 import { discoverOpencodeProviderCatalog } from '../opencode/model-discovery'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
@@ -268,9 +269,29 @@ function sharedEntry(
     origin: 'shared',
     credential: sharedCredential(definition, status),
     engines,
+    ...sharedPiBuiltinId(definition),
     ...sharedDetail(definition),
     ...sharedDiagnosis(status)
   }
+}
+
+/**
+ * The built-in pi vendor a SHARED row's models.json overrides would live under —
+ * ChatGPT's `openai-codex`, a Claude subscription's `anthropic`.
+ *
+ * Three gates, each load-bearing. A DISABLED pi route owns no pi entry at all
+ * (the same rule the dedupe above turns on), so there is nothing to override. A
+ * CUSTOM definition is projected INTO models.json by the adapter — M-AT4 already
+ * rejects a custom id that collides with a built-in, and a hand-written
+ * colliding file must not be handed an override surface that would fight the
+ * projection; its endpoint is edited where it is owned. And the resolved id has
+ * to be a vendor pi actually SHIPS, since `providers.<id>` under anything else
+ * is a declaration rather than an override.
+ */
+function sharedPiBuiltinId(definition: SharedProviderDefinition): { piBuiltinId?: string } {
+  if (!definition.routes.pi.enabled || definition.kind === 'custom') return {}
+  const vendorId = piNativeProviderId(definition)
+  return PI_NATIVE_VENDOR_IDS.has(vendorId) ? { piBuiltinId: vendorId } : {}
 }
 
 function opencodeNativeEntry(
@@ -318,6 +339,11 @@ function piNativeEntry(
     // The SAME predicate as the detail line below, projected as a field so the
     // Manage sheet routes removal by data rather than by parsing prose.
     piKind: sources.piAuthOptions[vendorId] ? 'builtin' : 'custom',
+    // The SAME predicate again, deliberately side by side: a vendor pi ships is
+    // exactly a vendor whose models.json entry is an OVERRIDE of pi's own
+    // definition rather than a declaration of its own, and the two answers must
+    // never disagree about one row.
+    ...(sources.piAuthOptions[vendorId] ? { piBuiltinId: vendorId } : {}),
     ...detail(
       // A configured vendor pi's built-in catalog does not know is a
       // user-defined models.json provider — the Manage sheet removes it through

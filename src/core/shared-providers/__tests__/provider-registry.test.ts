@@ -535,6 +535,80 @@ describe('engine facts', () => {
 })
 
 // ---------------------------------------------------------------------------
+// The pi override target
+// ---------------------------------------------------------------------------
+
+/**
+ * `piBuiltinId` is the id `providers.<id>` OVERRIDES a provider pi ships under
+ * (models.md "Overriding Built-in Providers" / "Per-model Overrides"), and it is
+ * what the Manage sheet's "pi overrides ›" opens the models.json editor on. The
+ * three ways a row can fail to have one are each a different hazard, so each has
+ * its own case below.
+ */
+describe('piBuiltinId', () => {
+  it('a pi-native BUILT-IN row names its own vendor; a custom one names nothing', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        piVendors: {
+          groq: { authState: 'authenticated', billingType: 'apiKey' },
+          'my-endpoint': { authState: 'authenticated', billingType: 'apiKey' }
+        },
+        piAuthOptions: { groq: [] }
+      })
+    )
+    // The SAME predicate as `piKind`, so the two can never disagree about a row.
+    expect(byId(snapshot, 'pi:groq')).toMatchObject({ piKind: 'builtin', piBuiltinId: 'groq' })
+    expect(byId(snapshot, 'pi:my-endpoint').piKind).toBe('custom')
+    expect(byId(snapshot, 'pi:my-endpoint').piBuiltinId).toBeUndefined()
+    expect(byId(snapshot, 'anthropic').piBuiltinId).toBeUndefined()
+  })
+
+  it('a shared subscription names the id its pi ROUTE resolves to, not its own id', () => {
+    // `providers.chatgpt` is not where pi reads ChatGPT from, so an override
+    // surface opened on the definition id would edit an entry nothing reads.
+    const snapshot = buildProviderRegistry(
+      sources({ definitions: [chatgpt], statuses: [status()] })
+    )
+    expect(byId(snapshot, 'chatgpt').piBuiltinId).toBe('openai-codex')
+  })
+
+  it('a DISABLED pi route owns no pi entry, so there is nothing to override (GUARD)', () => {
+    const off: SharedProviderDefinition = {
+      ...chatgpt,
+      routes: { ...chatgpt.routes, pi: { enabled: false, providerId: 'openai-codex' } }
+    }
+    expect(
+      byId(buildProviderRegistry(sources({ definitions: [off] })), 'chatgpt').piBuiltinId
+    ).toBeUndefined()
+  })
+
+  it('a CUSTOM definition never gets one, even at a built-in id (GUARD)', () => {
+    // M-AT4 refuses to SAVE such a definition, but a hand-written file can still
+    // produce one — and the adapter projects that entry on every sync, so an
+    // override surface over it would be editing the projection's own output.
+    const collides: SharedProviderDefinition = {
+      ...localCustom,
+      routes: { ...localCustom.routes, pi: { enabled: true, providerId: 'groq' } }
+    }
+    expect(
+      byId(buildProviderRegistry(sources({ definitions: [collides] })), 'ollama-local').piBuiltinId
+    ).toBeUndefined()
+  })
+
+  it('a subscription routed to a vendor pi does NOT ship gets none either', () => {
+    const proxied: SharedProviderDefinition = {
+      ...chatgpt,
+      id: 'acme',
+      name: 'Acme',
+      routes: { ...chatgpt.routes, pi: { enabled: true, providerId: 'acme-proxy' } }
+    }
+    expect(
+      byId(buildProviderRegistry(sources({ definitions: [proxied] })), 'acme').piBuiltinId
+    ).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // The degraded case
 // ---------------------------------------------------------------------------
 
