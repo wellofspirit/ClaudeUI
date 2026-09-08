@@ -22,7 +22,6 @@ import {
   pageOf,
   searchSettings,
   storageOf,
-  targetToLegacy,
   visibleGroups,
   type SettingsGroup
 } from '../settings-pages'
@@ -351,48 +350,5 @@ describe('searchSettings', () => {
     // The Claude page is findable by "sandbox" without matching its prose.
     const hits = searchSettings('sandbox')
     expect(hits.some((h) => h.page.id === 'claude' && h.group.id === 'sandbox')).toBe(true)
-  })
-})
-
-describe('targetToLegacy (the mobile adapter)', () => {
-  it('round-trips every legacy section through its new home', () => {
-    for (const section of SECTIONS) {
-      const target = SECTION_TARGET[section.id]
-      const back = targetToLegacy(target)
-      expect(back.section, `no legacy section for ${section.id}`).toBeDefined()
-      // Several sections can share one group (three engines' Default models);
-      // the adapter picks one, and it must be filed in the SAME group.
-      expect(SECTION_TARGET[back.section!]).toEqual(target)
-    }
-  })
-
-  it('maps the app deep links onto the tab their section used to live on', () => {
-    expect(targetToLegacy({ page: 'claude', group: 'sandbox' })).toEqual({
-      scope: 'claude',
-      section: 'sandbox'
-    })
-    expect(targetToLegacy({ page: 'remote', group: 'server' })).toEqual({
-      scope: 'common',
-      section: 'remote'
-    })
-    expect(targetToLegacy({ page: 'models', group: 'providers' })).toEqual({
-      scope: 'common',
-      section: 'shared-providers'
-    })
-  })
-
-  it('falls back to the page when the group owns no legacy section', () => {
-    // Chat › Git actions holds one ITEM of the legacy `git` section, which is
-    // filed under Appearance › Git panel — so the page-level fallback answers.
-    const back = targetToLegacy({ page: 'chat', group: 'git-actions' })
-    expect(back.scope).toBe('common')
-    expect(SECTION_TARGET[back.section!].page).toBe('chat')
-  })
-
-  it('answers a page-only target', () => {
-    expect(targetToLegacy({ page: 'opencode' })).toEqual({
-      scope: 'opencode',
-      section: 'opencode-session'
-    })
   })
 })

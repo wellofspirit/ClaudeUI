@@ -12,6 +12,16 @@ import { SelectMenu, type SelectMenuOption } from '../shared/SelectMenu'
 // right-aligned control column, and inline state badges. Wide controls (text,
 // lists, chip sets) go under the label at full width via `layout="stacked"`.
 //
+// The 240px column is a DESKTOP measure. Below Tailwind's `md` (768px — the
+// ADR-048 mobile edge, so this tracks the presentation fork) it would leave a
+// 390px phone ~120px of text column, wrapping "Auto mode (LLM gatekeeper)" one
+// word per line. There the column instead sizes to its content and caps at 58%
+// of the row (`max-md:w-auto max-md:min-w-0 max-md:max-w-[58%]`), with
+// `max-md:[&>*]:max-w-full max-md:[&>*]:min-w-0` so a control that declares its
+// own 240px (TextField, SelectField) shrinks into the cap instead of
+// overflowing the row. Additive variants only: at md and up the column is
+// byte-for-byte the desktop's.
+//
 // Nothing else may invent its own row: the controls below are the whole
 // vocabulary, and the legacy exports (`SettingsToggle`, `SettingsSelect`, …) are
 // thin wrappers over it, so their call sites and testids did not have to move.
@@ -221,7 +231,7 @@ export function SettingRow({
           className={
             layout === 'stacked'
               ? `block w-full ${dimmed ? 'opacity-50' : ''}`
-              : `w-[240px] shrink-0 flex items-center justify-end gap-2 ${dimmed ? 'opacity-50' : ''}`
+              : `w-[240px] shrink-0 flex items-center justify-end gap-2 max-md:w-auto max-md:min-w-0 max-md:max-w-[58%] max-md:[&>*]:max-w-full max-md:[&>*]:min-w-0 ${dimmed ? 'opacity-50' : ''}`
           }
         >
           {layout === 'inline' && resetNode}

@@ -157,11 +157,22 @@ export function SettingsDialog({
     onClose
   }
 
-  // Same data, two presentations (the PermissionsDialog pattern). The phone
-  // still runs the legacy scope/section model behind an adapter (ADR-065 phase
-  // 5 moves it onto the page model), so it OWNS that navigation state rather
-  // than taking page/group props it could not use.
-  if (isMobile) return <SettingsMobileView {...shared} initialTarget={initialTarget} />
+  // Same data, two presentations (the PermissionsDialog pattern). Both forks
+  // run the page model and share the three props that describe it beyond the
+  // data: which engine each segment shows, how to change that, and how a row's
+  // cross-link moves. The phone shows several pages at once as accordions, so
+  // it OWNS which of them are open rather than taking `activePage`/`activeGroup`
+  // props it could not express.
+  if (isMobile)
+    return (
+      <SettingsMobileView
+        {...shared}
+        engineByGroup={engineByGroup}
+        onSelectEngine={handleSelectEngine}
+        navigate={navigate}
+        initialTarget={initialTarget}
+      />
+    )
 
   return (
     <SettingsDialogView

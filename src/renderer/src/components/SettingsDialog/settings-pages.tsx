@@ -24,15 +24,9 @@
 import type { EngineId } from '../../../../shared/types'
 import type { EngineCapabilities } from '../../../../shared/model-capabilities'
 import { engineMeta } from '../../../../shared/engine-meta'
-import {
-  SECTIONS,
-  SECTION_SCOPE_MAP,
-  type Section,
-  type SettingItem,
-  type SettingsScope
-} from './settings-sections'
+import { SECTIONS, type Section, type SettingItem } from './settings-sections'
 import { SettingRow, ActionRow, type AppliesOn } from './settings-controls'
-import type { SettingsPageId, SettingsTarget } from './settings-target'
+import type { SettingsPageId } from './settings-target'
 
 export type { SettingsPageId, SettingsTarget } from './settings-target'
 
@@ -789,8 +783,12 @@ export function appliesOnOf(
 /**
  * Where each pre-ADR-065 section now lives. Every id in `SECTIONS` is present
  * (guarded by the model test); a section whose items were split across two
- * groups is filed under the group that owns its FIRST item, which is all the
- * mobile adapter and the legacy deep links need.
+ * groups is filed under the group that owns its FIRST item.
+ *
+ * Nothing renders from this any more — the mobile adapter that read it went
+ * with phase 5. It stays as the COVERAGE map: the model test walks it to prove
+ * no pre-arc section lost its home, which is the inventory guard ADR-065's
+ * phase 7 finishes.
  */
 export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; group: string }>> = {
   appearance: { page: 'appearance', group: 'theme' },
@@ -895,28 +893,4 @@ export function searchSettings(query: string): SettingsSearchHit[] {
     }
   }
   return hits
-}
-
-// ── Mobile adapter (phase 1 only) ────────────────────────────────────
-
-/**
- * A `{ page, group }` target, expressed in the legacy scope/section vocabulary
- * the MOBILE view still runs on this phase (ADR-065 phase 5 replaces it).
- *
- * Resolution order: the first section filed under that exact group, else the
- * first section anywhere on that page, else the Common tab. The scope comes
- * from `SECTION_SCOPE_MAP` rather than a second copy of the ownership rules —
- * the two must not be able to drift.
- */
-export function targetToLegacy(target: SettingsTarget): {
-  scope: SettingsScope
-  section?: string
-} {
-  const entries = Object.entries(SECTION_TARGET)
-  const exact = target.group
-    ? entries.find(([, t]) => t.page === target.page && t.group === target.group)
-    : undefined
-  const found = exact ?? entries.find(([, t]) => t.page === target.page)
-  if (!found) return { scope: 'common' }
-  return { scope: SECTION_SCOPE_MAP.get(found[0]) ?? 'common', section: found[0] }
 }
