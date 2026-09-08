@@ -676,6 +676,7 @@ function PiSessionDefaultModel(): React.JSX.Element {
               data-value={customMode || !known ? '__custom__' : current}
             >
               <ModelPicker
+                variant="field"
                 placement="down"
                 emptyOption={{ label: `Default (${PI_DEFAULT_MODEL})` }}
                 trailingOption={{ value: '__custom__', label: 'Custom model ID...' }}

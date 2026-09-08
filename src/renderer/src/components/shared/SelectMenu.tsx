@@ -25,6 +25,7 @@
  * `${testid}.option` + a `data-id` discriminator.
  */
 import { useEffect, useRef, useState } from 'react'
+import { ChevronIcon } from './ChevronIcon'
 
 export interface SelectMenuOption {
   value: string
@@ -124,17 +125,7 @@ export function SelectMenu({
         className={`${triggerClassName ?? DEFAULT_TRIGGER_CLASS} flex items-center justify-between gap-1 text-left cursor-pointer disabled:cursor-not-allowed`}
       >
         <span className="truncate">{label}</span>
-        <svg
-          width="8"
-          height="8"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.5"
-          className="shrink-0"
-        >
-          <polyline points="6 9 12 15 18 9" />
-        </svg>
+        <ChevronIcon open={open} className="text-text-muted" />
       </button>
       {open && (
         <div

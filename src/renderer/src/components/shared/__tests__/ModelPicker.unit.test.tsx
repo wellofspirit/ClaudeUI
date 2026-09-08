@@ -188,6 +188,62 @@ describe('EnginePicker', () => {
   })
 })
 
+describe('ModelPicker — field variant', () => {
+  it('defaults to compact: the composer keeps its bare 8px caret', () => {
+    render(
+      <ModelPicker models={[claudeModel]} selectedModel={claudeModel} onSelectModel={vi.fn()} />
+    )
+    // The InputBox controls bar is out of scope for the settings row look —
+    // guard it against accidental restyling.
+    expect(screen.getByTestId('ModelPicker').getAttribute('data-variant')).toBe('compact')
+    expect(screen.queryByTestId('ModelPicker.chevron')).toBeNull()
+  })
+
+  it('renders the SelectField look and the shared chevron when field', () => {
+    render(
+      <ModelPicker
+        variant="field"
+        models={[claudeModel]}
+        selectedModel={claudeModel}
+        onSelectModel={vi.fn()}
+      />
+    )
+    expect(screen.getByTestId('ModelPicker').getAttribute('data-variant')).toBe('field')
+
+    const trigger = screen.getByTestId('ModelPicker.trigger')
+    // The tokens that make it read as one control with `SelectField`.
+    for (const token of ['bg-bg-input', 'text-[12px]', 'items-center', 'justify-between']) {
+      expect(trigger.className).toContain(token)
+    }
+    expect(trigger.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.getByTestId('ModelPicker.chevron').getAttribute('data-open')).toBe('false')
+  })
+
+  it('flips the chevron while open and restores it on selection', () => {
+    const onSelectModel = vi.fn()
+    render(
+      <ModelPicker
+        variant="field"
+        models={[claudeModel]}
+        selectedModel={claudeModel}
+        onSelectModel={onSelectModel}
+      />
+    )
+    const trigger = screen.getByTestId('ModelPicker.trigger')
+
+    openDropdown()
+    expect(trigger.getAttribute('aria-expanded')).toBe('true')
+    const chevron = screen.getByTestId('ModelPicker.chevron')
+    expect(chevron.getAttribute('data-open')).toBe('true')
+    expect(chevron.getAttribute('class')).toContain('rotate-180')
+
+    fireEvent.click(optionByValue('claude-opus-4-7'))
+    expect(onSelectModel).toHaveBeenCalledWith('claude-opus-4-7')
+    expect(trigger.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.getByTestId('ModelPicker.chevron').getAttribute('data-open')).toBe('false')
+  })
+})
+
 describe('ModelPicker — pinned non-model rows', () => {
   it('pins emptyOption FIRST and trailingOption LAST, outside the Free filter', () => {
     const onSelectModel = vi.fn()

@@ -708,6 +708,7 @@ function AutoModeSection({
           >
             <span data-testid={`${testid}.judgeModel`} data-value={judgeModel}>
               <ModelPicker
+                variant="field"
                 placement="down"
                 emptyOption={{ label: JUDGE_MODEL_DEFAULT_LABEL }}
                 models={judgeModelOptions}
@@ -1013,15 +1014,12 @@ function DispatchIntoSection({
               judge-model note: OS-painted option lists are unreadable in dark
               themes. The section-scoped `.defaultModel` testid stays on this
               wrapper and carries `data-value`; the picker keeps its own
-              `ModelPicker.trigger` / `ModelPicker.option` ids. The wrapper draws
-              the bordered menu the row vocabulary asks for, since the shared
-              picker paints a bare caret for the composer. */}
-          <span
-            data-testid={`${testid}.defaultModel`}
-            data-value={defaultModel}
-            className="inline-flex items-center bg-bg-input border border-border rounded-md"
-          >
+              `ModelPicker.trigger` / `ModelPicker.option` ids. `variant="field"`
+              is what draws the bordered control the row vocabulary asks for —
+              the wrapper no longer borrows those classes. */}
+          <span data-testid={`${testid}.defaultModel`} data-value={defaultModel}>
             <ModelPicker
+              variant="field"
               placement="down"
               emptyOption={{ label: DISPATCH_MODEL_DEFAULT_LABEL }}
               models={toModelDisplays(models)}
@@ -1528,12 +1526,9 @@ function OpencodeModelsSection(): React.JSX.Element {
           modified={cfg.model !== undefined}
           onReset={() => update({ model: undefined })}
         >
-          <span
-            data-testid="OpencodeModelsSection.model"
-            data-value={cfg.model ?? ''}
-            className="inline-flex items-center bg-bg-input border border-border rounded-md"
-          >
+          <span data-testid="OpencodeModelsSection.model" data-value={cfg.model ?? ''}>
             <ModelPicker
+              variant="field"
               placement="down"
               emptyOption={{ label: OPENCODE_MODEL_DEFAULT_LABEL }}
               models={modelDisplays}
@@ -1560,12 +1555,9 @@ function OpencodeModelsSection(): React.JSX.Element {
           modified={cfg.smallModel !== undefined}
           onReset={() => update({ smallModel: undefined })}
         >
-          <span
-            data-testid="OpencodeModelsSection.smallModel"
-            data-value={cfg.smallModel ?? ''}
-            className="inline-flex items-center bg-bg-input border border-border rounded-md"
-          >
+          <span data-testid="OpencodeModelsSection.smallModel" data-value={cfg.smallModel ?? ''}>
             <ModelPicker
+              variant="field"
               placement="down"
               emptyOption={{ label: OPENCODE_MODEL_DEFAULT_LABEL }}
               models={modelDisplays}

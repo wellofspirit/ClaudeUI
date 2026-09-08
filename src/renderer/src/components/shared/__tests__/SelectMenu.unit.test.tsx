@@ -141,6 +141,25 @@ describe('SelectMenu', () => {
     expect(within(root).getByTestId('Demo.trigger').id).toBe('field-1')
   })
 
+  it('paints the shared chevron and flips it while the menu is open', () => {
+    const { root } = renderMenu()
+    // Decorative, so it is aria-hidden and has no testid of its own here — the
+    // trigger is the assertable part (ADR-027).
+    const chevron = root.querySelector('svg[aria-hidden="true"]')!
+    expect(chevron).toBeTruthy()
+    expect(chevron.getAttribute('class')).not.toContain('rotate-180')
+
+    fireEvent.click(within(root).getByTestId('Demo.trigger'))
+    expect(root.querySelector('svg[aria-hidden="true"]')!.getAttribute('class')).toContain(
+      'rotate-180'
+    )
+
+    fireEvent.click(within(root).getByTestId('Demo.trigger'))
+    expect(root.querySelector('svg[aria-hidden="true"]')!.getAttribute('class')).not.toContain(
+      'rotate-180'
+    )
+  })
+
   it('reads as a combobox to assistive tech, exactly like the <select> it replaced', () => {
     const { root } = renderMenu()
     const trigger = within(root).getByRole('combobox')
