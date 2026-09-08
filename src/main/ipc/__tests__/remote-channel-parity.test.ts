@@ -206,6 +206,26 @@ const REMOTE_VIEW_SWEEP: Record<string, { capability: Capability; kind: 'command
   'remote:status-view': { capability: 'config', kind: 'query' }
 }
 
+/**
+ * ADR-065 phase 6 — the unified provider list, declared in
+ * `ipc/auth-commands.ts` beside the `shared-provider:*` family whose stores it
+ * reads.
+ *
+ * Its own table, for the reason {@link TRUST_LIST_SWEEP} has one: S1B_SWEEP and
+ * S4 are records of dated sweeps. `config` and a `query` — it composes the
+ * shared definitions, opencode's provider catalog and pi's vendor entries into
+ * one row set and returns counts, badges and chips; no key material crosses it,
+ * and every mutation the rows drive is an EXISTING channel already on this
+ * surface. Being on both transports from one declaration is the point: the
+ * phone's provider page must read the same list the desktop does.
+ */
+const PROVIDER_REGISTRY_SWEEP: Record<
+  string,
+  { capability: Capability; kind: 'command' | 'query' }
+> = {
+  'provider-registry:list': { capability: 'config', kind: 'query' }
+}
+
 /** channel → declared capability, parsed from remote-handlers.ts registrations. */
 function remoteDeclarations(): Map<string, Capability> {
   const src = SHARED_DECLARATION_SOURCES.map(read).join('\n')
@@ -352,6 +372,37 @@ describe('remote channel parity (R5)', () => {
     expect([...declared.keys()].filter((c) => c.startsWith('remote:'))).toEqual([
       'remote:status-view'
     ])
+  })
+
+  it('the provider registry is declared ONCE in the shared auth family and is base-reachable', () => {
+    // Same two halves as the S1b case: declared exactly once in the shared
+    // module with the capability/kind this table freezes, never re-declared
+    // inline in a transport registrar — and reachable on the base grant set, so
+    // the remote provider page is not a desktop-only surface by omission.
+    const shared = read('src/core/ipc/auth-commands.ts')
+    const declRe = /channel:\s*'([^']+)',\s*capability:\s*'([^']+)',\s*kind:\s*'([^']+)'/g
+    const found = new Map<string, { capability: Capability; kind: string }>()
+    for (let m = declRe.exec(shared); m; m = declRe.exec(shared)) {
+      if (!(m[1] in PROVIDER_REGISTRY_SWEEP)) continue
+      expect(found.has(m[1]), `${m[1]} is declared twice in auth-commands.ts`).toBe(false)
+      found.set(m[1], { capability: m[2] as Capability, kind: m[3] })
+    }
+    expect(Object.fromEntries(found)).toEqual(PROVIDER_REGISTRY_SWEEP)
+
+    const registrars = [
+      read('src/core/ipc/session.ipc.ts'),
+      read('src/core/ipc/remote-handlers.ts')
+    ].join('\n')
+    const inline = Object.keys(PROVIDER_REGISTRY_SWEEP).filter((c) =>
+      registrars.includes(`channel: '${c}'`)
+    )
+    expect(inline, `re-declared inline in a transport registrar: ${inline.join(', ')}`).toEqual([])
+
+    const declared = remoteDeclarations()
+    for (const channel of Object.keys(PROVIDER_REGISTRY_SWEEP)) {
+      expect(declared.get(channel), `${channel} has no remote registration`).toBe('config')
+      expect(AUTH_OFF_GRANTS.has(declared.get(channel)!)).toBe(true)
+    }
   })
 
   it('the passkey channels declare enroll/admin, not anything grantable (ADR-052)', () => {

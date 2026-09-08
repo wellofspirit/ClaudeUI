@@ -13,6 +13,7 @@ import type {
   SharedProviderModel,
   SharedProviderStatus
 } from './shared-provider'
+import type { ProviderRegistrySnapshot } from './provider-registry'
 
 export type IpcResult<T> = { ok: true; data: T } | { ok: false; error: string; code?: string }
 
@@ -1319,6 +1320,13 @@ interface SessionAPI {
 }
 
 interface SharedProviderAPI {
+  /**
+   * The UNIFIED provider list (ADR-065 § "Providers: one list") — the shared
+   * definitions, opencode's catalog and pi's vendor entries as one row set, with
+   * `opencodeInstalled: false` standing for the single degraded case. A pure
+   * read: every row action is one of the write channels below or beside it.
+   */
+  listProviderRegistry(): Promise<ProviderRegistrySnapshot>
   listSharedProviders(): Promise<SharedProviderDefinition[]>
   getSharedProviderStatuses(): Promise<SharedProviderStatus[]>
   listSharedProviderModels(id: string): Promise<SharedProviderModel[]>

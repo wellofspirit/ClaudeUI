@@ -46,6 +46,7 @@ import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-en
 import { dispatchedUsageSummary } from '../services/db'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import { sharedProviderService } from '../shared-providers'
+import { opencodeProviderId } from '../shared-providers/OpencodeSharedProviderAdapter'
 import {
   accountState,
   hostIsPackaged,
@@ -1824,7 +1825,7 @@ function decorateSharedProviderClaims(
         .listDefinitions()
         .filter((definition) => definition.routes.opencode.enabled)
         .map((definition) => [
-          definition.routes.opencode.providerId ?? definition.id,
+          opencodeProviderId(definition),
           { id: definition.id, name: definition.name }
         ])
     )

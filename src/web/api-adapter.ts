@@ -295,6 +295,10 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('pi:binary-path') as ReturnType<ClaudeAPI['getPiBinaryPath']>,
     getPiAuthStatus: () =>
       connection.invoke('pi:auth-status') as ReturnType<ClaudeAPI['getPiAuthStatus']>,
+    // The unified provider list — safeHandler-wrapped host-side (declared once
+    // in `core/ipc/auth-commands.ts`), so it unwraps like the writes below and
+    // unlike the three older reads under it.
+    listProviderRegistry: () => unwrap('provider-registry:list'),
     listSharedProviders: () =>
       connection.invoke('shared-provider:list') as ReturnType<ClaudeAPI['listSharedProviders']>,
     getSharedProviderStatuses: () =>

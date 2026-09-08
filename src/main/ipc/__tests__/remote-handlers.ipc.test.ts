@@ -1603,6 +1603,21 @@ const S4_VENDOR_CREDENTIAL_CHANNELS = [
 ] as const
 
 /**
+ * ADR-065 phase 6 — the unified provider list.
+ *
+ * Its own line rather than a 23rd entry in {@link S4_VENDOR_CREDENTIAL_CHANNELS},
+ * which is the record of one dated sweep: this is a NEW channel, declared in the
+ * same shared module (`ipc/auth-commands.ts`) for the same reason that sweep
+ * moved there — the phone's provider page must read the same list the desktop
+ * does, and one declaration is what stops the two surfaces disagreeing.
+ *
+ * A `query` declaring `config`, so a base connection reaches it. It carries no
+ * key material: the shared definitions, opencode's catalog and pi's vendor
+ * entries reduce to names, counts, credential BADGES and per-engine chips.
+ */
+const PROVIDER_REGISTRY_CHANNELS = ['provider-registry:list'] as const
+
+/**
  * The redacted status READ (owner ruling, 2026-08-28) — the one `remote:*`
  * channel with a remote registration, and the SIXTH deliberate widening.
  *
@@ -1678,6 +1693,7 @@ describe('remote surface parity (phase 1 port)', () => {
         ...S1B_SWEEP_CHANNELS,
         ...TRUST_LIST_CHANNELS,
         ...S4_VENDOR_CREDENTIAL_CHANNELS,
+        ...PROVIDER_REGISTRY_CHANNELS,
         ...REMOTE_VIEW_CHANNELS,
         ...IDE_CHANNELS
       ].sort()
@@ -1711,6 +1727,20 @@ describe('remote surface parity (phase 1 port)', () => {
       capability: 'config',
       kind: 'query'
     })
+  })
+
+  it('the provider registry is a base-reachable `config` query (ADR-065 phase 6)', () => {
+    // The unified provider list must be readable by the same ordinary
+    // authenticated connection that reaches the writes behind its rows —
+    // otherwise the remote provider page renders nothing while every button on
+    // it would have worked.
+    for (const channel of PROVIDER_REGISTRY_CHANNELS) {
+      expect(commandRegistry.declaration(channel)).toMatchObject({
+        capability: 'config',
+        kind: 'query'
+      })
+      expect(AUTH_OFF_GRANTS.has(commandRegistry.declaration(channel)!.capability)).toBe(true)
+    }
   })
 
   it('automation:save dispatches over the remote transport, and fails closed without `config`', async () => {

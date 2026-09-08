@@ -387,6 +387,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     logRelay: (level, source, message) => ipcRenderer.send('log:relay', level, source, message),
 
     getVersionInfo: () => ipcRenderer.invoke('app:version-info'),
+    listProviderRegistry: () => unwrap('provider-registry:list'),
     listSharedProviders: () => unwrap('shared-provider:list'),
     getSharedProviderStatuses: () => unwrap('shared-provider:statuses'),
     listSharedProviderModels: (id) => unwrap('shared-provider:models', id),
