@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { RemoteServerSettings } from '../RemoteServerSettings'
+import {
+  RemoteAccessSection,
+  RemoteLinksSection,
+  RemoteSecuritySection,
+  RemoteServerSection,
+  RemoteServerSettings
+} from '../RemoteServerSettings'
 import { selectMenuValue, selectMenuOptionLabels } from '../../../../../test/helpers/select-menu'
 import type { RemoteConfig, NetworkInterfaceInfo } from '../../../../../shared/types'
 import type { IdeAvailability } from '../../../../../shared/remote-protocol'
@@ -123,11 +129,11 @@ describe('RemoteServerSettings', () => {
       expect(input).toHaveValue('8443')
       expect(input).toBeDisabled()
       // The hint has to state the two facts that surprise people: no fallback,
-      // and which ports Funnel would accept.
-      expect(screen.getByTestId('RemoteServerSettings.tlsHttpsPortHint')).toHaveTextContent(
-        /no fallback/i
-      )
-      expect(screen.getByTestId('RemoteServerSettings.tlsHttpsPortHint')).toHaveTextContent('10000')
+      // and which ports Funnel would accept. It is the ROW's description now
+      // (ADR-065) rather than its own `.tlsHttpsPortHint` node.
+      const row = screen.getByTestId('RemoteServerSettings.tlsHttpsPortRow')
+      expect(row).toHaveTextContent(/no fallback/i)
+      expect(row).toHaveTextContent('10000')
     })
 
     it('commits a valid port on blur when TLS mode is on', async () => {
@@ -144,21 +150,36 @@ describe('RemoteServerSettings', () => {
 
     // 0 is legal for the LISTEN port ("pick a random one") but meaningless here:
     // serve binds one concrete port, and pinning it is the whole point.
-    it.each(['0', '70000', 'abc', '-1'])(
-      'rejects %s without calling setRemoteConfig',
-      async (value) => {
-        api.getRemoteConfig.mockResolvedValue({ ...baseConfig, tlsMode: 1 })
-        render(<RemoteServerSettings />)
-        const input = await screen.findByTestId('RemoteServerSettings.tlsHttpsPort')
-        fireEvent.change(input, { target: { value } })
-        fireEvent.blur(input)
-        await screen.findByTestId('RemoteServerSettings.tlsHttpsPortError')
-        expect(screen.getByTestId('RemoteServerSettings.tlsHttpsPortError')).toHaveTextContent(
-          'Tailscale HTTPS port must be between 1 and 65535'
-        )
-        expect(api.setRemoteConfig).not.toHaveBeenCalled()
-      }
-    )
+    it.each(['0', '70000', '-1'])('rejects %s without calling setRemoteConfig', async (value) => {
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, tlsMode: 1 })
+      render(<RemoteServerSettings />)
+      const input = await screen.findByTestId('RemoteServerSettings.tlsHttpsPort')
+      fireEvent.change(input, { target: { value } })
+      fireEvent.blur(input)
+      await screen.findByTestId('RemoteServerSettings.tlsHttpsPortError')
+      expect(screen.getByTestId('RemoteServerSettings.tlsHttpsPortError')).toHaveTextContent(
+        'Tailscale HTTPS port must be between 1 and 65535'
+      )
+      expect(api.setRemoteConfig).not.toHaveBeenCalled()
+    })
+
+    /**
+     * Non-numeric text is now UNREPRESENTABLE rather than reported: `NumberField`
+     * (ADR-065's number control) parses on commit and reverts to the stored
+     * value when the text is not a number, so there is no invalid state left to
+     * name. The GUARD the old `'abc'` case existed for — that nothing is
+     * written — is what this asserts.
+     */
+    it('reverts non-numeric text without calling setRemoteConfig', async () => {
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, tlsMode: 1, tlsHttpsPort: 8443 })
+      render(<RemoteServerSettings />)
+      const input = await screen.findByTestId('RemoteServerSettings.tlsHttpsPort')
+      fireEvent.change(input, { target: { value: 'abc' } })
+      fireEvent.blur(input)
+      await waitFor(() => expect(input).toHaveValue('8443'))
+      expect(api.setRemoteConfig).not.toHaveBeenCalled()
+      expect(screen.queryByTestId('RemoteServerSettings.tlsHttpsPortError')).toBeNull()
+    })
 
     it('an empty field commits the 443 default rather than erroring', async () => {
       api.getRemoteConfig.mockResolvedValue({ ...baseConfig, tlsMode: 1, tlsHttpsPort: 9443 })
@@ -265,11 +286,38 @@ describe('RemoteServerSettings', () => {
 
       fireEvent.click(toggle)
       await waitFor(() => expect(api.setRemoteConfig).toHaveBeenCalledWith({ tlsMode: 1 }))
-      // The bind-interface picker is meaningless in TLS mode.
+      // The bind-interface picker is meaningless in TLS mode, and its row says
+      // why — the `.bindHostTlsHint` node became the row's description (ADR-065).
       await waitFor(() =>
         expect(screen.getByTestId('RemoteServerSettings.bindHost.trigger')).toBeDisabled()
       )
-      expect(screen.getByTestId('RemoteServerSettings.bindHostTlsHint')).toBeInTheDocument()
+      expect(screen.getByTestId('RemoteServerSettings.bindHostRow')).toHaveTextContent(
+        'TLS mode binds 127.0.0.1'
+      )
+    })
+
+    it('the Confirm button commits the mode too, without a second toggle press', async () => {
+      api.detectTailscale.mockResolvedValue({
+        state: 'ok',
+        binaryPath: 'tailscale',
+        version: '1.98.5',
+        dnsName: 'cg-mac.tail3140f8.ts.net',
+        certDomains: ['cg-mac.tail3140f8.ts.net'],
+        ownerLogin: 'owner@example.com'
+      })
+      api.setRemoteConfig.mockResolvedValue({ ...baseConfig, tlsMode: 1 })
+      render(<RemoteServerSettings />)
+
+      fireEvent.click(await screen.findByTestId('RemoteServerSettings.tls'))
+      await screen.findByTestId('RemoteServerSettings.tlsConfirm')
+      expect(api.setRemoteConfig).not.toHaveBeenCalled()
+
+      fireEvent.click(screen.getByTestId('RemoteServerSettings.tlsConfirmApply'))
+      await waitFor(() => expect(api.setRemoteConfig).toHaveBeenCalledWith({ tlsMode: 1 }))
+      // …and the confirm row goes away with the decision it was asking for.
+      await waitFor(() =>
+        expect(screen.queryByTestId('RemoteServerSettings.tlsConfirm')).toBeNull()
+      )
     })
 
     it('turning it OFF needs no probe and no confirm', async () => {
@@ -464,6 +512,71 @@ describe('RemoteServerSettings', () => {
       await waitFor(() =>
         expect(screen.queryByTestId('RemoteServerSettings.ideProbe')).not.toBeInTheDocument()
       )
+    })
+  })
+
+  /**
+   * ADR-065 — the pane is four exported GROUP BODIES, and the page mounts each
+   * one on its own. What each holds is therefore a contract, not a layout
+   * detail: a row that leaked into the wrong section would appear under the
+   * wrong card header, and a probe that leaked into a shared hook would exec a
+   * binary once per section on every page open.
+   */
+  describe('the four sections', () => {
+    it('Server: the listener rows only', async () => {
+      render(<RemoteServerSection />)
+
+      await screen.findByTestId('RemoteServerSettings.port')
+      expect(screen.getByTestId('RemoteServerSettings.bindHost')).toBeInTheDocument()
+      expect(screen.getByTestId('RemoteServerSettings.autostart')).toBeInTheDocument()
+      expect(screen.getByTestId('RemoteServerSettings.tls')).toBeInTheDocument()
+      expect(screen.getByTestId('RemoteServerSettings.tlsHttpsPort')).toBeInTheDocument()
+
+      expect(screen.queryByTestId('RemoteServerSettings.allowTerminal')).toBeNull()
+      expect(screen.queryByTestId('RemoteServerSettings.allowIde')).toBeNull()
+      expect(screen.queryByTestId('RemoteServerSettings.clearPassword')).toBeNull()
+      expect(screen.queryByTestId('SessionSecuritySettings')).toBeNull()
+      expect(screen.queryByTestId('RemotePasskeySettings')).toBeNull()
+      // GUARD: the IDE probe belongs to the access section. A hook shared by
+      // every section would exec `serve-web --help` once per section.
+      expect(api.ideAvailability).not.toHaveBeenCalled()
+    })
+
+    it('Remote access: the capability rows only', async () => {
+      render(<RemoteAccessSection />)
+
+      await screen.findByTestId('RemoteServerSettings.allowTerminal')
+      expect(screen.getByTestId('RemoteServerSettings.allowIde')).toBeInTheDocument()
+      expect(screen.getByTestId('RemoteServerSettings.ideLicense')).toBeInTheDocument()
+      expect(screen.getByTestId('RemoteServerSettings.ideCliPath')).toBeInTheDocument()
+
+      expect(screen.queryByTestId('RemoteServerSettings.port')).toBeNull()
+      expect(screen.queryByTestId('RemoteServerSettings.tls')).toBeNull()
+      expect(screen.queryByTestId('RemotePasskeySettings')).toBeNull()
+    })
+
+    it('Security: the credential surfaces only', async () => {
+      api.getRemoteConfig.mockResolvedValue({ ...baseConfig, passwordSet: true })
+      render(<RemoteSecuritySection />)
+
+      await screen.findByTestId('RemoteServerSettings.clearPassword')
+      expect(screen.getByTestId('SessionSecuritySettings')).toBeInTheDocument()
+      expect(await screen.findByTestId('RemotePasskeySettings')).toBeInTheDocument()
+
+      expect(screen.queryByTestId('RemoteServerSettings.port')).toBeNull()
+      expect(screen.queryByTestId('RemoteServerSettings.allowIde')).toBeNull()
+      expect(api.ideAvailability).not.toHaveBeenCalled()
+    })
+
+    it('Links: says where the links are on the host, and mounts no web-only card', () => {
+      render(<RemoteLinksSection />)
+
+      expect(screen.getByTestId('RemoteServerSettings.linksHostOnlyNote')).toBeInTheDocument()
+      // The desktop reads the FULL status through the Remote Access window; the
+      // redacted web card must not be mounted here (RemoteWebSection pins the
+      // web half of this).
+      expect(screen.queryByTestId('RemoteStatusCard')).toBeNull()
+      expect(screen.queryByTestId('AccessLinks')).toBeNull()
     })
   })
 

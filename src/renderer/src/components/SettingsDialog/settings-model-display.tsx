@@ -79,7 +79,7 @@ export function StaleModelNotice({
     <div
       data-testid={`${testid}.staleModel`}
       data-model={value}
-      className="mt-1 text-[10px] text-yellow-400 leading-relaxed"
+      className="px-3.5 pb-2 text-[12px] leading-4 text-warning"
     >
       “{value}” is no longer available. Pick another model — this one will fail when it is used.
     </div>

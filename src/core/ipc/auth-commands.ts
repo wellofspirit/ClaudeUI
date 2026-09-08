@@ -45,12 +45,18 @@
  * NOT here: `account:get` (a query already registered on both transports) and
  * `shared-provider:list` / `statuses` / `models` (queries, already on both) —
  * those never moved. Only the MUTATIONS the S1b sweep deferred land here.
+ *
+ * Since ADR-065 phase 6 one READ lands here too: `provider-registry:list`. It is
+ * new rather than moved, and it is declared in this module for the reason the
+ * module exists — ONE declaration both registrars spread, so the unified
+ * provider list cannot end up desktop-only by omission the way this family did.
  */
 
 import { safeHandler } from './safe-handler'
 import type { CommandConnection, CommandRegistration } from './command-registry'
 import type { EngineAuthProvider } from '../auth/EngineAuthProvider'
 import { sharedProviderService } from '../shared-providers'
+import { listProviderRegistry } from '../shared-providers/provider-registry'
 import type {
   AccountsState,
   AuthFlowState,
@@ -59,6 +65,7 @@ import type {
   VendorAuthOption
 } from '../../shared/types'
 import type { ConfigurableHarnessId, SharedProviderDefinition } from '../../shared/shared-provider'
+import type { ProviderRegistrySnapshot } from '../../shared/provider-registry'
 
 /**
  * The desktop-auth capabilities this family needs, injected from the boot seam
@@ -281,6 +288,17 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
     // injection needed. `set-key` stores an API key host-side; it never returns
     // one. ADR-056 reclassified this family admin→config with the rest.
     // -----------------------------------------------------------------------
+    // The unified provider READ MODEL (ADR-065 § "Providers: one list"). A
+    // `query`, `config` like the rest of this family: it composes the shared
+    // definitions, opencode's catalog and pi's vendor entries into one list and
+    // carries no key material — every count, chip and badge is derived, and the
+    // mutations behind the row are the existing channels above and below.
+    {
+      channel: 'provider-registry:list',
+      capability: 'config',
+      kind: 'query',
+      handler: safeHandler(async (): Promise<ProviderRegistrySnapshot> => listProviderRegistry())
+    },
     {
       channel: 'shared-provider:save',
       capability: 'config',

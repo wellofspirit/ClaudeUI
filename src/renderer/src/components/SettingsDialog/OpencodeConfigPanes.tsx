@@ -1,10 +1,10 @@
 /**
  * OpencodeConfigPanes.tsx
  *
- * The curated half of the opencode "Configuration" nav subgroup: seven
- * hand-written panes over the opencode config keys worth a real control, with
- * the generic schema-driven editor ("Raw config", settings-sections.tsx)
- * keeping everything else.
+ * The curated opencode groups on the opencode settings page: seven hand-written
+ * panes over the opencode config keys worth a real control, with the generic
+ * schema-driven editor ("Raw config", settings-sections.tsx) keeping everything
+ * else.
  *
  * All of them read and write opencode's OWN global config file through the
  * leaf-patch IPC pair (readOpencodeNativeRaw / patchOpencodeNative) — the same
@@ -22,17 +22,30 @@
  *  · ABSENT MEANS DEFAULT. A key whose absence already gives the wanted
  *    behaviour is DELETED rather than written with its default value, so the
  *    user's file only ever carries genuine overrides. An empty number/text
- *    input deletes its key for the same reason.
+ *    input deletes its key for the same reason. That is also what "changed
+ *    from default" MEANS here (ADR-065): a row is modified when its key is
+ *    present in the file, and its Reset deletes the key.
  *  · LEAF PATCHES ONLY. Nested keys (`compaction.auto`, `experimental.batch_tool`,
  *    `tools.<id>`) are patched at their own path, never by writing the parent
  *    object — a user file may hold sibling keys these panes don't model, and
  *    a whole-object write would erase them.
+ *
+ * Every row is drawn with the ADR-065 row vocabulary (`settings-controls.tsx`):
+ * label, one-sentence description, the raw config key on its own mono line, and
+ * a control in the 240px column. The pane footers are gone — the group card
+ * carries the storage tag and the "Next server start" note.
  */
 
 import { useCallback, useEffect, useState } from 'react'
-import { SettingsToggle, SandboxListSetting, ToggleSwitch } from './settings-controls'
-import { SelectMenu } from '../shared/SelectMenu'
-import { RawJsonField, inputClass } from './OpencodeSchemaForm'
+import {
+  Button,
+  ChipSet,
+  ListEditor,
+  SelectField,
+  SettingRow,
+  SettingsToggle
+} from './settings-controls'
+import { RawJsonField } from './OpencodeSchemaForm'
 import { useOpencodeInstalled } from './use-engine-installed'
 import { deepEqual, isPlainObject } from '../../../../shared/opencode-config-diff'
 import type { OpencodeAgentSummary, RawConfigPatch } from '../../../../shared/types'
@@ -56,8 +69,6 @@ function readLeaf(root: unknown, path: LeafPath): unknown {
 export interface OpencodeNativeConfigLeaf {
   /** null until the first read resolves — panes render Loading… meanwhile. */
   config: Record<string, unknown> | null
-  /** Resolved config file path (shown in the pane footer). */
-  filePath: string
   /** Current value at `path`, or undefined when the key is absent. */
   read: (path: LeafPath) => unknown
   /**
@@ -66,6 +77,13 @@ export interface OpencodeNativeConfigLeaf {
    * already matches, so a blur without an edit never touches the file.
    */
   patch: (path: LeafPath, value: unknown) => void
+  /**
+   * Commit SEVERAL leaves in one write. Two `patch` calls in the same tick
+   * would be two concurrent read-modify-write cycles over the same file, so a
+   * row that owns more than one key (the image dimensions, the built-in tool
+   * chips' Reset) batches them instead.
+   */
+  patchMany: (entries: { path: LeafPath; value?: unknown }[]) => void
   /** The last patch failure for `path`, or null. */
   errorAt: (path: LeafPath) => string | null
   reload: () => void
@@ -73,16 +91,12 @@ export interface OpencodeNativeConfigLeaf {
 
 function useOpencodeNativeConfigLeaf(): OpencodeNativeConfigLeaf {
   const [config, setConfig] = useState<Record<string, unknown> | null>(null)
-  const [filePath, setFilePath] = useState('')
   const [errors, setErrors] = useState<Record<string, string>>({})
 
   const reload = useCallback((): void => {
     window.api
       .readOpencodeNativeRaw()
-      .then(({ config: next, path }) => {
-        setConfig(next)
-        setFilePath(path)
-      })
+      .then(({ config: next }) => setConfig(next))
       .catch(() => setConfig({}))
   }, [])
 
@@ -90,32 +104,56 @@ function useOpencodeNativeConfigLeaf(): OpencodeNativeConfigLeaf {
 
   const read = useCallback((path: LeafPath) => readLeaf(config, path), [config])
 
-  const patch = useCallback(
-    (path: LeafPath, value: unknown): void => {
-      if (deepEqual(readLeaf(config, path), value)) return
-      const id = pathId(path)
-      const one: RawConfigPatch = value === undefined ? { path } : { path, value }
+  const patchMany = useCallback(
+    (entries: { path: LeafPath; value?: unknown }[]): void => {
+      const changed = entries.filter((e) => !deepEqual(readLeaf(config, e.path), e.value))
+      if (changed.length === 0) return
+      const ids = changed.map((e) => pathId(e.path))
+      const patches: RawConfigPatch[] = changed.map((e) =>
+        e.value === undefined ? { path: e.path } : { path: e.path, value: e.value }
+      )
       window.api
-        .patchOpencodeNative([one])
+        .patchOpencodeNative(patches)
         .then(() => {
           setErrors((prev) => {
-            if (!(id in prev)) return prev
+            if (!ids.some((id) => id in prev)) return prev
             const next = { ...prev }
-            delete next[id]
+            for (const id of ids) delete next[id]
             return next
           })
           reload()
         })
         .catch((e: unknown) => {
-          setErrors((prev) => ({ ...prev, [id]: e instanceof Error ? e.message : String(e) }))
+          const message = e instanceof Error ? e.message : String(e)
+          setErrors((prev) => {
+            const next = { ...prev }
+            for (const id of ids) next[id] = message
+            return next
+          })
         })
     },
     [config, reload]
   )
 
+  const patch = useCallback(
+    (path: LeafPath, value: unknown): void => patchMany([{ path, value }]),
+    [patchMany]
+  )
+
   const errorAt = useCallback((path: LeafPath) => errors[pathId(path)] ?? null, [errors])
 
-  return { config, filePath, read, patch, errorAt, reload }
+  return { config, read, patch, patchMany, errorAt, reload }
+}
+
+/** The row is "changed from default" when its key is PRESENT in the file. */
+function leafState(
+  api: OpencodeNativeConfigLeaf,
+  path: LeafPath
+): { modified: boolean; onReset: () => void } {
+  return {
+    modified: api.read(path) !== undefined,
+    onReset: () => api.patch(path, undefined)
+  }
 }
 
 // ── Row primitives ───────────────────────────────────────────────────────────
@@ -124,67 +162,34 @@ function useOpencodeNativeConfigLeaf(): OpencodeNativeConfigLeaf {
  * The two-tier testid namespace these rows emit (`<prefix>.row`, `.toggle`,
  * `.number`, `.text`, `.error`). Every primitive below takes it as an
  * overridable prop: the per-model capability editor
- * (OpencodeModelCapabilities.tsx) and the pi Configuration panes
- * (PiConfigPanes.tsx) reuse these rows under their OWN prefix, so a test can
+ * (OpencodeModelCapabilities.tsx), the opencode provider modal
+ * (OpencodeProviders.tsx) and the pi panes (PiConfigPanes.tsx,
+ * PiCustomProviders.tsx) reuse these rows under their OWN prefix, so a test can
  * address their controls without disambiguating them from an opencode
  * Configuration pane's.
+ *
+ * `.error` deliberately hangs off the PREFIX rather than off the row's testid:
+ * it is the id every one of those call sites' tests already asserts, so the
+ * primitive's `errorTestid` override carries it across the restyle.
  */
 const PANE_TESTID = 'OpencodeConfigPane'
-
-/** Label line + helper line; the helper always ENDS with the raw opencode key. */
-function RowLabel({
-  label,
-  helper,
-  keyText
-}: {
-  label: string
-  helper: string
-  keyText: string
-}): React.JSX.Element {
-  return (
-    <div className="min-w-0">
-      <div className="text-[13px] text-text-secondary leading-snug">{label}</div>
-      <div className="text-[11px] text-text-muted/60 leading-relaxed">
-        {helper} <span className="font-mono break-all text-text-muted/80">{keyText}</span>
-      </div>
-    </div>
-  )
-}
-
-function RowError({
-  configKey,
-  error,
-  testidPrefix = PANE_TESTID
-}: {
-  configKey: string
-  error: string | null
-  testidPrefix?: string
-}): React.JSX.Element | null {
-  if (!error) return null
-  return (
-    <div
-      data-testid={`${testidPrefix}.error`}
-      data-id={configKey}
-      className="text-[11px] text-red-400 mt-1 leading-relaxed"
-    >
-      {error}
-    </div>
-  )
-}
 
 interface RowProps {
   configKey: string
   label: string
   helper: string
   error: string | null
-  /** Raw key(s) shown at the end of the helper. Defaults to `configKey`. */
+  /** Raw key(s), on their own mono line. Defaults to `configKey`. */
   keyText?: string
   /** Testid namespace for the row and its error. Defaults to the panes'. */
   testidPrefix?: string
+  /** Accent dot + hover Reset (ADR-065). See `leafState`. */
+  modified?: boolean
+  onReset?: () => void
   children: React.ReactNode
 }
 
-/** Label block on the left, control on the right (toggles aside — see ToggleRow). */
+/** Label block on the left, control in the 240px column (toggles aside — see ToggleRow). */
 export function LeafRow({
   configKey,
   label,
@@ -192,25 +197,28 @@ export function LeafRow({
   error,
   keyText,
   testidPrefix = PANE_TESTID,
+  modified,
+  onReset,
   children
 }: RowProps): React.JSX.Element {
   return (
-    <div data-testid={`${testidPrefix}.row`} data-id={configKey} className="px-3 py-1.5">
-      <div className="flex items-start justify-between gap-4">
-        <RowLabel label={label} helper={helper} keyText={keyText ?? configKey} />
-        <div className="shrink-0 flex items-center gap-1.5">{children}</div>
-      </div>
-      <RowError configKey={configKey} error={error} testidPrefix={testidPrefix} />
-    </div>
+    <SettingRow
+      testid={`${testidPrefix}.row`}
+      dataId={configKey}
+      label={label}
+      description={helper}
+      keyText={keyText ?? configKey}
+      error={error ?? undefined}
+      errorTestid={`${testidPrefix}.error`}
+      modified={modified}
+      onReset={onReset}
+    >
+      {children}
+    </SettingRow>
   )
 }
 
-/**
- * Control spans the full width UNDER the label block (lists, chip rows). Only
- * the label and error carry the row's horizontal padding: a control that brings
- * its own (SandboxListSetting) would otherwise sit a step further in than every
- * other row's.
- */
+/** Control spans the full width UNDER the label block (lists, chip sets, text). */
 export function StackedRow({
   configKey,
   label,
@@ -218,77 +226,99 @@ export function StackedRow({
   error,
   keyText,
   testidPrefix = PANE_TESTID,
+  modified,
+  onReset,
   children
-}: RowProps & { children: React.ReactNode }): React.JSX.Element {
+}: RowProps): React.JSX.Element {
   return (
-    <div data-testid={`${testidPrefix}.row`} data-id={configKey} className="py-1.5">
-      <div className="px-3">
-        <RowLabel label={label} helper={helper} keyText={keyText ?? configKey} />
-      </div>
-      <div className="mt-1">{children}</div>
-      <div className="px-3">
-        <RowError configKey={configKey} error={error} testidPrefix={testidPrefix} />
-      </div>
-    </div>
+    <SettingRow
+      layout="stacked"
+      testid={`${testidPrefix}.row`}
+      dataId={configKey}
+      label={label}
+      description={helper}
+      keyText={keyText ?? configKey}
+      error={error ?? undefined}
+      errorTestid={`${testidPrefix}.error`}
+      modified={modified}
+      onReset={onReset}
+    >
+      {children}
+    </SettingRow>
   )
 }
 
 /**
- * Toggle row. Reuses `SettingsToggle` (which owns the label + switch layout the
- * rest of the dialog uses) and hangs the helper line under it, matching the
- * schema form's boolean field.
+ * Toggle row: `SettingsToggle` IS the row (label, description, key and switch in
+ * one), wrapped only so `<prefix>.row` and `<prefix>.toggle` can both be
+ * addressed — one element cannot carry two testids.
  */
 export function ToggleRow({
   configKey,
   label,
   helper,
+  keyText,
   checked,
   onChange,
   error,
-  testidPrefix = PANE_TESTID
+  testidPrefix = PANE_TESTID,
+  modified,
+  onReset
 }: {
   configKey: string
   label: string
   helper: string
+  keyText?: string
   checked: boolean
   onChange: (v: boolean) => void
   error: string | null
   testidPrefix?: string
+  modified?: boolean
+  onReset?: () => void
 }): React.JSX.Element {
   return (
-    <div data-testid={`${testidPrefix}.row`} data-id={configKey} className="py-0.5">
+    <div data-testid={`${testidPrefix}.row`} data-id={configKey}>
       <SettingsToggle
         label={label}
+        description={helper}
+        keyText={keyText ?? configKey}
         checked={checked}
         onChange={onChange}
+        error={error ?? undefined}
+        errorTestid={`${testidPrefix}.error`}
+        modified={modified}
+        onReset={onReset}
         testid={`${testidPrefix}.toggle`}
         dataId={configKey}
       />
-      <div className="px-3 pb-1 text-[11px] text-text-muted/60 leading-relaxed">
-        {helper} <span className="font-mono break-all text-text-muted/80">{configKey}</span>
-      </div>
-      <div className="px-3">
-        <RowError configKey={configKey} error={error} testidPrefix={testidPrefix} />
-      </div>
     </div>
   )
 }
 
 // ── Controls ─────────────────────────────────────────────────────────────────
 
+/** Right-aligned, tabular numerals, no spinner — `NumberField`'s look exactly. */
+const NUMBER_INPUT_CLASS =
+  'h-7 shrink-0 bg-bg-input border border-border rounded-md px-2.5 text-[12px] text-text-primary text-right tabular-nums placeholder:text-text-muted outline-none focus:border-accent/50 transition-colors [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none'
+
+const TEXT_INPUT_CLASS =
+  'h-7 bg-bg-input border border-border rounded-md px-2.5 text-[12px] text-text-primary font-mono placeholder:text-text-muted outline-none focus:border-accent/50 transition-colors'
+
 /**
  * Number input with a LOCAL draft, committed on blur and on Enter. An empty
  * field deletes the key. The draft resyncs whenever the committed value moves
  * (i.e. after a successful patch + re-read); a REJECTED patch leaves the value
  * untouched, so the user's text survives next to the error instead of snapping
- * back.
+ * back. That last property is why this is not `NumberField`, which reverts to
+ * its prop on every blur.
  */
 export function LeafNumberInput({
   configKey,
   value,
   placeholder,
   onCommit,
-  width = 'w-24',
+  unit,
+  width = 'w-[88px]',
   testid = `${PANE_TESTID}.number`,
   step = 1
 }: {
@@ -296,6 +326,8 @@ export function LeafNumberInput({
   value: unknown
   placeholder: string
   onCommit: (v: number | undefined) => void
+  /** tokens · lines · bytes · px · ms — shown after the field, as on the board. */
+  unit?: string
   width?: string
   testid?: string
   /** `'any'` for fields whose values are genuinely fractional (token prices) —
@@ -323,21 +355,24 @@ export function LeafNumberInput({
   }
 
   return (
-    <input
-      type="number"
-      min={0}
-      step={step}
-      data-testid={testid}
-      data-id={configKey}
-      value={draft}
-      placeholder={placeholder}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') commit()
-      }}
-      className={`${inputClass} ${width} tabular-nums text-right`}
-    />
+    <>
+      <input
+        type="number"
+        min={0}
+        step={step}
+        data-testid={testid}
+        data-id={configKey}
+        value={draft}
+        placeholder={placeholder}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') commit()
+        }}
+        className={`${NUMBER_INPUT_CLASS} ${width}`}
+      />
+      {unit && <span className="text-[12px] text-text-secondary whitespace-nowrap">{unit}</span>}
+    </>
   )
 }
 
@@ -379,7 +414,7 @@ export function LeafTextInput({
       onKeyDown={(e) => {
         if (e.key === 'Enter') commit()
       }}
-      className={`${inputClass} ${width}`}
+      className={`${TEXT_INPUT_CLASS} ${width}`}
     />
   )
 }
@@ -412,6 +447,7 @@ function AbsentDefaultToggleRow({
       checked={on}
       onChange={(next) => api.patch(path, next === defaultOn ? undefined : next)}
       error={api.errorAt(path)}
+      {...leafState(api, path)}
     />
   )
 }
@@ -422,21 +458,30 @@ function NumberRow({
   path,
   label,
   helper,
-  placeholder
+  placeholder,
+  unit
 }: {
   api: OpencodeNativeConfigLeaf
   path: LeafPath
   label: string
   helper: string
   placeholder: string
+  unit?: string
 }): React.JSX.Element {
   const key = pathId(path)
   return (
-    <LeafRow configKey={key} label={label} helper={helper} error={api.errorAt(path)}>
+    <LeafRow
+      configKey={key}
+      label={label}
+      helper={helper}
+      error={api.errorAt(path)}
+      {...leafState(api, path)}
+    >
       <LeafNumberInput
         configKey={key}
         value={api.read(path)}
         placeholder={placeholder}
+        unit={unit}
         onCommit={(v) => api.patch(path, v)}
       />
     </LeafRow>
@@ -463,31 +508,38 @@ function StringListRow({
   // Entries this control can't represent (e.g. `plugin`'s [path, options]
   // tuples) are carried through untouched rather than dropped on the next edit.
   const opaque = Array.isArray(raw) ? raw.filter((v) => typeof v !== 'string') : []
+  const opaqueNote =
+    opaque.length > 0
+      ? ` ${opaque.length} advanced ${opaque.length === 1 ? 'entry is' : 'entries are'} kept as-is and not shown here.`
+      : ''
   return (
-    <StackedRow configKey={key} label={label} helper={helper} error={api.errorAt(path)}>
-      <SandboxListSetting
-        label=""
-        labelColor="text-text-secondary"
+    <StackedRow
+      configKey={key}
+      label={label}
+      helper={`${helper}${opaqueNote}`}
+      error={api.errorAt(path)}
+      {...leafState(api, path)}
+    >
+      <ListEditor
         items={items}
         placeholder={placeholder}
         onUpdate={(next) => {
           const merged = [...next, ...opaque]
           api.patch(path, merged.length > 0 ? merged : undefined)
         }}
-        testid="OpencodeConfigPane.list"
+        testid={`${PANE_TESTID}.list`}
       />
-      {opaque.length > 0 && (
-        <div className="px-3 text-[10px] text-text-muted/50 leading-relaxed">
-          {opaque.length} advanced {opaque.length === 1 ? 'entry' : 'entries'} in this list are kept
-          as-is and not shown here.
-        </div>
-      )}
     </StackedRow>
   )
 }
 
-// ── Pane shell (install gate + file footer) ──────────────────────────────────
+// ── Pane shell (install gate) ────────────────────────────────────────────────
 
+/**
+ * Loading and not-installed are ONE description-only row each (ADR-065), and
+ * there is no footer: the group card already carries `opencode.jsonc` and the
+ * "Next server start" note.
+ */
 function PaneShell({
   testid,
   api,
@@ -500,34 +552,25 @@ function PaneShell({
   const installed = useOpencodeInstalled()
 
   if (installed === null || api.config === null) {
-    return (
-      <div data-testid={testid} className="px-3 py-1.5 text-[13px] text-text-muted">
-        Loading…
-      </div>
-    )
+    return <SettingRow testid={testid} description="Loading…" />
   }
   if (!installed) {
     return (
-      <div
-        data-testid={testid}
-        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
-      >
-        opencode is not installed. This edits opencode&apos;s own config file.
-      </div>
+      <SettingRow
+        testid={testid}
+        dimmed
+        description="opencode is not installed. This edits opencode's own config file."
+      />
     )
   }
   return (
-    <div data-testid={testid} className="py-1 text-[13px] text-text-secondary">
+    <div data-testid={testid} className="divide-y divide-border/55">
       {children}
-      <div className="px-3 pt-2 mt-1 border-t border-border/20 text-[10px] text-text-muted/50 leading-relaxed">
-        Saved immediately to {api.filePath || 'opencode.jsonc'}. Only the field you change is
-        written — comments and other keys are preserved.
-      </div>
     </div>
   )
 }
 
-// ── 2a · Session behavior ────────────────────────────────────────────────────
+// ── 2a · Session behaviour ───────────────────────────────────────────────────
 
 export function OpencodeSessionBehaviorSection(): React.JSX.Element {
   const api = useOpencodeNativeConfigLeaf()
@@ -551,7 +594,7 @@ export function OpencodeSessionBehaviorSection(): React.JSX.Element {
         api={api}
         path={['compaction', 'tail_turns']}
         label="Turns kept verbatim"
-        helper="Recent user turns preserved uncompacted; unset = limited only by the token budget."
+        helper="Recent user turns preserved uncompacted."
         placeholder="unlimited"
       />
       <NumberRow
@@ -560,13 +603,15 @@ export function OpencodeSessionBehaviorSection(): React.JSX.Element {
         label="Recent tokens preserved"
         helper="Token budget for the verbatim tail."
         placeholder="default"
+        unit="tokens"
       />
       <NumberRow
         api={api}
         path={['compaction', 'reserved']}
         label="Reserved tokens"
-        helper="Headroom kept free so compaction itself can't overflow the window."
+        helper="Headroom so compaction itself cannot overflow the window."
         placeholder="default"
+        unit="tokens"
       />
       <NumberRow
         api={api}
@@ -579,7 +624,7 @@ export function OpencodeSessionBehaviorSection(): React.JSX.Element {
         api={api}
         path={['snapshot']}
         label="Filesystem snapshots"
-        helper="Required for undo / revert of file changes."
+        helper="Required for undo and revert of file changes."
         defaultOn={true}
       />
     </PaneShell>
@@ -598,13 +643,15 @@ export function OpencodeToolOutputSection(): React.JSX.Element {
         label="Max lines"
         helper="Longer output is written to disk and only previewed to the model."
         placeholder="2000"
+        unit="lines"
       />
       <NumberRow
         api={api}
         path={['tool_output', 'max_bytes']}
         label="Max bytes"
-        helper="Same truncation, by size."
+        helper="The same truncation, by size."
         placeholder="51200"
+        unit="bytes"
       />
     </PaneShell>
   )
@@ -616,6 +663,7 @@ export function OpencodeAttachmentsSection(): React.JSX.Element {
   const api = useOpencodeNativeConfigLeaf()
   const widthPath: LeafPath = ['attachment', 'image', 'max_width']
   const heightPath: LeafPath = ['attachment', 'image', 'max_height']
+  const dimsSet = api.read(widthPath) !== undefined || api.read(heightPath) !== undefined
   return (
     <PaneShell testid="OpencodeAttachmentsSection" api={api}>
       <AbsentDefaultToggleRow
@@ -629,31 +677,37 @@ export function OpencodeAttachmentsSection(): React.JSX.Element {
         configKey="attachment.image.max_width"
         keyText="attachment.image.max_width / max_height"
         label="Maximum dimensions"
-        helper="Width × height in pixels before resize or rejection —"
+        helper="Width and height an image is measured against before resize or rejection."
         error={api.errorAt(widthPath) ?? api.errorAt(heightPath)}
+        modified={dimsSet}
+        // One write, not two: two `patch` calls in the same tick would be two
+        // concurrent read-modify-write cycles over the same file.
+        onReset={() => api.patchMany([{ path: widthPath }, { path: heightPath }])}
       >
         <LeafNumberInput
           configKey={pathId(widthPath)}
           value={api.read(widthPath)}
           placeholder="2000"
           onCommit={(v) => api.patch(widthPath, v)}
-          width="w-20"
+          width="w-[72px]"
         />
-        <span className="text-[11px] text-text-muted/60">×</span>
+        <span className="text-[12px] text-text-secondary">×</span>
         <LeafNumberInput
           configKey={pathId(heightPath)}
           value={api.read(heightPath)}
           placeholder="2000"
           onCommit={(v) => api.patch(heightPath, v)}
-          width="w-20"
+          width="w-[72px]"
+          unit="px"
         />
       </LeafRow>
       <NumberRow
         api={api}
         path={['attachment', 'image', 'max_base64_bytes']}
         label="Maximum payload"
-        helper="Base64 bytes an image attachment may occupy."
+        helper="How large an image attachment may be once base64-encoded."
         placeholder="5242880"
+        unit="bytes"
       />
     </PaneShell>
   )
@@ -703,45 +757,47 @@ export function OpencodeWorkspaceSection(): React.JSX.Element {
         api={api}
         path={['instructions']}
         label="Instruction files"
-        helper="Extra files or globs merged into the system context —"
+        helper="Extra files or globs merged into the system context."
         placeholder="AGENTS.md, docs/*.md…"
       />
       <LeafRow
         configKey={pathId(agentPath)}
         label="Default agent"
-        helper="Must be a primary agent; opencode falls back to build —"
+        helper="Must be a primary agent; opencode falls back to build."
         error={api.errorAt(agentPath)}
+        {...leafState(api, agentPath)}
       >
-        <SelectMenu
-          testid="OpencodeConfigPane.select"
-          dataAttrs={{ 'data-id': pathId(agentPath) }}
+        <SelectField
+          testid={`${PANE_TESTID}.select`}
+          dataId={pathId(agentPath)}
           value={typeof current === 'string' ? current : ''}
           onChange={(v) => api.patch(agentPath, v === '' ? undefined : v)}
           options={[
             { value: '', label: 'build (default)' },
             ...agents.map((a) => ({ value: a.name, label: a.name }))
           ]}
-          triggerClassName={`${inputClass} w-44 text-left`}
         />
       </LeafRow>
-      <LeafRow
+      <StackedRow
         configKey={pathId(shellPath)}
         label="Shell"
-        helper="Used by the terminal and the bash tool —"
+        helper="Used by the terminal and the bash tool."
         error={api.errorAt(shellPath)}
+        {...leafState(api, shellPath)}
       >
         <LeafTextInput
           configKey={pathId(shellPath)}
           value={api.read(shellPath)}
           placeholder="system default"
           onCommit={(v) => api.patch(shellPath, v)}
+          width="w-full"
         />
-      </LeafRow>
+      </StackedRow>
       <StringListRow
         api={api}
         path={['watcher', 'ignore']}
         label="File-watcher ignores"
-        helper="Globs the workspace watcher skips —"
+        helper="Globs the workspace watcher skips."
         placeholder="**/dist/**"
       />
     </PaneShell>
@@ -796,28 +852,31 @@ function UnionToggleRow({
   const on = value !== false
 
   return (
-    <div data-testid="OpencodeConfigPane.row" data-id={key} className="py-0.5">
+    <div data-testid={`${PANE_TESTID}.row`} data-id={key}>
       <SettingsToggle
         label={label}
+        description={helper}
+        keyText={key}
         checked={on}
         onChange={(next) => api.patch(path, next ? undefined : false)}
-        testid="OpencodeConfigPane.toggle"
+        error={api.errorAt(path) ?? undefined}
+        errorTestid={`${PANE_TESTID}.error`}
+        testid={`${PANE_TESTID}.toggle`}
         dataId={key}
+        {...leafState(api, path)}
       />
-      <div className="px-3 pb-1 text-[11px] text-text-muted/60 leading-relaxed">
-        {helper} <span className="font-mono break-all text-text-muted/80">{key}</span>
-      </div>
-      <div className="px-3 pb-1">
-        <button
-          type="button"
-          data-testid="OpencodeConfigPane.disclosure"
-          data-id={key}
-          aria-expanded={open}
+      {/* The disclosure cannot live INSIDE the toggle: that row is itself a
+          <button>, and nesting buttons is invalid HTML. */}
+      <div className="px-3.5 pb-2.5 -mt-1">
+        <Button
+          variant="link"
+          testid={`${PANE_TESTID}.disclosure`}
+          dataId={key}
+          ariaExpanded={open}
           onClick={() => setOpen((o) => !o)}
-          className="text-[10px] text-text-muted hover:text-text-secondary transition-colors"
         >
           {open ? '▾' : '▸'} Overrides…
-        </button>
+        </Button>
         {open && (
           <div className="mt-1">
             {/* Keyed on the committed value so a re-read (or the toggle
@@ -831,7 +890,6 @@ function UnionToggleRow({
             />
           </div>
         )}
-        <RowError configKey={key} error={api.errorAt(path)} />
       </div>
     </div>
   )
@@ -841,71 +899,54 @@ export function OpencodeToolsSection(): React.JSX.Element {
   const api = useOpencodeNativeConfigLeaf()
   const tools = api.read(['tools'])
   const toolsObj = isPlainObject(tools) ? tools : {}
+  const overridden = OPENCODE_BUILTIN_TOOLS.filter((id) => toolsObj[id] !== undefined)
 
   return (
     <PaneShell testid="OpencodeToolsSection" api={api}>
       <StackedRow
         configKey="tools"
         label="Built-in tools"
-        helper="Turn one off to hide it from every agent —"
+        helper="Turn one off to hide it from every agent."
         error={
           // One shared row error: only one chip can be in flight at a time.
           OPENCODE_BUILTIN_TOOLS.map((id) => api.errorAt(['tools', id])).find(Boolean) ?? null
         }
+        modified={overridden.length > 0}
+        onReset={() => api.patchMany(overridden.map((id) => ({ path: ['tools', id] })))}
       >
-        <div
-          data-testid="OpencodeConfigPane.chips"
-          data-id="tools"
-          className="px-3 flex flex-wrap gap-1.5"
-        >
-          {OPENCODE_BUILTIN_TOOLS.map((id) => {
-            const on = toolsObj[id] !== false
-            return (
-              <button
-                key={id}
-                type="button"
-                data-testid="OpencodeConfigPane.chip"
-                data-id={id}
-                aria-pressed={on}
-                // ON is the DEFAULT, so turning a tool back on deletes its key
-                // rather than writing `true`.
-                onClick={() => api.patch(['tools', id], on ? false : undefined)}
-                className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
-                  on
-                    ? 'bg-accent/20 text-accent border-accent/40'
-                    : 'bg-bg-hover text-text-muted border-border hover:text-text-secondary'
-                }`}
-              >
-                {id}
-              </button>
-            )
-          })}
-        </div>
+        <ChipSet
+          testid={PANE_TESTID}
+          value={OPENCODE_BUILTIN_TOOLS.filter((id) => toolsObj[id] !== false)}
+          options={OPENCODE_BUILTIN_TOOLS.map((id) => ({ value: id, label: id }))}
+          // ON is the DEFAULT, so turning a tool back on deletes its key rather
+          // than writing `true`.
+          onToggle={(id) => api.patch(['tools', id], toolsObj[id] !== false ? false : undefined)}
+        />
       </StackedRow>
       <UnionToggleRow
         api={api}
         path={['formatter']}
         label="Code formatters"
-        helper="Built-in formatters run after edits; overrides add or disable one —"
+        helper="Built-in formatters run after edits; Overrides adds or disables one."
       />
       <UnionToggleRow
         api={api}
         path={['lsp']}
         label="Language servers"
-        helper="Built-in LSPs supply diagnostics; overrides add or disable one —"
+        helper="Built-in language servers supply diagnostics; Overrides adds or disables one."
       />
       <StringListRow
         api={api}
         path={['plugin']}
         label="Plugins"
-        helper="Loads alongside ClaudeUI's injected caller-identity plugin —"
+        helper="Loads alongside ClaudeUI's injected caller-identity plugin."
         placeholder="npm package or file path…"
       />
       <StringListRow
         api={api}
         path={['skills', 'paths']}
         label="Skill folders"
-        helper="Searched in addition to the skills ClaudeUI already discovers —"
+        helper="Searched in addition to the skills ClaudeUI already discovers."
         placeholder="/path/to/skills"
       />
     </PaneShell>
@@ -932,16 +973,17 @@ export function OpencodeDiagnosticsSection(): React.JSX.Element {
       <LeafRow
         configKey={pathId(logPath)}
         label="Log level"
-        helper="Verbosity of opencode's own log file —"
+        helper="Verbosity of opencode's own log file."
         error={api.errorAt(logPath)}
+        {...leafState(api, logPath)}
       >
-        <SelectMenu
-          testid="OpencodeConfigPane.select"
-          dataAttrs={{ 'data-id': pathId(logPath) }}
+        <SelectField
+          testid={`${PANE_TESTID}.select`}
+          dataId={pathId(logPath)}
+          width="min-w-[120px]"
           value={typeof level === 'string' ? level : ''}
           onChange={(v) => api.patch(logPath, v === '' ? undefined : v)}
           options={LOG_LEVEL_OPTIONS}
-          triggerClassName={`${inputClass} w-32 text-left`}
         />
       </LeafRow>
       {/* Leaf paths, never a whole-`experimental` write: ClaudeUI itself injects
@@ -951,8 +993,9 @@ export function OpencodeDiagnosticsSection(): React.JSX.Element {
         api={api}
         path={['experimental', 'mcp_timeout']}
         label="MCP request timeout"
-        helper="Milliseconds before an MCP call is cancelled —"
+        helper="How long an MCP call may run before it is cancelled."
         placeholder="5000"
+        unit="ms"
       />
       <AbsentDefaultToggleRow
         api={api}
@@ -999,61 +1042,30 @@ const MANAGED_KEYS: ManagedKey[] = [
  * Static pane — no IPC, nothing writable. These three keys are set by ClaudeUI
  * at spawn (ephemeral env-var config + an env kill switch, ADR-031), so a value
  * in the user's file would be overridden anyway; showing them read-only is
- * more honest than hiding them.
+ * more honest than hiding them. The lock badge is the vocabulary's Managed
+ * state (ADR-065): the control is shown, and is not interactive.
  */
 export function OpencodeManagedKeysSection(): React.JSX.Element {
   return (
-    <div data-testid="OpencodeManagedKeysSection" className="py-1 text-[13px] text-text-secondary">
+    <div data-testid="OpencodeManagedKeysSection" className="divide-y divide-border/55">
       {MANAGED_KEYS.map((k) => (
-        <div
+        <SettingsToggle
           key={k.configKey}
-          data-testid="OpencodeConfigPane.managedRow"
-          data-id={k.configKey}
-          className="px-3 py-1.5 opacity-70"
-        >
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5">
-                <span className="text-[13px] text-text-secondary">{k.label}</span>
-                <span
-                  data-testid="OpencodeConfigPane.forcedBadge"
-                  data-id={k.configKey}
-                  className="text-[9px] px-1 py-0.5 rounded bg-bg-hover text-text-muted/70 uppercase tracking-wide"
-                >
-                  {k.forcedOn ? 'Forced on' : 'Forced off'}
-                </span>
-              </div>
-              <div className="text-[11px] text-text-muted/60 leading-relaxed">
-                {k.why}{' '}
-                <span className="font-mono break-all text-text-muted/80">{k.configKey}</span>
-              </div>
-            </div>
-            <span
-              data-testid="OpencodeConfigPane.forcedToggle"
-              data-id={k.configKey}
-              aria-disabled="true"
-              className="shrink-0 mt-0.5"
-            >
-              <ToggleSwitch checked={k.forcedOn} />
-            </span>
-          </div>
-        </div>
+          testid={`${PANE_TESTID}.managedRow`}
+          dataId={k.configKey}
+          label={k.label}
+          description={k.why}
+          keyText={k.configKey}
+          locked={k.forcedOn ? 'Forced on' : 'Forced off'}
+          checked={k.forcedOn}
+          disabled
+          onChange={() => {}}
+        />
       ))}
-      <div className="px-3 pt-2 mt-1 border-t border-border/20 text-[10px] text-text-muted/50 leading-relaxed space-y-0.5">
-        <div>
-          Elsewhere in Settings: <span className="font-mono">model</span> ·{' '}
-          <span className="font-mono">small_model</span> → Models;{' '}
-          <span className="font-mono">provider</span> → Providers;{' '}
-          <span className="font-mono">agent</span> → Agents;{' '}
-          <span className="font-mono">permission</span> → Autonomy mode.
-        </div>
-        <div>
-          <span className="font-mono">mcp</span> is bridged at spawn.{' '}
-          <span className="font-mono">server.*</span> is hidden (ClaudeUI&apos;s CLI flags win);{' '}
-          <span className="font-mono">layout</span> and <span className="font-mono">autoshare</span>{' '}
-          are hidden (deprecated).
-        </div>
-      </div>
+      <SettingRow
+        testid={`${PANE_TESTID}.elsewhere`}
+        description="Elsewhere in Settings: model and small_model under Models & providers, provider under its provider list, agent under Agents and permission under Sessions & autonomy; mcp is bridged at spawn, while server.*, layout and autoshare are hidden."
+      />
     </div>
   )
 }

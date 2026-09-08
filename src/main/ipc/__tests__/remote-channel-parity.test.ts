@@ -171,6 +171,26 @@ const S1B_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'que
 }
 
 /**
+ * ADR-065 phase 4 — the shared classifier trust lists, declared in the same
+ * shared module as the S1b family and therefore checked by the same equality.
+ *
+ * Its own table for the reason {@link REMOTE_VIEW_SWEEP} has one: S1B_SWEEP is
+ * the record of ONE dated sweep, and folding a later decision into it would
+ * make both unreadable. `config` because it is engine configuration like every
+ * other `config:*` verb here — what it writes is the judge's view of which
+ * hosts, registries and resources the user trusts, so the shape is validated at
+ * the perimeter (`config-commands-shared-automode.test.ts`) rather than by the
+ * id-segment guard the engine/vendor pairs use: this path carries no id.
+ */
+const TRUST_LIST_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'query' }> = {
+  'config:load-shared-automode': { capability: 'config', kind: 'query' },
+  'config:save-shared-automode': { capability: 'config', kind: 'command' }
+}
+
+/** Every channel the two shared config modules declare: S1b plus what followed. */
+const SHARED_CONFIG_SWEEP = { ...S1B_SWEEP, ...TRUST_LIST_SWEEP }
+
+/**
  * The 2026-08-28 status-view ruling, in the same shape as {@link S1B_SWEEP} and
  * deliberately NOT inside it — that table is the record of one dated sweep, and
  * folding a later decision into it would make both unreadable.
@@ -184,6 +204,26 @@ const S1B_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'que
  */
 const REMOTE_VIEW_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'query' }> = {
   'remote:status-view': { capability: 'config', kind: 'query' }
+}
+
+/**
+ * ADR-065 phase 6 — the unified provider list, declared in
+ * `ipc/auth-commands.ts` beside the `shared-provider:*` family whose stores it
+ * reads.
+ *
+ * Its own table, for the reason {@link TRUST_LIST_SWEEP} has one: S1B_SWEEP and
+ * S4 are records of dated sweeps. `config` and a `query` — it composes the
+ * shared definitions, opencode's provider catalog and pi's vendor entries into
+ * one row set and returns counts, badges and chips; no key material crosses it,
+ * and every mutation the rows drive is an EXISTING channel already on this
+ * surface. Being on both transports from one declaration is the point: the
+ * phone's provider page must read the same list the desktop does.
+ */
+const PROVIDER_REGISTRY_SWEEP: Record<
+  string,
+  { capability: Capability; kind: 'command' | 'query' }
+> = {
+  'provider-registry:list': { capability: 'config', kind: 'query' }
 }
 
 /** channel → declared capability, parsed from remote-handlers.ts registrations. */
@@ -257,14 +297,14 @@ describe('remote channel parity (R5)', () => {
       found.set(m[1], { capability: m[2] as Capability, kind: m[3] })
     }
     expect(Object.fromEntries([...found].sort())).toEqual(
-      Object.fromEntries(Object.entries(S1B_SWEEP).sort())
+      Object.fromEntries(Object.entries(SHARED_CONFIG_SWEEP).sort())
     )
 
     const registrars = [
       read('src/core/ipc/session.ipc.ts'),
       read('src/core/ipc/remote-handlers.ts')
     ].join('\n')
-    const inline = Object.keys(S1B_SWEEP)
+    const inline = Object.keys(SHARED_CONFIG_SWEEP)
       .filter((c) => registrars.includes(`channel: '${c}'`))
       .sort()
     expect(
@@ -295,11 +335,11 @@ describe('remote channel parity (R5)', () => {
     // from the remote UI. `git`, `config` and `chat` are all in AUTH_OFF_GRANTS,
     // so an ordinary authenticated connection reaches every one of them.
     const declared = remoteDeclarations()
-    const missing = Object.keys(S1B_SWEEP)
+    const missing = Object.keys(SHARED_CONFIG_SWEEP)
       .filter((c) => !declared.has(c))
       .sort()
     expect(missing, `S1b channels with no remote registration: ${missing.join(', ')}`).toEqual([])
-    const ungranted = Object.keys(S1B_SWEEP)
+    const ungranted = Object.keys(SHARED_CONFIG_SWEEP)
       .filter((c) => !AUTH_OFF_GRANTS.has(declared.get(c)!))
       .sort()
     expect(ungranted).toEqual([])
@@ -332,6 +372,37 @@ describe('remote channel parity (R5)', () => {
     expect([...declared.keys()].filter((c) => c.startsWith('remote:'))).toEqual([
       'remote:status-view'
     ])
+  })
+
+  it('the provider registry is declared ONCE in the shared auth family and is base-reachable', () => {
+    // Same two halves as the S1b case: declared exactly once in the shared
+    // module with the capability/kind this table freezes, never re-declared
+    // inline in a transport registrar — and reachable on the base grant set, so
+    // the remote provider page is not a desktop-only surface by omission.
+    const shared = read('src/core/ipc/auth-commands.ts')
+    const declRe = /channel:\s*'([^']+)',\s*capability:\s*'([^']+)',\s*kind:\s*'([^']+)'/g
+    const found = new Map<string, { capability: Capability; kind: string }>()
+    for (let m = declRe.exec(shared); m; m = declRe.exec(shared)) {
+      if (!(m[1] in PROVIDER_REGISTRY_SWEEP)) continue
+      expect(found.has(m[1]), `${m[1]} is declared twice in auth-commands.ts`).toBe(false)
+      found.set(m[1], { capability: m[2] as Capability, kind: m[3] })
+    }
+    expect(Object.fromEntries(found)).toEqual(PROVIDER_REGISTRY_SWEEP)
+
+    const registrars = [
+      read('src/core/ipc/session.ipc.ts'),
+      read('src/core/ipc/remote-handlers.ts')
+    ].join('\n')
+    const inline = Object.keys(PROVIDER_REGISTRY_SWEEP).filter((c) =>
+      registrars.includes(`channel: '${c}'`)
+    )
+    expect(inline, `re-declared inline in a transport registrar: ${inline.join(', ')}`).toEqual([])
+
+    const declared = remoteDeclarations()
+    for (const channel of Object.keys(PROVIDER_REGISTRY_SWEEP)) {
+      expect(declared.get(channel), `${channel} has no remote registration`).toBe('config')
+      expect(AUTH_OFF_GRANTS.has(declared.get(channel)!)).toBe(true)
+    }
   })
 
   it('the passkey channels declare enroll/admin, not anything grantable (ADR-052)', () => {

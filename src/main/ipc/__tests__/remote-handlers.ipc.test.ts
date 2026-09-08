@@ -43,7 +43,9 @@ const uiConfigMocks = vi.hoisted(() => ({
   saveSessionConfig: vi.fn(),
   loadSlashCommands: vi.fn(() => []),
   loadEngineConfig: vi.fn(() => ({})),
-  loadVendorConfig: vi.fn(() => ({}))
+  loadVendorConfig: vi.fn(() => ({})),
+  loadSharedAutoModeConfig: vi.fn(() => ({})),
+  saveSharedAutoModeConfig: vi.fn()
 }))
 
 vi.mock('../../../core/services/ui-config', () => uiConfigMocks)
@@ -1546,6 +1548,18 @@ const S1B_SWEEP_CHANNELS = [
 ] as const
 
 /**
+ * ADR-065 phase 4 — the engine-SHARED classifier trust lists.
+ *
+ * Their own pair rather than two more lines in {@link S1B_SWEEP_CHANNELS},
+ * which is the record of one dated sweep. Same reachability decision as that
+ * sweep's `config:*` half, for the same reason: this is engine configuration,
+ * and the phone must be able to edit it. What is different is where the guard
+ * sits — the path carries no id to traverse with, so the payload SHAPE is the
+ * perimeter (`config-commands-shared-automode.test.ts`).
+ */
+const TRUST_LIST_CHANNELS = ['config:load-shared-automode', 'config:save-shared-automode'] as const
+
+/**
  * S4 — the vendor-OAuth / account-mutation / native-OAuth family (ADR-057).
  *
  * The FIFTH deliberate widening, and like the S1b sweep it declares `config`
@@ -1587,6 +1601,21 @@ const S4_VENDOR_CREDENTIAL_CHANNELS = [
   'vendor-auth:remove',
   'vendor-auth:set-key'
 ] as const
+
+/**
+ * ADR-065 phase 6 — the unified provider list.
+ *
+ * Its own line rather than a 23rd entry in {@link S4_VENDOR_CREDENTIAL_CHANNELS},
+ * which is the record of one dated sweep: this is a NEW channel, declared in the
+ * same shared module (`ipc/auth-commands.ts`) for the same reason that sweep
+ * moved there — the phone's provider page must read the same list the desktop
+ * does, and one declaration is what stops the two surfaces disagreeing.
+ *
+ * A `query` declaring `config`, so a base connection reaches it. It carries no
+ * key material: the shared definitions, opencode's catalog and pi's vendor
+ * entries reduce to names, counts, credential BADGES and per-engine chips.
+ */
+const PROVIDER_REGISTRY_CHANNELS = ['provider-registry:list'] as const
 
 /**
  * The redacted status READ (owner ruling, 2026-08-28) — the one `remote:*`
@@ -1662,7 +1691,9 @@ describe('remote surface parity (phase 1 port)', () => {
         ...AUTHCFG_CHANNELS,
         ...VOICE_CHANNELS,
         ...S1B_SWEEP_CHANNELS,
+        ...TRUST_LIST_CHANNELS,
         ...S4_VENDOR_CREDENTIAL_CHANNELS,
+        ...PROVIDER_REGISTRY_CHANNELS,
         ...REMOTE_VIEW_CHANNELS,
         ...IDE_CHANNELS
       ].sort()
@@ -1674,7 +1705,7 @@ describe('remote surface parity (phase 1 port)', () => {
     // authenticated connection reaches these. Asserted through the CAPABILITY
     // (what dispatch actually checks) rather than by calling every handler —
     // most of them would touch the real filesystem.
-    const caps = S1B_SWEEP_CHANNELS.map(
+    const caps = [...S1B_SWEEP_CHANNELS, ...TRUST_LIST_CHANNELS].map(
       (c) => [c, commandRegistry.declaration(c)?.capability] as const
     )
     const ungranted = caps.filter(([, cap]) => !cap || !AUTH_OFF_GRANTS.has(cap))
@@ -1696,6 +1727,20 @@ describe('remote surface parity (phase 1 port)', () => {
       capability: 'config',
       kind: 'query'
     })
+  })
+
+  it('the provider registry is a base-reachable `config` query (ADR-065 phase 6)', () => {
+    // The unified provider list must be readable by the same ordinary
+    // authenticated connection that reaches the writes behind its rows —
+    // otherwise the remote provider page renders nothing while every button on
+    // it would have worked.
+    for (const channel of PROVIDER_REGISTRY_CHANNELS) {
+      expect(commandRegistry.declaration(channel)).toMatchObject({
+        capability: 'config',
+        kind: 'query'
+      })
+      expect(AUTH_OFF_GRANTS.has(commandRegistry.declaration(channel)!.capability)).toBe(true)
+    }
   })
 
   it('automation:save dispatches over the remote transport, and fails closed without `config`', async () => {

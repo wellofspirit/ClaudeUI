@@ -320,6 +320,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     loadVendorConfig: (vendorId) => ipcRenderer.invoke('config:load-vendor-config', vendorId),
     saveVendorConfig: (vendorId, config) =>
       ipcRenderer.invoke('config:save-vendor-config', vendorId, config),
+    loadSharedAutoMode: () => ipcRenderer.invoke('config:load-shared-automode'),
+    saveSharedAutoMode: (config) => ipcRenderer.invoke('config:save-shared-automode', config),
     loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
     saveOpencodeSettings: (settings) => unwrap('config:save-opencode-settings', settings),
     readOpencodeNativeRaw: async () => ({ config: {}, path: '' }),
@@ -386,6 +388,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     logRelay: (level, source, message) => ipcRenderer.send('log:relay', level, source, message),
 
     getVersionInfo: () => ipcRenderer.invoke('app:version-info'),
+    listProviderRegistry: () => unwrap('provider-registry:list'),
     listSharedProviders: () => unwrap('shared-provider:list'),
     getSharedProviderStatuses: () => unwrap('shared-provider:statuses'),
     listSharedProviderModels: (id) => unwrap('shared-provider:models', id),
@@ -494,6 +497,7 @@ export async function bootTestApp(): Promise<TestApp> {
     'config:save-engine-config',
     'config:load-vendor-config',
     'config:save-vendor-config',
+    'config:save-shared-automode',
     'usage:fetch',
     'usage:fetch-block',
     'plugin:views',
@@ -503,6 +507,10 @@ export async function bootTestApp(): Promise<TestApp> {
   for (const channel of stubChannels) {
     bridge.ipcMain.handle(channel, async () => null)
   }
+  // The shared trust lists answer an OBJECT, not the `null` the inert stubs
+  // return: `TrustListsSection` renders its three list rows from it, and a null
+  // would leave every settings-page test parked in the loading row.
+  bridge.ipcMain.handle('config:load-shared-automode', async () => ({}))
   bridge.ipcMain.handle('config:save-sessions', async (_e: unknown, config: unknown) => {
     echo('config:sessions-changed', [config])
     return null

@@ -64,7 +64,12 @@ vi.mock('../../services/claude-settings', () => ({
   loadClaudePermissions: mockLoadClaudePermissions,
   saveClaudePermissions: vi.fn()
 }))
-vi.mock('../../services/ui-config', () => ({ loadEngineConfig: mockLoadEngineConfig }))
+vi.mock('../../services/ui-config', () => ({
+  loadEngineConfig: mockLoadEngineConfig,
+  // The engine-SHARED trust lists (ADR-065 phase 4) — a session derives them
+  // into its classifier environment, so the module double has to offer them.
+  loadSharedAutoModeConfig: () => ({})
+}))
 vi.mock('../model-discovery', () => ({
   getOpencodeModelContextWindow: vi.fn().mockReturnValue(0),
   getOpencodeModelCapabilities: vi.fn().mockReturnValue(undefined),

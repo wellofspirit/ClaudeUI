@@ -73,7 +73,9 @@ import {
   loadEngineConfig,
   saveEngineConfig,
   loadVendorConfig,
-  saveVendorConfig
+  saveVendorConfig,
+  loadSharedAutoModeConfig,
+  saveSharedAutoModeConfig
 } from '../services/ui-config'
 import type { SlashCommandCache } from '../services/ui-config'
 import {
@@ -114,6 +116,7 @@ import { assertSafeIdSegment } from '../services/path-containment'
 import type {
   EngineConfig,
   VendorConfig,
+  SharedAutoModeConfig,
   OpencodeConfigSettings,
   ProxySettings,
   RawConfigPatch
@@ -275,6 +278,51 @@ async function testProxyConnection(
 }
 
 // ---------------------------------------------------------------------------
+// Shared trust lists (ADR-065 phase 4)
+// ---------------------------------------------------------------------------
+
+/** The only three keys `config:save-shared-automode` may carry. */
+const SHARED_TRUST_KEYS = ['trustedDomains', 'trustedRegistries', 'protectedPatterns'] as const
+
+/**
+ * Validate the shared trust-list payload AT THE PERIMETER, for the same reason
+ * `engineId` is validated here: this is a remotely reachable `config` write, and
+ * what it writes is fed verbatim into the judge's prompt on the next session.
+ * Garbage in that file is not a crash — it is a silently mis-specified
+ * classifier environment, which is exactly the failure nobody notices.
+ *
+ * The shape is narrow on purpose: three OPTIONAL string arrays, each entry a
+ * non-empty trimmed string, and no other keys. An empty list is expressed by
+ * omitting the key (see {@link SharedAutoModeConfig}) — `[]` is accepted from a
+ * caller and normalised away by the service, so an older client cannot create a
+ * second encoding of "nothing is trusted".
+ */
+function assertSharedAutoModeConfig(value: unknown): asserts value is SharedAutoModeConfig {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Invalid shared auto-mode config: expected an object')
+  }
+  const allowed = new Set<string>(SHARED_TRUST_KEYS)
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) throw new Error(`Invalid shared auto-mode config: unknown key "${key}"`)
+  }
+  const record = value as Record<string, unknown>
+  for (const key of SHARED_TRUST_KEYS) {
+    const list = record[key]
+    if (list === undefined) continue
+    if (!Array.isArray(list)) {
+      throw new Error(`Invalid shared auto-mode config: "${key}" must be an array of strings`)
+    }
+    for (const entry of list) {
+      if (typeof entry !== 'string' || entry.trim() !== entry || entry === '') {
+        throw new Error(
+          `Invalid shared auto-mode config: "${key}" entries must be non-empty trimmed strings`
+        )
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The registrations
 // ---------------------------------------------------------------------------
 
@@ -357,6 +405,24 @@ export function configCommands(
         // an app restart).
         if (engineId === 'opencode') invalidateOpencodeModelCache()
         if (engineId === 'pi') invalidatePiModelCache()
+      }
+    },
+    // The engine-SHARED classifier trust lists. One file, no id in the path, so
+    // there is no traversal surface here — the payload shape is what needs
+    // guarding instead (see assertSharedAutoModeConfig).
+    {
+      channel: 'config:load-shared-automode',
+      capability: 'config',
+      kind: 'query',
+      handler: () => loadSharedAutoModeConfig()
+    },
+    {
+      channel: 'config:save-shared-automode',
+      capability: 'config',
+      kind: 'command',
+      handler: (cfg: SharedAutoModeConfig) => {
+        assertSharedAutoModeConfig(cfg)
+        saveSharedAutoModeConfig(cfg)
       }
     },
     {

@@ -368,7 +368,7 @@ function ModalityChips({
 
   return (
     <div className="flex items-center gap-1.5">
-      <span className="w-10 shrink-0 text-[10px] text-text-muted/70 capitalize">{direction}</span>
+      <span className="w-10 shrink-0 text-[11px] text-text-secondary capitalize">{direction}</span>
       <div className="flex flex-wrap gap-1.5">
         {MODALITIES.map((id) => {
           const on = selected.includes(id)
@@ -437,7 +437,7 @@ function LeafNumberGrid({
         const id = pathId(leaf.slice(1))
         return (
           <label key={field.key} className="min-w-0 block">
-            <span className="block text-[10px] text-text-muted/70 mb-0.5 truncate">
+            <span className="block text-[11px] text-text-secondary mb-0.5 truncate">
               {field.label}
             </span>
             <LeafNumberInput
@@ -491,7 +491,7 @@ function AdvancedLeaf({
   return (
     <div data-testid={`${TESTID}.rawLeaf`} data-id={leafKey} className="px-3 pb-1.5">
       <div className="text-[11px] text-text-secondary leading-snug">{label}</div>
-      <div className="mb-1 text-[10px] text-text-muted/60 leading-relaxed">
+      <div className="mb-1 text-[12px] text-text-secondary leading-relaxed">
         {helper} <span className="font-mono text-text-muted/80">{leafKey}</span>
       </div>
       {/* Keyed on the committed value so a successful write (or a delete)
@@ -526,7 +526,7 @@ function CapabilityRows({ api }: { api: ModelEntryApi }): React.JSX.Element {
         testidPrefix={TESTID}
         configKey="modalities"
         label="Modalities"
-        helper="Content types the model takes and returns; text only is what opencode assumes when the key is absent —"
+        helper="Content types the model takes and returns; text only is what opencode assumes when the key is absent."
         keyText="modalities.input / output"
         error={api.errorAt('modalities')}
       >
@@ -540,7 +540,7 @@ function CapabilityRows({ api }: { api: ModelEntryApi }): React.JSX.Element {
         testidPrefix={TESTID}
         configKey="cost"
         label="Pricing"
-        helper="$ per 1M tokens; input and output are written together —"
+        helper="$ per 1M tokens; input and output are written together."
         error={api.errorAt('cost')}
       >
         <div className="space-y-1">
@@ -562,7 +562,7 @@ function CapabilityRows({ api }: { api: ModelEntryApi }): React.JSX.Element {
               open={longContextOpen}
               onToggle={() => setLongContextOpen((o) => !o)}
             />
-            <div className="mt-0.5 text-[10px] text-text-muted/60 leading-relaxed">
+            <div className="mt-0.5 text-[12px] text-text-secondary leading-relaxed">
               Alternate rates for the whole request once input exceeds 200k tokens.{' '}
               <span className="font-mono text-text-muted/80">cost.context_over_200k</span>
             </div>
@@ -586,7 +586,7 @@ function CapabilityRows({ api }: { api: ModelEntryApi }): React.JSX.Element {
         testidPrefix={TESTID}
         configKey="limit"
         label="Limits"
-        helper="Tokens. Context window and max output are written together —"
+        helper="Tokens. Context window and max output are written together."
         error={api.errorAt('limit')}
       >
         <LeafNumberGrid
@@ -604,7 +604,7 @@ function CapabilityRows({ api }: { api: ModelEntryApi }): React.JSX.Element {
         testidPrefix={TESTID}
         configKey="advanced"
         label="Advanced"
-        helper="Free-form JSON leaves —"
+        helper="Free-form JSON leaves."
         keyText="options / headers / variants"
         error={
           // One shared slot: only one raw leaf can be in flight at a time.
@@ -672,7 +672,7 @@ export function ModelCapabilityEditor({
 
   const body =
     api.entry === null ? (
-      <div className="text-[10px] text-text-muted/60 px-3 py-1">Loading capabilities…</div>
+      <div className="text-[12px] text-text-secondary px-3 py-1">Loading capabilities…</div>
     ) : (
       <CapabilityRows api={api} />
     )
@@ -723,7 +723,7 @@ export function ModelCapabilityEditor({
       data-id={`${providerId}/${modelId}`}
       className="rounded bg-bg-primary/30 py-1"
     >
-      <div className="px-3 pb-0.5 text-[11px] uppercase tracking-wider text-text-muted/60">
+      <div className="px-3 pb-0.5 text-[11px] uppercase tracking-wider text-text-secondary">
         Capabilities
       </div>
       {body}

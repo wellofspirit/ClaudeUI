@@ -148,7 +148,10 @@ vi.mock('../../services/claude-settings', () => ({
 
 // Engine config drives auto-mode (full); mock so tests control it hermetically.
 vi.mock('../../services/ui-config', () => ({
-  loadEngineConfig: mockLoadEngineConfig
+  loadEngineConfig: mockLoadEngineConfig,
+  // The engine-SHARED trust lists (ADR-065 phase 4) — a session derives them
+  // into its classifier environment, so the module double has to offer them.
+  loadSharedAutoModeConfig: () => ({})
 }))
 
 // Model-discovery provides context-window sizes + per-model capabilities;

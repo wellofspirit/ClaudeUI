@@ -324,6 +324,12 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     channel: 'config:save-engine-config',
     args: ['opencode', { autoMode: { enabled: true } }]
   },
+  { method: 'loadSharedAutoMode', channel: 'config:load-shared-automode', args: [] },
+  {
+    method: 'saveSharedAutoMode',
+    channel: 'config:save-shared-automode',
+    args: [{ trustedDomains: ['files.acme.com'] }]
+  },
   { method: 'loadVendorConfig', channel: 'config:load-vendor-config', args: ['anthropic'] },
   {
     method: 'saveVendorConfig',
@@ -470,6 +476,11 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     channel: 'mcp:toggle-disabled',
     args: ['/repo/app', 'lsphub', true]
   },
+
+  // The unified provider list (ADR-065 phase 6) — a READ, declared in the same
+  // shared module as the writes below so the phone gets it too, and unwrapped
+  // because its handler is safeHandler-wrapped.
+  { method: 'listProviderRegistry', channel: 'provider-registry:list', args: [] },
 
   // Shared-provider writes — `config` since ADR-056, registered beside the three
   // reads that were already wired (`core/ipc/auth-commands.ts`).

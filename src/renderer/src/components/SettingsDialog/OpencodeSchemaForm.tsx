@@ -9,32 +9,47 @@
  *   string             → text input
  *   number / integer   → numeric input
  *   enum               → select
- *   array<string>      → tag input        array<enum> → checklist
+ *   array<string>      → tag input        array<enum> → chip set
  *   object w/ props    → nested fieldset (collapsible when > 4 fields)
  *   object w/ addl.    → Record key/value list (add / remove rows)
  *   anyOf/oneOf/unknown→ raw-JSON leaf editor (escape hatch — never crashes)
  *
  * Field LABELS are the raw opencode key names verbatim (tool_call, small_model, …)
- * — the raw names are the contract, so we never prettify them. Keys present in the
- * value but ABSENT from the schema render as read-only "unmanaged" rows (never
- * dropped, never editable).
+ * — the raw names are the contract, so we never prettify them, and they render in
+ * mono where every other page shows a prose label (ADR-065's `labelClassName`).
+ * The schema's own `description` is a VISIBLE 12px line rather than an ⓘ: a
+ * hover-only explanation is unreachable on a phone. Keys present in the value but
+ * ABSENT from the schema render as read-only "unmanaged" rows (never dropped,
+ * never editable).
  *
  * The form is fully controlled: it never mutates `value`; every edit produces a
  * new object passed to `onChange`.
  */
 
 import { useState } from 'react'
-import { SettingsToggle, SandboxListSetting, InfoTooltip } from './settings-controls'
-import { SelectMenu } from '../shared/SelectMenu'
+import {
+  Button,
+  ChipSet,
+  NumberField,
+  SandboxListSetting,
+  SelectField,
+  SettingRow,
+  SettingsToggle,
+  TextField
+} from './settings-controls'
 
 // The vendored schema is loosely typed; a schema node is an open bag of keywords.
 export type SchemaNode = Record<string, unknown>
 export type SchemaDefs = Record<string, SchemaNode>
 
-/** Shared input look. Exported so hand-written opencode panes match the
- *  schema-driven form's fields instead of re-deriving the class string. */
+/** Shared input look. Exported so the opencode/pi provider editors — which are
+ *  NOT part of the settings row vocabulary — match this form's older fields
+ *  instead of re-deriving the class string. */
 export const inputClass =
   'bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors'
+
+/** A label that IS a config key: mono, at the row label's size and contrast. */
+const KEY_LABEL_CLASS = 'font-mono text-[12px] text-text-primary'
 
 // ── Schema helpers ───────────────────────────────────────────────────────────
 
@@ -112,6 +127,11 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
 }
 
+/** The schema's `description`, when it has one worth showing. */
+function descriptionOf(text: unknown): string | undefined {
+  return typeof text === 'string' && text ? text : undefined
+}
+
 // ── Individual field ───────────────────────────────────────────────────────────
 
 interface FieldProps {
@@ -121,11 +141,6 @@ interface FieldProps {
   value: unknown
   onChange: (v: unknown) => void
   depth: number
-}
-
-function Description({ text }: { text?: unknown }): React.JSX.Element | null {
-  if (typeof text !== 'string' || !text) return null
-  return <div className="text-[10px] text-text-muted/60 mt-0.5 leading-relaxed">{text}</div>
 }
 
 /** The subset of `FieldProps` the raw-JSON leaf editor actually reads. Named so
@@ -169,54 +184,9 @@ export function RawJsonField({ fieldKey, value, onChange }: RawJsonFieldProps): 
         onBlur={commit}
         rows={Math.min(8, Math.max(2, text.split('\n').length))}
         spellCheck={false}
-        className={`${inputClass} w-full font-mono resize-y`}
+        className="w-full bg-bg-input border border-border rounded-md px-2.5 py-1.5 font-mono text-[12px] text-text-primary placeholder:text-text-muted outline-none focus:border-accent/50 transition-colors resize-y"
       />
-      {error && <div className="text-[10px] text-red-400 mt-0.5">JSON error: {error}</div>}
-    </div>
-  )
-}
-
-function EnumChecklist({
-  fieldKey,
-  options,
-  value,
-  onChange
-}: {
-  fieldKey: string
-  options: string[]
-  value: unknown
-  onChange: (v: unknown) => void
-}): React.JSX.Element {
-  const selected = Array.isArray(value) ? (value as string[]) : []
-  const toggle = (opt: string): void => {
-    const next = selected.includes(opt) ? selected.filter((v) => v !== opt) : [...selected, opt]
-    onChange(next.length > 0 ? next : undefined)
-  }
-  return (
-    <div
-      data-testid="OpencodeSchemaForm.enumArray"
-      data-id={fieldKey}
-      className="flex flex-wrap gap-1.5"
-    >
-      {options.map((opt) => {
-        const on = selected.includes(opt)
-        return (
-          <button
-            key={opt}
-            type="button"
-            data-id={opt}
-            aria-pressed={on}
-            onClick={() => toggle(opt)}
-            className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
-              on
-                ? 'bg-accent/20 text-accent border-accent/40'
-                : 'bg-bg-hover text-text-muted border-border hover:text-text-secondary'
-            }`}
-          >
-            {opt}
-          </button>
-        )
-      })}
+      {error && <div className="text-[12px] leading-4 text-danger mt-1">JSON error: {error}</div>}
     </div>
   )
 }
@@ -262,26 +232,24 @@ function RecordKeyInput({
 
   return (
     <div className="flex-1 min-w-0">
-      <input
-        type="text"
-        data-testid="OpencodeSchemaForm.recordKey"
-        data-id={recordKey}
+      <TextField
+        testid="OpencodeSchemaForm.recordKey"
+        dataId={recordKey}
         value={draft}
-        onChange={(e) => {
-          setDraft(e.target.value)
+        onChange={(v) => {
+          setDraft(v)
           setError(null)
         }}
         onBlur={commit}
         onKeyDown={(e) => {
           if (e.key === 'Enter') commit(e)
         }}
-        className={`${inputClass} w-full`}
       />
       {error && (
         <div
           data-testid="OpencodeSchemaForm.recordKeyError"
           data-id={recordKey}
-          className="text-[10px] text-red-400 mt-0.5"
+          className="text-[12px] leading-4 text-danger mt-1"
         >
           {error}
         </div>
@@ -327,7 +295,7 @@ function RecordField({ node, defs, fieldKey, value, onChange }: FieldProps): Rea
           key={key}
           data-testid="OpencodeSchemaForm.recordRow"
           data-id={key}
-          className="border border-border/30 rounded-md p-1.5 space-y-1"
+          className="border border-border rounded-md p-1.5 space-y-1"
         >
           <div className="flex items-center gap-1.5">
             <RecordKeyInput
@@ -335,16 +303,15 @@ function RecordField({ node, defs, fieldKey, value, onChange }: FieldProps): Rea
               siblingKeys={Object.keys(record).filter((k) => k !== key)}
               onRename={(newKey) => renameKey(key, newKey)}
             />
-            <button
-              type="button"
-              data-testid="OpencodeSchemaForm.recordRemove"
-              data-id={key}
+            <Button
+              variant="link"
+              testid="OpencodeSchemaForm.recordRemove"
+              dataId={key}
               onClick={() => removeKey(key)}
-              className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors px-1"
               title="Remove entry"
             >
               ✕
-            </button>
+            </Button>
           </div>
           <SchemaField
             node={entrySchema}
@@ -356,15 +323,14 @@ function RecordField({ node, defs, fieldKey, value, onChange }: FieldProps): Rea
           />
         </div>
       ))}
-      <button
-        type="button"
-        data-testid="OpencodeSchemaForm.recordAdd"
-        data-id={fieldKey}
+      <Button
+        variant="link"
+        testid="OpencodeSchemaForm.recordAdd"
+        dataId={fieldKey}
         onClick={addRow}
-        className="text-[11px] text-accent hover:text-accent/80 transition-colors"
       >
         + Add entry
-      </button>
+      </Button>
     </div>
   )
 }
@@ -396,16 +362,16 @@ function ObjectFieldset({
   if (keys.length <= 4 && depth === 0) return body
 
   return (
-    <div className="border-l border-border/30 pl-2">
-      <button
-        type="button"
-        data-testid="OpencodeSchemaForm.fieldsetToggle"
-        data-id={fieldKey}
+    <div className="border-l border-border pl-2">
+      <Button
+        variant="link"
+        testid="OpencodeSchemaForm.fieldsetToggle"
+        dataId={fieldKey}
+        ariaExpanded={open}
         onClick={() => setOpen((o) => !o)}
-        className="text-[10px] text-text-muted hover:text-text-secondary transition-colors"
       >
         {open ? '▾' : '▸'} {fieldKey}
-      </button>
+      </Button>
       {open && <div className="mt-1">{body}</div>}
     </div>
   )
@@ -415,84 +381,90 @@ export function SchemaField(props: FieldProps): React.JSX.Element {
   const { defs, fieldKey, value, onChange } = props
   const node = resolveNode(props.node, defs)
   const kind = detectKind(node, defs)
-  const description = node.description
+  const description = descriptionOf(node.description)
 
   switch (kind) {
     case 'boolean':
       return (
         <div data-testid="OpencodeSchemaForm.field" data-id={fieldKey}>
           <SettingsToggle
+            testid="OpencodeSchemaForm.bool"
+            dataId={fieldKey}
             label={fieldKey}
+            labelClassName={KEY_LABEL_CLASS}
+            description={description}
             checked={value === true}
             onChange={(v) => onChange(v)}
-            testid="OpencodeSchemaForm.bool"
           />
-          <div className="px-3">
-            <Description text={description} />
-          </div>
         </div>
       )
     case 'string':
       return (
-        <div data-testid="OpencodeSchemaForm.field" data-id={fieldKey} className="px-3 py-1.5">
-          <FieldLabel name={fieldKey} description={description} />
-          <input
-            type="text"
-            data-testid="OpencodeSchemaForm.text"
-            data-id={fieldKey}
+        <SettingRow
+          testid="OpencodeSchemaForm.field"
+          dataId={fieldKey}
+          layout="stacked"
+          label={fieldKey}
+          labelClassName={KEY_LABEL_CLASS}
+          description={description}
+        >
+          <TextField
+            testid="OpencodeSchemaForm.text"
+            dataId={fieldKey}
             value={typeof value === 'string' ? value : ''}
-            onChange={(e) => onChange(e.target.value === '' ? undefined : e.target.value)}
-            className={`${inputClass} w-full`}
+            onChange={(v) => onChange(v === '' ? undefined : v)}
           />
-        </div>
+        </SettingRow>
       )
     case 'number':
       return (
-        <div data-testid="OpencodeSchemaForm.field" data-id={fieldKey} className="px-3 py-1.5">
-          <FieldLabel name={fieldKey} description={description} />
-          <input
-            type="number"
-            data-testid="OpencodeSchemaForm.number"
-            data-id={fieldKey}
-            value={typeof value === 'number' ? value : ''}
-            onChange={(e) => {
-              const s = e.target.value
-              onChange(s === '' ? undefined : Number(s))
-            }}
-            className={`${inputClass} w-full tabular-nums`}
+        <SettingRow
+          testid="OpencodeSchemaForm.field"
+          dataId={fieldKey}
+          label={fieldKey}
+          labelClassName={KEY_LABEL_CLASS}
+          description={description}
+        >
+          <NumberField
+            testid="OpencodeSchemaForm.number"
+            dataId={fieldKey}
+            value={typeof value === 'number' ? value : undefined}
+            onChange={(v) => onChange(v)}
           />
-        </div>
+        </SettingRow>
       )
     case 'enum': {
       const options = (node.enum as unknown[]).map((v) => String(v))
+      // The schema's "unset" choice, explicit as it was in the markup.
+      const choices = [{ value: '', label: '—' }, ...options.map((o) => ({ value: o, label: o }))]
       return (
-        <div data-testid="OpencodeSchemaForm.field" data-id={fieldKey} className="px-3 py-1.5">
-          <FieldLabel name={fieldKey} description={description} />
-          <SelectMenu
+        <SettingRow
+          testid="OpencodeSchemaForm.field"
+          dataId={fieldKey}
+          label={fieldKey}
+          labelClassName={KEY_LABEL_CLASS}
+          description={description}
+        >
+          <SelectField
             testid="OpencodeSchemaForm.enum"
-            dataAttrs={{ 'data-id': fieldKey }}
+            dataId={fieldKey}
             value={value === undefined || value === null ? '' : String(value)}
             onChange={(v) => onChange(v === '' ? undefined : v)}
-            options={[
-              // The schema's "unset" choice, explicit as it was in the markup.
-              { value: '', label: '—' },
-              ...options.map((o) => ({ value: o, label: o }))
-            ]}
-            triggerClassName={`${inputClass} w-full`}
+            options={choices}
           />
-        </div>
+        </SettingRow>
       )
     }
     case 'stringArray':
       return (
-        <div data-testid="OpencodeSchemaForm.field" data-id={fieldKey} className="py-0.5">
+        <div data-testid="OpencodeSchemaForm.field" data-id={fieldKey}>
           <SandboxListSetting
             label={fieldKey}
-            labelColor="text-text-secondary"
+            labelColor={KEY_LABEL_CLASS}
             items={Array.isArray(value) ? (value as string[]) : []}
             placeholder="Add value…"
             onUpdate={(items) => onChange(items.length > 0 ? items : undefined)}
-            tooltip={typeof description === 'string' ? description : undefined}
+            description={description}
             testid="OpencodeSchemaForm.stringArray"
           />
         </div>
@@ -500,48 +472,86 @@ export function SchemaField(props: FieldProps): React.JSX.Element {
     case 'enumArray': {
       const items = resolveNode(node.items as SchemaNode, defs)
       const options = (items.enum as unknown[]).map((v) => String(v))
+      const selected = Array.isArray(value) ? (value as string[]) : []
       return (
-        <div data-testid="OpencodeSchemaForm.field" data-id={fieldKey} className="px-3 py-1.5">
-          <FieldLabel name={fieldKey} description={description} />
-          <EnumChecklist fieldKey={fieldKey} options={options} value={value} onChange={onChange} />
-        </div>
+        <SettingRow
+          testid="OpencodeSchemaForm.field"
+          dataId={fieldKey}
+          layout="stacked"
+          label={fieldKey}
+          labelClassName={KEY_LABEL_CLASS}
+          description={description}
+        >
+          <ChipSet
+            testid="OpencodeSchemaForm.enumArray"
+            value={selected}
+            options={options.map((o) => ({ value: o, label: o }))}
+            onToggle={(opt) => {
+              const next = selected.includes(opt)
+                ? selected.filter((v) => v !== opt)
+                : [...selected, opt]
+              onChange(next.length > 0 ? next : undefined)
+            }}
+          />
+        </SettingRow>
       )
     }
     case 'object':
       return (
-        <div data-testid="OpencodeSchemaForm.field" data-id={fieldKey} className="px-3 py-1.5">
+        <div
+          data-testid="OpencodeSchemaForm.field"
+          data-id={fieldKey}
+          className="px-3.5 py-2.5 min-h-[44px]"
+        >
           <FieldLabel name={fieldKey} description={description} />
           <ObjectFieldset {...props} node={node} />
         </div>
       )
     case 'record':
       return (
-        <div data-testid="OpencodeSchemaForm.field" data-id={fieldKey} className="px-3 py-1.5">
+        <div
+          data-testid="OpencodeSchemaForm.field"
+          data-id={fieldKey}
+          className="px-3.5 py-2.5 min-h-[44px]"
+        >
           <FieldLabel name={fieldKey} description={description} />
           <RecordField {...props} node={node} />
         </div>
       )
     default:
       return (
-        <div data-testid="OpencodeSchemaForm.field" data-id={fieldKey} className="px-3 py-1.5">
-          <FieldLabel name={fieldKey} description={description} />
+        <SettingRow
+          testid="OpencodeSchemaForm.field"
+          dataId={fieldKey}
+          layout="stacked"
+          label={fieldKey}
+          labelClassName={KEY_LABEL_CLASS}
+          description={description}
+        >
           <RawJsonField fieldKey={fieldKey} value={value} onChange={onChange} />
-        </div>
+        </SettingRow>
       )
   }
 }
 
+/**
+ * The heading of a CONTAINER (a nested object, a Record) — not a row, so it is
+ * typed like one rather than drawn through `SettingRow`: the rows it contains
+ * are the settings.
+ */
 function FieldLabel({
   name,
   description
 }: {
   name: string
-  description?: unknown
+  description?: string
 }): React.JSX.Element {
   return (
-    <div className="mb-1 flex items-center gap-1">
-      <span className="font-mono text-[12px] text-text-secondary">{name}</span>
-      {typeof description === 'string' && description && <InfoTooltip text={description} />}
+    <div className="mb-1.5">
+      <div className={`${KEY_LABEL_CLASS} leading-[18px]`}>{name}</div>
+      {description && (
+        <div className="text-[12px] leading-4 text-text-secondary">{description}</div>
+      )}
     </div>
   )
 }
@@ -580,7 +590,7 @@ function ObjectFields({
   }
 
   return (
-    <div className="space-y-0.5">
+    <div className={depth === 0 ? 'divide-y divide-border/55' : 'space-y-0.5'}>
       {renderKeys.map((key) => (
         <SchemaField
           key={key}
@@ -593,22 +603,20 @@ function ObjectFields({
         />
       ))}
       {unmanaged.map((key) => (
-        <div
+        <SettingRow
           key={key}
-          data-testid="OpencodeSchemaForm.unmanaged"
-          data-id={key}
-          className="px-3 py-1.5 text-[11px]"
+          testid="OpencodeSchemaForm.unmanaged"
+          dataId={key}
+          layout="stacked"
+          dimmed
+          label={key}
+          labelClassName={KEY_LABEL_CLASS}
+          description="Unmanaged — not in opencode's schema, and kept in the file exactly as written."
         >
-          <div className="flex items-center gap-1.5">
-            <span className="font-mono text-[12px] text-text-muted">{key}</span>
-            <span className="text-[9px] px-1 py-0.5 rounded bg-bg-hover text-text-muted/70 uppercase tracking-wide">
-              unmanaged
-            </span>
-          </div>
-          <pre className="mt-0.5 text-[10px] text-text-muted/60 overflow-x-auto whitespace-pre-wrap break-all">
+          <span className="block font-mono text-[11px] leading-4 text-text-muted overflow-x-auto whitespace-pre-wrap break-all">
             {JSON.stringify(value[key])}
-          </pre>
-        </div>
+          </span>
+        </SettingRow>
       ))}
     </div>
   )

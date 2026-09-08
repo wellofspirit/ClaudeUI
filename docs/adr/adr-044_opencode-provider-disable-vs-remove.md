@@ -125,6 +125,12 @@ gained `.open` for its hit area, and `data-disabled` moved onto the shared row
 card. Icons are hand-rolled inline SVG; no icon dependency was added for two
 glyphs.
 
+> Superseded surface (ADR-065 phase 6c, 2026-09-08): `VendorOpencodeSection` and its row are
+> retired. The same two verbs live on the unified provider list's Manage sheet — the reversible veto
+> is `ProviderSheet.engineToggle[data-id=opencode]` (`session:set-opencode-provider-disabled`), the
+> destructive one is `ProviderSheet.remove` with the entry's own `removeKind`
+> (`session:remove-opencode-provider`) — still two different controls, per this ADR's split.
+
 ### 5. Shared-provider collisions are surfaced, not silently lost
 
 When an enabled shared-provider route vends a vendor id (`chatgpt` → `openai`),

@@ -9,6 +9,7 @@ import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import { resolvePiCapabilities } from '../../shared/model-capabilities'
 import type {
   AutoModeConfig,
+  SharedAutoModeConfig,
   ChatMessage,
   ContentBlock,
   SessionStatus,
@@ -106,7 +107,7 @@ import {
   type ToolOutcome
 } from '../automode/ground-truth'
 import { PiJudge } from './pi-judge'
-import { loadEngineConfig } from '../services/ui-config'
+import { loadEngineConfig, loadSharedAutoModeConfig } from '../services/ui-config'
 import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
 import {
   suggestionDestinationToScope,
@@ -334,6 +335,10 @@ export class PiSession extends BaseSession {
   // ── Auto mode (`auto`/`full`) LLM gatekeeper — phase 4 ───────────────────────
   /** Memoized `engines/pi.json#autoMode` (see autoModeConfig()). */
   private _autoModeConfig: AutoModeConfig | undefined
+  /** Memoized `~/.claude/ui/automode.json` — the engine-SHARED trust lists
+   *  (ADR-065 phase 4). Same lifetime as `_autoModeConfig`: one read per
+   *  session, and a mid-session edit is not hot-reloaded. */
+  private _sharedAutoMode: SharedAutoModeConfig | undefined
   /** Denial caps — 3 consecutive / 2 same-rule / 20 total blocks hand control
    *  back to the human. Shared with opencode (automode/denial-tracker.ts). */
   private autoDenials = new AutoModeDenialTracker()
@@ -1960,6 +1965,21 @@ export class PiSession extends BaseSession {
     return this._autoModeConfig
   }
 
+  /** The engine-shared trust lists, DERIVED into this session's classifier
+   *  environment at session start (ADR-065 § Shared trust lists). One file for
+   *  every engine, so they are read from there rather than from
+   *  `autoModeConfig()`, which is pi's own judge block. */
+  private sharedAutoModeConfig(): SharedAutoModeConfig {
+    if (this._sharedAutoMode === undefined) {
+      try {
+        this._sharedAutoMode = loadSharedAutoModeConfig()
+      } catch {
+        this._sharedAutoMode = {}
+      }
+    }
+    return this._sharedAutoMode
+  }
+
   /** Auto mode is active for `auto`/`full` autonomy unless explicitly disabled. */
   private isAutoMode(mode: string): boolean {
     return (mode === 'full' || mode === 'auto') && this.autoModeConfig().enabled !== false
@@ -1992,9 +2012,9 @@ export class PiSession extends BaseSession {
   }
 
   /** Host-supplied ground truth for the classifier's Environment section. Trust
-   *  slots come from the user's engine config and default to EMPTY — the policy
-   *  renders "nothing is trusted" for an empty slot, so omitting a list is the
-   *  restrictive choice.
+   *  slots come from the engine-SHARED `~/.claude/ui/automode.json` and default
+   *  to EMPTY — the policy renders "nothing is trusted" for an empty slot, so
+   *  omitting a list is the restrictive choice.
    *
    *  pi has no `additionalDirectories` enforcement of its own
    *  (permission-engine.ts documents the deliberate deferral), but the user's
@@ -2002,7 +2022,7 @@ export class PiSession extends BaseSession {
    *  user grant?", so it is reported to the judge exactly as opencode reports
    *  it. */
   private async classifierEnvironment(): Promise<EnvironmentInfo> {
-    const cfg = this.autoModeConfig()
+    const trust = this.sharedAutoModeConfig()
     const rules = this.currentRules()
     const additionalDirectories = [...new Set(rules.additionalDirectories)]
     const remotes = await this.sessionGitRemotes()
@@ -2013,9 +2033,9 @@ export class PiSession extends BaseSession {
       ...(remotes.length ? { remotes } : {}),
       ...(visibility && visibility !== 'unknown' ? { repoVisibility: visibility } : {}),
       ...(additionalDirectories.length ? { additionalDirectories } : {}),
-      ...(cfg.trustedDomains?.length ? { trustedDomains: cfg.trustedDomains } : {}),
-      ...(cfg.trustedRegistries?.length ? { trustedRegistries: cfg.trustedRegistries } : {}),
-      ...(cfg.protectedPatterns?.length ? { protectedPatterns: cfg.protectedPatterns } : {})
+      ...(trust.trustedDomains?.length ? { trustedDomains: trust.trustedDomains } : {}),
+      ...(trust.trustedRegistries?.length ? { trustedRegistries: trust.trustedRegistries } : {}),
+      ...(trust.protectedPatterns?.length ? { protectedPatterns: trust.protectedPatterns } : {})
     }
   }
 

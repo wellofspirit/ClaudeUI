@@ -398,7 +398,12 @@ vi.mock('../../services/claude-settings', () => ({
 }))
 // Engine config drives auto mode (phase 4) — and model-discovery's model
 // allowlist. Mocked so both are hermetic.
-vi.mock('../../services/ui-config', () => ({ loadEngineConfig: mockLoadEngineConfig }))
+vi.mock('../../services/ui-config', () => ({
+  loadEngineConfig: mockLoadEngineConfig,
+  // The engine-SHARED trust lists (ADR-065 phase 4) — a session derives them
+  // into its classifier environment, so the module double has to offer them.
+  loadSharedAutoModeConfig: () => ({})
+}))
 
 import { PiSession } from '../PiSession'
 

@@ -1,10 +1,15 @@
 /**
  * OpencodeAgents — full CRUD UI for opencode custom and built-in agents.
  *
- * Renders inside the Settings › Agents section. Self-gates on opencode
+ * Renders inside the opencode page's Agents group. Self-gates on opencode
  * installation. Supports creating, editing, disabling, resetting, and
  * deleting agents with scope (global / project), mode, model, system
  * prompt, tool permissions, advanced params, and appearance settings.
+ *
+ * Two views share the group card: a LIST of agents (each a row of the ADR-065
+ * vocabulary, drilling in on click) and an EDITOR. The editor scrolls with the
+ * page rather than owning its own scroller — the settings shell is one scrolling
+ * page now, so a nested `overflow-y-auto` would trap the form in a short box.
  */
 
 import { useState, useEffect } from 'react'
@@ -17,34 +22,32 @@ import type {
   ModelInfo
 } from '../../../../shared/types'
 import { useActiveSession } from '../../stores/session-store'
-import { SettingsSlider } from './settings-controls'
-import { SelectMenu } from '../shared/SelectMenu'
+import {
+  Button,
+  NumberField,
+  Segmented,
+  SelectField,
+  SettingRow,
+  SettingsSlider,
+  SettingsTextarea,
+  SettingsToggle,
+  TextField
+} from './settings-controls'
+import { useOpencodeInstalled } from './use-engine-installed'
 
-// ── useOpencodeInstalled ─────────────────────────────────────────────
+// ── Shared look ──────────────────────────────────────────────────────
 
-function useOpencodeInstalled(): boolean | null {
-  const [installed, setInstalled] = useState<boolean | null>(null)
-  useEffect(() => {
-    let cancelled = false
-    window.api
-      .engineIsInstalled('opencode')
-      .then((v) => {
-        if (!cancelled) setInstalled(v)
-      })
-      .catch(() => {
-        if (!cancelled) setInstalled(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
-  return installed
-}
+const TESTID = 'OpencodeAgentsSection'
 
-// ── Shared inputClass ────────────────────────────────────────────────
+/** The vocabulary's inline state badge (the shape `SettingRow` uses). */
+const BADGE =
+  'shrink-0 rounded-full px-[7px] text-[10.5px] leading-4 font-semibold tracking-[0.02em]'
 
-const inputClass =
-  'bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors'
+/** A group sub-caption inside the card (11px / 600 / caps, as on the boards). */
+const CAPTION = 'text-[11px] font-semibold uppercase tracking-[0.04em] text-text-secondary'
+
+/** A disclosure summary — not a row, so it borrows the description's type. */
+const FIELD_HELP = 'text-[12px] leading-4 text-text-secondary'
 
 // ── View state machine ───────────────────────────────────────────────
 
@@ -135,24 +138,37 @@ function detailToDraft(detail: OpencodeAgentDetail): Draft {
   }
 }
 
-// ── Mode badge colors ────────────────────────────────────────────────
-
-function ModeBadge({ mode }: { mode: OpencodeAgentMode }): React.JSX.Element {
-  const colors: Record<OpencodeAgentMode, string> = {
-    primary: 'bg-amber-500/15 text-amber-400',
-    subagent: 'bg-blue-500/15 text-blue-400',
-    all: 'bg-purple-500/15 text-purple-400'
-  }
-  return (
-    <span
-      className={`text-[9px] px-1.5 py-0.5 rounded-full font-medium uppercase tracking-wide ${colors[mode]}`}
-    >
-      {mode}
-    </span>
-  )
-}
+/** An optional numeric draft field, kept as text so "unset" stays distinct from 0. */
+const numDraft = (s: string): number | undefined => (s === '' ? undefined : Number(s))
+const numText = (v: number | undefined): string => (v === undefined ? '' : String(v))
 
 // ── List view ────────────────────────────────────────────────────────
+
+function ModeBadge({ mode }: { mode: OpencodeAgentMode }): React.JSX.Element {
+  // A subagent is the quieter of the two: it is only reachable through the task
+  // tool, so it never competes with the primary agents for attention.
+  const look =
+    mode === 'subagent' ? 'bg-text-muted/20 text-text-secondary' : 'bg-accent/15 text-accent'
+  return <span className={`${BADGE} ${look}`}>{mode}</span>
+}
+
+function Chevron(): React.JSX.Element {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="shrink-0 text-text-muted"
+    >
+      <polyline points="9 18 15 12 9 6" />
+    </svg>
+  )
+}
 
 interface ListViewProps {
   cwd: string
@@ -187,110 +203,68 @@ function ListView({ cwd, refresh, onEdit, onNew }: ListViewProps): React.JSX.Ele
   const custom = agents.filter((a) => a.kind === 'custom')
   const builtin = agents.filter((a) => a.kind === 'builtin')
 
-  if (loading) {
-    return <div className="px-3 py-2 text-[12px] text-text-muted">Loading agents…</div>
-  }
+  if (loading) return <SettingRow description="Loading agents…" />
 
   const renderRow = (a: OpencodeAgentSummary): React.JSX.Element => (
-    <button
+    <SettingRow
       key={`${a.kind}-${a.name}`}
-      data-testid="OpencodeAgentsSection.agentRow"
-      data-id={a.name}
+      as="button"
+      testid={`${TESTID}.agentRow`}
+      dataId={a.name}
       onClick={() => onEdit(a.name, a.scope ?? 'global')}
-      className={`w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-bg-hover rounded transition-colors cursor-default ${a.disabled ? 'opacity-55' : ''}`}
+      label={a.name}
+      labelClassName={a.disabled ? 'text-text-secondary line-through' : undefined}
+      description={a.model || undefined}
+      className="hover:bg-bg-hover/40 transition-colors"
+      leading={
+        <span
+          className="w-2 h-2 shrink-0 rounded-full"
+          style={{ backgroundColor: a.color || 'var(--color-text-muted)' }}
+        />
+      }
     >
-      {/* Color dot */}
-      <span
-        className="w-2 h-2 rounded-full shrink-0"
-        style={{ backgroundColor: a.color || '#6b7280' }}
-      />
-
-      {/* Name */}
-      <span
-        className={`text-[12px] text-text-secondary flex-1 min-w-0 truncate ${a.disabled ? 'line-through' : ''}`}
-      >
-        {a.name}
-      </span>
-
-      {/* Badges */}
-      <span className="flex items-center gap-1 shrink-0">
-        <ModeBadge mode={a.mode} />
-
-        {a.kind === 'custom' && (
-          <span
-            className={`text-[9px] px-1.5 py-0.5 rounded-full font-medium uppercase tracking-wide ${
-              (a.scope ?? 'global') === 'global'
-                ? 'bg-gray-500/15 text-gray-400'
-                : 'bg-purple-500/15 text-purple-400'
-            }`}
-          >
-            {a.scope ?? 'global'}
-          </span>
-        )}
-
-        {a.overridden && (
-          <span className="text-[9px] px-1.5 py-0.5 rounded-full font-medium bg-green-500/15 text-green-400 uppercase tracking-wide">
-            overridden
-          </span>
-        )}
-
-        {a.disabled && (
-          <span className="text-[9px] px-1.5 py-0.5 rounded-full font-medium bg-red-500/15 text-red-400 uppercase tracking-wide">
-            disabled
-          </span>
-        )}
-      </span>
-
-      {/* Model sub-text */}
-      {a.model && (
-        <span className="text-[10px] text-text-muted/60 shrink-0 max-w-[80px] truncate">
-          {a.model}
+      <ModeBadge mode={a.mode} />
+      {a.kind === 'custom' && (
+        <span
+          className={`${BADGE} border border-border font-normal text-text-secondary`}
+          data-id={a.scope ?? 'global'}
+        >
+          {a.scope ?? 'global'}
         </span>
       )}
-
-      {/* Chevron */}
-      <span className="text-text-muted/40 text-[10px] shrink-0">›</span>
-    </button>
+      {a.overridden && <span className={`${BADGE} bg-success/15 text-success`}>overridden</span>}
+      {a.disabled && <span className={`${BADGE} bg-danger/15 text-danger`}>disabled</span>}
+      <Chevron />
+    </SettingRow>
   )
 
   return (
-    <div className="space-y-1">
-      {/* New agent button */}
-      <div className="px-3 py-1.5 flex items-center justify-between">
-        <span className="text-[11px] text-text-muted/60 uppercase tracking-wide">Agents</span>
-        <button
-          data-testid="OpencodeAgentsSection.newAgent"
-          onClick={onNew}
-          className="text-[11px] text-accent hover:text-accent/80 transition-colors"
-        >
+    <>
+      <div className="px-3.5 py-2 flex items-center justify-between gap-4">
+        <span className={CAPTION}>Agents</span>
+        <Button variant="tinted" testid={`${TESTID}.newAgent`} onClick={onNew}>
           + New agent
-        </button>
+        </Button>
       </div>
 
       {custom.length > 0 && (
-        <div>
-          <div className="px-3 py-1 text-[10px] text-text-muted/50 uppercase tracking-wide">
-            Custom
-          </div>
+        <>
+          <div className={`px-3.5 py-1.5 ${CAPTION}`}>Custom</div>
           {custom.map(renderRow)}
-        </div>
+        </>
       )}
 
       {builtin.length > 0 && (
-        <div>
-          <div className="px-3 py-1 text-[10px] text-text-muted/50 uppercase tracking-wide">
-            Built-in
-          </div>
+        <>
+          <div className={`px-3.5 py-1.5 ${CAPTION}`}>Built-in</div>
           {builtin.map(renderRow)}
-        </div>
+        </>
       )}
 
       {agents.length === 0 && (
-        <div className="px-3 py-2 text-[12px] text-text-muted/60">
-          No agents found. Create a custom agent or opencode has no built-in agents loaded.
-        </div>
+        <SettingRow description="No agents found. Create a custom agent, or opencode has no built-in agents loaded." />
       )}
-    </div>
+    </>
   )
 }
 
@@ -302,23 +276,24 @@ interface PermGridProps {
 }
 
 function PermGrid({ grid, onChange }: PermGridProps): React.JSX.Element {
-  const btnCls = (active: boolean, variant: 'allow' | 'ask' | 'deny'): string => {
-    const base = 'w-6 h-5 text-[9px] font-medium rounded transition-colors cursor-default'
-    if (!active) return `${base} bg-bg-primary/30 text-text-muted/40 hover:bg-bg-hover`
-    if (variant === 'allow') return `${base} bg-green-500/20 text-green-400`
-    if (variant === 'ask') return `${base} bg-amber-500/20 text-amber-400`
-    return `${base} bg-red-500/20 text-red-400`
+  const btnCls = (active: boolean, variant: PermAction): string => {
+    const base = 'w-7 h-6 text-[12px] font-medium rounded transition-colors cursor-default'
+    if (!active) return `${base} bg-bg-input text-text-muted hover:bg-bg-hover`
+    if (variant === 'allow') return `${base} bg-success/15 text-success`
+    if (variant === 'ask') return `${base} bg-warning/15 text-warning`
+    return `${base} bg-danger/15 text-danger`
   }
 
   return (
-    <div className="space-y-1 mt-1">
+    <div className="space-y-1">
       {PERM_CATS.map((cat) => {
         const current = grid[cat] ?? 'allow'
         return (
           <div key={cat} className="flex items-center gap-2">
-            <span className="text-[11px] text-text-muted w-24 shrink-0">{cat}</span>
+            <span className="w-24 shrink-0 text-[12px] text-text-secondary">{cat}</span>
             <div className="flex items-center gap-0.5">
               <button
+                type="button"
                 className={btnCls(current === 'allow', 'allow')}
                 onClick={() => onChange(cat, 'allow')}
                 title="Allow"
@@ -326,6 +301,7 @@ function PermGrid({ grid, onChange }: PermGridProps): React.JSX.Element {
                 A
               </button>
               <button
+                type="button"
                 className={btnCls(current === 'ask', 'ask')}
                 onClick={() => onChange(cat, 'ask')}
                 title="Ask"
@@ -333,6 +309,7 @@ function PermGrid({ grid, onChange }: PermGridProps): React.JSX.Element {
                 ?
               </button>
               <button
+                type="button"
                 className={btnCls(current === 'deny', 'deny')}
                 onClick={() => onChange(cat, 'deny')}
                 title="Deny"
@@ -402,17 +379,14 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  if (loading) {
-    return <div className="px-3 py-2 text-[12px] text-text-muted">Loading agent…</div>
-  }
+  if (loading) return <SettingRow description="Loading agent…" />
   if (loadError) {
     return (
-      <div className="px-3 py-2 text-[12px] text-text-muted/70">
-        Failed to load agent.{' '}
-        <button onClick={onBack} className="text-accent hover:underline">
+      <SettingRow description="Failed to load this agent.">
+        <Button variant="link" onClick={onBack}>
           Go back
-        </button>
-      </div>
+        </Button>
+      </SettingRow>
     )
   }
 
@@ -540,349 +514,266 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
   const projectDisabled = !cwd
 
   return (
-    <div className="flex flex-col h-full" data-testid="OpencodeAgentsSection.editor">
-      {/* Back link */}
-      <div className="px-3 py-1.5 flex items-center gap-1 shrink-0">
-        <button
-          data-testid="OpencodeAgentsSection.back"
-          onClick={onBack}
-          className="text-[11px] text-text-muted/60 hover:text-text-secondary transition-colors cursor-default"
-        >
+    <div data-testid={`${TESTID}.editor`}>
+      <div className="px-3.5 py-2">
+        <Button variant="link" testid={`${TESTID}.back`} onClick={onBack}>
           ‹ Agents
-        </button>
+        </Button>
       </div>
 
-      {/* Scrollable form area */}
-      <div className="flex-1 overflow-y-auto space-y-1 pb-2">
-        {/* Built-in banner */}
-        {isBuiltin && (
-          <div className="mx-3 px-2 py-1.5 bg-amber-500/10 border border-amber-500/20 rounded text-[11px] text-amber-400/80 leading-relaxed">
-            Overriding built-in <strong>{view.mode === 'edit' ? view.name : ''}</strong> — unset
-            fields use opencode&apos;s defaults.
-          </div>
-        )}
+      {isBuiltin && (
+        <SettingRow
+          description={`Overriding the built-in ${view.mode === 'edit' ? view.name : ''} agent — fields left unset use opencode's defaults.`}
+        />
+      )}
 
-        {/* Name */}
-        <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-          <div className="mb-1">Name</div>
-          <input
-            type="text"
-            value={draft.name}
-            readOnly={isBuiltin}
-            onChange={(e) => update({ name: e.target.value })}
-            placeholder="my-agent"
-            className={`${inputClass} w-full ${isBuiltin ? 'opacity-60 cursor-default' : ''}`}
+      <SettingRow
+        layout="stacked"
+        label="Name"
+        description="Lowercase letters, digits and dashes."
+        keyText={filePath}
+        error={nameError ?? undefined}
+      >
+        <TextField
+          value={draft.name}
+          disabled={isBuiltin}
+          onChange={(v) => update({ name: v })}
+          placeholder="my-agent"
+        />
+      </SettingRow>
+
+      <SettingRow
+        label="Scope"
+        description={
+          projectDisabled
+            ? 'Open a project session to write a project-scoped agent.'
+            : 'Global agents are available everywhere; project agents live in this working directory.'
+        }
+      >
+        <Segmented
+          value={draft.scope}
+          onChange={(s) => update({ scope: s })}
+          options={[
+            { value: 'global' as OpencodeAgentScope, label: 'Global' },
+            { value: 'project' as OpencodeAgentScope, label: 'Project', disabled: projectDisabled }
+          ]}
+        />
+      </SettingRow>
+
+      <SettingRow
+        layout="stacked"
+        label="Generate with AI"
+        description="Describe what the agent should do and the model drafts its name, description and prompt."
+        error={genError ?? undefined}
+      >
+        <span className="flex items-center gap-2">
+          <TextField
+            mono={false}
+            className="flex-1 min-w-0"
+            value={genDesc}
+            onChange={setGenDesc}
+            placeholder="Describe what this agent should do…"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !generating) void handleGenerate()
+            }}
           />
-          {nameError && <div className="text-[10px] text-red-400 mt-0.5">{nameError}</div>}
-          <div className="text-[10px] text-text-muted/50 mt-1 font-mono truncate">{filePath}</div>
-        </div>
-
-        {/* Scope */}
-        <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-          <div className="mb-1">Scope</div>
-          <div className="flex items-center gap-0.5 bg-bg-primary/50 rounded-md p-0.5">
-            {(['global', 'project'] as OpencodeAgentScope[]).map((s) => (
-              <button
-                key={s}
-                disabled={s === 'project' && projectDisabled}
-                onClick={() => update({ scope: s })}
-                className={`flex-1 text-[11px] py-1 rounded transition-colors ${
-                  draft.scope === s
-                    ? 'bg-accent/20 text-accent'
-                    : 'text-text-muted hover:text-text-secondary hover:bg-white/5'
-                } disabled:opacity-40 disabled:cursor-not-allowed`}
-              >
-                {s === 'global' ? 'Global' : 'Project'}
-              </button>
-            ))}
-          </div>
-          {draft.scope === 'project' && !cwd && (
-            <div className="text-[10px] text-text-muted/50 mt-0.5">
-              Open a project session to use project scope
-            </div>
-          )}
-        </div>
-
-        {/* Generate with AI */}
-        <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-          <div className="mb-1 text-[11px] text-text-muted/70 uppercase tracking-wide">
-            Generate with AI
-          </div>
-          <div className="flex gap-1.5">
-            <input
-              type="text"
-              value={genDesc}
-              onChange={(e) => setGenDesc(e.target.value)}
-              placeholder="Describe what this agent should do…"
-              className={`${inputClass} flex-1`}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !generating) void handleGenerate()
-              }}
-            />
-            <button
-              data-testid="OpencodeAgentsSection.generate"
-              onClick={() => void handleGenerate()}
-              disabled={generating || !genDesc.trim()}
-              className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            >
-              {generating ? 'Generating…' : 'Generate'}
-            </button>
-          </div>
-          {genError && <div className="text-[10px] text-red-400 mt-0.5">{genError}</div>}
-        </div>
-
-        {/* Description */}
-        <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-          <div className="mb-1">Description</div>
-          <textarea
-            value={draft.description}
-            onChange={(e) => update({ description: e.target.value })}
-            placeholder="When to use this agent…"
-            rows={2}
-            spellCheck={false}
-            className={`${inputClass} w-full resize-none`}
-          />
-        </div>
-
-        {/* Mode */}
-        <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-          <div className="mb-1">Mode</div>
-          <div className="flex items-center gap-0.5 bg-bg-primary/50 rounded-md p-0.5">
-            {(['primary', 'subagent', 'all'] as OpencodeAgentMode[]).map((m) => (
-              <button
-                key={m}
-                onClick={() => update({ mode: m })}
-                className={`flex-1 text-[11px] py-1 rounded transition-colors capitalize ${
-                  draft.mode === m
-                    ? 'bg-accent/20 text-accent'
-                    : 'text-text-muted hover:text-text-secondary hover:bg-white/5'
-                }`}
-              >
-                {m === 'primary' ? 'Primary' : m === 'subagent' ? 'Subagent' : 'All'}
-              </button>
-            ))}
-          </div>
-          {draft.mode === 'subagent' && (
-            <div className="text-[10px] text-text-muted/50 mt-0.5">
-              Subagent → callable via the task tool.
-            </div>
-          )}
-        </div>
-
-        {/* Model */}
-        <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-          <div className="mb-1">Model</div>
-          <SelectMenu
-            testid="OpencodeAgentsSection.model"
-            value={draft.model}
-            onChange={(v) => update({ model: v })}
-            options={modelOptions}
-            triggerClassName={`${inputClass} w-full`}
-          />
-        </div>
-
-        {/* System prompt */}
-        <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-          <div className="mb-1">System prompt</div>
-          <textarea
-            value={draft.prompt}
-            onChange={(e) => update({ prompt: e.target.value })}
-            placeholder="You are an agent that…"
-            rows={5}
-            spellCheck={false}
-            className={`${inputClass} w-full resize-y font-mono`}
-          />
-        </div>
-
-        {/* Tool permissions collapsible */}
-        <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-          <button
-            data-testid="OpencodeAgentsSection.permToggle"
-            onClick={() => update({ restrict: !draft.restrict })}
-            className="w-full flex items-center justify-between py-1 cursor-default"
+          <Button
+            testid={`${TESTID}.generate`}
+            onClick={() => void handleGenerate()}
+            disabled={generating || !genDesc.trim()}
           >
-            <span className="text-[12px]">Restrict tool permissions</span>
-            <span
-              className={`w-7 h-4 rounded-full relative transition-colors ${draft.restrict ? 'bg-accent' : 'bg-text-muted/30'}`}
-            >
-              <span
-                className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${draft.restrict ? 'left-3.5' : 'left-0.5'}`}
-              />
-            </span>
-          </button>
-          {draft.restrict ? (
+            {generating ? 'Generating…' : 'Generate'}
+          </Button>
+        </span>
+      </SettingRow>
+
+      <SettingsTextarea
+        label="Description"
+        description="When the model should reach for this agent."
+        value={draft.description}
+        placeholder="When to use this agent…"
+        rows={2}
+        onChange={(v) => update({ description: v })}
+      />
+
+      <SettingRow
+        label="Mode"
+        description="A subagent is only reachable through the task tool; all is both."
+      >
+        <Segmented
+          value={draft.mode}
+          onChange={(m) => update({ mode: m })}
+          options={[
+            { value: 'primary' as OpencodeAgentMode, label: 'Primary' },
+            { value: 'subagent' as OpencodeAgentMode, label: 'Subagent' },
+            { value: 'all' as OpencodeAgentMode, label: 'All' }
+          ]}
+        />
+      </SettingRow>
+
+      <SettingRow layout="stacked" label="Model" description="Unset inherits the session's model.">
+        <SelectField
+          testid={`${TESTID}.model`}
+          width="w-full"
+          value={draft.model}
+          onChange={(v) => update({ model: v })}
+          options={modelOptions}
+        />
+      </SettingRow>
+
+      <SettingsTextarea
+        label="System prompt"
+        description="Replaces opencode's own prompt for this agent."
+        value={draft.prompt}
+        placeholder="You are an agent that…"
+        rows={5}
+        monospace
+        onChange={(v) => update({ prompt: v })}
+      />
+
+      <div>
+        <SettingsToggle
+          testid={`${TESTID}.permToggle`}
+          label="Restrict tool permissions"
+          description="Off inherits the session's autonomy mode and the auto gatekeeper."
+          checked={draft.restrict}
+          onChange={(v) => update({ restrict: v })}
+        />
+        {draft.restrict && (
+          <div className="px-3.5 pb-2.5">
             <PermGrid
               grid={draft.permGrid}
               onChange={(cat, action) => update({ permGrid: { ...draft.permGrid, [cat]: action } })}
             />
-          ) : (
-            <div className="text-[10px] text-text-muted/50 mt-0.5">
-              Inherits from the session&apos;s autonomy mode + auto gatekeeper
-            </div>
-          )}
-        </div>
-
-        {/* Advanced collapsible */}
-        <details className="px-3 py-1">
-          <summary className="text-[12px] text-text-muted/70 cursor-default select-none list-none flex items-center gap-1">
-            <span className="text-[9px]">▸</span> Advanced
-          </summary>
-          <div className="mt-1.5 space-y-1">
-            <SettingsSlider
-              label="Temperature"
-              value={draft.temperature ?? 0}
-              min={0}
-              max={2}
-              step={0.05}
-              onChange={(v) => update({ temperature: v > 0 ? v : null })}
-              formatValue={(v) => v.toFixed(2)}
-            />
-            <div className="py-1.5 text-[13px] text-text-secondary">
-              <div className="mb-1 text-[11px]">Top P</div>
-              <input
-                type="number"
-                min={0}
-                max={1}
-                step={0.01}
-                value={draft.topP}
-                onChange={(e) => update({ topP: e.target.value })}
-                placeholder="0.95"
-                className={`${inputClass} w-full`}
-              />
-            </div>
-            <div className="py-1.5 text-[13px] text-text-secondary">
-              <div className="mb-1 text-[11px]">Steps</div>
-              <input
-                type="number"
-                min={1}
-                value={draft.steps}
-                onChange={(e) => update({ steps: e.target.value })}
-                placeholder="unlimited"
-                className={`${inputClass} w-full`}
-              />
-            </div>
-            <div className="py-1.5 text-[13px] text-text-secondary">
-              <div className="mb-1 text-[11px]">Reasoning effort</div>
-              <SelectMenu
-                testid="OpencodeAgentsSection.reasoningEffort"
-                value={draft.reasoningEffort}
-                onChange={(v) => update({ reasoningEffort: v })}
-                options={[
-                  { value: '', label: 'Default' },
-                  { value: 'low', label: 'Low' },
-                  { value: 'high', label: 'High' }
-                ]}
-                triggerClassName={`${inputClass} w-full`}
-              />
-            </div>
-          </div>
-        </details>
-
-        {/* Appearance collapsible */}
-        <details className="px-3 py-1">
-          <summary className="text-[12px] text-text-muted/70 cursor-default select-none list-none flex items-center gap-1">
-            <span className="text-[9px]">▸</span> Appearance
-          </summary>
-          <div className="mt-1.5 space-y-2">
-            <div className="text-[13px] text-text-secondary">
-              <div className="mb-1 text-[11px]">Color</div>
-              <div className="flex items-center gap-1.5">
-                {PRESET_COLORS.map((c) => (
-                  <button
-                    key={c}
-                    onClick={() => update({ color: draft.color === c ? '' : c })}
-                    className={`w-5 h-5 rounded-full transition-transform hover:scale-110 cursor-default ${
-                      draft.color === c
-                        ? 'ring-2 ring-offset-1 ring-offset-bg-primary ring-accent scale-110'
-                        : ''
-                    }`}
-                    style={{ backgroundColor: c }}
-                    title={c}
-                  />
-                ))}
-                {draft.color && (
-                  <button
-                    onClick={() => update({ color: '' })}
-                    className="text-[10px] text-text-muted/60 hover:text-text-secondary transition-colors ml-1"
-                  >
-                    Clear
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <button
-              onClick={() => update({ hidden: !draft.hidden })}
-              className="w-full flex items-center justify-between py-1 text-[13px] text-text-secondary cursor-default"
-            >
-              <span className="text-[11px]">Hidden</span>
-              <span
-                className={`w-7 h-4 rounded-full relative transition-colors ${draft.hidden ? 'bg-accent' : 'bg-text-muted/30'}`}
-              >
-                <span
-                  className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${draft.hidden ? 'left-3.5' : 'left-0.5'}`}
-                />
-              </span>
-            </button>
-          </div>
-        </details>
-
-        {saveError && (
-          <div className="mx-3 px-2 py-1.5 bg-red-500/10 border border-red-500/20 rounded text-[11px] text-red-400">
-            {saveError}
           </div>
         )}
       </div>
 
-      {/* Pinned footer */}
-      <div className="shrink-0 px-3 py-2 border-t border-border/30 flex items-center justify-between gap-2">
-        {/* Left side: destructive actions */}
+      <details className="px-3.5 py-2">
+        <summary className={`${FIELD_HELP} cursor-default select-none list-none`}>
+          ▸ Advanced
+        </summary>
+        <div className="mt-1 -mx-3.5">
+          <SettingsSlider
+            label="Temperature"
+            description="0 leaves it to the model's own default."
+            value={draft.temperature ?? 0}
+            min={0}
+            max={2}
+            step={0.05}
+            onChange={(v) => update({ temperature: v > 0 ? v : null })}
+            formatValue={(v) => v.toFixed(2)}
+          />
+          <SettingRow label="Top P" description="Nucleus sampling cutoff.">
+            <NumberField
+              value={numDraft(draft.topP)}
+              min={0}
+              max={1}
+              step={0.01}
+              placeholder="0.95"
+              onChange={(v) => update({ topP: numText(v) })}
+            />
+          </SettingRow>
+          <SettingRow label="Steps" description="Tool-call steps allowed in one turn.">
+            <NumberField
+              value={numDraft(draft.steps)}
+              min={1}
+              placeholder="unlimited"
+              onChange={(v) => update({ steps: numText(v) })}
+            />
+          </SettingRow>
+          <SettingRow label="Reasoning effort" description="Only for models that expose it.">
+            <Segmented
+              testid={`${TESTID}.reasoningEffort`}
+              value={draft.reasoningEffort}
+              onChange={(v) => update({ reasoningEffort: v })}
+              options={[
+                { value: '', label: 'Default' },
+                { value: 'low', label: 'Low' },
+                { value: 'high', label: 'High' }
+              ]}
+            />
+          </SettingRow>
+        </div>
+      </details>
+
+      <details className="px-3.5 py-2">
+        <summary className={`${FIELD_HELP} cursor-default select-none list-none`}>
+          ▸ Appearance
+        </summary>
+        <div className="mt-1 -mx-3.5">
+          <SettingRow label="Colour" description="Shown as the dot beside the agent's name.">
+            <span className="flex items-center gap-1.5">
+              {PRESET_COLORS.map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  onClick={() => update({ color: draft.color === c ? '' : c })}
+                  className={`w-5 h-5 rounded-full transition-transform cursor-default ${
+                    draft.color === c
+                      ? 'ring-2 ring-offset-1 ring-offset-bg-secondary ring-accent'
+                      : ''
+                  }`}
+                  style={{ backgroundColor: c }}
+                  title={c}
+                />
+              ))}
+              {draft.color && (
+                <Button variant="link" onClick={() => update({ color: '' })}>
+                  Clear
+                </Button>
+              )}
+            </span>
+          </SettingRow>
+          <SettingsToggle
+            label="Hidden"
+            description="Keeps the agent out of the picker; it stays callable by name."
+            checked={draft.hidden}
+            onChange={(v) => update({ hidden: v })}
+          />
+        </div>
+      </details>
+
+      <div className="px-3.5 py-2.5 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           {isBuiltin && (
             <>
-              <button
-                data-testid="OpencodeAgentsSection.disable"
+              <Button
+                variant="danger"
+                testid={`${TESTID}.disable`}
                 onClick={() => void handleDisable()}
-                className="text-[11px] text-text-muted hover:text-text-secondary transition-colors cursor-default"
               >
                 {detail?.disabled ? 'Re-enable' : 'Disable'}
-              </button>
-              <button
-                data-testid="OpencodeAgentsSection.reset"
-                onClick={() => void handleReset()}
-                className="text-[11px] text-text-muted hover:text-text-secondary transition-colors cursor-default"
-              >
+              </Button>
+              <Button variant="link" testid={`${TESTID}.reset`} onClick={() => void handleReset()}>
                 Reset to default
-              </button>
+              </Button>
             </>
           )}
           {isCustom && (
-            <button
-              data-testid="OpencodeAgentsSection.delete"
+            <Button
+              variant="danger"
+              testid={`${TESTID}.delete`}
               onClick={() => void handleDelete()}
-              className="text-[11px] text-red-400 hover:text-red-300 transition-colors cursor-default"
             >
               Delete
-            </button>
+            </Button>
           )}
         </div>
 
-        {/* Right side: cancel + save */}
-        <div className="flex items-center gap-1.5">
-          <button
-            onClick={onBack}
-            className="px-3 py-1 text-[11px] text-text-muted hover:text-text-secondary transition-colors rounded cursor-default"
-          >
+        <div className="flex items-center gap-2">
+          {saveError && <span className="text-[12px] leading-4 text-danger">{saveError}</span>}
+          <Button variant="link" onClick={onBack}>
             Cancel
-          </button>
-          <button
-            data-testid="OpencodeAgentsSection.save"
+          </Button>
+          <Button
+            variant="primary"
+            testid={`${TESTID}.save`}
             onClick={() => void handleSave()}
             disabled={saving}
-            className="px-3 py-1 text-[11px] bg-accent/20 hover:bg-accent/30 text-accent rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-default"
           >
             {saving ? 'Saving…' : 'Save'}
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -902,27 +793,20 @@ export function OpencodeAgentsSection(): React.JSX.Element {
     setView({ mode: 'list' })
   }
 
-  if (installed === null) {
-    return (
-      <div data-testid="OpencodeAgentsSection" className="px-3 py-1.5 text-[13px] text-text-muted">
-        Loading…
-      </div>
-    )
-  }
+  if (installed === null) return <SettingRow testid={TESTID} description="Loading…" />
 
   if (!installed) {
     return (
-      <div
-        data-testid="OpencodeAgentsSection"
-        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
-      >
-        opencode is not installed. Agent settings apply to opencode sessions.
-      </div>
+      <SettingRow
+        testid={TESTID}
+        dimmed
+        description="opencode is not installed. Agent settings apply to opencode sessions."
+      />
     )
   }
 
   return (
-    <div data-testid="OpencodeAgentsSection" className="flex flex-col min-h-0">
+    <div data-testid={TESTID} className="divide-y divide-border/55">
       {view.mode === 'list' && (
         <ListView
           cwd={cwd}

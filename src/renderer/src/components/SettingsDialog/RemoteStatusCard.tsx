@@ -1,14 +1,18 @@
 import { useEffect, useState } from 'react'
 import type { RemoteStatusView } from '../../../../shared/types'
+import { SettingRow } from './settings-controls'
 
 /** How often the view re-reads while it is on screen. */
 const POLL_MS = 5_000
 
+/** Testid namespace (ADR-027 tier 2). */
+const S = 'RemoteStatusCard'
+
 /**
- * Settings › Remote — the WEB client's read-only view of the listener it is
- * talking to (owner ruling, 2026-08-28: "a remote web view should be able to see
- * the connected clients. though they should not be able to disable the remote
- * mode themselves, as it will kill themselves").
+ * Settings › Remote access — the WEB client's read-only view of the listener it
+ * is talking to (owner ruling, 2026-08-28: "a remote web view should be able to
+ * see the connected clients. though they should not be able to disable the
+ * remote mode themselves, as it will kill themselves").
  *
  * ## Read-only, and structurally so
  *
@@ -17,8 +21,8 @@ const POLL_MS = 5_000
  * `clear-password` / `force-reserve` have no registration on the remote
  * transport at all (`core/ipc/remote-view-commands.ts` states the rule where the
  * one readable channel is declared), so a button here would have nothing to
- * call. The sentence at the bottom says that to the operator rather than leaving
- * them hunting for a switch.
+ * call. The last row says that to the operator rather than leaving them hunting
+ * for a switch.
  *
  * ## Why it POLLS
  *
@@ -57,31 +61,29 @@ export function RemoteStatusCard(): React.JSX.Element {
   }, [])
 
   return (
-    <div data-testid="RemoteStatusCard" className="space-y-1.5">
-      <div className="flex items-center justify-between">
-        <span>Remote access</span>
+    <div data-testid={S} className="divide-y divide-border/55">
+      <SettingRow
+        testid={`${S}.stateRow`}
+        label="Remote access"
+        error={error ?? undefined}
+        errorTestid={`${S}.loadError`}
+      >
         <span
-          data-testid="RemoteStatusCard.state"
+          data-testid={`${S}.state`}
           data-running={status ? String(status.running) : 'unknown'}
-          className={`text-[10px] ${status?.running ? 'text-success' : 'text-text-muted/70'}`}
+          className={`text-[12px] leading-4 ${status?.running ? 'text-success' : 'text-text-secondary'}`}
         >
           {status === null ? 'Loading…' : status.running ? 'Running' : 'Stopped'}
         </span>
-      </div>
-
-      {error && (
-        <div data-testid="RemoteStatusCard.loadError" className="text-[10px] text-red-400">
-          {error}
-        </div>
-      )}
+      </SettingRow>
 
       {status && (
         <>
-          <Row testid="RemoteStatusCard.port" label="Port">
+          <Row testid={`${S}.port`} label="Port">
             {status.port === null ? 'not listening' : String(status.port)}
           </Row>
 
-          <Row testid="RemoteStatusCard.clients" label="Connected devices">
+          <Row testid={`${S}.clients`} label="Connected devices">
             {String(status.connectedClients)}
           </Row>
 
@@ -90,26 +92,26 @@ export function RemoteStatusCard(): React.JSX.Element {
               off the tailnet. `clientLogins` is parallel to `clientIps` by
               contract, so the index is the join. */}
           {status.clientIps.length > 0 && (
-            <div data-testid="RemoteStatusCard.clientList" className="space-y-1">
+            <div data-testid={`${S}.clientList`} className="divide-y divide-border/55">
               {status.clientIps.map((ip, index) => (
-                <div
+                <SettingRow
                   key={`${ip}-${index}`}
-                  data-testid="RemoteStatusCard.client"
-                  className="rounded border border-border/40 px-2 py-1 text-[11px] text-text-secondary"
-                >
-                  {status.clientLogins[index] ?? ip}
-                </div>
+                  testid={`${S}.client`}
+                  dataId={ip}
+                  indent
+                  description={status.clientLogins[index] ?? ip}
+                />
               ))}
             </div>
           )}
 
-          <Row testid="RemoteStatusCard.tunnel" label="Tunnel">
+          <Row testid={`${S}.tunnel`} label="Tunnel">
             {status.tunnelState ?? 'off'}
           </Row>
 
           {/* The redacted TLS block: mode/ports/detection only — no tailnet
               hostname and no free-text serve message (see RemoteStatusView). */}
-          <Row testid="RemoteStatusCard.tls" label="Tailscale HTTPS">
+          <Row testid={`${S}.tls`} label="Tailscale HTTPS">
             {status.tls === null
               ? 'off'
               : `on · port ${status.tls.httpsPort ?? status.tls.pinnedHttpsPort}${
@@ -117,31 +119,31 @@ export function RemoteStatusCard(): React.JSX.Element {
                 }`}
           </Row>
 
-          <Row testid="RemoteStatusCard.authMethods" label="Sign-in methods">
+          <Row testid={`${S}.authMethods`} label="Sign-in methods">
             {status.authMethods.length > 0 ? status.authMethods.join(', ') : 'none advertised'}
           </Row>
 
           {status.lastError && (
-            <div data-testid="RemoteStatusCard.lastError" className="text-[10px] text-red-400">
-              Last start error: {status.lastError}
-            </div>
+            <SettingRow
+              testid={`${S}.lastErrorRow`}
+              label="Last start error"
+              error={status.lastError}
+              errorTestid={`${S}.lastError`}
+            />
           )}
         </>
       )}
 
-      <div
-        data-testid="RemoteStatusCard.hostOnlyNote"
-        className="text-[10px] text-text-muted/60 leading-snug"
-      >
-        Starting, stopping and configuring the server happen on the machine itself — the desktop
-        app, or the server’s own console on a headless install. A remote client cannot switch off
-        the connection it is using.
-      </div>
+      <SettingRow
+        testid={`${S}.hostOnlyNote`}
+        dimmed
+        description="Starting, stopping and configuring the server happen on the machine itself, so a remote client cannot switch off the connection it is using."
+      />
     </div>
   )
 }
 
-/** One label/value line, so every row reads the same and carries a testid. */
+/** One label/value line. A `SettingRow` whose control column is the reading. */
 function Row({
   testid,
   label,
@@ -152,9 +154,10 @@ function Row({
   children: React.ReactNode
 }): React.JSX.Element {
   return (
-    <div data-testid={testid} className="flex items-baseline justify-between gap-2 text-[11px]">
-      <span className="text-text-muted/70">{label}</span>
-      <span className="text-text-secondary text-right break-all">{children}</span>
-    </div>
+    <SettingRow testid={testid} label={label}>
+      <span className="text-[12px] leading-4 text-text-secondary text-right break-all">
+        {children}
+      </span>
+    </SettingRow>
   )
 }

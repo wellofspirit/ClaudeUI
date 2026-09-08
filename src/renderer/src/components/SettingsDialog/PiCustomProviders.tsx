@@ -1,11 +1,20 @@
 /**
- * PiCustomProviders.tsx
+ * PiCustomProviders.tsx — pi's models.json editor.
  *
- * The models.json half of Settings › pi › Providers: the CUSTOM PROVIDERS and
- * BUILT-IN OVERRIDES blocks that hang under PiVendors' authentication content,
- * plus the provider dialog and the per-model capability editor they open.
+ * `PiProviderModal` is the whole surface: the provider dialog plus the
+ * per-model capability editor it opens, reached from the unified provider
+ * list's Manage sheet ("pi models ›") on the row it is showing.
  *
- * This pane is where the shared provider-editor LOOK was designed; the frame
+ * ADR-065 phase 6c retired the pane that used to host them (`PiVendors`), and
+ * phase 7 deleted the orphaned `PiCustomProviders` block pair with it. ONE
+ * capability went with that pane and has no entry point today: editing
+ * `providers.<builtin>.modelOverrides` for a built-in vendor that has no
+ * pi-native row of its own. `PiModelEditor` still takes `variant="override"`
+ * and still patches under `modelOverrides`, so whichever surface takes that job
+ * next has its editor; it is a documented residual for the owner, not a
+ * regression this file can fix on its own.
+ *
+ * This is where the shared provider-editor LOOK was designed; the frame
  * primitives it uses — dialog shell, block header, row card, pill row, create
  * form, disclosure — now live in provider-editor-shell.tsx so the opencode
  * editors wear the same frame. What stays here is pi's own semantics.
@@ -57,7 +66,6 @@ import {
 } from './OpencodeConfigPanes'
 import {
   AddForm,
-  BlockHeader,
   DialogShell,
   Disclosure,
   EntityRowCard,
@@ -67,8 +75,7 @@ import { ConfirmModal } from '../shared/ConfirmModal'
 import { deepEqual, isPlainObject } from '../../../../shared/opencode-config-diff'
 import type { RawConfigPatch } from '../../../../shared/types'
 
-/** Testid namespaces (ADR-027 tier 2) for the pane, the dialog and the editor. */
-const PANE = 'PiCustomProviders'
+/** Testid namespaces (ADR-027 tier 2) for the dialog and the editor. */
 const DIALOG = 'PiProviderDialog'
 const EDITOR = 'PiModelEditor'
 
@@ -182,61 +189,6 @@ function usePiModelsLeaf(): PiModelsLeaf {
   return { config, filePath, managedIds, read, patch, commit, errorAt, reload }
 }
 
-// ── Entry partition ──────────────────────────────────────────────────────────
-
-interface CustomProviderRow {
-  id: string
-  entry: Record<string, unknown>
-  managed: boolean
-}
-
-interface OverrideRow {
-  providerId: string
-  modelId: string
-  entry: Record<string, unknown>
-}
-
-/**
- * Split `providers` into the pane's two blocks by ENTRY SHAPE — never by a list
- * of pi's built-in vendor ids, which would rot on every pi release and is a
- * main-process concern anyway (PI_NATIVE_VENDOR_IDS backs the writer's guard).
- *
- * An entry declaring `baseUrl` or `models` is a provider definition, whether its
- * id is custom or a built-in being routed through a proxy (models.md "Overriding
- * Built-in Providers"). An entry declaring NEITHER is a pure per-model override
- * carrier, and contributes one row per `modelOverrides` key.
- *
- * Consequences, both deliberate: an entry with a `baseUrl` AND `modelOverrides`
- * shows only as a provider row (its overrides are preserved, unrendered, like
- * every other unmodeled field), and an entry with neither shape — say a
- * `headers`-only proxy tweak — contributes no row at all. Neither is ever
- * written to by this pane, so neither can be damaged by not being shown.
- */
-export function partitionPiProviders(
-  config: Record<string, unknown> | null,
-  managedIds: ReadonlySet<string>
-): { custom: CustomProviderRow[]; overrides: OverrideRow[] } {
-  const providers = isPlainObject(config?.providers) ? config.providers : {}
-  const custom: CustomProviderRow[] = []
-  const overrides: OverrideRow[] = []
-  for (const [id, raw] of Object.entries(providers)) {
-    if (!isPlainObject(raw)) continue
-    if (raw.baseUrl !== undefined || raw.models !== undefined) {
-      custom.push({ id, entry: raw, managed: managedIds.has(id) })
-      continue
-    }
-    const modelOverrides = isPlainObject(raw.modelOverrides) ? raw.modelOverrides : {}
-    for (const [modelId, override] of Object.entries(modelOverrides)) {
-      overrides.push({
-        providerId: id,
-        modelId,
-        entry: isPlainObject(override) ? override : {}
-      })
-    }
-  }
-  return { custom, overrides }
-}
-
 // ── Summaries ────────────────────────────────────────────────────────────────
 
 function formatTokens(n: number): string {
@@ -261,21 +213,6 @@ function modelSummary(entry: Record<string, unknown>): string {
   return parts.join(' · ')
 }
 
-/** One line naming what an override actually changes. */
-function overrideSummary(entry: Record<string, unknown>): string {
-  const keys = Object.keys(entry)
-  if (keys.length === 0) return 'no fields overridden yet'
-  return keys
-    .map((key) => {
-      const value = entry[key]
-      if (typeof value === 'number') return `${key} → ${value.toLocaleString('en-US')}`
-      if (typeof value === 'string' || typeof value === 'boolean')
-        return `${key} → ${String(value)}`
-      return key
-    })
-    .join(' · ')
-}
-
 // ── Pi-specific bits (the frame primitives live in provider-editor-shell) ────
 
 const API_OPTIONS = [
@@ -296,10 +233,10 @@ function ManagedNotice({
   return (
     <div
       data-testid={`${testidPrefix}.managed`}
-      className="px-4 py-3 space-y-1.5 text-[11px] leading-relaxed"
+      className="px-4 py-3 space-y-1.5 text-[12px] leading-relaxed"
     >
       <div className="text-text-primary font-medium">{name} is managed by a shared provider.</div>
-      <div className="text-text-muted/70">
+      <div className="text-text-secondary">
         ClaudeUI compiles this entry into models.json on every sync, so an edit made here would be
         reverted — and would make the next shared-provider save refuse as &ldquo;changed outside
         ClaudeUI&rdquo;. Change it where it is owned.
@@ -309,7 +246,7 @@ function ManagedNotice({
         onClick={() =>
           window.dispatchEvent(
             new CustomEvent('open-settings', {
-              detail: { scope: 'common', section: 'shared-providers' }
+              detail: { page: 'models', group: 'providers' }
             })
           )
         }
@@ -378,8 +315,8 @@ function AdvancedLeaf({
   const value = api.read(path)
   return (
     <div data-testid={`${EDITOR}.rawLeaf`} data-id={leafKey} className="px-3 pb-1.5">
-      <div className="text-[11px] text-text-secondary leading-snug">{label}</div>
-      <div className="mb-1 text-[10px] text-text-muted/60 leading-relaxed">
+      <div className="text-[12px] text-text-secondary leading-snug">{label}</div>
+      <div className="mb-1 text-[12px] text-text-secondary leading-relaxed">
         {helper} <span className="font-mono text-text-muted/80">{leafKey}</span>
       </div>
       {/* Keyed on the committed value so a successful write (or a delete)
@@ -394,7 +331,7 @@ function AdvancedLeaf({
         <div
           data-testid={`${EDITOR}.error`}
           data-id={leafKey}
-          className="text-[11px] text-red-400 mt-1"
+          className="text-[12px] text-danger mt-1"
         >
           {api.errorAt(path)}
         </div>
@@ -510,7 +447,7 @@ export function PiModelEditor({
           testidPrefix={EDITOR}
           configKey="name"
           label="Display name"
-          helper="Used for --model matching and secondary detail text; the id is still what pi shows —"
+          helper="Used for --model matching and secondary detail text; the id is still what pi shows."
           error={api.errorAt([...scope, 'name'])}
         >
           <LeafTextInput
@@ -526,7 +463,7 @@ export function PiModelEditor({
           testidPrefix={EDITOR}
           configKey="reasoning"
           label="Extended thinking"
-          helper="Model supports reasoning —"
+          helper="Model supports reasoning."
           checked={api.read([...scope, 'reasoning']) === true}
           onChange={(next) => api.commit([...scope, 'reasoning'], next ? true : undefined)}
           error={api.errorAt([...scope, 'reasoning'])}
@@ -536,7 +473,7 @@ export function PiModelEditor({
           testidPrefix={EDITOR}
           configKey="input"
           label="Image input"
-          helper="Off = text only, which is what pi assumes when the key is absent —"
+          helper="Off = text only, which is what pi assumes when the key is absent."
           checked={imageOn}
           onChange={(next) => api.commit(inputPath, next ? ['text', 'image'] : undefined)}
           error={api.errorAt(inputPath)}
@@ -546,7 +483,7 @@ export function PiModelEditor({
           testidPrefix={EDITOR}
           configKey="contextWindow"
           label="Context window"
-          helper="Tokens; pi assumes 128000 when unset —"
+          helper="Tokens; pi assumes 128000 when unset."
           error={api.errorAt([...scope, 'contextWindow'])}
         >
           <LeafNumberInput
@@ -562,7 +499,7 @@ export function PiModelEditor({
           testidPrefix={EDITOR}
           configKey="maxTokens"
           label="Max output tokens"
-          helper="pi assumes 16384 when unset —"
+          helper="pi assumes 16384 when unset."
           error={api.errorAt([...scope, 'maxTokens'])}
         >
           <LeafNumberInput
@@ -578,7 +515,7 @@ export function PiModelEditor({
           testidPrefix={EDITOR}
           configKey="cost"
           label="Pricing"
-          helper="$ per million tokens; every rate absent = free, which is what a local server wants —"
+          helper="$ per million tokens; every rate absent = free, which is what a local server wants."
           error={
             // One shared slot: only one price field can be in flight at a time,
             // and clearing the last one reports against the block it deleted.
@@ -589,7 +526,7 @@ export function PiModelEditor({
           <div className="px-3 grid grid-cols-4 gap-1.5">
             {COST_FIELDS.map((field) => (
               <label key={field.key} className="min-w-0 block">
-                <span className="block text-[10px] text-text-muted/70 mb-0.5 truncate">
+                <span className="block text-[11px] text-text-secondary mb-0.5 truncate">
                   {field.label}
                 </span>
                 <LeafNumberInput
@@ -620,7 +557,7 @@ export function PiModelEditor({
               open={tiersOpen}
               onToggle={() => setTiersOpen((o) => !o)}
             />
-            <div className="mt-0.5 text-[10px] text-text-muted/60 leading-relaxed">
+            <div className="mt-0.5 text-[12px] text-text-secondary leading-relaxed">
               Alternate rates for the whole request once input exceeds a threshold.{' '}
               <span className="font-mono text-text-muted/80">cost.tiers</span>
             </div>
@@ -634,14 +571,14 @@ export function PiModelEditor({
                 className="px-3 mt-1.5 pt-1.5 border-t border-border/20"
               >
                 <div className="flex items-center justify-between gap-2 mb-1">
-                  <span className="text-[10px] text-text-muted/70">Tier {idx + 1}</span>
+                  <span className="text-[11px] text-text-secondary">Tier {idx + 1}</span>
                   {idx < tiers.length && (
                     <button
                       type="button"
                       data-testid={`${EDITOR}.removeTier`}
                       data-id={String(idx)}
                       onClick={() => removeTier(idx)}
-                      className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors"
+                      className="text-[11px] text-text-secondary hover:text-danger transition-colors"
                     >
                       Remove tier
                     </button>
@@ -649,7 +586,7 @@ export function PiModelEditor({
                 </div>
                 <div className="grid grid-cols-5 gap-1.5">
                   <label className="min-w-0 block">
-                    <span className="block text-[10px] text-text-muted/70 mb-0.5 truncate">
+                    <span className="block text-[11px] text-text-secondary mb-0.5 truncate">
                       above
                     </span>
                     <LeafNumberInput
@@ -663,7 +600,7 @@ export function PiModelEditor({
                   </label>
                   {COST_FIELDS.map((field) => (
                     <label key={field.key} className="min-w-0 block">
-                      <span className="block text-[10px] text-text-muted/70 mb-0.5 truncate">
+                      <span className="block text-[11px] text-text-secondary mb-0.5 truncate">
                         {field.label}
                       </span>
                       <LeafNumberInput
@@ -686,7 +623,7 @@ export function PiModelEditor({
           testidPrefix={EDITOR}
           configKey="advanced"
           label="Advanced"
-          helper="Free-form JSON leaves —"
+          helper="Free-form JSON leaves."
           keyText={advanced.map((leaf) => leaf.key).join(' / ')}
           error={null}
         >
@@ -858,7 +795,7 @@ function PiProviderDialog({
               testidPrefix={DIALOG}
               configKey="id"
               label="Provider id"
-              helper={`Key under providers; its models appear as ${providerId}/<model id>. Fixed after creation —`}
+              helper={`Key under providers; its models appear as ${providerId}/<model id>. Fixed after creation.`}
               keyText="providers.<id>"
               error={null}
             >
@@ -874,7 +811,7 @@ function PiProviderDialog({
               testidPrefix={DIALOG}
               configKey="baseUrl"
               label="Base URL"
-              helper="API endpoint —"
+              helper="API endpoint."
               error={api.errorAt([...base, 'baseUrl'])}
             >
               <LeafTextInput
@@ -891,7 +828,7 @@ function PiProviderDialog({
               testidPrefix={DIALOG}
               configKey="api"
               label="API"
-              helper="Wire protocol pi speaks to this endpoint. A model may override it —"
+              helper="Wire protocol pi speaks to this endpoint. A model may override it."
               error={api.errorAt([...base, 'api'])}
             >
               <div className="px-3">
@@ -928,7 +865,7 @@ function PiProviderDialog({
               testidPrefix={DIALOG}
               configKey="authHeader"
               label="Authorization header"
-              helper="Send the API key as Authorization: Bearer. Off is pi’s default —"
+              helper="Send the API key as Authorization: Bearer. Off is pi’s default."
               checked={provider.authHeader === true}
               onChange={(next) => api.commit([...base, 'authHeader'], next ? true : undefined)}
               error={api.errorAt([...base, 'authHeader'])}
@@ -938,7 +875,7 @@ function PiProviderDialog({
               testidPrefix={DIALOG}
               configKey="headers"
               label="Extra headers"
-              helper="Sent with every request; values support $ENV_VAR and !command —"
+              helper="Sent with every request; values support $ENV_VAR and !command."
               error={api.errorAt([...base, 'headers'])}
             >
               <div className="px-3">
@@ -972,7 +909,7 @@ function PiProviderDialog({
               testidPrefix={DIALOG}
               configKey="compat"
               label="Compatibility (raw)"
-              helper="The whole compat object, including the two toggles above —"
+              helper="The whole compat object, including the two toggles above."
               error={api.errorAt(compatPath)}
             >
               <div className="px-3">
@@ -986,7 +923,7 @@ function PiProviderDialog({
             </StackedRow>
 
             <div className="mt-3 mb-1 mx-3 pb-1 border-b border-border/20 flex items-center justify-between gap-2">
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-text-muted/70">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-text-secondary">
                 Models
                 <span className="ml-1.5 normal-case tracking-normal font-normal">— models[]</span>
               </div>
@@ -1020,7 +957,7 @@ function PiProviderDialog({
             {models.length === 0 && !addingModel && (
               <div
                 data-testid={`${DIALOG}.noModels`}
-                className="px-3 py-1.5 text-[10px] text-text-muted/60 leading-relaxed"
+                className="px-3 py-1.5 text-[12px] text-text-secondary leading-relaxed"
               >
                 No models declared. pi needs at least one to offer this provider in the picker.
               </div>
@@ -1079,314 +1016,33 @@ function PiProviderDialog({
   )
 }
 
-// ── Creation forms ───────────────────────────────────────────────────────────
-
 /**
- * The one place a WHOLE entry is written: `providers.<id> = {baseUrl, api}`, the
- * minimum models.md requires of a non-built-in provider. The writer refuses this
- * shape at a built-in vendor id (that would replace pi's own definition) and at a
- * projected id, so the rejection is surfaced right here rather than after the
- * dialog has opened on an entry that does not exist.
+ * `PiProviderDialog` on its own, over whatever opened it — the Manage sheet's
+ * "pi models ›" (ADR-065 phase 6c). The dialog needs the models.json leaf API
+ * that only this pane held, so the hook is mounted HERE rather than exported
+ * into the sheet: one models.json reader, and it is read when the dialog opens
+ * rather than on every sheet.
+ *
+ * Works for a built-in vendor id too. `providers.<id>` is where models.md tells
+ * users to override a built-in (base URL, headers, per-model entries), and the
+ * writer allows exactly those leaf writes while refusing a whole-entry
+ * replacement at a built-in id (`pi-models-raw.ts`).
  */
-function AddProviderForm({
-  api,
-  existingIds,
-  onCreated,
-  onCancel
+export function PiProviderModal({
+  providerId,
+  onClose
 }: {
-  api: PiModelsLeaf
-  existingIds: string[]
-  onCreated: (id: string) => void
-  onCancel: () => void
-}): React.JSX.Element {
-  const [id, setId] = useState('')
-  const [baseUrl, setBaseUrl] = useState('')
-  const [apiType, setApiType] = useState<string>(API_OPTIONS[0])
-  const [error, setError] = useState<string | null>(null)
-
-  const submit = (): void => {
-    const providerId = id.trim()
-    const url = baseUrl.trim()
-    setError(null)
-    if (existingIds.includes(providerId)) {
-      setError(`models.json already has a providers."${providerId}" entry.`)
-      return
-    }
-    api
-      .patch(['providers', providerId], { baseUrl: url, api: apiType })
-      .then(() => onCreated(providerId))
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
-  }
-
-  return (
-    <div
-      data-testid={`${PANE}.addProvider.form`}
-      className="mx-3 my-1 border border-border/30 rounded-md p-2 space-y-1.5"
-    >
-      <label className="block">
-        <span className="block text-[10px] text-text-muted mb-0.5">Provider id</span>
-        <input
-          type="text"
-          data-testid={`${PANE}.addProvider.field`}
-          data-id="id"
-          placeholder="ollama"
-          value={id}
-          spellCheck={false}
-          onChange={(e) => setId(e.target.value)}
-          className={`${inputClass} w-full`}
-        />
-      </label>
-      <label className="block">
-        <span className="block text-[10px] text-text-muted mb-0.5">Base URL</span>
-        <input
-          type="text"
-          data-testid={`${PANE}.addProvider.field`}
-          data-id="baseUrl"
-          placeholder="http://localhost:11434/v1"
-          value={baseUrl}
-          spellCheck={false}
-          onChange={(e) => setBaseUrl(e.target.value)}
-          className={`${inputClass} w-full`}
-        />
-      </label>
-      <div>
-        <span className="block text-[10px] text-text-muted mb-0.5">API</span>
-        <SegmentPills
-          testid={`${PANE}.addProvider.segment`}
-          idPrefix="api"
-          options={API_OPTIONS}
-          current={apiType}
-          onSelect={setApiType}
-          align="start"
-        />
-      </div>
-      {error && (
-        <div
-          data-testid={`${PANE}.addProvider.error`}
-          className="text-[10px] text-red-400 leading-relaxed"
-        >
-          {error}
-        </div>
-      )}
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          data-testid={`${PANE}.addProvider.submit`}
-          disabled={id.trim() === '' || baseUrl.trim() === ''}
-          onClick={submit}
-          className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-        >
-          Create
-        </button>
-        <button
-          type="button"
-          data-testid={`${PANE}.addProvider.cancel`}
-          onClick={onCancel}
-          className="text-[11px] text-text-muted/70 hover:text-text-primary transition-colors"
-        >
-          Cancel
-        </button>
-      </div>
-    </div>
-  )
-}
-
-// ── The pane blocks ──────────────────────────────────────────────────────────
-
-/**
- * CUSTOM PROVIDERS + BUILT-IN OVERRIDES, rendered by PiVendors under its
- * authentication content. The pi-installed gate is PiVendors' (it returns the
- * not-installed copy before this ever mounts), so this component only gates on
- * the first read resolving.
- */
-export function PiCustomProviders(): React.JSX.Element {
+  providerId: string
+  onClose: () => void
+}): React.JSX.Element | null {
   const api = usePiModelsLeaf()
-  const [addingProvider, setAddingProvider] = useState(false)
-  const [addingOverride, setAddingOverride] = useState(false)
-  const [overrideError, setOverrideError] = useState<string | null>(null)
-  const [openProvider, setOpenProvider] = useState<string | null>(null)
-  const [openOverride, setOpenOverride] = useState<{ providerId: string; modelId: string } | null>(
-    null
-  )
-
-  const { custom, overrides } = partitionPiProviders(api.config, api.managedIds)
-
-  const addOverride = (values: Record<string, string>): void => {
-    const providerId = values.provider
-    const modelId = values.model
-    setOverrideError(null)
-    const entry = api.read(['providers', providerId])
-    if (isPlainObject(entry) && (entry.baseUrl !== undefined || entry.models !== undefined)) {
-      setOverrideError(
-        `models.json defines "${providerId}" as a full provider, so it is listed under Custom providers. Its per-model overrides are not editable here.`
-      )
-      return
-    }
-    if (api.read(['providers', providerId, 'modelOverrides', modelId]) !== undefined) {
-      setOverrideError(`An override for ${providerId} / ${modelId} already exists.`)
-      return
-    }
-    // An empty object is a legal, inert override — pi merges nothing. The editor
-    // that opens next fills it in, and "Remove override" deletes the key again.
-    api
-      .patch(['providers', providerId, 'modelOverrides', modelId], {})
-      .then(() => {
-        setAddingOverride(false)
-        setOpenOverride({ providerId, modelId })
-      })
-      .catch((e: unknown) => setOverrideError(e instanceof Error ? e.message : String(e)))
-  }
-
-  if (api.config === null) {
-    return (
-      <div data-testid={PANE} className="px-3 py-1.5 text-[11px] text-text-muted/60">
-        Loading model catalog…
-      </div>
-    )
-  }
-
+  if (api.config === null) return null
   return (
-    <div data-testid={PANE} className="-mx-3">
-      <BlockHeader
-        label="Custom providers"
-        note="models.json"
-        actionLabel="+ Add provider"
-        actionTestid={`${PANE}.addProvider`}
-        onAction={() => setAddingProvider((o) => !o)}
-      />
-
-      {addingProvider && (
-        <AddProviderForm
-          api={api}
-          existingIds={Object.keys(isPlainObject(api.config.providers) ? api.config.providers : {})}
-          onCreated={(id) => {
-            setAddingProvider(false)
-            setOpenProvider(id)
-          }}
-          onCancel={() => setAddingProvider(false)}
-        />
-      )}
-
-      {custom.length === 0 && !addingProvider && (
-        <div
-          data-testid={`${PANE}.noProviders`}
-          className="px-3 py-1 text-[10px] text-text-muted/60 leading-relaxed"
-        >
-          No custom providers yet. Add one to reach a local server (Ollama, vLLM, LM Studio) or a
-          proxy.
-        </div>
-      )}
-
-      {custom.map((row) => (
-        <EntityRowCard
-          key={row.id}
-          testid={`${PANE}.providerRow`}
-          dataId={row.id}
-          title={row.id}
-          tag={typeof row.entry.api === 'string' ? row.entry.api : undefined}
-          badges={
-            row.managed && (
-              <span
-                data-testid={`${PANE}.managedBadge`}
-                data-id={row.id}
-                className="shrink-0 text-[9px] px-1 py-0.5 rounded bg-bg-hover text-text-muted/70 uppercase tracking-wide"
-              >
-                🔒 managed
-              </span>
-            )
-          }
-          subtitle={
-            <>
-              {typeof row.entry.baseUrl === 'string' ? row.entry.baseUrl : 'no baseUrl'} ·{' '}
-              {Array.isArray(row.entry.models) ? row.entry.models.length : 0} models
-              {row.managed ? ' · managed by Shared Providers' : ''}
-            </>
-          }
-          action={row.managed ? 'View' : 'Edit'}
-          onClick={() => setOpenProvider(row.id)}
-        />
-      ))}
-
-      <BlockHeader
-        label="Built-in overrides"
-        note="modelOverrides"
-        actionLabel="+ Add override"
-        actionTestid={`${PANE}.addOverride`}
-        onAction={() => {
-          setOverrideError(null)
-          setAddingOverride((o) => !o)
-        }}
-      />
-
-      {addingOverride && (
-        <AddForm
-          testidPrefix={`${PANE}.addOverride`}
-          fields={[
-            { key: 'provider', label: 'Provider id', placeholder: 'openai' },
-            { key: 'model', label: 'Model id', placeholder: 'gpt-5.6-sol' }
-          ]}
-          submitLabel="Add"
-          error={overrideError}
-          onSubmit={addOverride}
-          onCancel={() => {
-            setAddingOverride(false)
-            setOverrideError(null)
-          }}
-        />
-      )}
-
-      {overrides.length === 0 && !addingOverride && (
-        <div
-          data-testid={`${PANE}.noOverrides`}
-          className="px-3 py-1 text-[10px] text-text-muted/60 leading-relaxed"
-        >
-          No overrides. Use one to change a built-in model&rsquo;s context window, pricing or
-          thinking map without redefining its provider.
-        </div>
-      )}
-
-      {overrides.map((row) => (
-        <EntityRowCard
-          key={`${row.providerId}/${row.modelId}`}
-          testid={`${PANE}.overrideRow`}
-          dataId={`${row.providerId}/${row.modelId}`}
-          title={`${row.providerId} / ${row.modelId}`}
-          subtitle={overrideSummary(row.entry)}
-          action="Edit"
-          onClick={() => setOpenOverride({ providerId: row.providerId, modelId: row.modelId })}
-        />
-      ))}
-
-      <div
-        data-testid={`${PANE}.footer`}
-        className="px-3 pt-2 mt-1 border-t border-border/20 text-[10px] text-text-muted/50 leading-relaxed"
-      >
-        Custom providers and overrides are saved to{' '}
-        <span className="font-mono break-all">{api.filePath || '~/.pi/agent/models.json'}</span>.
-        Only the field you change is written — other keys and comments are preserved. Keyless local
-        servers (Ollama) should keep a placeholder key: pi gates models on auth either way. Changes
-        apply to newly started pi sessions.
-      </div>
-
-      {openProvider !== null && (
-        <PiProviderDialog
-          api={api}
-          providerId={openProvider}
-          managed={api.managedIds.has(openProvider)}
-          onClose={() => setOpenProvider(null)}
-        />
-      )}
-
-      {openOverride !== null && (
-        <PiModelEditor
-          api={api}
-          scope={['providers', openOverride.providerId, 'modelOverrides', openOverride.modelId]}
-          title={`${openOverride.providerId} / ${openOverride.modelId}`}
-          variant="override"
-          onRemoved={() => setOpenOverride(null)}
-          onClose={() => setOpenOverride(null)}
-        />
-      )}
-    </div>
+    <PiProviderDialog
+      api={api}
+      providerId={providerId}
+      managed={api.managedIds.has(providerId)}
+      onClose={onClose}
+    />
   )
 }

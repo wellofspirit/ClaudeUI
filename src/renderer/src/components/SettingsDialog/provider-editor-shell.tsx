@@ -75,7 +75,7 @@ export function DialogShell({
         <div className="px-4 py-3 border-b border-border/50 flex items-center justify-between gap-3">
           <div className="min-w-0">
             <div className="text-[13px] font-medium text-text-primary truncate">{title}</div>
-            <div className="text-[11px] text-text-muted/70">{subtitle}</div>
+            <div className="text-[12px] text-text-secondary">{subtitle}</div>
           </div>
           <button
             data-testid={`${testid}.close`}
@@ -132,7 +132,7 @@ export function BlockHeader({
   )
   return (
     <div className="mt-3 mb-1 mx-3 pb-1 border-b border-border/20 flex items-center justify-between gap-2">
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-text-muted/70">
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-text-secondary">
         {label}
         <span className="ml-1.5 normal-case tracking-normal font-normal">— {note}</span>
       </div>
@@ -215,10 +215,10 @@ export function EntityRowCard({
       <span className="min-w-0">
         <span className="flex items-center gap-2">
           <span className="text-[12px] text-text-primary truncate">{title}</span>
-          {tag && <span className="font-mono text-[10px] text-text-muted/60 truncate">{tag}</span>}
+          {tag && <span className="font-mono text-[10px] text-text-muted truncate">{tag}</span>}
           {badges}
         </span>
-        <span className="block text-[10px] text-text-muted/70 truncate">{subtitle}</span>
+        <span className="block text-[11px] text-text-secondary truncate">{subtitle}</span>
       </span>
       <span className="ml-auto shrink-0 text-[10px] text-accent">{action}</span>
     </>
@@ -377,7 +377,7 @@ export function AddForm({
     >
       {fields.map((field) => (
         <label key={field.key} className="block">
-          <span className="block text-[10px] text-text-muted mb-0.5">{field.label}</span>
+          <span className="block text-[11px] text-text-secondary mb-0.5">{field.label}</span>
           <input
             type="text"
             data-testid={`${testidPrefix}.field`}
@@ -393,7 +393,7 @@ export function AddForm({
       {error && (
         <div
           data-testid={`${testidPrefix}.error`}
-          className="text-[10px] text-red-400 leading-relaxed"
+          className="text-[12px] text-danger leading-relaxed"
         >
           {error}
         </div>

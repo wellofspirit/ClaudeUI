@@ -1,6 +1,6 @@
 # ADR-048 — Mobile surface pattern: content-slot takeover, selection-as-navigation, keyboard-safe input placement
 
-**Status:** Accepted (2026-08-04) — Decision 5 (terminal-on-mobile declined) **superseded by ADR-052**: remote terminal is now planned behind a desktop-side opt-in, capability grants, and passkey step-up (`docs/architecture/security.md`). The UI surface patterns here are unaffected. **Amended 2026-08-19** (§Amendment below): the mobile-parity arc landed Settings, Skills, MCP, the terminal, and the enroll/access-links surfaces on the phone; the amendment records the rulings that generalize this ADR's decisions.
+**Status:** Accepted (2026-08-04) — Decision 5 (terminal-on-mobile declined) **superseded by ADR-052**: remote terminal is now planned behind a desktop-side opt-in, capability grants, and passkey step-up (`docs/architecture/security.md`). The UI surface patterns here are unaffected. **Amended 2026-08-19** (§Amendment below): the mobile-parity arc landed Settings, Skills, MCP, the terminal, and the enroll/access-links surfaces on the phone; the amendment records the rulings that generalize this ADR's decisions. **Amended 2026-09-08** (§Amendment — settings on the ADR-065 page model): Decision 2's tabs are now RAIL GROUPS and its accordions are PAGES.
 **Relates to:** ADR-027 (test ids), ADR-046 (remote directory browser — Decision 3 partially fulfilled here), ADR-049 (bounds this pattern: transient modal chrome like the image viewer is a portalled overlay, not a content-slot takeover), the audit remediation's remote denylist posture
 
 ## Context
@@ -153,6 +153,34 @@ because each generalizes a decision above:
    PermissionsDialog's shared root — the fork-guard tests depend on telling the two
    presentations apart, and a verifier asserting the desktop id must not silently no-op
    on a phone. PermissionsDialog keeps its shared root as the grandfathered exception.
+
+## Amendment — settings on the ADR-065 page model (2026-09-08, as built)
+
+ADR-065 replaced the settings IA the amendment above describes, so **Decision 2's "scope TABS"
+reads as "RAIL-GROUP tabs" and its "sections as accordions" as "PAGES as accordions"**. The
+pattern it ratified is unchanged and was re-picked on the new model: a fullscreen takeover,
+equal-width tabs with an underline, `useSwipeTabs` between adjacent tabs, lazily mounted
+accordions that reuse the desktop's content unchanged, and search that goes WIDE across every
+tab. What changed is what the tabs and the accordions ARE — three rail groups (App / Features /
+Engines) instead of four storage scopes, and eleven pages instead of forty-three sections — and
+that several accordions may be open at once, with the open set surviving tab switches and
+search.
+
+Two details are worth carrying forward for the next fork:
+
+- **The phone re-presents the model; it does not re-implement it.** Every row is rendered through
+  the same `item.render(...)` call the desktop makes, with the same arguments, and both
+  presentations take the engine-segment state (`engineByGroup` / `onSelectEngine`) and the search
+  bucketing from shared modules. The group CHROME is rebuilt from the same class tokens rather
+  than imported, because the desktop's version carries a scroll-spy rail and a fixed 240px
+  control column that mean nothing at 390px.
+- **A phone header wraps where the desktop truncates.** The desktop group header is a fixed 32px
+  row with `flex-1 min-w-0 truncate` on its label, which turns "Dispatch into" into "D" once a
+  three-engine segment claims the line. The mobile header keeps the label whole and wraps the
+  segment, badge and storage tag onto a second, right-aligned line.
+
+Decision 7's test-id ruling holds: `SettingsMobileView` keeps its own root, and phase 5 renamed
+its sub-ids from `.section*` to `.page*` with the group vocabulary alongside them.
 
 ## Alternatives considered
 

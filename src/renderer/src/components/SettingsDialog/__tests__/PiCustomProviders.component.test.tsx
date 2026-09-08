@@ -1,33 +1,36 @@
 /**
- * Layer 2: Component tests for the pi models.json editor (Settings › pi ›
- * Providers — CUSTOM PROVIDERS and BUILT-IN OVERRIDES).
+ * Layer 2: Component tests for the pi models.json editor — `PiProviderModal`,
+ * the provider dialog the unified provider list's Manage sheet opens with
+ * "pi models ›" (ADR-065 phase 6c), and the per-model capability editor inside
+ * it.
+ *
+ * The tests drive the modal directly, exactly as the sheet mounts it. Until
+ * phase 7 they went through the `PiCustomProviders` PANE, which had been
+ * mounted nowhere since 6c; the pane, its two creation forms and the tests that
+ * existed only for them are gone with it. `variant="override"` is the one thing
+ * that lost its entry point (see the module header) and so lost its coverage.
  *
  * Same rule as its Configuration-pane siblings: the invariants worth guarding
  * are about WHAT LANDS IN models.json, not what the blocks look like.
  *
- *   1. The partition is data-driven off ENTRY SHAPE — baseUrl/models makes a
- *      provider row, neither makes one override row per `modelOverrides` key —
- *      and never off a hardcoded list of pi's built-in vendor ids.
- *   2. A projected (shared-provider) entry is locked: badge in the list,
- *      read-only in the dialog, no controls that could produce a patch the
- *      writer would refuse.
- *   3. Creation is the ONE whole-object write: `providers.<id> = {baseUrl, api}`.
- *   4. Every other commit is one LEAF patch, and a key whose absence already
- *      gives the wanted behaviour is DELETED — authHeader, the two compat
- *      flags, image `input`, each cost rate.
- *   5. Emptying a block collapses it (cost, compat) without touching sibling
+ *   1. A projected (shared-provider) entry is locked: read-only in the dialog,
+ *      no controls that could produce a patch the writer would refuse.
+ *   2. Every commit is one LEAF patch, and a key whose absence already gives
+ *      the wanted behaviour is DELETED — authHeader, the two compat flags,
+ *      image `input`, each cost rate.
+ *   3. Emptying a block collapses it (cost, compat) without touching sibling
  *      keys this editor does not render.
- *   6. `models` is an ARRAY: add appends at index === length, remove deletes by
+ *   4. `models` is an ARRAY: add appends at index === length, remove deletes by
  *      index. (The writer-side proof that those two do the right thing to the
  *      file lives in src/core/pi/__tests__/pi-models-raw.test.ts.)
- *   7. A writer refusal surfaces inline at the control that caused it.
- *   8. A successful providers patch bumps the session store's model-reload
+ *   5. A writer refusal surfaces inline at the control that caused it.
+ *   6. A successful providers patch bumps the session store's model-reload
  *      nonce, so the picker re-reads the catalog.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, act, cleanup, waitFor } from '@testing-library/react'
-import { PiCustomProviders, partitionPiProviders } from '../PiCustomProviders'
+import { PiProviderModal } from '../PiCustomProviders'
 import { useSessionStore } from '../../../stores/session-store'
 import type { RawConfigPatch } from '../../../../../shared/types'
 
@@ -55,9 +58,17 @@ function installApiStub(overrides: Record<string, unknown> = {}): void {
   }
 }
 
-async function renderPane(): Promise<void> {
+/**
+ * The sheet's `onClose` — the dialog does not unmount itself, it asks its
+ * OWNER to (the Manage sheet clears `modelEditor` and re-reads the registry),
+ * so "closes the dialog" is asserted on this spy.
+ */
+const onClose = vi.fn()
+
+/** Mount the dialog on `id`, the way the Manage sheet does. */
+async function renderDialog(id: string): Promise<void> {
   await act(async () => {
-    render(<PiCustomProviders />)
+    render(<PiProviderModal providerId={id} onClose={onClose} />)
   })
   await act(async () => {
     await new Promise((r) => setTimeout(r, 0))
@@ -91,11 +102,6 @@ async function commitInput(el: HTMLElement, value: string): Promise<void> {
   })
 }
 
-/** Open the provider dialog for `id`. */
-async function openProvider(id: string): Promise<void> {
-  await click(byId('PiCustomProviders.providerRow', id))
-}
-
 const OLLAMA = {
   providers: {
     ollama: {
@@ -107,89 +113,26 @@ const OLLAMA = {
   }
 }
 
-describe('pi custom providers (models.json)', () => {
+describe('pi provider dialog (models.json)', () => {
   beforeEach(() => {
     captured = []
     currentConfig = {}
     managedProviderIds = []
     patchPiModels.mockClear()
     readPiModelsRaw.mockClear()
+    onClose.mockClear()
     installApiStub()
   })
 
   afterEach(() => cleanup())
 
-  // ── 1. Partition ───────────────────────────────────────────────────
-
-  describe('partition rule', () => {
-    it('is a pure function of entry shape (no built-in vendor id list)', () => {
-      const { custom, overrides } = partitionPiProviders(
-        {
-          providers: {
-            // baseUrl → provider, even though `anthropic` is a built-in id
-            anthropic: { baseUrl: 'https://proxy.example.com/v1' },
-            // models only → provider
-            'models-only': { models: [{ id: 'm1' }] },
-            // neither → one row per modelOverrides key
-            openai: {
-              modelOverrides: { 'gpt-5.6-sol': { contextWindow: 1_050_000 }, 'gpt-5.6-luna': {} }
-            },
-            // neither, and no overrides → no row at all (preserved, unrendered)
-            'headers-only': { headers: { 'x-a': '1' } },
-            // not an object → skipped rather than crashing the pane
-            broken: 'nope'
-          }
-        },
-        new Set(['models-only'])
-      )
-      expect(custom.map((c) => c.id)).toEqual(['anthropic', 'models-only'])
-      expect(custom.map((c) => c.managed)).toEqual([false, true])
-      expect(overrides.map((o) => `${o.providerId}/${o.modelId}`)).toEqual([
-        'openai/gpt-5.6-sol',
-        'openai/gpt-5.6-luna'
-      ])
-    })
-
-    it('renders provider rows and override rows in their own blocks', async () => {
-      currentConfig = {
-        providers: {
-          ollama: {
-            baseUrl: 'http://localhost:11434/v1',
-            api: 'openai-completions',
-            models: [{ id: 'a' }]
-          },
-          openai: { modelOverrides: { 'gpt-5.6-sol': { contextWindow: 1_050_000 } } }
-        }
-      }
-      await renderPane()
-      const row = byId('PiCustomProviders.providerRow', 'ollama')
-      expect(row.textContent).toContain('openai-completions')
-      expect(row.textContent).toContain('http://localhost:11434/v1')
-      expect(row.textContent).toContain('1 models')
-      const override = byId('PiCustomProviders.overrideRow', 'openai/gpt-5.6-sol')
-      expect(override.textContent).toContain('contextWindow → 1,050,000')
-      expect(screen.queryByTestId('PiCustomProviders.noProviders')).not.toBeInTheDocument()
-    })
-
-    it('shows the models.json path in the footer', async () => {
-      await renderPane()
-      expect(screen.getByTestId('PiCustomProviders.footer').textContent).toContain(MODELS_PATH)
-      expect(screen.getByTestId('PiCustomProviders.footer').textContent).toContain(
-        'newly started pi sessions'
-      )
-    })
-  })
-
   // ── 2. Managed entries ─────────────────────────────────────────────
 
   describe('managed (shared-provider) entries', () => {
-    it('badges the row and opens read-only, with no editable control', async () => {
+    it('opens read-only, with no editable control', async () => {
       currentConfig = { providers: { 'my-shared': { baseUrl: 'https://x/v1', models: [] } } }
       managedProviderIds = ['my-shared']
-      await renderPane()
-      expect(byId('PiCustomProviders.managedBadge', 'my-shared')).toBeInTheDocument()
-
-      await openProvider('my-shared')
+      await renderDialog('my-shared')
       expect(screen.getByTestId('PiProviderDialog.managed').textContent).toContain(
         'managed by a shared provider'
       )
@@ -202,125 +145,6 @@ describe('pi custom providers (models.json)', () => {
     })
   })
 
-  // ── 3. Creation ────────────────────────────────────────────────────
-
-  describe('add provider', () => {
-    it('writes ONE whole-entry patch of {baseUrl, api} and opens the dialog', async () => {
-      await renderPane()
-      await click(screen.getByTestId('PiCustomProviders.addProvider'))
-      await act(async () => {
-        fireEvent.change(byId('PiCustomProviders.addProvider.field', 'id'), {
-          target: { value: 'ollama' }
-        })
-        fireEvent.change(byId('PiCustomProviders.addProvider.field', 'baseUrl'), {
-          target: { value: 'http://localhost:11434/v1' }
-        })
-      })
-      await click(byId('PiCustomProviders.addProvider.segment', 'api:anthropic-messages'))
-      await click(screen.getByTestId('PiCustomProviders.addProvider.submit'))
-
-      expect(onlyPatch()).toEqual({
-        path: ['providers', 'ollama'],
-        value: { baseUrl: 'http://localhost:11434/v1', api: 'anthropic-messages' }
-      })
-      await waitFor(() =>
-        expect(screen.getByTestId('PiProviderDialog')).toHaveAttribute('data-id', 'ollama')
-      )
-    })
-
-    it('refuses a duplicate id locally, before any write', async () => {
-      currentConfig = OLLAMA
-      await renderPane()
-      await click(screen.getByTestId('PiCustomProviders.addProvider'))
-      await act(async () => {
-        fireEvent.change(byId('PiCustomProviders.addProvider.field', 'id'), {
-          target: { value: 'ollama' }
-        })
-        fireEvent.change(byId('PiCustomProviders.addProvider.field', 'baseUrl'), {
-          target: { value: 'http://x/v1' }
-        })
-      })
-      await click(screen.getByTestId('PiCustomProviders.addProvider.submit'))
-      expect(screen.getByTestId('PiCustomProviders.addProvider.error').textContent).toContain(
-        'already has a providers."ollama" entry'
-      )
-      expect(patchPiModels).not.toHaveBeenCalled()
-    })
-
-    it('surfaces the writer’s built-in-collision refusal inline on the form', async () => {
-      installApiStub({
-        patchPiModels: vi.fn(async () => {
-          throw new Error(
-            'Refusing to replace built-in pi provider "openai": choose a different provider id'
-          )
-        })
-      })
-      await renderPane()
-      await click(screen.getByTestId('PiCustomProviders.addProvider'))
-      await act(async () => {
-        fireEvent.change(byId('PiCustomProviders.addProvider.field', 'id'), {
-          target: { value: 'openai' }
-        })
-        fireEvent.change(byId('PiCustomProviders.addProvider.field', 'baseUrl'), {
-          target: { value: 'http://x/v1' }
-        })
-      })
-      await click(screen.getByTestId('PiCustomProviders.addProvider.submit'))
-      await waitFor(() =>
-        expect(screen.getByTestId('PiCustomProviders.addProvider.error').textContent).toContain(
-          'Refusing to replace built-in pi provider'
-        )
-      )
-      // The dialog never opened on an entry that does not exist.
-      expect(screen.queryByTestId('PiProviderDialog')).not.toBeInTheDocument()
-    })
-  })
-
-  describe('add override', () => {
-    it('creates an inert override entry and opens its editor', async () => {
-      await renderPane()
-      await click(screen.getByTestId('PiCustomProviders.addOverride'))
-      await act(async () => {
-        fireEvent.change(byId('PiCustomProviders.addOverride.field', 'provider'), {
-          target: { value: 'openai' }
-        })
-        fireEvent.change(byId('PiCustomProviders.addOverride.field', 'model'), {
-          target: { value: 'gpt-5.6-sol' }
-        })
-      })
-      await click(screen.getByTestId('PiCustomProviders.addOverride.submit'))
-      expect(onlyPatch()).toEqual({
-        path: ['providers', 'openai', 'modelOverrides', 'gpt-5.6-sol'],
-        value: {}
-      })
-      await waitFor(() =>
-        expect(screen.getByTestId('PiModelEditor')).toHaveAttribute(
-          'data-id',
-          'providers.openai.modelOverrides.gpt-5.6-sol'
-        )
-      )
-    })
-
-    it('explains rather than writes when the target is a full provider entry', async () => {
-      currentConfig = OLLAMA
-      await renderPane()
-      await click(screen.getByTestId('PiCustomProviders.addOverride'))
-      await act(async () => {
-        fireEvent.change(byId('PiCustomProviders.addOverride.field', 'provider'), {
-          target: { value: 'ollama' }
-        })
-        fireEvent.change(byId('PiCustomProviders.addOverride.field', 'model'), {
-          target: { value: 'llama3.1:8b' }
-        })
-      })
-      await click(screen.getByTestId('PiCustomProviders.addOverride.submit'))
-      expect(screen.getByTestId('PiCustomProviders.addOverride.error').textContent).toContain(
-        'listed under Custom providers'
-      )
-      expect(patchPiModels).not.toHaveBeenCalled()
-    })
-  })
-
   // ── 4. Provider fields ─────────────────────────────────────────────
 
   describe('provider fields', () => {
@@ -329,16 +153,14 @@ describe('pi custom providers (models.json)', () => {
     })
 
     it('the provider id is displayed, not editable', async () => {
-      await renderPane()
-      await openProvider('ollama')
+      await renderDialog('ollama')
       const id = screen.getByTestId('PiProviderDialog.id')
       expect(id.tagName).toBe('SPAN')
       expect(id.textContent).toBe('ollama')
     })
 
     it('baseUrl and apiKey commit as leaves on blur', async () => {
-      await renderPane()
-      await openProvider('ollama')
+      await renderDialog('ollama')
       await commitInput(byId('PiProviderDialog.text', 'baseUrl'), 'http://localhost:9999/v1')
       expect(onlyPatch()).toEqual({
         path: ['providers', 'ollama', 'baseUrl'],
@@ -352,8 +174,7 @@ describe('pi custom providers (models.json)', () => {
     })
 
     it('emptying apiKey deletes it (auth may come from /login)', async () => {
-      await renderPane()
-      await openProvider('ollama')
+      await renderDialog('ollama')
       await commitInput(byId('PiProviderDialog.text', 'apiKey'), '')
       const patch = onlyPatch()
       expect(patch.path).toEqual(['providers', 'ollama', 'apiKey'])
@@ -361,8 +182,7 @@ describe('pi custom providers (models.json)', () => {
     })
 
     it('offers all four documented api values and commits the picked one', async () => {
-      await renderPane()
-      await openProvider('ollama')
+      await renderDialog('ollama')
       expect(
         screen.getAllByTestId('PiProviderDialog.segment').map((n) => n.getAttribute('data-id'))
       ).toEqual([
@@ -379,8 +199,7 @@ describe('pi custom providers (models.json)', () => {
     })
 
     it('authHeader writes true and DELETES on the way back to pi’s default', async () => {
-      await renderPane()
-      await openProvider('ollama')
+      await renderDialog('ollama')
       await click(byId('PiProviderDialog.toggle', 'authHeader'))
       expect(onlyPatch()).toEqual({ path: ['providers', 'ollama', 'authHeader'], value: true })
 
@@ -389,8 +208,7 @@ describe('pi custom providers (models.json)', () => {
       currentConfig = {
         providers: { ollama: { ...OLLAMA.providers.ollama, authHeader: true } }
       }
-      await renderPane()
-      await openProvider('ollama')
+      await renderDialog('ollama')
       await click(byId('PiProviderDialog.toggle', 'authHeader'))
       const patch = onlyPatch()
       expect(patch.path).toEqual(['providers', 'ollama', 'authHeader'])
@@ -403,8 +221,7 @@ describe('pi custom providers (models.json)', () => {
   describe('compat', () => {
     it('reads absent as ON (pi’s default) and writes false at the leaf', async () => {
       currentConfig = OLLAMA
-      await renderPane()
-      await openProvider('ollama')
+      await renderDialog('ollama')
       expect(
         byId('PiProviderDialog.toggle', 'compat.supportsDeveloperRole').getAttribute('aria-pressed')
       ).toBe('true')
@@ -424,8 +241,7 @@ describe('pi custom providers (models.json)', () => {
           }
         }
       }
-      await renderPane()
-      await openProvider('ollama')
+      await renderDialog('ollama')
       await click(byId('PiProviderDialog.toggle', 'compat.supportsDeveloperRole'))
       const patch = onlyPatch()
       expect(patch.path).toEqual(['providers', 'ollama', 'compat', 'supportsDeveloperRole'])
@@ -438,8 +254,7 @@ describe('pi custom providers (models.json)', () => {
           ollama: { ...OLLAMA.providers.ollama, compat: { supportsReasoningEffort: false } }
         }
       }
-      await renderPane()
-      await openProvider('ollama')
+      await renderDialog('ollama')
       await click(byId('PiProviderDialog.toggle', 'compat.supportsReasoningEffort'))
       const patch = onlyPatch()
       expect(patch.path).toEqual(['providers', 'ollama', 'compat'])
@@ -455,8 +270,7 @@ describe('pi custom providers (models.json)', () => {
           }
         }
       }
-      await renderPane()
-      await openProvider('ollama')
+      await renderDialog('ollama')
       const raw = byId('OpencodeSchemaForm.rawJson', 'providers.ollama.compat').querySelector(
         'textarea'
       ) as HTMLTextAreaElement
@@ -484,16 +298,14 @@ describe('pi custom providers (models.json)', () => {
     })
 
     it('lists each model with its capability summary', async () => {
-      await renderPane()
-      await openProvider('ollama')
+      await renderDialog('ollama')
       expect(byId('PiProviderDialog.modelRow', '0').textContent).toContain('llama3.1:8b')
       expect(byId('PiProviderDialog.modelRow', '0').textContent).toContain('128k ctx')
       expect(byId('PiProviderDialog.modelRow', '1').textContent).toContain('reasoning')
     })
 
     it('adding APPENDS at index === length', async () => {
-      await renderPane()
-      await openProvider('ollama')
+      await renderDialog('ollama')
       await click(screen.getByTestId('PiProviderDialog.addModel'))
       await act(async () => {
         fireEvent.change(byId('PiProviderDialog.addModel.field', 'id'), {
@@ -508,8 +320,7 @@ describe('pi custom providers (models.json)', () => {
     })
 
     it('refuses a duplicate model id locally, before any write', async () => {
-      await renderPane()
-      await openProvider('ollama')
+      await renderDialog('ollama')
       await click(screen.getByTestId('PiProviderDialog.addModel'))
       await act(async () => {
         fireEvent.change(byId('PiProviderDialog.addModel.field', 'id'), {
@@ -524,8 +335,7 @@ describe('pi custom providers (models.json)', () => {
     })
 
     it('removing DELETES by index, behind a confirm', async () => {
-      await renderPane()
-      await openProvider('ollama')
+      await renderDialog('ollama')
       await click(byId('PiProviderDialog.modelRow', '0'))
       await click(screen.getByTestId('PiModelEditor.remove'))
       await click(screen.getByTestId('PiModelEditor.confirmRemove.confirm'))
@@ -545,8 +355,7 @@ describe('pi custom providers (models.json)', () => {
     })
 
     async function openModel(idx: string): Promise<void> {
-      await renderPane()
-      await openProvider('ollama')
+      await renderDialog('ollama')
       await click(byId('PiProviderDialog.modelRow', idx))
     }
 
@@ -721,41 +530,16 @@ describe('pi custom providers (models.json)', () => {
       })
     })
 
-    it('a model editor offers no headers leaf; an override editor does', async () => {
+    it('a model editor offers no headers leaf', async () => {
+      // `headers` is per-MODEL only inside `modelOverrides` (models.md), so the
+      // model variant is one row shorter than the override variant. The
+      // override half of this pair went with the pane that opened it — see the
+      // file header's residual.
       await openModel('0')
       await click(screen.getByTestId('PiModelEditor.advancedDisclosure'))
       expect(
         screen.getAllByTestId('PiModelEditor.rawLeaf').map((n) => n.getAttribute('data-id'))
       ).toEqual(['samplingParams', 'thinkingLevelMap', 'compat'])
-
-      cleanup()
-      currentConfig = {
-        providers: { openai: { modelOverrides: { 'gpt-5.6-sol': { contextWindow: 1_050_000 } } } }
-      }
-      await renderPane()
-      await click(byId('PiCustomProviders.overrideRow', 'openai/gpt-5.6-sol'))
-      await click(screen.getByTestId('PiModelEditor.advancedDisclosure'))
-      expect(
-        screen.getAllByTestId('PiModelEditor.rawLeaf').map((n) => n.getAttribute('data-id'))
-      ).toEqual(['samplingParams', 'thinkingLevelMap', 'compat', 'headers'])
-    })
-
-    it('an override editor patches under modelOverrides and can remove itself', async () => {
-      currentConfig = {
-        providers: { openai: { modelOverrides: { 'gpt-5.6-sol': { contextWindow: 1_050_000 } } } }
-      }
-      await renderPane()
-      await click(byId('PiCustomProviders.overrideRow', 'openai/gpt-5.6-sol'))
-      await commitInput(byId('PiModelEditor.number', 'contextWindow'), '272000')
-      expect(onlyPatch()).toEqual({
-        path: ['providers', 'openai', 'modelOverrides', 'gpt-5.6-sol', 'contextWindow'],
-        value: 272000
-      })
-      await click(screen.getByTestId('PiModelEditor.remove'))
-      await click(screen.getByTestId('PiModelEditor.confirmRemove.confirm'))
-      const patch = onlyPatch(1)
-      expect(patch.path).toEqual(['providers', 'openai', 'modelOverrides', 'gpt-5.6-sol'])
-      expect('value' in patch).toBe(false)
     })
   })
 
@@ -764,14 +548,13 @@ describe('pi custom providers (models.json)', () => {
   describe('delete provider', () => {
     it('deletes the whole entry behind a confirm and closes the dialog', async () => {
       currentConfig = OLLAMA
-      await renderPane()
-      await openProvider('ollama')
+      await renderDialog('ollama')
       await click(screen.getByTestId('PiProviderDialog.deleteProvider'))
       await click(screen.getByTestId('PiProviderDialog.confirmDelete.confirm'))
       const patch = onlyPatch()
       expect(patch.path).toEqual(['providers', 'ollama'])
       expect('value' in patch).toBe(false)
-      await waitFor(() => expect(screen.queryByTestId('PiProviderDialog')).not.toBeInTheDocument())
+      await waitFor(() => expect(onClose).toHaveBeenCalled())
     })
 
     it('a refused delete stays on the confirm with the writer’s reason', async () => {
@@ -783,8 +566,7 @@ describe('pi custom providers (models.json)', () => {
           )
         })
       })
-      await renderPane()
-      await openProvider('ollama')
+      await renderDialog('ollama')
       await click(screen.getByTestId('PiProviderDialog.deleteProvider'))
       await click(screen.getByTestId('PiProviderDialog.confirmDelete.confirm'))
       await waitFor(() =>
@@ -806,8 +588,7 @@ describe('pi custom providers (models.json)', () => {
           throw new Error('Refusing to overwrite unreadable pi models file')
         })
       })
-      await renderPane()
-      await openProvider('ollama')
+      await renderDialog('ollama')
       await commitInput(byId('PiProviderDialog.text', 'baseUrl'), 'http://localhost:9999/v1')
       await waitFor(() =>
         expect(byId('PiProviderDialog.error', 'baseUrl').textContent).toContain(
@@ -818,8 +599,7 @@ describe('pi custom providers (models.json)', () => {
 
     it('re-reads models.json and bumps the model-reload nonce after a successful patch', async () => {
       currentConfig = OLLAMA
-      await renderPane()
-      await openProvider('ollama')
+      await renderDialog('ollama')
       const readsBefore = readPiModelsRaw.mock.calls.length
       const nonceBefore = useSessionStore.getState().modelReloadNonce
       await commitInput(byId('PiProviderDialog.text', 'baseUrl'), 'http://localhost:9999/v1')
@@ -831,23 +611,26 @@ describe('pi custom providers (models.json)', () => {
 
     it('a blur with no edit writes nothing', async () => {
       currentConfig = OLLAMA
-      await renderPane()
-      await openProvider('ollama')
+      await renderDialog('ollama')
       await act(async () => {
         fireEvent.blur(byId('PiProviderDialog.text', 'baseUrl'))
       })
       expect(patchPiModels).not.toHaveBeenCalled()
     })
 
-    it('an unreadable models.json degrades to the empty-state blocks, not a crash', async () => {
+    it('an unreadable models.json opens on an empty entry, not a stuck dialog', async () => {
+      // A failed read resolves the leaf API to `{}` rather than leaving
+      // `config` null — the modal renders NOTHING while config is null, so a
+      // swallowed rejection would hang the Manage sheet's "pi models ›" on a
+      // blank overlay with no way to tell it apart from a slow disk.
       installApiStub({
         readPiModelsRaw: vi.fn(async () => {
           throw new Error('nope')
         })
       })
-      await renderPane()
-      expect(screen.getByTestId('PiCustomProviders.noProviders')).toBeInTheDocument()
-      expect(screen.getByTestId('PiCustomProviders.noOverrides')).toBeInTheDocument()
+      await renderDialog('ollama')
+      expect(screen.getByTestId('PiProviderDialog')).toHaveAttribute('data-id', 'ollama')
+      expect(patchPiModels).not.toHaveBeenCalled()
     })
   })
 })

@@ -176,6 +176,29 @@ describe('Settings › Remote, web variant', () => {
     window.localStorage.clear()
   })
 
+  /**
+   * ADR-065 — a group whose every control is host-anchored shows ONE dimmed
+   * explanatory row, never an empty card and never a wall of controls whose
+   * writes the server would refuse. Both transport groups owe that row.
+   */
+  describe('the host-only groups', () => {
+    it('replaces the listener and capability controls with one note each', async () => {
+      await renderPane()
+
+      expect(screen.getByTestId('RemoteServerSettings.hostOnlyNote')).toHaveTextContent(
+        /set on the machine itself/i
+      )
+      expect(screen.getByTestId('RemoteServerSettings.accessHostOnlyNote')).toHaveTextContent(
+        /set on the machine itself/i
+      )
+      // …and not one control from either of them.
+      for (const id of ['port', 'bindHost', 'autostart', 'tls', 'allowTerminal', 'allowIde']) {
+        expect(screen.queryByTestId(`RemoteServerSettings.${id}`)).toBeNull()
+      }
+      expect(api.setRemoteConfig).not.toHaveBeenCalled()
+    })
+  })
+
   describe('the durable enroll card', () => {
     it('offers enrolment on a password connection at a capable origin', async () => {
       installEnrollBridge(makeBridge())
