@@ -77,11 +77,13 @@ under the label at full width. Controls: toggle, select, number with unit, segme
 slider with value, text, list editor, chip set, radio row, action row. Buttons: filled = the one
 primary action on a page, tinted = secondary, link = tertiary, red = destructive.
 
-State vocabulary: an accent dot after the label = changed from default (hover reveals Reset;
-AppSettings compare against `DEFAULT_SETTINGS`, engine-native keys are modified when present in the
-file); a badge for "applies later" with exactly three values — **Next session**, **Next server
-start**, **Next launch** — replacing the five prose footers; a lock badge for values ClaudeUI forces
-(the Managed keys pattern); dependent rows nest one level and stay readable when disabled.
+State vocabulary: a changed-from-default row carries NO persistent indicator — hovering it reveals
+a Reset link, and that action is the whole affordance (AppSettings compare against
+`DEFAULT_SETTINGS`, engine-native keys are modified when present in the file). The accent dot that
+used to mark such a row was removed on the owner's request (2026-09-08) as noise. A badge for
+"applies later" with exactly three values — **Next session**, **Next server start**, **Next
+launch** — replaces the five prose footers; a lock badge marks values ClaudeUI forces (the Managed
+keys pattern); dependent rows nest one level and stay readable when disabled.
 
 Storage is a small tag on the group header (`opencode.jsonc`, `engines/pi.json`), shown only when
 the group does not write ClaudeUI's own settings. It is information, never navigation.
@@ -198,8 +200,10 @@ it, each carried by the phase that found it.
 
 7. **`SettingRow` gained state the boards implied but did not name:** `locked` (the Managed keys
    badge), `errorTestid` (the engine panes namespace their errors), `labelBadge`, `inputMode`,
-   ADR-027 `dataId` discriminators on the primitives, and — on the phone — a control column that
-   keeps its 240px on `md` and up but sizes to content below.
+   ADR-027 `dataId` discriminators on the primitives. Its inline control column began as the
+   board's fixed 240px (content-sized below `md`), and the 2026-09-08 follow-up made it
+   content-sized at EVERY width: 240px left a 560px sheet's descriptions wrapping at half the card
+   and the ~330px quick popover with ~60px of label. A control that needs a width now DECLARES one.
 
 8. **Search results are LIVE rows, so they are capped.** A one-character query matches 47 groups
    and every bucket shown mounts a real pane, several of which fetch on mount. Both views bucket

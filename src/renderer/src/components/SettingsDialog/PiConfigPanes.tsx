@@ -720,6 +720,7 @@ function PiSessionDefaultModel(): React.JSX.Element {
             description="A provider/model-id pi supports locally that ClaudeUI has not discovered — e.g. openai-codex/gpt-5.6-luna."
           >
             <TextField
+              className="w-full"
               testid="PiDefaultModelSection.customModel"
               value={current}
               onChange={update}

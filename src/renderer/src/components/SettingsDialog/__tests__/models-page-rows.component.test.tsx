@@ -204,10 +204,11 @@ describe('Default models › Claude effort rows', () => {
   it('marks a row modified only when ITS key is present in modelEffortDefaults', () => {
     renderEffortRows({ modelEffortDefaults: { 'claude-opus-4-8': 'max' } })
 
-    expect(
-      within(effortRow('claude-opus-4-8')).queryByTestId('ModelEffortRow.modified')
-    ).toBeTruthy()
-    expect(within(effortRow('claude-sonnet-5')).queryByTestId('ModelEffortRow.modified')).toBeNull()
+    // The accent dot is gone (2026-09-08); the hover Reset is the marker, and
+    // the row always passes `onReset`, so its presence IS "this row is
+    // modified".
+    expect(within(effortRow('claude-opus-4-8')).queryByTestId('ModelEffortRow.reset')).toBeTruthy()
+    expect(within(effortRow('claude-sonnet-5')).queryByTestId('ModelEffortRow.reset')).toBeNull()
   })
 
   it('Reset DELETES the key rather than writing the default level', () => {

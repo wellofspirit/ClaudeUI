@@ -1379,6 +1379,7 @@ function VendorAnthropicEditableForm({
         description="The gateway's Anthropic-compatible base address."
       >
         <TextField
+          className="w-full"
           testid="VendorAnthropicEditableForm.baseUrl"
           value={endpoint.baseUrl}
           placeholder="https://api.anthropic.com"
@@ -2252,6 +2253,7 @@ export const SECTIONS: Section[] = [
             description="Tokens: {in} {out} {total} · Cost: {cost} · Context: {used} {remaining} · Lines: {lines+} {lines-} · Time: {duration}"
           >
             <TextField
+              className="w-full"
               testid="StatusLineTemplateSetting.input"
               value={s.statusLineTemplate}
               onChange={(v) => u({ statusLineTemplate: v })}
@@ -2374,6 +2376,7 @@ export const SECTIONS: Section[] = [
             description="Comma-separated. A bare name enables debug for that source; use source:level for an explicit one. Logs are written to ~/.claude/ui/logs/."
           >
             <TextField
+              className="w-full"
               testid="LogFilterSetting.input"
               value={s.logFilter}
               onChange={(v) => u({ logFilter: v })}
@@ -3100,6 +3103,7 @@ export const SECTIONS: Section[] = [
               dimmed={!px.enabled}
             >
               <TextField
+                className="w-full"
                 testid="ClaudeProxy.hostname.input"
                 value={px.hostname}
                 onChange={(v) => ue({ proxy: { ...px, hostname: v } })}

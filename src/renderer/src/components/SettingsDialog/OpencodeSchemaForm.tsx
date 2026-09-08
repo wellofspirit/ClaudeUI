@@ -233,6 +233,7 @@ function RecordKeyInput({
   return (
     <div className="flex-1 min-w-0">
       <TextField
+        className="w-full"
         testid="OpencodeSchemaForm.recordKey"
         dataId={recordKey}
         value={draft}
@@ -409,6 +410,7 @@ export function SchemaField(props: FieldProps): React.JSX.Element {
           description={description}
         >
           <TextField
+            className="w-full"
             testid="OpencodeSchemaForm.text"
             dataId={fieldKey}
             value={typeof value === 'string' ? value : ''}

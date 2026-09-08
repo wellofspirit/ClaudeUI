@@ -630,6 +630,7 @@ export function RemoteAccessSection(): React.JSX.Element {
         errorTestid={`${R}.ideCliPathError`}
       >
         <TextField
+          className="w-full"
           testid={`${R}.ideCliPath`}
           value={ideCliPathInput}
           placeholder="Auto-detect"

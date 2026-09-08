@@ -225,7 +225,7 @@ export function ModelPicker({
         // cannot see built strings, and the two controls must not drift.
         className={
           field
-            ? `h-7 ${width} max-w-full bg-bg-input border border-border rounded-md px-2.5 text-[12px] text-text-primary outline-none focus:border-accent/50 transition-colors flex items-center justify-between gap-2 text-left cursor-pointer`
+            ? `h-7 ${width} max-w-[min(240px,100%)] bg-bg-input border border-border rounded-md px-2.5 text-[12px] text-text-primary outline-none focus:border-accent/50 transition-colors flex items-center justify-between gap-2 text-left cursor-pointer`
             : 'h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer'
         }
         title="Model"

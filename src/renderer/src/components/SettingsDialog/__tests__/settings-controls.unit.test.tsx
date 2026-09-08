@@ -4,8 +4,9 @@
  * Two things are guarded here.
  *
  * `SettingRow` is the one row vocabulary (ADR-065): every setting in the dialog
- * is drawn through it, so its label/description/chip/badge/dot/reset/error
- * anatomy and the legacy wrappers' preserved APIs are contract, not detail. The
+ * is drawn through it, so its label/description/chip/badge/reset/error anatomy,
+ * its content-sized control column, and the legacy wrappers' preserved APIs are
+ * contract, not detail. The
  * contrast fix in particular — a description is 12px `text-text-secondary`, not
  * 10px `text-text-muted/60` — is the reason the redesign happened, and a
  * regression there is invisible in a screenshot on a good monitor.
@@ -41,7 +42,7 @@ describe('SettingRow', () => {
     expect(description).toHaveClass('text-text-secondary')
   })
 
-  it('renders the engine chip, the applies-later badge and the changed dot', () => {
+  it('renders the engine chip and the applies-later badge, and NO changed dot', () => {
     render(
       <SettingRow
         label="Permission rules"
@@ -55,7 +56,10 @@ describe('SettingRow', () => {
     )
     expect(screen.getByTestId('SettingRow.engine')).toHaveTextContent('Claude')
     expect(screen.getByTestId('SettingRow.badge')).toHaveTextContent('Next server start')
-    expect(screen.getByTestId('SettingRow.modified')).toBeInTheDocument()
+    // The accent dot was removed on the owner's request (2026-09-08): a changed
+    // row has no persistent indicator, only the hover Reset below.
+    expect(screen.queryByTestId('SettingRow.modified')).not.toBeInTheDocument()
+    expect(screen.getByTestId('SettingRow.reset')).toBeInTheDocument()
   })
 
   it('offers Reset only when the row is modified AND a reset handler exists', () => {
@@ -119,9 +123,18 @@ describe('SettingRow', () => {
   })
 
   it('namespaces its parts under a caller-supplied testid (ADR-027)', () => {
-    render(<SettingRow testid="MyRow" dataId="x" label="A" modified appliesOn="next-session" />)
+    render(
+      <SettingRow
+        testid="MyRow"
+        dataId="x"
+        label="A"
+        modified
+        onReset={vi.fn()}
+        appliesOn="next-session"
+      />
+    )
     expect(screen.getByTestId('MyRow')).toHaveAttribute('data-id', 'x')
-    expect(screen.getByTestId('MyRow.modified')).toBeInTheDocument()
+    expect(screen.getByTestId('MyRow.reset')).toBeInTheDocument()
     expect(screen.getByTestId('MyRow.badge')).toBeInTheDocument()
     expect(screen.queryByTestId('SettingRow')).not.toBeInTheDocument()
   })
@@ -129,6 +142,28 @@ describe('SettingRow', () => {
   it('an explanatory row has no label and no control', () => {
     render(<SettingRow description="Nothing to configure." dimmed />)
     expect(screen.getByTestId('SettingRow')).toHaveTextContent('Nothing to configure.')
+  })
+
+  it('sizes the inline control column to its CONTENT, not to a fixed 240px', () => {
+    // The fixed column was wrong in both directions: in the 560px Manage sheet
+    // a row whose control is one button wrapped its description at half the
+    // card, and in the ~330px quick popover it left ~60px of label and pushed
+    // the switches out of the sidebar. The label block keeps `flex-1 min-w-0`,
+    // so the text now runs to the control and wraps there.
+    const { container } = render(
+      <SettingRow label="Shared login" description="One sign-in, vended to each engine.">
+        <button type="button">Disconnect</button>
+      </SettingRow>
+    )
+    const column = container.querySelector('[data-testid="SettingRow"] > span:last-of-type')!
+    expect(column.className).not.toContain('w-[240px]')
+    expect(column.className).toContain('shrink-0')
+    expect(column.className).toContain('justify-end')
+    // The phone cap is unchanged, including the two tokens that shrink a
+    // control which declares its own width into it.
+    expect(column.className).toContain('max-md:max-w-[58%]')
+    expect(column.className).toContain('max-md:[&>*]:max-w-full')
+    expect(column.className).toContain('max-md:[&>*]:min-w-0')
   })
 })
 
@@ -209,6 +244,15 @@ describe('the control set', () => {
     expect(slot).toHaveClass('min-w-9')
     expect(slot).toHaveClass('whitespace-nowrap')
     expect(slot.className).not.toMatch(/(^|\s)w-9(\s|$)/)
+  })
+
+  it('the slider DECLARES its 200px track', () => {
+    // The content-sized control column can no longer supply a width, so a
+    // `flex-1` track would collapse to the value span's width.
+    render(<SettingsSlider label="A" value={50} min={0} max={100} onChange={vi.fn()} />)
+    const track = screen.getByTestId('SliderField')
+    expect(track).toHaveClass('w-[200px]')
+    expect(track.className).not.toContain('flex-1')
   })
 
   it('the slider draws a full-strength accent fill', () => {

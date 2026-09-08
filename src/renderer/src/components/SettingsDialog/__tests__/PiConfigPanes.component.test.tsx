@@ -816,32 +816,34 @@ describe('pi Configuration panes', () => {
 
   // ── 13. Changed-from-default ───────────────────────────────────────
 
-  // The leaf rows get their dot and Reset from the SHARED row primitives
+  // The leaf rows get their Reset from the SHARED row primitives
   // (OpencodeConfigPanes.tsx) — the panes only pass `modified` / `onReset`, and
   // the rendering contract is pinned by that file's own tests. The pi-owned row
   // below is the one built on `SettingRow` directly, so it is pinned here.
+  //
+  // The accent dot is gone (2026-09-08): the hover Reset is the only marker of
+  // a changed row, present in the DOM (at opacity-0) exactly when it applies.
   describe('changed-from-default', () => {
-    it('a configured pi default model shows the dot, and Reset clears the key', async () => {
+    it('a configured pi default model offers Reset, and Reset clears the key', async () => {
       loadEngineConfig.mockResolvedValue({
         piConfig: { defaultModel: 'openai-codex/gpt-5.6-luna' }
       })
       await renderPane(<PiModelsSection />)
       const row = rowFor('piConfig.defaultModel')
-      expect(within(row).getByTestId('PiConfigPane.row.modified')).toBeTruthy()
+      expect(within(row).getByTestId('PiConfigPane.row.reset')).toBeTruthy()
 
       await act(async () => {
         fireEvent.click(within(row).getByTestId('PiConfigPane.row.reset'))
       })
       expect(saveEngineConfig).toHaveBeenCalled()
       expect(
-        rowFor('piConfig.defaultModel').querySelector('[data-testid="PiConfigPane.row.modified"]')
+        rowFor('piConfig.defaultModel').querySelector('[data-testid="PiConfigPane.row.reset"]')
       ).toBeNull()
     })
 
-    it('an unset default model has no dot to reset', async () => {
+    it('an unset default model has nothing to reset', async () => {
       await renderPane(<PiModelsSection />)
       const row = rowFor('piConfig.defaultModel')
-      expect(row.querySelector('[data-testid="PiConfigPane.row.modified"]')).toBeNull()
       expect(row.querySelector('[data-testid="PiConfigPane.row.reset"]')).toBeNull()
     })
   })

@@ -535,6 +535,7 @@ function EditorView({ view, cwd, onBack, onSaved }: EditorViewProps): React.JSX.
         error={nameError ?? undefined}
       >
         <TextField
+          className="w-full"
           value={draft.name}
           disabled={isBuiltin}
           onChange={(v) => update({ name: v })}

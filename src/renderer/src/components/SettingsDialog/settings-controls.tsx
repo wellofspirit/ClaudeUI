@@ -8,19 +8,30 @@ import { SelectMenu, type SelectMenuOption } from '../shared/SelectMenu'
 // Every setting in the dialog renders through `SettingRow`: label (13px,
 // text-primary), optional description (12px, text-SECONDARY — the contrast fix
 // that motivated the redesign; the 10px text-muted/60 helper text it replaces
-// measured 1.6:1 on dark), optional config key (11px mono), a 240px
-// right-aligned control column, and inline state badges. Wide controls (text,
-// lists, chip sets) go under the label at full width via `layout="stacked"`.
+// measured 1.6:1 on dark), optional config key (11px mono), a right-aligned
+// control column, and inline state badges. Wide controls (text, lists, chip
+// sets) go under the label at full width via `layout="stacked"`.
 //
-// The 240px column is a DESKTOP measure. Below Tailwind's `md` (768px — the
-// ADR-048 mobile edge, so this tracks the presentation fork) it would leave a
-// 390px phone ~120px of text column, wrapping "Auto mode (LLM gatekeeper)" one
-// word per line. There the column instead sizes to its content and caps at 58%
-// of the row (`max-md:w-auto max-md:min-w-0 max-md:max-w-[58%]`), with
-// `max-md:[&>*]:max-w-full max-md:[&>*]:min-w-0` so a control that declares its
-// own 240px (TextField, SelectField) shrinks into the cap instead of
-// overflowing the row. Additive variants only: at md and up the column is
-// byte-for-byte the desktop's.
+// The inline control column is CONTENT-SIZED (`shrink-0`, no width of its own),
+// and the label block keeps `flex-1 min-w-0`, so the text runs all the way to
+// the control and wraps there. The 240px fixed column this replaced (ADR-065's
+// board measure) was wrong in both directions: in the 560px Manage sheet a row
+// whose control is one "Disconnect" button wrapped its description at half the
+// card, and in the ~330px quick-settings popover it left ~60px of label and
+// pushed the switches out of the sidebar.
+//
+// The consequence is that a control which NEEDS a width must DECLARE one —
+// `TextField` (240px by default), `SliderField` (a 200px track), `NumberField`
+// (88px), `SelectField` (`min-w-[150px]`) and `ModelPicker variant="field"` all
+// do. Nothing may rely on the column to size it.
+//
+// Below Tailwind's `md` (768px — the ADR-048 mobile edge, so this tracks the
+// presentation fork) the column additionally caps at 58% of the row
+// (`max-md:max-w-[58%]`). The two `max-md:[&>*]` tokens beside it shrink a
+// control that declares its own 240px into that cap instead of letting it
+// overflow the row — they reach the column's DIRECT children only, so a call
+// site that wraps its control in a testid span has to keep the control itself
+// parent-relative.
 //
 // Nothing else may invent its own row: the controls below are the whole
 // vocabulary, and the legacy exports (`SettingsToggle`, `SettingsSelect`, …) are
@@ -67,9 +78,9 @@ export interface SettingRowProps {
    * credential badge, whose value set is the registry's, not this file's).
    *
    * Deliberately a slot rather than another enumerated badge: `engine`,
-   * `locked`, `modified` and `appliesOn` are fixed vocabularies ADR-065 defines,
-   * and adding provider credentials to that list would make this primitive know
-   * about a feature.
+   * `locked` and `appliesOn` are fixed vocabularies ADR-065 defines, and adding
+   * provider credentials to that list would make this primitive know about a
+   * feature.
    */
   labelBadge?: React.ReactNode
   description?: string
@@ -78,7 +89,13 @@ export interface SettingRowProps {
   /** Outlined chip after the label — the setting exists for this engine only. */
   engine?: EngineId
   appliesOn?: AppliesOn
-  /** Accent dot after the label; with `onReset`, a Reset link on row hover. */
+  /**
+   * This row's value differs from the default. There is NO persistent
+   * indicator: the accent dot after the label was removed on the owner's
+   * request (2026-09-08) as noise. What `modified` still does is gate the
+   * hover-only Reset link — an action, not a state badge — so a row with
+   * `modified` and no `onReset` now renders nothing extra at all.
+   */
   modified?: boolean
   onReset?: () => void
   /** Validation or write failure, in the danger colour under the description. */
@@ -196,13 +213,6 @@ export function SettingRow({
                 {locked}
               </span>
             )}
-            {modified && (
-              <span
-                data-testid={`${tid}.modified`}
-                title="Changed from default"
-                className="shrink-0 w-1.5 h-1.5 rounded-full bg-accent"
-              />
-            )}
             {appliesOn && (
               <span
                 data-testid={`${tid}.badge`}
@@ -244,7 +254,7 @@ export function SettingRow({
           className={
             layout === 'stacked'
               ? `block w-full ${dimmed ? 'opacity-50' : ''}`
-              : `w-[240px] shrink-0 flex items-center justify-end gap-2 max-md:w-auto max-md:min-w-0 max-md:max-w-[58%] max-md:[&>*]:max-w-full max-md:[&>*]:min-w-0 ${dimmed ? 'opacity-50' : ''}`
+              : `shrink-0 flex items-center justify-end gap-2 max-md:max-w-[58%] max-md:[&>*]:max-w-full max-md:[&>*]:min-w-0 ${dimmed ? 'opacity-50' : ''}`
           }
         >
           {layout === 'inline' && resetNode}
@@ -292,7 +302,7 @@ export function SettingRow({
   )
 }
 
-// ── Controls that live in the 240px column ───────────────────────────
+// ── Controls that live in the inline control column ──────────────────
 
 /**
  * The switch visual itself, split out of `SettingsToggle` so a READ-ONLY row —
@@ -484,14 +494,21 @@ export function NumberField({
   )
 }
 
-/** Paths, URLs and commands. Mono by default, full width in a stacked row. */
+/**
+ * Paths, URLs and commands. Mono by default.
+ *
+ * The default width is the row's own 240px, because the inline control column
+ * is content-sized and cannot supply one. A caller that wants the field to
+ * FILL its container — a `layout="stacked"` row, or a form block outside a row
+ * — passes `className="w-full"` explicitly.
+ */
 export function TextField({
   value,
   onChange,
   placeholder,
   mono = true,
   type = 'text',
-  className = 'w-full',
+  className = 'w-[240px]',
   disabled = false,
   testid,
   dataId,
@@ -581,10 +598,14 @@ export function SliderField({
           // unfilled half carries the muting instead.
           background: `linear-gradient(to right, var(--color-accent) ${pct}%, color-mix(in srgb, var(--color-text-muted) 45%, transparent) ${pct}%)`
         }}
-        // flex-1 rather than the board's fixed 200px track: a formatted value
-        // like "50,000 chars" is far wider than the board's "115%", and a fixed
-        // track would push it out of the 240px column.
-        className="flex-1 min-w-0 h-1 appearance-none rounded-full cursor-pointer [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:bg-accent"
+        // The board's fixed 200px track. It used to be `flex-1 min-w-0`, on the
+        // argument that a formatted value like "50,000 chars" is far wider than
+        // the board's "115%" and a fixed track would push it out of the column
+        // — but that argument assumed a FIXED 240px column to be pushed out of.
+        // The column is content-sized now, so a control that wants a width has
+        // to declare one; the value span next to it keeps `min-w-9 shrink-0`
+        // and the column simply grows to fit both.
+        className="w-[200px] h-1 appearance-none rounded-full cursor-pointer [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:bg-accent"
       />
       <span className="min-w-9 shrink-0 text-right text-[12px] text-text-secondary tabular-nums whitespace-nowrap">
         {display}
