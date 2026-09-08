@@ -44,6 +44,11 @@ function openDropdown(): void {
   fireEvent.click(screen.getByTestId('ModelPicker.trigger'))
 }
 
+/** The menu has no testid of its own; it is the root's second child. */
+function menu(): HTMLElement {
+  return screen.getByTestId('ModelPicker').lastElementChild as HTMLElement
+}
+
 function optionByValue(value: string): HTMLElement {
   const options = screen.getAllByTestId('ModelPicker.option')
   const match = options.find((o) => o.getAttribute('data-value') === value)
@@ -241,6 +246,67 @@ describe('ModelPicker — field variant', () => {
     expect(onSelectModel).toHaveBeenCalledWith('claude-opus-4-7')
     expect(trigger.getAttribute('aria-expanded')).toBe('false')
     expect(screen.getByTestId('ModelPicker.chevron').getAttribute('data-open')).toBe('false')
+  })
+})
+
+describe('ModelPicker — menu placement', () => {
+  it('places the FIELD menu as a fixed overlay so the group card cannot clip it', () => {
+    render(
+      <ModelPicker
+        variant="field"
+        placement="down"
+        models={[claudeModel]}
+        selectedModel={claudeModel}
+        onSelectModel={vi.fn()}
+      />
+    )
+    openDropdown()
+    const list = menu()
+    // Settings group cards are `overflow-hidden` (and the page scrolls, and a
+    // sheet adds a third scroll body) — an absolute menu was clipped by all
+    // three. See use-anchored-menu.
+    expect(list.style.position).toBe('fixed')
+    expect(list.className).not.toContain('absolute')
+    expect(list.getAttribute('data-side')).toBe('down')
+  })
+
+  it('leaves the COMPACT composer menu exactly as it was', () => {
+    render(
+      <ModelPicker models={[claudeModel]} selectedModel={claudeModel} onSelectModel={vi.fn()} />
+    )
+    openDropdown()
+    const list = menu()
+    // The InputBox controls bar is clipped by nothing and is out of scope: it
+    // keeps its absolute, 14rem list and never registers the hook's listeners.
+    expect(list.style.position).toBe('')
+    expect(list.className).toContain('absolute')
+    expect(list.className).toContain('bottom-full')
+    expect(list.className).toContain('w-56')
+    expect(list.getAttribute('data-side')).toBeNull()
+  })
+
+  it('closes the FIELD menu on an outside scroll, which a fixed list cannot follow', () => {
+    render(
+      <ModelPicker
+        variant="field"
+        placement="down"
+        models={[claudeModel]}
+        selectedModel={claudeModel}
+        onSelectModel={vi.fn()}
+      />
+    )
+    openDropdown()
+    fireEvent.scroll(document.body)
+    expect(screen.queryByTestId('ModelPicker.option')).toBeNull()
+  })
+
+  it('keeps the COMPACT menu open on an outside scroll (no listener at all)', () => {
+    render(
+      <ModelPicker models={[claudeModel]} selectedModel={claudeModel} onSelectModel={vi.fn()} />
+    )
+    openDropdown()
+    fireEvent.scroll(document.body)
+    expect(screen.getAllByTestId('ModelPicker.option')).toHaveLength(1)
   })
 })
 

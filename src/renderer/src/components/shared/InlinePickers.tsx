@@ -14,6 +14,7 @@ import type { EngineId, VendorId } from '../../../../shared/types'
 import { ENGINE_META, engineMeta } from '../../../../shared/engine-meta'
 import { ChevronIcon } from './ChevronIcon'
 import { EngineLogo } from './EngineLogo'
+import { useAnchoredMenu } from './use-anchored-menu'
 
 export interface ModelDisplay {
   value: string
@@ -191,6 +192,22 @@ export function ModelPicker({
   const ref = useRef<HTMLDivElement | null>(null)
   useClickOutside(ref, open, () => setOpen(false))
 
+  const field = variant === 'field'
+
+  // FIELD ONLY: the settings row control lives inside an `overflow-hidden`
+  // group card, which clipped an absolutely-positioned menu (see
+  // use-anchored-menu). The compact composer picker is not clipped by anything
+  // and keeps its absolute menu byte-for-byte.
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const anchored = useAnchoredMenu({
+    open: open && field,
+    anchorRef: triggerRef,
+    menuRef,
+    placement,
+    onClose: () => setOpen(false)
+  })
+
   // Local-only filter toggle — intentionally not persisted across dropdown
   // open/close (or model list changes); it simply resets on remount.
   const [freeOnly, setFreeOnly] = useState(false)
@@ -210,11 +227,10 @@ export function ModelPicker({
       .filter((g) => g.items.length > 0)
   }, [groups, freeOnly, hasFreeModels])
 
-  const field = variant === 'field'
-
   return (
     <div className="relative" ref={ref} data-testid="ModelPicker" data-variant={variant}>
       <button
+        ref={triggerRef}
         type="button"
         onClick={(e) => {
           e.stopPropagation()
@@ -256,9 +272,18 @@ export function ModelPicker({
       </button>
       {open && (
         <div
-          // The field menu is never narrower than its trigger (what `SelectMenu`
-          // does); the compact one keeps the composer's fixed 14rem list.
-          className={`absolute ${placement === 'down' ? 'top-full mt-1' : 'bottom-full mb-1'} left-0 ${field ? 'min-w-full w-max max-w-[22rem]' : 'w-56'} max-h-72 overflow-y-auto bg-bg-tertiary border border-border rounded-lg shadow-lg shadow-black/30 z-20`}
+          ref={menuRef}
+          data-side={anchored?.side}
+          style={anchored?.style}
+          // The field menu is placed by the hook — `position: fixed`, offsets and
+          // a min-width measured from the trigger, so no `overflow` ancestor in
+          // the settings tree clips it. The compact one keeps the composer's
+          // absolute menu and its fixed 14rem list.
+          className={
+            field
+              ? 'w-max max-w-[22rem] max-h-72 overflow-y-auto bg-bg-tertiary border border-border rounded-lg shadow-lg shadow-black/30 z-20'
+              : `absolute ${placement === 'down' ? 'top-full mt-1' : 'bottom-full mb-1'} left-0 w-56 max-h-72 overflow-y-auto bg-bg-tertiary border border-border rounded-lg shadow-lg shadow-black/30 z-20`
+          }
         >
           {emptyOption && (
             <button

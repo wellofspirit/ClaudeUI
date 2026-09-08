@@ -10,6 +10,10 @@
  *   5. options are real DOM buttons styled from theme tokens (the Monokai
  *      regression that motivated the whole sweep), never `<option>`
  *   6. ADR-027 testids: root / `.trigger` / `.option` + `data-id`
+ *   7. the list is `position: fixed` (use-anchored-menu), because the settings
+ *      group card it is drawn in is `overflow-hidden` and clipped an absolute
+ *      one — and a scroll therefore has to close it, since a fixed menu cannot
+ *      follow its trigger
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
@@ -132,6 +136,36 @@ describe('SelectMenu', () => {
     fireEvent.click(within(root).getByTestId('Demo.trigger'))
     fireEvent.mouseDown(document.body)
     expect(within(root).queryByRole('listbox')).toBeNull()
+  })
+
+  it('draws the list as a fixed overlay so no overflow ancestor clips it', () => {
+    const { root } = renderMenu()
+    fireEvent.click(within(root).getByTestId('Demo.trigger'))
+    const menu = within(root).getByTestId('Demo.menu')
+    // The group cards in Settings are `overflow-hidden`; `absolute` put the
+    // menu inside that clip (Extra high / Max were unreachable on the effort
+    // row). `fixed` takes the viewport as the containing block instead.
+    expect(menu.style.position).toBe('fixed')
+    expect(menu.className).not.toContain('absolute')
+    expect(menu.className).not.toContain('min-w-full')
+    // The hook measured the trigger, so the menu is never narrower than it.
+    expect(menu.style.minWidth).not.toBe('')
+    expect(menu.getAttribute('data-side')).toBe('down')
+  })
+
+  it('closes on a scroll outside the menu, which a fixed list cannot follow', () => {
+    const { root } = renderMenu()
+    fireEvent.click(within(root).getByTestId('Demo.trigger'))
+    // Scroll does not bubble; the hook listens in the capture phase.
+    fireEvent.scroll(document.body)
+    expect(within(root).queryByRole('listbox')).toBeNull()
+  })
+
+  it('keeps the menu open while its own option list is scrolled', () => {
+    const { root } = renderMenu()
+    fireEvent.click(within(root).getByTestId('Demo.trigger'))
+    fireEvent.scroll(within(root).getByTestId('Demo.menu'))
+    expect(within(root).queryByRole('listbox')).toBeTruthy()
   })
 
   it('carries the call site id and extra data attributes for repeated instances', () => {

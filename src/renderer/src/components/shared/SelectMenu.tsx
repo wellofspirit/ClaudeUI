@@ -26,6 +26,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import { ChevronIcon } from './ChevronIcon'
+import { useAnchoredMenu } from './use-anchored-menu'
 
 export interface SelectMenuOption {
   value: string
@@ -70,6 +71,17 @@ export function SelectMenu({
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
+  // The menu is `position: fixed` (see use-anchored-menu): the group cards it
+  // is drawn in are `overflow-hidden`, which clipped an absolute menu.
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const anchored = useAnchoredMenu({
+    open,
+    anchorRef: triggerRef,
+    menuRef,
+    placement,
+    onClose: () => setOpen(false)
+  })
 
   useEffect(() => {
     if (!open) return
@@ -107,6 +119,7 @@ export function SelectMenu({
       className="relative [-webkit-app-region:no-drag]"
     >
       <button
+        ref={triggerRef}
         type="button"
         id={id}
         data-testid={testid ? `${testid}.trigger` : undefined}
@@ -129,9 +142,14 @@ export function SelectMenu({
       </button>
       {open && (
         <div
+          ref={menuRef}
           role="listbox"
           data-testid={testid ? `${testid}.menu` : undefined}
-          className={`absolute ${placement === 'down' ? 'top-full mt-1' : 'bottom-full mb-1'} left-0 min-w-full w-max max-w-[22rem] max-h-72 overflow-y-auto bg-bg-tertiary border border-border rounded-lg shadow-lg shadow-black/30 z-30`}
+          data-side={anchored?.side}
+          style={anchored?.style}
+          // No `absolute`/`min-w-full`: the hook supplies position, offsets and
+          // a min-width measured from the trigger.
+          className="w-max max-w-[22rem] max-h-72 overflow-y-auto bg-bg-tertiary border border-border rounded-lg shadow-lg shadow-black/30 z-30"
         >
           {options.map((opt) => {
             const active = opt.value === value
