@@ -3,7 +3,7 @@ import { useSessionStore, type AppSettings } from '../../stores/session-store'
 import type { EngineConfig, EngineId, VendorConfig } from '../../../../shared/types'
 import { engineMeta } from '../../../../shared/engine-meta'
 import type { SettingItem } from './settings-sections'
-import { APPLIES_ON_LABEL } from './settings-controls'
+import { APPLIES_ON_LABEL, Button } from './settings-controls'
 import {
   PAGES,
   RAIL_GROUPS,
@@ -650,6 +650,22 @@ export function SettingsDialogView({
                           </span>
                         )}
                         {storage && <StorageTag file={storage} />}
+                        {group.action && (
+                          <Button
+                            testid="SettingsGroup.action"
+                            dataId={group.id}
+                            disabled={group.action.disabled}
+                            title={group.action.title}
+                            // A static group definition holds no closure, so the
+                            // header speaks to the pane it renders by event —
+                            // see `SettingsGroup.action`.
+                            onClick={() =>
+                              window.dispatchEvent(new CustomEvent(group.action!.event))
+                            }
+                          >
+                            {group.action.label}
+                          </Button>
+                        )}
                       </div>
                       <GroupCard items={itemsFor(group, engine)} render={renderItem} />
                       {note && (

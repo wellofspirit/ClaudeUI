@@ -121,6 +121,12 @@ export function buildProviderRegistry(sources: ProviderRegistrySources): Provide
 
   const natives = [
     ...(sources.opencodeCatalog ?? [])
+      // The catalog lists every provider opencode COULD use (~200 from
+      // models.dev). A row is a provider the user HAS: authenticated, free, or
+      // vetoed via disabled_providers — the same rule the opencode provider
+      // pane applies (`OpencodeProviders.tsx` "configured"). Everything else is
+      // an Add-sheet candidate, not a provider.
+      .filter(isConfiguredOpencodeProvider)
       .filter((entry) => !owned.opencode.has(entry.id))
       .map((entry) => opencodeNativeEntry(entry, sources)),
     ...Object.entries(sources.piVendors)
@@ -280,6 +286,9 @@ function opencodeNativeEntry(
     // `disabled_providers` is opencode's own veto: the provider is configured
     // but reaches no picker. Native by construction — this row IS the store entry.
     engines: { opencode: { enabled: !entry.disabled, ...counts, native: true } },
+    // Carried, never re-derived: `removeKind` is what the remove channel must be
+    // given, and it is non-null exactly when the provider can be removed at all.
+    ...(entry.actions.removeKind ? { opencodeRemoveKind: entry.actions.removeKind } : {}),
     ...detail(
       entry.disabled ? 'Disabled in opencode' : undefined,
       counts.curated
@@ -306,6 +315,9 @@ function piNativeEntry(
     // Turning the row off REMOVES it (owner ruling 1) — which is why there is no
     // disabled state to represent here.
     engines: { pi: { enabled: true, ...counts, native: true } },
+    // The SAME predicate as the detail line below, projected as a field so the
+    // Manage sheet routes removal by data rather than by parsing prose.
+    piKind: sources.piAuthOptions[vendorId] ? 'builtin' : 'custom',
     ...detail(
       // A configured vendor pi's built-in catalog does not know is a
       // user-defined models.json provider — the Manage sheet removes it through
@@ -319,6 +331,11 @@ function piNativeEntry(
 // ---------------------------------------------------------------------------
 // Rules
 // ---------------------------------------------------------------------------
+
+/** A catalog entry the user has actually set up (or vetoed) — the row predicate. */
+function isConfiguredOpencodeProvider(entry: OpencodeProviderCatalogEntry): boolean {
+  return entry.authState === 'authenticated' || entry.authState === 'free' || entry.disabled
+}
 
 /** The native ids each ENABLED shared route claims, per engine. See the header. */
 function ownedNativeIds(definitions: readonly SharedProviderDefinition[]): {

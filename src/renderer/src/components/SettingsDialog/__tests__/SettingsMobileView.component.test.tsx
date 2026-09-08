@@ -112,6 +112,11 @@ describe('SettingsDialog mobile fork', () => {
       activeId: null,
       accounts: []
     }))
+    // The Models page's provider list reads the registry on mount.
+    app.bridge.ipcMain.handle('provider-registry:list', async () => ({
+      entries: [],
+      opencodeInstalled: true
+    }))
   })
 
   afterEach(() => {
@@ -290,6 +295,25 @@ describe('SettingsDialog mobile fork', () => {
       expect(judge.getByTestId('SettingsMobileView.groupNote')).toHaveTextContent(
         'The judge sees tool calls, not their output'
       )
+    })
+
+    it('carries the group header ACTION, in the wrapping control line', async () => {
+      // The phone gets the same one-action header as the desktop (ADR-065's
+      // group chrome), wrapped with the other controls rather than dropped.
+      await renderDialog({ onClose })
+      await tapTab('features')
+      await expandPage('models')
+
+      const action = byId('SettingsMobileView.groupAction', 'providers')
+      expect(action).toHaveTextContent('+ Add provider')
+      expect(action).toBeDisabled()
+      expect(
+        within(byId('SettingsMobileView.group', 'providers')).getByTestId(
+          'SettingsMobileView.groupHeader'
+        )
+      ).toContainElement(action)
+      // No other group declares one.
+      expect(screen.getAllByTestId('SettingsMobileView.groupAction')).toHaveLength(1)
     })
 
     it('keeps the group label whole — the controls wrap, the name never truncates', async () => {

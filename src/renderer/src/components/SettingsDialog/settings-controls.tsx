@@ -61,6 +61,17 @@ function LockIcon(): React.JSX.Element {
 export interface SettingRowProps {
   /** Omit for an explanatory row: the description then occupies the label slot. */
   label?: string
+  /**
+   * Rendered immediately after the label text, before the built-in badges — a
+   * status chip the row's OWN vocabulary cannot express (the provider list's
+   * credential badge, whose value set is the registry's, not this file's).
+   *
+   * Deliberately a slot rather than another enumerated badge: `engine`,
+   * `locked`, `modified` and `appliesOn` are fixed vocabularies ADR-065 defines,
+   * and adding provider credentials to that list would make this primitive know
+   * about a feature.
+   */
+  labelBadge?: React.ReactNode
   description?: string
   /** The engine-native config key this row writes (11px mono, under the text). */
   keyText?: string
@@ -109,6 +120,7 @@ export interface SettingRowProps {
 
 export function SettingRow({
   label,
+  labelBadge,
   description,
   keyText,
   engine,
@@ -165,6 +177,7 @@ export function SettingRow({
             className={`flex items-center gap-2 text-[13px] leading-[18px] ${labelClassName ?? 'text-text-primary'}`}
           >
             <span className="min-w-0">{label}</span>
+            {labelBadge}
             {engine && (
               <span
                 data-testid={`${tid}.engine`}

@@ -3,7 +3,7 @@ import type { AppSettings } from '../../stores/session-store'
 import type { EngineConfig, EngineId, VendorConfig } from '../../../../shared/types'
 import { engineMeta } from '../../../../shared/engine-meta'
 import type { SettingItem } from './settings-sections'
-import { APPLIES_ON_LABEL } from './settings-controls'
+import { APPLIES_ON_LABEL, Button } from './settings-controls'
 import { groupKey } from './View'
 import {
   PAGES,
@@ -281,6 +281,19 @@ function GroupHeader({
         </span>
       )}
       {storage && <StorageTag file={storage} />}
+      {group.action && (
+        <Button
+          testid="SettingsMobileView.groupAction"
+          dataId={group.id}
+          disabled={group.action.disabled}
+          title={group.action.title}
+          // Same event channel as the desktop header — a static group definition
+          // holds no closure. See `SettingsGroup.action`.
+          onClick={() => window.dispatchEvent(new CustomEvent(group.action!.event))}
+        >
+          {group.action.label}
+        </Button>
+      )}
     </div>
   )
 }

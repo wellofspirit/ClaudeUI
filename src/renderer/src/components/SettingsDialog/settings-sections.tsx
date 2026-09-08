@@ -63,6 +63,7 @@ import {
   RemoteServerSection
 } from './RemoteServerSettings'
 import { PiVendors } from './PiVendors'
+import { ProviderList } from './ProviderList'
 import { SharedProviders } from './SharedProviders'
 import { VendorOpencodeSection } from './OpencodeProviders'
 import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
@@ -3311,9 +3312,27 @@ export const SECTIONS: Section[] = [
     ),
     items: [
       {
+        // ADR-065 phase 6b: ONE list over the three provider stores, not the
+        // shared vault's own pane. The item KEY is unchanged — it is what the
+        // page model, the deep links and the inventory guard address — while
+        // what it renders is now the unified list. The vault's own surface
+        // (`SharedProviders.tsx`) is retired in 6c along with the two
+        // engine-native provider groups.
         key: 'sharedProviders',
-        label: 'Providers & models',
-        keywords: 'shared provider chatgpt codex api key model pi opencode',
+        label: 'Providers',
+        keywords:
+          'shared provider chatgpt codex api key credential model pi opencode anthropic openrouter ollama',
+        render: (_s, _u, _e, _ue, _v, _uv, ctx) => <ProviderList navigate={ctx?.navigate} />
+      },
+      {
+        // BRIDGE until phase 6c: the shared vault's own pane still holds the
+        // flows the Manage sheet does not carry yet — signing in to a
+        // subscription (the ADR-057 paste-back), the custom-endpoint form,
+        // per-route default models and Sync. Mounted as its own group so none
+        // of them regresses between 6b and 6c; 6c deletes this item.
+        key: 'sharedProvidersLegacy',
+        label: 'Shared provider setup',
+        keywords: 'shared provider sign in chatgpt codex custom endpoint sync default model',
         render: () => <SharedProviders />
       }
     ]

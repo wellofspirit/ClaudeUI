@@ -62,6 +62,14 @@ function status(over: Partial<SharedProviderStatus> = {}): SharedProviderStatus 
   }
 }
 
+/** The default `actions` of a removable catalog entry. */
+const REMOVABLE: OpencodeProviderCatalogEntry['actions'] = {
+  canSetCredential: true,
+  canEditDeclaration: false,
+  canRemove: true,
+  removeKind: 'credential'
+}
+
 function catalogEntry(
   over: Partial<OpencodeProviderCatalogEntry> & { id: string }
 ): OpencodeProviderCatalogEntry {
@@ -71,12 +79,7 @@ function catalogEntry(
     authMethods: ['api'],
     modelCount: 300,
     disabled: false,
-    actions: {
-      canSetCredential: true,
-      canEditDeclaration: false,
-      canRemove: true,
-      removeKind: 'credential'
-    },
+    actions: REMOVABLE,
     ...over
   }
 }
@@ -336,8 +339,7 @@ describe('credential per origin', () => {
           catalogEntry({ id: 'zen', authState: 'free', authMethods: [] }),
           catalogEntry({ id: 'github-copilot' }),
           catalogEntry({ id: 'openrouter' }),
-          catalogEntry({ id: 'envkeyed' }),
-          catalogEntry({ id: 'mistral', authState: 'unauthenticated' })
+          catalogEntry({ id: 'envkeyed' })
         ],
         opencodeCredentialKinds: { 'github-copilot': 'oauth', openrouter: 'api' }
       })
@@ -348,7 +350,27 @@ describe('credential per origin', () => {
     // Usable with nothing in opencode's auth.json → an env var or a config file
     // ClaudeUI does not own.
     expect(byId(snapshot, 'opencode:envkeyed').credential).toBe('custom')
-    expect(byId(snapshot, 'opencode:mistral').credential).toBe('none')
+  })
+
+  it('opencode native: an UNCONFIGURED catalog entry is not a row (GUARD)', () => {
+    // The catalog is every provider opencode COULD use (~200 from models.dev).
+    // Without this filter the list was 230 rows of "Not connected" — the live
+    // walk of phase 6b caught it. The same rule the opencode pane applies:
+    // authenticated, free, or vetoed via disabled_providers.
+    const snapshot = buildProviderRegistry(
+      sources({
+        opencodeCatalog: [
+          catalogEntry({ id: 'mistral', authState: 'unauthenticated' }),
+          catalogEntry({ id: 'vetoed', authState: 'unauthenticated', disabled: true }),
+          catalogEntry({ id: 'zen', authState: 'free', authMethods: [] })
+        ]
+      })
+    )
+    expect(snapshot.entries.map((e) => e.id)).toEqual([
+      'anthropic',
+      'opencode:vetoed',
+      'opencode:zen'
+    ])
   })
 
   it('pi native: connected for an oauth entry, api-key for anything else', () => {
@@ -444,6 +466,45 @@ describe('engine facts', () => {
       })
     )
     expect(byId(snapshot, 'pi:my-endpoint').detail).toBe('Custom pi provider')
+  })
+
+  it('pi: `piKind` says which store a native row lives in (ruling 1 routes removal by it)', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        piVendors: {
+          groq: { authState: 'authenticated', billingType: 'apiKey' },
+          'my-endpoint': { authState: 'authenticated', billingType: 'apiKey' }
+        },
+        piAuthOptions: { groq: [] }
+      })
+    )
+    expect(byId(snapshot, 'pi:groq').piKind).toBe('builtin')
+    expect(byId(snapshot, 'pi:my-endpoint').piKind).toBe('custom')
+    // Not a native pi row: nothing to route.
+    expect(byId(snapshot, 'anthropic').piKind).toBeUndefined()
+  })
+
+  it('opencode: `opencodeRemoveKind` is carried through, and absent when Remove is unavailable', () => {
+    const snapshot = buildProviderRegistry(
+      sources({
+        opencodeCatalog: [
+          catalogEntry({ id: 'openrouter', actions: { ...REMOVABLE, removeKind: 'both' } }),
+          catalogEntry({
+            id: 'envkeyed',
+            actions: {
+              canSetCredential: true,
+              canEditDeclaration: false,
+              canRemove: false,
+              removeKind: null,
+              blockedReason: 'Its key comes from OPENAI_API_KEY.'
+            }
+          })
+        ]
+      })
+    )
+    expect(byId(snapshot, 'opencode:openrouter').opencodeRemoveKind).toBe('both')
+    expect(byId(snapshot, 'opencode:envkeyed').opencodeRemoveKind).toBeUndefined()
+    expect(byId(snapshot, 'anthropic').opencodeRemoveKind).toBeUndefined()
   })
 
   it('a shared row carries the ROUTE model counts and the definition diagnosis', () => {

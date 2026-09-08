@@ -19,7 +19,7 @@
  */
 
 import type { SharedProviderRouteDiagnosis } from './shared-provider'
-import type { EngineId } from './types'
+import type { EngineId, OpencodeProviderCatalogEntry } from './types'
 
 /** Which store the row's identity comes from. Decides the actions the sheet offers. */
 export type ProviderOrigin = 'anthropic' | 'shared' | 'opencode-native' | 'pi-native'
@@ -65,6 +65,28 @@ export interface ProviderEntry {
   detail?: string
   /** Why an enabled, credentialed shared route surfaces zero models. */
   diagnosis?: SharedProviderRouteDiagnosis
+  /**
+   * `pi-native` rows only: which store the row lives in, and therefore what
+   * REMOVING it means (owner ruling 1, 2026-09-08). A `builtin` vendor — one pi
+   * ships an auth option for — is removed with `vendor-auth:remove`; a `custom`
+   * one is a `models.json` `providers.<id>` entry the user declared, and is
+   * removed with a `patchPiModels` delete. The two are not interchangeable:
+   * `vendor-auth:remove` would leave a custom provider declared but keyless, and
+   * a models.json delete would not touch a built-in's credential at all.
+   *
+   * Absent on every other origin.
+   */
+  piKind?: 'builtin' | 'custom'
+  /**
+   * `opencode-native` rows only: what Remove would actually destroy, straight
+   * from the catalog entry's resolved `actions` — the value
+   * `session:remove-opencode-provider` must be given, never a widened one.
+   *
+   * ABSENT means the provider cannot be removed (`removeKind` is non-null
+   * exactly when `canRemove` is true — see `resolveProviderActions`), so the
+   * sheet's Remove affordance is gated on its presence.
+   */
+  opencodeRemoveKind?: NonNullable<OpencodeProviderCatalogEntry['actions']['removeKind']>
 }
 
 export interface ProviderRegistrySnapshot {

@@ -66,6 +66,11 @@ beforeEach(async () => {
     activeId: null,
     accounts: []
   }))
+  // …and the unified provider list, which reads the registry on mount.
+  app.bridge.ipcMain.handle('provider-registry:list', async () => ({
+    entries: [],
+    opencodeInstalled: true
+  }))
 })
 
 afterEach(() => {
@@ -172,6 +177,32 @@ describe('the page pane', () => {
   it('shows the group badge', () => {
     renderView({ activePage: 'sessions' })
     expect(screen.getAllByTestId('SettingsGroup.badge')[0]).toHaveTextContent('All engines')
+  })
+
+  it('renders a group header ACTION at the right of the header, and only where declared', () => {
+    renderView({ activePage: 'models' })
+    const action = screen.getByTestId('SettingsGroup.action')
+    expect(action).toHaveAttribute('data-id', 'providers')
+    expect(action).toHaveTextContent('+ Add provider')
+    // It sits INSIDE the providers group's header, after the label.
+    const header = within(byId('SettingsGroup', 'providers')).getByTestId('SettingsGroup.header')
+    expect(within(header).getByTestId('SettingsGroup.action')).toBe(action)
+    // Phase 6c wires the Add sheet; until then the button says why it is inert.
+    expect(action).toBeDisabled()
+    expect(action).toHaveAttribute('title', expect.stringContaining('next step'))
+
+    cleanup()
+    renderView({ activePage: 'appearance' })
+    expect(screen.queryByTestId('SettingsGroup.action')).not.toBeInTheDocument()
+  })
+
+  it('a disabled header action dispatches nothing', () => {
+    const seen = vi.fn()
+    window.addEventListener('settings:add-provider', seen)
+    renderView({ activePage: 'models' })
+    fireEvent.click(screen.getByTestId('SettingsGroup.action'))
+    expect(seen).not.toHaveBeenCalled()
+    window.removeEventListener('settings:add-provider', seen)
   })
 
   it('gives the shared trust lists their own group after the judge (ADR-065 phase 4)', async () => {

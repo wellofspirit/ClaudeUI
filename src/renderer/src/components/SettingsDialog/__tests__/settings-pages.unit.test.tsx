@@ -89,6 +89,7 @@ describe('PAGES structure', () => {
         'providers',
         'providers-opencode',
         'providers-pi',
+        'providers-shared-legacy',
         'defaults',
         'pi-fallbacks',
         'anthropic',
@@ -129,6 +130,32 @@ describe('PAGES structure', () => {
     for (const g of pageOf('appearance').groups) expect(g.appliesOn).toBeUndefined()
   })
 
+  it('the Providers group is ONE list with a header action, no longer the shared pane', () => {
+    // ADR-065 § "Providers: one list": the card fronts three stores now, so the
+    // 'Shared' badge would be a lie about what it holds.
+    const providers = pageOf('models').groups.find((g) => g.id === 'providers')!
+    expect(providers.badge).toBeUndefined()
+    expect(providers.action).toMatchObject({
+      label: '+ Add provider',
+      testid: 'ProviderList.add',
+      event: 'settings:add-provider',
+      // The Add sheet is phase 6c; the button says so rather than doing nothing.
+      disabled: true
+    })
+    expect(providers.action?.title).toBeTruthy()
+  })
+
+  it('exactly one group declares a header action, and it names an event, not a callback', () => {
+    // A group definition is a static module-level object, so an action can only
+    // carry a NAME the pane it renders listens for.
+    const withAction = PAGES.flatMap((p) => p.groups).filter((g) => g.action)
+    expect(withAction.map((g) => g.id)).toEqual(['providers'])
+    for (const group of withAction) {
+      expect(typeof group.action!.event).toBe('string')
+      expect(group.action!.event.length).toBeGreaterThan(0)
+    }
+  })
+
   it('group ids are unique within their page', () => {
     for (const page of PAGES) {
       const ids = page.groups.map((g) => g.id)
@@ -146,7 +173,7 @@ describe('PAGES structure', () => {
 
   it('byEngine groups list their engines in claude → opencode → pi order', () => {
     expect(enginesOf(pageOf('sessions').groups[2])).toEqual(['opencode', 'pi'])
-    expect(enginesOf(pageOf('models').groups[3])).toEqual(['claude', 'opencode', 'pi'])
+    expect(enginesOf(pageOf('models').groups.find((g) => g.id === 'defaults')!)).toEqual(['claude', 'opencode', 'pi'])
     // pi joined as a dispatch TARGET: core has accepted it since M4c, the UI
     // pane is what was missing (ADR-065 § Cross-engine dispatch into pi).
     expect(enginesOf(pageOf('dispatch').groups[0])).toEqual(['claude', 'opencode', 'pi'])

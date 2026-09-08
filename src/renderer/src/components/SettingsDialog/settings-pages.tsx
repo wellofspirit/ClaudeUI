@@ -45,6 +45,30 @@ export interface SettingsGroup {
   storage?: string | ((engine: EngineId) => string | undefined)
   /** Header badge text (e.g. 'All engines'). */
   badge?: string
+  /**
+   * The group header's ONE optional action (`board-RowVocabulary.png` § group
+   * chrome) — a tinted button at the right of the header, after the badge and
+   * the storage tag.
+   *
+   * It carries an EVENT NAME rather than a callback because a group definition
+   * is a static, module-level object while the state the action drives lives in
+   * the pane the group renders (the provider list owns its Manage/Add sheet).
+   * The header dispatches `new CustomEvent(event)` on `window` and the pane
+   * listens — the same one-way, closure-free channel the settings deep link
+   * (`open-settings`) already uses between panes and the shell, and the only
+   * shape that keeps BOTH views' header a single button with no plumbing.
+   *
+   * `disabled` + `title` are for an action whose destination has not landed
+   * yet: the header layout is real, the button says why it does nothing.
+   */
+  action?: {
+    label: string
+    testid: string
+    /** `window` CustomEvent name dispatched on click. Unique per action. */
+    event: string
+    disabled?: boolean
+    title?: string
+  }
   /** Capability gate, evaluated against the page's engine (sandbox/proxy). */
   requires?: 'sandbox' | 'proxy'
   /**
@@ -394,13 +418,38 @@ export const PAGES: SettingsPage[] = [
       'Which providers ClaudeUI can reach, and which model each engine starts a session with.',
     groups: [
       {
+        // ONE list over the three stores (ADR-065 § "Providers: one list"), so
+        // the 'Shared' badge is gone: the card is no longer the shared vault's
+        // pane, it is every provider ClaudeUI can reach, whichever store backs
+        // it. The two engine-native groups below it stay until phase 6c folds
+        // them in.
         id: 'providers',
         label: 'Providers',
-        badge: 'Shared',
-        items: itemsOf('shared-providers')
+        action: {
+          label: '+ Add provider',
+          testid: 'ProviderList.add',
+          // Listened for by `ProviderList` in 6c; nothing listens yet, which is
+          // exactly why the button is disabled rather than silently inert.
+          event: 'settings:add-provider',
+          // The Add sheet (subscriptions · models.dev catalog · custom
+          // endpoints) is phase 6c. Shipping the header now rather than later
+          // keeps the layout honest instead of reflowing the card next phase.
+          disabled: true,
+          title: 'Adding a provider arrives with the next step of the redesign.'
+        },
+        items: itemsOf('shared-providers', ['sharedProviders'])
       },
       { id: 'providers-opencode', label: 'opencode providers', items: itemsOf('vendor-opencode') },
       { id: 'providers-pi', label: 'pi providers', items: itemsOf('vendor-pi') },
+      {
+        // Bridge until 6c (see the `sharedProvidersLegacy` item): the vault's
+        // sign-in, custom-endpoint and sync flows keep a home while the Add
+        // sheet is built. Phase 6c deletes this group.
+        id: 'providers-shared-legacy',
+        label: 'Shared provider setup',
+        note: 'Moves into “Add provider” and the Manage sheet with the next step of the redesign.',
+        items: itemsOf('shared-providers', ['sharedProvidersLegacy'])
+      },
       {
         id: 'defaults',
         label: 'Default models',
