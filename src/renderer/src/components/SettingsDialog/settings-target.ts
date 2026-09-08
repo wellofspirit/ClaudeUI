@@ -8,12 +8,13 @@
  * here imports anything.
  */
 
-/** The 11 settings pages (ADR-065). Order is defined by `PAGES`. */
+/** The 12 settings pages (ADR-065). Order is defined by `PAGES`. */
 export type SettingsPageId =
   | 'appearance'
   | 'chat'
   | 'sessions'
   | 'advanced'
+  | 'about'
   | 'models'
   | 'dispatch'
   | 'mockups'

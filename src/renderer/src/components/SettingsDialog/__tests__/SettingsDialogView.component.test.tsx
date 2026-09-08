@@ -79,7 +79,7 @@ afterEach(() => {
 })
 
 describe('the rail', () => {
-  it('lists the three rail groups and all 11 pages', () => {
+  it('lists the three rail groups and all 12 pages', () => {
     renderView()
     for (const label of ['App', 'Features', 'Engines']) {
       expect(screen.getByText(label)).toBeInTheDocument()
@@ -496,14 +496,14 @@ describe('shell chrome', () => {
   })
 
   it('feeds the About rows from versionInfo', () => {
-    renderView({ activePage: 'advanced' })
+    renderView({ activePage: 'about' })
     const rows = screen.getAllByTestId('AboutVersionsRows.row')
     expect(rows.find((r) => r.dataset.id === 'app')).toHaveTextContent('v9.9.9')
     expect(rows.find((r) => r.dataset.id === 'cli')).toHaveTextContent('2.5.0')
   })
 
   it('shows a placeholder in About until versionInfo resolves', () => {
-    renderView({ activePage: 'advanced', versionInfo: null })
+    renderView({ activePage: 'about', versionInfo: null })
     const rows = screen.getAllByTestId('AboutVersionsRows.row')
     expect(rows.find((r) => r.dataset.id === 'app')).toHaveTextContent('…')
   })

@@ -2,7 +2,7 @@
  * Layer 1: the settings PAGE model (ADR-065).
  *
  * The load-bearing test here is the INVENTORY GUARD. The redesign re-homes 43
- * sections' worth of settings into 11 pages by hand; the failure mode is not a
+ * sections' worth of settings into 12 pages by hand; the failure mode is not a
  * crash but a setting that quietly stops having a home — unreachable in the UI,
  * still written in the config file. So the guard asserts an exact bijection:
  * every item key reachable from `PAGES` is either a key of some `SECTIONS`
@@ -38,12 +38,13 @@ function allItemsOf(group: SettingsGroup): Array<{ key: string; engine?: string 
 }
 
 describe('PAGES structure', () => {
-  it('has the 11 documented pages, in order', () => {
+  it('has the 12 documented pages, in order', () => {
     expect(PAGES.map((p) => p.id)).toEqual([
       'appearance',
       'chat',
       'sessions',
       'advanced',
+      'about',
       'models',
       'dispatch',
       'mockups',
@@ -62,7 +63,7 @@ describe('PAGES structure', () => {
 
   it('rail membership matches ADR-065 (App / Features / Engines)', () => {
     const byRail = (rail: string): string[] => PAGES.filter((p) => p.rail === rail).map((p) => p.id)
-    expect(byRail('app')).toEqual(['appearance', 'chat', 'sessions', 'advanced'])
+    expect(byRail('app')).toEqual(['appearance', 'chat', 'sessions', 'advanced', 'about'])
     expect(byRail('features')).toEqual(['models', 'dispatch', 'mockups', 'remote'])
     expect(byRail('engines')).toEqual(['claude', 'opencode', 'pi'])
   })
@@ -86,7 +87,8 @@ describe('PAGES structure', () => {
       appearance: ['theme', 'layout', 'diff', 'status-line', 'git-panel'],
       chat: ['tool-output', 'thinking', 'voice', 'git-actions'],
       sessions: ['autonomy', 'permissions', 'judge', 'trust', 'retention'],
-      advanced: ['logging', 'usage', 'about'],
+      advanced: ['logging', 'usage'],
+      about: ['about'],
       models: [
         // ONE providers group since 6c: the two engine-native groups and the
         // shared vault's bridge folded into the list and its two sheets.

@@ -184,7 +184,8 @@ describe('SettingsDialog mobile fork', () => {
         'appearance',
         'chat',
         'sessions',
-        'advanced'
+        'advanced',
+        'about'
       ])
 
       await tapTab('engines')

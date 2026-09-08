@@ -34,16 +34,20 @@ Two shell directions and two grouping options were mocked and reviewed with the 
 
 The dialog stays a modal (Direction A). It grows to `min(1040px, 92vw)` × `min(700px, 88vh)`.
 Header: title, a centred global search field (`Ctrl+,` / `Cmd+,` focuses it), close. Body: a 204px
-rail on the left, one scrolling page on the right. The version footer is gone; versions live under
-Advanced › About. A full-window settings view (Direction B) was rejected: it reads like VS Code.
+rail on the left, one scrolling page on the right. The version footer is gone; versions live on
+their own About page. A full-window settings view (Direction B) was rejected: it reads like VS Code.
 
-### Information architecture: 11 pages in 3 rail groups
+### Information architecture: 12 pages in 3 rail groups
 
 | Rail group | Pages                                                                |
 | ---------- | -------------------------------------------------------------------- |
-| App        | Appearance · Chat · Sessions & autonomy · Advanced                   |
+| App        | Appearance · Chat · Sessions & autonomy · Advanced · About           |
 | Features   | Models & providers · Cross-engine dispatch · Mockups · Remote access |
 | Engines    | Claude · opencode · pi                                               |
+
+About was split out of Advanced into its own App page on the owner's request (2026-09-08): versions
+are what a user opens Settings to read, and nesting them under Diagnostics made them the least
+findable thing in the dialog.
 
 "Features" holds what ClaudeUI adds on top of the engines; each is a first-class page. "Engines"
 holds each engine's own configuration file, curated (Option 1). The alternative of dissolving every

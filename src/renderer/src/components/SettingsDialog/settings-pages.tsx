@@ -8,7 +8,7 @@
  * opencode and pi, dispatch twice, model defaults in four sections) and left
  * ~20 of the 43 sections with three rows or fewer.
  *
- * Here, settings are organised by TASK: 11 pages in 3 rail groups, each page an
+ * Here, settings are organised by TASK: 12 pages in 3 rail groups, each page an
  * ordered list of GROUPS, each group a card of rows. Storage location becomes a
  * tag on the group header — information, never navigation.
  *
@@ -179,7 +179,7 @@ const OTHER_ENGINE_PERMISSIONS: SettingItem = {
   )
 }
 
-/** Advanced › About. The version footer the redesign removed lives here now. */
+/** The About page. The version footer the redesign removed lives here now. */
 const VERSIONS: SettingItem = {
   key: 'versions',
   label: 'Versions',
@@ -245,6 +245,12 @@ const ICON_ADVANCED = icon(
   <>
     <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3" />
     <path d="M1 14h6M9 8h6M17 16h6" />
+  </>
+)
+const ICON_ABOUT = icon(
+  <>
+    <circle cx="12" cy="12" r="10" />
+    <path d="M12 16v-4M12 8h.01" />
   </>
 )
 const ICON_MODELS = icon(
@@ -313,7 +319,7 @@ const DEFAULT_MODEL_NOTES: Record<EngineId, string> = {
   pi: 'Applies to new pi sessions.'
 }
 
-// ── The 11 pages ─────────────────────────────────────────────────────
+// ── The 12 pages ─────────────────────────────────────────────────────
 
 export const PAGES: SettingsPage[] = [
   {
@@ -402,12 +408,25 @@ export const PAGES: SettingsPage[] = [
     label: 'Advanced',
     rail: 'app',
     icon: ICON_ADVANCED,
-    description: 'Diagnostics, polling, and version information.',
+    description: 'Diagnostics and polling.',
     groups: [
       { id: 'logging', label: 'Logging', items: itemsOf('logging') },
-      { id: 'usage', label: 'Usage polling', items: itemsOf('usage') },
-      { id: 'about', label: 'About', items: [VERSIONS] }
+      { id: 'usage', label: 'Usage polling', items: itemsOf('usage') }
     ]
+  },
+  {
+    // Its own page rather than Advanced's last group, on the owner's request
+    // (2026-09-08): versions are what a user opens Settings to READ, and
+    // nesting them under Diagnostics made them the least findable thing in the
+    // dialog. The GROUP id stays `about`, so the `{ page:'about',
+    // group:'about' }` deep link and the `AboutVersionsRows` testids are
+    // unchanged.
+    id: 'about',
+    label: 'About',
+    rail: 'app',
+    icon: ICON_ABOUT,
+    description: 'Versions of ClaudeUI and the engines it runs.',
+    groups: [{ id: 'about', label: 'Versions', items: [VERSIONS] }]
   },
   {
     id: 'models',
