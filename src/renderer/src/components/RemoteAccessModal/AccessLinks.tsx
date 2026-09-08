@@ -440,7 +440,7 @@ export function AccessLinks({
         <div
           data-testid="AccessLinks.error"
           data-id={id}
-          className="mt-2 ml-9 text-[10px] text-danger leading-snug"
+          className="mt-2 ml-9 text-[12px] text-danger leading-snug"
         >
           {rowError.message}
         </div>
@@ -460,7 +460,7 @@ export function AccessLinks({
           ) : (
             <div className="h-28 w-28 rounded-lg bg-bg-tertiary" />
           )}
-          <div className="text-[10px] text-text-muted max-w-[200px] leading-snug">
+          <div className="text-[12px] text-text-secondary max-w-[200px] leading-snug">
             {qr.note ?? 'Scan from the phone’s camera, then sign in with the password.'}
           </div>
         </div>
@@ -472,14 +472,14 @@ export function AccessLinks({
     <code
       data-testid="AccessLinks.url"
       data-id={id}
-      className="block text-[10px] text-text-muted mt-1 font-mono truncate"
+      className="block text-[11px] text-text-muted mt-1 font-mono truncate"
     >
       {text}
     </code>
   )
 
   const note = (text: string): React.JSX.Element => (
-    <div className="text-[10px] text-text-muted mt-1 leading-snug">{text}</div>
+    <div className="text-[12px] text-text-secondary mt-1 leading-snug">{text}</div>
   )
 
   // ---------------------------------------------------------------------------
@@ -676,8 +676,8 @@ export function AccessLinks({
               data-testid="AccessLinks.rotateConfirm"
               className="mt-2 ml-9 rounded-lg border border-warning/25 bg-warning/5 p-2.5"
             >
-              <div className="text-[11px] text-warning font-medium">Rotate the LAN link?</div>
-              <div className="text-[10px] text-text-secondary mt-1 leading-snug">
+              <div className="text-[12px] text-warning font-medium">Rotate the LAN link?</div>
+              <div className="text-[12px] text-text-secondary mt-1 leading-snug">
                 Old bookmarks stop working for <span className="text-text-primary">new</span>{' '}
                 connections. Devices connected right now stay connected. The new link and QR appear
                 here immediately.
@@ -775,10 +775,10 @@ export function AccessLinks({
             data-testid="AccessLinks.tunnelConfirm"
             className="mt-2 ml-9 rounded-lg border border-warning/25 bg-warning/5 p-2.5"
           >
-            <div className="text-[11px] text-warning font-medium">
+            <div className="text-[12px] text-warning font-medium">
               {confirm === 'tunnel-on' ? 'Start the tunnel?' : 'Stop the tunnel?'}
             </div>
-            <div className="text-[10px] text-text-secondary mt-1 leading-snug">
+            <div className="text-[12px] text-text-secondary mt-1 leading-snug">
               The tunnel’s key is minted per run, so the remote server restarts. Devices connected
               right now are disconnected and reconnect with the links shown after the restart.
             </div>
@@ -790,7 +790,7 @@ export function AccessLinks({
             {tlsConfigured && confirm === 'tunnel-on' && (
               <div
                 data-testid="AccessLinks.tunnelConfirmTlsCost"
-                className="text-[10px] text-warning mt-1.5 leading-snug"
+                className="text-[12px] text-warning mt-1.5 leading-snug"
               >
                 Starting the tunnel also stops Tailscale HTTPS: passkey sign-in and adding a new
                 device are unavailable until you stop the tunnel again. The tunnel link needs your
@@ -821,7 +821,7 @@ export function AccessLinks({
 
   return (
     <div data-testid="AccessLinks" className="w-full">
-      <div className="text-[10px] font-semibold text-text-muted uppercase tracking-wider mb-1.5">
+      <div className="text-[10px] font-semibold text-text-secondary uppercase tracking-wider mb-1.5">
         Access links
       </div>
       <div className="rounded-xl border border-border bg-bg-primary divide-y divide-border">
@@ -835,7 +835,7 @@ export function AccessLinks({
         <div
           data-testid="AccessLinks.deadEnd"
           role="alert"
-          className="mt-2 rounded-md border border-warning/25 bg-warning/5 px-2.5 py-1.5 text-[10px] text-warning leading-snug"
+          className="mt-2 rounded-md border border-warning/25 bg-warning/5 px-2.5 py-1.5 text-[12px] text-warning leading-snug"
         >
           No device can sign in yet. Set a password or enable Tailscale HTTPS to connect a device.{' '}
           <button
@@ -850,7 +850,7 @@ export function AccessLinks({
       {passwordMissing && (
         <div
           data-testid="AccessLinks.passwordWarning"
-          className="mt-2 rounded-md border border-warning/25 bg-warning/5 px-2.5 py-1.5 text-[10px] text-warning leading-snug"
+          className="mt-2 rounded-md border border-warning/25 bg-warning/5 px-2.5 py-1.5 text-[12px] text-warning leading-snug"
         >
           {/* Name only what is on screen. The tunnel row is withheld on the web
               (see its note above), so naming the tunnel there would send the
@@ -867,7 +867,7 @@ export function AccessLinks({
         </div>
       )}
 
-      <p data-testid="AccessLinks.footer" className="text-[10px] text-text-muted/70 mt-2">
+      <p data-testid="AccessLinks.footer" className="text-[12px] text-text-secondary mt-2">
         Links are channels, not identity — anyone with a link still signs in with a passkey or the
         password.
       </p>

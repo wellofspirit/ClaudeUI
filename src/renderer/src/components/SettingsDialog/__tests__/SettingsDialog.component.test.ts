@@ -30,7 +30,7 @@ let viewProps: SettingsDialogViewProps
 vi.mock('../View', async () => {
   const actual = await vi.importActual<typeof import('../View')>('../View')
   return {
-    groupKey: actual.groupKey,
+    ...actual,
     SettingsDialogView: (props: SettingsDialogViewProps) => {
       viewProps = props
       return null

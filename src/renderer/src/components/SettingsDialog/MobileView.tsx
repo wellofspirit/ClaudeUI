@@ -4,22 +4,22 @@ import type { EngineConfig, EngineId, VendorConfig } from '../../../../shared/ty
 import { engineMeta } from '../../../../shared/engine-meta'
 import type { SettingItem } from './settings-sections'
 import { APPLIES_ON_LABEL, Button } from './settings-controls'
-import { groupKey } from './View'
 import {
   PAGES,
   RAIL_GROUPS,
   appliesOnOf,
+  bucketSearchHits,
   enginesOf,
   itemsFor,
   noteOf,
   pageOf,
-  searchSettings,
   storageOf,
   visibleGroups,
   type RailGroupId,
   type SettingsGroup,
   type SettingsPage
 } from './settings-pages'
+import { groupKey } from './settings-target'
 import type {
   SettingsPageId,
   SettingsRenderContext,
@@ -83,9 +83,10 @@ export interface SettingsMobileViewProps {
  *
  * The group chrome is deliberately REBUILT here from the same class tokens
  * rather than imported from `View.tsx`: the desktop shell renders one page with
- * a scroll-spy rail and a 240px control column, none of which applies at 390px,
- * and this phase must leave `View.tsx` untouched. The two therefore share the
- * MODEL (`settings-pages.tsx`) and the tokens, not the markup.
+ * a scroll-spy rail and a 240px control column, none of which applies at 390px.
+ * The two therefore share the MODEL (`settings-pages.tsx` — including the
+ * `bucketSearchHits` reducer both render results with) and the tokens, but not
+ * the markup.
  *
  * Lazily mounted, deliberately: `settings-sections.tsx` is ~200KB of definitions
  * and several panes fetch on mount, so a collapsed page renders nothing at all.
@@ -94,15 +95,6 @@ export interface SettingsMobileViewProps {
  * No version footer: ADR-065 moved versions into Advanced › About, which this
  * view now renders like every other group.
  */
-
-/**
- * How many search hits render at once. Mirrors the desktop cap for the same
- * reason: hits are LIVE rows, so each bucket mounts a real pane and a
- * one-character query matches 47 groups. The bucketing below is a second copy
- * of `View.tsx`'s only because that file is frozen this phase; the two must not
- * be allowed to drift (ADR-065 phase 7 folds them together).
- */
-const MAX_RESULT_BUCKETS = 8
 
 function CrossIcon(): React.JSX.Element {
   return (
@@ -500,31 +492,15 @@ export function SettingsMobileView({
   /** The pages of the active tab. */
   const pages = useMemo(() => PAGES.filter((p) => p.rail === activeRail), [activeRail])
 
-  /** Search hits, bucketed by the (page, group, engine) they came from. */
-  const buckets = useMemo(() => {
-    if (!searching) return []
-    const out: Array<{
-      id: string
-      page: SettingsPage
-      group: SettingsGroup
-      engine?: EngineId
-      items: SettingItem[]
-    }> = []
-    const byId = new Map<string, (typeof out)[number]>()
-    for (const hit of searchSettings(q)) {
-      const id = `${hit.page.id}/${hit.group.id}${hit.engine ? `/${hit.engine}` : ''}`
-      let bucket = byId.get(id)
-      if (!bucket) {
-        bucket = { id, page: hit.page, group: hit.group, engine: hit.engine, items: [] }
-        byId.set(id, bucket)
-        out.push(bucket)
-      }
-      bucket.items.push(hit.item)
-    }
-    return out
-  }, [searching, q])
-
-  const shownBuckets = useMemo(() => buckets.slice(0, MAX_RESULT_BUCKETS), [buckets])
+  /**
+   * Search hits as page › group cards, capped — the SHARED reducer, so the
+   * phone and the desktop can never bucket or cap the same query differently
+   * (hits are live rows, so every bucket shown mounts a real pane).
+   */
+  const { buckets, total } = useMemo(
+    () => (searching ? bucketSearchHits(q) : { buckets: [], total: 0 }),
+    [searching, q]
+  )
 
   /** One group of an open page: header, card, note. */
   const renderGroup = (page: SettingsPage, group: SettingsGroup): React.JSX.Element => {
@@ -669,12 +645,12 @@ export function SettingsMobileView({
       >
         {searching ? (
           <div data-testid="SettingsMobileView.searchResults" className="px-3 pb-6">
-            {buckets.length === 0 ? (
+            {total === 0 ? (
               <div className="px-1 py-8 text-center text-[13px] text-text-muted">
                 No settings match “{q}”
               </div>
             ) : (
-              shownBuckets.map((bucket) => (
+              buckets.map((bucket) => (
                 <div
                   key={bucket.id}
                   data-testid="SettingsMobileView.searchHit"
@@ -696,12 +672,12 @@ export function SettingsMobileView({
                 </div>
               ))
             )}
-            {buckets.length > shownBuckets.length && (
+            {total > buckets.length && (
               <div
                 data-testid="SettingsMobileView.moreResults"
                 className="mt-4 px-1 text-[12px] text-text-secondary"
               >
-                {buckets.length - shownBuckets.length} more groups match — keep typing to narrow it.
+                {total - buckets.length} more groups match — keep typing to narrow it.
               </div>
             )}
           </div>

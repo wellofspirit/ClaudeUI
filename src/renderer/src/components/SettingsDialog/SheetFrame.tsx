@@ -15,13 +15,26 @@
  * measured rect and a `fixed` inset resolve in different coordinate spaces. On
  * a phone (`useIsMobile`) the whole thing is the screen.
  *
- * ESCAPE CLOSES, captured, and the event is stopped so the settings dialog
- * behind does not close along with the sheet.
+ * ESCAPE CLOSES THE TOPMOST SHEET ONLY, captured, and the event is stopped so
+ * the settings dialog behind does not close along with it. See `SHEET_STACK`.
  */
 
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import { useIsMobile } from '../../hooks/useIsMobile'
+
+/**
+ * Every mounted frame, oldest first. The Manage sheet mounts a SECOND frame for
+ * "Edit endpoint", and both listen for Escape on `document` — so one press used
+ * to close both, dropping the user back on the providers list when they only
+ * meant to cancel the edit. A frame answers Escape only while it is the last
+ * entry here.
+ *
+ * Module level because that is the only scope both frames share: they are
+ * siblings in ProviderSheet's tree, not parent and child, so no context or ref
+ * reaches from one to the other.
+ */
+const SHEET_STACK: object[] = []
 
 export interface SheetFrameProps {
   /** Tier-1 testid of the OWNING sheet — the frame stamps no id of its own. */
@@ -48,15 +61,34 @@ export function SheetFrame({
   const isMobile = useIsMobile()
   const uiFontScale = useSessionStore((s) => s.settings.uiFontScale)
 
+  /**
+   * Read through a ref so the registration below can depend on NOTHING. The
+   * endpoint sheet passes an inline arrow as `onClose`, so a `[onClose]` effect
+   * would re-run on every render of its parent — and re-registering means
+   * re-pushing, which would make whichever sheet last re-rendered the "top" one
+   * regardless of mount order.
+   */
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
+
   useEffect(() => {
+    const token = {}
+    SHEET_STACK.push(token)
     const handler = (e: KeyboardEvent): void => {
       if (e.key !== 'Escape') return
+      // Not the top sheet: say nothing at all — including not stopping the
+      // event, which is the top sheet's job.
+      if (SHEET_STACK[SHEET_STACK.length - 1] !== token) return
       e.stopPropagation()
-      onClose()
+      closeRef.current()
     }
     document.addEventListener('keydown', handler, true)
-    return () => document.removeEventListener('keydown', handler, true)
-  }, [onClose])
+    return () => {
+      document.removeEventListener('keydown', handler, true)
+      const at = SHEET_STACK.indexOf(token)
+      if (at !== -1) SHEET_STACK.splice(at, 1)
+    }
+  }, [])
 
   const panel = (
     <div

@@ -138,7 +138,7 @@ export function VendorOAuthFlow({
       </div>
 
       {flow?.stage === 'waiting' && (
-        <div className="flex items-center gap-2 text-[11px] text-text-muted">
+        <div className="flex items-center gap-2 text-[12px] text-text-secondary">
           Waiting for browser authorization…
           <Button variant="link" testid={`${FLOW}.cancel`} onClick={() => cancelVendorOAuth()}>
             Cancel
@@ -174,12 +174,12 @@ export function VendorOAuthFlow({
             id={vendorId}
           />
         ) : (
-          <div className="text-[11px] text-danger">Authentication failed. Try again.</div>
+          <div className="text-[12px] text-danger">Authentication failed. Try again.</div>
         ))}
 
       {local.stage === 'instructions' && (
         <div className="space-y-1.5">
-          <div className="text-[11px] text-text-muted leading-relaxed whitespace-pre-wrap">
+          <div className="text-[12px] text-text-secondary leading-relaxed whitespace-pre-wrap">
             {local.instructions}
           </div>
           <div className="flex items-center gap-1.5">
@@ -219,11 +219,11 @@ export function VendorOAuthFlow({
       )}
 
       {local.stage === 'submitting' && (
-        <div className="text-[11px] text-text-muted">Submitting code…</div>
+        <div className="text-[12px] text-text-secondary">Submitting code…</div>
       )}
 
       {error && (
-        <div data-testid={`${FLOW}.error`} className="text-[11px] text-danger">
+        <div data-testid={`${FLOW}.error`} className="text-[12px] text-danger">
           {error}
         </div>
       )}

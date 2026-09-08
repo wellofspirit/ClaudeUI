@@ -820,8 +820,8 @@ export function appliesOnOf(
  *
  * Nothing renders from this any more — the mobile adapter that read it went
  * with phase 5. It stays as the COVERAGE map: the model test walks it to prove
- * no pre-arc section lost its home, which is the inventory guard ADR-065's
- * phase 7 finishes.
+ * no pre-arc section lost its home, which is the inventory guard phase 7 keeps
+ * exact.
  */
 export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; group: string }>> = {
   appearance: { page: 'appearance', group: 'theme' },
@@ -924,4 +924,53 @@ export function searchSettings(query: string): SettingsSearchHit[] {
     }
   }
   return hits
+}
+
+/** One block of results: the rows of a query that came from the same card. */
+export interface SettingsSearchBucket {
+  /** `<pageId>/<groupId>[/<engine>]` — unique, and an ADR-027 `data-id`. */
+  id: string
+  page: SettingsPage
+  group: SettingsGroup
+  engine?: EngineId
+  items: SettingItem[]
+}
+
+/**
+ * How many result buckets a view may MOUNT at once. Results are LIVE rows, so
+ * every bucket shown mounts its real pane — and several of those (Remote,
+ * Providers, Agents, the raw config editors) fetch on mount, while a
+ * one-character query matches 47 groups. Beyond this a view says how many more
+ * matched instead of mounting them.
+ */
+export const MAX_RESULT_BUCKETS = 8
+
+/**
+ * `searchSettings` grouped into cards, capped.
+ *
+ * Both presentations render results as page › group blocks and both must hold
+ * back the same overflow, so the reducer is here rather than copied into each
+ * view. Returns everything it found (`total`) alongside the capped list, since
+ * the "N more groups match" line needs the number that was NOT shown.
+ *
+ * The engine is part of a byEngine bucket's identity, or the same id would
+ * appear two or three times (ADR-027).
+ */
+export function bucketSearchHits(
+  query: string,
+  cap: number = MAX_RESULT_BUCKETS
+): { buckets: SettingsSearchBucket[]; total: number } {
+  const all: SettingsSearchBucket[] = []
+  const byId = new Map<string, SettingsSearchBucket>()
+  for (const hit of searchSettings(query)) {
+    const id = `${hit.page.id}/${hit.group.id}${hit.engine ? `/${hit.engine}` : ''}`
+    let bucket = byId.get(id)
+    if (!bucket) {
+      bucket = { id, page: hit.page, group: hit.group, engine: hit.engine, items: [] }
+      byId.set(id, bucket)
+      all.push(bucket)
+    }
+    bucket.items.push(hit.item)
+  }
+  return { buckets: all.slice(0, cap), total: all.length }
 }

@@ -292,7 +292,7 @@ export function OpencodeProviderConfigModal({
         actionTestid={`${DIALOG}.manageModels`}
         onAction={onManageModels}
       />
-      <div className="px-3 pb-1 text-[10px] text-text-muted/60 leading-relaxed">
+      <div className="px-3 pb-1 text-[12px] text-text-secondary leading-relaxed">
         Which of this provider&apos;s catalog models appear in ClaudeUI&apos;s model picker. It does
         not change what opencode itself can reach.
       </div>
@@ -337,17 +337,17 @@ export function OpencodeProviderConfigModal({
         }
       >
         {row === null ? (
-          <div className="px-3 py-1.5 text-[11px] text-text-muted/60">Loading…</div>
+          <div className="px-3 py-1.5 text-[12px] text-text-secondary">Loading…</div>
         ) : managed ? (
           <>
             <div
               data-testid={`${DIALOG}.managed`}
-              className="px-4 py-3 space-y-1.5 text-[11px] leading-relaxed"
+              className="px-4 py-3 space-y-1.5 text-[12px] leading-relaxed"
             >
               <div className="text-text-primary font-medium">
                 {row.name || row._id} is managed by a shared provider.
               </div>
-              <div className="text-text-muted/70">
+              <div className="text-text-secondary">
                 Its definition and credential are compiled from ClaudeUI&apos;s shared provider, so
                 edits made here would be overwritten on the next sync. Change it where it is owned.
               </div>
@@ -441,7 +441,7 @@ export function OpencodeProviderConfigModal({
               >
                 <div className="px-3 space-y-1.5">
                   {claim && (
-                    <div className="text-[10px] text-yellow-400/90 leading-relaxed">
+                    <div className="text-[12px] text-yellow-400/90 leading-relaxed">
                       This credential is vended by the shared provider &quot;{claim.name}&quot;. A
                       key set here is replaced on its next sync.
                     </div>
@@ -459,7 +459,7 @@ export function OpencodeProviderConfigModal({
                         data-testid={`${DIALOG}.removeKey`}
                         onClick={() => void removeKey()}
                         disabled={keyBusy}
-                        className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors disabled:opacity-40"
+                        className="text-[11px] text-text-secondary hover:text-danger transition-colors disabled:opacity-40"
                       >
                         {keyBusy ? 'Removing…' : credKind === 'oauth' ? 'Disconnect' : 'Remove key'}
                       </button>
@@ -502,7 +502,7 @@ export function OpencodeProviderConfigModal({
                 {declaredModels.length === 0 && (
                   <div
                     data-testid={`${DIALOG}.noModels`}
-                    className="px-3 py-1 text-[10px] text-text-muted/60 leading-relaxed"
+                    className="px-3 py-1 text-[12px] text-text-secondary leading-relaxed"
                   >
                     None declared. A custom endpoint needs at least one model before opencode can
                     offer it.
@@ -555,7 +555,7 @@ export function OpencodeProviderConfigModal({
                         data-testid={`${DIALOG}.removeModel`}
                         data-id={capKey}
                         onClick={() => removeModel(idx)}
-                        className="shrink-0 text-[10px] text-text-muted/60 hover:text-red-400 transition-colors px-1"
+                        className="shrink-0 text-[11px] text-text-secondary hover:text-danger transition-colors px-1"
                         title="Remove model"
                       >
                         ✕

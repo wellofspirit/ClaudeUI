@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { SettingsDialog, SettingsToggle } from '../SettingsDialog'
-import type { SettingsTarget } from '../SettingsDialog/settings-target'
+import { settingsTargetFromEvent, type SettingsTarget } from '../SettingsDialog/settings-target'
 import { UsageRing } from './UsagePanel'
 
 // Lazy: the modal tree + qrcode must not ride the eager App chunk — the mount
@@ -97,13 +97,16 @@ export function SettingsPanel(): React.JSX.Element {
     }
   }, [])
 
-  // Listen for 'open-settings' custom events (e.g. from sandbox pill in InputBox)
+  // `open-settings` is the app-wide deep-link channel, always a
+  // `{ page, group? }` detail (ADR-065) parsed by the one shared helper both
+  // hosts use. The desktop callers are the composer's sandbox pill, the remote
+  // modal, this panel's own button, and the cross-links inside the dialog (the
+  // pi and opencode provider editors' "managed by a shared provider" notices).
   //
   // Narrowing past the breakpoint hands this dialog to SessionView, so a dialog
   // opened while wide must CLOSE here rather than linger: left open it would
   // render the mobile takeover from inside the drawer, and any `open-settings`
-  // fired from within it (settings-sections' "Open Providers & models",
-  // PiVendors) would mount a SECOND takeover from SessionView on top.
+  // fired from within it would mount a SECOND takeover from SessionView on top.
   useEffect(() => {
     if (isMobile) {
       setDialogOpen(false)
@@ -111,8 +114,7 @@ export function SettingsPanel(): React.JSX.Element {
       return
     }
     const handler = (event: Event): void => {
-      const detail = (event as CustomEvent<Partial<SettingsTarget> | undefined>).detail
-      setSettingsTarget(detail?.page ? { page: detail.page, group: detail.group } : undefined)
+      setSettingsTarget(settingsTargetFromEvent(event))
       setDialogOpen(true)
     }
     window.addEventListener('open-settings', handler)

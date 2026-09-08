@@ -29,10 +29,8 @@ import {
   defaultEffort,
   type EffortLevel,
   type AutonomyMode,
-  type EngineCapabilities,
   CLAUDE_ENGINE_CAPABILITIES
 } from '../../../../shared/model-capabilities'
-import { engineMeta } from '../../../../shared/engine-meta'
 import { AUTONOMY_TO_PERMISSION, AUTONOMY_LABELS } from '../../../../shared/permission-modes'
 import {
   SettingsToggle,
@@ -90,6 +88,14 @@ import { diffToPatches } from '../../../../shared/opencode-config-diff'
 import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.18.29.json'
 
 // ── Section definitions ──────────────────────────────────────────────
+//
+// This file is the ITEM SOURCE and nothing else: `SECTIONS` holds every
+// setting's render body, and `settings-pages.tsx` arranges those very objects
+// into the ADR-065 pages. The store-derived scope tree that used to live at the
+// tail of this file (SCOPES / SECTION_SCOPE_MAP / the per-scope id sets) went
+// with phase 7 — organisation is the page model's job, and a second, disagreeing
+// tree of the same sections is exactly what that redesign removed. The import
+// edge is one-way: settings-pages imports from here, never the reverse.
 
 export interface SettingItem {
   key: string
@@ -106,7 +112,8 @@ export interface SettingItem {
      * Shell context (ADR-065): app metadata and cross-page navigation. Kept
      * POSITIONAL and last so the ~130 existing bodies — which declare fewer
      * parameters and ignore it — did not have to be touched. Optional because
-     * a caller outside the dialog (the mobile view) has no shell to provide.
+     * the type must stay satisfiable by a body that ignores it; both
+     * presentations do pass one.
      */
     ctx?: SettingsRenderContext
   ) => React.JSX.Element
@@ -4049,300 +4056,3 @@ export const SECTIONS: Section[] = [
     ]
   }
 ]
-
-// ── Navigation groups tree ───────────────────────────────────────────
-
-/** Section ids that belong to the App group (flat, directly visible) */
-const APP_SECTION_IDS = new Set([
-  'appearance',
-  'chat',
-  'session',
-  'autonomy',
-  'trust-lists',
-  'shared-providers',
-  'tool-output',
-  'diff',
-  'git',
-  'status-line',
-  'usage',
-  'logging',
-  'voice',
-  'remote',
-  'mockup'
-])
-
-/** Section ids that belong to Engines > Claude */
-const ENGINE_CLAUDE_SECTION_IDS = new Set(['permissions', 'sandbox', 'proxy', 'claude-dispatch'])
-
-/** Section ids that belong to Engines > opencode (content self-gates on install) */
-const ENGINE_OPENCODE_SECTION_IDS = new Set([
-  'opencode-automode',
-  'opencode-models',
-  'opencode-dispatch'
-])
-
-/**
- * Section ids that belong to opencode > Configuration — the curated panes over
- * opencode's own config file, then the generic editor for what they don't cover.
- */
-const CONFIGURATION_OPENCODE_SECTION_IDS = new Set([
-  'opencode-session',
-  'opencode-tool-output',
-  'opencode-attachments',
-  'opencode-workspace',
-  'opencode-tools',
-  'opencode-diagnostics',
-  'opencode-managed',
-  'opencode-config'
-])
-
-/** Section ids that belong to Vendors > Anthropic */
-const VENDOR_ANTHROPIC_SECTION_IDS = new Set(['vendor-anthropic', 'effortDefaults'])
-
-/** Section ids that belong to opencode Agents subgroup */
-const AGENTS_OPENCODE_SECTION_IDS = new Set(['opencode-agents'])
-
-/** Section ids that belong to Engines > pi (content self-gates on install).
- *  `pi-automode` edits the same `EngineConfig.autoMode` block opencode's does —
- *  PiSession reads `loadEngineConfig('pi').autoMode` since the phase-4
- *  gatekeeper wiring, so the setting was live but unreachable from the UI until
- *  this section. The old `pi-models` section moved INTO `pi-config-models`
- *  below: ClaudeUI's session-default model and pi's own
- *  `defaultProvider`/`defaultModel` fallbacks answer one question between them,
- *  and answering it across two nav entries was the confusion.
- *  `pi-dispatch` configures dispatches INTO pi (allowlist/default/cap for
- *  incoming targets), exactly as the Claude and opencode dispatch sections do
- *  for theirs. pi has been an accepted dispatch TARGET since M4c —
- *  `cross-engine-dispatcher.ts`'s `resolveAndRunPi` reads
- *  `engines/pi.json#dispatch` and its refusal text already names this pane —
- *  the UI simply never gained one (ADR-065 § Cross-engine dispatch into pi). */
-const ENGINE_PI_SECTION_IDS = new Set(['pi-automode', 'pi-dispatch'])
-
-/**
- * Section ids that belong to pi > Configuration — the curated panes over pi's
- * own `~/.pi/agent/settings.json`, then the whole-file text editor for what they
- * don't cover (pi ships no config schema, so there is no generic form to
- * fall back on).
- */
-const CONFIGURATION_PI_SECTION_IDS = new Set([
-  'pi-config-session',
-  'pi-config-retry',
-  'pi-config-models',
-  'pi-config-fallbacks',
-  'pi-config-tools',
-  'pi-config-images',
-  'pi-config-workspace',
-  'pi-config-resources',
-  'pi-config-network',
-  'pi-config-raw'
-])
-
-/** Section ids that belong to Accounts (flat) */
-const ACCOUNTS_SECTION_IDS = new Set(['accounts'])
-
-function getSectionsForIds(ids: Set<string>, order?: string[]): Section[] {
-  if (!order) return SECTIONS.filter((s) => ids.has(s.id))
-  return order
-    .filter((id) => ids.has(id))
-    .map((id) => SECTIONS.find((s) => s.id === id)!)
-    .filter(Boolean)
-}
-
-// ── Scoped navigation (Option A, ADR settings-ia-refactor) ──────────
-
-export type SettingsScope = 'common' | 'claude' | 'opencode' | 'pi'
-
-export interface ScopeSubgroup {
-  id: string
-  label?: string // undefined = flat (no header)
-  sections: Section[]
-}
-
-export interface ScopeDef {
-  id: SettingsScope
-  label: string
-  subgroups: ScopeSubgroup[]
-}
-
-/**
- * Ordered scope→section mapping. This is the authoritative section order
- * within each scope (fixes the flat SECTIONS order divergence bug).
- */
-export const SCOPES: ScopeDef[] = [
-  {
-    id: 'common',
-    label: 'Common',
-    subgroups: [
-      {
-        id: 'common-app',
-        label: undefined,
-        sections: getSectionsForIds(APP_SECTION_IDS, [
-          'appearance',
-          'chat',
-          'session',
-          'autonomy',
-          'trust-lists',
-          'shared-providers',
-          'tool-output',
-          'diff',
-          'git',
-          'status-line',
-          'usage',
-          'logging',
-          'voice',
-          'remote',
-          'mockup'
-        ])
-      }
-    ]
-  },
-  {
-    id: 'claude',
-    label: 'Claude',
-    subgroups: [
-      {
-        id: 'claude-engine',
-        label: 'Engine',
-        sections: getSectionsForIds(ENGINE_CLAUDE_SECTION_IDS, [
-          'permissions',
-          'sandbox',
-          'proxy',
-          'claude-dispatch'
-        ])
-      },
-      {
-        id: 'claude-vendor',
-        label: 'Vendor · Anthropic',
-        sections: getSectionsForIds(VENDOR_ANTHROPIC_SECTION_IDS, [
-          'vendor-anthropic',
-          'effortDefaults'
-        ])
-      },
-      {
-        id: 'claude-account',
-        label: 'Account',
-        sections: getSectionsForIds(ACCOUNTS_SECTION_IDS, ['accounts'])
-      }
-    ]
-  },
-  {
-    id: 'opencode',
-    label: 'opencode',
-    subgroups: [
-      {
-        id: 'opencode-engine',
-        label: 'Engine',
-        sections: getSectionsForIds(ENGINE_OPENCODE_SECTION_IDS, [
-          'opencode-automode',
-          'opencode-models',
-          'opencode-dispatch'
-        ])
-      },
-      {
-        id: 'opencode-configuration',
-        label: 'Configuration',
-        sections: getSectionsForIds(CONFIGURATION_OPENCODE_SECTION_IDS, [
-          'opencode-session',
-          'opencode-tool-output',
-          'opencode-attachments',
-          'opencode-workspace',
-          'opencode-tools',
-          'opencode-diagnostics',
-          'opencode-managed',
-          'opencode-config'
-        ])
-      },
-      {
-        id: 'opencode-agents',
-        label: 'Agents',
-        sections: getSectionsForIds(AGENTS_OPENCODE_SECTION_IDS, ['opencode-agents'])
-      }
-    ]
-  },
-  {
-    id: 'pi',
-    label: 'pi',
-    subgroups: [
-      {
-        id: 'pi-engine',
-        label: 'Engine',
-        sections: getSectionsForIds(ENGINE_PI_SECTION_IDS, ['pi-automode', 'pi-dispatch'])
-      },
-      {
-        id: 'pi-configuration',
-        label: 'Configuration',
-        sections: getSectionsForIds(CONFIGURATION_PI_SECTION_IDS, [
-          'pi-config-session',
-          'pi-config-retry',
-          'pi-config-models',
-          'pi-config-fallbacks',
-          'pi-config-tools',
-          'pi-config-images',
-          'pi-config-workspace',
-          'pi-config-resources',
-          'pi-config-network',
-          'pi-config-raw'
-        ])
-      }
-    ]
-  }
-]
-
-/**
- * The section a scope opens on: its first CAPABILITY-VISIBLE section, so a
- * gated-out one is never selected. Shared by the desktop container and the
- * mobile view (which uses it to tell a deep link apart from a plain tab
- * switch), so the two can't drift.
- */
-export function firstSectionOfScope(scope: SettingsScope): string {
-  const scopeDef = SCOPES.find((s) => s.id === scope)
-  if (!scopeDef) return ''
-  const caps = scopeCapabilities(scope)
-  for (const sg of scopeDef.subgroups) {
-    const sec = sg.sections.find((s) => isSectionVisible(s.id, caps))
-    if (sec) return sec.id
-  }
-  return ''
-}
-
-/** Map from section id → scope id, for search + selection logic */
-export const SECTION_SCOPE_MAP: ReadonlyMap<string, SettingsScope> = new Map(
-  SCOPES.flatMap((scope) =>
-    scope.subgroups.flatMap((sg) =>
-      sg.sections.map((sec): [string, SettingsScope] => [sec.id, scope.id])
-    )
-  )
-)
-
-// ── Per-section capability gating (ROADMAP #12) ──────────────────────
-//
-// A section listed here renders only when the scope's engine has the named
-// EngineCapabilities flag. Sections NOT listed are always visible. Today only
-// the Claude launch-param sections are gated; Claude has both flags true, so
-// there is no user-visible change — the gating is structure-ready for an engine
-// that lacks sandbox/proxy (or for surfacing one of these under opencode later).
-
-/** Boolean EngineCapabilities keys that can gate a section. */
-type GatingCapability = 'sandbox' | 'proxy'
-
-/** sectionId → the EngineCapabilities flag it requires (absent = always shown). */
-export const SECTION_CAPABILITY: Readonly<Record<string, GatingCapability>> = {
-  sandbox: 'sandbox',
-  proxy: 'proxy'
-}
-
-/** Static per-engine capabilities for a settings scope ('common' = engine-agnostic → null). */
-export function scopeCapabilities(scope: SettingsScope): EngineCapabilities | null {
-  return scope === 'common' ? null : engineMeta(scope).capabilities
-}
-
-/**
- * Whether a section should render, given the scope's engine capabilities.
- * Gated sections hide when the engine lacks the capability; ungated sections
- * (and the engine-agnostic 'common' scope, caps=null) always show.
- */
-export function isSectionVisible(sectionId: string, caps: EngineCapabilities | null): boolean {
-  const flag = SECTION_CAPABILITY[sectionId]
-  if (!flag || !caps) return true
-  return caps[flag] === true
-}

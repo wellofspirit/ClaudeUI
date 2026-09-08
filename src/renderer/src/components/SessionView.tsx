@@ -20,7 +20,7 @@ import { useIsMobile, useVisualViewportHeight } from '../hooks/useIsMobile'
 import { QuitWorktreeModal } from './QuitWorktreeModal'
 import { RemoteServeBanner } from './RemoteServeBanner'
 import { SettingsDialog } from './SettingsDialog'
-import type { SettingsTarget } from './SettingsDialog/settings-target'
+import { settingsTargetFromEvent, type SettingsTarget } from './SettingsDialog/settings-target'
 import { nextPermissionMode, autoModeAvailableForEngine } from '../../../shared/permission-modes'
 
 export const SidebarContext = createContext<{
@@ -223,10 +223,7 @@ export function SessionView(): React.JSX.Element {
       return
     }
     const handler = (event: Event): void => {
-      const detail = (event as CustomEvent<Partial<SettingsTarget> | undefined>).detail
-      setMobileSettings({
-        target: detail?.page ? { page: detail.page, group: detail.group } : undefined
-      })
+      setMobileSettings({ target: settingsTargetFromEvent(event) })
       setSidebarCollapsed(true)
     }
     window.addEventListener('open-settings', handler)

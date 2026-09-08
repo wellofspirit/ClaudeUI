@@ -8,16 +8,16 @@ import {
   PAGES,
   RAIL_GROUPS,
   appliesOnOf,
+  bucketSearchHits,
   enginesOf,
   itemsFor,
   noteOf,
   pageOf,
-  searchSettings,
   storageOf,
   visibleGroups,
-  type SettingsGroup,
-  type SettingsPage
+  type SettingsGroup
 } from './settings-pages'
+import { groupKey } from './settings-target'
 import type {
   SettingsPageId,
   SettingsRenderContext,
@@ -26,9 +26,6 @@ import type {
 } from './settings-target'
 
 export type { VersionInfo } from './settings-target'
-
-/** Key of a group's engine-segment selection: `<pageId>/<groupId>`. */
-export const groupKey = (page: SettingsPageId, group: string): string => `${page}/${group}`
 
 export interface SettingsDialogViewProps {
   settings: AppSettings
@@ -102,13 +99,6 @@ export function pickActiveGroup(
   for (const header of headers) if (header.top <= line) current = header.id
   return current
 }
-
-/**
- * How many result groups render at once. Search results are LIVE rows, so each
- * bucket mounts its real pane — and a one-character query matches 47 groups.
- * Beyond this the list says how many more matched instead of mounting them.
- */
-const MAX_RESULT_BUCKETS = 8
 
 function CloseIcon(): React.JSX.Element {
   return (
@@ -393,39 +383,14 @@ export function SettingsDialogView({
     return () => document.removeEventListener('keydown', handler)
   }, [])
 
-  const results = useMemo(() => (searching ? searchSettings(query) : []), [searching, query])
-
-  /** Search hits, bucketed by the (page, group, engine) they came from. */
-  const buckets = useMemo(() => {
-    const out: Array<{
-      id: string
-      page: SettingsPage
-      group: SettingsGroup
-      engine?: EngineId
-      items: SettingItem[]
-    }> = []
-    const byId = new Map<string, (typeof out)[number]>()
-    for (const hit of results) {
-      const id = `${hit.page.id}/${hit.group.id}${hit.engine ? `/${hit.engine}` : ''}`
-      let bucket = byId.get(id)
-      if (!bucket) {
-        bucket = { id, page: hit.page, group: hit.group, engine: hit.engine, items: [] }
-        byId.set(id, bucket)
-        out.push(bucket)
-      }
-      bucket.items.push(hit.item)
-    }
-    return out
-  }, [results])
-
   /**
-   * Results render their rows LIVE, so every bucket shown mounts a real pane —
-   * and several of those (Remote, Providers, Agents, the raw config editors)
-   * fetch on mount. A one-character query matches 47 groups, which would fire
-   * that whole storm on every keystroke, so the list is bounded and says how
-   * much it is holding back.
+   * Search hits as page › group cards, capped — the shared reducer, so the two
+   * presentations can never bucket or cap the same query differently.
    */
-  const shownBuckets = useMemo(() => buckets.slice(0, MAX_RESULT_BUCKETS), [buckets])
+  const { buckets, total } = useMemo(
+    () => (searching ? bucketSearchHits(query) : { buckets: [], total: 0 }),
+    [searching, query]
+  )
 
   return (
     <div
@@ -553,7 +518,7 @@ export function SettingsDialogView({
           <div ref={paneRef} className="flex-1 min-w-0 overflow-y-auto pt-[22px] px-7 pb-10">
             {searching ? (
               <div data-testid="SettingsDialog.results">
-                {buckets.length === 0 ? (
+                {total === 0 ? (
                   <div
                     data-testid="SettingsDialog.noResults"
                     className="pt-10 text-center text-[13px] text-text-secondary"
@@ -561,7 +526,7 @@ export function SettingsDialogView({
                     No settings match “{query}”
                   </div>
                 ) : (
-                  shownBuckets.map((bucket) => (
+                  buckets.map((bucket) => (
                     <div
                       key={bucket.id}
                       data-testid="SettingsDialog.resultBucket"
@@ -583,13 +548,12 @@ export function SettingsDialogView({
                     </div>
                   ))
                 )}
-                {buckets.length > shownBuckets.length && (
+                {total > buckets.length && (
                   <div
                     data-testid="SettingsDialog.moreResults"
                     className="mt-5 px-1 text-[12px] text-text-secondary"
                   >
-                    {buckets.length - shownBuckets.length} more groups match — keep typing to narrow
-                    it.
+                    {total - buckets.length} more groups match — keep typing to narrow it.
                   </div>
                 )}
               </div>

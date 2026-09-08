@@ -28,6 +28,30 @@ export interface SettingsTarget {
   group?: string
 }
 
+/**
+ * Key of a group's engine-segment selection: `<pageId>/<groupId>`.
+ *
+ * Both presentations and the container index `engineByGroup` with it, so it
+ * lives here rather than in either view — a phone and a desktop that disagreed
+ * about the key would show two different engines for the same card after a
+ * rotation.
+ */
+export const groupKey = (page: SettingsPageId, group: string): string => `${page}/${group}`
+
+/**
+ * The `{ page, group? }` detail of an `open-settings` event, or `undefined` for
+ * the bare "just open Settings" form.
+ *
+ * Both dialog hosts (SettingsPanel on the desktop, SessionView on the phone)
+ * parse the same event, and a detail without a `page` must NOT become a target
+ * — `{ page: undefined }` would navigate the dialog to a page that does not
+ * exist instead of leaving it on the last one.
+ */
+export function settingsTargetFromEvent(event: Event): SettingsTarget | undefined {
+  const detail = (event as CustomEvent<Partial<SettingsTarget> | undefined>).detail
+  return detail?.page ? { page: detail.page, group: detail.group } : undefined
+}
+
 export interface VersionInfo {
   appVersion: string
   cliVersion: string

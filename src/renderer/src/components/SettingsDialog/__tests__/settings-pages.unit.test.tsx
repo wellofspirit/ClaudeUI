@@ -12,11 +12,13 @@
 import { describe, it, expect } from 'vitest'
 import { SECTIONS } from '../settings-sections'
 import {
+  MAX_RESULT_BUCKETS,
   PAGES,
   PAGE_LOCAL_ITEMS,
   RAIL_GROUPS,
   SECTION_TARGET,
   appliesOnOf,
+  bucketSearchHits,
   enginesOf,
   noteOf,
   pageOf,
@@ -396,5 +398,55 @@ describe('searchSettings', () => {
     // The Claude page is findable by "sandbox" without matching its prose.
     const hits = searchSettings('sandbox')
     expect(hits.some((h) => h.page.id === 'claude' && h.group.id === 'sandbox')).toBe(true)
+  })
+})
+
+describe('bucketSearchHits', () => {
+  /**
+   * The reducer BOTH presentations render results with (ADR-065 phase 7 folded
+   * the desktop's and the phone's copies together). What matters is that the
+   * two can never bucket or cap the same query differently, so the rules live
+   * here rather than in either view.
+   */
+
+  it('groups a query into page › group cards, in hit order', () => {
+    const { buckets } = bucketSearchHits('sandbox')
+    const claude = buckets.find((b) => b.page.id === 'claude' && b.group.id === 'sandbox')
+    expect(claude).toBeDefined()
+    // Every hit of one card lands in ONE bucket, and the bucket's rows are the
+    // very items the group would render.
+    const hits = searchSettings('sandbox').filter(
+      (h) => h.page.id === 'claude' && h.group.id === 'sandbox'
+    )
+    expect(claude!.items).toEqual(hits.map((h) => h.item))
+  })
+
+  it('makes the engine part of a byEngine bucket id (ADR-027)', () => {
+    const { buckets } = bucketSearchHits('judge model')
+    const judge = buckets.filter((b) => b.group.id === 'judge')
+    // Two engines, two buckets, two DISTINCT data-ids — one id rendered twice
+    // is exactly what the discriminator exists to prevent.
+    expect(judge.map((b) => b.id).sort()).toEqual(['sessions/judge/opencode', 'sessions/judge/pi'])
+    expect(judge.map((b) => b.engine).sort()).toEqual(['opencode', 'pi'])
+  })
+
+  it('caps the buckets it returns but reports the true total', () => {
+    // A one-character query matches far more cards than either view may mount:
+    // each bucket renders LIVE rows and several panes fetch on mount.
+    const wide = bucketSearchHits('e')
+    expect(wide.total).toBeGreaterThan(MAX_RESULT_BUCKETS)
+    expect(wide.buckets).toHaveLength(MAX_RESULT_BUCKETS)
+    // The "N more groups match" line is total − shown, so the total must count
+    // what was held back rather than what was returned.
+    expect(wide.total).toBe(bucketSearchHits('e', Number.MAX_SAFE_INTEGER).buckets.length)
+  })
+
+  it('takes the cap from its caller', () => {
+    expect(bucketSearchHits('e', 2).buckets).toHaveLength(2)
+    expect(bucketSearchHits('e', 2).total).toBe(bucketSearchHits('e').total)
+  })
+
+  it('is empty for a query that matches nothing', () => {
+    expect(bucketSearchHits('zzzznotasetting')).toEqual({ buckets: [], total: 0 })
   })
 })

@@ -104,7 +104,7 @@ export function PiModelAllowlistDialog({
         <div className="px-4 py-3 border-b border-border/50 flex items-center justify-between">
           <div>
             <div className="text-[13px] font-medium text-text-primary">Models · {providerName}</div>
-            <div className="text-[11px] text-text-muted/70">
+            <div className="text-[12px] text-text-secondary">
               Pick which models appear in ClaudeUI&rsquo;s picker. {checked.size} selected.
             </div>
           </div>
@@ -146,14 +146,14 @@ export function PiModelAllowlistDialog({
           {error || saveError ? (
             <div
               data-testid="ModelAllowlistDialog.error"
-              className="px-2 py-3 text-[11px] text-danger"
+              className="px-2 py-3 text-[12px] text-danger"
             >
               {error || saveError}
             </div>
           ) : models === null ? (
-            <div className="px-2 py-3 text-[11px] text-text-muted/60">Loading models…</div>
+            <div className="px-2 py-3 text-[12px] text-text-secondary">Loading models…</div>
           ) : filtered.length === 0 ? (
-            <div className="px-2 py-3 text-[11px] text-text-muted/60">No models match.</div>
+            <div className="px-2 py-3 text-[12px] text-text-secondary">No models match.</div>
           ) : (
             filtered.map((model) => (
               <button
@@ -176,7 +176,7 @@ export function PiModelAllowlistDialog({
                   <span className="flex items-center gap-1.5">
                     <span className="text-[12px] text-text-secondary truncate">{model.name}</span>
                   </span>
-                  <span className="text-[10px] text-text-muted/50 truncate block">
+                  <span className="text-[11px] text-text-secondary truncate block">
                     {model.id}
                     {model.provider ? ` · ${model.provider}` : ''}
                     {model.toolCalling ? ' · tools' : ''}
