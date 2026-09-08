@@ -586,6 +586,7 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
     <div>
       <label className={FIELD_LABEL}>{label}</label>
       <TextField
+        className="w-full"
         testid={`SessionSecuritySettings.${field}`}
         mono={false}
         inputMode="numeric"
@@ -697,6 +698,7 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
           {changingPassword ? (
             <div ref={passwordRef} className="space-y-1">
               <TextField
+                className="w-full"
                 testid="SessionSecuritySettings.password"
                 type="password"
                 mono={false}
@@ -706,6 +708,7 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
                 onChange={(password) => setDraft((prev) => ({ ...prev, password }))}
               />
               <TextField
+                className="w-full"
                 testid="SessionSecuritySettings.passwordConfirm"
                 type="password"
                 mono={false}
@@ -750,6 +753,7 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
             reachable client to have operator-level access to this machine.
           </div>
           <TextField
+            className="w-full"
             testid="SessionSecuritySettings.offConfirmInput"
             mono={false}
             value={offDraft}

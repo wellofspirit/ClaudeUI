@@ -81,8 +81,7 @@ import {
   PiNetworkSection,
   PiRawConfigSection,
   PiRetrySection,
-  PiResourcesSection,
-  PiFallbacksSection
+  PiResourcesSection
 } from './PiConfigPanes'
 import { diffToPatches } from '../../../../shared/opencode-config-diff'
 import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.18.29.json'
@@ -708,6 +707,7 @@ function AutoModeSection({
           >
             <span data-testid={`${testid}.judgeModel`} data-value={judgeModel}>
               <ModelPicker
+                variant="field"
                 placement="down"
                 emptyOption={{ label: JUDGE_MODEL_DEFAULT_LABEL }}
                 models={judgeModelOptions}
@@ -1013,15 +1013,12 @@ function DispatchIntoSection({
               judge-model note: OS-painted option lists are unreadable in dark
               themes. The section-scoped `.defaultModel` testid stays on this
               wrapper and carries `data-value`; the picker keeps its own
-              `ModelPicker.trigger` / `ModelPicker.option` ids. The wrapper draws
-              the bordered menu the row vocabulary asks for, since the shared
-              picker paints a bare caret for the composer. */}
-          <span
-            data-testid={`${testid}.defaultModel`}
-            data-value={defaultModel}
-            className="inline-flex items-center bg-bg-input border border-border rounded-md"
-          >
+              `ModelPicker.trigger` / `ModelPicker.option` ids. `variant="field"`
+              is what draws the bordered control the row vocabulary asks for —
+              the wrapper no longer borrows those classes. */}
+          <span data-testid={`${testid}.defaultModel`} data-value={defaultModel}>
             <ModelPicker
+              variant="field"
               placement="down"
               emptyOption={{ label: DISPATCH_MODEL_DEFAULT_LABEL }}
               models={toModelDisplays(models)}
@@ -1381,6 +1378,7 @@ function VendorAnthropicEditableForm({
         description="The gateway's Anthropic-compatible base address."
       >
         <TextField
+          className="w-full"
           testid="VendorAnthropicEditableForm.baseUrl"
           value={endpoint.baseUrl}
           placeholder="https://api.anthropic.com"
@@ -1528,12 +1526,9 @@ function OpencodeModelsSection(): React.JSX.Element {
           modified={cfg.model !== undefined}
           onReset={() => update({ model: undefined })}
         >
-          <span
-            data-testid="OpencodeModelsSection.model"
-            data-value={cfg.model ?? ''}
-            className="inline-flex items-center bg-bg-input border border-border rounded-md"
-          >
+          <span data-testid="OpencodeModelsSection.model" data-value={cfg.model ?? ''}>
             <ModelPicker
+              variant="field"
               placement="down"
               emptyOption={{ label: OPENCODE_MODEL_DEFAULT_LABEL }}
               models={modelDisplays}
@@ -1560,12 +1555,9 @@ function OpencodeModelsSection(): React.JSX.Element {
           modified={cfg.smallModel !== undefined}
           onReset={() => update({ smallModel: undefined })}
         >
-          <span
-            data-testid="OpencodeModelsSection.smallModel"
-            data-value={cfg.smallModel ?? ''}
-            className="inline-flex items-center bg-bg-input border border-border rounded-md"
-          >
+          <span data-testid="OpencodeModelsSection.smallModel" data-value={cfg.smallModel ?? ''}>
             <ModelPicker
+              variant="field"
               placement="down"
               emptyOption={{ label: OPENCODE_MODEL_DEFAULT_LABEL }}
               models={modelDisplays}
@@ -2260,6 +2252,7 @@ export const SECTIONS: Section[] = [
             description="Tokens: {in} {out} {total} · Cost: {cost} · Context: {used} {remaining} · Lines: {lines+} {lines-} · Time: {duration}"
           >
             <TextField
+              className="w-full"
               testid="StatusLineTemplateSetting.input"
               value={s.statusLineTemplate}
               onChange={(v) => u({ statusLineTemplate: v })}
@@ -2382,6 +2375,7 @@ export const SECTIONS: Section[] = [
             description="Comma-separated. A bare name enables debug for that source; use source:level for an explicit one. Logs are written to ~/.claude/ui/logs/."
           >
             <TextField
+              className="w-full"
               testid="LogFilterSetting.input"
               value={s.logFilter}
               onChange={(v) => u({ logFilter: v })}
@@ -3108,6 +3102,7 @@ export const SECTIONS: Section[] = [
               dimmed={!px.enabled}
             >
               <TextField
+                className="w-full"
                 testid="ClaudeProxy.hostname.input"
                 value={px.hostname}
                 onChange={(v) => ue({ proxy: { ...px, hostname: v } })}
@@ -3799,7 +3794,7 @@ export const SECTIONS: Section[] = [
         key: 'piSessionBehavior',
         label: 'Session behavior',
         keywords:
-          'pi compaction enabled reserveTokens keepRecentTokens branchSummary retry maxRetries baseDelayMs provider timeoutMs maxRetryDelayMs backoff context window compact summarise',
+          'pi compaction enabled reserveTokens keepRecentTokens branchSummary retry maxRetries baseDelayMs provider timeoutMs maxRetryDelayMs backoff context window compact summarise thinkingBudgets thinking budget tokens effort',
         render: () => <PiSessionBehaviorSection />
       }
     ]
@@ -3856,36 +3851,8 @@ export const SECTIONS: Section[] = [
         key: 'piModels',
         label: 'Models & thinking',
         keywords:
-          'pi model default provider openai-codex anthropic allowlist defaultProvider defaultModel defaultThinkingLevel thinkingBudgets reasoning effort',
+          'pi model default provider openai-codex anthropic allowlist defaultModel reasoning effort',
         render: () => <PiModelsSection />
-      }
-    ]
-  },
-  {
-    id: 'pi-config-fallbacks',
-    label: 'pi fallbacks',
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <path d="M4 4v6h6" />
-        <path d="M4 10a8 8 0 1 1 2.3 5.7" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'piFallbacks',
-        label: 'pi fallbacks',
-        keywords:
-          'pi defaultProvider defaultModel defaultThinkingLevel thinkingBudgets fallback standalone thinking budget reasoning',
-        render: () => <PiFallbacksSection />
       }
     ]
   },
@@ -4050,7 +4017,7 @@ export const SECTIONS: Section[] = [
         key: 'piRawConfig',
         label: 'Raw config (settings.json)',
         keywords:
-          'pi config raw json settings theme tuiMode fullscreen markdown terminal keybindings externalEditor enabledModels warnings advanced',
+          'pi config raw json settings theme tuiMode fullscreen markdown terminal keybindings externalEditor enabledModels warnings defaultProvider defaultThinkingLevel advanced',
         render: () => <PiRawConfigSection />
       }
     ]

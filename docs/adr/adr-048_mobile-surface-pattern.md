@@ -162,7 +162,7 @@ pattern it ratified is unchanged and was re-picked on the new model: a fullscree
 equal-width tabs with an underline, `useSwipeTabs` between adjacent tabs, lazily mounted
 accordions that reuse the desktop's content unchanged, and search that goes WIDE across every
 tab. What changed is what the tabs and the accordions ARE — three rail groups (App / Features /
-Engines) instead of four storage scopes, and eleven pages instead of forty-three sections — and
+Engines) instead of four storage scopes, and twelve pages instead of forty-three sections — and
 that several accordions may be open at once, with the open set surviving tab switches and
 search.
 

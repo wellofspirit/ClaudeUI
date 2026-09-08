@@ -303,6 +303,7 @@ export function RemotePasskeySettings({ config, onReload }: Props): React.JSX.El
               >
                 <span ref={renameRef} className="block">
                   <TextField
+                    className="w-full"
                     testid={`${P}.credentialNameInput`}
                     mono={false}
                     value={renaming.value}

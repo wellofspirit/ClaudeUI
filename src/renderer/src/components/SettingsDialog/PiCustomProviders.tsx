@@ -6,13 +6,16 @@
  * list's Manage sheet ("pi models ›") on the row it is showing.
  *
  * ADR-065 phase 6c retired the pane that used to host them (`PiVendors`), and
- * phase 7 deleted the orphaned `PiCustomProviders` block pair with it. ONE
- * capability went with that pane and has no entry point today: editing
- * `providers.<builtin>.modelOverrides` for a built-in vendor that has no
- * pi-native row of its own. `PiModelEditor` still takes `variant="override"`
- * and still patches under `modelOverrides`, so whichever surface takes that job
- * next has its editor; it is a documented residual for the owner, not a
- * regression this file can fix on its own.
+ * phase 7 deleted the orphaned `PiCustomProviders` block pair with it. TWO
+ * ENTRY POINTS replace it, and the dialog's `variant` is which one opened it:
+ * `custom` is the models.json entry the user DECLARED ("pi models ›" on a
+ * pi-native custom row), `builtin` is the override surface over a provider pi
+ * SHIPS ("pi overrides ›" on any row the read model gives a `piBuiltinId` — a
+ * pi-native built-in vendor, or a shared subscription whose enabled pi route
+ * lands on one). The builtin variant writes only the leaves models.md documents
+ * for that job — `baseUrl`, `apiKey`, `authHeader`, `headers` and
+ * `modelOverrides.<modelId>` — so a hand-written `models`, `compat`, `api` or
+ * `oauth` under the same entry survives by never being named in a patch.
  *
  * This is where the shared provider-editor LOOK was designed; the frame
  * primitives it uses — dialog shell, block header, row card, pill row, create
@@ -66,6 +69,7 @@ import {
 } from './OpencodeConfigPanes'
 import {
   AddForm,
+  BlockHeader,
   DialogShell,
   Disclosure,
   EntityRowCard,
@@ -211,6 +215,25 @@ function modelSummary(entry: Record<string, unknown>): string {
   const cost = isPlainObject(entry.cost) ? entry.cost : {}
   if (Object.values(cost).every((v) => v === 0)) parts.push('free')
   return parts.join(' · ')
+}
+
+/**
+ * One line naming what an override actually changes. Every key counts, including
+ * ones the editor renders as raw JSON — the row has to describe an entry that
+ * models.md allows nine fields in, not only the five with their own control.
+ */
+function overrideSummary(entry: Record<string, unknown>): string {
+  const keys = Object.keys(entry)
+  if (keys.length === 0) return 'no fields overridden yet'
+  return keys
+    .map((key) => {
+      const value = entry[key]
+      if (typeof value === 'number') return `${key} → ${value.toLocaleString('en-US')}`
+      if (typeof value === 'string' || typeof value === 'boolean')
+        return `${key} → ${String(value)}`
+      return key
+    })
+    .join(' · ')
 }
 
 // ── Pi-specific bits (the frame primitives live in provider-editor-shell) ────
@@ -693,6 +716,83 @@ const CURATED_COMPAT_FLAGS = [
 ]
 
 /**
+ * The three transport leaves BOTH variants render, in the order both render them
+ * (models.md's Provider Configuration table). They mean the same thing whether
+ * the entry declares a provider or overrides a built-in one — a key, whether to
+ * send it as `Authorization: Bearer`, and the headers that go with every request
+ * — so they are written once rather than twice with a chance to drift.
+ *
+ * The API-key COPY is the caller's, because the same leaf answers two different
+ * questions. On a declared provider the key is how pi reaches an endpoint it
+ * knows nothing else about, and a keyless local server still wants a
+ * placeholder; on a built-in it is an override of a credential pi already holds,
+ * so blank is the normal, working state and the placeholder has to say so.
+ */
+function CredentialLeaves({
+  api,
+  base,
+  provider,
+  apiKeyHelper,
+  apiKeyPlaceholder
+}: {
+  api: PiModelsLeaf
+  base: LeafPath
+  provider: Record<string, unknown>
+  /** What an API key MEANS for this variant — see the note above. */
+  apiKeyHelper: string
+  /** What an empty field falls back to for this variant. */
+  apiKeyPlaceholder: string
+}): React.JSX.Element {
+  return (
+    <>
+      <LeafRow
+        testidPrefix={DIALOG}
+        configKey="apiKey"
+        label="API key"
+        helper={apiKeyHelper}
+        error={api.errorAt([...base, 'apiKey'])}
+      >
+        <LeafTextInput
+          testid={`${DIALOG}.text`}
+          configKey="apiKey"
+          value={provider.apiKey}
+          placeholder={apiKeyPlaceholder}
+          width="w-64"
+          onCommit={(v) => api.commit([...base, 'apiKey'], v)}
+        />
+      </LeafRow>
+
+      <ToggleRow
+        testidPrefix={DIALOG}
+        configKey="authHeader"
+        label="Authorization header"
+        helper="Send the API key as Authorization: Bearer. Off is pi’s default."
+        checked={provider.authHeader === true}
+        onChange={(next) => api.commit([...base, 'authHeader'], next ? true : undefined)}
+        error={api.errorAt([...base, 'authHeader'])}
+      />
+
+      <StackedRow
+        testidPrefix={DIALOG}
+        configKey="headers"
+        label="Extra headers"
+        helper="Sent with every request; values support $ENV_VAR and !command."
+        error={api.errorAt([...base, 'headers'])}
+      >
+        <div className="px-3">
+          <RawJsonField
+            key={String(JSON.stringify(provider.headers))}
+            fieldKey={pathId([...base, 'headers'])}
+            value={provider.headers}
+            onChange={(v) => api.commit([...base, 'headers'], v)}
+          />
+        </div>
+      </StackedRow>
+    </>
+  )
+}
+
+/**
  * One custom provider entry. Fields follow models.md's Provider Configuration
  * table in the mockup's order; everything else in the entry (`oauth`, a stray
  * `modelOverrides`, anything hand-written) is left alone because no patch here
@@ -707,7 +807,7 @@ const CURATED_COMPAT_FLAGS = [
  * from the text in front of them, and makes the two flags unremovable by hand.
  * The raw field is keyed on the committed value, so a toggle re-seeds it.
  */
-function PiProviderDialog({
+function PiCustomProviderDialog({
   api,
   providerId,
   managed,
@@ -842,51 +942,15 @@ function PiProviderDialog({
               </div>
             </StackedRow>
 
-            <LeafRow
-              testidPrefix={DIALOG}
-              configKey="apiKey"
-              label="API key"
-              helper={
+            <CredentialLeaves
+              api={api}
+              base={base}
+              provider={provider}
+              apiKeyHelper={
                 'Optional — /login or auth.json works too. Keyless local servers keep a placeholder, since pi gates models on auth either way. Supports $ENV_VAR and !command —'
               }
-              error={api.errorAt([...base, 'apiKey'])}
-            >
-              <LeafTextInput
-                testid={`${DIALOG}.text`}
-                configKey="apiKey"
-                value={provider.apiKey}
-                placeholder="ollama"
-                width="w-64"
-                onCommit={(v) => api.commit([...base, 'apiKey'], v)}
-              />
-            </LeafRow>
-
-            <ToggleRow
-              testidPrefix={DIALOG}
-              configKey="authHeader"
-              label="Authorization header"
-              helper="Send the API key as Authorization: Bearer. Off is pi’s default."
-              checked={provider.authHeader === true}
-              onChange={(next) => api.commit([...base, 'authHeader'], next ? true : undefined)}
-              error={api.errorAt([...base, 'authHeader'])}
+              apiKeyPlaceholder="ollama"
             />
-
-            <StackedRow
-              testidPrefix={DIALOG}
-              configKey="headers"
-              label="Extra headers"
-              helper="Sent with every request; values support $ENV_VAR and !command."
-              error={api.errorAt([...base, 'headers'])}
-            >
-              <div className="px-3">
-                <RawJsonField
-                  key={String(JSON.stringify(provider.headers))}
-                  fieldKey={pathId([...base, 'headers'])}
-                  value={provider.headers}
-                  onChange={(v) => api.commit([...base, 'headers'], v)}
-                />
-              </div>
-            </StackedRow>
 
             {CURATED_COMPAT_FLAGS.map((flag) => (
               <ToggleRow
@@ -1017,22 +1081,286 @@ function PiProviderDialog({
 }
 
 /**
+ * One BUILT-IN provider entry: the override surface models.md documents for a
+ * provider pi ships ("Overriding Built-in Providers" + "Per-model Overrides").
+ *
+ * WHAT IT DELIBERATELY DOES NOT RENDER, and why each absence is the point:
+ * `api` (the wire protocol is pi's own), the two curated compat toggles and the
+ * raw compat field (a built-in's quirks are pi's to know), and `models[]`
+ * (declaring a model list here MERGES it into pi's catalog — a different
+ * capability, and the writer refuses a whole-entry write at a built-in id
+ * anyway). Anything hand-written under the entry survives untouched, because
+ * nothing here ever names it in a patch.
+ *
+ * The entry is normally ABSENT — an override surface starts empty — so every
+ * row reads from `undefined` and the first commit creates `providers.<id>` as a
+ * side effect of one leaf write, which is exactly the write `pi-models-raw.ts`
+ * allows under a built-in id.
+ */
+function PiBuiltinProviderDialog({
+  api,
+  providerId,
+  managed,
+  onClose
+}: {
+  api: PiModelsLeaf
+  providerId: string
+  managed: boolean
+  onClose: () => void
+}): React.JSX.Element {
+  const [addingOverride, setAddingOverride] = useState(false)
+  const [overrideError, setOverrideError] = useState<string | null>(null)
+  const [openOverride, setOpenOverride] = useState<string | null>(null)
+  const [confirmRemove, setConfirmRemove] = useState(false)
+
+  // An INVARIANT, not a UI state: a managed id is a custom shared provider's
+  // projection, and M-AT4 refuses a custom provider whose pi id collides with a
+  // built-in — so the two sets cannot intersect. Reaching here means the read
+  // model handed the sheet a `piBuiltinId` it must never have derived.
+  if (managed) {
+    throw new Error(
+      `pi provider "${providerId}" is both a built-in vendor and a projected shared provider; ` +
+        'the built-in override dialog must never be opened on a managed id.'
+    )
+  }
+
+  const base: LeafPath = ['providers', providerId]
+  const entry = api.read(base)
+  const provider = isPlainObject(entry) ? entry : {}
+  const overrides = isPlainObject(provider.modelOverrides) ? provider.modelOverrides : {}
+  const overrideIds = Object.keys(overrides)
+
+  const addOverride = (values: Record<string, string>): void => {
+    setOverrideError(null)
+    const modelId = values.model
+    if (api.read([...base, 'modelOverrides', modelId]) !== undefined) {
+      setOverrideError(`An override for ${providerId} / ${modelId} already exists.`)
+      return
+    }
+    // An empty object is a legal, inert override — pi merges nothing. The editor
+    // that opens next fills it in, and "Remove override" deletes the key again.
+    api
+      .patch([...base, 'modelOverrides', modelId], {})
+      .then(() => {
+        setAddingOverride(false)
+        setOpenOverride(modelId)
+      })
+      .catch((e: unknown) => setOverrideError(e instanceof Error ? e.message : String(e)))
+  }
+
+  return (
+    <>
+      {/* The one stable way to tell the two variants apart: `DialogShell` takes
+          no extra data attributes, and both variants share its testid. */}
+      <div data-variant="builtin">
+        <DialogShell
+          testid={DIALOG}
+          dataId={providerId}
+          title={`Built-in provider — ${providerId}`}
+          subtitle="pi ships this provider. Only what you set here changes; unset fields keep pi’s own values. Saved as you edit; applies to newly started pi sessions."
+          onClose={onClose}
+          footer={
+            <>
+              {entry === undefined ? (
+                <span />
+              ) : (
+                <button
+                  type="button"
+                  data-testid={`${DIALOG}.removeOverrides`}
+                  onClick={() => setConfirmRemove(true)}
+                  className="px-2 py-1 text-[11px] rounded text-text-muted/70 hover:text-red-400 hover:bg-bg-hover transition-colors"
+                >
+                  Remove all overrides
+                </button>
+              )}
+              <button
+                type="button"
+                data-testid={`${DIALOG}.done`}
+                onClick={onClose}
+                className="px-3 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent transition-colors"
+              >
+                Done
+              </button>
+            </>
+          }
+        >
+          <LeafRow
+            testidPrefix={DIALOG}
+            configKey="id"
+            label="Provider id"
+            helper="pi’s built-in provider. Its models are pi’s own; add per-model overrides below."
+            keyText="providers.<id>"
+            error={null}
+          >
+            <span
+              data-testid={`${DIALOG}.id`}
+              className={`${inputClass} w-44 font-mono text-text-muted/80 truncate`}
+            >
+              {providerId}
+            </span>
+          </LeafRow>
+
+          <LeafRow
+            testidPrefix={DIALOG}
+            configKey="baseUrl"
+            label="Base URL"
+            helper="Route this provider through a proxy. Unset uses pi’s endpoint."
+            error={api.errorAt([...base, 'baseUrl'])}
+          >
+            <LeafTextInput
+              testid={`${DIALOG}.text`}
+              configKey="baseUrl"
+              value={provider.baseUrl}
+              placeholder="https://my-proxy.example.com/v1"
+              width="w-64"
+              onCommit={(v) => api.commit([...base, 'baseUrl'], v)}
+            />
+          </LeafRow>
+
+          <CredentialLeaves
+            api={api}
+            base={base}
+            provider={provider}
+            apiKeyHelper={
+              'Optional — a key for this entry only. Unset keeps the credential pi already holds for this provider (auth.json or /login). Supports $ENV_VAR and !command.'
+            }
+            apiKeyPlaceholder="unset — pi’s own credential"
+          />
+
+          <BlockHeader
+            label="Model overrides"
+            note="modelOverrides"
+            actionLabel="+ Add override"
+            actionTestid={`${DIALOG}.addOverride`}
+            onAction={() => {
+              setOverrideError(null)
+              setAddingOverride((o) => !o)
+            }}
+          />
+
+          {addingOverride && (
+            <AddForm
+              testidPrefix={`${DIALOG}.addOverride`}
+              fields={[{ key: 'model', label: 'Model id', placeholder: 'gpt-5.6-sol' }]}
+              submitLabel="Add"
+              error={overrideError}
+              onSubmit={addOverride}
+              onCancel={() => {
+                setAddingOverride(false)
+                setOverrideError(null)
+              }}
+            />
+          )}
+
+          {overrideIds.length === 0 && !addingOverride && (
+            <div
+              data-testid={`${DIALOG}.noOverrides`}
+              className="px-3 py-1.5 text-[12px] text-text-secondary leading-relaxed"
+            >
+              No overrides. Use one to change a built-in model&rsquo;s context window, pricing or
+              thinking map without redefining its provider.
+            </div>
+          )}
+
+          {overrideIds.map((modelId) => {
+            const override = overrides[modelId]
+            return (
+              <EntityRowCard
+                key={modelId}
+                testid={`${DIALOG}.overrideRow`}
+                dataId={modelId}
+                title={modelId}
+                subtitle={overrideSummary(isPlainObject(override) ? override : {})}
+                action="Edit"
+                onClick={() => setOpenOverride(modelId)}
+              />
+            )
+          })}
+        </DialogShell>
+      </div>
+
+      {openOverride !== null && (
+        <PiModelEditor
+          api={api}
+          scope={[...base, 'modelOverrides', openOverride]}
+          title={`${providerId} / ${openOverride}`}
+          variant="override"
+          onRemoved={() => setOpenOverride(null)}
+          onClose={() => setOpenOverride(null)}
+        />
+      )}
+
+      {confirmRemove && (
+        <ConfirmModal
+          testId={`${DIALOG}.confirmRemoveOverrides`}
+          stackedAbove
+          title="Remove all overrides?"
+          body={`The providers.${providerId} entry is removed from models.json — its base URL, headers and per-model overrides. pi’s built-in definition and any credential in auth.json are untouched.`}
+          detail={`providers.${providerId}`}
+          confirmLabel="Remove"
+          onConfirm={async () => {
+            await api.patch(base, undefined)
+            onClose()
+          }}
+          onCancel={() => setConfirmRemove(false)}
+        />
+      )}
+    </>
+  )
+}
+
+/**
+ * The dialog, on whichever of its two entry points opened it (see the module
+ * header). A dispatcher rather than one body with branches everywhere: the two
+ * variants share their leaves through {@link CredentialLeaves} and differ in
+ * everything else — title, footer verb, which blocks exist and what a row
+ * writes — so a single body would be two components interleaved.
+ */
+function PiProviderDialog({
+  api,
+  providerId,
+  managed,
+  variant,
+  onClose
+}: {
+  api: PiModelsLeaf
+  providerId: string
+  managed: boolean
+  variant: 'custom' | 'builtin'
+  onClose: () => void
+}): React.JSX.Element {
+  return variant === 'builtin' ? (
+    <PiBuiltinProviderDialog
+      api={api}
+      providerId={providerId}
+      managed={managed}
+      onClose={onClose}
+    />
+  ) : (
+    <PiCustomProviderDialog api={api} providerId={providerId} managed={managed} onClose={onClose} />
+  )
+}
+
+/**
  * `PiProviderDialog` on its own, over whatever opened it — the Manage sheet's
  * "pi models ›" (ADR-065 phase 6c). The dialog needs the models.json leaf API
  * that only this pane held, so the hook is mounted HERE rather than exported
  * into the sheet: one models.json reader, and it is read when the dialog opens
  * rather than on every sheet.
  *
- * Works for a built-in vendor id too. `providers.<id>` is where models.md tells
- * users to override a built-in (base URL, headers, per-model entries), and the
- * writer allows exactly those leaf writes while refusing a whole-entry
- * replacement at a built-in id (`pi-models-raw.ts`).
+ * `builtin` picks the OTHER variant, on a built-in vendor id — the sheet's "pi
+ * overrides ›". `providers.<id>` is where models.md tells users to override a
+ * built-in (base URL, headers, per-model overrides), and the writer allows
+ * exactly those leaf writes while refusing a whole-entry replacement at a
+ * built-in id (`pi-models-raw.ts`).
  */
 export function PiProviderModal({
   providerId,
+  builtin = false,
   onClose
 }: {
   providerId: string
+  builtin?: boolean
   onClose: () => void
 }): React.JSX.Element | null {
   const api = usePiModelsLeaf()
@@ -1042,6 +1370,7 @@ export function PiProviderModal({
       api={api}
       providerId={providerId}
       managed={api.managedIds.has(providerId)}
+      variant={builtin ? 'builtin' : 'custom'}
       onClose={onClose}
     />
   )

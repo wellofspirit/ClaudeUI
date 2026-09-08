@@ -38,11 +38,22 @@
  * mirroring the dialog's box formula separately would be two chances to get it
  * wrong.
  *
- * WHAT IT DOES NOT OWN. Two flows here are entry points into surfaces that
+ * THE CURATION LIST IS ITS OWN COMPONENT. "Models in the picker" is a grouped,
+ * filterable LIST (`ModelCurationList.tsx`, follow-up G, mockup `0a41c623`),
+ * not the chip cloud the board drew: a chip carries only a display name, and a
+ * gateway catalog of 358 models needs the vendor and the mono id on the line,
+ * plus facets and a bulk action. The sheet keeps the reads, the orphan guard
+ * and the one writer; the list is presentation and local UI state.
+ *
+ * WHAT IT DOES NOT OWN. Three flows here are entry points into surfaces that
  * already exist and are deliberately not re-implemented: opencode's per-model
  * capability editor (`OpencodeProviderConfigModal` → `ModelCapabilityEditor`)
- * and pi's models.json editor (`PiProviderDialog` → `PiModelEditor`). The sheet
- * opens each on the provider it is showing; everything they write is theirs.
+ * and pi's models.json editor (`PiProviderDialog` → `PiModelEditor`) in BOTH
+ * its variants — "pi models ›" opens the custom one on a pi-native declared
+ * provider, "pi overrides ›" the built-in one on `entry.piBuiltinId` (a pi-native
+ * built-in vendor, or a shared subscription whose enabled pi route lands on one).
+ * The sheet opens each on the provider it is showing; everything they write is
+ * theirs.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -64,14 +75,13 @@ import type {
   OpencodeConfigSettings,
   OpencodeProviderCatalogEntry
 } from '../../../../shared/types'
+import { Button, SelectField, SettingRow, TextField, ToggleSwitch } from './settings-controls'
 import {
-  Button,
-  ChipSet,
-  SelectField,
-  SettingRow,
-  TextField,
-  ToggleSwitch
-} from './settings-controls'
+  ModelCurationActions,
+  ModelCurationList,
+  type CurationFacet,
+  type CurationSort
+} from './ModelCurationList'
 import { SheetFrame, SheetGroup } from './SheetFrame'
 import { ProviderForm, normalizeProviderDraft } from './ProviderForm'
 import { VendorOAuthFlow } from './VendorOAuthFlow'
@@ -80,9 +90,6 @@ import { PiProviderModal } from './PiCustomProviders'
 
 /** Testid namespace (ADR-027 tier 1/2). */
 const SHEET = 'ProviderSheet'
-
-/** How many model chips render before the "Show all" link (the board's density). */
-const CHIP_PREVIEW = 12
 
 /** The row order of the ENABLED FOR group — claude first, as on the board. */
 const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi']
@@ -283,7 +290,7 @@ export function ProviderSheet({
    */
   const [sharedModels, setSharedModels] = useState<SharedProviderModel[]>([])
   /** Which engine's own model editor is open over the sheet, if any. */
-  const [modelEditor, setModelEditor] = useState<'opencode' | 'pi' | null>(null)
+  const [modelEditor, setModelEditor] = useState<'opencode' | 'pi' | 'pi-builtin' | null>(null)
   /**
    * The definition being EDITED, over this sheet — a custom endpoint's base
    * URL, protocol and model list. Seeded from the definition when the editor
@@ -848,9 +855,16 @@ export function ProviderSheet({
 
   /**
    * The engine's OWN model editor for this provider, opened over the sheet.
-   * Neither is re-implemented here (see the header): opencode's declared models
+   * None is re-implemented here (see the header): opencode's declared models
    * and their capabilities live in `OpencodeProviderConfigModal`, pi's
    * models.json entry in `PiProviderDialog`.
+   *
+   * The two pi rows are mutually exclusive by construction, and the read model
+   * is what says which: a pi-native row is `builtin` XOR `custom`, only the
+   * built-in half carries `piBuiltinId`, and a shared row is never pi-native
+   * custom. Declaring a models.json provider and overriding one pi ships are
+   * different jobs on different entry shapes, so they are different rows rather
+   * than one row that changes meaning.
    */
   function modelSetupGroup(): React.ReactNode {
     if (entry.origin === 'opencode-native') {
@@ -882,7 +896,7 @@ export function ProviderSheet({
         </SheetGroup>
       )
     }
-    if (entry.origin === 'pi-native') {
+    if (entry.origin === 'pi-native' && entry.piKind === 'custom') {
       return (
         <SheetGroup testid={`${SHEET}.group`} id="model-setup" label="Model setup">
           <SettingRow
@@ -898,6 +912,27 @@ export function ProviderSheet({
               onClick={() => setModelEditor('pi')}
             >
               pi models ›
+            </Button>
+          </SettingRow>
+        </SheetGroup>
+      )
+    }
+    if (entry.piBuiltinId) {
+      return (
+        <SheetGroup testid={`${SHEET}.group`} id="model-setup" label="Model setup">
+          <SettingRow
+            testid={`${SHEET}.modelSetup`}
+            dataId="pi-builtin"
+            label="pi overrides"
+            description="Route this provider through a proxy, or change a built-in model’s context window, pricing or thinking map — in pi’s models.json."
+          >
+            <Button
+              variant="link"
+              testid={`${SHEET}.piOverrides`}
+              disabled={busy}
+              onClick={() => setModelEditor('pi-builtin')}
+            >
+              pi overrides ›
             </Button>
           </SettingRow>
         </SheetGroup>
@@ -1060,6 +1095,20 @@ export function ProviderSheet({
           }}
         />
       )}
+
+      {/* `piBuiltinId`, never `nativeId`: on a shared row the native id is the
+          DEFINITION id (`chatgpt`), and `providers.chatgpt` is not the entry pi
+          reads its ChatGPT models from. */}
+      {modelEditor === 'pi-builtin' && entry.piBuiltinId && (
+        <PiProviderModal
+          providerId={entry.piBuiltinId}
+          builtin
+          onClose={() => {
+            setModelEditor(null)
+            void onWrote()
+          }}
+        />
+      )}
     </>
   )
 }
@@ -1070,12 +1119,18 @@ export function ProviderSheet({
  * Which of a provider's catalog models reach ClaudeUI's picker
  * (`opencodeConfig.modelAllowlist[providerId]`, the very list
  * `ModelAllowlistDialog` edits). Absent means "all of them", so an absent list
- * shows every chip selected and the first de-selection writes an explicit list.
+ * shows every row checked and the first de-selection writes an explicit list.
  *
- * Commits per chip, as the row vocabulary requires — with the ORPHAN GUARD the
+ * Commits per change, as the row vocabulary requires — with the ORPHAN GUARD the
  * old dialog carries: hiding a model some setting still names would break that
  * setting with no way back from here, so a blocked edit is refused and says
  * which setting blocked it, rather than applied with a warning.
+ *
+ * The LIST itself is `ModelCurationList` (follow-up G, mockup `0a41c623`): a
+ * chip cloud could not say which vendor a name came from, and 358 OpenRouter
+ * models have to be reachable by search and by the vendor. This half owns the
+ * reads, the guard and the write; search / facet / sort state is held here only
+ * because the bulk actions render in the row's TITLE line, outside the list.
  */
 function OpencodeModelCuration({
   providerId,
@@ -1095,7 +1150,8 @@ function OpencodeModelCuration({
   /** Every engine's ClaudeUI config: a cross-engine dispatch default names these too. */
   const [engineConfigs, setEngineConfigs] = useState<Partial<Record<EngineId, EngineConfig>>>({})
   const [filter, setFilter] = useState('')
-  const [showAll, setShowAll] = useState(false)
+  const [facets, setFacets] = useState<CurationFacet[]>([])
+  const [sort, setSort] = useState<CurationSort>('newest')
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -1144,7 +1200,7 @@ function OpencodeModelCuration({
   const allowlist = cfg.modelAllowlist ?? {}
   const all = models.map((m) => m.id)
   // Absent = "everything currently shown", the same reading the allowlist dialog
-  // seeds itself with — so the chips must show every model selected.
+  // seeds itself with — so every row must render checked.
   const selected = allowlist[providerId] ?? all
 
   const save = (next: string[]): void => {
@@ -1174,12 +1230,6 @@ function OpencodeModelCuration({
       .catch((e: unknown) => setError(message(e)))
   }
 
-  const q = filter.trim().toLowerCase()
-  const matching = models.filter(
-    (m) => !q || m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)
-  )
-  const shown = showAll ? matching : matching.slice(0, CHIP_PREVIEW)
-
   return (
     <SettingRow
       testid={`${SHEET}.models`}
@@ -1189,40 +1239,32 @@ function OpencodeModelCuration({
       description={`${selected.length} of ${models.length} selected. Nothing here changes what opencode itself can reach.`}
       error={error ?? undefined}
       errorTestid={`${SHEET}.modelsError`}
+      trailing={
+        <ModelCurationActions
+          testid={`${SHEET}.models`}
+          models={models}
+          selected={selected}
+          onSet={save}
+          filter={filter}
+          facets={facets}
+        />
+      }
     >
-      <span className="block space-y-2">
-        <input
-          ref={filterRef}
-          type="text"
-          data-testid={`${SHEET}.modelFilter`}
-          value={filter}
-          placeholder={`Filter ${models.length} models…`}
-          spellCheck={false}
-          autoComplete="off"
-          onChange={(e) => setFilter(e.target.value)}
-          className="w-full h-7 bg-bg-input border border-border rounded-md px-2.5 text-[12px] text-text-primary placeholder:text-text-muted outline-none focus:border-accent/50 transition-colors"
-        />
-        <ChipSet
-          testid={`${SHEET}.modelChips`}
-          value={selected}
-          options={shown.map((m) => ({ value: m.id, label: m.name || m.id }))}
-          onToggle={(id) =>
-            save(selected.includes(id) ? selected.filter((v) => v !== id) : [...selected, id])
-          }
-          trailing={
-            matching.length > shown.length ? (
-              <button
-                type="button"
-                data-testid={`${SHEET}.showAll`}
-                onClick={() => setShowAll(true)}
-                className="text-[11px] leading-[18px] text-accent hover:text-accent-hover cursor-default"
-              >
-                Show all {matching.length}
-              </button>
-            ) : undefined
-          }
-        />
-      </span>
+      <ModelCurationList
+        testid={`${SHEET}.models`}
+        filterTestid={`${SHEET}.modelFilter`}
+        models={models}
+        selected={selected}
+        onSet={save}
+        filterRef={filterRef}
+        total={models.length}
+        filter={filter}
+        onFilterChange={setFilter}
+        facets={facets}
+        onFacetsChange={setFacets}
+        sort={sort}
+        onSortChange={setSort}
+      />
     </SettingRow>
   )
 }

@@ -184,7 +184,8 @@ describe('SettingsDialog mobile fork', () => {
         'appearance',
         'chat',
         'sessions',
-        'advanced'
+        'advanced',
+        'about'
       ])
 
       await tapTab('engines')
@@ -344,23 +345,22 @@ describe('SettingsDialog mobile fork', () => {
       expect(header.className).toContain('justify-end')
     })
 
-    it('lets a row control column size to its content below the md breakpoint', async () => {
-      // `SettingRow`'s 240px column is a DESKTOP measure: keeping it at 390px
-      // leaves ~120px of text column and wraps a label one word per line.
+    it('caps a row control column at 58% of the row below the md breakpoint', async () => {
+      // The column sizes to its CONTENT at every width now (the 2026-09-08
+      // follow-up), so the phone no longer needs to undo a 240px desktop
+      // measure — but it still needs the cap: a control that declares its own
+      // 240px would otherwise leave a 390px phone ~120px of text column and
+      // wrap a label one word per line.
       await renderDialog({ onClose })
       await expandPage('sessions')
 
       const columns = Array.from(
-        screen.getByTestId('SettingsMobileView').querySelectorAll('[class*="w-[240px] shrink-0"]')
+        screen.getByTestId('SettingsMobileView').querySelectorAll('[class*="max-md:max-w-[58%]"]')
       )
       expect(columns.length).toBeGreaterThan(0)
       for (const column of columns) {
-        // Additive: the desktop measure is still there for md and up.
-        expect(column.className).toContain('w-[240px] shrink-0')
-        expect(column.className).toContain('max-md:w-auto')
-        expect(column.className).toContain('max-md:min-w-0')
-        expect(column.className).toContain('max-md:max-w-[58%]')
-        // …and a control that declares its own 240px shrinks into the cap.
+        expect(column.className).not.toContain('w-[240px]')
+        // …and a control that declares its own width shrinks into the cap.
         expect(column.className).toContain('max-md:[&>*]:max-w-full')
         expect(column.className).toContain('max-md:[&>*]:min-w-0')
       }

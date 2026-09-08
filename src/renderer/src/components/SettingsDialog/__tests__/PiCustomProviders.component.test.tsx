@@ -7,8 +7,12 @@
  * The tests drive the modal directly, exactly as the sheet mounts it. Until
  * phase 7 they went through the `PiCustomProviders` PANE, which had been
  * mounted nowhere since 6c; the pane, its two creation forms and the tests that
- * existed only for them are gone with it. `variant="override"` is the one thing
- * that lost its entry point (see the module header) and so lost its coverage.
+ * existed only for them are gone with it.
+ *
+ * TWO VARIANTS, and which one a row gets is the point: `custom` edits the entry
+ * the user DECLARED, `builtin` overrides a provider pi SHIPS. The builtin half
+ * is where `variant="override"` gets its entry point back, and its own describe
+ * below pins the rows it must NOT offer as hard as the ones it must.
  *
  * Same rule as its Configuration-pane siblings: the invariants worth guarding
  * are about WHAT LANDS IN models.json, not what the blocks look like.
@@ -65,10 +69,13 @@ function installApiStub(overrides: Record<string, unknown> = {}): void {
  */
 const onClose = vi.fn()
 
-/** Mount the dialog on `id`, the way the Manage sheet does. */
-async function renderDialog(id: string): Promise<void> {
+/**
+ * Mount the dialog on `id`, the way the Manage sheet does — `builtin` picks the
+ * variant its "pi overrides ›" row opens, over a provider pi SHIPS.
+ */
+async function renderDialog(id: string, opts: { builtin?: boolean } = {}): Promise<void> {
   await act(async () => {
-    render(<PiProviderModal providerId={id} onClose={onClose} />)
+    render(<PiProviderModal providerId={id} builtin={opts.builtin} onClose={onClose} />)
   })
   await act(async () => {
     await new Promise((r) => setTimeout(r, 0))
@@ -91,6 +98,13 @@ function byId(testid: string, id: string): HTMLElement {
 async function click(el: HTMLElement): Promise<void> {
   await act(async () => {
     fireEvent.click(el)
+  })
+}
+
+/** One Escape, on `document`, where every layer listens (`useEscapeLayer`). */
+async function escape(): Promise<void> {
+  await act(async () => {
+    fireEvent.keyDown(document, { key: 'Escape' })
   })
 }
 
@@ -532,9 +546,8 @@ describe('pi provider dialog (models.json)', () => {
 
     it('a model editor offers no headers leaf', async () => {
       // `headers` is per-MODEL only inside `modelOverrides` (models.md), so the
-      // model variant is one row shorter than the override variant. The
-      // override half of this pair went with the pane that opened it — see the
-      // file header's residual.
+      // model variant is one row shorter than the override variant, which the
+      // builtin dialog opens.
       await openModel('0')
       await click(screen.getByTestId('PiModelEditor.advancedDisclosure'))
       expect(
@@ -575,6 +588,174 @@ describe('pi provider dialog (models.json)', () => {
         )
       )
       expect(screen.getByTestId('PiProviderDialog')).toBeInTheDocument()
+    })
+  })
+
+  // ── 8b. The builtin variant ────────────────────────────────────────
+
+  /**
+   * `providers.<builtin>` is an OVERRIDE, not a declaration (models.md
+   * "Overriding Built-in Providers" / "Per-model Overrides"), and the entry is
+   * normally absent until the first edit creates it. What the variant must NOT
+   * render matters as much as what it must: `api`, `compat` and `models[]`
+   * belong to pi's own definition, and a whole-entry write at a built-in id is
+   * refused by the writer anyway (`pi-models-raw.ts`).
+   */
+  describe('builtin variant', () => {
+    it('renders from an ABSENT entry, without the custom form’s controls', async () => {
+      currentConfig = {}
+      await renderDialog('openai', { builtin: true })
+      const dialog = screen.getByTestId('PiProviderDialog')
+      expect(dialog).toHaveAttribute('data-id', 'openai')
+      expect(dialog.closest('[data-variant]')).toHaveAttribute('data-variant', 'builtin')
+      expect(dialog.textContent).toContain('Built-in provider — openai')
+
+      expect(screen.queryAllByTestId('PiProviderDialog.segment')).toHaveLength(0)
+      expect(screen.queryByTestId('PiProviderDialog.addModel')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('PiProviderDialog.deleteProvider')).not.toBeInTheDocument()
+      // Nothing to remove yet: `providers.openai` does not exist.
+      expect(screen.queryByTestId('PiProviderDialog.removeOverrides')).not.toBeInTheDocument()
+      expect(screen.getByTestId('PiProviderDialog.noOverrides').textContent).toContain(
+        'No overrides'
+      )
+      expect(patchPiModels).not.toHaveBeenCalled()
+    })
+
+    it('adds an override as ONE empty-object leaf and opens the OVERRIDE editor on it', async () => {
+      currentConfig = {}
+      await renderDialog('openai', { builtin: true })
+      await click(screen.getByTestId('PiProviderDialog.addOverride'))
+      await act(async () => {
+        fireEvent.change(byId('PiProviderDialog.addOverride.field', 'model'), {
+          target: { value: 'gpt-5.6-sol' }
+        })
+      })
+      await click(screen.getByTestId('PiProviderDialog.addOverride.submit'))
+      // An empty object is a legal, inert override — pi merges nothing until the
+      // editor that opens next fills it in.
+      expect(captured).toEqual([
+        [{ path: ['providers', 'openai', 'modelOverrides', 'gpt-5.6-sol'], value: {} }]
+      ])
+
+      const editor = await screen.findByTestId('PiModelEditor')
+      expect(editor).toHaveAttribute('data-id', 'providers.openai.modelOverrides.gpt-5.6-sol')
+      expect(screen.getByTestId('PiModelEditor.remove').textContent).toBe('Remove override')
+    })
+
+    it('refuses a duplicate override id locally, before any write', async () => {
+      currentConfig = {
+        providers: { openai: { modelOverrides: { 'gpt-5.6-sol': { contextWindow: 1050000 } } } }
+      }
+      await renderDialog('openai', { builtin: true })
+      await click(screen.getByTestId('PiProviderDialog.addOverride'))
+      await act(async () => {
+        fireEvent.change(byId('PiProviderDialog.addOverride.field', 'model'), {
+          target: { value: 'gpt-5.6-sol' }
+        })
+      })
+      await click(screen.getByTestId('PiProviderDialog.addOverride.submit'))
+      expect(screen.getByTestId('PiProviderDialog.addOverride.error').textContent).toContain(
+        'already exists'
+      )
+      expect(patchPiModels).not.toHaveBeenCalled()
+    })
+
+    it('lists the existing overrides, prefills the proxy leaves, and removes the whole entry', async () => {
+      currentConfig = {
+        providers: {
+          openai: {
+            baseUrl: 'https://my-proxy.example.com/v1',
+            modelOverrides: { x: { contextWindow: 1050000 } }
+          }
+        }
+      }
+      await renderDialog('openai', { builtin: true })
+      expect(byId('PiProviderDialog.text', 'baseUrl')).toHaveValue(
+        'https://my-proxy.example.com/v1'
+      )
+      expect(byId('PiProviderDialog.overrideRow', 'x').textContent).toContain(
+        'contextWindow → 1,050,000'
+      )
+
+      await click(screen.getByTestId('PiProviderDialog.removeOverrides'))
+      await click(screen.getByTestId('PiProviderDialog.confirmRemoveOverrides.confirm'))
+      const patch = onlyPatch()
+      expect(patch.path).toEqual(['providers', 'openai'])
+      expect('value' in patch).toBe(false)
+      await waitFor(() => expect(onClose).toHaveBeenCalled())
+    })
+
+    /**
+     * ESCAPE GOES ONE LEVEL UP (owner ruling 2026-09-08). Every overlay here is
+     * an `useEscapeLayer` layer, so a press with the override editor open over
+     * the dialog closes the EDITOR and leaves the dialog — before the shared
+     * hook only `SheetFrame` listened, and the key fell through both dialogs to
+     * the Manage sheet, which closed the sheet and unmounted everything on it.
+     */
+    it('Escape closes the override editor, then the dialog — one layer per press', async () => {
+      currentConfig = {
+        providers: { openai: { modelOverrides: { 'gpt-5.6-sol': { contextWindow: 1050000 } } } }
+      }
+      await renderDialog('openai', { builtin: true })
+      await click(byId('PiProviderDialog.overrideRow', 'gpt-5.6-sol'))
+      expect(screen.getByTestId('PiModelEditor')).toBeInTheDocument()
+
+      await escape()
+      expect(screen.queryByTestId('PiModelEditor')).not.toBeInTheDocument()
+      expect(screen.getByTestId('PiProviderDialog')).toBeInTheDocument()
+      // The dialog does not close itself — it asks its owner to, and that ask
+      // must not have happened yet.
+      expect(onClose).not.toHaveBeenCalled()
+
+      await escape()
+      expect(onClose).toHaveBeenCalledTimes(1)
+    })
+
+    it('Escape on the remove-overrides confirm cancels it and writes nothing', async () => {
+      currentConfig = { providers: { openai: { baseUrl: 'https://my-proxy.example.com/v1' } } }
+      await renderDialog('openai', { builtin: true })
+      await click(screen.getByTestId('PiProviderDialog.removeOverrides'))
+      expect(screen.getByTestId('PiProviderDialog.confirmRemoveOverrides')).toBeInTheDocument()
+
+      await escape()
+      expect(
+        screen.queryByTestId('PiProviderDialog.confirmRemoveOverrides')
+      ).not.toBeInTheDocument()
+      expect(screen.getByTestId('PiProviderDialog')).toBeInTheDocument()
+      expect(onClose).not.toHaveBeenCalled()
+      expect(patchPiModels).not.toHaveBeenCalled()
+    })
+
+    it('says what an API key means HERE — an override, not the only credential', async () => {
+      // On a built-in, blank is the normal working state: pi already holds a
+      // credential for the provider. The custom form's "ollama" placeholder
+      // would read as "you must put something here".
+      currentConfig = {}
+      await renderDialog('openai', { builtin: true })
+      const builtinKey = byId('PiProviderDialog.text', 'apiKey')
+      expect(builtinKey).toHaveAttribute('placeholder', 'unset — pi’s own credential')
+      expect(builtinKey.getAttribute('placeholder')).not.toBe('ollama')
+      expect(byId('PiProviderDialog.row', 'apiKey').textContent).toContain(
+        'Unset keeps the credential pi already holds'
+      )
+
+      cleanup()
+      currentConfig = OLLAMA
+      await renderDialog('ollama')
+      expect(byId('PiProviderDialog.text', 'apiKey')).toHaveAttribute('placeholder', 'ollama')
+    })
+
+    it('throws on a MANAGED id rather than rendering an override surface', async () => {
+      // An INVARIANT: M-AT4 refuses a custom shared provider whose pi id collides
+      // with a built-in, so a managed id can never also be a built-in one. If the
+      // read model ever hands the sheet one, that is a bug to see, not a state.
+      currentConfig = { providers: { openai: { baseUrl: 'https://x/v1' } } }
+      managedProviderIds = ['openai']
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+      await expect(renderDialog('openai', { builtin: true })).rejects.toThrow(
+        'must never be opened on a managed id'
+      )
+      logged.mockRestore()
     })
   })
 

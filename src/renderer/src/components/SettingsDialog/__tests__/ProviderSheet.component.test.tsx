@@ -34,7 +34,9 @@ const chatgpt: ProviderEntry = {
   origin: 'shared',
   credential: 'connected',
   engines: { opencode: { enabled: true, native: true }, pi: { enabled: true, native: true } },
-  detail: 'ChatGPT subscription · shared with pi and opencode'
+  detail: 'ChatGPT subscription · shared with pi and opencode',
+  // Its ENABLED pi route lands on a vendor pi ships, so the row can override it.
+  piBuiltinId: 'openai-codex'
 }
 
 const custom: ProviderEntry = {
@@ -62,7 +64,8 @@ const groq: ProviderEntry = {
   origin: 'pi-native',
   credential: 'api-key',
   engines: { pi: { enabled: true, native: true } },
-  piKind: 'builtin'
+  piKind: 'builtin',
+  piBuiltinId: 'groq'
 }
 
 const piCustom: ProviderEntry = {
@@ -434,42 +437,130 @@ describe('closing', () => {
     })
     expect(screen.queryByTestId('ProviderSheet')).not.toBeInTheDocument()
   })
+
+  it('Escape closes a dialog opened FROM the sheet, and only then the sheet', async () => {
+    // Owner ruling 2026-09-08: Escape goes one level up. The sheet's frame and
+    // the dialog it opens are both `useEscapeLayer` layers, so the first press
+    // must not take the sheet — and the dialog — with it.
+    await openSheet('pi:groq')
+    await click(screen.getByTestId('ProviderSheet.piOverrides'))
+    expect(await screen.findByTestId('PiProviderDialog')).toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.keyDown(document, { key: 'Escape' })
+    })
+    expect(screen.queryByTestId('PiProviderDialog')).not.toBeInTheDocument()
+    expect(screen.getByTestId('ProviderSheet')).toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.keyDown(document, { key: 'Escape' })
+    })
+    expect(screen.queryByTestId('ProviderSheet')).not.toBeInTheDocument()
+  })
 })
 
 // ── Models in the picker ─────────────────────────────────────────────
 
 describe('MODELS IN THE PICKER', () => {
+  /**
+   * A gateway catalog: prefixed ids, so the list groups by vendor. The picker
+   * VALUE of a catalog model is `${providerId}/${model.id}` — for OpenRouter
+   * that is the double-segment `openrouter/moonshotai/kimi-k3`, which is what
+   * the orphan guard has to match against.
+   */
   const models = [
-    { id: 'kimi', name: 'Kimi K3' },
-    { id: 'luna', name: 'GPT-5.6 Luna' },
-    { id: 'sol', name: 'GPT-5.6 Sol' }
+    { id: 'moonshotai/kimi-k3', name: 'Kimi K3' },
+    { id: 'openai/gpt-5-6-luna', name: 'GPT-5.6 Luna' },
+    { id: 'openai/gpt-5-6-sol', name: 'GPT-5.6 Sol' }
   ]
+
+  const row = (id: string): HTMLElement =>
+    screen.getAllByTestId('ProviderSheet.models.row').find((el) => el.dataset.id === id)!
+  const groupToggle = (prefix: string): HTMLElement =>
+    screen
+      .getAllByTestId('ProviderSheet.models.groupToggle')
+      .find((el) => el.dataset.id === prefix)!
 
   beforeEach(() => {
     app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => models)
     app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({
-      modelAllowlist: { openrouter: ['kimi', 'luna'] }
+      modelAllowlist: { openrouter: ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna'] }
     }))
   })
 
-  it('curates through the opencode allowlist, one chip at a time', async () => {
+  it('curates through the opencode allowlist, one row at a time', async () => {
     await openSheet('opencode:openrouter')
-    const chip = (id: string): HTMLElement =>
-      screen.getAllByTestId('ProviderSheet.modelChips.chip').find((el) => el.dataset.id === id)!
-    expect(chip('kimi')).toHaveAttribute('aria-pressed', 'true')
-    expect(chip('sol')).toHaveAttribute('aria-pressed', 'false')
+    expect(row('moonshotai/kimi-k3')).toHaveAttribute('aria-checked', 'true')
+    expect(row('openai/gpt-5-6-sol')).toHaveAttribute('aria-checked', 'false')
 
-    await click(chip('sol'))
+    await click(row('openai/gpt-5-6-sol'))
     expect(sent('config:save-opencode-settings')).toEqual([
-      [{ modelAllowlist: { openrouter: ['kimi', 'luna', 'sol'] } }]
+      [
+        {
+          modelAllowlist: {
+            openrouter: ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna', 'openai/gpt-5-6-sol']
+          }
+        }
+      ]
+    ])
+  })
+
+  it('groups by vendor prefix, and a vendor checkbox writes the whole group', async () => {
+    await openSheet('opencode:openrouter')
+    // Both vendors hold a selection, so both are open; the tie in selected
+    // count breaks alphabetically by label (Moonshot, OpenAI).
+    expect(screen.getAllByTestId('ProviderSheet.models.group').map((el) => el.dataset.id)).toEqual([
+      'moonshotai',
+      'openai'
+    ])
+    expect(groupToggle('openai')).toHaveAttribute('data-state', 'mixed')
+
+    await click(groupToggle('openai'))
+    expect(sent('config:save-opencode-settings')).toEqual([
+      [
+        {
+          modelAllowlist: {
+            openrouter: ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna', 'openai/gpt-5-6-sol']
+          }
+        }
+      ]
+    ])
+  })
+
+  it('an ABSENT allowlist means all of them, and the first de-selection writes the list', async () => {
+    app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({}))
+    await openSheet('opencode:openrouter')
+    for (const model of models) expect(row(model.id)).toHaveAttribute('aria-checked', 'true')
+
+    await click(row('moonshotai/kimi-k3'))
+    expect(sent('config:save-opencode-settings')).toEqual([
+      [{ modelAllowlist: { openrouter: ['openai/gpt-5-6-luna', 'openai/gpt-5-6-sol'] } }]
+    ])
+  })
+
+  it('Select all acts on what the search narrowed to', async () => {
+    await openSheet('opencode:openrouter')
+    await typeInto('ProviderSheet.modelFilter', 'openai/')
+    expect(screen.getByTestId('ProviderSheet.models.selectAll')).toHaveTextContent('Select all 2')
+
+    await click(screen.getByTestId('ProviderSheet.models.selectAll'))
+    // The model outside the search keeps its place in the list.
+    expect(sent('config:save-opencode-settings')).toEqual([
+      [
+        {
+          modelAllowlist: {
+            openrouter: ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna', 'openai/gpt-5-6-sol']
+          }
+        }
+      ]
     ])
   })
 
   it('refuses a de-selection that would orphan a configured model', async () => {
     // No-silent-fallback (ADR-059): the reference would break far from here.
     app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({
-      model: 'openrouter/kimi',
-      modelAllowlist: { openrouter: ['kimi', 'luna'] }
+      model: 'openrouter/moonshotai/kimi-k3',
+      modelAllowlist: { openrouter: ['moonshotai/kimi-k3', 'openai/gpt-5-6-luna'] }
     }))
     app.bridge.ipcMain.handle('session:get-engine-models', async () => [
       {
@@ -478,7 +569,7 @@ describe('MODELS IN THE PICKER', () => {
         vendorName: 'OpenRouter',
         models: [
           {
-            value: 'openrouter/kimi',
+            value: 'openrouter/moonshotai/kimi-k3',
             displayName: 'Kimi K3',
             description: '',
             engineId: 'opencode',
@@ -488,13 +579,17 @@ describe('MODELS IN THE PICKER', () => {
       }
     ])
     await openSheet('opencode:openrouter')
-    await click(
-      screen.getAllByTestId('ProviderSheet.modelChips.chip').find((el) => el.dataset.id === 'kimi')!
-    )
+    await click(row('moonshotai/kimi-k3'))
     expect(screen.getByTestId('ProviderSheet.modelsError')).toHaveTextContent(
       'the opencode default model'
     )
     expect(sent('config:save-opencode-settings')).toEqual([])
+  })
+
+  it('“Curate models ›” focuses the list’s search box', async () => {
+    await openSheet('opencode:openrouter')
+    await click(screen.getByTestId('ProviderSheet.curate'))
+    expect(screen.getByTestId('ProviderSheet.modelFilter')).toHaveFocus()
   })
 })
 
@@ -610,15 +705,41 @@ describe('model setup', () => {
     expect(sent('session:get-opencode-providers').length).toBeGreaterThan(0)
   })
 
-  it('opens pi’s models.json editor on this provider', async () => {
+  it('opens pi’s models.json editor on a DECLARED pi provider', async () => {
     await openSheet('pi:my-endpoint')
+    // A declared entry is edited, not overridden: one row, and it is this one.
+    expect(screen.queryByTestId('ProviderSheet.piOverrides')).not.toBeInTheDocument()
     await click(screen.getByTestId('ProviderSheet.piModels'))
     expect(await screen.findByTestId('PiProviderDialog')).toHaveAttribute('data-id', 'my-endpoint')
   })
 
-  it('offers neither on a shared row — it owns no engine-native declaration', async () => {
+  it('opens the BUILT-IN override dialog on a built-in pi row, not the custom form', async () => {
+    // `providers.groq` overrides a provider pi ships; the custom form's models[]
+    // and API-protocol rows are the wrong shape for one, so it is a different row.
+    await openSheet('pi:groq')
+    expect(screen.queryByTestId('ProviderSheet.piModels')).not.toBeInTheDocument()
+    await click(screen.getByTestId('ProviderSheet.piOverrides'))
+    const dialog = await screen.findByTestId('PiProviderDialog')
+    expect(dialog).toHaveAttribute('data-id', 'groq')
+    expect(dialog.closest('[data-variant]')).toHaveAttribute('data-variant', 'builtin')
+  })
+
+  it('opens it on a shared row’s pi ROUTE id, never on the definition id', async () => {
+    // `providers.chatgpt` is not the entry pi reads ChatGPT's models from.
+    await openSheet('chatgpt')
+    await click(screen.getByTestId('ProviderSheet.piOverrides'))
+    expect(await screen.findByTestId('PiProviderDialog')).toHaveAttribute('data-id', 'openai-codex')
+  })
+
+  it('offers no model DECLARATION editor on a shared row — it declares nothing natively', async () => {
     await openSheet('chatgpt')
     expect(screen.queryByTestId('ProviderSheet.opencodeModels')).not.toBeInTheDocument()
     expect(screen.queryByTestId('ProviderSheet.piModels')).not.toBeInTheDocument()
+  })
+
+  it('offers neither row when the shared row has no pi route into a built-in', async () => {
+    await openSheet('ollama-local')
+    expect(screen.queryByTestId('ProviderSheet.piModels')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('ProviderSheet.piOverrides')).not.toBeInTheDocument()
   })
 })

@@ -34,16 +34,20 @@ Two shell directions and two grouping options were mocked and reviewed with the 
 
 The dialog stays a modal (Direction A). It grows to `min(1040px, 92vw)` × `min(700px, 88vh)`.
 Header: title, a centred global search field (`Ctrl+,` / `Cmd+,` focuses it), close. Body: a 204px
-rail on the left, one scrolling page on the right. The version footer is gone; versions live under
-Advanced › About. A full-window settings view (Direction B) was rejected: it reads like VS Code.
+rail on the left, one scrolling page on the right. The version footer is gone; versions live on
+their own About page. A full-window settings view (Direction B) was rejected: it reads like VS Code.
 
-### Information architecture: 11 pages in 3 rail groups
+### Information architecture: 12 pages in 3 rail groups
 
 | Rail group | Pages                                                                |
 | ---------- | -------------------------------------------------------------------- |
-| App        | Appearance · Chat · Sessions & autonomy · Advanced                   |
+| App        | Appearance · Chat · Sessions & autonomy · Advanced · About           |
 | Features   | Models & providers · Cross-engine dispatch · Mockups · Remote access |
 | Engines    | Claude · opencode · pi                                               |
+
+About was split out of Advanced into its own App page on the owner's request (2026-09-08): versions
+are what a user opens Settings to read, and nesting them under Diagnostics made them the least
+findable thing in the dialog.
 
 "Features" holds what ClaudeUI adds on top of the engines; each is a first-class page. "Engines"
 holds each engine's own configuration file, curated (Option 1). The alternative of dissolving every
@@ -77,11 +81,13 @@ under the label at full width. Controls: toggle, select, number with unit, segme
 slider with value, text, list editor, chip set, radio row, action row. Buttons: filled = the one
 primary action on a page, tinted = secondary, link = tertiary, red = destructive.
 
-State vocabulary: an accent dot after the label = changed from default (hover reveals Reset;
-AppSettings compare against `DEFAULT_SETTINGS`, engine-native keys are modified when present in the
-file); a badge for "applies later" with exactly three values — **Next session**, **Next server
-start**, **Next launch** — replacing the five prose footers; a lock badge for values ClaudeUI forces
-(the Managed keys pattern); dependent rows nest one level and stay readable when disabled.
+State vocabulary: a changed-from-default row carries NO persistent indicator — hovering it reveals
+a Reset link, and that action is the whole affordance (AppSettings compare against
+`DEFAULT_SETTINGS`, engine-native keys are modified when present in the file). The accent dot that
+used to mark such a row was removed on the owner's request (2026-09-08) as noise. A badge for
+"applies later" with exactly three values — **Next session**, **Next server start**, **Next
+launch** — replaces the five prose footers; a lock badge marks values ClaudeUI forces (the Managed
+keys pattern); dependent rows nest one level and stay readable when disabled.
 
 Storage is a small tag on the group header (`opencode.jsonc`, `engines/pi.json`), shown only when
 the group does not write ClaudeUI's own settings. It is information, never navigation.
@@ -198,8 +204,10 @@ it, each carried by the phase that found it.
 
 7. **`SettingRow` gained state the boards implied but did not name:** `locked` (the Managed keys
    badge), `errorTestid` (the engine panes namespace their errors), `labelBadge`, `inputMode`,
-   ADR-027 `dataId` discriminators on the primitives, and — on the phone — a control column that
-   keeps its 240px on `md` and up but sizes to content below.
+   ADR-027 `dataId` discriminators on the primitives. Its inline control column began as the
+   board's fixed 240px (content-sized below `md`), and the 2026-09-08 follow-up made it
+   content-sized at EVERY width: 240px left a 560px sheet's descriptions wrapping at half the card
+   and the ~330px quick popover with ~60px of label. A control that needs a width now DECLARES one.
 
 8. **Search results are LIVE rows, so they are capped.** A one-character query matches 47 groups
    and every bucket shown mounts a real pane, several of which fetch on mount. Both views bucket
@@ -223,11 +231,17 @@ on Escape (the Manage sheet mounts a second frame for Edit endpoint, and one pre
 both), and `useIsMobile` is `< 768` rather than `<= 768` so that the fork it chooses and the
 `max-md:` layout inside it agree at exactly 768px.
 
-**Residual for the owner:** editing `providers.<builtin>.modelOverrides` for a built-in pi vendor
-that has no pi-native row of its own has no entry point. It belonged to the `PiCustomProviders`
-pane, which 6c stopped mounting and phase 7 deleted; `PiModelEditor` still takes
-`variant="override"`, so whichever surface takes that job next has its editor. An "Overrides" row
-on the pi provider's Manage sheet is the obvious home if the owner wants one.
+**Post-arc follow-up (landed on `settings-v2-followups`):** editing a built-in pi vendor's
+models.json overrides (`providers.<builtin>.{baseUrl,headers,apiKey,authHeader,modelOverrides}`,
+models.md "Overriding Built-in Providers" / "Per-model Overrides") lost its entry point when 6c
+retired the `PiCustomProviders` pane. It is back as data, not as a pane: the read model gives a row
+`piBuiltinId` when its pi route lands on a vendor pi ships (a pi-native `builtin` row, or a shared
+subscription such as ChatGPT → `openai-codex`), and the Manage sheet renders a "pi overrides ›" row
+for it that opens `PiProviderModal` in its `builtin` variant — proxy leaves plus a `modelOverrides`
+list over `PiModelEditor variant="override"`. A pi-native `custom` row keeps "pi models ›" (the
+declaration form). The same slice moved the five settings model pickers onto
+`ModelPicker variant="field"` (the `SelectField` trigger and one shared `ChevronIcon`), closing
+the "ModelPicker ≠ SelectField look" deviation above.
 
 ## Alternatives considered
 

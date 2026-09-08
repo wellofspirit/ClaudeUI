@@ -25,10 +25,14 @@
  * Three levels are all there are. A fourth would mean a dialog opened from a
  * dialog opened from a dialog, which is a design problem rather than a missing
  * z value.
+ *
+ * Z-ORDER IS NOT THE ESCAPE ORDER: the ladder above is paint order, while which
+ * overlay a key closes is mount order, kept by `useEscapeLayer`.
  */
 
 import { useState } from 'react'
 import { inputClass } from './OpencodeSchemaForm'
+import { useEscapeLayer } from '../shared/use-escape-layer'
 
 // ── Dialog frame ─────────────────────────────────────────────────────────────
 
@@ -37,9 +41,10 @@ import { inputClass } from './OpencodeSchemaForm'
  * the caller fills (destructive action left, confirming action right).
  *
  * The backdrop closes on click and the panel stops propagation, so a click
- * inside never dismisses. `onClose` is the ONLY way out — every editor built on
- * this saves immediately, so there is nothing to cancel and no unsaved-changes
- * prompt to owe the user.
+ * inside never dismisses. Escape closes it too, and ONLY it — the dialog or
+ * sheet underneath keeps the next press (`useEscapeLayer`). Every editor built
+ * on this saves immediately, so there is nothing to cancel and no
+ * unsaved-changes prompt to owe the user.
  */
 export function DialogShell({
   testid,
@@ -61,6 +66,8 @@ export function DialogShell({
   footer: React.ReactNode
   children: React.ReactNode
 }): React.JSX.Element {
+  useEscapeLayer(onClose)
+
   return (
     <div
       data-testid={testid}

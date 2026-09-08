@@ -210,10 +210,12 @@ describe('opencode Configuration panes', () => {
     it('marks a row whose key is PRESENT as changed, and its Reset deletes the key', async () => {
       currentConfig = { tool_output: { max_lines: 500 } }
       await renderPane(<OpencodeToolOutputSection />)
-      const dot = (key: string): Element | null =>
-        rowFor(key).querySelector('[data-testid="OpencodeConfigPane.row.modified"]')
-      expect(dot('tool_output.max_lines')).toBeTruthy()
-      expect(dot('tool_output.max_bytes')).toBeNull()
+      // The accent dot is gone (2026-09-08); the hover Reset IS the marker, and
+      // it is in the DOM (at opacity-0) exactly when the row is modified.
+      const reset = (key: string): Element | null =>
+        rowFor(key).querySelector('[data-testid="OpencodeConfigPane.row.reset"]')
+      expect(reset('tool_output.max_lines')).toBeTruthy()
+      expect(reset('tool_output.max_bytes')).toBeNull()
 
       await act(async () => {
         fireEvent.click(
@@ -229,14 +231,14 @@ describe('opencode Configuration panes', () => {
 
     it('a toggle is unmarked while its key is absent, marked once it is written', async () => {
       await renderPane(<OpencodeSessionBehaviorSection />)
-      const dot = (): Element | null =>
-        toggleFor('snapshot').querySelector('[data-testid="OpencodeConfigPane.toggle.modified"]')
-      expect(dot()).toBeNull()
+      const reset = (): Element | null =>
+        toggleFor('snapshot').querySelector('[data-testid="OpencodeConfigPane.toggle.reset"]')
+      expect(reset()).toBeNull()
 
       cleanup()
       currentConfig = { snapshot: true }
       await renderPane(<OpencodeSessionBehaviorSection />)
-      expect(dot()).toBeTruthy()
+      expect(reset()).toBeTruthy()
     })
 
     it('resetting the image dimensions deletes BOTH keys in one write', async () => {
