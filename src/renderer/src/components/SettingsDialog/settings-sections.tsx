@@ -62,10 +62,7 @@ import {
   RemoteSecuritySection,
   RemoteServerSection
 } from './RemoteServerSettings'
-import { PiVendors } from './PiVendors'
 import { ProviderList } from './ProviderList'
-import { SharedProviders } from './SharedProviders'
-import { VendorOpencodeSection } from './OpencodeProviders'
 import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
 import { useOpencodeInstalled, usePiInstalled } from './use-engine-installed'
 import {
@@ -2659,34 +2656,6 @@ export const SECTIONS: Section[] = [
     ]
   },
   {
-    id: 'vendor-opencode',
-    label: 'Providers',
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <circle cx="12" cy="12" r="3" />
-        <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'vendorOpencodeAuth',
-        label: 'Providers & models',
-        keywords:
-          'opencode provider add auth api key oauth login openai google anthropic openrouter model allowlist enable disable',
-        render: () => <VendorOpencodeSection />
-      }
-    ]
-  },
-  {
     id: 'mockup',
     label: 'Mockups',
     icon: (
@@ -3312,28 +3281,17 @@ export const SECTIONS: Section[] = [
     ),
     items: [
       {
-        // ADR-065 phase 6b: ONE list over the three provider stores, not the
-        // shared vault's own pane. The item KEY is unchanged — it is what the
-        // page model, the deep links and the inventory guard address — while
-        // what it renders is now the unified list. The vault's own surface
-        // (`SharedProviders.tsx`) is retired in 6c along with the two
-        // engine-native provider groups.
+        // ADR-065 phase 6b/6c: ONE list over the three provider stores. The item
+        // KEY is unchanged — it is what the page model, the deep links and the
+        // inventory guard address — while what it renders is the unified list,
+        // whose Manage and Add sheets are now the ONLY provider surface: the
+        // vault's own pane, opencode's `vendor-opencode` and pi's `vendor-pi`
+        // were retired with 6c.
         key: 'sharedProviders',
         label: 'Providers',
         keywords:
-          'shared provider chatgpt codex api key credential model pi opencode anthropic openrouter ollama',
+          'shared provider add chatgpt codex api key oauth credential subscription custom endpoint model pi opencode anthropic openrouter ollama',
         render: (_s, _u, _e, _ue, _v, _uv, ctx) => <ProviderList navigate={ctx?.navigate} />
-      },
-      {
-        // BRIDGE until phase 6c: the shared vault's own pane still holds the
-        // flows the Manage sheet does not carry yet — signing in to a
-        // subscription (the ADR-057 paste-back), the custom-endpoint form,
-        // per-route default models and Sync. Mounted as its own group so none
-        // of them regresses between 6b and 6c; 6c deletes this item.
-        key: 'sharedProvidersLegacy',
-        label: 'Shared provider setup',
-        keywords: 'shared provider sign in chatgpt codex custom endpoint sync default model',
-        render: () => <SharedProviders />
       }
     ]
   },
@@ -4089,34 +4047,6 @@ export const SECTIONS: Section[] = [
         render: () => <PiRawConfigSection />
       }
     ]
-  },
-  {
-    id: 'vendor-pi',
-    label: 'Providers',
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <circle cx="12" cy="12" r="3" />
-        <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'vendorPiAuth',
-        label: 'Providers & subscriptions',
-        keywords:
-          'pi provider add auth api key oauth subscription login openai anthropic radius xai copilot',
-        render: () => <PiVendors />
-      }
-    ]
   }
 ]
 
@@ -4169,9 +4099,6 @@ const CONFIGURATION_OPENCODE_SECTION_IDS = new Set([
 /** Section ids that belong to Vendors > Anthropic */
 const VENDOR_ANTHROPIC_SECTION_IDS = new Set(['vendor-anthropic', 'effortDefaults'])
 
-/** Section ids that belong to Vendors > opencode (gated: only shown when opencode engine installs) */
-const VENDOR_OPENCODE_SECTION_IDS = new Set(['vendor-opencode'])
-
 /** Section ids that belong to opencode Agents subgroup */
 const AGENTS_OPENCODE_SECTION_IDS = new Set(['opencode-agents'])
 
@@ -4209,9 +4136,6 @@ const CONFIGURATION_PI_SECTION_IDS = new Set([
   'pi-config-network',
   'pi-config-raw'
 ])
-
-/** Section ids that belong to Vendors > pi (gated: only shown when pi engine installs) */
-const VENDOR_PI_SECTION_IDS = new Set(['vendor-pi'])
 
 /** Section ids that belong to Accounts (flat) */
 const ACCOUNTS_SECTION_IDS = new Set(['accounts'])
@@ -4329,11 +4253,6 @@ export const SCOPES: ScopeDef[] = [
         ])
       },
       {
-        id: 'opencode-vendor',
-        label: 'Vendor',
-        sections: getSectionsForIds(VENDOR_OPENCODE_SECTION_IDS, ['vendor-opencode'])
-      },
-      {
         id: 'opencode-agents',
         label: 'Agents',
         sections: getSectionsForIds(AGENTS_OPENCODE_SECTION_IDS, ['opencode-agents'])
@@ -4364,11 +4283,6 @@ export const SCOPES: ScopeDef[] = [
           'pi-config-network',
           'pi-config-raw'
         ])
-      },
-      {
-        id: 'pi-vendor',
-        label: 'Vendor',
-        sections: getSectionsForIds(VENDOR_PI_SECTION_IDS, ['vendor-pi'])
       }
     ]
   }

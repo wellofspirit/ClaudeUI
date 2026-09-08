@@ -124,11 +124,12 @@ describe('SCOPES structure', () => {
 
     it('exists', () => expect(opencode).toBeDefined())
 
-    it('has 4 subgroups: Engine, Configuration, Vendor, Agents', () => {
+    it('has 3 subgroups: Engine, Configuration, Agents', () => {
+      // The Vendor subgroup went with `vendor-opencode` (ADR-065 phase 6c):
+      // opencode's providers are rows of the ONE provider list now.
       expect(opencode.subgroups.map((sg) => sg.label)).toEqual([
         'Engine',
         'Configuration',
-        'Vendor',
         'Agents'
       ])
     })
@@ -185,12 +186,13 @@ describe('SCOPES structure', () => {
       expect(raw.items[0].label).toBe('Raw config (opencode.json)')
     })
 
-    it('Vendor subgroup contains only vendor-opencode', () => {
-      // 'opencode-providers' ("Custom providers") was merged INTO vendor-opencode:
-      // custom declarations now sit in the single Providers list, edited through the
-      // provider configuration dialog rather than their own section.
-      const vendor = opencode.subgroups.find((sg) => sg.label === 'Vendor')!
-      expect(vendor.sections.map((s) => s.id)).toEqual(['vendor-opencode'])
+    it('has no Vendor subgroup — vendor-opencode is retired', () => {
+      // 'opencode-providers' merged into 'vendor-opencode', and 6c retired that
+      // in turn: every opencode provider is a row of the unified list, added
+      // and managed through its two sheets.
+      expect(opencode.subgroups.find((sg) => sg.label === 'Vendor')).toBeUndefined()
+      expect(SECTIONS.find((s) => s.id === 'vendor-opencode')).toBeUndefined()
+      expect(SECTION_SCOPE_MAP.has('vendor-opencode')).toBe(false)
     })
 
     it('Agents subgroup contains opencode-agents', () => {
@@ -204,8 +206,9 @@ describe('SCOPES structure', () => {
 
     it('exists', () => expect(pi).toBeDefined())
 
-    it('has 3 subgroups: Engine, Configuration, Vendor', () => {
-      expect(pi.subgroups.map((sg) => sg.label)).toEqual(['Engine', 'Configuration', 'Vendor'])
+    it('has 2 subgroups: Engine, Configuration', () => {
+      // The Vendor subgroup went with `vendor-pi` (ADR-065 phase 6c).
+      expect(pi.subgroups.map((sg) => sg.label)).toEqual(['Engine', 'Configuration'])
     })
 
     it('Engine subgroup contains pi-automode then pi-dispatch, in order', () => {
@@ -265,9 +268,9 @@ describe('SCOPES structure', () => {
       expect(models.items[0].key).toBe('piModels')
     })
 
-    it('Vendor subgroup contains vendor-pi', () => {
-      const vendor = pi.subgroups.find((sg) => sg.label === 'Vendor')!
-      expect(vendor.sections.map((s) => s.id)).toEqual(['vendor-pi'])
+    it('has no Vendor subgroup — vendor-pi is retired', () => {
+      expect(pi.subgroups.find((sg) => sg.label === 'Vendor')).toBeUndefined()
+      expect(SECTIONS.find((s) => s.id === 'vendor-pi')).toBeUndefined()
     })
   })
 
@@ -385,8 +388,8 @@ describe('SECTION_SCOPE_MAP', () => {
     expect(SECTION_SCOPE_MAP.get('pi-dispatch')).toBe('pi')
   })
 
-  it('vendor-pi → pi', () => {
-    expect(SECTION_SCOPE_MAP.get('vendor-pi')).toBe('pi')
+  it('vendor-pi is no longer a section (retired with the pi Vendor subgroup)', () => {
+    expect(SECTION_SCOPE_MAP.has('vendor-pi')).toBe(false)
   })
 })
 

@@ -52,9 +52,9 @@ menu items) get `data-testid="<ComponentName>.<partName>"`, `<partName>` in came
 role/action:
 
 ```tsx
-<input  data-testid="ModelAllowlistDialog.search" … />
-<button data-testid="ModelAllowlistDialog.save" … />
-<button data-testid="VendorOpencodeSection.addProvider" … />
+<input  data-testid="ProviderAddSheet.search" … />
+<button data-testid="ProviderSheet.done" … />
+<button data-testid="ProviderAddSheet.catalog" data-id="groq" … />
 ```
 
 The dot namespace keeps part ids unique per component and self-documenting at the call site.

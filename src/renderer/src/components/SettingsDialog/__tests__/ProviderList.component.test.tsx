@@ -159,6 +159,21 @@ describe('the rows', () => {
     expect(row('chatgpt')).toHaveTextContent('Disabled in the engine')
   })
 
+  it('has a distinct sentence for each diagnosis the registry can report', async () => {
+    // Carried from the retired shared-provider pane's own guard: each string
+    // names the CAUSE first, so it stays legible truncated, and says where the
+    // fix is. Two of the three had no coverage once that pane went.
+    for (const [diagnosis, text] of [
+      ['models-restricted', 'Every model is filtered out'],
+      ['no-models-discovered', 'The engine reported no models']
+    ] as const) {
+      snapshot = { entries: [{ ...chatgpt, diagnosis }], opencodeInstalled: true }
+      await renderList()
+      expect(row('chatgpt')).toHaveTextContent(text)
+      cleanup()
+    }
+  })
+
   it('says opencode is not installed ONCE, and drops every opencode chip', async () => {
     // The one degraded case (owner ruling 2): a stopped server is not degraded.
     snapshot = { entries: [chatgpt, ollama], opencodeInstalled: false }

@@ -187,21 +187,24 @@ describe('the page pane', () => {
     // It sits INSIDE the providers group's header, after the label.
     const header = within(byId('SettingsGroup', 'providers')).getByTestId('SettingsGroup.header')
     expect(within(header).getByTestId('SettingsGroup.action')).toBe(action)
-    // Phase 6c wires the Add sheet; until then the button says why it is inert.
-    expect(action).toBeDisabled()
-    expect(action).toHaveAttribute('title', expect.stringContaining('next step'))
+    // Phase 6c wired the Add sheet: the button is live and carries no
+    // "why it does nothing" tooltip.
+    expect(action).not.toBeDisabled()
+    expect(action).not.toHaveAttribute('title')
 
     cleanup()
     renderView({ activePage: 'appearance' })
     expect(screen.queryByTestId('SettingsGroup.action')).not.toBeInTheDocument()
   })
 
-  it('a disabled header action dispatches nothing', () => {
+  it('the header action dispatches its window event — the pane listens', () => {
+    // A group definition is a static object, so the header can only NAME an
+    // event; `ProviderList` is what turns it into the Add sheet.
     const seen = vi.fn()
     window.addEventListener('settings:add-provider', seen)
     renderView({ activePage: 'models' })
     fireEvent.click(screen.getByTestId('SettingsGroup.action'))
-    expect(seen).not.toHaveBeenCalled()
+    expect(seen).toHaveBeenCalledTimes(1)
     window.removeEventListener('settings:add-provider', seen)
   })
 

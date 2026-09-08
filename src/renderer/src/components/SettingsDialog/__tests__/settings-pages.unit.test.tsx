@@ -86,10 +86,9 @@ describe('PAGES structure', () => {
       sessions: ['autonomy', 'permissions', 'judge', 'trust', 'retention'],
       advanced: ['logging', 'usage', 'about'],
       models: [
+        // ONE providers group since 6c: the two engine-native groups and the
+        // shared vault's bridge folded into the list and its two sheets.
         'providers',
-        'providers-opencode',
-        'providers-pi',
-        'providers-shared-legacy',
         'defaults',
         'pi-fallbacks',
         'anthropic',
@@ -130,7 +129,7 @@ describe('PAGES structure', () => {
     for (const g of pageOf('appearance').groups) expect(g.appliesOn).toBeUndefined()
   })
 
-  it('the Providers group is ONE list with a header action, no longer the shared pane', () => {
+  it('the Providers group is ONE list with a LIVE header action', () => {
     // ADR-065 § "Providers: one list": the card fronts three stores now, so the
     // 'Shared' badge would be a lie about what it holds.
     const providers = pageOf('models').groups.find((g) => g.id === 'providers')!
@@ -138,11 +137,27 @@ describe('PAGES structure', () => {
     expect(providers.action).toMatchObject({
       label: '+ Add provider',
       testid: 'ProviderList.add',
-      event: 'settings:add-provider',
-      // The Add sheet is phase 6c; the button says so rather than doing nothing.
-      disabled: true
+      event: 'settings:add-provider'
     })
-    expect(providers.action?.title).toBeTruthy()
+    // 6c wired the Add sheet: the button is live, and the "why it does nothing"
+    // tooltip is gone with the reason for it.
+    expect(providers.action?.disabled).toBeFalsy()
+    expect(providers.action?.title).toBeUndefined()
+  })
+
+  it('no provider group survives outside the one list', () => {
+    // The 6b bridge (`providers-shared-legacy`) and the two engine-native
+    // groups are DELETED, not hidden: a second provider surface is exactly what
+    // ADR-065 § "Providers: one list" exists to remove.
+    const ids = PAGES.flatMap((page) => page.groups.map((group) => group.id))
+    for (const gone of ['providers-opencode', 'providers-pi', 'providers-shared-legacy']) {
+      expect(ids).not.toContain(gone)
+    }
+    expect(SECTIONS.map((section) => section.id)).not.toContain('vendor-opencode')
+    expect(SECTIONS.map((section) => section.id)).not.toContain('vendor-pi')
+    expect(
+      SECTIONS.find((section) => section.id === 'shared-providers')!.items.map((item) => item.key)
+    ).toEqual(['sharedProviders'])
   })
 
   it('exactly one group declares a header action, and it names an event, not a callback', () => {
@@ -173,7 +188,11 @@ describe('PAGES structure', () => {
 
   it('byEngine groups list their engines in claude → opencode → pi order', () => {
     expect(enginesOf(pageOf('sessions').groups[2])).toEqual(['opencode', 'pi'])
-    expect(enginesOf(pageOf('models').groups.find((g) => g.id === 'defaults')!)).toEqual(['claude', 'opencode', 'pi'])
+    expect(enginesOf(pageOf('models').groups.find((g) => g.id === 'defaults')!)).toEqual([
+      'claude',
+      'opencode',
+      'pi'
+    ])
     // pi joined as a dispatch TARGET: core has accepted it since M4c, the UI
     // pane is what was missing (ADR-065 § Cross-engine dispatch into pi).
     expect(enginesOf(pageOf('dispatch').groups[0])).toEqual(['claude', 'opencode', 'pi'])

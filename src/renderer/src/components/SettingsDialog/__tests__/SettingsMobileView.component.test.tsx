@@ -306,7 +306,13 @@ describe('SettingsDialog mobile fork', () => {
 
       const action = byId('SettingsMobileView.groupAction', 'providers')
       expect(action).toHaveTextContent('+ Add provider')
-      expect(action).toBeDisabled()
+      // Live since 6c, and it speaks by event so the phone needs no plumbing.
+      expect(action).not.toBeDisabled()
+      const seen = vi.fn()
+      window.addEventListener('settings:add-provider', seen)
+      fireEvent.click(action)
+      expect(seen).toHaveBeenCalledTimes(1)
+      window.removeEventListener('settings:add-provider', seen)
       expect(
         within(byId('SettingsMobileView.group', 'providers')).getByTestId(
           'SettingsMobileView.groupHeader'

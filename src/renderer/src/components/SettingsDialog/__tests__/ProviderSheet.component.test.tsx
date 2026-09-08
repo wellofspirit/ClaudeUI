@@ -16,8 +16,9 @@
  * that pair's shared contract and cannot be seen from either half alone.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, act, within } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { chooseSelectMenuOption } from '@test/helpers/select-menu'
 import { ProviderList } from '../ProviderList'
 import type {
   ProviderEntry,
@@ -104,6 +105,10 @@ let definitions: SharedProviderDefinition[]
 /** Every `channel → args` the sheet sent, in order. */
 let calls: Array<{ channel: string; args: unknown[] }>
 let registryReads: number
+/** `shared-provider:models` — what a per-route DEFAULT may be set to. */
+let sharedModels: Array<{ id: string; name?: string }>
+/** `session:get-opencode-providers` — read on demand by "Model overrides ›". */
+let opencodeCatalog: unknown[]
 
 /** Record a channel and answer it. */
 function stub(channel: string, answer: (...args: unknown[]) => unknown = () => undefined): void {
@@ -135,17 +140,43 @@ beforeEach(async () => {
   calls = []
   registryReads = 0
   definitions = [chatgptDefinition, customDefinition]
+  sharedModels = [
+    { id: 'qwen3.8-27b', name: 'Qwen3.8 27B' },
+    { id: 'llama-4', name: 'Llama 4' }
+  ]
+  opencodeCatalog = [
+    {
+      id: 'openrouter',
+      name: 'OpenRouter',
+      authState: 'authenticated',
+      authMethods: ['api'],
+      modelCount: 300,
+      disabled: false,
+      actions: {
+        canSetCredential: true,
+        canEditDeclaration: false,
+        canRemove: true,
+        removeKind: 'credential'
+      }
+    }
+  ]
   snapshot = { entries: [chatgpt, custom, openrouter, groq, piCustom], opencodeInstalled: true }
   app.bridge.ipcMain.handle('provider-registry:list', async () => {
     registryReads += 1
     return snapshot
   })
   app.bridge.ipcMain.handle('shared-provider:list', async () => definitions)
+  app.bridge.ipcMain.handle('shared-provider:models', async () => sharedModels)
+  app.bridge.ipcMain.handle('pi:binary-path', async () => '/opt/pi/bin/pi')
   app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => [])
   app.bridge.ipcMain.handle('config:load-opencode-settings', async () => ({}))
   app.bridge.ipcMain.handle('session:get-engine-models', async () => [])
   app.bridge.ipcMain.handle('config:load-engine-config', async () => ({}))
+  stub('session:get-opencode-providers', () => opencodeCatalog)
+  stub('shared-provider:save')
   stub('shared-provider:set-route')
+  stub('shared-provider:set-default')
+  stub('shared-provider:sync')
   stub('shared-provider:set-key')
   stub('shared-provider:disconnect')
   stub('shared-provider:remove')
@@ -464,5 +495,130 @@ describe('MODELS IN THE PICKER', () => {
       'the opencode default model'
     )
     expect(sent('config:save-opencode-settings')).toEqual([])
+  })
+})
+
+// ── What 6c moved INTO the sheet ─────────────────────────────────────
+
+/**
+ * The flows the retired panes owned. Each one is asserted by the channel it
+ * lands on, because "it still works" is not the claim — "it still writes the
+ * same thing" is.
+ */
+describe('the re-homed vault flows', () => {
+  it('sets a per-route default model through the vault, per harness', async () => {
+    await openSheet('ollama-local')
+    // Only the ENABLED route gets a row: a default on a route that delivers
+    // nothing configures nothing.
+    expect(screen.getAllByTestId('ProviderSheet.defaultModel').map((el) => el.dataset.id)).toEqual([
+      'pi'
+    ])
+
+    chooseSelectMenuOption(screen.getByTestId('ProviderSheet.defaultModelSelect'), 'llama-4')
+    await act(async () => {})
+    expect(sent('shared-provider:set-default')).toEqual([['ollama-local', 'pi', 'llama-4']])
+  })
+
+  it('clears a default with undefined, not with an empty string', async () => {
+    definitions = [
+      chatgptDefinition,
+      {
+        ...customDefinition,
+        routes: { ...customDefinition.routes, pi: { enabled: true, defaultModel: 'llama-4' } }
+      }
+    ]
+    await openSheet('ollama-local')
+    chooseSelectMenuOption(screen.getByTestId('ProviderSheet.defaultModelSelect'), '')
+    await act(async () => {})
+    expect(sent('shared-provider:set-default')).toEqual([['ollama-local', 'pi', undefined]])
+  })
+
+  it('re-delivers the definition on Sync now, and only for a shared row', async () => {
+    await openSheet('ollama-local')
+    await click(screen.getByTestId('ProviderSheet.sync'))
+    expect(sent('shared-provider:sync')).toEqual([['ollama-local']])
+
+    cleanup()
+    await openSheet('opencode:openrouter')
+    expect(screen.queryByTestId('ProviderSheet.sync')).not.toBeInTheDocument()
+  })
+
+  it('edits a custom endpoint’s definition — the one thing only the vault’s pane could do', async () => {
+    await openSheet('ollama-local')
+    await click(screen.getByTestId('ProviderSheet.editEndpoint'))
+
+    // Seeded from the definition, and the id is LOCKED: `providers.<id>` is the
+    // key both adapters project under, so a re-typed id would declare a second
+    // provider rather than rename this one.
+    const form = screen.getByTestId('ProviderForm')
+    expect(within(form).getByTestId('ProviderForm.baseUrl')).toHaveValue('http://localhost:11434')
+    expect(within(form).getByTestId('ProviderForm.id')).toBeDisabled()
+
+    await typeInto('ProviderForm.baseUrl', 'http://10.0.0.5:11434')
+    await click(screen.getByTestId('ProviderSheet.saveEndpoint'))
+
+    expect(sent('shared-provider:save')).toEqual([
+      [
+        {
+          ...customDefinition,
+          baseUrl: 'http://10.0.0.5:11434',
+          models: [{ id: 'qwen3.8-27b', name: undefined }]
+        }
+      ]
+    ])
+    // No key typed, so no credential write at all.
+    expect(sent('shared-provider:set-key')).toEqual([])
+    expect(screen.queryByTestId('ProviderSheet.endpointSheet')).not.toBeInTheDocument()
+  })
+
+  it('offers no endpoint editor for a subscription — ClaudeUI owns that definition', async () => {
+    await openSheet('chatgpt')
+    expect(screen.queryByTestId('ProviderSheet.editEndpoint')).not.toBeInTheDocument()
+  })
+
+  it('hands a disconnected subscription to the ADD sheet rather than signing in here', async () => {
+    // One sign-in surface, and it is the one that ACQUIRES providers.
+    snapshot = {
+      ...snapshot,
+      entries: snapshot.entries.map((e) =>
+        e.id === 'chatgpt' ? { ...e, credential: 'none' as const } : e
+      )
+    }
+    await openSheet('chatgpt')
+    await click(screen.getByTestId('ProviderSheet.signIn'))
+
+    expect(screen.queryByTestId('ProviderSheet')).not.toBeInTheDocument()
+    const add = screen.getByTestId('ProviderAddSheet')
+    expect(add).toBeInTheDocument()
+    // Opened ON that row: the search is seeded with the provider handed over.
+    expect(screen.getByTestId('ProviderAddSheet.search')).toHaveValue('chatgpt')
+  })
+})
+
+/**
+ * The two per-model editors. The sheet does not re-implement either — it opens
+ * the engine's own, on the provider it is showing.
+ */
+describe('model setup', () => {
+  it('opens opencode’s config dialog on this provider, with its catalog entry', async () => {
+    await openSheet('opencode:openrouter')
+    await click(screen.getByTestId('ProviderSheet.opencodeModels'))
+    const dialog = await screen.findByTestId('OpencodeProviderConfigModal')
+    expect(dialog).toHaveAttribute('data-id', 'openrouter')
+    // The entry is READ, not assumed: its resolved `actions` are what gate the
+    // dialog's declaration form and credential block.
+    expect(sent('session:get-opencode-providers').length).toBeGreaterThan(0)
+  })
+
+  it('opens pi’s models.json editor on this provider', async () => {
+    await openSheet('pi:my-endpoint')
+    await click(screen.getByTestId('ProviderSheet.piModels'))
+    expect(await screen.findByTestId('PiProviderDialog')).toHaveAttribute('data-id', 'my-endpoint')
+  })
+
+  it('offers neither on a shared row — it owns no engine-native declaration', async () => {
+    await openSheet('chatgpt')
+    expect(screen.queryByTestId('ProviderSheet.opencodeModels')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('ProviderSheet.piModels')).not.toBeInTheDocument()
   })
 })

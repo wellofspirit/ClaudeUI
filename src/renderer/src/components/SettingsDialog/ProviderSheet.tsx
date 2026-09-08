@@ -33,32 +33,50 @@
  * on a sheet on a dialog. A shared route toggle is NOT confirmed: it is
  * reversible with one click and destroys no credential.
  *
- * DELIBERATE GEOMETRY. The sheet is a `fixed` overlay that reproduces the
- * dialog's own box (`View.tsx`: `min(1040px, 92vw/scale) × min(700px, 88vh/scale)`,
- * centred) and pins itself to that box's right edge below the 52px header, so it
- * reads as part of the dialog rather than as another stacked modal. It mirrors
- * the formula instead of measuring, because the dialog renders under CSS `zoom`
- * and a measured rect and a `fixed` inset resolve in different coordinate
- * spaces. On a phone (`useIsMobile`) the whole thing is the screen.
+ * THE FRAME IS SHARED. Geometry, scrim, title bar, footer bar and the Escape
+ * handler live in `SheetFrame.tsx`, which the Add sheet wears too — two sheets
+ * mirroring the dialog's box formula separately would be two chances to get it
+ * wrong.
+ *
+ * WHAT IT DOES NOT OWN. Two flows here are entry points into surfaces that
+ * already exist and are deliberately not re-implemented: opencode's per-model
+ * capability editor (`OpencodeProviderConfigModal` → `ModelCapabilityEditor`)
+ * and pi's models.json editor (`PiProviderDialog` → `PiModelEditor`). The sheet
+ * opens each on the provider it is showing; everything they write is theirs.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
-import { useIsMobile } from '../../hooks/useIsMobile'
 import { engineMeta } from '../../../../shared/engine-meta'
 import { findModelReferences, formatModelReferences } from '../../../../shared/model-references'
 import type { ProviderCredential, ProviderEntry } from '../../../../shared/provider-registry'
-import type { SharedProviderDefinition } from '../../../../shared/shared-provider'
+import type {
+  ConfigurableHarnessId,
+  SharedProviderDefinition,
+  SharedProviderModel
+} from '../../../../shared/shared-provider'
 import type {
   EngineConfig,
   EngineId,
   EngineModelGroup,
   ModelInfo,
   OpencodeCatalogModel,
-  OpencodeConfigSettings
+  OpencodeConfigSettings,
+  OpencodeProviderCatalogEntry
 } from '../../../../shared/types'
-import { Button, ChipSet, SettingRow, TextField, ToggleSwitch } from './settings-controls'
-import type { SettingsTarget } from './settings-target'
+import {
+  Button,
+  ChipSet,
+  SelectField,
+  SettingRow,
+  TextField,
+  ToggleSwitch
+} from './settings-controls'
+import { SheetFrame, SheetGroup } from './SheetFrame'
+import { ProviderForm, normalizeProviderDraft } from './ProviderForm'
+import { VendorOAuthFlow } from './VendorOAuthFlow'
+import { OpencodeProviderConfigModal } from './OpencodeProviders'
+import { PiProviderModal } from './PiCustomProviders'
 
 /** Testid namespace (ADR-027 tier 1/2). */
 const SHEET = 'ProviderSheet'
@@ -206,33 +224,6 @@ function EngineRow({
   )
 }
 
-/** A group header inside the sheet: the board's caps label, plus an optional chip. */
-function SheetGroup({
-  id,
-  label,
-  trailing,
-  children
-}: {
-  id: string
-  label: string
-  trailing?: React.ReactNode
-  children: React.ReactNode
-}): React.JSX.Element {
-  return (
-    <div data-testid={`${SHEET}.group`} data-id={id} className="mt-5 first:mt-0">
-      <div className="flex items-center gap-3 h-8 px-1 mb-2">
-        <span className="flex-1 min-w-0 truncate text-[11px] font-semibold uppercase tracking-wide text-text-secondary">
-          {label}
-        </span>
-        {trailing}
-      </div>
-      <div className="border border-border rounded-lg bg-bg-secondary overflow-hidden divide-y divide-border/55">
-        {children}
-      </div>
-    </div>
-  )
-}
-
 // ── The sheet ────────────────────────────────────────────────────────────────
 
 export interface ProviderSheetProps {
@@ -245,7 +236,12 @@ export interface ProviderSheetProps {
    * snapshot, and closes the sheet itself when this entry is gone from it.
    */
   onWrote: () => Promise<void>
-  navigate?: (target: SettingsTarget) => void
+  /**
+   * Open the Add sheet, optionally on one row. Signing in to a subscription
+   * lives THERE (it is how a provider is acquired), so the not-connected
+   * credential row hands over rather than growing a second sign-in surface.
+   */
+  onAddProvider?: (focusId?: string) => void
 }
 
 export function ProviderSheet({
@@ -253,10 +249,8 @@ export function ProviderSheet({
   opencodeInstalled,
   onClose,
   onWrote,
-  navigate
+  onAddProvider
 }: ProviderSheetProps): React.JSX.Element {
-  const isMobile = useIsMobile()
-  const uiFontScale = useSessionStore((s) => s.settings.uiFontScale)
   /**
    * The shared DEFINITION behind a shared row. The read model deliberately does
    * not carry `kind` — but a disconnected subscription and a disconnected custom
@@ -282,6 +276,30 @@ export function ProviderSheet({
   const [confirming, setConfirming] = useState<'remove' | 'pi-off' | 'disconnect' | null>(null)
   /** The provider's catalog size, reported up by the curation block. */
   const [catalogTotal, setCatalogTotal] = useState<number | null>(null)
+  /**
+   * The shared definition's own models — what a per-route DEFAULT can be. Only
+   * a custom definition has any (a subscription's models come from the vendor),
+   * so this read is made for exactly that case.
+   */
+  const [sharedModels, setSharedModels] = useState<SharedProviderModel[]>([])
+  /** Which engine's own model editor is open over the sheet, if any. */
+  const [modelEditor, setModelEditor] = useState<'opencode' | 'pi' | null>(null)
+  /**
+   * The definition being EDITED, over this sheet — a custom endpoint's base
+   * URL, protocol and model list. Seeded from the definition when the editor
+   * opens (never live-bound to it), so an abandoned edit changes nothing.
+   */
+  const [endpointDraft, setEndpointDraft] = useState<SharedProviderDefinition | null>(null)
+  const [endpointKey, setEndpointKey] = useState('')
+  const [endpointError, setEndpointError] = useState<string | null>(null)
+  /**
+   * The opencode catalog entry behind this row, read on demand for the config
+   * modal. The modal gates its declaration form and credential block on the
+   * entry's resolved `actions`; mounting it WITHOUT one grants both, and a
+   * stray keystroke in a declaration form a catalog provider never had is
+   * exactly the hazard that gating exists for.
+   */
+  const [opencodeEntry, setOpencodeEntry] = useState<OpencodeProviderCatalogEntry | null>(null)
   const filterRef = useRef<HTMLInputElement>(null)
   const modelsRef = useRef<HTMLDivElement>(null)
 
@@ -305,17 +323,21 @@ export function ProviderSheet({
     }
   }, [isShared, entry.id])
 
-  // Escape closes. Capture so a nested control cannot swallow it, and stop the
-  // event so the settings dialog behind does not close along with the sheet.
   useEffect(() => {
-    const handler = (e: KeyboardEvent): void => {
-      if (e.key !== 'Escape') return
-      e.stopPropagation()
-      onClose()
+    if (definition?.kind !== 'custom') return
+    let cancelled = false
+    window.api
+      .listSharedProviderModels(entry.id)
+      .then((models) => {
+        if (!cancelled) setSharedModels(models)
+      })
+      .catch(() => {
+        if (!cancelled) setSharedModels([])
+      })
+    return () => {
+      cancelled = true
     }
-    document.addEventListener('keydown', handler, true)
-    return () => document.removeEventListener('keydown', handler, true)
-  }, [onClose])
+  }, [definition?.kind, entry.id])
 
   /**
    * Run one write: the model picker's cache is dropped, the registry is re-read,
@@ -338,6 +360,15 @@ export function ProviderSheet({
     },
     [onWrote]
   )
+
+  /**
+   * A write this sheet did not make — an OAuth sign-in inside `VendorOAuthFlow`
+   * — still changed the credential, so the registry has to be re-read and the
+   * model picker's cache dropped exactly as `run` does for our own writes.
+   */
+  const refreshAfterExternalWrite = useCallback((): void => {
+    void run(async () => {})
+  }, [run])
 
   /** Two-click confirm: arm on the first press, act on the second. */
   const confirmThen = (
@@ -432,28 +463,28 @@ export function ProviderSheet({
         />
       )
     }
-    // An opencode OAuth credential: the paste-back flow and its state machine
-    // live in the opencode provider pane (ADR-057), so this points at it rather
-    // than growing a second copy that could disagree with it.
+    // An opencode OAuth credential. Re-authorising happens HERE, through the
+    // shared ADR-057 flow, rather than pointing at another pane: this sheet is
+    // the provider's one home, and the pane it used to point at is gone.
     if (entry.origin === 'opencode-native' && entry.credential === 'connected') {
       return (
-        <SettingRow
-          testid={`${SHEET}.credential`}
-          dataId="oauth"
-          label="Signed in"
-          description="opencode holds this OAuth credential in its own auth store."
-        >
-          <Button
-            variant="link"
-            testid={`${SHEET}.oauthLink`}
-            onClick={() => {
-              navigate?.({ page: 'models', group: 'providers-opencode' })
-              onClose()
-            }}
-          >
-            Manage sign-in
-          </Button>
-        </SettingRow>
+        <>
+          <SettingRow
+            testid={`${SHEET}.credential`}
+            dataId="oauth"
+            label="Signed in"
+            description="opencode holds this OAuth credential in its own auth store. Sign in again to refresh it."
+          />
+          <div className="px-3.5 py-2.5">
+            <VendorOAuthFlow
+              engineId="opencode"
+              vendorId={nativeId}
+              label="Sign in again"
+              disabled={busy}
+              onDone={refreshAfterExternalWrite}
+            />
+          </div>
+        </>
       )
     }
     if (isShared && definition?.kind === 'subscription') {
@@ -480,8 +511,17 @@ export function ProviderSheet({
           testid={`${SHEET}.credential`}
           dataId="subscription"
           label="Not connected"
-          description="Signing in to a subscription arrives with the Add provider sheet."
-        />
+          description="One sign-in, vended to each engine you enable below."
+        >
+          <Button
+            variant="tinted"
+            testid={`${SHEET}.signIn`}
+            disabled={busy || !onAddProvider}
+            onClick={() => onAddProvider?.(entry.id)}
+          >
+            Sign in
+          </Button>
+        </SettingRow>
       )
     }
     if (entry.origin === 'pi-native' && entry.credential === 'connected') {
@@ -700,56 +740,246 @@ export function ProviderSheet({
     ? 'Built-in providers cannot be removed — disconnect it instead.'
     : 'This provider is not ClaudeUI’s to remove.'
 
+  // ── Extra entry points ─────────────────────────────────────────────────────
+
+  /**
+   * A custom shared provider's per-route DEFAULT model — the only setting the
+   * vault owns that is neither a credential nor a route. One row per ENABLED
+   * route, because a default for a route that delivers nothing configures
+   * nothing.
+   *
+   * A configured model the provider no longer delivers stays selectable, so the
+   * control reports what is actually saved rather than silently reading as "no
+   * default".
+   */
+  function defaultModelRows(): React.ReactNode {
+    if (!isShared || definition?.kind !== 'custom') return null
+    return (['pi', 'opencode'] as ConfigurableHarnessId[])
+      .filter((harness) => definition.routes[harness].enabled)
+      .map((harness) => {
+        const saved = definition.routes[harness].defaultModel ?? ''
+        const available = sharedModels.filter(
+          (model) =>
+            model.harnessOverrides?.[harness]?.available !== false &&
+            model.harnessOverrides?.[harness]?.enabled !== false
+        )
+        return (
+          <SettingRow
+            key={`default-${harness}`}
+            testid={`${SHEET}.defaultModel`}
+            dataId={harness}
+            label={`Default model for ${harness}`}
+            description={`What a new ${harness} session starts on when it starts on this provider.`}
+          >
+            <SelectField
+              testid={`${SHEET}.defaultModelSelect`}
+              dataId={harness}
+              value={saved}
+              disabled={busy}
+              placeholder="No default from this provider"
+              options={[
+                { value: '', label: 'No default from this provider' },
+                ...(saved && !available.some((model) => model.id === saved)
+                  ? [{ value: saved, label: `${saved} (unavailable)` }]
+                  : []),
+                ...available.map((model) => ({ value: model.id, label: model.name || model.id }))
+              ]}
+              onChange={(value) =>
+                void run(() =>
+                  window.api.setSharedProviderDefaultModel(entry.id, harness, value || undefined)
+                )
+              }
+            />
+          </SettingRow>
+        )
+      })
+  }
+
+  /**
+   * A custom shared endpoint is a DEFINITION the user wrote, and it is the one
+   * thing on this sheet that is neither a credential nor a route: its base URL,
+   * protocol and model list. The vault's own pane held that form until 6c, so
+   * without this row a saved endpoint could never be corrected again.
+   */
+  function endpointGroup(): React.ReactNode {
+    if (!isShared || definition?.kind !== 'custom') return null
+    return (
+      <SheetGroup testid={`${SHEET}.group`} id="endpoint" label="Endpoint">
+        <SettingRow
+          testid={`${SHEET}.endpoint`}
+          label="Definition"
+          description={`${definition.baseUrl || 'No base URL'} · ${definition.models.length} model${
+            definition.models.length === 1 ? '' : 's'
+          }`}
+        >
+          <Button
+            variant="link"
+            testid={`${SHEET}.editEndpoint`}
+            disabled={busy}
+            onClick={() => {
+              setEndpointDraft(definition)
+              setEndpointKey('')
+              setEndpointError(null)
+            }}
+          >
+            Edit endpoint ›
+          </Button>
+        </SettingRow>
+      </SheetGroup>
+    )
+  }
+
+  /** Save the edited definition, then its key if one was typed. */
+  function saveEndpoint(): void {
+    if (!endpointDraft) return
+    const result = normalizeProviderDraft(endpointDraft)
+    if ('error' in result) {
+      setEndpointError(result.error)
+      return
+    }
+    setEndpointError(null)
+    void run(async () => {
+      await window.api.saveSharedProvider(result.definition)
+      if (endpointKey) await window.api.setSharedProviderApiKey(result.definition.id, endpointKey)
+      setEndpointDraft(null)
+      setEndpointKey('')
+    })
+  }
+
+  /**
+   * The engine's OWN model editor for this provider, opened over the sheet.
+   * Neither is re-implemented here (see the header): opencode's declared models
+   * and their capabilities live in `OpencodeProviderConfigModal`, pi's
+   * models.json entry in `PiProviderDialog`.
+   */
+  function modelSetupGroup(): React.ReactNode {
+    if (entry.origin === 'opencode-native') {
+      return (
+        <SheetGroup testid={`${SHEET}.group`} id="model-setup" label="Model setup">
+          <SettingRow
+            testid={`${SHEET}.modelSetup`}
+            dataId="opencode"
+            label="Model overrides"
+            description="Declared models, and the capabilities, cost and limits opencode reads for each — in opencode's own config file."
+          >
+            <Button
+              variant="link"
+              testid={`${SHEET}.opencodeModels`}
+              disabled={busy || !opencodeInstalled}
+              onClick={() =>
+                void window.api
+                  .getOpencodeProviders()
+                  .then((catalog) => {
+                    setOpencodeEntry(catalog.find((p) => p.id === nativeId) ?? null)
+                    setModelEditor('opencode')
+                  })
+                  .catch((e: unknown) => setError(message(e)))
+              }
+            >
+              Model overrides ›
+            </Button>
+          </SettingRow>
+        </SheetGroup>
+      )
+    }
+    if (entry.origin === 'pi-native') {
+      return (
+        <SheetGroup testid={`${SHEET}.group`} id="model-setup" label="Model setup">
+          <SettingRow
+            testid={`${SHEET}.modelSetup`}
+            dataId="pi"
+            label="pi models"
+            description="This provider's models.json entry: base URL, wire protocol, and the models pi may use with it."
+          >
+            <Button
+              variant="link"
+              testid={`${SHEET}.piModels`}
+              disabled={busy}
+              onClick={() => setModelEditor('pi')}
+            >
+              pi models ›
+            </Button>
+          </SettingRow>
+        </SheetGroup>
+      )
+    }
+    return null
+  }
+
   // ── Frame ──────────────────────────────────────────────────────────────────
 
-  const panel = (
-    <div
-      data-testid={SHEET}
-      data-id={entry.id}
-      className={`pointer-events-auto flex flex-col bg-bg-primary animate-fade-in ${
-        isMobile ? 'w-full h-full' : 'w-[560px] max-w-full h-full border-l border-border shadow-2xl'
-      }`}
-    >
-      {/* Title: name · id · credential badge · close */}
-      <div className="h-[52px] shrink-0 flex items-center gap-2 px-4 border-b border-border">
-        <span className="text-[15px] font-semibold text-text-primary truncate">{entry.name}</span>
-        <span className="font-mono text-[11px] text-text-muted truncate">{entry.id}</span>
-        <CredentialChip credential={entry.credential} testid={`${SHEET}.credentialChip`} />
-        <button
-          type="button"
-          data-testid={`${SHEET}.close`}
-          title="Close"
-          onClick={onClose}
-          className="ml-auto shrink-0 w-6 h-6 flex items-center justify-center rounded-md text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
-        >
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-          >
-            <path d="M18 6L6 18M6 6l12 12" />
-          </svg>
-        </button>
-      </div>
-
-      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">
-        <SheetGroup id="credential" label="Credential">
+  return (
+    <>
+      <SheetFrame
+        testid={SHEET}
+        dataId={entry.id}
+        title={entry.name}
+        titleExtras={
+          <>
+            <span className="font-mono text-[11px] text-text-muted truncate">{entry.id}</span>
+            <CredentialChip credential={entry.credential} testid={`${SHEET}.credentialChip`} />
+          </>
+        }
+        onClose={onClose}
+        footer={
+          <>
+            <Button
+              variant="danger"
+              testid={`${SHEET}.remove`}
+              disabled={busy || remove === null}
+              title={remove === null ? removeTitle : undefined}
+              onClick={() => remove && confirmThen('remove', remove)}
+            >
+              {confirming === 'remove' ? 'Remove provider?' : 'Remove provider'}
+            </Button>
+            {/* One error slot for every write on the sheet: the row that failed is
+                always visible above it, and three copies of the same banner is how
+                a surface ends up reporting a stale failure next to a fresh row. */}
+            <span
+              data-testid={`${SHEET}.error`}
+              className="flex-1 min-w-0 truncate text-[12px] text-danger"
+            >
+              {error}
+            </span>
+            <Button variant="primary" testid={`${SHEET}.done`} onClick={onClose}>
+              Done
+            </Button>
+          </>
+        }
+      >
+        <SheetGroup testid={`${SHEET}.group`} id="credential" label="Credential">
           {credentialRows()}
         </SheetGroup>
 
-        <SheetGroup id="enabled" label="Enabled for">
+        <SheetGroup
+          testid={`${SHEET}.group`}
+          id="enabled"
+          label="Enabled for"
+          trailing={
+            // The vault re-delivers this definition to every enabled engine, so
+            // only a shared row has anything to sync.
+            isShared ? (
+              <Button
+                variant="link"
+                testid={`${SHEET}.sync`}
+                disabled={busy}
+                onClick={() => void run(() => window.api.syncSharedProvider(entry.id))}
+              >
+                Sync now
+              </Button>
+            ) : undefined
+          }
+        >
           {ENGINE_ORDER.map((engine) => (
             <div key={engine}>{engineRow(engine)}</div>
           ))}
+          {defaultModelRows()}
         </SheetGroup>
 
         {curatable && (
           <div ref={modelsRef}>
             <SheetGroup
+              testid={`${SHEET}.group`}
               id="models"
               label="Models in the picker"
               trailing={<EngineChip engine="opencode" enabled testid={`${SHEET}.modelsEngine`} />}
@@ -763,55 +993,74 @@ export function ProviderSheet({
             </SheetGroup>
           </div>
         )}
-      </div>
 
-      <div className="shrink-0 flex items-center gap-2 px-4 py-3 border-t border-border">
-        <Button
-          variant="danger"
-          testid={`${SHEET}.remove`}
-          disabled={busy || remove === null}
-          title={remove === null ? removeTitle : undefined}
-          onClick={() => remove && confirmThen('remove', remove)}
-        >
-          {confirming === 'remove' ? 'Remove provider?' : 'Remove provider'}
-        </Button>
-        {/* One error slot for every write on the sheet: the row that failed is
-            always visible above it, and three copies of the same banner is how
-            a surface ends up reporting a stale failure next to a fresh row. */}
-        <span
-          data-testid={`${SHEET}.error`}
-          className="flex-1 min-w-0 truncate text-[12px] text-danger"
-        >
-          {error}
-        </span>
-        <Button variant="primary" testid={`${SHEET}.done`} onClick={onClose}>
-          Done
-        </Button>
-      </div>
-    </div>
-  )
+        {endpointGroup()}
+        {modelSetupGroup()}
+      </SheetFrame>
 
-  if (isMobile) {
-    return <div className="fixed inset-0 z-[100] flex">{panel}</div>
-  }
-  return (
-    // The dialog's own geometry, mirrored rather than measured — see the header.
-    <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
-      <div
-        style={{
-          width: `min(1040px, calc(92vw / ${uiFontScale}))`,
-          height: `min(700px, calc(88vh / ${uiFontScale}))`
-        }}
-        className="relative flex justify-end pt-[52px] overflow-hidden rounded-xl"
-      >
-        <span
-          data-testid={`${SHEET}.scrim`}
-          onClick={onClose}
-          className="absolute inset-0 pointer-events-auto bg-black/30"
+      {endpointDraft && (
+        <SheetFrame
+          testid={`${SHEET}.endpointSheet`}
+          dataId={endpointDraft.id}
+          title={`Edit ${endpointDraft.name || endpointDraft.id}`}
+          onClose={() => setEndpointDraft(null)}
+          footer={
+            <>
+              <span className="flex-1 min-w-0 truncate text-[12px] text-text-secondary">
+                Saved to the vault, then delivered to each enabled engine.
+              </span>
+              <Button
+                variant="link"
+                testid={`${SHEET}.cancelEndpoint`}
+                onClick={() => setEndpointDraft(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                testid={`${SHEET}.saveEndpoint`}
+                disabled={busy}
+                onClick={saveEndpoint}
+              >
+                Save
+              </Button>
+            </>
+          }
+        >
+          <ProviderForm
+            draft={endpointDraft}
+            onDraft={setEndpointDraft}
+            apiKey={endpointKey}
+            onApiKey={setEndpointKey}
+            error={endpointError}
+            idLocked
+          />
+        </SheetFrame>
+      )}
+
+      {modelEditor === 'opencode' && (
+        <OpencodeProviderConfigModal
+          providerId={nativeId}
+          entry={opencodeEntry ?? undefined}
+          onClose={() => {
+            setModelEditor(null)
+            setOpencodeEntry(null)
+            void onWrote()
+          }}
+          onCredentialChanged={() => void onWrote()}
         />
-        {panel}
-      </div>
-    </div>
+      )}
+
+      {modelEditor === 'pi' && (
+        <PiProviderModal
+          providerId={nativeId}
+          onClose={() => {
+            setModelEditor(null)
+            void onWrote()
+          }}
+        />
+      )}
+    </>
   )
 }
 

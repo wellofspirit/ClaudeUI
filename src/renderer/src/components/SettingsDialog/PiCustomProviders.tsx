@@ -2,8 +2,17 @@
  * PiCustomProviders.tsx
  *
  * The models.json half of Settings › pi › Providers: the CUSTOM PROVIDERS and
- * BUILT-IN OVERRIDES blocks that hang under PiVendors' authentication content,
- * plus the provider dialog and the per-model capability editor they open.
+ * BUILT-IN OVERRIDES blocks, plus the provider dialog and the per-model
+ * capability editor they open.
+ *
+ * ADR-065 phase 6c retired the pane that hosted them (`PiVendors`). What the
+ * settings UI still reaches is `PiProviderModal` — the provider dialog, opened
+ * from the unified provider list's Manage sheet ("pi models ›") on the row it is
+ * showing. The `PiCustomProviders` block pair below is therefore MOUNTED
+ * NOWHERE today: its custom-provider list is the provider list's job now, but
+ * its BUILT-IN OVERRIDES half (`providers.<builtin>.modelOverrides`) has no new
+ * entry point yet and is an open item for the owner — the editor it opens is
+ * kept intact for whichever surface takes it.
  *
  * This pane is where the shared provider-editor LOOK was designed; the frame
  * primitives it uses — dialog shell, block header, row card, pill row, create
@@ -1191,13 +1200,46 @@ function AddProviderForm({
   )
 }
 
+/**
+ * `PiProviderDialog` on its own, over whatever opened it — the Manage sheet's
+ * "pi models ›" (ADR-065 phase 6c). The dialog needs the models.json leaf API
+ * that only this pane held, so the hook is mounted HERE rather than exported
+ * into the sheet: one models.json reader, and it is read when the dialog opens
+ * rather than on every sheet.
+ *
+ * Works for a built-in vendor id too. `providers.<id>` is where models.md tells
+ * users to override a built-in (base URL, headers, per-model entries), and the
+ * writer allows exactly those leaf writes while refusing a whole-entry
+ * replacement at a built-in id (`pi-models-raw.ts`).
+ */
+export function PiProviderModal({
+  providerId,
+  onClose
+}: {
+  providerId: string
+  onClose: () => void
+}): React.JSX.Element | null {
+  const api = usePiModelsLeaf()
+  if (api.config === null) return null
+  return (
+    <PiProviderDialog
+      api={api}
+      providerId={providerId}
+      managed={api.managedIds.has(providerId)}
+      onClose={onClose}
+    />
+  )
+}
+
 // ── The pane blocks ──────────────────────────────────────────────────────────
 
 /**
- * CUSTOM PROVIDERS + BUILT-IN OVERRIDES, rendered by PiVendors under its
- * authentication content. The pi-installed gate is PiVendors' (it returns the
- * not-installed copy before this ever mounts), so this component only gates on
- * the first read resolving.
+ * CUSTOM PROVIDERS + BUILT-IN OVERRIDES. Rendered by `PiVendors` until ADR-065
+ * phase 6c retired it; nothing mounts this pane today (see the file header) —
+ * it is kept because its BUILT-IN OVERRIDES block is the only editor for
+ * `providers.<builtin>.modelOverrides`, which the unified provider list does
+ * not yet reach. It gates only on the first read resolving; the pi-installed
+ * gate was its host's.
  */
 export function PiCustomProviders(): React.JSX.Element {
   const api = usePiModelsLeaf()

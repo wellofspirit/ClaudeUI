@@ -7,17 +7,20 @@
  *    than on the host-local `auth:state` event. The pane folds it into the
  *    store's `authState` — the same field AuthBanner drives — so the Claude flow
  *    still has exactly one state.
- * 2. Providers › the opencode catalog rows, whose OAuth button now parks the
- *    shared paste-back flow on web and keeps its own local instructions UI on
- *    desktop.
+ * 2. Models & providers › the two provider SHEETS (ADR-065 phase 6c): the Add
+ *    sheet's catalog pick and the Manage sheet's re-authorise, whose OAuth
+ *    button parks the shared paste-back flow on web and keeps its own local
+ *    instructions UI on desktop.
  *
  * Both directions of each platform branch are pinned.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { SECTIONS } from '../settings-sections'
+import { ProviderList } from '../ProviderList'
 import { useSessionStore } from '../../../stores/session-store'
 import type { OpencodeProviderCatalogEntry } from '../../../../../shared/types'
+import type { ProviderEntry } from '../../../../../shared/provider-registry'
 
 vi.mock('electron', async () => await import('../../../../../test/stubs/electron-shim'))
 
@@ -248,7 +251,19 @@ describe('Settings › Accounts — the rows', () => {
   })
 })
 
-// ── opencode providers pane ──────────────────────────────────────────────
+// ── The provider sheets ──────────────────────────────────────────────────
+
+/**
+ * SURFACE MOVED, CONTRACT KEPT. These four cases used to drive
+ * `VendorOpencodeSection` — its catalog picker's inline OAuth panel, and the
+ * same flow re-hosted in the provider configuration dialog. ADR-065 phase 6c
+ * retired that pane: acquiring a provider is the ADD sheet's job and
+ * re-authorising an existing one is the MANAGE sheet's, and both render the one
+ * `VendorOAuthFlow`. The behaviours pinned here are unchanged — on web the
+ * shared paste-back flow replaces the local instructions UI and the pasted
+ * string reaches `vendor-auth:oauth-callback` verbatim; on desktop the local
+ * code box survives and the host opens the browser.
+ */
 
 const OAUTH_PROVIDER: OpencodeProviderCatalogEntry = {
   id: 'anthropic',
@@ -266,10 +281,24 @@ const OAUTH_PROVIDER: OpencodeProviderCatalogEntry = {
 }
 const AUTHORIZE_URL = 'https://console.anthropic.com/oauth?state=s'
 
-function installOpencodeApi(platform: string, over: Record<string, unknown> = {}): void {
+/** The Manage sheet's subject: the same provider, already signed in. */
+const CONNECTED_ROW: ProviderEntry = {
+  id: 'opencode:anthropic',
+  name: 'Anthropic',
+  origin: 'opencode-native',
+  credential: 'connected',
+  engines: { opencode: { enabled: true, native: true } }
+}
+
+function installOpencodeApi(
+  platform: string,
+  entries: ProviderEntry[] = [],
+  over: Record<string, unknown> = {}
+): void {
   ;(globalThis as unknown as { window: Record<string, unknown> }).window.api = {
     platform,
     engineIsInstalled: vi.fn(async () => true),
+    listProviderRegistry: vi.fn(async () => ({ entries, opencodeInstalled: true })),
     getOpencodeProviders: vi.fn(async () => [OAUTH_PROVIDER]),
     loadOpencodeSettings: vi.fn(async () => ({})),
     saveOpencodeSettings: vi.fn(async () => {}),
@@ -283,11 +312,13 @@ function installOpencodeApi(platform: string, over: Record<string, unknown> = {}
     })),
     vendorAuthOauthCallback: vi.fn(async () => true),
     vendorAuthOauthCancel: vi.fn(async () => {}),
+    vendorAuthSetKey: vi.fn(async () => {}),
     getOpencodeProviderModels: vi.fn(async () => []),
     listSharedProviders: vi.fn(async () => []),
+    getPiBinaryPath: vi.fn(async () => null),
     // The row's credential-kind badge reads opencode's auth store.
     vendorAuthListKeys: vi.fn(async () => ({})),
-    // Orphan-guard inputs (see VendorOpencodeSection.reload).
+    // Orphan-guard inputs (the sheet's model curation reads these).
     getEngineModels: vi.fn(async () => []),
     loadEngineConfig: vi.fn(async () => ({})),
     ...over
@@ -295,49 +326,52 @@ function installOpencodeApi(platform: string, over: Record<string, unknown> = {}
   ;(globalThis as unknown as { window: Record<string, unknown> }).window.open = vi.fn()
 }
 
-/** Expand the catalog picker's row panel, which is where its OAuth button lives. */
-async function openProviderOAuth(): Promise<void> {
-  await act(async () => renderSection('vendor-opencode'))
+/** Open the Add sheet the way the group header does, and pick the catalog row. */
+async function openAddSheetOAuth(platform: string): Promise<void> {
+  installOpencodeApi(platform)
   await act(async () => {
-    fireEvent.click(screen.getByTestId('VendorOpencodeSection.addProvider'))
+    render(<ProviderList />)
   })
   await act(async () => {
-    fireEvent.click(screen.getByText('Anthropic'))
+    window.dispatchEvent(new CustomEvent('settings:add-provider'))
   })
   await act(async () => {
-    fireEvent.click(screen.getByText('Sign in with Claude Pro/Max'))
+    fireEvent.click(
+      screen.getAllByTestId('ProviderAddSheet.catalog').find((el) => el.dataset.id === 'anthropic')!
+    )
+  })
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('VendorOAuthFlow.start'))
   })
 }
 
 /**
- * The SECOND host of the same flow: an already-configured provider re-authing
- * from its configuration dialog. That affordance used to be an inline panel on
- * the row; the restyle moved it into the dialog, and the flow machinery is one
- * render function shared with the picker above — so this pins that the move did
- * not fork it.
+ * The SECOND host of the same flow: an already-connected provider re-authing
+ * from its Manage sheet. That affordance used to be an inline panel on the
+ * pane's row, then a block in the configuration dialog; it is the sheet's
+ * credential group now, and the flow machinery is one component shared with the
+ * Add sheet — so this pins that the move did not fork it.
  */
-async function reauthFromDialog(platform: string): Promise<void> {
-  installOpencodeApi(platform, {
-    // Configured, so it is a Providers ROW rather than a catalog pick.
-    getOpencodeProviders: vi.fn(async () => [{ ...OAUTH_PROVIDER, authState: 'authenticated' }])
-  })
-  await act(async () => renderSection('vendor-opencode'))
+async function reauthFromSheet(platform: string): Promise<void> {
+  installOpencodeApi(platform, [CONNECTED_ROW])
   await act(async () => {
-    fireEvent.click(await screen.findByTestId('VendorOpencodeSection.providerRow.open'))
+    render(<ProviderList />)
   })
   await act(async () => {
-    fireEvent.click(await screen.findByTestId('VendorOpencodeSection.credentialOauth'))
+    fireEvent.click(await screen.findByTestId('ProviderList.manage'))
+  })
+  await act(async () => {
+    fireEvent.click(await screen.findByTestId('VendorOAuthFlow.start'))
   })
 }
 
-describe('Settings › opencode providers — OAuth', () => {
+describe('Settings › the provider sheets — opencode OAuth', () => {
   beforeEach(() => {
     useSessionStore.setState({ vendorOAuth: null })
   })
 
   it('on web: the shared paste-back flow replaces the local instructions UI', async () => {
-    installOpencodeApi('web')
-    await openProviderOAuth()
+    await openAddSheetOAuth('web')
     const flow = screen.getByTestId('OAuthPasteBackFlow')
     expect(flow).toHaveAttribute('data-variant', 'url')
     expect(flow).toHaveAttribute('data-id', 'anthropic')
@@ -357,26 +391,14 @@ describe('Settings › opencode providers — OAuth', () => {
   })
 
   it('on desktop: the legacy instructions + code box, no shared flow (platform pin)', async () => {
-    installOpencodeApi('darwin')
-    await openProviderOAuth()
+    await openAddSheetOAuth('darwin')
     expect(screen.queryByTestId('OAuthPasteBackFlow')).toBeNull()
     expect(screen.getByPlaceholderText('Paste code here')).toBeTruthy()
     expect(window.open).toHaveBeenCalledWith(AUTHORIZE_URL, '_blank')
-  })
 
-  it('on web: re-authing from the provider dialog parks the same paste-back flow', async () => {
-    await reauthFromDialog('web')
-    // Inside the dialog, not back on the pane behind it.
-    const dialog = screen.getByTestId('OpencodeProviderConfigModal')
-    const flow = within(dialog).getByTestId('OAuthPasteBackFlow')
-    expect(flow).toHaveAttribute('data-variant', 'url')
-    expect(flow).toHaveAttribute('data-id', 'anthropic')
-
-    fireEvent.change(within(dialog).getByTestId('OAuthPasteBackFlow.input'), {
-      target: { value: 'k9' }
-    })
+    fireEvent.change(screen.getByTestId('VendorOAuthFlow.code'), { target: { value: 'k9' } })
     await act(async () => {
-      fireEvent.click(within(dialog).getByTestId('OAuthPasteBackFlow.submit'))
+      fireEvent.click(screen.getByTestId('VendorOAuthFlow.submit'))
     })
     expect(window.api.vendorAuthOauthCallback).toHaveBeenCalledWith(
       'opencode',
@@ -386,10 +408,32 @@ describe('Settings › opencode providers — OAuth', () => {
     )
   })
 
-  it('on desktop: re-authing from the provider dialog keeps the local code box', async () => {
-    await reauthFromDialog('darwin')
-    const dialog = screen.getByTestId('OpencodeProviderConfigModal')
-    expect(within(dialog).queryByTestId('OAuthPasteBackFlow')).toBeNull()
-    expect(within(dialog).getByPlaceholderText('Paste code here')).toBeTruthy()
+  it('on web: re-authing from the Manage sheet parks the same paste-back flow', async () => {
+    await reauthFromSheet('web')
+    // Inside the sheet, not on the list behind it.
+    const sheet = screen.getByTestId('ProviderSheet')
+    const flow = within(sheet).getByTestId('OAuthPasteBackFlow')
+    expect(flow).toHaveAttribute('data-variant', 'url')
+    expect(flow).toHaveAttribute('data-id', 'anthropic')
+
+    fireEvent.change(within(sheet).getByTestId('OAuthPasteBackFlow.input'), {
+      target: { value: 'k9' }
+    })
+    await act(async () => {
+      fireEvent.click(within(sheet).getByTestId('OAuthPasteBackFlow.submit'))
+    })
+    expect(window.api.vendorAuthOauthCallback).toHaveBeenCalledWith(
+      'opencode',
+      'anthropic',
+      0,
+      'k9'
+    )
+  })
+
+  it('on desktop: re-authing from the Manage sheet keeps the local code box', async () => {
+    await reauthFromSheet('darwin')
+    const sheet = screen.getByTestId('ProviderSheet')
+    expect(within(sheet).queryByTestId('OAuthPasteBackFlow')).toBeNull()
+    expect(within(sheet).getByPlaceholderText('Paste code here')).toBeTruthy()
   })
 })

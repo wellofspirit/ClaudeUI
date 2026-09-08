@@ -25,7 +25,10 @@
  *
  * The group header's "+ Add provider" is declared by the page model
  * (`settings-pages.tsx`) and dispatches the `settings:add-provider` window
- * event; phase 6c adds the listener here along with the Add sheet.
+ * event, which THIS component listens for (phase 6c): a group definition is a
+ * static object and cannot hold a callback, and the state the button drives —
+ * the Add sheet — belongs to the pane the group renders. The listener lives
+ * here rather than in the sheet so the sheet has no existence to subscribe with.
  */
 
 import { useCallback, useEffect, useState } from 'react'
@@ -34,10 +37,14 @@ import type { ProviderEntry, ProviderRegistrySnapshot } from '../../../../shared
 import type { SharedProviderRouteDiagnosis } from '../../../../shared/shared-provider'
 import { Button, SettingRow } from './settings-controls'
 import { CredentialChip, EngineChip, ProviderSheet } from './ProviderSheet'
+import { ProviderAddSheet } from './ProviderAddSheet'
 import type { SettingsTarget } from './settings-target'
 
 /** Testid namespace (ADR-027 tier 1/2). */
 const LIST = 'ProviderList'
+
+/** The `settings:add-provider` header action — see `SettingsGroup.action`. */
+const ADD_EVENT = 'settings:add-provider'
 
 /** Chip order, and the order the ENABLED FOR group reads in. */
 const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi']
@@ -77,6 +84,12 @@ export function ProviderList({
   const [error, setError] = useState<string | null>(null)
   /** The provider whose Manage sheet is open. */
   const [openId, setOpenId] = useState<string | null>(null)
+  /**
+   * The Add sheet, and the row it should open on (the Manage sheet's "Sign in"
+   * hands ChatGPT over). `null` = closed; a state object with `focusId: null` is
+   * the plain "+ Add provider" case, which is why this is not a bare string.
+   */
+  const [adding, setAdding] = useState<{ focusId: string | null } | null>(null)
 
   /**
    * Read the registry. Returns the snapshot so a write can close the sheet on an
@@ -100,16 +113,53 @@ export function ProviderList({
     void reload()
   }, [reload])
 
+  // The group header's action, which cannot hold a callback (see the header).
+  useEffect(() => {
+    const open = (): void => setAdding({ focusId: null })
+    window.addEventListener(ADD_EVENT, open)
+    return () => window.removeEventListener(ADD_EVENT, open)
+  }, [])
+
   /** After a sheet write: re-read, and close the sheet if its provider is gone. */
   const handleWrote = useCallback(async (): Promise<void> => {
     const next = await reload()
     if (next && !next.entries.some((entry) => entry.id === openId)) setOpenId(null)
   }, [reload, openId])
 
+  /**
+   * After an ADD: re-read, close the Add sheet, and open the new row's Manage
+   * sheet when the write produced one. That is where curation lives — a catalog
+   * provider is added with an empty model allowlist (`ProviderAddSheet`), so
+   * landing on the list with a row saying "0 models" and no next step is how the
+   * old picker's own "open the model dialog" behaviour would have been lost.
+   */
+  const handleAdded = useCallback(
+    async (registryId: string | null): Promise<void> => {
+      const next = await reload()
+      setAdding(null)
+      const row = registryId && next?.entries.some((entry) => entry.id === registryId)
+      setOpenId(row ? registryId : null)
+    },
+    [reload]
+  )
+
+  // Mounted from BOTH returns: the header action can fire before the first read
+  // resolves, and a button that silently does nothing for a second is worse than
+  // an Add sheet whose catalog fills in a moment later.
+  const addSheet = adding && (
+    <ProviderAddSheet
+      snapshot={snapshot ?? { entries: [], opencodeInstalled: true }}
+      focusId={adding.focusId}
+      onClose={() => setAdding(null)}
+      onAdded={handleAdded}
+    />
+  )
+
   if (snapshot === null) {
     return (
       <div data-testid={LIST}>
         <SettingRow testid={`${LIST}.loading`} description="Loading providers…" />
+        {addSheet}
       </div>
     )
   }
@@ -178,11 +228,16 @@ export function ProviderList({
         <ProviderSheet
           entry={open}
           opencodeInstalled={opencodeInstalled}
-          navigate={navigate}
           onWrote={handleWrote}
           onClose={() => setOpenId(null)}
+          onAddProvider={(focusId) => {
+            setOpenId(null)
+            setAdding({ focusId: focusId ?? null })
+          }}
         />
       )}
+
+      {addSheet}
     </div>
   )
 }

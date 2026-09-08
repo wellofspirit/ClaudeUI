@@ -421,34 +421,18 @@ export const PAGES: SettingsPage[] = [
         // ONE list over the three stores (ADR-065 § "Providers: one list"), so
         // the 'Shared' badge is gone: the card is no longer the shared vault's
         // pane, it is every provider ClaudeUI can reach, whichever store backs
-        // it. The two engine-native groups below it stay until phase 6c folds
-        // them in.
+        // it. Phase 6c folded the two engine-native groups and the vault's own
+        // pane in — this group is now the whole provider surface, and the
+        // header action opens the Add sheet that replaced their three add flows.
         id: 'providers',
         label: 'Providers',
         action: {
           label: '+ Add provider',
           testid: 'ProviderList.add',
-          // Listened for by `ProviderList` in 6c; nothing listens yet, which is
-          // exactly why the button is disabled rather than silently inert.
-          event: 'settings:add-provider',
-          // The Add sheet (subscriptions · models.dev catalog · custom
-          // endpoints) is phase 6c. Shipping the header now rather than later
-          // keeps the layout honest instead of reflowing the card next phase.
-          disabled: true,
-          title: 'Adding a provider arrives with the next step of the redesign.'
+          // Listened for by `ProviderList`, which owns the Add sheet's state.
+          event: 'settings:add-provider'
         },
         items: itemsOf('shared-providers', ['sharedProviders'])
-      },
-      { id: 'providers-opencode', label: 'opencode providers', items: itemsOf('vendor-opencode') },
-      { id: 'providers-pi', label: 'pi providers', items: itemsOf('vendor-pi') },
-      {
-        // Bridge until 6c (see the `sharedProvidersLegacy` item): the vault's
-        // sign-in, custom-endpoint and sync flows keep a home while the Add
-        // sheet is built. Phase 6c deletes this group.
-        id: 'providers-shared-legacy',
-        label: 'Shared provider setup',
-        note: 'Moves into “Add provider” and the Manage sheet with the next step of the redesign.',
-        items: itemsOf('shared-providers', ['sharedProvidersLegacy'])
       },
       {
         id: 'defaults',
@@ -860,8 +844,6 @@ export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; gro
   usage: { page: 'advanced', group: 'usage' },
 
   'shared-providers': { page: 'models', group: 'providers' },
-  'vendor-opencode': { page: 'models', group: 'providers-opencode' },
-  'vendor-pi': { page: 'models', group: 'providers-pi' },
   effortDefaults: { page: 'models', group: 'defaults' },
   'opencode-models': { page: 'models', group: 'defaults' },
   'pi-config-models': { page: 'models', group: 'defaults' },
