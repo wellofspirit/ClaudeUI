@@ -298,10 +298,7 @@ describe('the list', () => {
     })
     piOptions = {}
     await openAddSheet()
-    expect(screen.getByTestId('ProviderAddSheet.catalogEmpty')).toHaveAttribute(
-      'data-id',
-      'failed'
-    )
+    expect(screen.getByTestId('ProviderAddSheet.catalogEmpty')).toHaveAttribute('data-id', 'failed')
     expect(screen.getByTestId('ProviderAddSheet.catalogEmpty')).toHaveTextContent(
       'could not be read'
     )
