@@ -99,6 +99,31 @@ describe('SettingRow', () => {
     expect(reset.parentElement?.textContent).toContain('Network allowlist')
   })
 
+  it('puts `trailing` on the label line, not in the control column', () => {
+    // A stacked list's Select all / Clear act on the list BELOW the label, so
+    // rendering them in the control column would put them inside the thing they
+    // act on — and they are actions, not the row's value.
+    render(
+      <SettingRow
+        testid="Stacked"
+        layout="stacked"
+        label="Shown in the picker"
+        modified
+        onReset={vi.fn()}
+        trailing={<button type="button">Select all 358</button>}
+      >
+        <textarea />
+      </SettingRow>
+    )
+    const action = screen.getByText('Select all 358')
+    const labelLine = screen.getByText('Shown in the picker').parentElement!
+    expect(labelLine).toContainElement(action)
+    // Reset keeps its place ahead of it.
+    expect(labelLine).toContainElement(screen.getByTestId('Stacked.reset'))
+    // And the control column holds only the control.
+    expect(action.closest('[data-testid="Stacked"] > span:last-of-type')).toBeNull()
+  })
+
   it('a disabled dependent row is not resettable either', () => {
     render(
       <SettingRow

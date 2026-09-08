@@ -83,6 +83,16 @@ export interface SettingRowProps {
    * feature.
    */
   labelBadge?: React.ReactNode
+  /**
+   * Actions that belong to the row's title line — a stacked list's Select all /
+   * Clear — not a control.
+   *
+   * Right-aligned after the badges, on both layouts. A stacked row's control
+   * column is the full width UNDER the label, so an action rendered there would
+   * sit inside the list it acts on; and an action is not a value, so it does not
+   * belong in the inline control column either.
+   */
+  trailing?: React.ReactNode
   description?: string
   /** The engine-native config key this row writes (11px mono, under the text). */
   keyText?: string
@@ -138,6 +148,7 @@ export interface SettingRowProps {
 export function SettingRow({
   label,
   labelBadge,
+  trailing,
   description,
   keyText,
   engine,
@@ -225,6 +236,7 @@ export function SettingRow({
             {/* A stacked row's control column is the full width under the
                 label, so Reset belongs on the label line there. */}
             {layout === 'stacked' && resetNode}
+            {trailing && <span className="ml-auto shrink-0 flex items-center">{trailing}</span>}
           </span>
         )}
         {description && (
