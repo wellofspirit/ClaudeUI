@@ -8,7 +8,7 @@
 
 import { useState } from 'react'
 import { describe, it, expect } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, within } from '@testing-library/react'
 import {
   OpencodeSchemaForm,
   detectKind,
@@ -74,14 +74,34 @@ describe('OpencodeSchemaForm rendering', () => {
     const row = screen.getByTestId('OpencodeSchemaForm.unmanaged')
     expect(row).toHaveAttribute('data-id', 'mysteryKey')
     expect(row.textContent).toContain('mysteryKey')
-    expect(row.textContent).toContain('unmanaged')
+    // The "unmanaged" tag became the row's description when the form moved onto
+    // the row vocabulary — the state is explained, not badged.
+    expect(row.textContent).toContain('Unmanaged')
+    expect(row.textContent).toContain('{"deep":1}')
+  })
+
+  it('labels every field with its RAW key, in mono, and shows the schema description', () => {
+    // The raw key names are the contract with opencode; a prettified label
+    // would stop matching the file the user edits. The boolean field goes
+    // through `SettingsToggle`, so the mono treatment is the row primitive's
+    // `labelClassName`, not a hand-built label.
+    render(<Harness initial={{}} />)
+    const bool = screen.getByTestId('OpencodeSchemaForm.bool')
+    const label = within(bool).getByText('flag')
+    expect(label.parentElement?.className).toContain('font-mono')
+    // The schema's description is VISIBLE (12px/secondary), never behind an ⓘ.
+    const description = within(bool).getByText('A boolean flag')
+    expect(description).toHaveClass('text-[12px]')
+    expect(description).toHaveClass('text-text-secondary')
+    expect(screen.queryByTestId('InfoTooltip')).not.toBeInTheDocument()
   })
 
   it('toggling a boolean updates the value', () => {
     render(<Harness initial={{}} />)
     const toggle = screen.getByTestId('OpencodeSchemaForm.bool')
-    // The toggle track (2nd span) carries the muted background while off.
-    const track = () => toggle.querySelectorAll('span')[1]
+    // The switch track carries the muted background while off. Found by testid
+    // rather than span index: the row primitive owns how many spans precede it.
+    const track = (): Element => toggle.querySelector('[data-testid="ToggleSwitch"]')!
     expect(track().className).toContain('bg-text-muted')
     fireEvent.click(toggle)
     // After toggling, the controlled state flips the track to the accent colour.

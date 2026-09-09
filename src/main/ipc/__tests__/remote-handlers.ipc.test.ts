@@ -43,7 +43,9 @@ const uiConfigMocks = vi.hoisted(() => ({
   saveSessionConfig: vi.fn(),
   loadSlashCommands: vi.fn(() => []),
   loadEngineConfig: vi.fn(() => ({})),
-  loadVendorConfig: vi.fn(() => ({}))
+  loadVendorConfig: vi.fn(() => ({})),
+  loadSharedAutoModeConfig: vi.fn(() => ({})),
+  saveSharedAutoModeConfig: vi.fn()
 }))
 
 vi.mock('../../../core/services/ui-config', () => uiConfigMocks)
@@ -1515,11 +1517,16 @@ const S1B_SWEEP_CHANNELS = [
   'config:load-opencode-settings',
   'config:load-vendor-config',
   'config:patch-opencode-native',
+  'config:patch-pi-models',
+  'config:patch-pi-native',
   'config:read-opencode-native-raw',
+  'config:read-pi-models-raw',
+  'config:read-pi-native-raw',
   'config:save-engine-config',
   'config:save-opencode-settings',
   'config:save-slash-commands',
   'config:save-vendor-config',
+  'config:write-pi-native-text',
   'mcp:reconnect',
   'mcp:remove-server',
   'mcp:save-servers',
@@ -1539,6 +1546,18 @@ const S1B_SWEEP_CHANNELS = [
   'worktree:remove',
   'worktree:status'
 ] as const
+
+/**
+ * ADR-065 phase 4 — the engine-SHARED classifier trust lists.
+ *
+ * Their own pair rather than two more lines in {@link S1B_SWEEP_CHANNELS},
+ * which is the record of one dated sweep. Same reachability decision as that
+ * sweep's `config:*` half, for the same reason: this is engine configuration,
+ * and the phone must be able to edit it. What is different is where the guard
+ * sits — the path carries no id to traverse with, so the payload SHAPE is the
+ * perimeter (`config-commands-shared-automode.test.ts`).
+ */
+const TRUST_LIST_CHANNELS = ['config:load-shared-automode', 'config:save-shared-automode'] as const
 
 /**
  * S4 — the vendor-OAuth / account-mutation / native-OAuth family (ADR-057).
@@ -1583,6 +1602,53 @@ const S4_VENDOR_CREDENTIAL_CHANNELS = [
   'vendor-auth:set-key'
 ] as const
 
+/**
+ * ADR-065 phase 6 — the unified provider list.
+ *
+ * Its own line rather than a 23rd entry in {@link S4_VENDOR_CREDENTIAL_CHANNELS},
+ * which is the record of one dated sweep: this is a NEW channel, declared in the
+ * same shared module (`ipc/auth-commands.ts`) for the same reason that sweep
+ * moved there — the phone's provider page must read the same list the desktop
+ * does, and one declaration is what stops the two surfaces disagreeing.
+ *
+ * A `query` declaring `config`, so a base connection reaches it. It carries no
+ * key material: the shared definitions, opencode's catalog and pi's vendor
+ * entries reduce to names, counts, credential BADGES and per-engine chips.
+ */
+const PROVIDER_REGISTRY_CHANNELS = ['provider-registry:list'] as const
+
+/**
+ * The redacted status READ (owner ruling, 2026-08-28) — the one `remote:*`
+ * channel with a remote registration, and the SIXTH deliberate widening.
+ *
+ * The narrowest of the six by some distance: a `query`, declaring `config`, that
+ * returns a field-PICKED subset of `RemoteStatus` (`RemoteStatusView`) with no
+ * `lanUrl` / `tunnelUrl` and nothing derived from them — the fields that carry
+ * the LAN and tunnel channel keys, and the reason the rest of this namespace has
+ * no registry entry at all. What bounds it is the pin two blocks below: every
+ * `remote:*` MUTATION is still absent from the remote surface, so a client
+ * cannot stop, reconfigure or re-serve the listener it is talking through.
+ * `ipc/__tests__/remote-view-commands.test.ts` owns the redaction itself.
+ */
+const REMOTE_VIEW_CHANNELS = ['remote:status-view'] as const
+
+/**
+ * The remote IDE (ADR-064) — the SEVENTH deliberate widening, and the second one
+ * (after the terminal) that puts a capability outside every static grant set on
+ * the remote surface.
+ *
+ * TWO channels and they are deliberately asymmetric, which is the whole design:
+ * `ide:availability` declares `config` and is reachable on the base grant set,
+ * because asking "may I?" must be answerable WITHOUT the grant (the
+ * `terminal:availability` rule); `ide:mint-entry` declares `ide`, which no login
+ * confers — the step-up ceremony arms it iff the host-anchored `allow_ide`
+ * toggle is on, and toggle-off revokes it in place.
+ */
+const IDE_CHANNELS = ['ide:availability', 'ide:mint-entry'] as const
+
+/** The half of {@link IDE_CHANNELS} that is gated by the `ide` capability. */
+const IDE_GATED_CHANNELS = ['ide:mint-entry'] as const
+
 /** channel → the capability it must declare (the reachability decision). */
 const PASSKEY_CAPABILITIES: Record<string, 'enroll' | 'admin'> = {
   'webauthn:register-options': 'enroll',
@@ -1625,7 +1691,11 @@ describe('remote surface parity (phase 1 port)', () => {
         ...AUTHCFG_CHANNELS,
         ...VOICE_CHANNELS,
         ...S1B_SWEEP_CHANNELS,
-        ...S4_VENDOR_CREDENTIAL_CHANNELS
+        ...TRUST_LIST_CHANNELS,
+        ...S4_VENDOR_CREDENTIAL_CHANNELS,
+        ...PROVIDER_REGISTRY_CHANNELS,
+        ...REMOTE_VIEW_CHANNELS,
+        ...IDE_CHANNELS
       ].sort()
     )
   })
@@ -1635,7 +1705,7 @@ describe('remote surface parity (phase 1 port)', () => {
     // authenticated connection reaches these. Asserted through the CAPABILITY
     // (what dispatch actually checks) rather than by calling every handler —
     // most of them would touch the real filesystem.
-    const caps = S1B_SWEEP_CHANNELS.map(
+    const caps = [...S1B_SWEEP_CHANNELS, ...TRUST_LIST_CHANNELS].map(
       (c) => [c, commandRegistry.declaration(c)?.capability] as const
     )
     const ungranted = caps.filter(([, cap]) => !cap || !AUTH_OFF_GRANTS.has(cap))
@@ -1657,6 +1727,20 @@ describe('remote surface parity (phase 1 port)', () => {
       capability: 'config',
       kind: 'query'
     })
+  })
+
+  it('the provider registry is a base-reachable `config` query (ADR-065 phase 6)', () => {
+    // The unified provider list must be readable by the same ordinary
+    // authenticated connection that reaches the writes behind its rows —
+    // otherwise the remote provider page renders nothing while every button on
+    // it would have worked.
+    for (const channel of PROVIDER_REGISTRY_CHANNELS) {
+      expect(commandRegistry.declaration(channel)).toMatchObject({
+        capability: 'config',
+        kind: 'query'
+      })
+      expect(AUTH_OFF_GRANTS.has(commandRegistry.declaration(channel)!.capability)).toBe(true)
+    }
   })
 
   it('automation:save dispatches over the remote transport, and fails closed without `config`', async () => {
@@ -1768,7 +1852,11 @@ describe('remote surface parity (phase 1 port)', () => {
     const expected = [
       ...SHELL_GATED_CHANNELS.map((c) => [c, 'shell'] as const),
       ...PASSKEY_CHANNELS.map((c) => [c, PASSKEY_CAPABILITIES[c]] as const),
-      ...AUTHCFG_CHANNELS.map((c) => [c, 'admin'] as const)
+      ...AUTHCFG_CHANNELS.map((c) => [c, 'admin'] as const),
+      // ADR-064: `ide:mint-entry` only. Its sibling `ide:availability` is
+      // deliberately absent — it declares `config` and IS reachable at connect,
+      // which is what makes the button able to explain itself.
+      ...IDE_GATED_CHANNELS.map((c) => [c, 'ide'] as const)
     ].sort(([a], [b]) => a.localeCompare(b))
     expect(
       [...unreachable].sort(([a], [b]) => a.localeCompare(b)),
@@ -1865,7 +1953,32 @@ describe('remote surface parity (phase 1 port)', () => {
     // connection DOES hold `admin`). The settings verbs that ARE web-reachable
     // live in their own namespace, and `authcfg:apply` refuses an `off` auth-mode
     // with a typed error (asserted in authcfg-commands.test.ts).
-    expect(commandRegistry.channels('remote').filter((c) => c.startsWith('remote:'))).toEqual([])
+    //
+    // The namespace is no longer EMPTY on this transport (owner ruling,
+    // 2026-08-28): `remote:status-view` reads a redacted status. It is pinned as
+    // an exact list rather than a prefix emptiness check precisely so the next
+    // `remote:*` registration has to be argued for here — a `query` that
+    // discloses no key is a different thing from a mutation that could stop the
+    // listener the caller is riding, and only the first is sanctioned.
+    expect(commandRegistry.channels('remote').filter((c) => c.startsWith('remote:'))).toEqual([
+      ...REMOTE_VIEW_CHANNELS
+    ])
+    // Named individually, because THIS is the self-kill protection: none of the
+    // host-anchor verbs may acquire a remote handler.
+    for (const channel of [
+      'remote:start',
+      'remote:stop',
+      'remote:status',
+      'remote:interfaces',
+      'remote:get-config',
+      'remote:set-config',
+      'remote:set-password',
+      'remote:clear-password',
+      'remote:tailscale-detect',
+      'remote:force-reserve'
+    ]) {
+      expect(commandRegistry.get(channel, 'remote'), channel).toBeUndefined()
+    }
     expect(
       commandRegistry
         .channels('remote')
@@ -1915,11 +2028,12 @@ describe('remote surface parity (phase 1 port)', () => {
   })
 
   it('exposes no channel whose capability the old denylist stood for, except the sanctioned ones', () => {
-    // THREE sanctioned widenings, each deliberate and each behind a ceremony:
-    // the terminal set (ADR-052 decision 6), the passkey set (decision 1), and
-    // the `authcfg:*` settings namespace (ADR-054 §6, extended by ADR-056 with
-    // the two LAN-channel verbs — which is also when the namespace joined the
-    // pin table, `admin` having shrunk to exactly these two families).
+    // FOUR sanctioned widenings, each deliberate and each behind a ceremony:
+    // the terminal set (ADR-052 decision 6), the passkey set (decision 1), the
+    // `authcfg:*` settings namespace (ADR-054 §6, extended by ADR-056 with the
+    // two LAN-channel verbs — which is also when the namespace joined the pin
+    // table, `admin` having shrunk to exactly these two families), and the IDE
+    // mint (ADR-064).
     // Everything else in the pin table must still be absent from the remote
     // surface — which, for `remote:set-config`, is what makes the `off` master
     // switch structurally unreachable from a remote client now that a passkey
@@ -1928,7 +2042,11 @@ describe('remote surface parity (phase 1 port)', () => {
     const sanctioned = new Set<string>([
       ...SHELL_GATED_CHANNELS,
       ...PASSKEY_CHANNELS,
-      ...AUTHCFG_CHANNELS
+      ...AUTHCFG_CHANNELS,
+      // ADR-064's widening: `ide:mint-entry` is pinned to `ide`, registered for
+      // remote, and reachable only behind the toggle + a step-up. Same shape as
+      // the terminal set above.
+      ...IDE_GATED_CHANNELS
     ])
     for (const channel of Object.keys(PINNED_CAPABILITIES)) {
       if (sanctioned.has(channel)) continue

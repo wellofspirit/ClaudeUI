@@ -5,8 +5,8 @@
  * but this is plain JSON, NOT MCP.
  *
  * One instance per PiSession: `start()` binds an ephemeral port on loopback
- * ONLY, mints a bearer token, and exposes TWO routes the bridge extension
- * calls:
+ * ONLY, mints a bearer token, and exposes TWO logical exchanges the bridge
+ * extension calls — each with a `/wait` twin (see "Long-poll protocol" below):
  *  - `POST /tool-call` — the approval gate (M2a). The caller supplies
  *    `handler`, which makes the actual gating decision (PiSession.gateToolCall)
  *    — this class only owns transport (listen/auth/body-cap/dispatch/dispose),
@@ -26,11 +26,43 @@
  *    whose toolCallId/toolName doesn't match what was actually granted, fails
  *    closed. The caller supplies the optional second `hostedToolHandler`
  *    (PiSession.handleHostedTool); omitting it just fails closed on every
- *    /hosted-tool request (see processHostedToolBody).
+ *    /hosted-tool request (see runHostedTool).
+ *
+ * ## Long-poll protocol (2026-09-09)
+ *
+ * An exchange used to be ONE request held open until the handler settled —
+ * which for a human approval is however long the card sits, and for a
+ * `dispatch_agent` run is the whole child run. That collided with the Bun
+ * `fetch` idle timeout inside pi (probed: **300.6 s** in pi 0.84.3's embedded
+ * Bun 1.3.14; 360 s in a standalone Bun 1.4.2): past five minutes the
+ * extension's `fetch` rejected with a `DOMException`, the tool call failed
+ * closed with "ClaudeUI approval service unreachable (DOMException)", and the
+ * host went on holding a dead socket — the approval card lingered, a late
+ * click resolved a promise nobody was reading, and a dispatched child kept
+ * running with no consumer.
+ *
+ * So every exchange is now a sequence of BOUNDED requests:
+ *
+ *  - `POST /tool-call` / `POST /hosted-tool` START the work and hold the
+ *    response for at most `holdMs` ({@link DEFAULT_HOLD_MS}). Settled in time
+ *    → the decision / tool result inline, exactly as before. Otherwise →
+ *    `200 {"pending": true}`.
+ *  - `POST /tool-call/wait` / `POST /hosted-tool/wait`, body `{toolCallId}`,
+ *    re-park on the SAME exchange under the same rules. An unknown key → 404
+ *    (the extension treats every non-2xx as unreachable → fails closed).
+ *  - A repeated INITIAL post for a live key parks like a wait; it never runs
+ *    the handler twice (no second approval card, no double execution).
+ *  - At most one parked response per exchange. When the handler settles it
+ *    goes to whoever is parked, else it is buffered for the next wait.
+ *  - With nobody parked (after a `pending`, after a parked socket closed, or
+ *    while a settled result sits uncollected) an `abandonMs`
+ *    ({@link DEFAULT_ABANDON_MS}) timer runs. On expiry the exchange is
+ *    dropped and {@link PiBridgeHostOptions.onAbandoned} fires — that is what
+ *    lets PiSession dismiss the stale card and stop the orphaned child.
  *
  * `dispose()` MUST be called on session teardown (cancel/dispose/unexpected
  * exit) — an open server otherwise leaks a port and can keep the process
- * alive.
+ * alive; it also clears every hold/abandon timer.
  */
 import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
@@ -78,27 +110,169 @@ export interface PiBridgeStartResult {
   token: string
 }
 
+/** The two logical exchanges the bridge hosts; each has a `/wait` twin. */
+export type PiBridgeRoute = 'tool-call' | 'hosted-tool'
+
+/**
+ * Handed to {@link PiBridgeHostOptions.onAbandoned} when pi stops polling an
+ * exchange (see {@link PiBridgeHost} module doc "Long-poll protocol"). The
+ * owner uses it to undo whatever the exchange was holding open: PiSession
+ * force-denies + dismisses the approval card for `tool-call`, and stops an
+ * in-flight dispatched child for `hosted-tool`.
+ */
+export interface PiBridgeAbandoned {
+  route: PiBridgeRoute
+  toolCallId: string
+  toolName: string
+  /**
+   * true when the handler HAD already produced a result and it was sitting
+   * uncollected — i.e. the decision/tool result is lost, not merely pending.
+   */
+  settled: boolean
+}
+
+export interface PiBridgeHostOptions {
+  /** How long ONE request may be held before answering `{pending:true}`. Default {@link DEFAULT_HOLD_MS}. */
+  holdMs?: number
+  /** How long an unpolled exchange survives before it is abandoned. Default {@link DEFAULT_ABANDON_MS}. */
+  abandonMs?: number
+  onAbandoned?: (info: PiBridgeAbandoned) => void
+}
+
+/**
+ * Hold budget for a single bridge request. Must stay comfortably under the
+ * Bun `fetch` idle timeout inside pi (probed 2026-09-09: **300.6 s** in pi
+ * 0.84.3's embedded Bun 1.3.14; 360 s in a standalone Bun 1.4.2) — that
+ * timeout is the whole reason this protocol exists, since it used to kill any
+ * approval card left open for five minutes with a `DOMException` the extension
+ * then failed closed on.
+ */
+const DEFAULT_HOLD_MS = 45_000
+
+/**
+ * Grace period with NOBODY parked on an exchange before it is declared
+ * abandoned. The extension re-polls immediately after each `{pending:true}`,
+ * so on loopback this much silence means the pi child is gone.
+ */
+const DEFAULT_ABANDON_MS = 30_000
+
+/** `req.url` → the exchange it addresses. `/wait` re-parks; the bare route starts. */
+const ROUTES: Record<string, { route: PiBridgeRoute; wait: boolean } | undefined> = {
+  '/tool-call': { route: 'tool-call', wait: false },
+  '/tool-call/wait': { route: 'tool-call', wait: true },
+  '/hosted-tool': { route: 'hosted-tool', wait: false },
+  '/hosted-tool/wait': { route: 'hosted-tool', wait: true }
+}
+
+/** One in-flight (started, not yet collected) bridge exchange. */
+interface InFlight {
+  /** `${route}:${toolCallId}` — the map key, carried so timers can identity-guard. */
+  key: string
+  route: PiBridgeRoute
+  toolCallId: string
+  toolName: string
+  /** The handler has produced {@link result}. */
+  settled: boolean
+  result?: unknown
+  /** The single response currently held open for this exchange, if any. */
+  waiter: ServerResponse | null
+  /** Removes the `'close'` listener installed on {@link waiter}. */
+  detachWaiter: (() => void) | null
+  holdTimer: NodeJS.Timeout | null
+  abandonTimer: NodeJS.Timeout | null
+}
+
+function parseToolCallBody(body: string): PiToolCallPayload | null {
+  try {
+    const parsed = JSON.parse(body) as Partial<PiToolCallPayload> | null
+    if (parsed && typeof parsed.toolCallId === 'string' && typeof parsed.toolName === 'string') {
+      return {
+        toolCallId: parsed.toolCallId,
+        toolName: parsed.toolName,
+        input: (parsed.input as Record<string, unknown>) ?? {}
+      }
+    }
+  } catch {
+    // fall through — malformed JSON is handled as an invalid payload (400).
+  }
+  return null
+}
+
+function parseHostedToolBody(body: string): PiHostedToolPayload | null {
+  try {
+    const parsed = JSON.parse(body) as Partial<PiHostedToolPayload> | null
+    if (parsed && typeof parsed.toolName === 'string' && typeof parsed.toolCallId === 'string') {
+      return {
+        toolName: parsed.toolName,
+        toolCallId: parsed.toolCallId,
+        input: (parsed.input as Record<string, unknown>) ?? {}
+      }
+    }
+  } catch {
+    // fall through — malformed JSON is handled as an invalid payload (400).
+  }
+  return null
+}
+
+/** `POST /<route>/wait` body → the toolCallId it is polling for, or null (→ 400). */
+function parseWaitBody(body: string): string | null {
+  try {
+    const parsed = JSON.parse(body) as { toolCallId?: unknown } | null
+    if (parsed && typeof parsed.toolCallId === 'string' && parsed.toolCallId.length > 0) {
+      return parsed.toolCallId
+    }
+  } catch {
+    // fall through
+  }
+  return null
+}
+
 export class PiBridgeHost {
   private server: Server | null = null
   private readonly sockets = new Set<Socket>()
   private token = ''
+  private readonly holdMs: number
+  private readonly abandonMs: number
+  private readonly onAbandoned?: (info: PiBridgeAbandoned) => void
+  /**
+   * One entry per exchange that has been STARTED and whose result has not been
+   * collected yet, keyed `${route}:${toolCallId}`.
+   *
+   * The ROUTE is part of the key on purpose: a hosted tool passes through BOTH
+   * routes carrying the SAME `toolCallId` (first `/tool-call` for the gate,
+   * then `/hosted-tool` for the execution), so a toolCallId-only key would let
+   * the second exchange collect the first's buffered decision.
+   */
+  private readonly inFlight = new Map<string, InFlight>()
 
   /**
    * `hostedToolHandler` is a SECOND, optional constructor arg (not an options
    * bag) — keeps `handler` first-positional for back-compat with every
    * existing single-arg `new PiBridgeHost(handler)` call site/test; omitting
    * it just means `POST /hosted-tool` always responds with a fail-closed
-   * isError result (see processHostedToolBody) instead of crashing.
+   * isError result (see runHostedTool) instead of crashing. `options` is the
+   * THIRD, likewise optional, arg for the same back-compat reason.
    */
   constructor(
     private readonly handler: PiBridgeHandler,
-    private readonly hostedToolHandler?: PiHostedToolHandler
-  ) {}
+    private readonly hostedToolHandler?: PiHostedToolHandler,
+    options?: PiBridgeHostOptions
+  ) {
+    this.holdMs = options?.holdMs ?? DEFAULT_HOLD_MS
+    this.abandonMs = options?.abandonMs ?? DEFAULT_ABANDON_MS
+    this.onAbandoned = options?.onAbandoned
+  }
 
   /** Bind 127.0.0.1:0 (OS-assigned ephemeral port) and mint a fresh bearer token. */
   start(): Promise<PiBridgeStartResult> {
     this.token = randomUUID()
     return new Promise((resolve, reject) => {
+      // No server timeout options are set, deliberately: Node's
+      // `requestTimeout` (300 s) and `headersTimeout` (60 s) bound how long
+      // RECEIVING a request may take, not how long a response may be held
+      // open. The hold/abandon timers below are what bound our side; the
+      // extension's own bounded re-polling is what bounds pi's side (its Bun
+      // `fetch` has a ~300 s idle timeout — see pi-bridge-source.ts).
       const server = createServer((req, res) => this.handleRequest(req, res))
 
       server.on('connection', (socket) => {
@@ -138,9 +312,8 @@ export class PiBridgeHost {
   }
 
   private handleRequest(req: IncomingMessage, res: ServerResponse): void {
-    const route =
-      req.url === '/tool-call' ? 'tool-call' : req.url === '/hosted-tool' ? 'hosted-tool' : null
-    if (req.method !== 'POST' || route === null) {
+    const target = ROUTES[req.url ?? '']
+    if (req.method !== 'POST' || !target) {
       res.writeHead(404).end()
       return
     }
@@ -178,35 +351,181 @@ export class PiBridgeHost {
     })
     req.on('end', () => {
       if (tooLarge) return
-      const body = Buffer.concat(chunks).toString('utf-8')
-      if (route === 'tool-call') void this.processToolCallBody(body, res)
-      else void this.processHostedToolBody(body, res)
+      this.dispatchBody(target.route, target.wait, Buffer.concat(chunks).toString('utf-8'), res)
     })
     req.on('error', () => {
       // Connection-level error mid-body (e.g. client aborted) — nothing left to respond to.
     })
   }
 
-  private async processToolCallBody(body: string, res: ServerResponse): Promise<void> {
-    let payload: PiToolCallPayload | null = null
-    try {
-      const parsed = JSON.parse(body) as Partial<PiToolCallPayload> | null
-      if (parsed && typeof parsed.toolCallId === 'string' && typeof parsed.toolName === 'string') {
-        payload = {
-          toolCallId: parsed.toolCallId,
-          toolName: parsed.toolName,
-          input: (parsed.input as Record<string, unknown>) ?? {}
-        }
+  /** Route a fully-received, authenticated body onto the long-poll state machine. */
+  private dispatchBody(
+    route: PiBridgeRoute,
+    wait: boolean,
+    body: string,
+    res: ServerResponse
+  ): void {
+    if (wait) {
+      const toolCallId = parseWaitBody(body)
+      if (toolCallId === null) {
+        res.writeHead(400).end()
+        return
       }
-    } catch {
-      // fall through — payload stays null, handled below
+      const entry = this.inFlight.get(`${route}:${toolCallId}`)
+      if (!entry) {
+        // Nothing in flight under this key — either it was never started or we
+        // already abandoned/delivered it. 404 rather than a fabricated
+        // decision: the extension treats every non-2xx as "host unreachable"
+        // and fails the tool call CLOSED, which is the correct answer here.
+        res.writeHead(404).end()
+        return
+      }
+      this.park(entry, res)
+      return
     }
 
+    if (route === 'tool-call') {
+      const payload = parseToolCallBody(body)
+      if (!payload) {
+        res.writeHead(400).end()
+        return
+      }
+      const entry = this.begin(route, payload.toolCallId, payload.toolName, res)
+      if (entry) void this.runToolCall(entry, payload)
+      return
+    }
+
+    const payload = parseHostedToolBody(body)
     if (!payload) {
       res.writeHead(400).end()
       return
     }
+    const entry = this.begin(route, payload.toolCallId, payload.toolName, res)
+    if (entry) void this.runHostedTool(entry, payload)
+  }
 
+  /**
+   * Start (or re-park on) the exchange for this key. Returns the NEW entry when
+   * the caller must kick the handler off, or `null` when an exchange was
+   * already running and `res` simply joined it.
+   *
+   * That null case is the IDEMPOTENCE guarantee: a repeated initial POST (a
+   * retry, or an extension whose `{pending:true}` answer was lost) must never
+   * run the handler — and so never raise a second approval card or execute a
+   * hosted tool twice.
+   */
+  private begin(
+    route: PiBridgeRoute,
+    toolCallId: string,
+    toolName: string,
+    res: ServerResponse
+  ): InFlight | null {
+    const key = `${route}:${toolCallId}`
+    const existing = this.inFlight.get(key)
+    if (existing) {
+      this.park(existing, res)
+      return null
+    }
+    const entry: InFlight = {
+      key,
+      route,
+      toolCallId,
+      toolName,
+      settled: false,
+      waiter: null,
+      detachWaiter: null,
+      holdTimer: null,
+      abandonTimer: null
+    }
+    this.inFlight.set(key, entry)
+    // Park BEFORE the handler starts, so a handler that settles immediately
+    // (an auto-allow) finds a response to write into and answers INLINE —
+    // byte-identical to the pre-long-poll behavior for every fast decision.
+    this.park(entry, res)
+    return entry
+  }
+
+  /**
+   * Attach `res` to `entry` as the single parked response, bounded by
+   * `holdMs`. Delivers immediately if the result is already buffered; answers
+   * `{pending: true}` when the hold expires; re-arms abandonment whenever
+   * nobody is parked any more.
+   */
+  private park(entry: InFlight, res: ServerResponse): void {
+    if (entry.settled) {
+      this.deliver(entry, res)
+      return
+    }
+
+    // At most ONE parked response per entry. The extension never polls the
+    // same key twice concurrently, but a duplicate request must not leave a
+    // socket hanging forever: the OLDER one is answered `{pending:true}` and
+    // the newest poll becomes the live one.
+    if (entry.waiter) {
+      const stale = entry.waiter
+      this.releaseWaiter(entry)
+      this.endJson(stale, { pending: true })
+    }
+
+    this.clearAbandon(entry)
+    entry.waiter = res
+    const onClose = (): void => {
+      if (entry.waiter !== res) return
+      // The caller went away mid-hold without reading our answer — the same
+      // situation as a `pending` nobody re-polled, so treat it identically.
+      this.releaseWaiter(entry)
+      this.armAbandon(entry)
+    }
+    res.on('close', onClose)
+    entry.detachWaiter = () => res.off('close', onClose)
+
+    const timer = setTimeout(() => {
+      entry.holdTimer = null
+      if (entry.waiter !== res) return
+      this.releaseWaiter(entry)
+      logger.debug(
+        'PiBridgeHost',
+        `hold expired on /${entry.route} for ${entry.toolName} — answering {pending:true}`
+      )
+      this.endJson(res, { pending: true })
+      this.armAbandon(entry)
+    }, this.holdMs)
+    timer.unref?.()
+    entry.holdTimer = timer
+  }
+
+  /** Hand a settled result to `res` and retire the entry. */
+  private deliver(entry: InFlight, res: ServerResponse): void {
+    this.remove(entry)
+    this.endJson(res, entry.result)
+  }
+
+  /**
+   * The handler produced `result`. Deliver it to whoever is parked, or buffer
+   * it for the next wait (arming abandonment so an uncollected result cannot
+   * linger forever).
+   */
+  private settle(entry: InFlight, result: unknown): void {
+    if (this.inFlight.get(entry.key) !== entry) {
+      // Abandoned or disposed while the handler was still running. Nothing is
+      // waiting for this result and nothing may re-arm a timer for a dead
+      // entry — drop it. (PiSession has already been told via onAbandoned and
+      // has force-denied / stopped whatever this was.)
+      return
+    }
+    entry.settled = true
+    entry.result = result
+    this.clearHold(entry)
+    const waiter = entry.waiter
+    if (waiter) {
+      this.releaseWaiter(entry)
+      this.deliver(entry, waiter)
+      return
+    }
+    this.armAbandon(entry)
+  }
+
+  private async runToolCall(entry: InFlight, payload: PiToolCallPayload): Promise<void> {
     let decision: GateDecision
     try {
       decision = await this.handler(payload)
@@ -215,41 +534,21 @@ export class PiBridgeHost {
       logger.error('PiBridgeHost', 'gate handler threw — failing closed', err)
       decision = { behavior: 'deny', reason: 'Internal approval error' }
     }
-    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(decision))
+    this.settle(entry, decision)
   }
 
   /**
    * M4a+b: executes a hosted tool AFTER the /tool-call gate already allowed
-   * it — never re-gates. Same transport-level validation as
-   * processToolCallBody (bearer/body-cap in handleRequest above; malformed
-   * JSON here still 400s, matching /tool-call), but past that point the
-   * "decision" is an MCP-shaped `{content, isError?}` tool result instead of
-   * an allow/deny — so a HANDLER-level failure (throws, or no
-   * hostedToolHandler configured) still responds 200 with an isError body,
-   * fail-closed defense-in-depth, since the pi extension expects a
+   * it — never re-gates. Same transport-level validation as the gate route
+   * (bearer/body-cap in handleRequest, malformed JSON → 400 in dispatchBody),
+   * but past that point the "decision" is an MCP-shaped `{content, isError?}`
+   * tool result instead of an allow/deny — so a HANDLER-level failure (throws,
+   * or no hostedToolHandler configured) still responds 200 with an isError
+   * body, fail-closed defense-in-depth, since the pi extension expects a
    * tool-result-shaped body to return verbatim from execute(), never an HTTP
    * error status for that case.
    */
-  private async processHostedToolBody(body: string, res: ServerResponse): Promise<void> {
-    let payload: PiHostedToolPayload | null = null
-    try {
-      const parsed = JSON.parse(body) as Partial<PiHostedToolPayload> | null
-      if (parsed && typeof parsed.toolName === 'string' && typeof parsed.toolCallId === 'string') {
-        payload = {
-          toolName: parsed.toolName,
-          toolCallId: parsed.toolCallId,
-          input: (parsed.input as Record<string, unknown>) ?? {}
-        }
-      }
-    } catch {
-      // fall through — payload stays null, handled below
-    }
-
-    if (!payload) {
-      res.writeHead(400).end()
-      return
-    }
-
+  private async runHostedTool(entry: InFlight, payload: PiHostedToolPayload): Promise<void> {
     let result: PiHostedToolResult
     if (!this.hostedToolHandler) {
       // No hosted-tool handler was wired (e.g. an existing /tool-call-only
@@ -268,11 +567,99 @@ export class PiBridgeHost {
         result = { content: [{ type: 'text', text: 'Internal hosted-tool error' }], isError: true }
       }
     }
-    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(result))
+    this.settle(entry, result)
   }
 
-  /** Close the server and forcibly destroy any still-open sockets (keep-alive connections would otherwise delay/prevent close). Idempotent. */
+  // ── entry bookkeeping ──────────────────────────────────────────────────────
+
+  /** Detach the parked response (its 'close' listener included) without answering it, and drop the hold. */
+  private releaseWaiter(entry: InFlight): void {
+    entry.detachWaiter?.()
+    entry.detachWaiter = null
+    entry.waiter = null
+    this.clearHold(entry)
+  }
+
+  private clearHold(entry: InFlight): void {
+    if (entry.holdTimer) clearTimeout(entry.holdTimer)
+    entry.holdTimer = null
+  }
+
+  private clearAbandon(entry: InFlight): void {
+    if (entry.abandonTimer) clearTimeout(entry.abandonTimer)
+    entry.abandonTimer = null
+  }
+
+  /**
+   * Nobody is parked on `entry`. The extension re-polls IMMEDIATELY after each
+   * `{pending:true}`, so this much silence on loopback means the pi child is
+   * gone (crashed, killed, or its own `fetch` finally gave up) — after
+   * `abandonMs` retire the entry and tell the owner, which is what lets
+   * PiSession dismiss a now-pointless approval card and stop a dispatched
+   * child nobody is waiting for.
+   */
+  private armAbandon(entry: InFlight): void {
+    this.clearAbandon(entry)
+    const timer = setTimeout(() => {
+      entry.abandonTimer = null
+      if (!this.remove(entry)) return
+      logger.warn(
+        'PiBridgeHost',
+        `pi stopped polling /${entry.route} for ${entry.toolName} — abandoning the exchange (settled=${entry.settled})`
+      )
+      this.onAbandoned?.({
+        route: entry.route,
+        toolCallId: entry.toolCallId,
+        toolName: entry.toolName,
+        settled: entry.settled
+      })
+    }, this.abandonMs)
+    timer.unref?.()
+    entry.abandonTimer = timer
+  }
+
+  /**
+   * Drop `entry` from the map and clear its timers. Returns false when the map
+   * no longer holds THIS entry (already retired, or replaced by a later
+   * exchange reusing the same key) — the identity guard that stops a stale
+   * timer from evicting its successor.
+   */
+  private remove(entry: InFlight): boolean {
+    this.clearHold(entry)
+    this.clearAbandon(entry)
+    if (this.inFlight.get(entry.key) !== entry) return false
+    this.inFlight.delete(entry.key)
+    return true
+  }
+
+  private endJson(res: ServerResponse, body: unknown): void {
+    try {
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(body))
+    } catch (err) {
+      // The socket may already be gone (destroyed mid-hold). Writing to a dead
+      // socket is a silent no-op in Node, but writeHead on an already-ended
+      // response throws — and nothing above may break because a caller left.
+      logger.debug(
+        'PiBridgeHost',
+        `response write failed: ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+  }
+
+  /** Close the server, clear every timer, and forcibly destroy any still-open sockets (keep-alive connections would otherwise delay/prevent close). Idempotent. */
   dispose(): void {
+    // Timers and 'close' listeners FIRST: destroying the sockets below fires
+    // every parked response's 'close', which would otherwise re-arm an abandon
+    // timer for a host that is going away. `remove()`'s identity guard is what
+    // actually makes a post-dispose `onAbandoned` impossible (a timer that
+    // does fire finds its entry gone and returns); this loop is hygiene on top
+    // — it stops orphaned timers and map entries from outliving the host at
+    // all, rather than living on until they harmlessly expire.
+    for (const entry of this.inFlight.values()) {
+      this.releaseWaiter(entry)
+      this.clearAbandon(entry)
+    }
+    this.inFlight.clear()
     for (const socket of this.sockets) socket.destroy()
     this.sockets.clear()
     this.server?.close()

@@ -22,6 +22,7 @@ import {
 } from '../../../../../shared/permission-modes'
 import { ENGINE_META, engineMeta } from '../../../../../shared/engine-meta'
 import { EngineLogo } from '../../shared/EngineLogo'
+import { useEscapeLayer } from '../../shared/use-escape-layer'
 import {
   ADAPTIVE_UNSUPPORTED_TOOLTIP,
   deriveModelGroups,
@@ -506,14 +507,10 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
     effortSupported
   ])
 
-  useEffect(() => {
-    if (!open) return
-    const handler = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [open])
+  // The OPEN sheet is an Escape layer (use-escape-layer): the key closes the
+  // sheet and stops there, and whatever is above it — a picker menu opened
+  // inside, a confirm — answers first. Closed, it registers nothing.
+  useEscapeLayer(() => setOpen(false), true, open)
 
   // If every grouped setting becomes inapplicable while the sheet is open
   // (e.g. an engine switch strips all capabilities), close it — otherwise

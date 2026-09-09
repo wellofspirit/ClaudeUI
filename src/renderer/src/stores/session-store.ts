@@ -440,7 +440,9 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     window.api.loadSettings(),
     window.api.loadSessionConfig(),
     window.api.loadSlashCommands(),
-    window.api.loadEngineConfig('claude'),
+    window.api
+      .loadEngineConfig('claude')
+      .catch((): import('../../../shared/types').EngineConfig => ({})),
     window.api
       .loadOpencodeSettings()
       .catch((): import('../../../shared/types').OpencodeConfigSettings => ({})),

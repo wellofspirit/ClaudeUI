@@ -11,7 +11,15 @@ import { McpDialog } from '../../McpDialog'
 import { EngineLogo } from '../../shared/EngineLogo'
 import { toggleTerminalPanel } from '../../terminal/toggle-terminal'
 import { useTerminalAvailability } from '../../terminal/terminal-availability'
+import { useIdeAvailability } from '../ide-availability'
+import { IdeUnavailableDialog } from '../IdeUnavailableDialog'
 import { shortModelName } from '../../usage/usage-utils'
+import { ideLaunchPageHtml } from '../../../../../shared/ide-launch-page'
+import {
+  ideUnavailableReason,
+  isIdeUnavailableError,
+  type IdeUnavailableReason
+} from '../../../../../shared/remote-protocol'
 
 /** Format a millisecond duration as "Ns", "Nm Ns", or "Nh Nm" — seconds drop
  *  out at the hour scale where they're noise. Shared by the Session time /
@@ -43,6 +51,33 @@ function dispatchedModelLabel(modelId: string): string {
   return slash === -1 ? short : short.slice(slash + 1)
 }
 
+/**
+ * The host's own words about a typed `ide:mint-entry` refusal, re-read AFTER the
+ * failure (ADR-064 §5).
+ *
+ * The refusal itself is deliberately detail-free — `ide-unavailable:<reason>`
+ * and nothing more, so a connection that has not earned one cannot use it as a
+ * host-path oracle. The DETAIL lives on `ide:availability`, which is a `config`
+ * query any signed-in client may ask, so the explain-why dialog fetches it
+ * separately rather than the wire carrying it to clients that never open a
+ * dialog.
+ *
+ * Never throws and never fabricates: an undefined result means the host said
+ * nothing, and the dialog renders its reason copy alone.
+ */
+async function ideFailureDetail(reason: IdeUnavailableReason): Promise<string | undefined> {
+  // Neither of these has a detail to fetch — the toggle is off, or the origin is
+  // excluded by policy — so skip a round-trip whose answer is already known.
+  if (reason === 'toggle-off' || reason === 'origin-not-allowed') return undefined
+  try {
+    const fresh = await window.api.ideAvailability()
+    if (reason === 'spawn-failed') return fresh.lastError
+    return fresh.probe.ok ? undefined : fresh.probe.detail
+  } catch {
+    return undefined
+  }
+}
+
 export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
   const cwd = useActiveSession((s) => s.cwd)
   const sdkSessionId = useActiveSession((s) => s.status.sessionId)
@@ -65,6 +100,20 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const isMac = window.api.platform === 'darwin'
   const leftPadding = isMobileCtx ? 8 : sidebarCollapsed && isMac ? 148 / uiFontScale : 13
   const terminalAvailability = useTerminalAvailability()
+  // Null on the desktop by construction — the desktop VSCode button is the
+  // `vscode://` deep link and consults no host answer (ADR-064 §5).
+  const { availability: ideAvailability, refresh: refreshIdeAvailability } = useIdeAvailability()
+  /**
+   * The colour scheme the proxied workbench should open in (ADR-064 polish).
+   *
+   * ClaudeUI's palette is a three-member union and VS Code's is two, so the
+   * mapping is here rather than on the wire: `monokai` is a dark scheme, and
+   * anything that is not explicitly `light` is dark — a future ClaudeUI theme
+   * lands on the safer side without a protocol change.
+   */
+  const ideThemeKind: 'dark' | 'light' =
+    useSessionStore((s) => s.settings.theme) === 'light' ? 'light' : 'dark'
+  const isWeb = window.api?.platform === 'web'
   // Tooltip text only. `window.api.platform` is 'web' for every host OS, so the
   // UA hint is the only signal a browser client has about its keyboard. Both
   // bindings work everywhere regardless — this just names the reachable one.
@@ -78,6 +127,18 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const [mcpOpen, setMcpOpen] = useState(false)
   const [overflowOpen, setOverflowOpen] = useState(false)
   const overflowRef = useRef<HTMLDivElement>(null)
+  /** The typed IDE refusal currently being explained, or null. */
+  const [ideDialog, setIdeDialog] = useState<{
+    reason: IdeUnavailableReason
+    detail?: string
+  } | null>(null)
+  /**
+   * The one IDE failure that is NOT a typed refusal and does not earn a modal:
+   * the browser refused the pre-opened tab. Nothing about the host is wrong, so
+   * a dialog explaining the security model would be a lie — the operator needs
+   * one line about their own pop-up blocker instead.
+   */
+  const [ideError, setIdeError] = useState<string | null>(null)
 
   /**
    * Mobile overflow ("⋯") menu contents. The desktop right-side buttons don't
@@ -275,6 +336,129 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
     setCopiedField(field)
     setTimeout(() => setCopiedField(null), 1500)
   }, [])
+
+  /**
+   * The VSCode button's two completely different jobs (ADR-064 §5).
+   *
+   * DESKTOP is unchanged and stays unchanged: `vscode://file/…` handed to the
+   * OS, no host question asked, nothing about the remote IDE involved.
+   *
+   * WEB mints a one-time entry under `/vscode` and navigates a second tab into
+   * the proxied workbench. Three things about the order here are load-bearing:
+   *
+   *  1. **Pre-flight on the answer already held.** An excluded origin and a
+   *     missing CLI are states the mint would only re-discover, and opening a
+   *     tab for them would strand a blank one behind the dialog.
+   *  2. **The CEREMONY comes before the tab** (ADR-064 polish). A step-up
+   *     renders in THIS tab, so pre-opening the workbench tab first pushed the
+   *     app into the background and left the operator staring at "Opening VS
+   *     Code…" while the prompt they had to answer was somewhere behind it.
+   *     Running the ceremony first costs the click's user gesture — see (3).
+   *  3. **`window.open` runs SYNCHRONOUSLY on the click** whenever it can. A
+   *     pop-up blocker kills a `window.open` issued after an `await`, so on the
+   *     no-ceremony path (the common one) the tab is still claimed on the
+   *     click's own gesture and navigated once the URL lands — the regression
+   *     the component test asserts by call order. After a ceremony that gesture
+   *     is spent, so a refused tab there is EXPECTED and gets its own copy: the
+   *     grant is now held, and the second click takes the synchronous path.
+   *  4. **The invoke gate is still the backstop.** It intercepts `needs-step-up`
+   *     on ANY invoke and retries once, which covers the rare decay race between
+   *     the availability answer and the mint; a cancelled ceremony there rethrows
+   *     the ORIGINAL refusal, which is not an IDE refusal and therefore closes
+   *     the tab in silence — the operator just declined, and has nothing to be
+   *     told.
+   */
+  const handleOpenVSCode = useCallback(async (): Promise<void> => {
+    if (!cwd) return
+    if (!isWeb) {
+      window.api.openInVSCode(cwd)
+      return
+    }
+    setIdeError(null)
+    if (ideAvailability && !ideAvailability.originAllowed) {
+      setIdeDialog({ reason: ideAvailability.originReason ?? 'origin-not-allowed' })
+      return
+    }
+    if (ideAvailability && !ideAvailability.probe.ok) {
+      setIdeDialog({
+        reason: ideAvailability.probe.reason,
+        ...(ideAvailability.probe.detail ? { detail: ideAvailability.probe.detail } : {})
+      })
+      return
+    }
+    let ceremonyRan = false
+    if (ideAvailability?.needsStepUp) {
+      // The web bundle installs this before React mounts; the desktop build has
+      // no ceremony at all, hence the optional access rather than an import —
+      // TerminalPanel's exact idiom. A build WITHOUT the global falls through to
+      // the old order, where the invoke gate runs the ceremony instead: degrading
+      // to the previous behaviour beats a button that silently does nothing.
+      const request = (
+        window as unknown as { __STEP_UP_REQUEST__?: (channel: string) => Promise<boolean> }
+      ).__STEP_UP_REQUEST__
+      if (request) {
+        const granted = await request('ide:mint-entry')
+        // Cancelled or failed. Silent, exactly as a cancelled ceremony has always
+        // been: the operator declined, and has nothing to be told.
+        if (!granted) return
+        ceremonyRan = true
+        // The answer this flow was gated on is now stale in the one field that
+        // matters, and nothing else re-queries between here and the mint.
+        await refreshIdeAvailability()
+      }
+    }
+    const tab = window.open('', '_blank')
+    if (!tab) {
+      // NEVER navigate this tab instead: the operator would lose the session
+      // they are in to a workbench they did not ask to replace it with.
+      setIdeError(
+        ceremonyRan
+          ? // Not a pop-up-blocker problem to solve: the ceremony consumed the
+            // click's user gesture. The grant is held now, so the next click
+            // opens the tab synchronously and works.
+            'VS Code unlocked — click the button again to open it.'
+          : 'Allow pop-ups for this site to open VS Code.'
+      )
+      return
+    }
+    try {
+      // So the round-trip isn't a bare tab — and not a bare WHITE tab on a dark
+      // client: the shared launch page (spinner + label, the session's scheme),
+      // static variant since this tab is navigated by us, not by a refresh.
+      // Best-effort by construction: a tab we cannot write to is still a tab we
+      // can navigate.
+      tab.document.write(ideLaunchPageHtml(ideThemeKind, 'static'))
+      tab.document.close()
+    } catch {
+      /* see above */
+    }
+    try {
+      const { url } = await window.api.ideMintEntry(cwd, ideThemeKind)
+      // RELATIVE by contract — this page's own origin is the one the entry
+      // cookie is scoped to, so the host never has to guess what it is.
+      tab.location.href = url
+    } catch (err) {
+      try {
+        tab.close()
+      } catch {
+        /* the operator may have closed it already */
+      }
+      if (!isIdeUnavailableError(err)) {
+        console.warn('[TopBar] IDE entry mint failed:', err)
+        return
+      }
+      const reason = ideUnavailableReason(err)
+      if (!reason) {
+        // A typed refusal that lost its suffix. There is no honest copy for
+        // "unknown", so say the little that is true rather than picking one.
+        console.warn('[TopBar] IDE refusal carried no reason:', err)
+        setIdeError('Could not open VS Code.')
+        return
+      }
+      const detail = await ideFailureDetail(reason)
+      setIdeDialog({ reason, ...(detail ? { detail } : {}) })
+    }
+  }, [cwd, isWeb, ideAvailability, ideThemeKind, refreshIdeAvailability])
 
   return (
     <div
@@ -520,10 +704,27 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
         </div>
       </div>
       <div className="flex items-center gap-3 [-webkit-app-region:no-drag]">
-        {!isMobileCtx && cwd && (
+        {!isMobileCtx && ideError && (
+          <span
+            data-testid="TopBar.openVSCodeError"
+            title={ideError}
+            className="text-[11px] text-red-400 max-w-[220px] truncate"
+          >
+            {ideError}
+          </span>
+        )}
+        {/* Desktop: always, and it is the `vscode://` deep link — a host-physical
+            act the remote toggle has no say over. Web: only once the host's own
+            `ide:availability` says the owner turned the remote IDE on, the
+            terminal-button precedent verbatim (toggle off ⇒ no affordance, and a
+            null "still asking" renders nothing rather than flashing in and out).
+            Origin/CLI refusals deliberately do NOT hide it: those are the states
+            ADR-064 rules must be EXPLAINED, so the button stays and opens the
+            dialog. */}
+        {!isMobileCtx && cwd && (!isWeb || ideAvailability?.allowed === true) && (
           <button
             data-testid="TopBar.openVSCode"
-            onClick={() => window.api.openInVSCode(cwd)}
+            onClick={() => void handleOpenVSCode()}
             className="group flex items-baseline gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             title="Open in VS Code"
           >
@@ -724,6 +925,13 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
         onClose={() => setPermissionsOpen(false)}
         cwd={cwd}
       />
+      {ideDialog && (
+        <IdeUnavailableDialog
+          reason={ideDialog.reason}
+          {...(ideDialog.detail ? { detail: ideDialog.detail } : {})}
+          onClose={() => setIdeDialog(null)}
+        />
+      )}
     </div>
   )
 }

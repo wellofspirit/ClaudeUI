@@ -2,10 +2,13 @@
  * Unit tests for the opencode provider configuration dialog
  * (OpencodeProviderConfigModal) — declaration render/save behaviour.
  *
- * SURFACE MOVED, CONTRACT KEPT. These behaviours were previously guarded against
- * the "Custom providers" settings section, which no longer exists: custom
- * declarations now live in the single Providers list and are edited through this
- * dialog. Every guard below is carried over deliberately —
+ * SURFACE MOVED TWICE, CONTRACT KEPT BOTH TIMES. These behaviours were first
+ * guarded against a "Custom providers" settings section (gone: declarations live
+ * in the single Providers list), and the dialog itself has since moved out of
+ * settings-sections.tsx into OpencodeProviders.tsx and onto the shared dialog
+ * shell. It is mounted here STANDALONE — no catalog entry — which is the case
+ * that grants the declaration form and the credential block, so every guard
+ * below still addresses the same controls. Carried over deliberately —
  *
  *  - Typing a multi-character provider id keeps focus (the id <input> stays the
  *    SAME DOM node across keystrokes — no remount from a changing React key).
@@ -25,7 +28,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, act, cleanup, waitFor } from '@testing-library/react'
-import { OpencodeProviderConfigModal } from '../settings-sections'
+import { OpencodeProviderConfigModal } from '../OpencodeProviders'
 import type { OpencodeConfigSettings } from '../../../../../shared/types'
 import type { SharedProviderDefinition } from '../../../../../shared/shared-provider'
 

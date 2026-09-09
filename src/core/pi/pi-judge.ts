@@ -49,10 +49,35 @@
  * `{success: true, data: {cancelled: false}}`, mints a new `sessionId`, and
  * resets `get_state().messageCount` and `get_messages()` to zero. The judge
  * confirmed statelessness behaviourally (it answered `UNKNOWN` about a fact
- * from the previous exchange), and BOTH the `--system-prompt` and the
- * `set_model` selection survive the reset. So the warm-process design holds and
- * respawn-per-call is not needed. A `new_session` that fails or reports
- * `cancelled` still falls back to a respawn — correctness before cost.
+ * from the previous exchange), and the `--system-prompt` survives the reset. So
+ * the warm-process design holds and respawn-per-call is not needed. A
+ * `new_session` that fails or reports `cancelled` still falls back to a
+ * respawn — correctness before cost.
+ *
+ * **The MODEL does not survive the reset** (re-probed 2026-09-09 against pi
+ * 0.84.3 — the 2026-08-01 note claiming it did is now false). After
+ * `set_model {openai-codex, gpt-5.6-luna}` → `prompt` → `new_session`,
+ * `get_state` reports pi's own default (`gpt-5.4-mini`), and the next `prompt`
+ * on it returns an assistant message with `content: []` in ~0.7 s, so
+ * `get_last_assistant_text` answers `{}` and {@link PiJudge.ask} throws
+ * `no assistant text`. Live symptom: strictly ALTERNATING
+ * `auto-mode allow (stage=fast)` / `auto-mode BLOCK (stage=error)` — every
+ * second verdict lost to the human. Hence {@link PiJudge.applyModel} runs after
+ * EVERY successful reset as well as at spawn; one extra RPC per verdict is the
+ * price of the warm-process design.
+ *
+ * ## Model selection fails CLOSED
+ *
+ * `set_model` used to be best-effort ("a judge on pi's default model is far
+ * better than no judge at all"). It no longer is: pi's default is a DIFFERENT
+ * security posture from the model the user configured, and silently standing in
+ * for it is precisely the invisible downgrade this transport exists to avoid —
+ * nothing in the UI says which model actually judged. So a `resolveModel()`
+ * that returned a model and a `set_model` that did not demonstrably take now
+ * THROWS: `runExclusive` retires the process, `classify()` marks the verdict
+ * `unavailable`, and the human decides. `resolveModel()` returning `null` (the
+ * session's own model failed to decode — the documented exception) still means
+ * "leave pi on its default" and is not an error.
  *
  * ## Advisory request fields (ADR-023-style deviation)
  *
@@ -120,10 +145,17 @@ export interface PiJudgeOptions {
   /** Working directory for the judge process — the session's own cwd. */
   cwd: string
   /**
-   * The judge model, resolved LAZILY at each spawn so a mid-session
-   * `setModel()` (or an edited `autoMode.judgeModel`) is picked up on the next
-   * respawn. `null` leaves pi on its own default; a failing `set_model` is
-   * swallowed for the same reason (mirrors askSideQuestion).
+   * The judge model, resolved LAZILY at each spawn AND after each
+   * `new_session` reset (pi 0.84.3 forgets it — see the module doc), so a
+   * mid-session `setModel()` (or an edited `autoMode.judgeModel`) is picked up
+   * on the next verdict rather than only on the next respawn.
+   *
+   * `null` leaves pi on its own default — the one documented case where a
+   * stand-in model is acceptable (the session's own model failed to decode, so
+   * there is nothing to ask for). A NON-null model whose `set_model` fails is
+   * a hard error: it throws, which retires the process and lands the verdict on
+   * the human (see {@link PiJudge.applyModel}). It is deliberately NOT
+   * swallowed the way `askSideQuestion`'s is.
    */
   resolveModel: () => { vendorId: string; modelId: string } | null
   /** Injectable for tests; defaults to the real vendored-binary locator. */
@@ -220,7 +252,15 @@ export class PiJudge {
   private async ensureReady(system: string): Promise<PiJudgeClient> {
     if (this.client && this.spawnedSystem === system) {
       if (this.conversationEmpty) return this.client
-      if (await this.resetConversation(this.client)) return this.client
+      if (await this.resetConversation(this.client)) {
+        // pi 0.84.3 resets the MODEL along with the conversation (probed
+        // 2026-09-09 — see the module doc), so the reused process is back on
+        // pi's default until we re-apply the selection. This throws when the
+        // re-apply fails, which retires the process and asks the human rather
+        // than judging on a model the user never chose.
+        await this.applyModel(this.client)
+        return this.client
+      }
       // The reset did not take — fall through to a respawn rather than judge
       // the next action against the previous one's context.
       this.teardown()
@@ -278,25 +318,48 @@ export class PiJudge {
       this.conversationEmpty = false
     })
 
-    // Best-effort, exactly like askSideQuestion's: a judge on pi's default
-    // model is far better than no judge at all (which means "ask the human"
-    // for every gated action).
-    const model = this.opts.resolveModel()
-    if (model) {
-      try {
-        await client.request({
-          type: 'set_model',
-          provider: model.vendorId,
-          modelId: model.modelId
-        })
-      } catch (err) {
-        logger.debug(
-          'PiJudge',
-          `set_model failed (judge runs on pi's default): ${err instanceof Error ? err.message : String(err)}`
-        )
-      }
-    }
+    await this.applyModel(client)
     return client
+  }
+
+  /**
+   * Point `client` at the configured judge model. Called at the end of
+   * {@link spawn} AND after every successful {@link resetConversation} — pi
+   * 0.84.3 forgets the model on `new_session` (probed 2026-09-09; see the
+   * module doc's statelessness section), so a warm process whose model was only
+   * set at spawn silently judges on pi's default from the second verdict on.
+   *
+   * FAILS CLOSED (module doc "Model selection fails CLOSED"): a throw here
+   * propagates out of `ensureReady`/`spawn` into `runExclusive`'s catch, which
+   * tears the process down and rethrows → `classify()` reports
+   * `unavailable` → the human decides.
+   *
+   * The thrown message carries ONLY the requested vendor/model id — never the
+   * transport's own text, which is arbitrary pi output.
+   */
+  private async applyModel(client: PiJudgeClient): Promise<void> {
+    const model = this.opts.resolveModel()
+    if (!model) return
+    const failure = `pi judge: set_model failed for ${model.vendorId}/${model.modelId}`
+    let resp: PiRpcResponse<{ id?: string }>
+    try {
+      resp = await client.request<{ id?: string }>({
+        type: 'set_model',
+        provider: model.vendorId,
+        modelId: model.modelId
+      })
+    } catch {
+      throw new Error(failure)
+    }
+    if (!resp.success) throw new Error(failure)
+    // `set_model` echoes the selection back (`data.id`). When it is present it
+    // is authoritative: an id that is not what we asked for means pi resolved
+    // something else, which is the same silent-substitution problem as an
+    // outright failure. An ABSENT id is not treated as a failure — older/other
+    // pi builds answer `{success:true}` with no data, and inventing a
+    // requirement they don't meet would break every verdict.
+    const applied = resp.data?.id
+    if (typeof applied === 'string' && applied !== model.modelId) throw new Error(failure)
   }
 
   /** One prompt → the assistant's text. Throws on anything unusable. */

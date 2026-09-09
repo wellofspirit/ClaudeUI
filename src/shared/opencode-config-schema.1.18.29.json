@@ -304,13 +304,21 @@
                   "enum": [false]
                 }
               ],
-              "description": "Timeout in milliseconds to wait for response headers. Provider integrations may set defaults. Set to false to disable timeout."
+              "description": "Timeout in milliseconds to wait for response headers (default: 300000). Set to false to disable timeout."
             },
             "chunkTimeout": {
-              "exclusiveMinimum": 0,
-              "type": "integer",
-              "maximum": 9007199254740991,
-              "description": "Timeout in milliseconds between streamed SSE chunks for this provider. If no chunk arrives within this window, the request is aborted."
+              "anyOf": [
+                {
+                  "exclusiveMinimum": 0,
+                  "type": "integer",
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "boolean",
+                  "enum": [false]
+                }
+              ],
+              "description": "Timeout in milliseconds between streamed SSE chunks for this provider (default: 300000). If no chunk arrives within this window, the request is aborted. Set to false to disable timeout."
             }
           }
         },
@@ -346,15 +354,32 @@
               "interleaved": {
                 "anyOf": [
                   {
-                    "type": "boolean",
-                    "enum": [true]
+                    "type": "boolean"
+                  },
+                  {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": ["reasoning", "reasoning_content", "reasoning_text"]
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ]
                   },
                   {
                     "type": "object",
                     "properties": {
                       "field": {
-                        "type": "string",
-                        "enum": ["reasoning", "reasoning_content", "reasoning_details"]
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "enum": ["reasoning", "reasoning_content", "reasoning_text"]
+                          },
+                          {
+                            "type": "string"
+                          }
+                        ]
                       }
                     },
                     "required": ["field"],
@@ -1113,7 +1138,7 @@
               "minimum": 0,
               "type": "integer",
               "maximum": 9007199254740991,
-              "description": "Number of recent user turns, including their following assistant/tool responses, to keep verbatim during compaction (default: 2)"
+              "description": "Maximum number of recent user turns, including their following assistant/tool responses, to keep verbatim during compaction. By default retention is limited only by the preserved token budget."
             },
             "preserve_recent_tokens": {
               "minimum": 0,

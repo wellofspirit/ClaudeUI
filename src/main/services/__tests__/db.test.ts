@@ -134,7 +134,7 @@ describe('migration framework — user_version guard', () => {
     }
   })
 
-  it('applies the real production migration set (v1–v12)', () => {
+  it('applies the real production migration set (v1–v14)', () => {
     const db = openRawDb()
     try {
       // Default migration list (production MIGRATIONS).
@@ -145,8 +145,9 @@ describe('migration framework — user_version guard', () => {
       // v9: audit_log, v10: remote-terminal posture columns,
       // v11: webauthn_credential + auth-policy columns (ADR-052 passkeys),
       // v12: step-up tier columns + audit detail/retention (ADR-054),
-      // v13: LAN channel key + the `legacy` policy retirement (ADR-056)
-      expect(userVersion(db)).toBe(13)
+      // v13: LAN channel key + the `legacy` policy retirement (ADR-056),
+      // v14: remote-IDE posture columns (ADR-064)
+      expect(userVersion(db)).toBe(14)
       // session_meta must exist and be queryable.
       const rows = db.prepare('SELECT * FROM session_meta').all()
       expect(rows).toEqual([])
@@ -225,7 +226,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(13)
+      expect(userVersion(db)).toBe(14)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',
@@ -252,7 +253,49 @@ describe('migration framework — user_version guard', () => {
         step_up_tier: 'medium',
         step_up_mutation_idle_minutes: 60,
         session_max_age_hours: 4,
-        audit_retention_days: 365
+        audit_retention_days: 365,
+        // v14 backfills the remote-IDE posture CLOSED (ADR-064). A row upgraded
+        // across seven migrations must never land holding a capability that
+        // spawns an editor on the host, and must never land with a CLI path
+        // nobody configured.
+        allow_ide: 0,
+        ide_cli_path: null
+      })
+    } finally {
+      db.close()
+    }
+  })
+
+  // ADR-064 v14: the remote-IDE posture columns.
+  it('v14 adds allow_ide (NOT NULL, default 0) and the nullable ide_cli_path', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      const columns = (
+        db
+          .prepare('SELECT name, "notnull", dflt_value FROM pragma_table_info(?)')
+          .all('remote_config') as Array<{
+          name: string
+          notnull: number
+          dflt_value: string | null
+        }>
+      ).filter((c) => c.name === 'allow_ide' || c.name === 'ide_cli_path')
+
+      expect(columns.map((c) => c.name).sort()).toEqual(['allow_ide', 'ide_cli_path'])
+      const toggle = columns.find((c) => c.name === 'allow_ide')!
+      // NOT NULL with a 0 default — the toggle has no third state, and the
+      // failure mode of a missing value must be "off", never "unknown".
+      expect(toggle.notnull).toBe(1)
+      expect(Number(toggle.dflt_value)).toBe(0)
+      const cliPath = columns.find((c) => c.name === 'ide_cli_path')!
+      // NULLABLE, and null is the NORMAL state: no override means auto-detect.
+      expect(cliPath.notnull).toBe(0)
+
+      // A row written without naming the new columns takes the closed defaults.
+      db.prepare('INSERT INTO remote_config (id, updated_at) VALUES (1, 1)').run()
+      expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
+        allow_ide: 0,
+        ide_cli_path: null
       })
     } finally {
       db.close()
@@ -327,7 +370,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(13)
+      expect(userVersion(db)).toBe(14)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         auth_policy: null,
         step_up_tier: 'medium',
@@ -769,6 +812,50 @@ describe('remote_config repository', () => {
     setRemoteConfig({ allowTerminal: false })
     expect(getRemoteConfig()?.allowTerminal).toBe(false)
     expect(getRemoteConfig()?.shellGrantIdleMinutes).toBe(25)
+  })
+
+  // v14 — the remote-IDE posture (ADR-064).
+  it('defaults the IDE posture to OFF with no CLI override', () => {
+    setRemoteConfig({ port: 4568 })
+    const config = getRemoteConfig()
+    expect(config?.allowIde).toBe(false)
+    expect(config?.ideCliPath).toBeNull()
+  })
+
+  it('round-trips allowIde + ideCliPath and preserves them on partial writes', () => {
+    setRemoteConfig({ allowIde: true, ideCliPath: '/opt/vscode/bin/code-tunnel' })
+    expect(getRemoteConfig()?.allowIde).toBe(true)
+    expect(getRemoteConfig()?.ideCliPath).toBe('/opt/vscode/bin/code-tunnel')
+
+    // An unrelated write must not silently arm or disarm the IDE, and must not
+    // drop the path the host will SPAWN.
+    setRemoteConfig({ port: 9999 })
+    const config = getRemoteConfig()
+    expect(config?.port).toBe(9999)
+    expect(config?.allowIde).toBe(true)
+    expect(config?.ideCliPath).toBe('/opt/vscode/bin/code-tunnel')
+
+    // `null` is a MEANINGFUL value: clear the override, keep the toggle.
+    setRemoteConfig({ ideCliPath: null })
+    expect(getRemoteConfig()?.ideCliPath).toBeNull()
+    expect(getRemoteConfig()?.allowIde).toBe(true)
+
+    setRemoteConfig({ allowIde: false })
+    expect(getRemoteConfig()?.allowIde).toBe(false)
+  })
+
+  it('the terminal and IDE toggles are independent', () => {
+    // Two capabilities, two switches (ADR-064): arming a remote editor must not
+    // arm a pty, and the reverse.
+    setRemoteConfig({ allowTerminal: true, allowIde: false })
+    expect(getRemoteConfig()?.allowTerminal).toBe(true)
+    expect(getRemoteConfig()?.allowIde).toBe(false)
+
+    setRemoteConfig({ allowIde: true })
+    expect(getRemoteConfig()?.allowTerminal).toBe(true)
+
+    setRemoteConfig({ allowTerminal: false })
+    expect(getRemoteConfig()?.allowIde).toBe(true)
   })
 
   it('setRemotePassword leaves the terminal posture untouched', () => {

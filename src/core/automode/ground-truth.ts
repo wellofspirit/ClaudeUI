@@ -40,12 +40,16 @@ import { tmpdir } from 'node:os'
 /**
  * How a completed tool call ended, with cli.js's prescribed meanings (ref §5).
  *
- * This is deliberately a SUBSET of cli.js's eight values: these four are the
- * ones our harness can actually observe today. The others (`interrupted`,
- * `blocked-by-permissions`, `automode-unavailable`, `automode-parsing-error`)
- * are not invented here — an outcome we cannot measure would be a lie to the
- * judge, and per ref §5 the absence of an outcome is explicitly *not* success,
- * so omitting is always the safe fallback.
+ * This is deliberately a SUBSET of cli.js's eight values plus ONE of our own:
+ * the four cli.js values are the ones our harness can actually observe today.
+ * The others (`interrupted`, `blocked-by-permissions`, `automode-unavailable`,
+ * `automode-parsing-error`) are not invented here — an outcome we cannot
+ * measure would be a lie to the judge, and per ref §5 the absence of an
+ * outcome is explicitly *not* success, so omitting is always the safe fallback.
+ * `unanswered` has no cli.js counterpart because cli.js has no equivalent
+ * failure: it is measured directly by PiBridgeHost's abandonment timer (the
+ * pi child stopped polling the approval bridge before ClaudeUI answered — see
+ * PiSession.handleBridgeAbandoned), so recording it is a fact, not a guess.
  *
  * | Value | Meaning to the classifier |
  * |---|---|
@@ -53,8 +57,9 @@ import { tmpdir } from 'node:os'
  * | `error` | harness/tool error; may not have executed |
  * | `rejected-by-user` | the human declined **this** call; a retry without new authorization should be blocked |
  * | `automode-blocked` | this classifier denied it |
+ * | `unanswered` | ClaudeUI's decision never reached the agent (it stopped waiting); the call never ran, and nobody refused it — a re-attempt is a fresh proposal that Transient Retry may cover |
  */
-export type ToolOutcome = 'ok' | 'error' | 'rejected-by-user' | 'automode-blocked'
+export type ToolOutcome = 'ok' | 'error' | 'rejected-by-user' | 'automode-blocked' | 'unanswered'
 
 /**
  * Outcomes that record a permission DECISION rather than an execution result.
@@ -65,7 +70,11 @@ export type ToolOutcome = 'ok' | 'error' | 'rejected-by-user' | 'automode-blocke
  */
 const DECISION_OUTCOMES: ReadonlySet<ToolOutcome> = new Set<ToolOutcome>([
   'rejected-by-user',
-  'automode-blocked'
+  'automode-blocked',
+  // Sticky for the same reason: pi reports the abandoned call as a failed tool
+  // ("approval service unreachable") moments after the bridge gave up, and
+  // that `error` must not erase the fact that nobody ever decided.
+  'unanswered'
 ])
 
 /** Bound on a session's outcome map — a long session must not grow it forever. */

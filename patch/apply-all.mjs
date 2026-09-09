@@ -1,5 +1,6 @@
 /**
- * Master patch runner — applies all patches in order, then verifies syntax.
+ * Master patch runner — applies all patches in order, then checks that the
+ * patch target still has the shape the rebundler expects.
  *
  * Usage: node patch/apply-all.mjs
  *        node patch/apply-all.mjs --quiet   # print only per-patch verdicts +
@@ -7,8 +8,11 @@
  */
 
 import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { basename, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+import { CHUNK_DELIM_PREFIX, isChunkConcat } from '../scripts/lib/chunk-format.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const QUIET = process.argv.includes('--quiet')
@@ -69,60 +73,50 @@ for (const patch of patches) {
 if (!QUIET) console.log('\nAll patches applied.')
 
 // ---------------------------------------------------------------------------
-// Syntax check — verify patched cli.js parses without errors.
+// Structure check — verify the patched target still looks like the chunk
+// concat the rebundler will split apart.
 //
-// Uses `bun build --no-bundle` (fast, native parser) with esbuild fallback.
-// Both parse the full file and exit non-zero on syntax errors.
+// Since Claude Code 2.1.261 `vendor/claude-cli/cli.js` is NOT one program: it
+// is ~1,630 separate minified ESM chunks concatenated behind `// @bun-chunk`
+// delimiter lines (see scripts/extract-cli.mjs). No parser can read that as a
+// single file — duplicate top-level import bindings alone guarantee failure —
+// so the old whole-file node/bun/esbuild check is gone.
+//
+// Real syntax checking is now PER CHUNK and lives in scripts/rebundle-cli.mjs,
+// which esbuild-parses every chunk whose bytes a patch actually changed. That
+// runs immediately after this script in the same `ensure-cli` pipeline, so a
+// patch that produces broken JS still fails the build — just one step later.
+// What we check here is only that the delimiter structure survived patching.
 // ---------------------------------------------------------------------------
 
 const cliPath = resolve(__dirname, '..', 'vendor', 'claude-cli', 'cli.js')
+const MIN_CHUNKS = 1000
 
-if (!QUIET) console.log('\n>>> Syntax check: %s\n', cliPath)
+if (!QUIET) console.log('\n>>> Structure check: %s\n', cliPath)
 
-const checkers = [
-  {
-    name: 'node --check',
-    run: () => execFileSync('node', ['--check', cliPath], { stdio: 'pipe' })
-  },
-  {
-    name: 'bun build',
-    run: () =>
-      execFileSync('bun', ['build', '--no-bundle', '--outfile', '/dev/null', cliPath], {
-        stdio: 'pipe'
-      })
-  },
-  {
-    name: 'esbuild',
-    run: () =>
-      execFileSync(
-        resolve(__dirname, '..', 'node_modules', '.bin', 'esbuild'),
-        ['--bundle=false', cliPath],
-        { stdio: 'pipe' }
-      )
-  }
-]
-
-let checked = false
-for (const checker of checkers) {
-  try {
-    checker.run()
-    console.log(`  ${green('OK')} Syntax check passed (%s)`, checker.name)
-    checked = true
-    break
-  } catch (err) {
-    if (err.code === 'ENOENT') continue // tool not installed, try next
-    const stderr = err.stderr?.toString() || ''
-    // bun's node shim doesn't support --check — skip to next checker
-    if (checker.name === 'node --check' && stderr.includes('Input must be provided')) continue
-    // Tool exists but syntax check failed
-    console.error('  FAIL Syntax check failed! (%s)', checker.name)
-    console.error(stderr || err.message)
-    process.exit(1)
-  }
+function structureFail(msg) {
+  console.error(`  ${red('FAIL')} Structure check: ${msg}`)
+  process.exit(1)
 }
 
-if (!checked) {
-  console.warn('  SKIP Syntax check — none of node, bun, esbuild found in PATH')
+const cliBytes = readFileSync(cliPath)
+if (!isChunkConcat(cliBytes)) {
+  structureFail(
+    'file does not start with a "// @bun-chunk <module>" delimiter line — ' +
+      'a patch clobbered the header, or the file was produced by an old extractor. ' +
+      'Re-run `node scripts/extract-cli.mjs`.'
+  )
 }
+
+const DELIM = Buffer.from(`\n${CHUNK_DELIM_PREFIX}`, 'latin1')
+let chunkCount = 1 // the leading delimiter has no preceding newline
+for (let i = cliBytes.indexOf(DELIM); i !== -1; i = cliBytes.indexOf(DELIM, i + 1)) chunkCount++
+if (chunkCount <= MIN_CHUNKS) {
+  structureFail(
+    `only ${chunkCount} chunk delimiters found (expected > ${MIN_CHUNKS}) — ` +
+      'the concat looks truncated. Re-run `node scripts/extract-cli.mjs`.'
+  )
+}
+console.log(`  ${green('OK')} Structure check passed (${chunkCount} chunks)`)
 
 if (!QUIET) console.log('\nDone.')

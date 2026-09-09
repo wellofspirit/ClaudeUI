@@ -18,10 +18,94 @@ your system, and may trail behind in version.
 | ---------------------- | ------------------------------------------ |
 | SDK package            | 0.2.38 → 0.2.39 → 0.2.41 → 0.2.42 → 0.2.49 |
 | Bundled CLI (`cli.js`) | 2.1.38 → 2.1.39 → 2.1.41 → 2.1.42 → 2.1.49 |
-| Last re-anchored       | 2.1.197                                    |
+| Last re-anchored       | 2.1.261 (chunked)                          |
 
 All versions exhibit the same behavior. Function names change between
-versions but the architecture is stable through v2.1.196. **v2.1.197 introduced a significant refactor** (BVe unification — see below) that required new patches F2 and changes to B and E; the logical problem and fix strategy are identical.
+versions but the architecture is stable through v2.1.196. **v2.1.197 introduced a significant refactor** (BVe unification — see below) that required new patches F2 and changes to B and E; the logical problem and fix strategy are identical. **v2.1.261 changed the bundle format** (code-split ESM chunks — see the next section) and reshaped three anchors (F2, C, E); the patch design is unchanged.
+
+## The v2.1.261 chunked bundle (read this before anything else)
+
+Up to v2.1.241, `vendor/claude-cli/cli.js` was ONE monolithic minified CJS
+bundle (~28 MB). v2.1.261 is built with code-splitting: **1,631 separate
+minified ESM chunks**. The vendored `cli.js` is their **concatenation** in
+module-graph order, each chunk preceded by a delimiter line:
+
+```
+// @bun-chunk B:/~BUN/root/chunk-9c0rs7w4.js
+```
+
+Chunk bodies are verbatim (minified, mostly one huge line each, always ending
+`\n`). The rebundler splits the concat back into chunks on build and
+syntax-checks every chunk that changed, so a broken edit fails the build loudly.
+Every regex in `apply.mjs` still operates on the whole concat exactly as before
+— but two new hazards apply:
+
+**1. A regex must never match across a chunk boundary.** The delimiter lines
+break almost every pattern naturally (`[\w$]+` cannot match `/` or a newline,
+and `.` does not match newlines). Just never write `[\s\S]*?` spans wide enough
+to bridge one.
+
+**2. Minified identifiers are CHUNK-LOCAL.** The same short name means unrelated
+things in different chunks — `Hr` alone has five independent definitions across
+the bundle — and helpers a chunk uses are often **imported bindings** aliased per
+chunk (`import{...,Y,...}from"B:/~BUN/root/chunk-….js"`). So when the patch
+injects code that _calls_ a helper, the captured name must be a binding that is
+in scope **in the chunk being edited**. A whole-file search will happily hand you
+a name from a different module.
+
+This is not theoretical. Patch E used to find its session-id getter with a
+global scan:
+
+```js
+const sessFnRe = /session_id:([\w$]+)\(\).*?parent_tool_use_id/ // WRONG on a chunked bundle
+```
+
+On the 2.1.261 concat the first hit is at char ~2262651 in
+`chunk-nhm4zepz.js` — a **Zod schema definition**:
+
+```js
+Kie = m(() => c({ type: R('assistant'), ..., parent_tool_use_id: s().nullable(), ..., session_id: s(), ... }))
+```
+
+There `s` is Zod's `string()`. `s` also happens to be imported into the
+injection chunk under an unrelated meaning, so
+`session_id:s()` would have compiled, passed `node --check`, passed the
+rebundler's per-chunk esbuild check — and emitted a Zod schema object as
+`session_id` on every background sub-agent stream event at runtime.
+
+### Chunk-scoping helpers in `apply.mjs`
+
+| Helper                        | What it does                                                                                                                   |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `chunkAt(off)`                | `{name, start, end}` of the chunk containing `off` in the CURRENT `src` (recomputed per call — offsets shift as patches apply) |
+| `prefixWindow(off, size)`     | `src.slice(off-size, off)` clamped to the chunk — for lookback windows                                                         |
+| `suffixWindow(off, size)`     | `src.slice(off, off+size)` clamped to the chunk — for lookahead windows                                                        |
+| `findSessionIdFn(off, label)` | Resolves the in-scope `session_id:X()` getter by scanning ONLY `off`'s chunk, and only sites adjacent to `parent_tool_use_id`  |
+| `litReplace(hay, ndl, rep)`   | First-occurrence literal replace — `String.replace` interprets `$&`/`$1` in the replacement and minified names contain `$`     |
+
+On a pre-split (monolithic) bundle there are no delimiters, `chunkAt` reports
+`(monolithic bundle)` spanning the whole file, and every helper degrades to its
+un-clamped behaviour. The patch therefore still applies to older CLIs.
+
+`findSessionIdFn` requires **exactly one** candidate name in the chunk and
+aborts otherwise. In 2.1.261's `chunk-9c0rs7w4.js` it resolves `Y()` (18 SDK
+yields); the stray `session_id:s()` is rejected because no `parent_tool_use_id`
+sits within 400 chars of it.
+
+### All seven injections land in one chunk
+
+Every anchor this patch touches in 2.1.261 lives in
+`B:/~BUN/root/chunk-9c0rs7w4.js` (5.59 MB, the main agent-loop chunk):
+
+| Patch | Char offset (pristine) | Site                                                      |
+| ----- | ---------------------- | --------------------------------------------------------- |
+| C     | 8034064                | `WOe()` SDK converter, `case"progress":` chain            |
+| D     | 7449502 / 7616642      | `lht()` text extractor / remote-task `.output` writer map |
+| F2    | 8142069                | `dw()` sub-agent generator, IVe/fHo pre-filter tail       |
+| F     | 8143129                | `dw()` sub-agent generator, RVY gate                      |
+| E     | 8207467                | `EV()` unified runner, for-await api_error anchor         |
+| B     | 8259245                | `Task.call()` `$s` onMessage callback, collection push    |
+| A     | 8260605                | `Task.call()` `$s` callback, content-block filter         |
 
 ## The Problem
 
@@ -724,51 +808,98 @@ for await (let MSG of b4({...})) {
 
 **Fix:** Inside the `IVe` branch, after the `FHO()` side-effect call and before the BUF flush, yield the message when it is a `stream_event`. This lets it flow through to `nt`/BVe as designed.
 
-**Anchor** (unique, 1 match):
+#### Anchor — matched in TWO parts (v2.1.261+)
 
-```
-if(CB?.(),IVe(MSG)){FHO(MSG,CFG,N),yield*BUF,BUF.length=0;continue}
-```
-
-More precisely as a regex (minified names vary):
-
-```
-if(<CB>?.(),<IVe>(<MSG>)){<FHO>(<MSG>,<CFG1>,<CFG2>),yield*<BUF>,<BUF>.length=0;continue}
-```
-
-**Before:**
+In v2.1.197–v2.1.241 the branch was one contiguous string. **v2.1.261 interposed
+a stream-mode bookkeeping statement** between the branch head and the `fHo` call,
+so a single regex no longer spans it (this is why the pre-2.1.261 pattern
+reported "pre-filter not found" and F2 _silently skipped_ on a bundle that very
+much still has one):
 
 ```js
-if(CB?.(), IVe(MSG)){FHO(MSG, CFG, N), yield*BUF, BUF.length=0; continue}
+// v2.1.261, char ~8142069 in chunk-9c0rs7w4.js — inside async function*dw()
+for await (let Rn of PL({...})) {
+  if (en?.(), bq(Rn)) {                                  // ← HEAD (the IVe gate)
+    if (tn && Rn.type === "stream_event") {              // ← NEW in v2.1.261
+      if (Rn.event.type === "message_start") Gm();
+      else if (Rn.event.type === "message_stop") km()
+    }
+    lut(Rn, Jd, ZS), yield*la, la.length = 0; continue   // ← TAIL (fHo + flush)
+  }
+  ...
+}
+```
+
+So `apply.mjs` matches the **tail** (unique in the whole concat), then requires
+exactly one gate **head** within 600 chars before it (117 in v2.1.261), and
+rewrites only the tail. Anything upstream splices into the gap is left
+byte-for-byte intact, so the next interposed statement will not break this.
+
+```
+TAIL (unique, 1 match):   <FHO>(<MSG>,<CFG1>,<CFG2>),yield*<BUF>,<BUF>.length=0;continue}
+HEAD (1 match in window): if(<CB>?.(),<IVe>(<MSG>)){
+```
+
+The head/tail split additionally asserts `gateArg === msgVar` — the gate must
+test the same message the handler consumes, or the two matches belong to
+different statements.
+
+**Before** (v2.1.261 names: CB=`en`, IVe=`bq`, MSG=`Rn`, FHO=`lut`, CFG=`Jd`/`ZS`, BUF=`la`):
+
+```js
+lut(Rn, Jd, ZS), yield*la, la.length = 0; continue}
 ```
 
 **After:**
 
 ```js
-if(CB?.(), IVe(MSG)){/*PATCHED:subagent-F2*/FHO(MSG, CFG, N),
-  MSG.type==="stream_event"&&(yield MSG),
-  yield*BUF, BUF.length=0; continue}
+lut(Rn, Jd, ZS), /*PATCHED:subagent-F2*/Rn.type === "stream_event" && (yield Rn), yield*la, la.length = 0; continue}
 ```
 
-The `(yield MSG)` expression is valid inside a generator body. It is wrapped in `&&` short-circuit so it only runs when `MSG.type==="stream_event"`.
+The `(yield MSG)` expression is valid inside a generator body. It is parenthesised
+(so it is a legal `&&` operand) and short-circuited so it only runs for
+stream_events. The comma operator binds loosest, so the statement parses as
+`(lut(...)), (Rn.type==="stream_event" && (yield Rn)), (yield*la), (la.length=0)`.
 
-**Safety check:** `apply.mjs` verifies that Patch F's marker is within 6000 chars downstream of the F2 injection site (confirms we're inside the correct sub-agent generator, not a different for-await loop).
+**Safety checks:**
 
-**Applicability:** F2 auto-skips on pre-2.1.197 CLIs where the `IVe/fHo` pre-filter does not exist. Patch F alone was sufficient there.
+- Tail must match exactly once in the concat.
+- Exactly one gate head in the 600-char window before it, testing the same message var.
+- Patch F's marker must appear within 6000 chars downstream, **in the same chunk**
+  (confirms we're inside the correct sub-agent generator, not a different for-await loop).
+
+**Applicability / fail-loud rule:** F2 auto-skips on pre-2.1.197 CLIs where the
+`IVe/fHo` pre-filter does not exist (Patch F alone sufficed there). But if the
+gate **head** is found and the tail is not, `apply.mjs` now **hard-errors**
+instead of skipping — a silent skip there ships a build with sub-agent streaming
+quietly dead, which is exactly what happened on the first 2.1.261 run.
 
 **How to find this code:**
 
 ```bash
-bundle-analyzer find cli.js "IVe(MSG)){FHO" --compact
-# Or search for the buffer flush pattern unique to this generator:
-bundle-analyzer find cli.js "yield*BUF,BUF.length=0;continue" --compact
+# The buffer-flush tail is the most distinctive fragment (1 match):
+bundle-analyzer.cmd find vendor/claude-cli/cli.js "yield*la,la.length=0;continue" --compact
+# Generic (names vary) — regex for the flush shape:
+bundle-analyzer.cmd find vendor/claude-cli/cli.js 'yield\*[\w$]+,[\w$]+\.length=0;continue\}' --regex --compact
 ```
 
-The `IVe` function is `Bam.has(MSG.type)` — find it by:
+The `IVe` gate is a `Set.has(MSG.type)` predicate. In v2.1.261 it is `bq`:
+
+```js
+var OCo = ['stream_event', 'stream_request_start', 'response_length', ...Lit] // Lit = ["compact_progress","sdk_status","stream_mode"]
+var DCo = new Set(OCo)
+function bq(e) {
+  return DCo.has(e.type)
+}
+```
+
+Find it by:
 
 ```bash
-bundle-analyzer find cli.js '"stream_event"' --compact
-# Look for a Set that includes "stream_event" among other streaming message types
+bundle-analyzer.cmd find vendor/claude-cli/cli.js '"stream_request_start"' --compact
+# Look for the Set literal that also contains "stream_event"; the function
+# immediately after it is the gate. NOTE: `bq` is defined twice in the concat
+# (the other is a Zod helper in chunk-yfgje4dy.js) — chunk-local names collide.
 ```
 
 ---
@@ -938,34 +1069,92 @@ function* if8(A) {
 }
 ```
 
+#### v2.1.261 — `agent_progress` moved into a predicate helper
+
+The injection site is unchanged, but the **context check** that proves we found
+the right `bash_progress` had to change. Up to v2.1.241 the converter tested the
+literal inline, so `agent_progress` sat a few hundred chars before the anchor.
+v2.1.261 extracted it into a predicate + a dedicated sub-generator:
+
+```js
+// v2.1.261, chunk-9c0rs7w4.js
+function lmn(e) {
+  return e.type === 'progress' && (e.data.type === 'agent_progress' || e.data.type === 'skill_progress')
+}
+function* cmn(e, t) { /* the agent_progress → assistant/user yields, extracted out of WOe */ }
+
+function* WOe(e, t, r) {            // ← the ZhA/ihA/ATt SDK converter
+  switch (e.type) {
+    case 'assistant': ...
+    case 'progress':
+      if (lmn(e)) yield* cmn(e, r)                                       // agent_progress
+      else if (e.data.type === 'repl_tool_call') yield {...}
+      /* ← Patch C injects here ← */
+      else if (e.data.type === 'bash_progress' || e.data.type === 'powershell_progress') {...}
+      else if (e.data.type === 'tool_heartbeat') yield {...}
+      else if (e.data.type === 'agent_api_retry') yield {...}
+      break
+    case 'user': ...
+  }
+}
+```
+
+The old check was `src.slice(anchorIdx-1500, anchorIdx).includes('agent_progress')`
+— now 2224 chars away, so it failed with
+`ERROR: bash_progress found but not in expected ZhA context.` The replacement is
+structural rather than a wider window:
+
+1. The anchor must match **exactly once** in the concat (new assertion).
+2. `case"progress":` must appear within 1500 chars before it (chunk-clamped) —
+   this pins us to the converter's progress dispatch.
+3. The dispatch chain from `case"progress":` to the anchor must route
+   agent_progress — **either** the literal appears inline (≤ v2.1.241) **or** the
+   chain opens with `if(PRED(x))` and `function PRED(x){…"agent_progress"…}` is
+   defined **in the same chunk** (v2.1.261).
+4. The session-id getter is the **nearest** `session_id:X()` before the anchor
+   (a sibling yield in the same switch arm, so guaranteed in scope) — `Y()` in v2.1.261.
+
+**After (v2.1.261, real output):**
+
+```js
+...,session_id:Y(),uuid:e.uuid};/*PATCHED:subagent-C*/else if(e.data.type==="agent_stream_event"){yield{type:"stream_event",event:e.data.event,parent_tool_use_id:e.parentToolUseID,session_id:Y(),uuid:e.uuid}}else if(e.data.type==="bash_progress"||...
+```
+
 **Why this is safe:**
 
-- `ZhA` is a generator function — our injected `yield` integrates naturally
+- `ZhA`/`WOe` is a generator function — our injected `yield` integrates naturally
 - The yielded message matches the SDK's `stream_event` Zod schema:
   `{type, event, parent_tool_use_id, uuid, session_id}`
-- `A.parentToolUseID` comes from `U1q()` wrapping (set by the tool executor)
-- `A.uuid` comes from `U1q()` wrapping (generated by `_f()`)
-- `U6()` is the session ID function (same one used by all other yields in
-  this function)
+- `A.parentToolUseID` comes from `U1q()`/`H8e()` wrapping (set by the tool executor)
+- `A.uuid` comes from the same wrapping
+- `U6()`/`Y()` is the session ID function (same one used by all other yields in
+  this function, hence in scope in this chunk)
 - The `else if` placement means it only triggers for the new
   `agent_stream_event` type — existing `agent_progress` and
   `bash_progress`/`powershell_progress` paths are untouched
+- `if(c) yield{…};/*comment*/else if(…)` is valid: the `;` terminates the
+  consequent ExpressionStatement, and a block comment carries no line terminator
 
 **How to find this code in a new version:**
-Search for a generator function that contains both `agent_progress` and
-`bash_progress` string literals, with `parent_tool_use_id` in yields:
+Search for a generator that yields SDK messages with `parent_tool_use_id` and
+contains a `case"progress":` dispatch:
 
-```
-function\*.*agent_progress.*bash_progress
-```
-
-Or search for the `bash_progress` anchor specifically:
-
-```
-else if(A.data.type==="bash_progress"||A.data.type==="powershell_progress"){
+```bash
+bundle-analyzer.cmd find vendor/claude-cli/cli.js 'case"progress":' --compact
+# Then the bash_progress arm inside it:
+bundle-analyzer.cmd find vendor/claude-cli/cli.js 'else if(e.data.type==="bash_progress"' --compact
 ```
 
-(Older versions may only have `bash_progress` without `powershell_progress`.)
+Generic regex (older versions may only have `bash_progress`):
+
+```
+else if\([\w$]+\.data\.type==="bash_progress"(\|\|[\w$]+\.data\.type==="powershell_progress")?\)\{
+```
+
+**Do not** confuse this with the `[engine] yield-twin` converter in
+`chunk-rq9v9vtq.js` (~char 13776288), which also handles `bash_progress` but is a
+separate engine's message twin — it has **no** `agent_progress` branch at all,
+which is exactly what check (3) above is testing for.
 
 ### Patch D — .output file thinking inclusion
 
@@ -994,23 +1183,58 @@ The same change is applied to the background agent polling map.
 
 - v2.1.38: `FM6` at char ~9019631
 - v2.1.39: `sM6` at char ~9022069
-- The function structure is stable: `function NAME(A, q="Execution completed")`
-  followed by `GN(A)` / `PN(A)` / `HN(A)` call (get-last-assistant-message),
-  then `.filter().map().join()`
+- v2.1.87+: the inline `.filter().map().join()` was extracted into a shared
+  helper (`S3(content, "\n")`), so the patch **replaces the helper call** with an
+  inline filter+map that includes thinking, rather than editing the helper (which
+  is used globally).
+- v2.1.261: `lht` at char ~7449502, helper is `Hr` —
+  `function lht(e,t="Execution completed"){let r=Zm(e);if(!r)return t;return Hr(r.message.content,`\n`)||t}`.
+  Note `Hr` here is an **imported** binding; there are five unrelated `Hr`
+  definitions elsewhere in the concat, which is another reason the patch inlines
+  rather than chasing the helper.
+- The signature is stable across all of them:
+  `function NAME(A, q="Execution completed")` followed by a
+  get-last-assistant-message call, then either `.filter().map().join()` or the
+  helper call.
+
+**Background polling map (v2.1.261, char ~7616642):** the second half of Patch D
+edits the remote/cloud task poller that appends to the `.output` file:
+
+```js
+let Br = Mn.newEvents
+  .map((Ho) => {
+    if (Ho.type === 'assistant')
+      return Ho.message.content
+        .filter((is) => is.type === 'text') // ← patched
+        .map((is) => ('text' in is ? is.text : '')) // ← patched
+        .join(`\n`)
+    return S(Ho) // JSON.stringify
+  })
+  .join(`\n`)
+if (Br) XNe(e, Br + `\n`)
+```
+
+This sub-patch writes **no marker of its own**, so the final marker verification
+cannot catch its absence — `apply.mjs` therefore hard-errors when the map is not
+found rather than shipping background `.output` files with thinking silently
+missing.
 
 **How to find this code in a new version:**
-Search for the unique function signature with "Execution completed" default:
+Search for the unique function signature with "Execution completed" default
+(1 match in the 2.1.261 concat):
 
-```
-function.*="Execution completed".*\.filter.*type==="text"
+```bash
+bundle-analyzer.cmd find vendor/claude-cli/cli.js '"Execution completed"' --compact
 ```
 
 For the background polling map, search for:
 
-```
-\.map.*type==="assistant".*\.filter.*type==="text".*\.join.*return.*\(
+```bash
+bundle-analyzer.cmd find vendor/claude-cli/cli.js '\.map\(\([\w$]+\)=>\{if\([\w$]+\.type==="assistant"\)' --regex --compact
 ```
 
+The 2.1.261 concat has four hits for that shape; only one continues into
+`.filter(...type==="text").map(...).join(`\n`);return X(msg)}` — that is the one.
 This pattern is unique — it's the only place that maps over messages,
 extracts text from assistant messages, and JSON-stringifies everything else.
 
@@ -1028,12 +1252,39 @@ Patch E writes sub-agent messages directly to stdout as newline-delimited JSON.
 In v2.1.197, `iu8()` and both re-background loops were unified into `BVe()`.
 BVe takes `shouldNotifyOwner:d`, defaulted into a local alias — `let p=d??(()=>!0)` in
 v2.1.197–v2.1.207, `let m=d??(()=>!0)` in v2.1.219+ (new `onRunSettled:p,onTerminalSuccess:f`
-params claimed the old letters). The gate returns `Fe` (the done/backgrounded flag) on the
-sync Task path, or `true` when no shouldNotifyOwner was passed (spawned/background path).
-**The alias name MUST be extracted structurally** from
-`shouldNotifyOwner:(V1)[^)]*){let (V2)=V1??(()=>!0)` — hardcoding it caused a silent semantic
+params claimed the old letters), `de=N??(()=>!0)` in v2.1.261. The gate returns `Fe` (the
+done/backgrounded flag) on the sync Task path, or `true` when no shouldNotifyOwner was
+passed (spawned/background path).
+**The alias name MUST be extracted structurally** — hardcoding it caused a silent semantic
 break on v2.1.219 (`p()` called `onRunSettled` instead: gate always falsy → background
 stream_events dropped, run-settled callback fired per message).
+
+**v2.1.261 — the alias is no longer adjacent to the signature.** Through v2.1.241
+the defaulting was the runner's first statement, so one regex covered signature +
+alias (`shouldNotifyOwner:(V1)[^)]*){let (V2)=V1??(()=>!0)`). v2.1.261 opens the
+body with watchdog/registry wiring first, and the alias became a `let`-continuation:
+
+```js
+// v2.1.261, char ~8203230 in chunk-9c0rs7w4.js — EV() is the BVe unified runner
+async function EV({ taskId:e, abortController:t, makeStream:r, metadata:o, description:d,
+                    toolUseContext:f, taskRegistry:y, agentIdForCleanup:k, enableSummarization:v,
+                    getWorktreeResult:P, onMessage:M, shouldNotifyOwner:N,
+                    reviewInlineHandoff:F=!1, onRunSettled:U, onTerminalSuccess:q }) {
+  let re = qUt(e, t); KUt(e, k, t), ghe(k);
+  let ue = () => { re(), U?.() },
+      de = N ?? (() => !0),          // ← THE GATE (57 chars into the body)
+      ye, be = () => {...}
+```
+
+So the extraction is now two-step:
+
+1. Find the runner signature `shouldNotifyOwner:(PARAM)[^)]*\)\{` (exactly one
+   match in the chunk-clamped 15 KB prefix before the anchor) → `PARAM = N`.
+2. Find `(?:let |,)(ALIAS)=PARAM\?\?\(\(\)=>!0\)` within 1500 chars after the
+   signature (exactly one match) → `ALIAS = de`.
+
+`hasNativeRelay` is still read off the **signature** text (`onRunSettled:` present
+→ skip the assistant/user stdout writes; the native relay covers them).
 
 **Anchor** (unique in BVe's for-await body):
 
@@ -1080,11 +1331,30 @@ The captured `VAR` (shown as `CTX` above; `i` in v2.1.207) is then used for `.to
 **Verify anchor uniqueness:**
 
 ```bash
-bundle-analyzer find cli.js 'ce.type==="system"&&ce.subtype==="api_error")continue' --compact
-# Should match exactly once (inside BVe's for-await loop body)
+bundle-analyzer.cmd find vendor/claude-cli/cli.js 'ls.type==="system"&&ls.subtype==="api_error")continue' --compact
+# Generic (names vary) — note the leading `if(WATCHDOG(),` is what makes it unique;
+# there are two other bare `type==="system"&&x.subtype==="api_error")continue` sites
+# in the 2.1.261 concat that the watchdog prefix excludes:
+bundle-analyzer.cmd find vendor/claude-cli/cli.js 'if\([\w$]+\(\),[\w$]+\.type==="system"&&[\w$]+\.subtype==="api_error"\)continue;' --regex --compact
 ```
 
-Then verify `toolUseContext:` appears in the function signature ~3.5KB before the anchor, capturing the minified variable name after the colon.
+Then verify `toolUseContext:` appears in the function signature before the anchor
+(~4.2 KB in v2.1.261), capturing the minified variable name after the colon.
+
+**Real v2.1.261 output** (gate `de`, ctx `f`, session `Y`, msg `ls`, arr `ke`):
+
+```js
+/*PATCHED:subagent-E*/if(ls.type==="stream_event"){if(de())try{process.stdout.write(JSON.stringify({type:"stream_event",event:ls.event,parent_tool_use_id:f.toolUseId,session_id:Y(),uuid:globalThis.crypto.randomUUID()})+"\n")}catch(_e){}continue}if(vn(),ls.type==="system"&&ls.subtype==="api_error")continue;...;ke.push(ls),...
+```
+
+**Known trade-off (unchanged since v2.1.197):** the injection sits _before_ the
+watchdog call `vn()`, so `continue`d stream_events do not reset the async-agent
+stall watchdog (`CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS`, default ~5 min). The
+watchdog defers while tool uses are in flight, and a single turn streaming for
+5 min with no other message is not realistic, so this has never bitten — but if a
+long-thinking sub-agent is ever aborted with
+`[AsyncAgent …] stall watchdog fired … with no progress`, move the injection to
+_after_ the `api_error` `continue;` instead of before the watchdog.
 
 #### v2.1.196 and earlier — Legacy re-background for-await loops
 
@@ -1436,11 +1706,44 @@ If a future CLI version changes the code structure enough that pattern
 matching fails, the script exits with an error. In that case:
 
 1. Check if the bug is fixed upstream — test if sub-agent thinking/text/stream events appear in the SDK stream without patching.
-2. If not fixed, use `/bundle-analyzer` to find equivalent functions using the search patterns in each patch section above.
-3. Update regex patterns in `apply.mjs`. Follow the conventions: `const V = '[\\w$]+'` for minified identifiers, content-pattern anchors not name-based.
-4. Update this README with the new shapes and version progression.
+2. If not fixed, use `bundle-analyzer` to find equivalent functions using the
+   search patterns in each patch section above. On Windows Git Bash call it with
+   the explicit extension: `bundle-analyzer.cmd find vendor/claude-cli/cli.js '<literal>' --compact`.
+   It works fine on the concatenated chunk bundle (it is plain JS text search +
+   function extraction).
+3. Update regex patterns in `apply.mjs`. Follow the conventions: `const V = '[\\w$]+'`
+   for minified identifiers, content-pattern anchors not name-based, uniqueness
+   assertions (fail on 0 **or** >1 matches — never "first match wins"), and
+   chunk-clamped windows for anything whose capture ends up inside injected code.
+4. **A "skipped, not applicable" result on a modern CLI is a failure.** Check the
+   applicability flags (`patchF2Applicable`, `patchGApplicable`) against the
+   version you are actually patching.
+5. Update this README with the new shapes and version progression.
 
 ## Verification
+
+Static (no engine binary needed):
+
+1. `node patch/subagent-streaming/apply.mjs` against a pristine `cli.js` — all
+   applicable markers report OK (F, F2, A, B, C, D, E; G skips on v2.1.197+).
+2. Run it again — every sub-patch reports "Already applied", exit 0.
+3. **Read the run log, don't just check the exit code.** Every dynamically
+   captured name is printed (session-id fn, gate alias, toolUseContext var,
+   callback/parent/agent vars, chunk name). On a chunked bundle, two sub-patches
+   reporting _different_ names for the same helper is the tell that one of them
+   captured out of scope.
+4. Extract the modified chunk and syntax-check it:
+   ```bash
+   # split on the `// @bun-chunk` delimiter lines, write the chunk you touched
+   # to a .mjs file, then:
+   node --check <chunk>.mjs
+   ```
+   The whole concat will NOT parse as one module (it is 1,631 ESM modules) —
+   check per chunk. Verify the delimiter count is unchanged.
+5. `node patch/apply-all.mjs` — all patches pass together.
+
+Behavioural (`patch/subagent-streaming/test.mjs`) requires the real rebundled
+`bun-claude` binary and live API calls; it cannot run against a bare concat.
 
 After patching, launch a session and ask the model to use the Task tool
 (e.g., "use the Task tool to read file X"). In the console you should see:
@@ -1460,33 +1763,37 @@ Where the message content includes `type:"thinking"` blocks.
 
 ## Key Functions Reference
 
-| Name (v2.1.38 → v2.1.49 → v2.1.197)              | Purpose                                                            |
-| ------------------------------------------------ | ------------------------------------------------------------------ |
-| `RVY()` → `T7z()` → (still present, RVY-gate)    | cR/jy/Wy yield filter (gates what the generator yields to callers) |
-| `dR()` → (merged) → BVe()                        | Sub-agent execution generator / unified runner (v2.1.197+)         |
-| `UEA()` → `Mg8()` → `Tko()`/`FVe()`              | Extract text-only result from agent messages                       |
-| `FM6()` → `r_1()` → (varies)                     | Extract text from last assistant message                           |
-| `ZhA()` → `if8()` → `ATt()`                      | Convert internal messages to SDK output format                     |
-| `U1q()` → `O6q()` → (varies)                     | Wrap progress data into progress message format                    |
-| `iO()` → `W_()` → (varies)                       | Normalize messages to individual content blocks                    |
-| `_f()` → `nk()` → `globalThis.crypto.randomUUID` | UUID generator for message wrapping (web crypto in v2.1.197+)      |
-| `iu8()` → `iu8()` → (merged into BVe)            | Standalone background agent runner (removed in v2.1.197)           |
-| `IVe()` / `Bam`                                  | Pre-filter in sub-agent generator (v2.1.197+): `Bam.has(MSG.type)` |
-| `FHO()` / `fHo()`                                | Streaming display handler called inside IVe branch (v2.1.197+)     |
-| `BVe()`                                          | Unified sub-agent runner (sync + background) (v2.1.197+)           |
+| Name (v2.1.38 → v2.1.49 → v2.1.197 → **v2.1.261**) | Purpose                                                            |
+| -------------------------------------------------- | ------------------------------------------------------------------ |
+| `RVY()` → `T7z()` → (RVY-gate) → **`w2o()`**       | cR/jy/Wy yield filter (gates what the generator yields to callers) |
+| `dR()` → (merged) → BVe() → **`EV()`**             | Sub-agent execution generator / unified runner (v2.1.197+)         |
+| `UEA()` → `Mg8()` → `Tko()`/`FVe()`                | Extract text-only result from agent messages                       |
+| `FM6()` → `r_1()` → (varies) → **`lht()`**         | Extract text from last assistant message ("Execution completed")   |
+| `ZhA()` → `if8()` → `ATt()` → **`WOe()`**          | Convert internal messages to SDK output format                     |
+| `U1q()` → `O6q()` → (varies) → **`H8e()`**         | Wrap progress data into progress message format                    |
+| `iO()` → `W_()` → (varies) → **`wf()`**            | Normalize messages to individual content blocks                    |
+| `_f()` → `nk()` → `globalThis.crypto.randomUUID`   | UUID generator for message wrapping (web crypto in v2.1.197+)      |
+| `iu8()` → `iu8()` → (merged into BVe)              | Standalone background agent runner (removed in v2.1.197)           |
+| `IVe()` / `Bam` → **`bq()` / `DCo`**               | Pre-filter in sub-agent generator (v2.1.197+): `Set.has(MSG.type)` |
+| `FHO()` / `fHo()` → **`lut()`**                    | Streaming display handler called inside IVe branch (v2.1.197+)     |
+| `BVe()` → **`EV()`**                               | Unified sub-agent runner (sync + background) (v2.1.197+)           |
+| **`dw()`** (v2.1.261)                              | The sub-agent query generator (`async function*`) holding F + F2   |
+| **`lmn()` / `cmn()`** (v2.1.261)                   | agent_progress predicate + extracted converter sub-generator       |
+| **`Y()`** (v2.1.261, imported)                     | Session-id getter used by SDK yields in `chunk-9c0rs7w4.js`        |
 
-**v2.1.197 patch inventory (A–G + F2):**
+**Patch inventory (A–G + F2), with what each re-anchor had to change:**
 
-| Patch | Marker        | What it does                                                                    | v2.1.197 notes                                                                            |
-| ----- | ------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| F     | `subagent-F`  | RVY gate bypass — yield stream_event before it's filtered in cR                 | Still present; now unreachable for stream_events (F2 catches them upstream), but harmless |
-| F2    | `subagent-F2` | Yield stream_event past IVe/fHo pre-filter in sub-agent generator               | NEW in v2.1.197; auto-skips on older CLIs                                                 |
-| A     | `subagent-A`  | Remove content-block type filter from progress callback                         | No structural change in v2.1.197                                                          |
-| B     | `subagent-B`  | Intercept stream_event before Ye.push in nt-callback / O1.push in for-await     | v2.1.197: targets nt-callback (`ntCallbackRe`); uses `return` not `continue`              |
-| C     | `subagent-C`  | Add agent_stream_event handler in ZhA/ihA/ATt                                   | No structural change in v2.1.197                                                          |
-| D     | `subagent-D`  | Include thinking blocks in .output file                                         | No structural change in v2.1.197                                                          |
-| E     | `subagent-E`  | Background agent stdout (BVe for-await in v2.1.197+; legacy loops in v2.1.196-) | v2.1.197: targets BVe anchor; uses `s.toolUseId`                                          |
-| G     | `subagent-G`  | iu8() standalone background stdout (≤v2.1.196)                                  | Auto-skips in v2.1.197+ (iu8 merged into BVe)                                             |
+| Patch | Marker        | What it does                                                                    | v2.1.197 notes                                                                            | v2.1.261 notes                                                                                    |
+| ----- | ------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| F     | `subagent-F`  | RVY gate bypass — yield stream_event before it's filtered in cR                 | Still present; now unreachable for stream_events (F2 catches them upstream), but harmless | Unchanged (`w2o` gate, `if(w2o(Rn)){` braced call). Lookback for the generator decl is now 14.5 k |
+| F2    | `subagent-F2` | Yield stream_event past IVe/fHo pre-filter in sub-agent generator               | NEW in v2.1.197; auto-skips on older CLIs                                                 | **Re-anchored**: head/tail split (a bookkeeping stmt was interposed); fails loud on head-no-tail  |
+| A     | `subagent-A`  | Remove content-block type filter from progress callback                         | No structural change in v2.1.197                                                          | Unchanged (v119 shape still matches: `let ws=xs.message.content[0];if(!km&&…)continue;`)          |
+| B     | `subagent-B`  | Intercept stream_event before Ye.push in nt-callback / O1.push in for-await     | v2.1.197: targets nt-callback (`ntCallbackRe`); uses `return` not `continue`              | Unchanged (`ntCallbackRe` still matches); nearby-window now chunk-clamped                         |
+| C     | `subagent-C`  | Add agent_stream_event handler in ZhA/ihA/ATt                                   | No structural change in v2.1.197                                                          | **Re-anchored**: `agent_progress` moved into predicate `lmn()`; context check is now structural   |
+| D     | `subagent-D`  | Include thinking blocks in .output file                                         | No structural change in v2.1.197                                                          | Unchanged anchors; `String.replace` swapped for `litReplace` (`$` in minified names)              |
+| E     | `subagent-E`  | Background agent stdout (BVe for-await in v2.1.197+; legacy loops in v2.1.196-) | v2.1.197: targets BVe anchor; uses `s.toolUseId`                                          | **Re-anchored**: gate alias no longer adjacent to the signature; session-id fn now chunk-scoped   |
+| G     | `subagent-G`  | iu8() standalone background stdout (≤v2.1.196)                                  | Auto-skips in v2.1.197+ (iu8 merged into BVe)                                             | Still auto-skips. `EV()` destructures the same first ten fields, but continues past               |
+|       |               |                                                                                 |                                                                                           | `getWorktreeResult:P,` so the `\}\)` terminator keeps the signature regex from false-matching     |
 
 **Note:** Names change between versions — always use content patterns, not
 names. Use `bundle-analyzer find` with string literals as anchors.
@@ -1631,6 +1938,100 @@ handles all content types. No change needed to `et()`.
   queuedCommands. This patch addresses a different problem: the sub-agent's
   individual messages (thinking, text, stream events) never being forwarded
   through the progress callback.
+
+## Syntax & scope pitfalls
+
+### Pitfall: capturing a helper name from the wrong chunk
+
+The v2.1.261 bundle is a concatenation of 1,631 independently-minified ESM
+chunks. A whole-file search for a helper hands you a name that is only valid in
+some _other_ module.
+
+```js
+// WRONG — first hit is a Zod schema in chunk-nhm4zepz.js where `s` is string()
+const sessFnRe = /session_id:([\w$]+)\(\).*?parent_tool_use_id/
+const sessFn = src.match(sessFnRe)[1] // → "s"
+
+// CORRECT — scan only the injection site's chunk, and only real SDK yields
+const sessFn = findSessionIdFn(anchorIdx, 'Patch E (BVe)') // → "Y"
+```
+
+This compiles, passes `node --check`, passes the rebundler's per-chunk esbuild
+check, and then emits a Zod object as `session_id` at runtime. **Every captured
+identifier that ends up inside injected code must come from a chunk-clamped
+window** (`prefixWindow` / `suffixWindow` / `chunkAt`).
+
+### Pitfall: `String.prototype.replace` in patch construction
+
+```js
+// WRONG — `$1`, `$&`, `` $` `` in the REPLACEMENT are substitution patterns,
+// and minified identifiers legitimately contain `$`
+src = src.replace(oldBg, newBg)
+
+// CORRECT
+src = src.slice(0, bgIdx) + newBg + src.slice(bgIdx + oldBg.length)
+// or litReplace(hay, needle, replacement) for sub-string edits
+```
+
+Search _patterns_ passed as strings are literal — only the replacement is
+interpreted. This bites silently, and only for some minified name sets.
+
+### Pitfall: silent skip on a reshaped anchor
+
+Patch F2 and Patch D's background map both used to skip quietly when their
+pattern stopped matching, shipping a build with sub-agent streaming (or
+background `.output` thinking) dead. Both now distinguish _feature absent_ from
+_feature reshaped_ and hard-error on the latter. When adding an optional
+sub-patch, always give it either its own verified marker or a fail-loud branch.
+
+### Pitfall: `continue` vs `return` in the injected exit
+
+`stream_event` messages lack `.message`/`.uuid` — pushing them into a collection
+array crashes downstream (`NAe` reads `.message.content`). The exit keyword
+depends on the host: **for-await loop body → `continue`** (Patches E, F2, and the
+legacy Patch B), **arrow-function callback → `return`** (Patch B on v2.1.197+,
+selected by the `isNtCallback` flag).
+
+Always run `node --check` on the modified chunk after applying (extract it by its
+`// @bun-chunk` delimiters and check it as an `.mjs` file — the whole concat will
+not parse as a single module).
+
+## Discovery Method (v2.1.261 re-anchor — chunked bundle)
+
+1. **Ran `apply.mjs` against the pristine 2.1.261 concat.** F, A, B applied; F2
+   reported "pre-filter not found — pre-v2.1.197 CLI"; C died with
+   `ERROR: bash_progress found but not in expected ZhA context.`
+2. **Treated the F2 "skip" as a failure, not a pass.** The CLI is 2.1.261, so a
+   pre-2.1.197 skip was nonsense. Found the reshaped branch by grepping the
+   distinctive flush tail (`yield*[\w$]+,[\w$]+\.length=0;continue}`, 1 match) —
+   upstream had interposed a stream-mode bookkeeping `if` between the gate head
+   and the `fHo` call. Confirmed the gate is still live by resolving `bq` →
+   `DCo = new Set(["stream_event", …])`. Rewrote F2 as head+tail with a fail-loud
+   head-without-tail branch.
+3. **Diagnosed Patch C** by measuring distances from the anchor: `agent_progress`
+   had moved from a few hundred chars to 2224, because the branch was extracted
+   into `function lmn(e){…}` + `function*cmn(e,t){…}`. Replaced the "widen the
+   window" reflex with a structural check (`case"progress":` + inline literal _or_
+   a same-chunk predicate definition), plus a new anchor-uniqueness assertion.
+4. **Found Patch E's gate silently unmatchable** — `shouldNotifyOwner:N…){let
+re=qUt(e,t);…,de=N??(()=>!0)`: the alias is 57 chars into the body now, not
+   adjacent to `){`. Split it into signature-capture + bounded alias lookup.
+5. **Caught the worst bug by reading the run log, not the exit code.** Patch C
+   logged `Session ID function: Y()` while Patch E logged `Session ID function:
+s()` — two different names for the same thing in the same injection chunk.
+   Traced `s` to a Zod schema in `chunk-nhm4zepz.js` (see the pitfall above) and
+   added `findSessionIdFn`, which scans only the anchor's chunk and requires one
+   unambiguous candidate. **This is the failure mode a chunked bundle introduces
+   that no syntax check catches.**
+6. **Audited every remaining window** that captures an identifier or gates on a
+   marker and clamped it to the chunk (`prefixWindow`/`suffixWindow`): Patch F's
+   generator-decl lookback, Patch B's `nearby`, Patch E's `sigBefore` and push
+   window, Patch F2's marker-proximity check.
+7. **Verified the output, not the exit code.** Dumped all seven injection sites
+   with surrounding context and read them; extracted the one modified chunk
+   (`chunk-9c0rs7w4.js`) and ran `node --check` on it (pristine baseline checked
+   too); confirmed the delimiter count is unchanged (1,631) and the size delta is
+   +873 bytes; re-ran to confirm idempotency.
 
 ## Discovery Method (v2.1.197 re-anchor)
 

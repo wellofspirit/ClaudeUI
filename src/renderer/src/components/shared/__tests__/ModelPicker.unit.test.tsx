@@ -6,11 +6,13 @@
  *   - activating the filter hides non-free models AND groups that become empty
  *   - a stale active filter is ignored when the list loses all free models
  *     (chip unmounts → user can't un-toggle → must not dead-end empty)
+ *   - an OPEN menu (both variants) is an Escape layer, and a CLOSED one is not
  */
 
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent, within } from '@testing-library/react'
 import { EnginePicker, ModelPicker, type ModelDisplay } from '../InlinePickers'
+import { __escapeLayerCount } from '../use-escape-layer'
 
 const claudeModel: ModelDisplay = {
   value: 'claude-opus-4-7',
@@ -42,6 +44,11 @@ const zenPaidModel: ModelDisplay = {
 
 function openDropdown(): void {
   fireEvent.click(screen.getByTestId('ModelPicker.trigger'))
+}
+
+/** The menu has no testid of its own; it is the root's second child. */
+function menu(): HTMLElement {
+  return screen.getByTestId('ModelPicker').lastElementChild as HTMLElement
 }
 
 function optionByValue(value: string): HTMLElement {
@@ -188,6 +195,123 @@ describe('EnginePicker', () => {
   })
 })
 
+describe('ModelPicker — field variant', () => {
+  it('defaults to compact: the composer keeps its bare 8px caret', () => {
+    render(
+      <ModelPicker models={[claudeModel]} selectedModel={claudeModel} onSelectModel={vi.fn()} />
+    )
+    // The InputBox controls bar is out of scope for the settings row look —
+    // guard it against accidental restyling.
+    expect(screen.getByTestId('ModelPicker').getAttribute('data-variant')).toBe('compact')
+    expect(screen.queryByTestId('ModelPicker.chevron')).toBeNull()
+  })
+
+  it('renders the SelectField look and the shared chevron when field', () => {
+    render(
+      <ModelPicker
+        variant="field"
+        models={[claudeModel]}
+        selectedModel={claudeModel}
+        onSelectModel={vi.fn()}
+      />
+    )
+    expect(screen.getByTestId('ModelPicker').getAttribute('data-variant')).toBe('field')
+
+    const trigger = screen.getByTestId('ModelPicker.trigger')
+    // The tokens that make it read as one control with `SelectField`.
+    for (const token of ['bg-bg-input', 'text-[12px]', 'items-center', 'justify-between']) {
+      expect(trigger.className).toContain(token)
+    }
+    expect(trigger.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.getByTestId('ModelPicker.chevron').getAttribute('data-open')).toBe('false')
+  })
+
+  it('flips the chevron while open and restores it on selection', () => {
+    const onSelectModel = vi.fn()
+    render(
+      <ModelPicker
+        variant="field"
+        models={[claudeModel]}
+        selectedModel={claudeModel}
+        onSelectModel={onSelectModel}
+      />
+    )
+    const trigger = screen.getByTestId('ModelPicker.trigger')
+
+    openDropdown()
+    expect(trigger.getAttribute('aria-expanded')).toBe('true')
+    const chevron = screen.getByTestId('ModelPicker.chevron')
+    expect(chevron.getAttribute('data-open')).toBe('true')
+    expect(chevron.getAttribute('class')).toContain('rotate-180')
+
+    fireEvent.click(optionByValue('claude-opus-4-7'))
+    expect(onSelectModel).toHaveBeenCalledWith('claude-opus-4-7')
+    expect(trigger.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.getByTestId('ModelPicker.chevron').getAttribute('data-open')).toBe('false')
+  })
+})
+
+describe('ModelPicker — menu placement', () => {
+  it('places the FIELD menu as a fixed overlay so the group card cannot clip it', () => {
+    render(
+      <ModelPicker
+        variant="field"
+        placement="down"
+        models={[claudeModel]}
+        selectedModel={claudeModel}
+        onSelectModel={vi.fn()}
+      />
+    )
+    openDropdown()
+    const list = menu()
+    // Settings group cards are `overflow-hidden` (and the page scrolls, and a
+    // sheet adds a third scroll body) — an absolute menu was clipped by all
+    // three. See use-anchored-menu.
+    expect(list.style.position).toBe('fixed')
+    expect(list.className).not.toContain('absolute')
+    expect(list.getAttribute('data-side')).toBe('down')
+  })
+
+  it('leaves the COMPACT composer menu exactly as it was', () => {
+    render(
+      <ModelPicker models={[claudeModel]} selectedModel={claudeModel} onSelectModel={vi.fn()} />
+    )
+    openDropdown()
+    const list = menu()
+    // The InputBox controls bar is clipped by nothing and is out of scope: it
+    // keeps its absolute, 14rem list and never registers the hook's listeners.
+    expect(list.style.position).toBe('')
+    expect(list.className).toContain('absolute')
+    expect(list.className).toContain('bottom-full')
+    expect(list.className).toContain('w-56')
+    expect(list.getAttribute('data-side')).toBeNull()
+  })
+
+  it('closes the FIELD menu on an outside scroll, which a fixed list cannot follow', () => {
+    render(
+      <ModelPicker
+        variant="field"
+        placement="down"
+        models={[claudeModel]}
+        selectedModel={claudeModel}
+        onSelectModel={vi.fn()}
+      />
+    )
+    openDropdown()
+    fireEvent.scroll(document.body)
+    expect(screen.queryByTestId('ModelPicker.option')).toBeNull()
+  })
+
+  it('keeps the COMPACT menu open on an outside scroll (no listener at all)', () => {
+    render(
+      <ModelPicker models={[claudeModel]} selectedModel={claudeModel} onSelectModel={vi.fn()} />
+    )
+    openDropdown()
+    fireEvent.scroll(document.body)
+    expect(screen.getAllByTestId('ModelPicker.option')).toHaveLength(1)
+  })
+})
+
 describe('ModelPicker — pinned non-model rows', () => {
   it('pins emptyOption FIRST and trailingOption LAST, outside the Free filter', () => {
     const onSelectModel = vi.fn()
@@ -235,5 +359,63 @@ describe('ModelPicker — pinned non-model rows', () => {
     expect(onSelectModel).toHaveBeenCalledWith('__custom__')
     // …and the menu closes, like any other row.
     expect(screen.queryByTestId('ModelPicker.option')).toBeNull()
+  })
+})
+
+describe('ModelPicker — Escape', () => {
+  // A menu is a layer only while it is open (use-escape-layer). Before this the
+  // picker ignored Escape entirely, so inside a settings sheet the press closed
+  // the SHEET with the menu still on screen.
+  it('closes an open FIELD menu and stops the key there', () => {
+    const behind = vi.fn()
+    document.addEventListener('keydown', behind)
+    try {
+      render(
+        <ModelPicker
+          variant="field"
+          models={[claudeModel]}
+          selectedModel={claudeModel}
+          onSelectModel={vi.fn()}
+        />
+      )
+      openDropdown()
+      expect(__escapeLayerCount()).toBe(1)
+
+      fireEvent.keyDown(document, { key: 'Escape' })
+      expect(screen.queryByTestId('ModelPicker.option')).toBeNull()
+      expect(screen.getByTestId('ModelPicker.trigger').getAttribute('aria-expanded')).toBe('false')
+      // The layer stopped the event, so nothing behind the menu (a sheet, the
+      // SettingsDialog's own bubble-phase listener) sees the press.
+      expect(behind).not.toHaveBeenCalled()
+      expect(__escapeLayerCount()).toBe(0)
+    } finally {
+      document.removeEventListener('keydown', behind)
+    }
+  })
+
+  it('closes an open COMPACT menu too — a menu is a menu', () => {
+    render(
+      <ModelPicker models={[claudeModel]} selectedModel={claudeModel} onSelectModel={vi.fn()} />
+    )
+    openDropdown()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByTestId('ModelPicker.option')).toBeNull()
+  })
+
+  it('registers nothing while closed, and lets the key through', () => {
+    // The composer binds Escape to "interrupt the run" and a settings page
+    // holds a dozen pickers: a closed one must be completely invisible.
+    const behind = vi.fn()
+    document.addEventListener('keydown', behind)
+    try {
+      render(
+        <ModelPicker models={[claudeModel]} selectedModel={claudeModel} onSelectModel={vi.fn()} />
+      )
+      expect(__escapeLayerCount()).toBe(0)
+      fireEvent.keyDown(document, { key: 'Escape' })
+      expect(behind).toHaveBeenCalledTimes(1)
+    } finally {
+      document.removeEventListener('keydown', behind)
+    }
   })
 })

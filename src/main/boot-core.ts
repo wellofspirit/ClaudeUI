@@ -180,6 +180,12 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
   // `core/boot/host-anchor.ts` because `claudeui-server` needs the same
   // operations from its console; only this ipcMain registration is desktop.
   //
+  // `remote:status-view` is NOT one of them and is not registered here: it is a
+  // redacted READ of `status()`, declared for both transports in
+  // `core/ipc/remote-view-commands.ts` (owner ruling, 2026-08-28). Every channel
+  // in the list below stays anchor-only, which is what stops a remote client
+  // cutting the connection it is riding.
+  //
   // Idempotent, like every other register* in the tree: production boots core
   // exactly once, but a test that boots twice must not hit Electron's "second
   // handler for '<channel>'" throw.

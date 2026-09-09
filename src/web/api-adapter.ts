@@ -13,6 +13,7 @@ import type {
   PermissionSuggestion,
   TerminalAvailability
 } from '../shared/types'
+import type { IdeAvailability, IdeEntry } from '../shared/remote-protocol'
 import { buildMockupHttpUrl } from '../shared/mockup-url'
 import { buildSentFileUrl } from '../shared/sent-file-url'
 import { derivePasswordProof } from './password-proof'
@@ -30,12 +31,6 @@ declare global {
      *  probe. */
     __FILE_TOKEN__?: string
   }
-}
-
-function sharedProviderRemoteMutation(..._args: unknown[]): Promise<never> {
-  return Promise.reject(
-    new Error('Shared provider settings can only be changed from the desktop app')
-  )
 }
 
 export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
@@ -300,6 +295,10 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('pi:binary-path') as ReturnType<ClaudeAPI['getPiBinaryPath']>,
     getPiAuthStatus: () =>
       connection.invoke('pi:auth-status') as ReturnType<ClaudeAPI['getPiAuthStatus']>,
+    // The unified provider list — safeHandler-wrapped host-side (declared once
+    // in `core/ipc/auth-commands.ts`), so it unwraps like the writes below and
+    // unlike the three older reads under it.
+    listProviderRegistry: () => unwrap('provider-registry:list'),
     listSharedProviders: () =>
       connection.invoke('shared-provider:list') as ReturnType<ClaudeAPI['listSharedProviders']>,
     getSharedProviderStatuses: () =>
@@ -310,13 +309,23 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('shared-provider:models', id) as ReturnType<
         ClaudeAPI['listSharedProviderModels']
       >,
-    saveSharedProvider: sharedProviderRemoteMutation,
-    removeSharedProvider: sharedProviderRemoteMutation,
-    setSharedProviderRoute: sharedProviderRemoteMutation,
-    setSharedProviderApiKey: sharedProviderRemoteMutation,
-    syncSharedProvider: sharedProviderRemoteMutation,
-    disconnectSharedProvider: sharedProviderRemoteMutation,
-    setSharedProviderDefaultModel: sharedProviderRemoteMutation,
+    // Shared-provider WRITES — mirrors preload 1:1. All seven are registered for
+    // both transports in core/ipc/auth-commands.ts under `capability: 'config'`
+    // (ADR-056 reclassified the family admin→config), alongside the three reads
+    // above that were already wired. They used to answer one shared rejecting
+    // helper, which refused honestly but refused a write the server was already
+    // prepared to accept. Every handler is safeHandler-wrapped, so `unwrap`
+    // carries a real refusal back. `set-key` sends the key host-side and returns
+    // nothing — the same direction `vendor-auth:set-key` already travels.
+    saveSharedProvider: (definition) => unwrap('shared-provider:save', definition),
+    removeSharedProvider: (id) => unwrap('shared-provider:remove', id),
+    setSharedProviderRoute: (id, harness, enabled) =>
+      unwrap('shared-provider:set-route', id, harness, enabled),
+    setSharedProviderApiKey: (id, key) => unwrap('shared-provider:set-key', id, key),
+    syncSharedProvider: (id) => unwrap('shared-provider:sync', id),
+    disconnectSharedProvider: (id) => unwrap('shared-provider:disconnect', id),
+    setSharedProviderDefaultModel: (id, harness, modelId) =>
+      unwrap('shared-provider:set-default', id, harness, modelId),
 
     // Generation
     generateTitle: (conversationText) =>
@@ -385,6 +394,14 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // `shell` channel) until the three gates hold — the caller treats a refusal
     // as "nothing known", never as "nothing running".
     terminalPool: (cwd) => connection.invoke('terminal:pool', cwd) as Promise<number[]>,
+    // Remote IDE (ADR-064). Both go straight over the wire — unlike
+    // `terminalAvailability` there is nothing for the client to merge in, because
+    // every axis of the answer (toggle, grant, ORIGIN, CLI probe, child state) is
+    // a host fact. The entry URL comes back RELATIVE and the caller navigates its
+    // own origin with it, which is why no host or scheme is ever guessed here.
+    ideAvailability: () => connection.invoke('ide:availability') as Promise<IdeAvailability>,
+    ideMintEntry: (folder, themeKind) =>
+      connection.invoke('ide:mint-entry', { folder, themeKind }) as Promise<IdeEntry>,
     watchStreams: async (sessionIds, automationIds) => {
       await connection.invoke('stream:watch', { sessionIds, automationRuns: automationIds })
     },
@@ -455,17 +472,20 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     onTerminalDetached: ((cb: Parameters<ClaudeAPI['onTerminalDetached']>[0]) =>
       connection.onTerminalDetached(cb)) as ClaudeAPI['onTerminalDetached'],
 
-    // Worktree — not available on web
-    createWorktree: async () => {
-      throw new Error('Worktrees not available in remote mode')
-    },
-    getWorktreeStatus: async () => {
-      throw new Error('Worktrees not available in remote mode')
-    },
-    removeWorktree: async () => {
-      throw new Error('Worktrees not available in remote mode')
-    },
-    listWorktrees: async () => [],
+    // Worktree — mirrors preload 1:1. All four are registered for both transports
+    // in core/ipc/config-commands.ts under `capability: 'git'`, the same
+    // capability the `git:*` mutations below already ride, and the gate is
+    // SERVER-side. Creating or removing a worktree is git work on the host's
+    // repos: no dialog, no window, nothing host-physical. Every handler is
+    // safeHandler-wrapped, so `unwrap` carries the real reason back — where
+    // `listWorktrees` used to answer `[]`, which the modal read as "this repo has
+    // no worktrees" rather than "this client cannot ask".
+    createWorktree: (cwd, name) => unwrap('worktree:create', cwd, name),
+    getWorktreeStatus: (worktreePath, originalHead) =>
+      unwrap('worktree:status', worktreePath, originalHead),
+    removeWorktree: (worktreePath, branch, gitRoot) =>
+      unwrap('worktree:remove', worktreePath, branch, gitRoot),
+    listWorktrees: (cwd) => unwrap('worktree:list', cwd),
 
     // App lifecycle — quit is desktop-only; no-ops that resolve on web.
     confirmQuit: async () => {}, // No-op on web
@@ -540,7 +560,14 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('config:save-sessions', config) as Promise<void>,
     loadSlashCommands: () =>
       connection.invoke('config:load-slash-commands') as ReturnType<ClaudeAPI['loadSlashCommands']>,
-    saveSlashCommands: async () => {}, // Read-only
+    // `config:save-slash-commands` is registered for both transports
+    // (config-commands.ts, `config`) with a PLAIN handler, so this is a bare
+    // invoke exactly like preload's. It is not a user edit but the cache write
+    // useClaudeEvents makes when cli.js announces the command list — stubbing it
+    // meant a remote client's slash menu was rebuilt from whatever the desktop
+    // last cached.
+    saveSlashCommands: (commands) =>
+      connection.invoke('config:save-slash-commands', commands) as Promise<void>,
     scanCustomCommands: (cwd) =>
       connection.invoke('config:scan-custom-commands', cwd) as ReturnType<
         ClaudeAPI['scanCustomCommands']
@@ -611,31 +638,67 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     setCleanupPeriodDays: (days) =>
       connection.invoke('claude:set-cleanup-period', days) as Promise<void>,
 
-    // MCP
+    // MCP — the WRITE half now mirrors preload 1:1. Every channel here is
+    // registered for both transports in core/ipc/config-commands.ts under
+    // `capability: 'config'`; the read half (`status`, `load-servers`,
+    // `read-disabled`) was already wired, and splitting read from write across
+    // transports was the accident that comment in config-commands.ts names.
+    //
+    // `unwrap` appears exactly where preload uses it: the three LIVE verbs that
+    // address a running session are safeHandler-wrapped, the three FILE verbs are
+    // plain handlers whose throw is already a rejection over the wire.
+    // `mcpSetServers` was the worst of the old stubs — it resolved an empty
+    // SUCCESS result, so a remote caller could not tell the write from a no-op.
     mcpServerStatus: (routingId) =>
       connection.invoke('mcp:status', routingId) as ReturnType<ClaudeAPI['mcpServerStatus']>,
-    mcpToggleServer: async () => {}, // Not available in remote
-    mcpReconnectServer: async () => {},
-    mcpSetServers: async () => ({ added: [], removed: [], errors: {} }),
+    mcpToggleServer: (routingId, serverName, enabled) =>
+      unwrap('mcp:toggle', routingId, serverName, enabled),
+    mcpReconnectServer: (routingId, serverName) => unwrap('mcp:reconnect', routingId, serverName),
+    mcpSetServers: (routingId, servers) => unwrap('mcp:set-servers', routingId, servers),
     loadMcpServers: (scope, cwd?) =>
       connection.invoke('mcp:load-servers', scope, cwd) as ReturnType<ClaudeAPI['loadMcpServers']>,
-    saveMcpServers: async () => {},
-    removeMcpServer: async () => {}, // Read-only on web
+    saveMcpServers: (scope, servers, cwd?) =>
+      connection.invoke('mcp:save-servers', scope, servers, cwd) as Promise<void>,
+    removeMcpServer: (scope, serverName, cwd?) =>
+      connection.invoke('mcp:remove-server', scope, serverName, cwd) as Promise<void>,
     mcpReadDisabled: (cwd) =>
       connection.invoke('mcp:read-disabled', cwd) as ReturnType<ClaudeAPI['mcpReadDisabled']>,
-    mcpToggleDisabled: async () => {},
+    mcpToggleDisabled: (cwd, serverName, enabled) =>
+      connection.invoke('mcp:toggle-disabled', cwd, serverName, enabled) as Promise<void>,
 
-    // Automation — not available on web
-    listAutomations: async () => [],
-    saveAutomation: async () => {},
-    deleteAutomation: async () => {},
-    runAutomationNow: async () => {},
-    toggleAutomation: async () => {},
-    listAutomationRuns: async () => [],
-    loadAutomationRunHistory: async () => [],
-    cancelAutomationRun: async () => {},
-    dismissAutomationRun: async () => {},
-    sendAutomationMessage: async () => {},
+    // Automation — mirrors preload 1:1. All ten channels are one frozen
+    // declaration shared by both transports (core/ipc/automation-commands.ts)
+    // under `capability: 'config'`, and the gate is SERVER-side: an automation is
+    // host-side configuration (a stored prompt plus a cron expression under
+    // ~/.claude/ui/automation/), which is why that file rules `config` rather
+    // than `admin`. None of these is safeHandler-wrapped, so they are bare
+    // invokes like preload's — a throw is already a rejection over the wire.
+    //
+    // The run LANE was always remote (`stream:watch` carries automationRuns), so
+    // the stubs left the remote UI able to watch a run it could not start: the
+    // list came back empty, and every mutation resolved into nothing.
+    listAutomations: () =>
+      connection.invoke('automation:list') as ReturnType<ClaudeAPI['listAutomations']>,
+    saveAutomation: (automation) =>
+      connection.invoke('automation:save', automation) as Promise<void>,
+    deleteAutomation: (id) => connection.invoke('automation:delete', id) as Promise<void>,
+    runAutomationNow: (id) => connection.invoke('automation:run-now', id) as Promise<void>,
+    toggleAutomation: (id, enabled) =>
+      connection.invoke('automation:toggle', id, enabled) as Promise<void>,
+    listAutomationRuns: (automationId) =>
+      connection.invoke('automation:list-runs', automationId) as ReturnType<
+        ClaudeAPI['listAutomationRuns']
+      >,
+    loadAutomationRunHistory: (automationId, runId) =>
+      connection.invoke('automation:load-run-history', automationId, runId) as ReturnType<
+        ClaudeAPI['loadAutomationRunHistory']
+      >,
+    cancelAutomationRun: (automationId) =>
+      connection.invoke('automation:cancel', automationId) as Promise<void>,
+    dismissAutomationRun: (automationId, runId) =>
+      connection.invoke('automation:dismiss-run', automationId, runId) as Promise<void>,
+    sendAutomationMessage: (automationId, prompt) =>
+      connection.invoke('automation:send-message', automationId, prompt) as Promise<void>,
 
     // Remote access (not needed on the web client itself)
     getNetworkInterfaces: async () => [],
@@ -659,6 +722,17 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       authMethods: []
     }),
     onRemoteStatus: () => () => {},
+    // The REDACTED status is real over remote (owner ruling, 2026-08-28):
+    // `remote:status-view`, a `config` QUERY declared for both transports in
+    // `core/ipc/remote-view-commands.ts`, carrying running state, port, the
+    // connected-client list, tunnel state, auth methods, the last listen error
+    // and a redacted `tls` — and neither `lanUrl`/`tunnelUrl` nor anything
+    // derived from them, which is why the two stubs above stay stubs.
+    //
+    // No event twin: `remote:status` is host-local by classification, so the web
+    // settings view polls this while it is on screen.
+    getRemoteStatusView: () =>
+      connection.invoke('remote:status-view') as ReturnType<ClaudeAPI['getRemoteStatusView']>,
     // The READ is real over remote as of ADR-054 decision 6: `authcfg:get`, an
     // `admin`-gated QUERY answering the same sanitized object the desktop's
     // `remote:get-config` does. Making the routine settings web-reachable is
@@ -822,29 +896,72 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     getVersionInfo: () =>
       connection.invoke('app:version-info') as ReturnType<ClaudeAPI['getVersionInfo']>,
 
-    // Desktop-only — no native debug window / proxy stack on the web client
+    // Desktop-only by ABSENCE of a channel: `log-viewer:open` is a raw
+    // `ipcMain.handle` registration (main/services/log-viewer.ts) with no remote
+    // twin, and a browser has no native window to open anyway.
     openLogViewer: async () => {},
-    testProxyConnection: async () => ({
-      ok: false,
-      latencyMs: 0,
-      error: 'Not available in remote mode'
-    }),
-    loadEngineConfig: async () => ({}),
-    saveEngineConfig: async () => {},
-    loadVendorConfig: async () => ({}),
-    saveVendorConfig: async () => {},
-    loadOpencodeSettings: async () => ({}),
-    saveOpencodeSettings: async () => {},
-    readOpencodeNativeRaw: async () => ({ config: {}, path: '' }),
-    patchOpencodeNative: async () => {},
-    listOpencodeAgents: async () => [],
-    readOpencodeAgent: async () => null,
-    saveOpencodeAgent: async () => {},
-    deleteOpencodeAgent: async () => {},
-    setOpencodeAgentDisabled: async () => {},
-    generateOpencodeAgent: async () => {
-      throw new Error('Not available in remote mode')
-    },
+    // Mirrors preload 1:1 (`proxy:test-connection`, both transports,
+    // `capability: 'config'`, safeHandler-wrapped). It probes the HOST's egress
+    // rather than this browser's — which is the CORRECT semantic for a remote
+    // client, because the proxy settings being tested are the host's and it is
+    // the host that will dial through them. A local probe would answer a question
+    // nobody asked. The stub reported a hard failure next to fields the same pane
+    // can now save, so the button contradicted its own form.
+    testProxyConnection: (proxy) => unwrap('proxy:test-connection', proxy),
+
+    // Engine / vendor / engine-native config. Every channel below is registered
+    // for BOTH transports in core/ipc/config-commands.ts under `capability:
+    // 'config'`, so these mirror preload 1:1 instead of stubbing. Wiring them
+    // widens nothing: the capability gate is SERVER-side, in the channel
+    // registry, and it already applied to these channels whether or not this
+    // client could reach them. What the stubs broke was honest callers — every
+    // remote settings pane (auto mode, dispatch, the pi ClaudeUI half, vendor
+    // endpoints, the opencode Configuration panes) rendered and then resolved a
+    // save that went nowhere.
+    //
+    // `unwrap` appears exactly where preload uses it. The four engine/vendor
+    // channels are plain handlers, so a throw is already a rejection over the
+    // wire; the rest are safeHandler-wrapped and answer an { ok, data } envelope.
+    loadEngineConfig: (engineId) =>
+      connection.invoke('config:load-engine-config', engineId) as ReturnType<
+        ClaudeAPI['loadEngineConfig']
+      >,
+    saveEngineConfig: (engineId, config) =>
+      connection.invoke('config:save-engine-config', engineId, config) as Promise<void>,
+    loadVendorConfig: (vendorId) =>
+      connection.invoke('config:load-vendor-config', vendorId) as ReturnType<
+        ClaudeAPI['loadVendorConfig']
+      >,
+    saveVendorConfig: (vendorId, config) =>
+      connection.invoke('config:save-vendor-config', vendorId, config) as Promise<void>,
+    loadSharedAutoMode: () =>
+      connection.invoke('config:load-shared-automode') as ReturnType<
+        ClaudeAPI['loadSharedAutoMode']
+      >,
+    saveSharedAutoMode: (config) =>
+      connection.invoke('config:save-shared-automode', config) as Promise<void>,
+    loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
+    saveOpencodeSettings: (settings) => unwrap('config:save-opencode-settings', settings),
+    readOpencodeNativeRaw: () => unwrap('config:read-opencode-native-raw'),
+    patchOpencodeNative: (patches) => unwrap('config:patch-opencode-native', patches),
+    readPiNativeRaw: () => unwrap('config:read-pi-native-raw'),
+    patchPiNative: (patches) => unwrap('config:patch-pi-native', patches),
+    writePiNativeText: (text) => unwrap('config:write-pi-native-text', text),
+    readPiModelsRaw: () => unwrap('config:read-pi-models-raw'),
+    patchPiModels: (patches) => unwrap('config:patch-pi-models', patches),
+
+    // opencode agent CRUD — the same family, split across two capabilities:
+    // `config` for the five file verbs, `chat` for `generate` because it spends
+    // model tokens. Both are in the base grant set, so an authenticated remote
+    // connection reaches all six.
+    listOpencodeAgents: (cwd) => unwrap('opencode-agents:list', cwd),
+    readOpencodeAgent: (name, scope, cwd) => unwrap('opencode-agents:read', name, scope, cwd),
+    saveOpencodeAgent: (input, cwd) => unwrap('opencode-agents:save', input, cwd),
+    deleteOpencodeAgent: (name, scope, cwd) => unwrap('opencode-agents:delete', name, scope, cwd),
+    setOpencodeAgentDisabled: (name, scope, cwd, disabled) =>
+      unwrap('opencode-agents:set-disabled', name, scope, cwd, disabled),
+    generateOpencodeAgent: (description, cwd) =>
+      unwrap('opencode-agents:generate', description, cwd),
 
     // Engine-routed per-vendor auth — registered on both transports since S4
     // (core/ipc/auth-commands.ts), so this mirrors preload 1:1 through `unwrap`
@@ -865,15 +982,23 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     vendorAuthRemove: (engineId, vendorId) => unwrap('vendor-auth:remove', engineId, vendorId),
     vendorAuthOauthCancel: (engineId) => unwrap('vendor-auth:oauth-cancel', engineId),
 
-    // Plugin system — desktop-only, stubbed out on web
+    // Plugin system — desktop-only by ABSENCE of a channel, like the log viewer:
+    // the four `plugin:*` handlers are raw `ipcMain.handle` registrations in
+    // main/index.ts, and a plugin view is a `<webview>` hosting a preload script
+    // from the host's disk, which a browser cannot load at all.
     listPlugins: async () => [],
     reloadPlugin: async () => {},
     getPluginViews: async () => [],
     getPluginPreloadPath: async () => '',
     onPluginViewsChanged: () => () => {},
 
-    // Desktop-only: spawns a local opencode server — not available in remote mode (Phase 9b)
-    refreshPrices: async () => ({ count: 0, refreshedAt: Date.now() })
+    // Mirrors preload 1:1 (`usage:refresh-prices`, both transports,
+    // `capability: 'config'`, safeHandler-wrapped). It spawns a LOCAL opencode
+    // server to read its price table — host-side work, not host-PHYSICAL, which
+    // is exactly the line the everything-remote ruling draws. The stub was the
+    // quietest of the lot: `{ count: 0 }` renders as "Updated 0 model prices",
+    // a success message for a refresh that never happened.
+    refreshPrices: () => unwrap('usage:refresh-prices')
   }
 
   return api

@@ -60,6 +60,13 @@ export function sanitizedRemoteConfig(): RemoteConfig {
     // user-facing configuration.
     allowTerminal: config?.allowTerminal ?? false,
     shellGrantIdleMinutes: config?.shellGrantIdleMinutes ?? DEFAULT_SHELL_GRANT_IDLE_MINUTES,
+    // ADR-064. The toggle and its CLI override are CONFIGURATION, not secrets:
+    // the path is one the operator typed on the host, and a client that can read
+    // this already holds `fs-read`. What keeps them safe is the WRITE path — they
+    // are settable only through the host-anchored `remote:set-config`, which has
+    // no registration on either transport — not this read.
+    allowIde: config?.allowIde ?? false,
+    ideCliPath: config?.ideCliPath ?? null,
     // Both the RAW setting (null = auto) and what it resolves to right now: a
     // settings UI has to be able to say "Automatic (passkeys required)" without
     // re-deriving the rule, and re-deriving it in the renderer is exactly how

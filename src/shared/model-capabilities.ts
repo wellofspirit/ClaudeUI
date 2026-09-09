@@ -51,10 +51,13 @@ function normaliseModelId(model: string | undefined | null): string {
 }
 
 /**
- * Map a model picker value to its canonical id. Mirrors cli.js's `i8_`
- * alias table at the time of writing (2.1.197):
- *   `opus` → `claude-opus-4-8`, `sonnet` → `claude-sonnet-5`,
- *   `haiku` → `claude-haiku-4-5`.
+ * Map a model picker value to its canonical id. Mirrors cli.js's baked model
+ * catalog aliases at the time of writing (2.1.261):
+ *   `opus` → `claude-opus-5`, `sonnet` → `claude-sonnet-5`,
+ *   `haiku` → `claude-haiku-4-5`. (Upstream also maps `fable` →
+ *   `claude-fable-5-1`; there has never been a `fable` case here — a bare
+ *   `fable` value falls through to the unknown-family "assume modern"
+ *   defaults, which match Fable's actual capabilities.)
  *
  * The `default` alias intentionally has no mapping — it resolves at the cli.js
  * layer to whatever the user (or environment) has configured. Returns the
@@ -64,9 +67,9 @@ export function canonicalizeModelValue(value: string | undefined | null): string
   if (!value) return ''
   switch (value) {
     case 'opus':
-      return 'claude-opus-4-8'
+      return 'claude-opus-5'
     case 'opus[1m]':
-      return 'claude-opus-4-8'
+      return 'claude-opus-5'
     case 'sonnet':
       return 'claude-sonnet-5'
     case 'sonnet[1m]':
@@ -170,10 +173,11 @@ export function modelResolveEffort(
 // Kept exported for tests and for future models the SDK hasn't labelled yet.
 // ---------------------------------------------------------------------------
 
-/** Mirrors cli.js `kh8`. */
+/** Mirrors cli.js `kh8` (2.1.261: registry `capabilities` incl. "adaptive_thinking"). */
 export function supportsAdaptiveThinking(model: string | undefined | null): boolean {
   const id = normaliseModelId(model)
   if (
+    id.includes('opus-5') ||
     id.includes('opus-4-8') ||
     id.includes('opus-4-7') ||
     id.includes('opus-4-6') ||
@@ -186,10 +190,11 @@ export function supportsAdaptiveThinking(model: string | undefined | null): bool
   return true
 }
 
-/** Mirrors cli.js `QI`. */
+/** Mirrors cli.js `QI` (2.1.261: registry `capabilities` incl. "effort"). */
 export function supportsEffort(model: string | undefined | null): boolean {
   const id = normaliseModelId(model)
   if (
+    id.includes('opus-5') ||
     id.includes('opus-4-8') ||
     id.includes('opus-4-7') ||
     id.includes('opus-4-6') ||
@@ -210,6 +215,7 @@ export function supportsEffort(model: string | undefined | null): boolean {
 export function supportsXhighEffort(model: string | undefined | null): boolean {
   const id = normaliseModelId(model)
   if (
+    id.includes('opus-5') ||
     id.includes('opus-4-7') ||
     id.includes('opus-4-8') ||
     id.includes('fable-5') ||
@@ -298,8 +304,9 @@ export function resolveEffort(
  */
 export function maxOutputTokens(model: string | undefined | null): number {
   const id = normaliseModelId(canonicalizeModelValue(model))
-  // 128K ceiling — Fable/Mythos 5, Sonnet 5, Opus 4.6/4.7/4.8, Sonnet 4.6
+  // 128K ceiling — Fable/Mythos 5, Sonnet 5, Opus 4.6/4.7/4.8/5, Sonnet 4.6
   if (
+    id.includes('opus-5') ||
     id.includes('fable-5') ||
     id.includes('mythos-5') ||
     id.includes('sonnet-5') ||
@@ -336,21 +343,24 @@ export const CONTEXT_WINDOW_1M = 1_000_000
 export const CONTEXT_WINDOW_DEFAULT = 200_000
 
 /**
- * Base models that get a 1M window without a "[1m]" suffix — cli.js `UE()`.
- * Matched by substring like cli.js's normaliser, so dated ids and
- * provider-prefixed ids (Bedrock) resolve too.
+ * Base models that get a 1M window without a "[1m]" suffix — cli.js's
+ * per-model capabilities registry (`context:{window:1e6,native_1m:!0}`
+ * entries; hardcoded `UE()` list before 2.1.261). Matched by substring like
+ * cli.js's normaliser, so dated ids, point releases (claude-fable-5-1,
+ * claude-mythos-5-1) and provider-prefixed ids (Bedrock) resolve too.
  */
 const IMPLICIT_1M_BASE_MODELS = [
   'claude-fable-5',
   'claude-mythos-5',
   'claude-opus-4-7',
   'claude-opus-4-8',
+  'claude-opus-5',
   'claude-sonnet-5'
 ]
 
 /**
  * Picker aliases that cli.js currently resolves to an implicit-1M base model:
- * "fable" → claude-fable-5, "opus" → claude-opus-4-8,
+ * "fable" → claude-fable-5-1, "opus" → claude-opus-5 (both as of 2.1.261),
  * "sonnet" → claude-sonnet-5 (native-1M since 2.1.197).
  * Aliases track the latest model generation, so re-verify this set on
  * claudeCliVersion bumps.

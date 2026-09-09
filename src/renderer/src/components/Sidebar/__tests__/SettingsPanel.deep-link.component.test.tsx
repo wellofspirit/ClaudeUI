@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import type { SettingsScope } from '../../SettingsDialog/settings-sections'
+import type { SettingsTarget } from '../../SettingsDialog/settings-target'
 
-let dialogProps: { initialScope?: SettingsScope; initialSection?: string } | undefined
+let dialogProps: { initialTarget?: SettingsTarget } | undefined
 vi.mock('../../SettingsDialog', () => ({
   SettingsDialog: (props: typeof dialogProps) => {
     dialogProps = props
@@ -21,29 +21,39 @@ describe('SettingsPanel deep links', () => {
     ;(window as unknown as { api: Record<string, unknown> }).api = {
       platform: 'web',
       getRemoteStatus: vi.fn(),
-      onRemoteStatus: vi.fn(() => () => {})
+      onRemoteStatus: vi.fn(() => () => {}),
+      // The web footer indicator polls this on mount (E4) — stubbed so the
+      // deep-link cases don't exercise the poll's failure path as a side effect.
+      getRemoteStatusView: vi.fn(async () => ({ running: true, connectedClients: 0 }))
     }
   })
-  it('opens the Common shared providers section from an explicit target', async () => {
+  it('opens the Providers group of Models & providers from an explicit target', async () => {
     render(<SettingsPanel />)
     window.dispatchEvent(
       new CustomEvent('open-settings', {
-        detail: { scope: 'common', section: 'shared-providers' }
+        detail: { page: 'models', group: 'providers' }
       })
     )
     await waitFor(() =>
       expect(dialogProps).toMatchObject({
-        initialScope: 'common',
-        initialSection: 'shared-providers'
+        initialTarget: { page: 'models', group: 'providers' }
       })
     )
   })
-  it('infers the owning Claude scope for existing section-only links', async () => {
+  it('passes the sandbox link through as the Claude page + Sandbox group', async () => {
     render(<SettingsPanel />)
-    window.dispatchEvent(new CustomEvent('open-settings', { detail: { section: 'sandbox' } }))
-    await waitFor(() =>
-      expect(dialogProps).toMatchObject({ initialScope: 'claude', initialSection: 'sandbox' })
+    window.dispatchEvent(
+      new CustomEvent('open-settings', { detail: { page: 'claude', group: 'sandbox' } })
     )
+    await waitFor(() =>
+      expect(dialogProps).toMatchObject({ initialTarget: { page: 'claude', group: 'sandbox' } })
+    )
+  })
+  it('a target-less event opens the dialog on its last page', async () => {
+    render(<SettingsPanel />)
+    window.dispatchEvent(new CustomEvent('open-settings', { detail: {} }))
+    await waitFor(() => expect(dialogProps).toBeDefined())
+    expect(dialogProps?.initialTarget).toBeUndefined()
   })
 })
 
@@ -89,7 +99,10 @@ describe('SettingsPanel on mobile', () => {
     ;(window as unknown as { api: Record<string, unknown> }).api = {
       platform: 'web',
       getRemoteStatus: vi.fn(),
-      onRemoteStatus: vi.fn(() => () => {})
+      onRemoteStatus: vi.fn(() => () => {}),
+      // The web footer indicator polls this on mount (E4) — stubbed so the
+      // deep-link cases don't exercise the poll's failure path as a side effect.
+      getRemoteStatusView: vi.fn(async () => ({ running: true, connectedClients: 0 }))
     }
     setViewport(true)
     window.matchMedia = ((query: string) => ({
@@ -121,7 +134,9 @@ describe('SettingsPanel on mobile', () => {
 
   it('does not host the dialog itself', async () => {
     render(<SettingsPanel />)
-    window.dispatchEvent(new CustomEvent('open-settings', { detail: { section: 'sandbox' } }))
+    window.dispatchEvent(
+      new CustomEvent('open-settings', { detail: { page: 'claude', group: 'sandbox' } })
+    )
     await waitFor(() => expect(dialogProps).toBeUndefined())
     expect(screen.queryByTestId('SettingsDialog')).not.toBeInTheDocument()
   })
@@ -146,7 +161,9 @@ describe('SettingsPanel on mobile', () => {
     setViewport(false)
     render(<SettingsPanel />)
     act(() => {
-      window.dispatchEvent(new CustomEvent('open-settings', { detail: { section: 'sandbox' } }))
+      window.dispatchEvent(
+        new CustomEvent('open-settings', { detail: { page: 'claude', group: 'sandbox' } })
+      )
     })
     expect(screen.getByTestId('SettingsDialog')).toBeInTheDocument()
 

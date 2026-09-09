@@ -25,6 +25,9 @@
  * `${testid}.option` + a `data-id` discriminator.
  */
 import { useEffect, useRef, useState } from 'react'
+import { ChevronIcon } from './ChevronIcon'
+import { useAnchoredMenu } from './use-anchored-menu'
+import { useEscapeLayer } from './use-escape-layer'
 
 export interface SelectMenuOption {
   value: string
@@ -69,6 +72,23 @@ export function SelectMenu({
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
+  // The menu is `position: fixed` (see use-anchored-menu): the group cards it
+  // is drawn in are `overflow-hidden`, which clipped an absolute menu.
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const anchored = useAnchoredMenu({
+    open,
+    anchorRef: triggerRef,
+    menuRef,
+    placement,
+    onClose: () => setOpen(false)
+  })
+
+  // An OPEN menu is the top Escape layer, so the key closes the menu and stops
+  // there. Its own bubble-phase listener could not do that: a sheet's
+  // capture-phase layer (use-escape-layer) had already stopped the event and
+  // closed the SHEET under the open select. A closed menu registers nothing.
+  useEscapeLayer(() => setOpen(false), true, open)
 
   useEffect(() => {
     if (!open) return
@@ -76,14 +96,9 @@ export function SelectMenu({
       const node = ref.current
       if (node && e.target instanceof Node && !node.contains(e.target)) setOpen(false)
     }
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') setOpen(false)
-    }
     document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
     return () => {
       document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
     }
   }, [open])
 
@@ -106,6 +121,7 @@ export function SelectMenu({
       className="relative [-webkit-app-region:no-drag]"
     >
       <button
+        ref={triggerRef}
         type="button"
         id={id}
         data-testid={testid ? `${testid}.trigger` : undefined}
@@ -124,23 +140,18 @@ export function SelectMenu({
         className={`${triggerClassName ?? DEFAULT_TRIGGER_CLASS} flex items-center justify-between gap-1 text-left cursor-pointer disabled:cursor-not-allowed`}
       >
         <span className="truncate">{label}</span>
-        <svg
-          width="8"
-          height="8"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.5"
-          className="shrink-0"
-        >
-          <polyline points="6 9 12 15 18 9" />
-        </svg>
+        <ChevronIcon open={open} className="text-text-muted" />
       </button>
       {open && (
         <div
+          ref={menuRef}
           role="listbox"
           data-testid={testid ? `${testid}.menu` : undefined}
-          className={`absolute ${placement === 'down' ? 'top-full mt-1' : 'bottom-full mb-1'} left-0 min-w-full w-max max-w-[22rem] max-h-72 overflow-y-auto bg-bg-tertiary border border-border rounded-lg shadow-lg shadow-black/30 z-30`}
+          data-side={anchored?.side}
+          style={anchored?.style}
+          // No `absolute`/`min-w-full`: the hook supplies position, offsets and
+          // a min-width measured from the trigger.
+          className="w-max max-w-[22rem] max-h-72 overflow-y-auto bg-bg-tertiary border border-border rounded-lg shadow-lg shadow-black/30 z-30"
         >
           {options.map((opt) => {
             const active = opt.value === value

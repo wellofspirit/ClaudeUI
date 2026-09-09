@@ -1,464 +1,582 @@
 # Patch: bash-output-streaming
 
-Live Bash/PowerShell command output never reaches the SDK consumer until the command finishes or the 2-second progress-loop timeout fires — and even then, the GUI must wait an additional ~1s for file polling to start.
+Live Bash command output never reaches the stream-json consumer until the command finishes, or ~3 seconds after it starts — whichever comes first.
 
 ## Affected Component
 
-`@anthropic-ai/claude-agent-sdk` — bundled `cli.js` file.
+`vendor/claude-cli/cli.js` — the vendored Claude Code bundle (`bun-claude`).
 
-| Component              | Version at time of discovery |
-| ---------------------- | ---------------------------- |
-| SDK package            | 0.2.97 → 0.2.105             |
-| Bundled CLI (`cli.js`) | 2.1.97 → 2.1.105             |
+| Component            | Version                                                  |
+| -------------------- | -------------------------------------------------------- |
+| Original discovery   | SDK 0.2.97 → 0.2.105 / bundled `cli.js` 2.1.97 → 2.1.105 |
+| Last verified anchor | **2.1.261** (chunked bundle — see "Bundle shape" below)  |
+
+### Bundle shape (changed in 2.1.261)
+
+Up to 2.1.241, `cli.js` was one monolithic minified CJS bundle. From 2.1.261 the upstream
+build is code-split into ~1,631 minified **ESM chunks**, and the ClaudeUI rebundler
+concatenates them into a single `vendor/claude-cli/cli.js`, each chunk preceded by
+
+```
+// @bun-chunk B:/~BUN/root/chunk-xxxxxxxx.js
+```
+
+Consequences for this patch:
+
+- **Every minified identifier changed.** All names below are 2.1.261-era and will be wrong again next bump.
+- **A regex must never match across a chunk delimiter.** Part B clamps its search window to the
+  end of the enclosing chunk for exactly this reason.
+- **A helper you inject a call to must be bound in the target chunk's scope.** Post-split, a class
+  can reach a chunk as an imported binding under a chunk-local alias. Part B therefore reads the
+  TaskOutput class name off an existing call site _inside the same chunk_ rather than searching
+  globally for the class declaration.
+
+Everything this patch touches lives in one chunk: **`chunk-9c0rs7w4.js`** (~5.6 MB, the tool
+implementations chunk).
 
 ## The Problem
 
-### Problem 1: No real-time output streaming
+### Problem 1: no real-time output streaming
 
-When a Bash tool runs, the SDK's async generator (`sLz`) only yields progress to the consumer after a 2-second timeout (`Bc4=2000`). Fast commands (< 2s) never yield any progress at all. The GUI shows nothing until the command completes.
+The Bash tool is an async generator (`ats` in 2.1.261). It passes an `onProgress` callback to the
+command runner (`w6`), but the progress data only reaches the stream-json consumer through the
+generator's own `yield {type:"progress",...}` loop, which starts **after** a 2-second race
+(`Hnr=2000`). Commands shorter than that never yield progress at all — the GUI sees nothing until
+the tool result lands.
 
-### Problem 2: Output file polling starts too late
+### Problem 2: the file poll starts too late
 
-In SDK 0.2.97+, **both foreground and background** bash commands redirect stdout to an output file via OS-level file descriptor (`wvz()` returns `["pipe", fd, fd]`). The `onProgress` callback in `j$` (TaskOutput) only fires when `j$.startPolling()` reads this file — but `startPolling()` is called **after** the 2-second HEK timeout, adding another ~1s for the first poll interval (`OGz=1000`).
+Both foreground and background bash redirect stdout to an output file at the OS level (stdio
+`["pipe", fd, fd]`), so `TaskOutput.writeStdout()` is never called from process output. The **only**
+thing that ever fires `onProgress` is `TaskOutput.pollProgress()`, driven by a 1-second interval
+(`ISr=1000`) that the generator starts with `aI.startPolling(...)` — and it starts that call only
+_after_ the 2-second race returns.
 
-Total delay from process spawn to first output: **~3.9 seconds** (868ms spawn + 2000ms HEK + 1000ms first poll).
+Measured on 2.1.105: spawn 868 ms + HEK 2004 ms + first poll 1013 ms = **~3.9 s** before the first
+byte of output was observable.
 
-### Root cause: `onStdout` not passed by bash generator
+### Root cause: the generator never passes `onStdout`
 
-The bash async generator `sLz` calls `nE6()` (the command runner) with `{onProgress, preventCwdChanges, shouldUseSandbox, shouldAutoBackground}` but does **not** pass `onStdout`. Inside `nE6()`:
+`w6` destructures `{onProgress, onStdout, ...}` from its options. The bash generator passes
+`onProgress` but not `onStdout`, so the runner takes the "stdout to file" branch:
 
 ```js
-let {onProgress:A, ..., onStdout:j} = z ?? {}
-// j = undefined (not passed by sLz)
-let R = !!j       // R = false
-new j$(x, A??null, !R)  // stdoutToFile = true
+let {onProgress:k, ..., onStdout:U} = o          // U === undefined
+// ...stdoutToFile = !U  → true → stdio ["pipe", fd, fd]
 ```
 
-With `stdoutToFile=true`, `wvz(false, fd, ...)` returns `["pipe", fd, fd]` — stdout goes directly to the file at the OS level, bypassing Node pipes entirely. The `xO7` stream handler is never created. `j$.writeStdout()` is never called from process output. The only way `onProgress` fires is through `j$.startPolling()`, which reads the file on a 1-second interval.
+With `stdoutToFile` true there is no Node-side stream handler, no `writeStdout()`, and therefore no
+`onProgress` except from the deferred poll.
 
 ## Architecture Overview
 
-### Data flow (before patch)
+### Data flow (unpatched)
 
 ```
-sLz (bash generator)
+Bash tool .call()  →  ats()  (async generator, chunk-9c0rs7w4.js)
   │
-  ├─ Calls nE6() with onProgress but NOT onStdout
+  ├─ tn = await w6(cmd, signal, "bash", { ..., onProgress(){...} })
+  │     └─ new aI(taskId, onProgress, stdoutToFile=true)   ← TaskOutput, registers itself
+  │     └─ spawn(cmd, {stdio:["pipe", fd, fd]})            ← stdout → file, no Node pipe
   │
-  ▼
-nE6() (command runner)
-  │
-  ├─ new j$(taskId, onProgress, stdoutToFile=true)
-  ├─ Opens output file fd
-  ├─ spawn(cmd, {stdio: ["pipe", fd, fd]})  ← stdout → file directly
-  │
-  ▼
-Returns IO7 (shell command wrapper), h = k.result (completion promise)
-  │
-  ▼
-sLz continues:
-  ├─ if (run_in_background) → return immediately with backgroundTaskId
-  ├─ await Promise.race([h, setTimeout(null, Bc4=2000)])  ← 2s HEK wait
-  ├─ j$.startPolling(taskId)  ← file polling starts HERE (too late!)
-  ├─ Progress loop: while(true) { await race(h, resolverPromise) → yield }
-  │     └─ onProgress fires from file poll → resolves promise → yield progress
-  └─ Command finishes → return result
+  ├─ let gn = tn.result                                    ← completion promise
+  ├─ if (run_in_background) → return { backgroundTaskId }  ← never polls
+  ├─ await Promise.race([gn, setTimeout(null, Hnr=2000)])  ← 2 s dead air
+  ├─ aI.startPolling(tn.taskOutput.taskId)                 ← polling starts HERE (too late)
+  ├─ try { while(true) { ... yield {type:"progress"} } }
+  └─ finally { aI.stopPolling(tn.taskOutput.taskId); ... }
 ```
 
-### Data flow (after patch)
+### Data flow (patched)
 
 ```
-sLz (bash generator)
-  │
-  ├─ Calls nE6() with onProgress
-  │
-  ▼
-nE6() returns
-  │
-  ├─ [Part B] Emits bash_output_init with output file path  ← IMMEDIATE
-  │     └─ GUI starts polling the file within 500ms
-  │
-  ▼
-sLz continues:
-  ├─ 2s HEK wait (output file being polled by GUI independently)
-  ├─ j$.startPolling → onProgress fires
-  │     └─ [Part A] Emits bash_output to stdout  ← supplements GUI polling
-  └─ Command finishes → return result
+  ├─ tn = await w6(..., onProgress(){ [Part A] emit bash_output to stdout; ...original... })
+  ├─ let gn = tn.result
+  ├─ [Part B] aI.startPolling(tn.taskOutput.taskId)   ← polling starts NOW, ~2 s earlier
+  ├─ if (run_in_background) → return { backgroundTaskId }   (still polling — see "Why it's safe")
+  ├─ await Promise.race([gn, setTimeout(null, Hnr)])
+  ├─ aI.startPolling(...)                              ← CLI's own call, now a no-op
+  └─ ... unchanged ...
 ```
 
-### Key classes and functions
+Part A and Part B are a pair: Part B makes `onProgress` fire early, Part A is what turns an
+`onProgress` call into a wire message. Neither is useful alone.
 
-| Name (v2.1.105) | Purpose                                                                                             |
-| --------------- | --------------------------------------------------------------------------------------------------- |
-| `sLz`           | Bash async generator — orchestrates command execution                                               |
-| `nE6`           | Command runner — spawns process, returns `IO7` wrapper                                              |
-| `j$`            | `TaskOutput` — manages output buffering, file spill, polling                                        |
-| `IO7`           | `ShellCommand` — wraps child process, handles backgrounding                                         |
-| `xO7`           | `StreamHandler` — bridges process stdout → `j$.writeStdout()` (only created when `onStdout` exists) |
-| `wvz`           | stdio config — returns `["pipe","pipe","pipe"]` or `["pipe",fd,fd]`                                 |
-| `nY`            | Path generator — `nY(taskId)` → `<sessions-dir>/<taskId>.output`                                    |
+### Key classes and functions (v2.1.261, all in `chunk-9c0rs7w4.js` unless noted)
 
-### Variable mapping (inside `sLz`)
+| Name  | Kind     | Purpose                                                                               |
+| ----- | -------- | ------------------------------------------------------------------------------------- |
+| `ats` | fn\*     | Bash async generator — orchestrates the command, owns the progress loop               |
+| `w6`  | async fn | Command runner — builds the exec command, spawns, returns a ShellCommand              |
+| `aI`  | class    | **TaskOutput** — output ring buffers, file spill, `static startPolling/stopPolling`   |
+| `hWe` | class    | **ShellCommand** — real spawned command; `cleanup()` → `taskOutput.clear()`           |
+| `lAt` | class    | Aborted-before-exec ShellCommand stub (`status:"killed"`) — still has `taskOutput`    |
+| `cD`  | fn       | Pre-spawn-error ShellCommand stub (`status:"completed"`) — still has `taskOutput`     |
+| `oAt` | class    | Poll registry — `#e` registered instances, `#t` polling set, one shared `setInterval` |
+| `lhe` | fn       | Host-scoped accessor for the `oAt` singleton                                          |
+| `rnr` | fn       | Background-task watcher — on `result`, calls `snr` → `shellCommand.cleanup()`         |
+| `Hnr` | const    | HEK timeout, `2000`                                                                   |
+| `ISr` | const    | Poll interval, `1000`                                                                 |
+| `yl`  | fn       | `taskId` → `<sessions-dir>/<taskId>.output` (imported from another chunk)             |
 
-| Variable | Meaning                                                  |
-| -------- | -------------------------------------------------------- |
-| `w`      | Command string                                           |
-| `j`      | Description                                              |
-| `O`      | `toolUseId`                                              |
-| `$`      | `agentId`                                                |
-| `k`      | `IO7` shell command instance (returned by `nE6`)         |
-| `h`      | `k.result` — promise that resolves when command finishes |
-| `J`      | `run_in_background` flag                                 |
-| `Bc4`    | HEK timeout constant (2000ms)                            |
-| `V`      | `shouldAutoBackground` flag                              |
+### Variable mapping (inside `ats`)
 
-### Variable mapping (inside `nE6`)
+| Variable | Meaning                                                               |
+| -------- | --------------------------------------------------------------------- |
+| `ke`     | command string                                                        |
+| `Me`     | description                                                           |
+| `M`      | `toolUseId` (destructured from the generator's single options object) |
+| `F`      | `agentId`                                                             |
+| `De`     | `run_in_background` flag                                              |
+| `tn`     | ShellCommand instance returned by `w6`                                |
+| `gn`     | `tn.result` — resolves when the command finishes                      |
+| `Wt`     | progress-loop resolver (`null` when the loop is not waiting)          |
+| `je`     | last-5-lines window (the callback's 1st param)                        |
+| `He`     | last-100-lines window (the callback's 2nd param)                      |
+| `Ve`     | total lines                                                           |
+| `et`     | total bytes                                                           |
+| `Pt`     | "background forbidden" flag                                           |
+| `ut`     | background task id, once backgrounded                                 |
 
-| Variable | Meaning                                                |
-| -------- | ------------------------------------------------------ |
-| `A`      | `onProgress` callback                                  |
-| `j`      | `onStdout` callback (undefined when called from `sLz`) |
-| `R`      | `!!j` — true if `onStdout` exists                      |
-| `x`      | Task ID from `vB("local_bash")`                        |
-| `m`      | `j$` (TaskOutput) instance — `new j$(x, A??null, !R)`  |
-| `S`      | File descriptor for output file (opened when `!R`)     |
+### `onProgress` callback contract
+
+`aI.pollProgress()` calls the callback as
+
+```js
+this.#s(e.slice(d), e.slice(f), k, r, t < r)
+//      ^last 5     ^last 100   ^lines ^bytes ^hasMore
+```
+
+so the parameter order is `(last5, last100, totalLines, totalBytes, hasMore)`. The 4th param is
+only meaningful when the 5th is truthy — hence the `et=Zr?Kn:0` in the callback body, which is the
+structural fingerprint Part A anchors on.
 
 ## The Patches
 
-### Part A: onProgress stdout hook
+### Part A: emit `bash_output` from `onProgress`
 
 **Marker**: `/*PATCHED:bash-output-streaming*/`
 
 #### Anchor (unique, 1 match)
 
+Structural shape, no literals needed:
+
 ```
-onProgress(<5 vars>){<var>=<1st>,<var>=<2nd>,<var>=<3rd>,<var>=<5th>?<4th>:0;let <var>=<var>;if(<10th>)<11th>=null,<10th>()}
+onProgress(<p1>,<p2>,<p3>,<p4>,<p5>){<a>=<p1>,<b>=<p2>,<c>=<p3>,<d>=<p5>?<p4>:0;let <e>=<r>;if(<e>)<r>=null,<e>()}
 ```
 
-Regex:
+Regex in `apply.mjs`:
 
 ```js
-;`onProgress\\((V),(V),(V),(V),(V))\\{` +
-  `(V)=\\1,(V)=\\2,(V)=\\3,(V)=\\5\\?\\4:0;` +
-  `let (V)=(V);if\\(\\10\\)\\11=null,\\10\\(\\)`
+;`onProgress\\((${V}),(${V}),(${V}),(${V}),(${V})\\)\\{` +
+  `(${V})=\\1,(${V})=\\2,(${V})=\\3,(${V})=\\5\\?\\4:0;` +
+  `let (${V})=(${V});if\\(\\10\\)\\11=null,\\10\\(\\)\\}`
 ```
 
-#### Before
+**Why it is unique.** 2.1.261 has exactly four `onProgress(` occurrences in the whole concat:
+
+| Offset      | Chunk               | Shape                                                                    |
+| ----------- | ------------------- | ------------------------------------------------------------------------ |
+| ~9,070,524  | `chunk-9c0rs7w4.js` | **the target** — bash, with the `let Br=Wt;if(Br)Wt=null,Br()` resolver  |
+| ~20,004,080 | `chunk-98vnsjhm.js` | PowerShell tool — same 4 assignments, **no resolver tail**               |
+| ~15,891,569 | `chunk-jkzh538b.js` | `de.onProgress(ge.data)` — an agent-runner call, not a method definition |
+| ~19,657,603 | `chunk-f8rcj764.js` | `this.sink?.onProgress(w)` — same                                        |
+
+The `let <e>=<r>;if(<e>)<r>=null,<e>()` resolver tail is what excludes PowerShell. **PowerShell is
+deliberately not patched** — its generator has no resolver promise and a different progress loop.
+If a future bundle makes the two shapes converge, the uniqueness assertion in `apply.mjs` will fail
+loudly rather than patch the wrong one; do not weaken it to "first match wins".
+
+#### toolUseId capture
+
+`M` is read out of the 2,000 chars _before_ the anchor with `toolUseId:(V)[,}]`. In 2.1.261 that
+window contains exactly one match — the generator's own parameter destructuring
+(`...,toolUseId:M,attributionMessageId:N,agentId:F,...` at anchor −723). Note the same window later
+contains `sandboxAttributionId:M`, which is the _same variable_ but would not match the pattern.
+
+#### Before (2.1.261, pristine)
 
 ```js
-onProgress(p,m,S,g,F){P=p,X=m,D=S,W=F?g:0;let U=Z;if(U)Z=null,U()}
+onProgress(hn,vt,Fn,Kn,Zr){je=hn,He=vt,Ve=Fn,et=Zr?Kn:0;let Br=Wt;if(Br)Wt=null,Br()}
 ```
 
 #### After
 
 ```js
-onProgress(p,m,S,g,F){/*PATCHED:bash-output-streaming*/{let _bo_now=Date.now();
+onProgress(hn,vt,Fn,Kn,Zr){/*PATCHED:bash-output-streaming*/{let _bo_now=Date.now();
 if(!globalThis._bo_map)globalThis._bo_map=new Map;
-let _bo_k=O||"",_bo_last=globalThis._bo_map.get(_bo_k)||0;
+let _bo_k=M||"",_bo_last=globalThis._bo_map.get(_bo_k)||0;
 if(_bo_now-_bo_last>=200){
   globalThis._bo_map.set(_bo_k,_bo_now);
   try{process.stdout.write(JSON.stringify({type:"bash_output",
-    tool_use_id:O, output:m, full_output:p,
-    total_lines:S, total_bytes:g
+    tool_use_id:M, output:vt, full_output:hn,
+    total_lines:Fn, total_bytes:Kn
   })+"\n")}catch(_bo_e){}
-}}P=p,X=m,D=S,W=F?g:0;let U=Z;if(U)Z=null,U()}
+}}je=hn,He=vt,Ve=Fn,et=Zr?Kn:0;let Br=Wt;if(Br)Wt=null,Br()}
 ```
+
+(Injected as one line; wrapped here for readability. The `"\n"` is `"\\n"` in the apply script —
+see Syntax Pitfalls.)
 
 #### Rate limiting
 
-Uses `globalThis._bo_map` (a `Map<toolUseId, lastEmitTimestamp>`) to rate-limit to 1 emission per 200ms per tool. This prevents flooding stdout when commands produce rapid output.
+`globalThis._bo_map` is a `Map<toolUseId, lastEmitMs>`, throttling to one message per 200 ms per
+tool use so a chatty command can't flood stdout.
 
 #### Why it's safe
 
-- The injected code runs before the original callback body — original behavior is preserved
-- `process.stdout.write` is wrapped in try/catch — failures are silently ignored
-- `globalThis._bo_map` uses a unique prefix (`_bo_`) to avoid collisions
-- The rate limit (200ms) prevents performance issues from rapid output
-- Non-Bash tools never hit this code path (it's inside the bash-specific `onProgress`)
+- The injected block is a bare `{...}` statement placed _before_ the original body; every original
+  assignment and the resolver call still run, unchanged.
+- `process.stdout.write` is inside try/catch — a closed/blocked stdout can't take down the CLI.
+- `_bo_`-prefixed globals avoid collisions with the bundle and with other patches.
+- Only the bash generator's callback is patched, so no other tool reaches this code.
 
-#### When it fires
+### Part B: start the file poll as soon as the runner returns
 
-Part A only fires when `j$.startPolling()` reads the output file and calls `onProgress`. Without Part B, this happens ~3s after the process spawns (after HEK timeout + first poll). With Part B, the GUI is already polling the file directly, so Part A serves as a supplementary data source.
+**Marker**: `/*PATCHED:bash-early-poll*/`
 
-### Part B: Early output file path emission
-
-**Marker**: `/*PATCHED:bash-output-init*/`
+This is the part that actually removes the delay. Part A alone only fires once the CLI's own
+(late) `startPolling` gets around to it.
 
 #### Anchor
 
-The `nE6()` result assignment immediately after the `onProgress` callback closure:
+Two-step capture, in this order:
 
-```
-),<resultVar>=<bcVar>.result;
-```
+1. **The CLI's own call**, which yields _both_ the TaskOutput class binding and the ShellCommand
+   variable — `.startPolling(` and `.taskOutput.taskId` are property names and survive minification:
 
-Regex:
+   ```js
+   new RegExp(`(${V})\\.startPolling\\((${V})\\.taskOutput\\.taskId\\)`, 'g')
+   // 2.1.261 → aI.startPolling(tn.taskOutput.taskId)
+   ```
+
+   Taking the class name from a call site _inside the target chunk_ is what guarantees the
+   identifier we inject is in scope there (post-split it might be an imported alias).
+
+2. **The result-promise assignment for that same variable**, which is the injection point:
+
+   ```js
+   new RegExp(`(?:\\),|;let )(${V})=${reEsc(shellCmdVar)}\\.result;`, 'g')
+   // 2.1.261 → ;let gn=tn.result;      (the `;let ` alternative)
+   // <=2.1.241 → ),h=k.result;         (the `),` alternative — one comma expression)
+   ```
+
+Both searches run over a window that starts at the Part A anchor, is 4,000 chars long, and is
+clamped to the next `\n// @bun-chunk ` delimiter. Both assert **exactly one** match.
+
+Window sizing: in 2.1.261 the `.result` assignment sits at anchor +527 and the CLI's own
+`startPolling` at anchor +1775 in the pristine file. Part A has already injected ~450 chars into
+that window by the time Part B runs, pushing `startPolling` to ~+2225 — which is why the window is
+4,000 and not the old 3,000.
+
+#### Before (2.1.261, pristine)
 
 ```js
-;`\\),(${V})=(${V})\\.result;`
-```
-
-Found by searching within 2000 chars after the Part A anchor.
-
-#### Before
-
-```js
-),h=k.result;async function E(){
+...storageV5:ye})}catch(hn){throw Le?.(),hn}if(tn.status==="killed")Le?.();let gn=tn.result;if(Le)gn.then((hn)=>{if(hn.preSpawnError)Le()}).catch(()=>{});async function Qt(){...
 ```
 
 #### After
 
 ```js
-),h=k.result;/*PATCHED:bash-output-init*/try{process.stdout.write(JSON.stringify({type:"bash_output_init",tool_use_id:O,output_file:k.taskOutput.path})+"\n")}catch(_bi_e){}async function E(){
+...storageV5:ye})}catch(hn){throw Le?.(),hn}if(tn.status==="killed")Le?.();let gn=tn.result;/*PATCHED:bash-early-poll*/aI.startPolling(tn.taskOutput.taskId);if(Le)gn.then((hn)=>{if(hn.preSpawnError)Le()}).catch(()=>{});async function Qt(){...
 ```
 
 #### Why it's safe
 
-- `k.taskOutput.path` is set during `j$` construction (before `nE6` returns) — always available
-- Wrapped in try/catch — failures are silently ignored
-- Emits once per `nE6()` call — no rate limiting needed
-- The `bash_output_init` message type is new — no existing consumer will misinterpret it
-- `k.taskOutput.path` is the same path that `j$.startPolling()` reads — no extra files
+Four separate properties were verified against 2.1.261 source:
 
-#### Dynamic variable extraction
+1. **`taskOutput` always exists.** Every return path of `w6` produces something with a
+   `taskOutput`: the real `hWe` ShellCommand, the aborted-before-exec stub `lAt`
+   (`constructor(){this.taskOutput=new aI(...)}`), and the pre-spawn-error stub `cD`
+   (`return {status:"completed", ..., taskOutput:t, ...}`). No `undefined` deref.
 
-Both `O` (toolUseId) and `k` (shell command) are extracted dynamically:
+2. **`startPolling` is idempotent.** The registry is
+   `startPolling(e){if(this.#t.set(e.taskId,e),!this.#n)this.#n=setInterval(()=>this.#r(),ISr),this.#n.unref()}`
+   — a `Map.set` plus one shared, `unref`'d interval. The CLI's later call is a no-op.
 
-- `O` (toolUseId): found via `toolUseId:(V)[,}]` in the 2000 chars before `onProgress`
-- `k` (bcVar): found via `),(V)=(V)\.result;` in the 2000 chars after `onProgress`
+3. **Calling it too early is inert, not wrong.** `aI.static startPolling(e)` does
+   `let r=t.registeredInstance(e); if(!r||!r.#s) return;` — for the stub paths the TaskOutput was
+   constructed with `onProgress = null` and never registered, so the call silently does nothing.
 
-## Message Formats
+4. **Nothing leaks a poller.** Every way out of the generator still stops it:
+   - normal progress loop → `finally{ aI.stopPolling(tn.taskOutput.taskId); ... }`
+   - command finished inside the HEK race → `return tn.cleanup(), hn` → `hWe.cleanup()` →
+     `taskOutput.clear()` → `aI.stopPolling(...)` + `unregister(...)`
+   - explicit `run_in_background` and auto-backgrounded returns → `jne()` registers `rnr`, whose
+     `shellCommand.result.then(...)` runs `snr()` → `taskOutput.flush()` + `shellCommand.cleanup()`.
 
-### `bash_output` (Part A)
+Point 4 is the one to re-verify on every bump — it is the only thing standing between this patch
+and an interval that keeps re-reading a finished command's output file and emitting `bash_output`
+forever.
+
+There is one intended behavior change: **backgrounded commands now stream too.** Unpatched, an
+explicitly backgrounded command returns before `startPolling` is ever reached, so nothing polls it;
+patched, polling is already running, so `bash_output` keeps flowing for the life of the background
+task. That is what the GUI's background bash cards want.
+
+## Message Format
+
+### `bash_output` — the only message this patch emits
 
 ```json
 {
   "type": "bash_output",
   "tool_use_id": "toolu_XXX",
-  "output": "last 100 lines",
-  "full_output": "last 5 lines",
+  "output": "last ~100 lines",
+  "full_output": "last ~5 lines",
   "total_lines": 42,
   "total_bytes": 1234
 }
 ```
 
-| Field         | Type   | Description                                       |
-| ------------- | ------ | ------------------------------------------------- |
-| `tool_use_id` | string | The tool_use block ID for this Bash invocation    |
-| `output`      | string | Last ~100 lines of output (from `j$` ring buffer) |
-| `full_output` | string | Last ~5 lines of output                           |
-| `total_lines` | number | Total line count so far                           |
-| `total_bytes` | number | Total byte count so far                           |
+| Field         | Type   | Description                                |
+| ------------- | ------ | ------------------------------------------ |
+| `tool_use_id` | string | tool_use block ID for this Bash invocation |
+| `output`      | string | last ~100 lines (callback param 2)         |
+| `full_output` | string | last ~5 lines (callback param 1)           |
+| `total_lines` | number | total line count so far                    |
+| `total_bytes` | number | total byte count so far                    |
 
-**Note:** The `output` and `full_output` field names are misleading (inherited from the `onProgress` callback semantics). `output` is actually the larger window (~100 lines) and `full_output` is the smaller window (~5 lines). This is because `onProgress` is called from `j$.startPolling()` with `(last5, last100, totalLines, totalBytes, hasMore)` — our patch captures param positions 1 and 2.
+**The `output` / `full_output` names are backwards** and always have been: `output` is the _larger_
+(~100-line) window and `full_output` the _smaller_ (~5-line) one, because the patch maps callback
+param 2 → `output` and param 1 → `full_output`. The consumer only reads `output`, so this is a
+naming wart, not a bug. Don't "fix" it without changing `BashOutputMessage` in
+`src/core/sdk/types.ts` and `handleBashOutput` together.
 
-### `bash_output_init` (Part B)
-
-```json
-{
-  "type": "bash_output_init",
-  "tool_use_id": "toolu_XXX",
-  "output_file": "/path/to/sessions/<taskId>.output"
-}
-```
-
-| Field         | Type   | Description                                                         |
-| ------------- | ------ | ------------------------------------------------------------------- |
-| `tool_use_id` | string | The tool_use block ID for this Bash invocation                      |
-| `output_file` | string | Absolute path to the output file being written by the child process |
+Delivered via direct `process.stdout.write`, like every other ClaudeUI patch that adds a message
+type (see `docs/protocol-cc/03-inbound-messages.md`).
 
 ## Consumer-Side Integration
 
-### Main process (`claude-session.ts`)
-
-**`bash_output_init` handler**: When received, creates a background file poller and starts 500ms polling immediately:
-
-```ts
-} else if (type === 'bash_output_init') {
-  const toolUseId = (msg.tool_use_id as string) || ''
-  const outputFile = (msg.output_file as string) || ''
-  if (toolUseId && outputFile) {
-    this.backgroundFilePaths.set(toolUseId, outputFile)
-    if (!this.backgroundPollers.has(toolUseId)) {
-      this.backgroundPollers.set(toolUseId, { filePath: outputFile, lastSize: 0, done: false })
-      this.watchBackground(toolUseId)  // starts 500ms file polling
-    }
-  }
-}
+```
+cli.js Part A stdout
+  → ClaudeSession stream-json reader
+  → case 'bash_output': handleBashOutput()        src/core/services/claude-session.ts:1058
+  → this.send('session:bash-output', {toolUseId, output, totalLines, totalBytes})
+  → volatile TAIL lane (src/core/shared/sync/channels.ts)
+  → renderer: bashOutputs[toolUseId]  →  LiveBashOutput inside ToolCallBlock
 ```
 
-This reuses the existing `watchBackground` / `pollBackgroundFile` / `readTail` infrastructure that was already built for background bash commands.
+`BashOutputMessage` is declared in `src/core/sdk/types.ts`; the field names there must match the
+JSON emitted by Part A. `session:bash-output` is a _volatile_ sync lane — it has no snapshot field
+and is listed in `sealed-fields.ts` as `bashOutputs`, so dropped frames are acceptable by design.
 
-**`bash_output` handler**: Forwards to the renderer as `session:bash-output` IPC event (unchanged from before Part B).
-
-**Cleanup**: `markBackgroundDone(toolUseId)` is called when:
-
-- A foreground tool result arrives (command completed)
-- A task notification arrives (background task completed)
-
-### Renderer (`ToolCallBlock.tsx`)
-
-- Subscribes to `backgroundOutputs[toolUseId]` via `useActiveSession`
-- Auto-expands the tool card when `bgOutput` arrives
-- Renders `BackgroundBashOutput` component for both foreground and background bash when file polling data is available
-- Falls back to `LiveBashOutput` (from `bash_output` events) if no file polling data
-
-### Timeline comparison
-
-**Before patch** (foreground bash):
-
-```
-t=0.0s  Process spawns
-t=2.0s  HEK timeout resolves
-t=2.0s  j$.startPolling() starts
-t=3.0s  First poll reads file → onProgress → (no stdout emit)
-t=∞     Command finishes → tool result arrives → GUI shows output
-```
-
-**After patch** (foreground bash):
-
-```
-t=0.0s  Process spawns
-t=0.0s  bash_output_init emitted with file path
-t=0.0s  GUI receives path → starts 500ms file polling
-t=0.5s  First poll reads file → session:background-output → GUI shows output
-t=1.0s  Second poll...
-...
-t=∞     Command finishes → cleanup
-```
+`src/main/__tests__/patches.test.ts` asserts that **both** markers
+(`/*PATCHED:bash-output-streaming*/` and `/*PATCHED:bash-early-poll*/`) are present in the built
+binary. Renaming a marker breaks that test.
 
 ## How to Find This Code
 
-### `sLz` (bash async generator)
+`bundle-analyzer.cmd` (global, at `C:\Users\why20\.local\bin\bundle-analyzer.cmd`; call it _with_
+the `.cmd` extension from Git Bash) works on the concat. Plain `rg` / a `node -e` offset script is
+an equally good fallback and is what was used for the 2.1.261 re-anchor.
+
+### The bash generator (`ats`) — best single entry point
 
 ```bash
-bundle-analyzer find cli.js "onProgress" --compact
-# Look for the match inside an async function* with toolUseId destructuring
+bundle-analyzer.cmd find cli.js '"tengu_bash_command_explicitly_backgrounded"' --compact
+# exactly 1 hit in 2.1.261, ~1.6 KB after the onProgress anchor, inside the generator
 ```
 
-### `nE6` (command runner / Bc equivalent)
+### The `onProgress` callback (Part A anchor)
 
 ```bash
-bundle-analyzer find cli.js "onStdout" --compact
-# The function that destructures {onProgress, onStdout, ...} from options
+bundle-analyzer.cmd find cli.js 'onProgress(' --compact
+# 4 hits; the target is the one whose body ends `let X=Y;if(X)Y=null,X()`
 ```
 
-### `j$` (TaskOutput class)
+### The startPolling call + TaskOutput class (Part B step 1)
 
 ```bash
-bundle-analyzer find cli.js "stdoutToFile" --compact
-# The class with taskId, path, stdoutToFile properties
+bundle-analyzer.cmd find cli.js '.taskOutput.taskId)' --compact
+# the bash generator has two: the CLI's own late call, and the one in the finally's stopPolling
 ```
 
-### `wvz` (stdio config)
+### The TaskOutput class (`aI`) and the poll registry (`oAt`)
 
 ```bash
-bundle-analyzer find cli.js '"pipe","pipe","pipe"' --compact
-# Returns ["pipe","pipe","pipe"] or ["pipe",fd,fd]
+bundle-analyzer.cmd find cli.js 'stdoutToFile' --compact
+# the class with taskId / path / stdoutToFile fields and static startPolling/stopPolling
 ```
 
-### `nY` (output file path generator)
+### The command runner (`w6`)
 
 ```bash
-bundle-analyzer find cli.js ".output" --compact
-# Pattern: function NAME(q){return JOIN(DIR(),`${q}.output`)}
+bundle-analyzer.cmd find cli.js 'onStdout' --compact
+# 4 hits; the runner is the one destructuring {onProgress, ..., onStdout} from its options
 ```
 
-### HEK timeout (2000ms)
+### The HEK timeout constant (`Hnr`)
 
 ```bash
-bundle-analyzer find cli.js "setTimeout" --compact
-# Look for: setTimeout((l)=>l(null),HEK_VAR,c).unref()
-# In the bash generator, after the explicit background check
+rg -o 'Hnr=[0-9]+' vendor/claude-cli/cli.js
+# 2.1.261 → Hnr=2000; used as setTimeout((x)=>x(null),Hnr,resolve).unref()
+```
+
+### Which chunk am I in?
+
+```bash
+node -e "const s=require('fs').readFileSync('vendor/claude-cli/cli.js','utf-8');
+const i=<offset>; const b=s.lastIndexOf('// @bun-chunk ',i);
+console.log(s.slice(b, s.indexOf('\n', b)), 'rel', i-b)"
 ```
 
 ## Syntax Pitfalls
 
-### Pitfall: Injecting statements into comma expressions
+### Pitfall: injecting a statement into a comma-separated declarator list
 
-The code `let V=expr,k=await nE6(...)` is a single `let` declaration with comma-separated declarators. Injecting a `process.stderr.write(...)` between them creates:
+Up to 2.1.241 the injection site was in the middle of `let V=expr,k=await run(...)`. Splicing a
+statement between declarators produces a parse error:
 
 ```js
-// WRONG — process becomes a let declarator name
-let V=expr,process.stderr.write(...)
+// WRONG — `process` becomes a declarator name
+let V=expr,process.stdout.write(...)
 // SyntaxError: Unexpected token '.'
 
-// CORRECT — inject BEFORE the let statement
-process.stderr.write(...);let V=expr,k=await nE6(...)
+// CORRECT — inject before the whole `let`, or after its terminating `;`
+process.stdout.write(...);let V=expr,k=await run(...)
 ```
 
-### Pitfall: Newlines in minified code
+2.1.261 is friendlier (`let gn=tn.result;` is its own statement), but the Part B regex still
+requires the trailing `;` to be part of the match so the injection can only ever land at a
+statement boundary. Keep it that way.
 
-`cli.js` is a single-line file. Using `"\n"` in injected strings creates a literal newline that breaks the JavaScript parser:
+### Pitfall: literal newlines in injected source
+
+Chunk bodies are one enormous line each. A real newline inside injected code changes nothing
+semantically here, but a newline inside a _string literal_ is a parse error:
 
 ```js
-// WRONG — literal newline in source
-process.stderr.write("[TIMING] "+Date.now()+"\n")
+// WRONG — literal newline inside the source string
+process.stdout.write(JSON.stringify(x)+"
+")
 
-// CORRECT — use runtime newline generation
-process.stderr.write("[TIMING] "+Date.now()+String.fromCharCode(10))
-// Or for stdout messages (which need \n for readline parsing):
-process.stdout.write(JSON.stringify({...})+"\\n")  // \\n = escaped in the source string
+// CORRECT — escaped in the apply script so the file gets a two-char \n escape
+process.stdout.write(JSON.stringify(x)+"\\n")
+// or, when an escape is awkward:
+process.stdout.write(s+String.fromCharCode(10))
 ```
 
-**Always run `node --check cli.js` after applying patches.**
+Note that a real newline in _injected code_ would also split the concat's chunk reconstruction if
+it happened to look like a delimiter — never emit a line starting with `// @bun-chunk`.
+
+### Pitfall: regexes that bridge chunks
+
+Any `[\s\S]*?` span wide enough to cross a `\n// @bun-chunk ` delimiter can match two unrelated
+modules. This patch has no such span, and Part B additionally clamps its window to the chunk edge.
+
+**Always syntax-check after applying.** For the chunked bundle, `node --check` on the whole concat
+is meaningless (it is not a valid single module); check the modified chunk instead:
+
+```bash
+node -e "const fs=require('fs'); const s=fs.readFileSync('vendor/claude-cli/cli.js','utf-8');
+const b=s.indexOf('/*PATCHED:bash-early-poll*/');
+const st=s.lastIndexOf('// @bun-chunk ',b), h=s.indexOf('\n',st)+1;
+let e=s.indexOf('\n// @bun-chunk ',b); e=e===-1?s.length:e+1;
+fs.writeFileSync(process.env.SCRATCH+'/chunk.mjs', s.slice(h,e))" \
+  && node --check "$SCRATCH/chunk.mjs"
+# SCRATCH = any writable scratch dir (2.1.261: the chunk is ~5.6 MB)
+```
+
+(The repo's rebundler does this for you with esbuild on every chunk the patches touched.)
 
 ## What's NOT Changed
 
-**The `onProgress` callback signature** — We inject code at the start of the callback body but don't change its parameters or return behavior. The original `P=p,X=m,...` assignments still run.
+**The `onProgress` signature and body.** Part A prepends a block; the original assignments and
+resolver call are untouched.
 
-**The progress loop** — `j$.startPolling()` and the `while(true)` yield loop still work as before. Part A emits `bash_output` as a side effect; it doesn't replace the progress loop.
+**The progress loop and the CLI's own `startPolling`/`stopPolling`.** Part B adds a call, it does
+not move or remove one. `bash_output` is a side channel, not a replacement for `yield
+{type:"progress"}`.
 
-**Background bash path** — `run_in_background: true` still returns immediately. Part B emits `bash_output_init` for both foreground and background; the GUI starts polling either way.
+**The 2-second HEK race (`Hnr`).** Deliberately left alone — it gates when the tool _result_ path
+gives up waiting, and shortening it would change tool semantics. The patch removes the _output_
+delay without touching it.
 
-**The 2-second HEK timeout** — We don't modify or bypass it. It still gates when `j$.startPolling()` starts. The improvement comes from the GUI polling the file independently via Part B.
+**The PowerShell tool.** `chunk-98vnsjhm.js` has a near-identical `onProgress`, but no resolver
+promise and a different loop. It has never been patched. Adding it would need its own anchor and
+its own uniqueness proof.
+
+**`onStdout`.** Passing it to the runner would flip `stdoutToFile` to false and reroute output
+through Node pipes — a much larger behavioral change (it also changes what ends up in the
+`.output` file that `BashOutput` reads). Rejected in favour of polling earlier.
 
 ## Verification
 
-1. `node patch/bash-output-streaming/apply.mjs` — should apply both parts
-2. Run again — should report "Already applied (both parts). Skipping."
-3. `node --check node_modules/@anthropic-ai/claude-agent-sdk/cli.js` — no syntax errors
-4. `node patch/apply-all.mjs` — all patches pass
-5. Start the app, run a foreground Bash command (e.g., `for i in {1..10}; do echo $i; sleep 1; done`)
-6. Output should appear in the tool card within ~1s of the command starting
-7. Background bash (`run_in_background: true`) should also show output immediately
+1. `node patch/bash-output-streaming/apply.mjs` — applies both parts, exits 0.
+2. Run it again — "Already applied (both parts). Skipping.", exits 0.
+3. Delete only the Part B injection and re-run — Part A reports "already applied", Part B
+   re-applies. (The `apply.mjs` fallback anchor exists for exactly this half-patched state.)
+4. Syntax-check the modified chunk (see Syntax Pitfalls). Expect exit 0.
+5. `node patch/apply-all.mjs` — all patches pass.
+6. `bun run test` — `src/main/__tests__/patches.test.ts` checks both markers in the built binary.
+7. `node patch/bash-output-streaming/test.mjs` — behavioral; spawns the **real** rebundled binary,
+   so it only runs in the main repo after `bun run ensure-cli`, not in a bare worktree.
+8. Manual: run `for i in $(seq 1 20); do echo "line-$i"; sleep 0.2; done` in the app. Output should
+   appear in the tool card within ~1 s, not ~4 s. Repeat with `run_in_background: true`.
 
 ## Discovery Method
 
-1. **Observed symptom**: Foreground bash output showed a ~4s delay before any output appeared in the UI.
-2. **Added timing logs** to `claude-session.ts` — measured gap between assistant message arrival and first `bash_output` receipt.
-3. **Injected timing into cli.js** at key points (before Bc, after Bc, HEK resolve, first onProgress). Results:
-   - assistant message → before Bc: 16ms (instant)
-   - before Bc → Bc returned: 868ms (process spawn)
-   - Bc returned → HEK resolved: 2004ms (the 2s timeout)
-   - HEK resolved → first onProgress: 1013ms (first file poll)
-4. **Investigated why `onProgress` fires so late**: Discovered that `sLz` does NOT pass `onStdout` to `nE6`, so `stdoutToFile=true` even for foreground bash. stdout goes directly to a file via fd. `j$.writeStdout()` is never called. `onProgress` only fires from `j$.startPolling()`, which starts after HEK.
-5. **Initial Part A (insufficient)**: The original patch hooked `onProgress` to emit `bash_output` to stdout. This worked, but only after HEK + first poll — still ~3s delay.
-6. **Part B fix**: Emit the output file path immediately after `nE6()` returns. The GUI receives `bash_output_init`, creates a file poller, and starts reading output within 500ms. This bypasses both the HEK timeout and the `j$.startPolling()` delay.
-7. **Verified full round-trip**: `bash_output_init` → `claude-session.ts` handler → `watchBackground` → `pollBackgroundFile` → `session:background-output` IPC → `BackgroundBashOutput` component → visible in UI within ~1.4s of process spawn.
+1. **Observed symptom**: foreground bash output showed a ~4 s delay before anything appeared.
+2. **Timed the consumer** in `claude-session.ts` — gap between the assistant message and the first
+   `bash_output`.
+3. **Injected timing probes into cli.js** at four points (before/after the runner, HEK resolve,
+   first `onProgress`): 16 ms → runner call, 868 ms spawn, 2004 ms HEK, 1013 ms first poll.
+4. **Found the real cause**: the generator never passes `onStdout`, so `stdoutToFile` is true,
+   stdout bypasses Node entirely, and `onProgress` can only come from the deferred file poll.
+5. **First fix (insufficient)**: Part A alone. It emits correctly, but only starts emitting after
+   HEK + first poll — still ~3 s.
+6. **Rejected fix**: emitting a `bash_output_init` message carrying `taskOutput.path` so the GUI
+   could poll the file itself. It worked, but it duplicated polling logic on the consumer side and
+   made the main process responsible for a path the CLI owns. Superseded by Part B; **no
+   `bash_output_init` consumer exists in the app** — if you find that message type described
+   anywhere else, it is stale.
+7. **Part B**: call the CLI's _own_ `startPolling` as soon as the runner returns. One statement, no
+   new message type, no consumer changes, and every existing stop path already covers it.
+
+### 2.1.261 re-anchor (chunked bundle)
+
+- Part A's regex survived untouched — the callback shape is unchanged; only the names moved
+  (`p,m,S,g,F` → `hn,vt,Fn,Kn,Zr`, `O` → `M`, `Z` → `Wt`).
+- Part B's `\),(V)=(V)\.result;` failed: `ERROR: Cannot find Bc result assignment after onProgress.`
+  Upstream wrapped the runner call in `try{...}catch(hn){throw Le?.(),hn}` and split the result
+  assignment out into its own statement, `if(tn.status==="killed")Le?.();let gn=tn.result;`. The
+  regex now accepts `),` **or** `;let `.
+- The capture order was inverted while re-anchoring: the old script derived the ShellCommand
+  variable from the `.result` assignment and then looked for `startPolling`. The new one reads both
+  the class binding and the variable off the `startPolling` call first, then constrains the
+  `.result` regex to that exact variable. This is both stricter and chunk-safe.
+- Window widened 3,000 → 4,000 and clamped to the chunk edge.
 
 ## Key Functions Reference
 
-| Name (v2.1.105) | Purpose                                    | How to find                                                           |
-| --------------- | ------------------------------------------ | --------------------------------------------------------------------- |
-| `sLz`           | Bash async generator                       | `bundle-analyzer find cli.js "onProgress" --compact` near `toolUseId` |
-| `nE6`           | Command runner (spawns process)            | `bundle-analyzer find cli.js "onStdout" --compact`                    |
-| `j$`            | TaskOutput (output buffering + file spill) | `bundle-analyzer find cli.js "stdoutToFile" --compact`                |
-| `IO7`           | ShellCommand wrapper (DH7)                 | `bundle-analyzer find cli.js '"running"' --compact` near `taskOutput` |
-| `xO7`           | StreamHandler (stdout→TaskOutput bridge)   | Near `IO7`, has `setEncoding("utf-8")`                                |
-| `wvz`           | stdio config function                      | `bundle-analyzer find cli.js '"pipe","pipe","pipe"' --compact`        |
-| `nY`            | Output file path generator                 | `bundle-analyzer find cli.js ".output" --compact`                     |
+| Name (v2.1.261)        | Purpose                                   | Char offset (pristine concat) | Chunk               |
+| ---------------------- | ----------------------------------------- | ----------------------------- | ------------------- |
+| `ats`                  | Bash async generator                      | ~9,069,640                    | `chunk-9c0rs7w4.js` |
+| `onProgress`           | Part A anchor                             | ~9,070,524                    | `chunk-9c0rs7w4.js` |
+| `;let gn=tn.result;`   | Part B match start (inject after its `;`) | ~9,071,051 (anchor +527)      | `chunk-9c0rs7w4.js` |
+| `aI.startPolling(...)` | CLI's own late call                       | ~9,072,299 (anchor +1,775)    | `chunk-9c0rs7w4.js` |
+| `aI.stopPolling(...)`  | the `finally` stop                        | ~9,073,784 (anchor +3,260)    | `chunk-9c0rs7w4.js` |
+| `w6`                   | Command runner                            | ~6,599,698                    | `chunk-9c0rs7w4.js` |
+| `aI`                   | TaskOutput class                          | ~5,413,043                    | `chunk-9c0rs7w4.js` |
+| `oAt`                  | Poll registry                             | ~5,412,488                    | `chunk-9c0rs7w4.js` |
+| `hWe`                  | ShellCommand class                        | ~5,417,792                    | `chunk-9c0rs7w4.js` |
+| `Hnr=2000`             | HEK timeout                               | ~9,049,694                    | `chunk-9c0rs7w4.js` |
 
-**Note:** All minified names will change in future SDK versions. Use content patterns (string literals, structural shapes) to relocate code.
+**Note:** all minified names and offsets change on every bump. Use the string literals and
+structural shapes in "How to Find This Code" to relocate.
 
 ## Related Patches
 
-- `patch/subagent-streaming/` — Handles message forwarding from subagent Task tool execution. Different code path but similar pattern of needing to bypass SDK buffering.
-- `patch/background-task/` — Exposes the CLI's "send to background" feature. Uses `IO7.background()` which affects the same `j$` TaskOutput polling.
+- `patch/subagent-streaming/` — different code path, same theme: bypassing SDK-side buffering so
+  the GUI can render while work is in flight.
+- `patch/background-task/` — exposes the CLI's send-to-background feature, which drives the same
+  `aI` TaskOutput polling this patch starts early.
 
 ## Files
 
-| File        | Purpose                                                          |
-| ----------- | ---------------------------------------------------------------- |
-| `README.md` | This document                                                    |
-| `apply.mjs` | Patch script (Part A: onProgress hook, Part B: bash_output_init) |
+| File        | Purpose                                                                |
+| ----------- | ---------------------------------------------------------------------- |
+| `README.md` | This document                                                          |
+| `apply.mjs` | Patch script (Part A: `onProgress` hook; Part B: early `startPolling`) |
+| `test.mjs`  | Behavioral test — needs the real rebundled binary                      |

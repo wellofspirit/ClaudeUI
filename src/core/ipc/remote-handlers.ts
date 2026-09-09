@@ -72,6 +72,8 @@ import {
   type CommandRegistration
 } from './command-registry'
 import { configCommands } from './config-commands'
+import { ideCommands, type IdeCommandHost } from './ide-commands'
+import { remoteViewCommands, type RemoteStatusHost } from './remote-view-commands'
 import { authCommands, type AuthCommandDeps } from './auth-commands'
 import { AUTOMATION_COMMANDS } from './automation-commands'
 import {
@@ -303,13 +305,18 @@ export function registerRemoteHandlers(
   dispatcher: RemoteDispatcher,
   manager: SessionManager,
   /**
-   * The running remote server, for `webauthn:mint-enroll-token`. Optional so the
-   * existing two-argument call sites (and every test) keep working; absent, the
-   * channel still registers but throws `enroll-unavailable` — the channel SET
-   * must not depend on runtime configuration, or the parity pins would report a
-   * different surface in tests than in production.
+   * The running remote server: the auth-surface host for
+   * `webauthn:mint-enroll-token` and the `authcfg:*` family, and — since the
+   * 2026-08-28 status-view ruling — the STATUS SOURCE behind the redacted
+   * `remote:status-view` (it is the same object in every deployment, so a second
+   * parameter would only be a second way to hand over the same server).
+   *
+   * Optional so the existing two-argument call sites (and every test) keep
+   * working; absent, each of those channels still registers but throws — the
+   * channel SET must not depend on runtime configuration, or the parity pins
+   * would report a different surface in tests than in production.
    */
-  enrollTokens?: RemoteAuthSurfaceHost & AuthcfgHost,
+  enrollTokens?: RemoteAuthSurfaceHost & AuthcfgHost & RemoteStatusHost & IdeCommandHost,
   /**
    * The desktop-auth dependencies for the vendor-OAuth / account / native-OAuth
    * command family (ADR-057, S4). Optional for the SAME reason `enrollTokens` is
@@ -1405,6 +1412,24 @@ export function registerRemoteHandlers(
   })
 
   // -------------------------------------------------------------------------
+  // Remote IDE (ADR-064) — VS Code `serve-web` behind the `ide` capability
+  // -------------------------------------------------------------------------
+  //
+  // Declared in `ide-commands.ts` and spread by BOTH transports (the desktop half
+  // is `registerIdeIpc`, called from core-services once the server exists), so
+  // the capability/kind pair is one reviewed fact rather than a remote-only one.
+  // `enrollTokens` is the running `RemoteServer` and supplies both things the
+  // declarations cannot answer themselves: which origin a connection was
+  // classified as, and which IDE service this process installed (`setIdeService`
+  // is the ONE injection point — importing the module singleton here instead
+  // would make that setter a lie in any deployment or test that injected a
+  // different one). Absent (tests, remote-disabled harnesses) the channels still
+  // register and throw — the channel SET must not depend on runtime config.
+  for (const cmd of ideCommands(enrollTokens ?? null)) {
+    handleRemote(cmd)
+  }
+
+  // -------------------------------------------------------------------------
   // Passkeys (ADR-052) — enrollment + credential management
   // -------------------------------------------------------------------------
   //
@@ -1552,6 +1577,21 @@ export function registerRemoteHandlers(
     handler: async (connection: CommandConnection) =>
       authcfgRotateLanKey(connection, enrollTokens ?? null)
   })
+
+  // The REDACTED status read (owner ruling, 2026-08-28) — the ONLY `remote:*`
+  // channel with a registration on this transport, and a `query` at that. Its
+  // declaration and its field-picking redaction live in
+  // `ipc/remote-view-commands.ts`, which both transports spread.
+  //
+  // The self-kill protection is STRUCTURAL: every remote-server mutation
+  // (`remote:start` / `stop` / `set-config` / `set-password` /
+  // `clear-password` / `force-reserve`) is raw `ipcMain.handle` on the host
+  // anchor with no `CommandRegistration` anywhere, so a remote client has no
+  // channel to call — it is not a hidden button and not a capability refusal.
+  // Adding one here would break that; don't.
+  for (const cmd of remoteViewCommands(enrollTokens ?? null)) {
+    handleRemote(cmd)
+  }
 
   // -------------------------------------------------------------------------
   // The config / worktree family + the automations (S1b — the everything-remote

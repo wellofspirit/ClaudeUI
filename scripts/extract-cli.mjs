@@ -1,12 +1,32 @@
 #!/usr/bin/env node
 /**
  * Download the official @anthropic-ai/claude-code Bun standalone binary and
- * extract the wrapped cli.js module from its `.bun` section for patching.
+ * extract every JS chunk from its `.bun` section into one patchable file.
+ *
+ * Since Claude Code 2.1.261 (Bun 1.4.1) the standalone module graph is no
+ * longer one monolithic wrapped-CJS `cli` module — it is ~1,800 modules, of
+ * which ~1,630 are minified **ESM chunks** (`B:/~BUN/root/chunk-*.js`, plus the
+ * `B:/~BUN/root/cli` entry and a couple of worker scripts). JS modules are
+ * identified by their loader byte (`loader == 1`).
  *
  * Output:
- *   - `vendor/claude-cli/cli.js` — wrapped CJS IIFE bytes ready for text
- *     patching by `patch/apply-all.mjs` and re-injection by
- *     `scripts/rebundle-cli.mjs`.
+ *   - `vendor/claude-cli/cli.js` — the concatenation of every JS chunk in
+ *     module-table order, each preceded by a delimiter line:
+ *
+ *         // @bun-chunk B:/~BUN/root/chunk-w7xy78n9.js
+ *         <chunk contents, byte-verbatim, always ends with \n>
+ *         // @bun-chunk B:/~BUN/root/cli
+ *         <chunk contents>
+ *
+ *     Module names are HOST-SPECIFIC: Bun mounts its standalone FS at
+ *     `B:/~BUN/root/` on Windows and `/$bunfs/root/` on macOS and Linux, and
+ *     the chunk set itself differs per platform (1,631 on win32-x64 vs 1,650
+ *     on darwin-arm64 for 2.1.261). Nothing downstream may key on the prefix.
+ *
+ *     `patch/apply-all.mjs` text-patches this file; `scripts/rebundle-cli.mjs`
+ *     splits it back apart on the delimiters and re-injects each chunk into its
+ *     own module-table slot. Every chunk's bytes are pure ASCII and end with a
+ *     newline, so delimiters always start at column 0 (validated below).
  *   - `vendor/claude-cli/vendor/<addon>/<arch>-<platform>/<addon>.node` —
  *     native NAPI addons (e.g. `audio-capture.node`) for the Electron
  *     main process to load directly. cli.js itself resolves these from
@@ -18,8 +38,8 @@
  *   2. Download claude-<version>-<platform>.exe from downloads.claude.ai
  *      (verifies SHA256 against manifest; cached under .cache/claude-cli/ —
  *      CI caches this directory keyed on the pinned version).
- *   3. Parse Bun's standalone trailer, walk the modules table, extract
- *      cli.js and every `.node` addon verbatim.
+ *   3. Parse Bun's standalone trailer, walk the modules table, concatenate
+ *      every loader==1 module and extract every `.node` addon verbatim.
  *   4. Write to vendor/claude-cli/cli.js + per-triple addon paths +
  *      version.json.
  *
@@ -48,7 +68,8 @@ import {
 import { get as httpsGet } from 'node:https'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { isCliEntrypointName } from './lib/bun-entrypoint.mjs'
+
+import { CHUNK_DELIM_PREFIX } from './lib/chunk-format.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
@@ -60,6 +81,15 @@ const UA = {
   'User-Agent': 'claude-ui-extract/2.0 (+https://github.com/wellofspirit/ClaudeUI)'
 }
 const BUN_MAGIC = Buffer.from('\n---- Bun! ----\n', 'utf8')
+/** Loader byte for JavaScript modules in Bun's standalone module table. */
+const LOADER_JS = 1
+/** Encoding byte for latin1 text (0 = binary). */
+const ENCODING_LATIN1 = 1
+/** Delimiter that separates chunks in the concatenated patch target. */
+const DELIM_PREFIX = Buffer.from(CHUNK_DELIM_PREFIX, 'latin1')
+const NEWLINE = Buffer.from('\n', 'latin1')
+/** A delimiter line anywhere but column 0 of the file, i.e. a collision. */
+const DELIM_INLINE = Buffer.concat([NEWLINE, DELIM_PREFIX])
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -264,8 +294,9 @@ async function resolveBinary(arg) {
 }
 
 // ---------------------------------------------------------------------------
-// Wrapped cli.js extractor — walks the PE `.bun` section, finds the cli.js
-// module entry in the trailer's modules table, and returns its contents bytes.
+// Chunk extractor — walks the PE `.bun` section (or the whole file for
+// overlay containers), reads the trailer's modules table, and returns every
+// JS chunk plus every `.node` addon.
 // ---------------------------------------------------------------------------
 
 function findBunSectionRawOff(buf) {
@@ -287,11 +318,50 @@ function findBunSectionRawOff(buf) {
 }
 
 /**
- * Extract cli.js and all `.node` native addons from a Bun standalone binary.
- * Walks the trailer at the end of the `.bun` section (PE) or the file
+ * Guard the invariants the concat patch-target format depends on. Any
+ * violation means upstream changed how it packages JS and the concat/split
+ * round-trip is no longer lossless — fail the build rather than ship a
+ * silently-corrupted binary.
+ *
+ * @param {string} name    module name from the table
+ * @param {Buffer} bytes   module contents
+ * @param {number} encoding encoding byte from the table
+ */
+function validateJsChunk(name, bytes, encoding) {
+  const fail = (why) => {
+    throw new Error(
+      `JS chunk "${name}" ${why}.\n` +
+        '  The vendor/claude-cli/cli.js concat format requires every loader==1 module to be\n' +
+        '  non-empty, newline-terminated, pure-ASCII, latin1-encoded text with no embedded\n' +
+        '  "// @bun-chunk " delimiter line. Upstream packaging changed — re-verify\n' +
+        "  scripts/extract-cli.mjs + scripts/rebundle-cli.mjs against Bun's\n" +
+        '  StandaloneModuleGraph before shipping.'
+    )
+  }
+  if (name.length === 0) fail('has an empty module name')
+  if (name.includes('\n')) fail('has a newline in its module name')
+  if (bytes.length === 0) fail('has empty contents')
+  if (bytes[bytes.length - 1] !== 0x0a) fail('does not end with a newline')
+  if (encoding !== ENCODING_LATIN1) fail(`has encoding byte ${encoding} (expected 1 = latin1)`)
+  for (let i = 0; i < bytes.length; i++) {
+    if (bytes[i] >= 0x80) {
+      fail(`contains non-ASCII byte 0x${bytes[i].toString(16)} at offset ${i}`)
+    }
+  }
+  // Delimiter collision: a chunk that itself contains a line starting with the
+  // delimiter would be split into two on the way back in. Impossible today
+  // (the delimiter is our own invention), cheap to prove.
+  if (bytes.includes(DELIM_INLINE) || bytes.subarray(0, DELIM_PREFIX.length).equals(DELIM_PREFIX)) {
+    fail('contains a "// @bun-chunk " delimiter line of its own')
+  }
+}
+
+/**
+ * Extract every JS chunk and all `.node` native addons from a Bun standalone
+ * binary. Walks the trailer at the end of the `.bun` section (PE) or the file
  * (overlay formats on mac/linux).
  */
-function extractWrappedAssets(buf) {
+function extractAssets(buf) {
   let blob
   if (buf.readUInt16LE(0) === 0x5a4d) {
     // Windows PE — `.bun` section holds [u64 blobLen][blob][padding]
@@ -301,7 +371,7 @@ function extractWrappedAssets(buf) {
   } else {
     // Mach-O / ELF — blob sits at EOF or in a named section. `lastIndexOf`
     // on the full buffer + `byte_count` computation is format-agnostic for
-    // reading (see Bun's StandaloneModuleGraph.zig).
+    // reading (see Bun's StandaloneModuleGraph — Zig through 1.3, Rust from 1.4).
     blob = buf
   }
 
@@ -317,29 +387,53 @@ function extractWrappedAssets(buf) {
   const n = mod_len / 52
   const base = data_start + mod_off
 
-  const assets = { cliName: null, cliBytes: null, addons: [] }
+  const assets = { chunks: [], addons: [], moduleCount: n }
+  const seen = new Set()
   for (let i = 0; i < n; i++) {
     const e = base + i * 52
     const nameOff = blob.readUInt32LE(e)
     const nameLen = blob.readUInt32LE(e + 4)
-    const name = blob
-      .subarray(data_start + nameOff, data_start + nameOff + nameLen)
-      .toString('utf8')
+    const nameBytes = Buffer.from(
+      blob.subarray(data_start + nameOff, data_start + nameOff + nameLen)
+    )
+    const name = nameBytes.toString('utf8')
     const cOff = blob.readUInt32LE(e + 8)
     const cLen = blob.readUInt32LE(e + 12)
     const bytes = Buffer.from(blob.subarray(data_start + cOff, data_start + cOff + cLen))
+    const encoding = blob.readUInt8(e + 48)
+    const loader = blob.readUInt8(e + 49)
 
-    if (isCliEntrypointName(name)) {
-      assets.cliName = name
-      assets.cliBytes = bytes
+    if (loader === LOADER_JS) {
+      validateJsChunk(name, bytes, encoding)
+      // Names key the split on the rebundle side, so duplicates would make the
+      // round-trip ambiguous.
+      if (seen.has(name)) throw new Error(`duplicate JS module name in modules table: "${name}"`)
+      seen.add(name)
+      assets.chunks.push({ name, nameBytes, bytes })
     } else if (name.endsWith('.node')) {
       const leaf = name.split(/[\\/]/).pop()
       const addonName = leaf.replace(/\.node$/, '')
       assets.addons.push({ name, addonName, bytes })
     }
   }
-  if (!assets.cliBytes) throw new Error('cli.js module not found in modules table')
+  if (assets.chunks.length === 0) {
+    throw new Error(
+      `no JS modules (loader==${LOADER_JS}) found in the ${n}-entry modules table — ` +
+        'the standalone format changed; see scripts/extract-cli.mjs header'
+    )
+  }
   return assets
+}
+
+/**
+ * Concatenate the chunks into the patch target. Delimiter line is
+ * `// @bun-chunk <exact module name>\n`; chunk bytes follow verbatim and
+ * always end with `\n`, so the next delimiter starts at column 0.
+ */
+function buildConcat(chunks) {
+  const parts = []
+  for (const c of chunks) parts.push(DELIM_PREFIX, c.nameBytes, NEWLINE, c.bytes)
+  return Buffer.concat(parts)
 }
 
 // ---------------------------------------------------------------------------
@@ -352,16 +446,23 @@ async function main() {
 
   log(`reading ${binPath}`)
   const buf = readFileSync(binPath)
-  const { cliName, cliBytes, addons } = extractWrappedAssets(buf)
-  log(`extracted cli.js: ${cliBytes.length.toLocaleString()} bytes (from "${cliName}")`)
+  const { chunks, addons, moduleCount } = extractAssets(buf)
+  const concat = buildConcat(chunks)
+  // Named (non `chunk-*`) modules are the entry + workers — worth naming in the
+  // log since a rename there is exactly what broke extraction on past bumps.
+  const named = chunks.filter((c) => !/\/chunk-[^/]*$/.test(c.name)).map((c) => c.name)
+  log(
+    `extracted ${chunks.length} JS chunks of ${moduleCount} modules → ` +
+      `${concat.length.toLocaleString()} bytes; named modules: ` +
+      (named.slice(0, 8).join(', ') + (named.length > 8 ? `, … (${named.length})` : ''))
+  )
 
-  // Wipe the vendor dir so stale artifacts (old pipeline's unwrapped cli.js
-  // with Bun-path shim, stale addon copies, vendored ripgrep) don't leak
-  // into the build. Safe — rebundle + addon writes below regenerate
-  // what's needed.
+  // Wipe the vendor dir so stale artifacts (previous versions' chunk set,
+  // stale addon copies, vendored ripgrep) don't leak into the build. Safe —
+  // rebundle + addon writes below regenerate what's needed.
   if (existsSync(VENDOR_DIR)) rmSync(VENDOR_DIR, { recursive: true, force: true })
   mkdirSync(VENDOR_DIR, { recursive: true })
-  writeFileSync(OUT_CLI, cliBytes)
+  writeFileSync(OUT_CLI, concat)
   log(`wrote ${OUT_CLI}`)
 
   // Native addons — extracted for the host triple (Bun binary is
@@ -393,9 +494,10 @@ async function main() {
         source: '@anthropic-ai/claude-code (Bun standalone binary)',
         sourceBinary,
         extractedAt: new Date().toISOString(),
-        cliSize: cliBytes.length,
-        cliSha256: createHash('sha256').update(cliBytes).digest('hex'),
-        form: 'wrapped'
+        cliSize: concat.length,
+        cliSha256: createHash('sha256').update(concat).digest('hex'),
+        form: 'chunked',
+        chunkCount: chunks.length
       },
       null,
       2

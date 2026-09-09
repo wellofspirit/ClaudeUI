@@ -185,6 +185,10 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     killTerminalsByCwd: (cwd) => ipcRenderer.invoke('terminal:kill-by-cwd', cwd),
     terminalAvailability: () => ipcRenderer.invoke('terminal:availability'),
     terminalPool: (cwd) => ipcRenderer.invoke('terminal:pool', cwd),
+    // Remote IDE (ADR-064) — real IPC here exactly as in the preload.
+    ideAvailability: () => ipcRenderer.invoke('ide:availability'),
+    ideMintEntry: (folder, themeKind) =>
+      ipcRenderer.invoke('ide:mint-entry', { folder, themeKind }),
     watchStreams: (sessionIds, automationIds) =>
       ipcRenderer.invoke('stream:watch', { sessionIds, automationRuns: automationIds }),
     // Mirrors preload: step-up is remote-only, but attach/detach are real on the
@@ -316,10 +320,17 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     loadVendorConfig: (vendorId) => ipcRenderer.invoke('config:load-vendor-config', vendorId),
     saveVendorConfig: (vendorId, config) =>
       ipcRenderer.invoke('config:save-vendor-config', vendorId, config),
+    loadSharedAutoMode: () => ipcRenderer.invoke('config:load-shared-automode'),
+    saveSharedAutoMode: (config) => ipcRenderer.invoke('config:save-shared-automode', config),
     loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
     saveOpencodeSettings: (settings) => unwrap('config:save-opencode-settings', settings),
     readOpencodeNativeRaw: async () => ({ config: {}, path: '' }),
     patchOpencodeNative: async () => {},
+    readPiNativeRaw: async () => ({ config: {}, path: '', text: '' }),
+    patchPiNative: async () => {},
+    writePiNativeText: async () => {},
+    readPiModelsRaw: async () => ({ config: {}, path: '', text: '', managedProviderIds: [] }),
+    patchPiModels: async () => {},
     listOpencodeAgents: async () => [],
     readOpencodeAgent: async () => null,
     saveOpencodeAgent: async () => {},
@@ -336,6 +347,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     stopRemoteServer: () => ipcRenderer.invoke('remote:stop'),
     getRemoteStatus: () => ipcRenderer.invoke('remote:status'),
     onRemoteStatus: onEvent('remote:status'),
+    getRemoteStatusView: () => ipcRenderer.invoke('remote:status-view'),
     getRemoteConfig: () => ipcRenderer.invoke('remote:get-config'),
     setRemoteConfig: (partial) => ipcRenderer.invoke('remote:set-config', partial),
     setRemotePassword: (password) => ipcRenderer.invoke('remote:set-password', password),
@@ -376,6 +388,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     logRelay: (level, source, message) => ipcRenderer.send('log:relay', level, source, message),
 
     getVersionInfo: () => ipcRenderer.invoke('app:version-info'),
+    listProviderRegistry: () => unwrap('provider-registry:list'),
     listSharedProviders: () => unwrap('shared-provider:list'),
     getSharedProviderStatuses: () => unwrap('shared-provider:statuses'),
     listSharedProviderModels: (id) => unwrap('shared-provider:models', id),
@@ -484,6 +497,7 @@ export async function bootTestApp(): Promise<TestApp> {
     'config:save-engine-config',
     'config:load-vendor-config',
     'config:save-vendor-config',
+    'config:save-shared-automode',
     'usage:fetch',
     'usage:fetch-block',
     'plugin:views',
@@ -493,6 +507,10 @@ export async function bootTestApp(): Promise<TestApp> {
   for (const channel of stubChannels) {
     bridge.ipcMain.handle(channel, async () => null)
   }
+  // The shared trust lists answer an OBJECT, not the `null` the inert stubs
+  // return: `TrustListsSection` renders its three list rows from it, and a null
+  // would leave every settings-page test parked in the loading row.
+  bridge.ipcMain.handle('config:load-shared-automode', async () => ({}))
   bridge.ipcMain.handle('config:save-sessions', async (_e: unknown, config: unknown) => {
     echo('config:sessions-changed', [config])
     return null

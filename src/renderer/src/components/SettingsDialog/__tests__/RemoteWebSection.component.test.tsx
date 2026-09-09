@@ -34,6 +34,9 @@ const baseConfig: RemoteConfig = {
   tlsMode: 0,
   tlsHttpsPort: 443,
   allowTerminal: false,
+  // ADR-064: the remote-IDE toggle at its closed default.
+  allowIde: false,
+  ideCliPath: null,
   shellGrantIdleMinutes: 10,
   authPolicy: null,
   effectiveAuthPolicy: 'password',
@@ -55,6 +58,17 @@ const api = {
   getNetworkInterfaces: vi.fn(),
   detectTailscale: vi.fn(),
   onRemoteStatus: vi.fn(() => () => {}),
+  getRemoteStatusView: vi.fn(async () => ({
+    running: true,
+    port: 7365,
+    connectedClients: 1,
+    clientIps: ['100.64.0.7'],
+    clientLogins: ['owner@example.com'],
+    tunnelState: null,
+    authMethods: ['password' as const],
+    lastError: null,
+    tls: null
+  })),
   webauthnCredentials: vi.fn(async () => []),
   authcfgLanLink: vi.fn(),
   authcfgRotateLanKey: vi.fn(),
@@ -160,6 +174,29 @@ describe('Settings › Remote, web variant', () => {
     cleanup()
     installEnrollBridge(null)
     window.localStorage.clear()
+  })
+
+  /**
+   * ADR-065 — a group whose every control is host-anchored shows ONE dimmed
+   * explanatory row, never an empty card and never a wall of controls whose
+   * writes the server would refuse. Both transport groups owe that row.
+   */
+  describe('the host-only groups', () => {
+    it('replaces the listener and capability controls with one note each', async () => {
+      await renderPane()
+
+      expect(screen.getByTestId('RemoteServerSettings.hostOnlyNote')).toHaveTextContent(
+        /set on the machine itself/i
+      )
+      expect(screen.getByTestId('RemoteServerSettings.accessHostOnlyNote')).toHaveTextContent(
+        /set on the machine itself/i
+      )
+      // …and not one control from either of them.
+      for (const id of ['port', 'bindHost', 'autostart', 'tls', 'allowTerminal', 'allowIde']) {
+        expect(screen.queryByTestId(`RemoteServerSettings.${id}`)).toBeNull()
+      }
+      expect(api.setRemoteConfig).not.toHaveBeenCalled()
+    })
   })
 
   describe('the durable enroll card', () => {
@@ -313,6 +350,31 @@ describe('Settings › Remote, web variant', () => {
         bridge.reconnectAs({ capableOrigin: false })
       })
       expect(screen.queryByTestId('EnrollCard')).toBeNull()
+    })
+  })
+
+  describe('the status view mount', () => {
+    /**
+     * The web client's answer to the sidebar pill + Remote Access modal, both of
+     * which are desktop-only: a redacted, read-only reading of the listener it
+     * is talking to (`remote:status-view`). Its own rows and its polling are
+     * pinned in `RemoteStatusCard.component.test.tsx`; what this pins is that
+     * the pane mounts it on the web transport and nowhere else.
+     */
+    it('renders the read-only status card on the web transport', async () => {
+      await renderPane()
+
+      expect(await screen.findByTestId('RemoteStatusCard')).toBeInTheDocument()
+      expect(api.getRemoteStatusView).toHaveBeenCalled()
+      expect(screen.getByTestId('RemoteStatusCard.client')).toHaveTextContent('owner@example.com')
+    })
+
+    it('is not mounted on the host anchor — it reads the full status there (GUARD)', async () => {
+      api.platform = 'darwin'
+      await renderPane()
+
+      expect(screen.queryByTestId('RemoteStatusCard')).toBeNull()
+      expect(api.getRemoteStatusView).not.toHaveBeenCalled()
     })
   })
 

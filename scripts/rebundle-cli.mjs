@@ -1,21 +1,40 @@
 #!/usr/bin/env node
 /**
- * Rebundle a Bun standalone executable with a replaced cli.js payload.
+ * Rebundle a Bun standalone executable with a replaced JS payload.
  *
  * Reads the original claude.exe (PE binary with a `.bun` section containing
- * `[u64 blobLen][data buffer][Offsets 32B][Magic 16B]`), substitutes the
- * cli.js module's contents with a patched version, lays out a fresh blob,
- * and writes a new executable. Drops baked-in JSC bytecode so Bun recompiles
- * cli.js from our patched source on first run (~1-2s cold-start penalty).
+ * `[u64 blobLen][data buffer][Offsets 32B][Magic 16B]`), replaces the contents
+ * of every JS module (loader == 1) with the patched chunk of the same name
+ * from `vendor/claude-cli/cli.js`, lays out a fresh blob, and writes a new
+ * executable.
+ *
+ * Since Claude Code 2.1.261 (Bun 1.4.1) the graph holds ~1,800 modules — ~1,630
+ * minified ESM chunks rather than one wrapped-CJS `cli` module — so the patch
+ * target is a *concatenation* of all JS chunks separated by
+ * `// @bun-chunk <module name>` delimiter lines (produced by
+ * `scripts/extract-cli.mjs`). We split it back apart here and re-inject each
+ * chunk into its own module-table slot.
+ *
+ * What we deliberately drop on the way out:
+ *   - **JSC bytecode** (`bytecode`), plus `module_info` and
+ *     `bytecode_origin_path` which only exist to serve it. Bun recompiles from
+ *     source on first run (~1-2 s cold-start penalty) and the blob shrinks
+ *     127 MB → ~38 MB.
+ *   - **Bun 1.4 optional records** chained after the module table (source
+ *     hashes, builtin bytecode, bytecode string table, startup module count,
+ *     module_info string table, cross-compiled bytecode). We emit none of
+ *     them, so the trailer flags must be masked to `flags & 0xf` — see the
+ *     comment in `writeBlob()`.
  *
  * Truncates the Authenticode cert (binary becomes unsigned — inevitable once
  * we touch the bytes) and shrinks the `.bun` section to match the new blob
- * size, so the output is ~15MB instead of 235MB.
+ * size.
  *
  * Format references:
- *   - Bun StandaloneModuleGraph.zig: 32-byte Offsets struct, 52-byte module
- *     entries (6× StringPointer + 4× u8), strings are \0-terminated, bytecode
- *     requires (offset % 128 == 120) alignment when non-empty.
+ *   - Bun StandaloneModuleGraph (Zig ≤1.3 / Rust ≥1.4): 32-byte Offsets
+ *     struct, 52-byte module entries (6× StringPointer + 4× u8), strings are
+ *     \0-terminated, bytecode requires (offset % 128 == 120) alignment when
+ *     non-empty (moot — we never emit bytecode).
  *   - byte_count = size of data buffer (excludes Offsets + magic).
  *
  * Usage:
@@ -23,23 +42,27 @@
  *     reads sourceBinary + cli.js from vendor/claude-cli/version.json and
  *     writes vendor/claude-cli/bun-claude<ext>)
  *   node scripts/rebundle-cli.mjs <input.exe> <new-cli.js> <output.exe>
- *   node scripts/rebundle-cli.mjs --quiet   (any mode — suppress info logs)
+ *   node scripts/rebundle-cli.mjs --quiet     (any mode — suppress info logs)
+ *   node scripts/rebundle-cli.mjs --verbose   (dump the full module inventory)
  *   node scripts/rebundle-cli.mjs --noop <input.exe> <output.exe>
- *     (NO-OP rebundle: reuse original cli.js contents unchanged — validates
- *      reader/writer symmetry.)
+ *     (NO-OP rebundle: reuse the original module contents unchanged — validates
+ *      reader/writer symmetry, including the bytecode/optional-record drop.)
  */
 
 import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync, chmodSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { isCliEntrypointName } from './lib/bun-entrypoint.mjs'
+
+import { CHUNK_DELIM_RE, isChunkConcat } from './lib/chunk-format.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
 
 const BUN_MAGIC = Buffer.from('\n---- Bun! ----\n', 'utf8')
 const ENTRY_SIZE = 52
+/** Loader byte for JavaScript modules in Bun's standalone module table. */
+const LOADER_JS = 1
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -100,6 +123,7 @@ function die(msg) {
 }
 
 const QUIET = process.argv.includes('--quiet')
+const VERBOSE = process.argv.includes('--verbose')
 
 function log(...args) {
   if (!QUIET) console.log('[rebundle-cli]', ...args)
@@ -327,26 +351,19 @@ function readBlobAtSection(buf, sectionOff, sectionSize) {
 
 // ---------------------------------------------------------------------------
 // Blob writer: emit strings, modules table, argv, Offsets, magic.
-// Drops bytecode (sets offset/len to 0) so Bun recompiles source.
+// Drops bytecode + its two companion fields (module_info,
+// bytecode_origin_path) so Bun recompiles from source, and emits none of
+// Bun 1.4's optional post-table records.
 // ---------------------------------------------------------------------------
 
 function writeBlob({ modules, argv, entry_point_id, flags }) {
   // Allocate a generous buffer and track position; we'll slice at the end.
-  // Upper bound: sum of all field bytes + terminators + table + argv + trailer.
+  // Upper bound: only the three strings we actually emit (name, contents,
+  // sourcemap) plus their \0 terminators, then table + argv + trailer.
+  // bytecode / module_info / bytecode_origin_path are never written.
   const estimate =
     modules.reduce(
-      (s, m) =>
-        s +
-        m.name.length +
-        1 +
-        m.contents.length +
-        1 +
-        m.sourcemap.length +
-        1 +
-        m.module_info.length +
-        1 +
-        m.bytecode_origin_path.length +
-        1,
+      (s, m) => s + m.name.length + 1 + m.contents.length + 1 + m.sourcemap.length + 1,
       0
     ) +
     argv.length +
@@ -373,11 +390,15 @@ function writeBlob({ modules, argv, entry_point_id, flags }) {
     ptrs.name = writeStr(m.name)
     ptrs.contents = writeStr(m.contents)
     ptrs.sourcemap = writeStr(m.sourcemap)
-    // bytecode: intentionally dropped — forces Bun to recompile from source.
-    // Keeps blob size down (108MB → ~14MB) and avoids the alignment dance.
+    // bytecode + module_info + bytecode_origin_path: intentionally dropped —
+    // forces Bun to recompile from source. Keeps the blob small (127MB → ~38MB
+    // at 2.1.261) and avoids the offset % 128 == 120 alignment dance. The two
+    // companions only describe baked bytecode, so carrying them forward while
+    // the bytecode is gone would be at best dead weight and at worst a
+    // dangling reference from the loader's point of view.
     ptrs.bytecode = { off: 0, len: 0 }
-    ptrs.module_info = writeStr(m.module_info)
-    ptrs.bytecode_origin_path = writeStr(m.bytecode_origin_path)
+    ptrs.module_info = { off: 0, len: 0 }
+    ptrs.bytecode_origin_path = { off: 0, len: 0 }
     strPtrs.push(ptrs)
   }
 
@@ -413,6 +434,17 @@ function writeBlob({ modules, argv, entry_point_id, flags }) {
   }
   const mod_len = modules.length * ENTRY_SIZE
 
+  // Bun 1.4 chains OPTIONAL records after the module table, each gated by a
+  // trailer flag bit: SOURCE_TEXT_CONTIGUOUS (4), HAS_SOURCE_HASHES (5),
+  // HAS_BUILTIN_BYTECODE (6), HAS_BYTECODE_STRING_TABLE (7),
+  // HAS_STARTUP_MODULE_COUNT (8), HAS_MODULE_INFO_STRING_TABLE (9),
+  // CROSS_COMPILED_BYTECODE (10). We emit none of them, so those bits MUST be
+  // cleared — copying the upstream flags verbatim (0x3ff on 2.1.261) makes the
+  // loader read whatever follows the table as record data and segfault before
+  // main. Bits 0-3 (DISABLE_DEFAULT_ENV_FILES / DISABLE_AUTOLOAD_BUNFIG /
+  // _TSCONFIG / _PACKAGE_JSON) are behavioural and must be preserved.
+  const outFlags = flags & 0xf
+
   // Offsets struct sits at byte_count (= current pos), trailer follows.
   const byte_count = pos
   out.writeBigUInt64LE(BigInt(byte_count), pos)
@@ -427,8 +459,11 @@ function writeBlob({ modules, argv, entry_point_id, flags }) {
   pos += 4
   out.writeUInt32LE(argvPtr.len, pos)
   pos += 4
-  out.writeUInt32LE(flags, pos)
+  out.writeUInt32LE(outFlags, pos)
   pos += 4
+  if (flags !== outFlags) {
+    log(`flags: 0x${flags.toString(16)} → 0x${outFlags.toString(16)} (optional records dropped)`)
+  }
 
   // Magic
   BUN_MAGIC.copy(out, pos)
@@ -521,14 +556,82 @@ function rewritePE(buf, pe, newBlob) {
 }
 
 // ---------------------------------------------------------------------------
-// Main
+// Concat patch target: split `vendor/claude-cli/cli.js` back into per-module
+// chunks on its `// @bun-chunk <name>` delimiter lines.
 // ---------------------------------------------------------------------------
 
-function findCliModule(modules) {
-  const cli = modules.find((m) => isCliEntrypointName(m.name.toString('utf8')))
-  if (!cli) die('cli.js module not found in blob')
-  return cli
+/**
+ * @param {string} path concat file produced by scripts/extract-cli.mjs
+ * @returns {Map<string, Buffer>} module name → contents bytes
+ */
+function parseChunkFile(path) {
+  const raw = readFileSync(path)
+  if (!isChunkConcat(raw)) {
+    die(
+      `${path} is not a chunk-concat patch target (first line must be a "// @bun-chunk <module>" delimiter). ` +
+        'Re-run `node scripts/extract-cli.mjs` to regenerate it. ' +
+        '(≤2.1.241 produced a single wrapped-CJS module starting with "// @bun" — that format is gone.)'
+    )
+  }
+  // latin1 is a 1:1 byte↔char mapping, so string indices are byte indices and
+  // we can slice the ORIGINAL buffer for byte-verbatim contents.
+  const text = raw.toString('latin1')
+  const chunks = new Map()
+  CHUNK_DELIM_RE.lastIndex = 0
+  let m
+  let pending = null // { name, start } — closed when the next delimiter is found
+  const closePending = (end) => {
+    if (chunks.has(pending.name)) die(`${path}: duplicate chunk "${pending.name}"`)
+    const bytes = raw.subarray(pending.start, end)
+    if (bytes.length === 0) die(`${path}: chunk "${pending.name}" is empty`)
+    if (bytes[bytes.length - 1] !== 0x0a) {
+      die(`${path}: chunk "${pending.name}" does not end with a newline`)
+    }
+    chunks.set(pending.name, bytes)
+  }
+  while ((m = CHUNK_DELIM_RE.exec(text)) !== null) {
+    if (pending) closePending(m.index)
+    // m[0] ends just before the line's \n, so contents start one byte later.
+    pending = { name: m[1], start: m.index + m[0].length + 1 }
+  }
+  if (!pending) die(`${path}: no "// @bun-chunk" delimiter lines found`)
+  closePending(raw.length)
+  return chunks
 }
+
+/**
+ * Parse-check one chunk with esbuild. Each chunk is standalone ESM, which
+ * esbuild's transform mode (stdin) handles by default.
+ *
+ * Note `--bundle=false` is NOT accepted in transform mode ("Invalid transform
+ * flag") — transform can't bundle at all, so its absence is not a loosening.
+ *
+ * @returns {string|null} esbuild stderr on failure, null on success
+ */
+function syntaxCheckChunk(bytes) {
+  try {
+    execFileSync(resolve(ROOT, 'node_modules', '.bin', 'esbuild'), ['--loader=js'], {
+      input: bytes,
+      // Discard stdout — the transformed source can be multiple MB and would
+      // blow execFileSync's 1 MB maxBuffer.
+      stdio: ['pipe', 'ignore', 'pipe'],
+      maxBuffer: 8 * 1024 * 1024
+    })
+    return null
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      die(
+        'esbuild not found at node_modules/.bin/esbuild — cannot syntax-check patched chunks. ' +
+          'Run `bun install` first.'
+      )
+    }
+    return err.stderr?.toString() || err.message
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 
 function main() {
   const args = parseArgs(process.argv.slice(2))
@@ -579,35 +682,65 @@ function main() {
   const origBlobLen = Number(buf.readBigUInt64LE(sectionOff))
 
   const graph = readBlobAtSection(buf, sectionOff, sectionSize)
+  const jsModules = graph.modules.filter((m) => m.loader === LOADER_JS)
   log(
-    `${graph.modules.length} modules, ${graph.argv.length} argv bytes, flags=0x${graph.flags.toString(16)}`
+    `${graph.modules.length} modules (${jsModules.length} JS, ` +
+      `${graph.modules.length - jsModules.length} assets), ` +
+      `${graph.argv.length} argv bytes, flags=0x${graph.flags.toString(16)}`
   )
-  for (const m of graph.modules) {
-    log(
-      `  [${m.index}] ${m.name.toString('utf8')} ` +
-        `contents=${m.contents.length} bc=${m.bytecode.length} ` +
-        `enc=${m.encoding} ldr=${m.loader}`
-    )
-  }
-
-  const cli = findCliModule(graph.modules)
-  if (!args.noop) {
-    const newCli = readFileSync(args.newCli)
-    // Guardrail: our replacement must be the wrapped form (Bun CJS IIFE),
-    // not the unwrapped Node-runnable form the old pipeline produced. The
-    // Bun loader expects `// @bun ...` + `(function(exports, require, ...){`
-    // as the first non-whitespace content. If we hand it the unwrapped
-    // shape, Bun fails to load the module at startup with a cryptic error.
-    if (!newCli.subarray(0, 8).toString('utf8').startsWith('// @bun')) {
-      die(
-        `${args.newCli} is not a wrapped Bun CJS module (missing "// @bun" header). ` +
-          'Re-run `node scripts/extract-cli.mjs` to regenerate it.'
+  // The 2.1.261 graph has ~1,800 entries — a per-module dump is only useful
+  // when debugging the reader, so it's opt-in.
+  if (VERBOSE) {
+    for (const m of graph.modules) {
+      log(
+        `  [${m.index}] ${m.name.toString('utf8')} ` +
+          `contents=${m.contents.length} bc=${m.bytecode.length} ` +
+          `enc=${m.encoding} ldr=${m.loader}`
       )
     }
-    log(`replacing cli.js contents: ${cli.contents.length} → ${newCli.length} bytes`)
-    cli.contents = newCli
+  }
+
+  if (!args.noop) {
+    const patched = parseChunkFile(args.newCli)
+
+    // The chunk set must match the binary's JS module set exactly. A missing
+    // name would silently ship an unpatched (or worse, stale) chunk; an extra
+    // one means the concat came from a different binary than `sourceBinary`.
+    const graphNames = new Set(jsModules.map((m) => m.name.toString('utf8')))
+    const missing = [...graphNames].filter((n) => !patched.has(n))
+    const extra = [...patched.keys()].filter((n) => !graphNames.has(n))
+    if (missing.length || extra.length) {
+      const sample = (a) => a.slice(0, 10).join(', ') + (a.length > 10 ? `, … (${a.length})` : '')
+      die(
+        `${args.newCli} does not match ${args.input}'s JS module set:\n` +
+          (missing.length ? `  missing from the concat: ${sample(missing)}\n` : '') +
+          (extra.length ? `  not in the binary:       ${sample(extra)}\n` : '') +
+          '  Re-run `node scripts/extract-cli.mjs` against the same source binary.'
+      )
+    }
+
+    const changed = []
+    for (const m of jsModules) {
+      const next = patched.get(m.name.toString('utf8'))
+      if (!next.equals(m.contents)) changed.push({ module: m, bytes: next })
+      m.contents = next
+    }
+    log(`${changed.length}/${jsModules.length} chunks modified`)
+
+    // Per-changed-chunk syntax check. Whole-file checking is impossible now
+    // (1,631 separate ESM modules with colliding import bindings), so this is
+    // where a broken patch gets caught — patch/apply-all.mjs only does a
+    // structural sanity check on the concat.
+    for (const { module: m, bytes } of changed) {
+      const name = m.name.toString('utf8')
+      const stderr = syntaxCheckChunk(bytes)
+      if (stderr) die(`syntax check failed for chunk "${name}":\n${stderr}`)
+    }
+    if (changed.length > 0) {
+      log(`syntax check passed for all ${changed.length} modified chunk(s) (esbuild)`)
+    }
   } else {
-    log('NO-OP mode: reusing original cli.js contents (drops bytecode only)')
+    log('NO-OP mode: reusing original module contents (drops bytecode + optional records only)')
   }
 
   const newBlob = writeBlob(graph)

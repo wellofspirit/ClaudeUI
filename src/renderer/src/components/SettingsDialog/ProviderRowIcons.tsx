@@ -3,8 +3,14 @@
  *
  * Hand-rolled inline SVG, matching this codebase's existing convention (see
  * settings-controls.tsx / SettingsDialog/View.tsx) — the app has no icon library
- * and one is not worth adding for five glyphs. Paths follow Lucide's
- * `sliders-horizontal`, `key-round`, `pencil`, `power`, and `trash-2` (ISC).
+ * and one is not worth adding for two glyphs. Paths follow Lucide's `power` and
+ * `trash-2` (ISC).
+ *
+ * TWO, not five. The row once carried sliders / key / pencil icons for manage
+ * models, update credential and configure declaration; those moved into the
+ * provider dialog the row now opens (OpencodeProviders.tsx). What stayed is the
+ * pair a list needs one click away: the reversible veto and the destructive
+ * action, which must never be reachable by the same gesture.
  *
  * `currentColor` throughout so each button owns its own colour state.
  */
@@ -18,44 +24,6 @@ const base = {
   strokeWidth: 1.8,
   strokeLinecap: 'round' as const,
   strokeLinejoin: 'round' as const
-}
-
-/** Manage which models this provider surfaces in the picker. */
-export function SlidersIcon(): React.JSX.Element {
-  return (
-    <svg {...base} aria-hidden="true">
-      <line x1="21" y1="4" x2="14" y2="4" />
-      <line x1="10" y1="4" x2="3" y2="4" />
-      <line x1="21" y1="12" x2="12" y2="12" />
-      <line x1="8" y1="12" x2="3" y2="12" />
-      <line x1="21" y1="20" x2="16" y2="20" />
-      <line x1="12" y1="20" x2="3" y2="20" />
-      <line x1="14" y1="2" x2="14" y2="6" />
-      <line x1="8" y1="10" x2="8" y2="14" />
-      <line x1="16" y1="18" x2="16" y2="22" />
-    </svg>
-  )
-}
-
-/** Update the stored credential (API key or OAuth). */
-export function KeyIcon(): React.JSX.Element {
-  return (
-    <svg {...base} aria-hidden="true">
-      <circle cx="7.5" cy="15.5" r="4.5" />
-      <path d="M10.7 12.3 21 2" />
-      <path d="m16 7 3 3" />
-    </svg>
-  )
-}
-
-/** Configure the provider declaration (name, base URL, models). */
-export function PencilIcon(): React.JSX.Element {
-  return (
-    <svg {...base} aria-hidden="true">
-      <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" />
-      <path d="m15 5 4 4" />
-    </svg>
-  )
 }
 
 /** Enable / disable — the reversible veto, never destructive. */

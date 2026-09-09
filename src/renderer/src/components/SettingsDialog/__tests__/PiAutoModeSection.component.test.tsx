@@ -14,10 +14,9 @@
  *   6. A configured-but-undiscovered judgeModel is shown verbatim, not
  *      collapsed to the "default" label
  *   7. The opencode twin renders from the same core with its own testids
- *   8. The three trust lists (trustedDomains / trustedRegistries /
- *      protectedPatterns) round-trip, and an emptied list is saved as an
- *      ABSENT key -- never `[]`, which the classifier cannot distinguish from
- *      absent (`?.length`) and which would invent a second encoding
+ *   8. The three trust lists are NOT here any more: ADR-065 phase 4 moved them
+ *      to the shared `automode.json` and its own Trust & protection group
+ *      (TrustLists.component.test.tsx). This pane must not resurrect them.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react'
@@ -68,7 +67,7 @@ const MODEL_GROUPS: EngineModelGroup[] = [
 
 /** Baseline saved config with a sibling block that must never be clobbered. */
 const BASE_CONFIG: EngineConfig = {
-  autoMode: { enabled: true, judgeModel: 'openai-codex/gpt-5.6-mini', trustedDomains: ['a.dev'] },
+  autoMode: { enabled: true, judgeModel: 'openai-codex/gpt-5.6-mini' },
   piConfig: { defaultModel: 'openai-codex/gpt-5.6-luna' }
 }
 
@@ -243,7 +242,7 @@ describe('PiAutoModeSection — load', () => {
 })
 
 describe('PiAutoModeSection — saves merge into engines/pi.json, never clobber', () => {
-  it('toggling auto mode off writes enabled:false and keeps piConfig + trust lists', async () => {
+  it('toggling auto mode off writes enabled:false and keeps the sibling piConfig block', async () => {
     await renderLoaded()
 
     fireEvent.click(screen.getByTestId('PiAutoModeSection.enabled'))
@@ -251,11 +250,7 @@ describe('PiAutoModeSection — saves merge into engines/pi.json, never clobber'
     expect(saveEngineConfig).toHaveBeenCalledTimes(1)
     expect(savedEngineIds[0]).toBe('pi')
     expect(savedConfigs[0]).toEqual({
-      autoMode: {
-        enabled: false,
-        judgeModel: 'openai-codex/gpt-5.6-mini',
-        trustedDomains: ['a.dev']
-      },
+      autoMode: { enabled: false, judgeModel: 'openai-codex/gpt-5.6-mini' },
       piConfig: { defaultModel: 'openai-codex/gpt-5.6-luna' }
     })
 
@@ -269,7 +264,6 @@ describe('PiAutoModeSection — saves merge into engines/pi.json, never clobber'
     fireEvent.click(judgeOption('openai-codex/gpt-5.6-luna'))
 
     expect(savedConfigs[0].autoMode?.judgeModel).toBe('openai-codex/gpt-5.6-luna')
-    expect(savedConfigs[0].autoMode?.trustedDomains).toEqual(['a.dev'])
     expect(savedConfigs[0].piConfig).toEqual(BASE_CONFIG.piConfig)
   })
 
@@ -294,7 +288,6 @@ describe('PiAutoModeSection — saves merge into engines/pi.json, never clobber'
     expect(savedConfigs[0].autoMode).toEqual({
       enabled: true,
       judgeModel: 'openai-codex/gpt-5.6-mini',
-      trustedDomains: ['a.dev'],
       twoStageMode: 'fast'
     })
   })
@@ -313,130 +306,35 @@ describe('PiAutoModeSection — saves merge into engines/pi.json, never clobber'
     expect(savedConfigs[1].autoMode).toEqual({
       enabled: true,
       judgeModel: 'openai-codex/gpt-5.6-luna',
-      trustedDomains: ['a.dev'],
       twoStageMode: 'thinking'
     })
   })
 })
 
-// -- Trust lists ------------------------------------------------------
+// -- The trust lists are GONE from this pane (ADR-065 phase 4) -------
 
-/** Add a value to one of the three trust-list editors. */
-function addTrustItem(field: string, value: string): void {
-  const root = screen.getByTestId(`PiAutoModeSection.${field}`)
-  fireEvent.change(within(root).getByTestId(`PiAutoModeSection.${field}.input`), {
-    target: { value }
-  })
-  fireEvent.click(within(root).getByTestId(`PiAutoModeSection.${field}.add`))
-}
-
-/** Remove a value from one of the three trust-list editors, by chip data-id. */
-function removeTrustItem(field: string, value: string): void {
-  const root = screen.getByTestId(`PiAutoModeSection.${field}`)
-  const chip = within(root)
-    .getAllByTestId(`PiAutoModeSection.${field}.remove`)
-    .find((b) => b.getAttribute('data-id') === value)
-  if (!chip) throw new Error(`No ${field} chip for "${value}"`)
-  fireEvent.click(chip)
-}
-
-/** Item values currently rendered by one of the trust-list editors. */
-function trustItems(field: string): (string | null)[] {
-  return within(screen.getByTestId(`PiAutoModeSection.${field}`))
-    .queryAllByTestId(`PiAutoModeSection.${field}.item`)
-    .map((el) => el.getAttribute('data-id'))
-}
-
-describe('AutoModeSection - trust lists', () => {
-  it('renders all three lists, seeded from the saved config', async () => {
+describe('AutoModeSection - trust lists moved out', () => {
+  it('renders none of the three list editors any more', async () => {
     await renderLoaded()
 
-    expect(trustItems('trustedDomains')).toEqual(['a.dev'])
-    expect(trustItems('trustedRegistries')).toEqual([])
-    expect(trustItems('protectedPatterns')).toEqual([])
+    // They live in `TrustListsSection` now, saved to the shared automode.json.
+    // A regression that re-added them here would write them back into
+    // engines/pi.json, where nothing reads them.
+    for (const field of ['trustedDomains', 'trustedRegistries', 'protectedPatterns']) {
+      expect(screen.queryByTestId(`PiAutoModeSection.${field}`)).toBeNull()
+    }
   })
 
-  it('states what an EMPTY list means - the load-bearing half of the semantics', async () => {
+  it('never writes a trust-list key into engines/pi.json', async () => {
     await renderLoaded()
 
-    expect(screen.getByTestId('PiAutoModeSection.trustedDomains').textContent).toContain(
-      'Empty = no external destination is trusted.'
-    )
-    expect(screen.getByTestId('PiAutoModeSection.trustedRegistries').textContent).toContain(
-      "Empty = only the project manifest's default registry."
-    )
-    const protectedText = screen.getByTestId('PiAutoModeSection.protectedPatterns').textContent!
-    expect(protectedText).toContain("'prod'/'production' as a whole word or segment")
-    // A non-empty list REPLACES the heuristic rather than adding to it -
-    // the one behavior a user cannot infer from the field name.
-    expect(protectedText).toContain('REPLACES the heuristic')
-  })
+    const fast = within(screen.getByTestId('PiAutoModeSection.twoStageMode'))
+      .getAllByTestId('PiAutoModeSection.twoStageMode.option')
+      .find((o) => o.getAttribute('data-id') === 'fast')!
+    fireEvent.click(fast)
 
-  it('hides the lists when auto mode is off (they only feed the judge)', async () => {
-    installApiStub({ loadEngineConfig: vi.fn(async () => ({ autoMode: { enabled: false } })) })
-    render(<PiAutoModeSection />)
-    await waitFor(() => expect(screen.getByTestId('PiAutoModeSection.enabled')).toBeTruthy())
-
-    expect(screen.queryByTestId('PiAutoModeSection.trustedDomains')).toBeNull()
-    expect(screen.queryByTestId('PiAutoModeSection.trustedRegistries')).toBeNull()
-    expect(screen.queryByTestId('PiAutoModeSection.protectedPatterns')).toBeNull()
-  })
-
-  it('adding a registry saves it and keeps every sibling key intact', async () => {
-    await renderLoaded()
-
-    addTrustItem('trustedRegistries', 'https://npm.acme.internal')
-
-    expect(savedEngineIds[0]).toBe('pi')
-    expect(savedConfigs[0]).toEqual({
-      autoMode: {
-        enabled: true,
-        judgeModel: 'openai-codex/gpt-5.6-mini',
-        trustedDomains: ['a.dev'],
-        trustedRegistries: ['https://npm.acme.internal']
-      },
-      piConfig: { defaultModel: 'openai-codex/gpt-5.6-luna' }
-    })
-  })
-
-  it('emptying a list DELETES the key - never writes [] (absent = the restrictive default)', async () => {
-    await renderLoaded()
-
-    removeTrustItem('trustedDomains', 'a.dev')
-
-    const auto = savedConfigs[0].autoMode!
-    // The distinction matters: the classifier reads these behind `?.length`,
-    // so `[]` and absent mean the same thing - one encoding, not two.
-    expect('trustedDomains' in auto).toBe(false)
-    expect(JSON.parse(JSON.stringify(savedConfigs[0])).autoMode).not.toHaveProperty(
-      'trustedDomains'
-    )
-    // ...and the rest of the block survives.
-    expect(auto.enabled).toBe(true)
-    expect(auto.judgeModel).toBe('openai-codex/gpt-5.6-mini')
-    expect(savedConfigs[0].piConfig).toEqual({ defaultModel: 'openai-codex/gpt-5.6-luna' })
-  })
-
-  it('a re-added value comes back as a present key (absent <-> populated round-trip)', async () => {
-    await renderLoaded()
-
-    removeTrustItem('trustedDomains', 'a.dev')
-    expect(trustItems('trustedDomains')).toEqual([])
-    addTrustItem('trustedDomains', 'files.acme.com')
-
-    expect(savedConfigs).toHaveLength(2)
-    expect(savedConfigs[1].autoMode?.trustedDomains).toEqual(['files.acme.com'])
-    expect(trustItems('trustedDomains')).toEqual(['files.acme.com'])
-  })
-
-  it('protectedPatterns edits never touch the other two lists', async () => {
-    await renderLoaded()
-
-    addTrustItem('protectedPatterns', 'acme-live-*')
-
-    expect(savedConfigs[0].autoMode?.protectedPatterns).toEqual(['acme-live-*'])
-    expect(savedConfigs[0].autoMode?.trustedDomains).toEqual(['a.dev'])
-    expect('trustedRegistries' in savedConfigs[0].autoMode!).toBe(false)
+    const auto = savedConfigs[0].autoMode as Record<string, unknown>
+    expect(Object.keys(auto).sort()).toEqual(['enabled', 'judgeModel', 'twoStageMode'])
   })
 })
 
@@ -476,21 +374,13 @@ describe('OpencodeAutoModeSection - same core, own engine + testids', () => {
     expect(savedConfigs[0].autoMode?.judgeModel).toBe('openai/gpt-5')
   })
 
-  it('gets the trust lists from the shared core, under its own testids', async () => {
+  it('has no trust lists either — the shared core dropped them for BOTH engines', async () => {
     renderOpencode()
     await waitFor(() =>
-      expect(screen.getByTestId('OpencodeAutoModeSection.trustedDomains')).toBeTruthy()
+      expect(screen.getByTestId('OpencodeAutoModeSection.judgeModel')).toBeTruthy()
     )
-    expect(screen.getByTestId('OpencodeAutoModeSection.trustedRegistries')).toBeTruthy()
-    expect(screen.getByTestId('OpencodeAutoModeSection.protectedPatterns')).toBeTruthy()
-
-    const root = screen.getByTestId('OpencodeAutoModeSection.trustedDomains')
-    fireEvent.change(within(root).getByTestId('OpencodeAutoModeSection.trustedDomains.input'), {
-      target: { value: 'files.acme.com' }
-    })
-    fireEvent.click(within(root).getByTestId('OpencodeAutoModeSection.trustedDomains.add'))
-
-    expect(savedEngineIds[0]).toBe('opencode')
-    expect(savedConfigs[0].autoMode?.trustedDomains).toEqual(['a.dev', 'files.acme.com'])
+    for (const field of ['trustedDomains', 'trustedRegistries', 'protectedPatterns']) {
+      expect(screen.queryByTestId(`OpencodeAutoModeSection.${field}`)).toBeNull()
+    }
   })
 })

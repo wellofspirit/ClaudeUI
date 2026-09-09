@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ENROLL_UNAVAILABLE_ERROR,
   LAST_CREDENTIAL_LOCKOUT_ERROR
@@ -8,15 +8,17 @@ import type {
   WebauthnCredential,
   WebauthnEnrollToken
 } from '../../../../shared/types'
-import { SessionSecuritySettings } from './SessionSecuritySettings'
-
-const inputClass =
-  'bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[12px] text-text-secondary outline-none focus:border-accent/50 transition-colors'
+import { Button, SettingRow, TextField } from './settings-controls'
 
 // The sign-in-requirement OPTIONS, their hints, and the typed `off` confirmation
 // moved to `SessionSecuritySettings` with the rest of the editable set (ADR-054
 // §6 amendment). They belong wherever the editing MODE is, and there is exactly
-// one of those.
+// one of those. That pane is now mounted BESIDE this one by
+// `RemoteSecuritySection` rather than from inside it (ADR-065): two group bodies
+// in one group card, not one nested in the other.
+
+/** Testid namespace (ADR-027 tier 2). */
+const P = 'RemotePasskeySettings'
 
 function formatTime(ms: number | null): string {
   if (!ms) return 'never'
@@ -25,8 +27,6 @@ function formatTime(ms: number | null): string {
 
 interface Props {
   config: RemoteConfig
-  /** Fresh config from a write, so the parent stays the single source of truth. */
-  onConfigChange: (config: RemoteConfig) => void
   /**
    * Re-read the config from main. Credential mutations move
    * `credentialCount` / `effectiveAuthPolicy` without any config write, so the
@@ -36,12 +36,13 @@ interface Props {
 }
 
 /**
- * Settings › Remote › passkeys (ADR-052 / security.md §Passkeys, §Enrollment).
+ * Settings › Remote access › Passkeys (ADR-052 / security.md §Passkeys,
+ * §Enrollment).
  *
- * Split out of `RemoteServerSettings` because it is a different concern with a
- * different lifecycle: the transport block is pure config writes, while this one
- * owns credential state that changes underneath it (an enrollment from a phone
- * lands here with no local action at all).
+ * Its own component because it is a different concern with a different
+ * lifecycle: the transport rows are pure config writes, while this one owns
+ * credential state that changes underneath it (an enrollment from a phone lands
+ * here with no local action at all).
  *
  * The desktop renderer deliberately runs NO ceremony. It is loaded from
  * `file://` (or the vite dev origin), so it has no RP ID to bind a credential
@@ -49,11 +50,7 @@ interface Props {
  * device that does have one, which is exactly the QR / copy / open-in-browser
  * trio below.
  */
-export function RemotePasskeySettings({
-  config,
-  onConfigChange,
-  onReload
-}: Props): React.JSX.Element {
+export function RemotePasskeySettings({ config, onReload }: Props): React.JSX.Element {
   const [credentials, setCredentials] = useState<WebauthnCredential[] | null>(null)
   const [credentialsError, setCredentialsError] = useState<string | null>(null)
   const [renaming, setRenaming] = useState<{ credId: string; value: string } | null>(null)
@@ -68,12 +65,25 @@ export function RemotePasskeySettings({
   /**
    * Why the last mint was refused for a reason the operator has to go fix
    * (`tailscale serve` is down). Guidance, NOT a latch: the buttons stay live,
-   * because the fix happens elsewhere in this very pane and the operator's next
+   * because the fix happens elsewhere in this very page and the operator's next
    * click is exactly how they check whether it worked.
    */
   const [enrollBlocked, setEnrollBlocked] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
   const [busy, setBusy] = useState(false)
+
+  /**
+   * Focus the rename field the moment it appears.
+   *
+   * Through the wrapper rather than an `autoFocus` prop: the field is the shared
+   * `TextField`, which owns its own DOM node and forwards no ref. Querying for
+   * the input INSIDE our own wrapper is a structural lookup, not a testid hook.
+   */
+  const renameRef = useRef<HTMLSpanElement>(null)
+  const renamingId = renaming?.credId ?? null
+  useEffect(() => {
+    if (renamingId !== null) renameRef.current?.querySelector('input')?.focus()
+  }, [renamingId])
 
   const loadCredentials = useCallback(async (): Promise<void> => {
     try {
@@ -161,7 +171,7 @@ export function RemotePasskeySettings({
   /**
    * Mint a FRESH link every time. Tokens are single-use and short-lived, so a
    * cached URL is a link that has already stopped working — each button press
-   * is its own mint, including the second press of "Copy".
+   * is its own mint, including the second press of "Copy link".
    *
    * `qrcode` is imported dynamically so it stays out of the eagerly-loaded
    * settings chunk, the same reason `RemoteAccessModal` is lazy.
@@ -178,7 +188,7 @@ export function RemotePasskeySettings({
       const message = err instanceof Error ? err.message : String(err)
       if (message.includes(ENROLL_UNAVAILABLE_ERROR)) {
         setEnrollBlocked(
-          'Enrollment links need Tailscale HTTPS to be running — that hostname is what the passkey binds to. Turn on “Tailscale HTTPS” above and start the remote server, then try again.'
+          'Enrollment links need Tailscale HTTPS to be running — that hostname is what the passkey binds to. Turn on “Tailscale HTTPS” in the server settings and start the remote server, then try again.'
         )
       } else {
         setEnrollError(message)
@@ -240,205 +250,191 @@ export function RemotePasskeySettings({
 
   const authOff = config.effectiveAuthPolicy === 'off'
   // Only the in-flight request disables these. A "serve is down" refusal is
-  // guidance the operator acts on right here (the Tailscale HTTPS toggle is a
-  // few rows up), and disabling the button they need in order to find out
+  // guidance the operator acts on right here (the Tailscale HTTPS toggle is in
+  // the server group), and disabling the button they need in order to find out
   // whether the fix worked would make the notice's own "then try again" a lie.
   const addDeviceDisabled = busy
 
   return (
-    <div data-testid="RemotePasskeySettings" className="space-y-3">
+    <div data-testid="RemotePasskeySettings" className="divide-y divide-border/55">
       {/* security.md §Policy modes hard requirement 2 — persistent, prominent,
-          and NOT dismissible while the mode is active. */}
+          and NOT dismissible while the mode is active. Full-bleed rather than an
+          inset card: inside the group card it IS a row. */}
       {authOff && (
         <div
-          data-testid="RemotePasskeySettings.offBanner"
+          data-testid={`${P}.offBanner`}
           role="alert"
-          className="rounded border border-red-500/40 bg-red-500/10 px-2 py-1.5 text-[11px] text-red-300 leading-snug"
+          className="px-3.5 py-2.5 bg-danger/10 text-[12px] leading-4 text-danger"
         >
           Remote authentication is OFF. Anyone who can reach this machine on the network has full
           control of it — no password, no passkey, no link required.
         </div>
       )}
 
-      {/* The SIGN-IN REQUIREMENT, the step-up tier, the timing dials, the audit
-          window and the password all live in the settings EDITOR below
-          (ADR-054 §6 amendment): they are one set an operator changes together,
-          inside one bounded editing mode, and splitting them across two panes
-          was what made the old surface a wall of always-live knobs. What stays
-          here is what is NOT part of that set — the two admission toggles and
-          the credential list, which are per-credential rather than policy. */}
-      {/* The two ADMISSION TOGGLES — "allow the password as a backup" and "skip
-          the passkey for Tailscale sign-ins" — moved INTO the settings editor
-          below (owner ruling, 2026-08-16). They were always members of the auth
-          SURFACE: they sweep and audit through the same machinery as the tier,
-          so leaving them outside as always-live switches made two classes of one
-          thing. The editor is the configuration of all of it. */}
+      <SettingRow
+        testid={`${P}.header`}
+        label="Passkeys"
+        description="Devices that sign in with a fingerprint or face instead of the remote password."
+        error={credentialsError ?? undefined}
+        errorTestid={`${P}.credentialsError`}
+      />
 
-      {/* ADR-054's SECOND axis: how fresh a presence proof has to stay AFTER
-          sign-in. Directly under the sign-in requirement because the two are
-          read together and were one knob until ADR-054 split them. */}
-      <SessionSecuritySettings config={config} onConfigChange={onConfigChange} />
-
-      {/* Credentials */}
-      <div>
-        <div className="mb-1">Passkeys</div>
-        {credentialsError && (
-          <div
-            data-testid="RemotePasskeySettings.credentialsError"
-            className="text-[10px] text-red-400 mb-1"
-          >
-            {credentialsError}
-          </div>
-        )}
-        {credentials === null ? (
-          <div className="text-[10px] text-text-muted/70">Loading…</div>
-        ) : credentials.length === 0 ? (
-          <div
-            data-testid="RemotePasskeySettings.credentialsEmpty"
-            className="text-[10px] text-text-muted/70 leading-snug"
-          >
-            No passkeys yet. Add one below — it has to be created on the device that will use it, so
-            this machine hands that device a one-time link.
-          </div>
-        ) : (
-          <div data-testid="RemotePasskeySettings.credentials" className="space-y-1">
-            {credentials.map((cred) => (
-              <div
+      {credentials === null ? (
+        <SettingRow testid={`${P}.credentialsLoading`} description="Loading…" />
+      ) : credentials.length === 0 ? (
+        <SettingRow
+          testid={`${P}.credentialsEmpty`}
+          indent
+          dimmed
+          description="No passkeys yet — a passkey has to be created on the device that will use it, so this machine hands that device a one-time link."
+        />
+      ) : (
+        <div data-testid={`${P}.credentials`} className="divide-y divide-border/55">
+          {credentials.map((cred) =>
+            renaming?.credId === cred.credId ? (
+              <SettingRow
                 key={cred.credId}
-                data-testid="RemotePasskeySettings.credential"
-                data-id={cred.credId}
-                className="rounded border border-border/40 px-2 py-1.5"
+                testid={`${P}.credential`}
+                dataId={cred.credId}
+                layout="stacked"
+                indent
+                label="Device name"
+                description="Empty clears the name; Escape leaves it as it was."
               >
-                <div className="flex items-center gap-2">
-                  {renaming?.credId === cred.credId ? (
-                    <input
-                      data-testid="RemotePasskeySettings.credentialNameInput"
-                      autoFocus
-                      value={renaming.value}
-                      onChange={(e) => setRenaming({ credId: cred.credId, value: e.target.value })}
-                      onBlur={() => void handleRename(cred.credId, renaming.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') void handleRename(cred.credId, renaming.value)
-                        if (e.key === 'Escape') setRenaming(null)
-                      }}
-                      className={`${inputClass} flex-1`}
-                    />
-                  ) : (
-                    <button
-                      data-testid="RemotePasskeySettings.credentialName"
-                      onClick={() =>
-                        setRenaming({ credId: cred.credId, value: cred.nickname ?? '' })
-                      }
-                      title="Rename"
-                      className="flex-1 text-left text-[12px] text-text-primary hover:text-accent truncate"
-                    >
-                      {cred.nickname ?? `Unnamed (${cred.credId.slice(0, 8)})`}
-                    </button>
-                  )}
-                  {cred.backedUp && (
-                    <span
-                      data-testid="RemotePasskeySettings.credentialBackedUp"
-                      title="Synced by the device's password manager — revoking it here removes it everywhere it syncs to."
-                      className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 text-[9px] text-accent"
-                    >
-                      Synced
-                    </span>
-                  )}
-                  <button
-                    data-testid="RemotePasskeySettings.credentialRevoke"
-                    disabled={busy}
-                    onClick={() => void handleRevoke(cred.credId)}
-                    className="shrink-0 rounded px-1.5 py-0.5 text-red-400 hover:bg-red-500/10 disabled:opacity-40 text-[10px]"
+                <span ref={renameRef} className="block">
+                  <TextField
+                    className="w-full"
+                    testid={`${P}.credentialNameInput`}
+                    mono={false}
+                    value={renaming.value}
+                    onChange={(value) => setRenaming({ credId: cred.credId, value })}
+                    onBlur={() => void handleRename(cred.credId, renaming.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void handleRename(cred.credId, renaming.value)
+                      if (e.key === 'Escape') setRenaming(null)
+                    }}
+                  />
+                </span>
+              </SettingRow>
+            ) : (
+              <SettingRow
+                key={cred.credId}
+                testid={`${P}.credential`}
+                dataId={cred.credId}
+                indent
+                label={cred.nickname ?? `Unnamed (${cred.credId.slice(0, 8)})`}
+                description={`Added ${formatTime(cred.createdAt)} · Last used ${formatTime(
+                  cred.lastUsedAt
+                )}${cred.backedUp ? '' : ' · Only on that device'}`}
+              >
+                {cred.backedUp && (
+                  <span
+                    data-testid={`${P}.credentialBackedUp`}
+                    title="Synced by the device's password manager — revoking it here removes it everywhere it syncs to."
+                    className="shrink-0 border border-border rounded-full px-[7px] text-[10.5px] leading-4 text-text-secondary"
                   >
-                    {confirmRevoke === cred.credId ? 'Confirm remove?' : 'Remove'}
-                  </button>
-                </div>
-                <div
-                  data-testid="RemotePasskeySettings.credentialMeta"
-                  className="text-[10px] text-text-muted/60 mt-0.5"
+                    Synced
+                  </span>
+                )}
+                <Button
+                  testid={`${P}.credentialName`}
+                  variant="link"
+                  onClick={() => setRenaming({ credId: cred.credId, value: cred.nickname ?? '' })}
                 >
-                  Added {formatTime(cred.createdAt)} · Last used {formatTime(cred.lastUsedAt)}
-                  {cred.backedUp ? '' : ' · Only on that device'}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-        {revokeError && (
-          <div
-            data-testid="RemotePasskeySettings.revokeError"
-            className="text-[10px] text-red-400 mt-1 leading-snug"
-          >
-            {revokeError}
-          </div>
-        )}
-      </div>
+                  Rename
+                </Button>
+                <Button
+                  testid={`${P}.credentialRevoke`}
+                  variant="danger"
+                  disabled={busy}
+                  onClick={() => void handleRevoke(cred.credId)}
+                >
+                  {confirmRevoke === cred.credId ? 'Confirm remove?' : 'Remove'}
+                </Button>
+              </SettingRow>
+            )
+          )}
+        </div>
+      )}
 
-      {/* Add a device */}
-      <div>
-        <div className="flex items-center gap-2">
-          <button
-            data-testid="RemotePasskeySettings.addDevice"
+      {revokeError && (
+        <SettingRow
+          testid={`${P}.revokeErrorRow`}
+          error={revokeError}
+          errorTestid={`${P}.revokeError`}
+        />
+      )}
+
+      <SettingRow
+        testid={`${P}.addDeviceRow`}
+        layout="stacked"
+        label="Add a device"
+        description="Every press mints a NEW single-use link that expires shortly."
+      >
+        <span className="flex flex-wrap items-center gap-2">
+          <Button
+            testid={`${P}.addDevice`}
+            variant="primary"
             disabled={addDeviceDisabled}
             onClick={() => void handleAddDevice()}
-            className="rounded bg-accent/15 px-2 py-1 text-accent hover:bg-accent/25 disabled:opacity-40 text-[11px]"
           >
-            Add a device
-          </button>
-          <button
-            data-testid="RemotePasskeySettings.copyLink"
+            Show QR code
+          </Button>
+          <Button
+            testid={`${P}.copyLink`}
+            variant="link"
             disabled={addDeviceDisabled}
             onClick={() => void handleCopyLink()}
-            className="rounded px-2 py-1 text-text-secondary hover:bg-bg-hover disabled:opacity-40 text-[11px]"
           >
             {copied ? 'Copied' : 'Copy link'}
-          </button>
-          <button
-            data-testid="RemotePasskeySettings.openInBrowser"
+          </Button>
+          <Button
+            testid={`${P}.openInBrowser`}
+            variant="link"
             disabled={addDeviceDisabled}
             onClick={() => void handleOpenInBrowser()}
-            className="rounded px-2 py-1 text-text-secondary hover:bg-bg-hover disabled:opacity-40 text-[11px]"
           >
             Open in browser
-          </button>
-        </div>
-        {enrollBlocked && (
-          <div
-            data-testid="RemotePasskeySettings.addDeviceBlocked"
-            className="text-[10px] text-red-400 mt-1 leading-snug"
-          >
-            {enrollBlocked}{' '}
-            <button
-              data-testid="RemotePasskeySettings.addDeviceRetry"
+          </Button>
+        </span>
+      </SettingRow>
+
+      {enrollBlocked && (
+        <SettingRow testid={`${P}.addDeviceBlocked`} layout="stacked" indent>
+          <span className="block">
+            <span className="block text-[12px] leading-4 text-danger mb-2">{enrollBlocked}</span>
+            <Button
+              testid={`${P}.addDeviceRetry`}
               disabled={busy}
               onClick={() => void handleAddDevice()}
-              className="underline underline-offset-2 hover:text-red-300 disabled:opacity-40"
             >
               Try again
-            </button>
-          </div>
-        )}
-        {enrollError && (
-          <div
-            data-testid="RemotePasskeySettings.enrollError"
-            className="text-[10px] text-red-400 mt-1 leading-snug"
-          >
-            {enrollError}
-          </div>
-        )}
-        <div
-          data-testid="RemotePasskeySettings.enrollNote"
-          className="text-[10px] text-text-muted/60 mt-1 leading-snug"
-        >
-          Each button press creates a NEW single-use link that expires shortly. Enrollment always
-          happens at your Tailscale HTTPS address — that hostname is what the passkey is bound to,
-          so a link opened over plain LAN or a tunnel cannot work.
-        </div>
-        {enroll && (
-          <div className="mt-2 flex flex-col items-center gap-2">
+            </Button>
+          </span>
+        </SettingRow>
+      )}
+
+      {enrollError && (
+        <SettingRow
+          testid={`${P}.enrollErrorRow`}
+          error={enrollError}
+          errorTestid={`${P}.enrollError`}
+        />
+      )}
+
+      <SettingRow
+        testid={`${P}.enrollNote`}
+        indent
+        dimmed
+        description="Enrollment always happens at your Tailscale HTTPS address — that hostname is what the passkey is bound to, so a link opened over plain LAN or a tunnel cannot work."
+      />
+
+      {enroll && (
+        <SettingRow testid={`${P}.enroll`} layout="stacked" indent>
+          <span className="flex flex-col items-center gap-2">
             {enroll.qr && (
               <img
-                data-testid="RemotePasskeySettings.enrollQr"
+                data-testid={`${P}.enrollQr`}
                 src={enroll.qr}
                 alt="Enrollment QR code"
                 width={180}
@@ -447,17 +443,17 @@ export function RemotePasskeySettings({
               />
             )}
             <code
-              data-testid="RemotePasskeySettings.enrollUrl"
-              className="w-full truncate text-[10px] text-text-muted font-mono"
+              data-testid={`${P}.enrollUrl`}
+              className="w-full truncate text-[12px] leading-4 text-text-secondary font-mono"
             >
               {enroll.url.replace(/#.*$/, '#enroll=…')}
             </code>
-            <div className="text-[10px] text-text-muted/60">
+            <span className="text-[12px] leading-4 text-text-secondary">
               Expires {new Date(enroll.expiresAt).toLocaleTimeString()}
-            </div>
-          </div>
-        )}
-      </div>
+            </span>
+          </span>
+        </SettingRow>
+      )}
     </div>
   )
 }

@@ -1,19 +1,20 @@
 {
   "name": "claudui",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "An Electron application with React and TypeScript",
   "main": "./out/main/index.js",
   "author": "Daniel Liu <wellofspirit@gmail.com>",
   "license": "Apache-2.0",
   "homepage": "https://github.com/wellofspirit/ClaudeUI",
-  "claudeCliVersion": "2.1.241",
-  "opencodeCliVersion": "1.18.10",
+  "claudeCliVersion": "2.1.261",
+  "opencodeCliVersion": "1.18.29",
   "opencodeFork": {
     "repo": "https://github.com/wellofspirit/opencode.git",
     "branch": "claudeui",
-    "tag": "v1.18.10"
+    "tag": "v1.18.29",
+    "ref": "v1.18.29-claudeui.1"
   },
-  "piCliVersion": "0.82.1",
+  "piCliVersion": "0.84.3",
   "ripgrepVersion": "14.1.1",
   "overrides": {
     "node-abi": "^4.33.0",

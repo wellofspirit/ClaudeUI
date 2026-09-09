@@ -54,10 +54,15 @@
  * service is entered at all.
  *
  * NOT here, deliberately: `session:pick-folder`, `app:open-in-vscode`,
- * `window:*` (host-physical, capability `host`), and the vendor/account
- * credential surfaces (`auth:*`, `account:*`, `vendor-auth:*`,
- * `shared-provider:*` writes) — those land with their remote OAuth handling in
- * a later series and stay desktop-registered until then.
+ * `window:*` — host-physical, capability `host`, no remote registration at all.
+ *
+ * The vendor/account credential surfaces (`auth:*`, `account:*`,
+ * `vendor-auth:*`, `shared-provider:*` writes) are not here either, but they are
+ * no longer desktop-only: the "later series" this header once deferred them to
+ * is S4 (ADR-057), and they now live in the sibling `auth-commands.ts` under the
+ * same one-declaration-both-transports rule. They are a separate file rather
+ * than a separate surface, because they need the desktop auth subsystem injected
+ * (`AuthCommandDeps`) and this family does not.
  */
 
 import type { SessionManager } from '../services/session-manager'
@@ -68,7 +73,9 @@ import {
   loadEngineConfig,
   saveEngineConfig,
   loadVendorConfig,
-  saveVendorConfig
+  saveVendorConfig,
+  loadSharedAutoModeConfig,
+  saveSharedAutoModeConfig
 } from '../services/ui-config'
 import type { SlashCommandCache } from '../services/ui-config'
 import {
@@ -92,6 +99,8 @@ import {
   migrateOpencodeConfigToNative
 } from '../opencode/opencode-config'
 import { readOpencodeNativeRaw, patchOpencodeNativeRaw } from '../opencode/opencode-native-raw'
+import { readPiNativeRaw, patchPiNativeRaw, writePiNativeRawText } from '../pi/pi-native-raw'
+import { readPiModelsRaw, patchPiModelsRaw } from '../pi/pi-models-raw'
 import {
   listAgents,
   readAgent,
@@ -107,6 +116,7 @@ import { assertSafeIdSegment } from '../services/path-containment'
 import type {
   EngineConfig,
   VendorConfig,
+  SharedAutoModeConfig,
   OpencodeConfigSettings,
   ProxySettings,
   RawConfigPatch
@@ -268,6 +278,51 @@ async function testProxyConnection(
 }
 
 // ---------------------------------------------------------------------------
+// Shared trust lists (ADR-065 phase 4)
+// ---------------------------------------------------------------------------
+
+/** The only three keys `config:save-shared-automode` may carry. */
+const SHARED_TRUST_KEYS = ['trustedDomains', 'trustedRegistries', 'protectedPatterns'] as const
+
+/**
+ * Validate the shared trust-list payload AT THE PERIMETER, for the same reason
+ * `engineId` is validated here: this is a remotely reachable `config` write, and
+ * what it writes is fed verbatim into the judge's prompt on the next session.
+ * Garbage in that file is not a crash — it is a silently mis-specified
+ * classifier environment, which is exactly the failure nobody notices.
+ *
+ * The shape is narrow on purpose: three OPTIONAL string arrays, each entry a
+ * non-empty trimmed string, and no other keys. An empty list is expressed by
+ * omitting the key (see {@link SharedAutoModeConfig}) — `[]` is accepted from a
+ * caller and normalised away by the service, so an older client cannot create a
+ * second encoding of "nothing is trusted".
+ */
+function assertSharedAutoModeConfig(value: unknown): asserts value is SharedAutoModeConfig {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Invalid shared auto-mode config: expected an object')
+  }
+  const allowed = new Set<string>(SHARED_TRUST_KEYS)
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) throw new Error(`Invalid shared auto-mode config: unknown key "${key}"`)
+  }
+  const record = value as Record<string, unknown>
+  for (const key of SHARED_TRUST_KEYS) {
+    const list = record[key]
+    if (list === undefined) continue
+    if (!Array.isArray(list)) {
+      throw new Error(`Invalid shared auto-mode config: "${key}" must be an array of strings`)
+    }
+    for (const entry of list) {
+      if (typeof entry !== 'string' || entry.trim() !== entry || entry === '') {
+        throw new Error(
+          `Invalid shared auto-mode config: "${key}" entries must be non-empty trimmed strings`
+        )
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The registrations
 // ---------------------------------------------------------------------------
 
@@ -350,6 +405,24 @@ export function configCommands(
         // an app restart).
         if (engineId === 'opencode') invalidateOpencodeModelCache()
         if (engineId === 'pi') invalidatePiModelCache()
+      }
+    },
+    // The engine-SHARED classifier trust lists. One file, no id in the path, so
+    // there is no traversal surface here — the payload shape is what needs
+    // guarding instead (see assertSharedAutoModeConfig).
+    {
+      channel: 'config:load-shared-automode',
+      capability: 'config',
+      kind: 'query',
+      handler: () => loadSharedAutoModeConfig()
+    },
+    {
+      channel: 'config:save-shared-automode',
+      capability: 'config',
+      kind: 'command',
+      handler: (cfg: SharedAutoModeConfig) => {
+        assertSharedAutoModeConfig(cfg)
+        saveSharedAutoModeConfig(cfg)
       }
     },
     {
@@ -437,6 +510,57 @@ export function configCommands(
         patchOpencodeNativeRaw(patches)
         // Capability edits (attachment/modalities/…) change model discovery.
         invalidateOpencodeModelCache()
+      })
+    },
+
+    // The same raw pair for pi's OWN global settings file (~/.pi/agent/settings.json).
+    // Global scope only — pi's project-local .pi/settings.json is not ours to edit.
+    // No cache invalidation on the write: pi model discovery reads auth.json (and
+    // the shared-provider models.json), never settings.json.
+    {
+      channel: 'config:read-pi-native-raw',
+      capability: 'config',
+      kind: 'query',
+      handler: safeHandler(async () => readPiNativeRaw())
+    },
+    {
+      channel: 'config:patch-pi-native',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(async (patches: RawConfigPatch[]) => {
+        patchPiNativeRaw(patches)
+      })
+    },
+    // The Raw config pane's whole-file write. pi has no config schema, so the
+    // pane is a text editor and this takes the user's text verbatim — the
+    // validity check inside the writer is what stops a broken file reaching pi.
+    {
+      channel: 'config:write-pi-native-text',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(async (text: string) => {
+        writePiNativeRawText(text)
+      })
+    },
+
+    // The same raw pair for pi's MODEL CATALOG (~/.pi/agent/models.json). Unlike
+    // settings.json this file has a second writer — the shared-provider
+    // projection — so the read also reports which provider entries that writer
+    // owns, and the patch refuses them. Cache invalidation lives inside
+    // patchPiModelsRaw (models.json IS the model catalog, so an edit the picker
+    // cannot see would look broken), not here.
+    {
+      channel: 'config:read-pi-models-raw',
+      capability: 'config',
+      kind: 'query',
+      handler: safeHandler(async () => readPiModelsRaw())
+    },
+    {
+      channel: 'config:patch-pi-models',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(async (patches: RawConfigPatch[]) => {
+        patchPiModelsRaw(patches)
       })
     },
 

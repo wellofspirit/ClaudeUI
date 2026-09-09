@@ -783,7 +783,9 @@ export function InputBox(): React.JSX.Element {
   )
 
   const handleOpenSandboxSettings = useCallback(() => {
-    window.dispatchEvent(new CustomEvent('open-settings', { detail: { section: 'sandbox' } }))
+    window.dispatchEvent(
+      new CustomEvent('open-settings', { detail: { page: 'claude', group: 'sandbox' } })
+    )
   }, [])
 
   // Mobile mode picker (MobileConfigSheet) — mirrors the desktop Shift+Tab

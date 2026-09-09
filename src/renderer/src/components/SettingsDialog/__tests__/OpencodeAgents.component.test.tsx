@@ -195,7 +195,9 @@ describe('OpencodeAgentsSection', () => {
     expect(screen.getByTestId('OpencodeAgentsSection.newAgent')).toBeTruthy()
   })
 
-  it('renders disabled agent with opacity style', async () => {
+  it('marks a disabled agent by striking its name, not by fading the whole row', async () => {
+    // The red "disabled" chip is the thing that EXPLAINS the state, so the row
+    // may not be dimmed as a whole — that would fade the explanation with it.
     installApiStub({
       listOpencodeAgents: vi.fn(async () => [DISABLED_BUILTIN])
     })
@@ -203,7 +205,9 @@ describe('OpencodeAgentsSection', () => {
     await renderSection()
 
     const row = screen.getByTestId('OpencodeAgentsSection.agentRow')
-    expect(row.className).toContain('opacity-55')
+    expect(row.className).not.toContain('opacity')
+    expect(screen.getByText('plan').parentElement?.className).toContain('line-through')
+    expect(screen.getByText('disabled').className).toContain('text-danger')
   })
 
   it('builtin with overridden=true stays in Built-in group', async () => {

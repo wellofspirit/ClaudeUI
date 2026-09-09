@@ -1,12 +1,22 @@
 import { useState, useEffect } from 'react'
 
+/**
+ * Tailwind's `md` breakpoint. The forks this hook chooses are LAID OUT with
+ * Tailwind's `max-md:` variant, which is `not all and (min-width: 768px)` — it
+ * has already stopped applying at exactly 768. So the hook is `< 768`, not
+ * `<= 768`: at 768 the two disagreed, and the phone fork was drawn with the
+ * desktop's `md`-and-up rules (ADR-065 phase 7).
+ */
 const MOBILE_BREAKPOINT = 768
 
+/** The widest viewport that is still a phone — what `max-md:` resolves to. */
+const MOBILE_MAX_WIDTH = MOBILE_BREAKPOINT - 0.02
+
 export function useIsMobile(): boolean {
-  const [isMobile, setIsMobile] = useState(() => window.innerWidth <= MOBILE_BREAKPOINT)
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth < MOBILE_BREAKPOINT)
 
   useEffect(() => {
-    const mql = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT}px)`)
+    const mql = window.matchMedia(`(max-width: ${MOBILE_MAX_WIDTH}px)`)
     const handler = (e: MediaQueryListEvent): void => setIsMobile(e.matches)
     mql.addEventListener('change', handler)
     return () => mql.removeEventListener('change', handler)

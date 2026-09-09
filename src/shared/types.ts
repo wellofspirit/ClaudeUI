@@ -1,5 +1,8 @@
 import type { ResolvedCapabilities } from './model-capabilities'
 import type {
+  IdeAvailability,
+  IdeEntry,
+  IdeThemeKind,
   PublicKeyCredentialCreationOptionsJSON,
   RegistrationResponseJSON,
   RemoteKdfParams
@@ -10,6 +13,7 @@ import type {
   SharedProviderModel,
   SharedProviderStatus
 } from './shared-provider'
+import type { ProviderRegistrySnapshot } from './provider-registry'
 
 export type IpcResult<T> = { ok: true; data: T } | { ok: false; error: string; code?: string }
 
@@ -481,10 +485,12 @@ export interface OpencodeConfigSettings {
 }
 
 /**
- * A single leaf edit against opencode's raw config file, applied by the
- * schema-driven settings editor via jsonc-parser modify(). `value` absent (or
- * undefined) means DELETE the leaf at `path`; otherwise SET it. Paths use raw
- * opencode key names verbatim (e.g. ['provider','ec2','models','qwen3.6:27b','attachment']).
+ * A single leaf edit against an engine's OWN raw config file, applied via
+ * jsonc-parser modify() by opencode's schema-driven settings editor and by the
+ * curated pi Configuration panes. `value` absent (or undefined) means DELETE the
+ * leaf at `path`; otherwise SET it. Paths use that engine's key names verbatim
+ * (e.g. ['provider','ec2','models','qwen3.6:27b','attachment'] for opencode,
+ * ['compaction','reserveTokens'] for pi).
  */
 export interface RawConfigPatch {
   path: (string | number)[]
@@ -495,6 +501,37 @@ export interface RawConfigPatch {
 export interface OpencodeNativeRaw {
   config: Record<string, unknown>
   path: string
+}
+
+/** Raw pi settings read (`~/.pi/agent/settings.json`) + its resolved file path. */
+export interface PiNativeRaw {
+  config: Record<string, unknown>
+  path: string
+  /**
+   * The file's text exactly as stored, minus any UTF-8 BOM, and '' when the file
+   * is absent or unreadable. The Raw config pane edits THIS rather than a
+   * re-serialisation of `config`, so the user's own formatting survives a round
+   * trip — and a file too broken to parse can still be shown and repaired. The
+   * BOM is stripped because it is an encoding marker rather than content the
+   * user should have to see; the writer puts the file's own BOM back.
+   */
+  text: string
+}
+
+/** Raw pi model catalog read (`~/.pi/agent/models.json`) + its resolved path. */
+export interface PiModelsRaw {
+  config: Record<string, unknown>
+  path: string
+  /** The file's bytes minus any BOM; '' when absent or unreadable. */
+  text: string
+  /**
+   * The `providers.<id>` keys the shared-provider projection currently owns
+   * (`PiSharedProviderAdapter`). The editor must show these read-only: a raw
+   * write into one is reverted by the next provider sync, and turns the user's
+   * next provider save into a "changed outside ClaudeUI" refusal. The writer
+   * rejects such a patch outright — this is what lets the UI say so first.
+   */
+  managedProviderIds: string[]
 }
 
 /**
@@ -636,6 +673,22 @@ export interface DispatchConfig {
    * raising the cap or starting a fresh dispatch both work). Undefined = no cap.
    */
   maxCostUsd?: number
+  /**
+   * Absolute cap on ONE dispatched turn, in MILLISECONDS (ADR-033's 2026-09-01
+   * amendment). `0` disables it; undefined = 60 min. Consumed by the OPENCODE
+   * dispatch direction only — the Claude/pi directions keep their fixed
+   * 10-minute cap. The turn is aborted server-side when it trips.
+   */
+  turnTimeoutMs?: number
+  /**
+   * Inactivity cap for one dispatched turn, in MILLISECONDS: how long the
+   * target may produce NO events at all before the turn is aborted. `0`
+   * disables it; undefined = 15 min. Opencode direction only, same as
+   * `turnTimeoutMs`. This is the real liveness guard — a slow-but-working
+   * target streams continuously, so it should normally be the cap that fires
+   * on a genuinely wedged turn.
+   */
+  idleTimeoutMs?: number
 }
 
 /**
@@ -656,11 +709,33 @@ export interface AutoModeConfig {
   judgeModel?: string
   /** Two-stage classifier mode. Defaults to 'both'. */
   twoStageMode?: 'both' | 'fast' | 'thinking'
-  /** Trust lists fed to the classifier's Environment section (phase 2 of
-   *  `docs/automode-rework-plan.md`). Every slot defaults to EMPTY, and an empty
-   *  slot means "nothing is trusted" rather than "anything goes" — the policy
-   *  renders the restrictive fallback text for it (see `EnvironmentInfo`).
-   *  External domains/services the agent may send data to. */
+  // The three trust lists that used to live here moved to
+  // {@link SharedAutoModeConfig} in ADR-065 phase 4 — they are the same values
+  // for every engine, and keeping a copy per engine meant dropping a trusted
+  // host from one judge and not the other. A read-time migration in
+  // `ui-config.ts` unions the two engines' old lists into the shared file once.
+}
+
+/**
+ * The classifier trust lists, shared by every engine that runs ClaudeUI's own
+ * judge — ONE file, `~/.claude/ui/automode.json` (ADR-065 § Shared trust lists).
+ *
+ * These are not per-engine settings and never were: they describe the user's
+ * environment (which hosts, registries and resources are trusted), not how a
+ * particular engine judges. OpencodeSession and PiSession DERIVE them into the
+ * classifier environment at session start, alongside the per-engine
+ * `AutoModeConfig` (judge model, two-stage mode, master switch), which stays in
+ * `engines/<engineId>.json`. Claude cannot consume them — cli.js ships its own
+ * classifier — which is why the settings badge reads "opencode · pi".
+ *
+ * Every slot defaults to EMPTY, and an empty slot means "nothing is trusted"
+ * rather than "anything goes": the policy renders the restrictive fallback text
+ * for it (see `EnvironmentInfo`). An empty list is therefore stored as an ABSENT
+ * key — the sessions read them behind `?.length`, so `[]` is not a distinct
+ * state and storing it would invent a second encoding of one meaning.
+ */
+export interface SharedAutoModeConfig {
+  /** External domains/services the agent may send data to or fetch from. */
   trustedDomains?: string[]
   /** Package registries beyond the project manifest's default. */
   trustedRegistries?: string[]
@@ -1201,6 +1276,10 @@ interface SessionAPI {
   saveEngineConfig(engineId: string, config: EngineConfig): Promise<void>
   loadVendorConfig(vendorId: string): Promise<VendorConfig>
   saveVendorConfig(vendorId: string, config: VendorConfig): Promise<void>
+  /** The engine-shared classifier trust lists (`~/.claude/ui/automode.json`). */
+  loadSharedAutoMode(): Promise<SharedAutoModeConfig>
+  /** Replaces the shared trust lists wholesale; an empty list is stored absent. */
+  saveSharedAutoMode(config: SharedAutoModeConfig): Promise<void>
   /** Load opencode's engine-native config from opencode's own global config file. */
   loadOpencodeSettings(): Promise<OpencodeConfigSettings>
   /** Save opencode's engine-native config to opencode's own global config file. */
@@ -1209,6 +1288,16 @@ interface SessionAPI {
   readOpencodeNativeRaw(): Promise<OpencodeNativeRaw>
   /** Apply leaf patches to opencode's config file, preserving comments + siblings. */
   patchOpencodeNative(patches: RawConfigPatch[]): Promise<void>
+  /** Read pi's global settings.json verbatim for the curated pi Configuration panes. */
+  readPiNativeRaw(): Promise<PiNativeRaw>
+  /** Apply leaf patches to pi's global settings.json, preserving siblings + formatting. */
+  patchPiNative(patches: RawConfigPatch[]): Promise<void>
+  /** Replace pi's global settings.json with `text` verbatim (Raw config pane). */
+  writePiNativeText(text: string): Promise<void>
+  /** Read pi's models.json verbatim, plus the ids the shared-provider projection owns. */
+  readPiModelsRaw(): Promise<PiModelsRaw>
+  /** Apply leaf patches to pi's models.json; refuses projection-owned provider entries. */
+  patchPiModels(patches: RawConfigPatch[]): Promise<void>
   listOpencodeAgents(cwd?: string): Promise<OpencodeAgentSummary[]>
   readOpencodeAgent(
     name: string,
@@ -1231,6 +1320,13 @@ interface SessionAPI {
 }
 
 interface SharedProviderAPI {
+  /**
+   * The UNIFIED provider list (ADR-065 § "Providers: one list") — the shared
+   * definitions, opencode's catalog and pi's vendor entries as one row set, with
+   * `opencodeInstalled: false` standing for the single degraded case. A pure
+   * read: every row action is one of the write channels below or beside it.
+   */
+  listProviderRegistry(): Promise<ProviderRegistrySnapshot>
   listSharedProviders(): Promise<SharedProviderDefinition[]>
   getSharedProviderStatuses(): Promise<SharedProviderStatus[]>
   listSharedProviderModels(id: string): Promise<SharedProviderModel[]>
@@ -1378,6 +1474,29 @@ interface TerminalAPI {
    * whole terminal affordance on it.
    */
   terminalAvailability(): Promise<TerminalAvailability>
+  /**
+   * May this client open VS Code on the host, and why not (ADR-064)?
+   *
+   * Unlike {@link ClaudeAPI.terminalAvailability} the desktop answers this for
+   * real rather than with a constant: whether a usable VS Code CLI exists is a
+   * fact about the machine, not about the transport, and the desktop settings
+   * pane is the surface that renders the typed probe result.
+   */
+  ideAvailability(): Promise<IdeAvailability>
+  /**
+   * Mint a single-use IDE entry URL for `folder`, RELATIVE to this origin.
+   *
+   * Relative because the caller navigates its own page's origin with it — the
+   * host never has to guess what that origin is, and the cookie the entry sets is
+   * scoped to `/vscode` on it. Throws {@link IDE_UNAVAILABLE_ERROR} with a typed
+   * reason suffix when the toggle, the origin, the CLI or the spawn refuses.
+   *
+   * `themeKind` is the client's own colour scheme, carried so the workbench
+   * opens matching it rather than in whatever the host profile last stored
+   * (ADR-064 polish). Purely cosmetic: omitted or unrecognized simply leaves the
+   * workbench alone, and it never affects whether an entry is handed out.
+   */
+  ideMintEntry(folder: string, themeKind?: IdeThemeKind): Promise<IdeEntry>
   /**
    * Which slots of `cwd`'s terminal POOL currently hold a LIVE pty.
    *
@@ -1617,6 +1736,20 @@ export interface RemoteConfig {
   /** Idle window before a stepped-up `shell` grant decays, in minutes. */
   shellGrantIdleMinutes: number
   /**
+   * Host-side master switch for the remote IDE (ADR-064), OFF by default. Its
+   * own toggle rather than a rider on {@link RemoteConfig.allowTerminal}: a
+   * remote VS Code is shell-EQUIVALENT but not a pty, and an operator must be
+   * able to want one without the other.
+   */
+  allowIde: boolean
+  /**
+   * Optional path to the VS Code CLI the host spawns (`code-tunnel(.exe)` /
+   * `code`), or null to auto-detect. Host-anchored like the toggle, and for a
+   * sharper reason: the host EXECUTES this path, so a remotely writable copy
+   * would be remote code execution by config write.
+   */
+  ideCliPath: string | null
+  /**
    * Stored auth policy, or `null` for AUTO (≥1 credential ⇒ `passkey-always`,
    * else `password`). Same table + same desktop-only write path as
    * {@link RemoteConfig.allowTerminal}, and for the same reason: a remotely
@@ -1755,6 +1888,21 @@ interface RemoteAPI {
   getRemoteStatus(): Promise<RemoteStatus>
   onRemoteStatus(cb: (status: RemoteStatus) => void): () => void
   /**
+   * The REDACTED status (`remote:status-view`), on BOTH transports.
+   *
+   * `getRemoteStatus` above is host-anchor only — `RemoteStatus.lanUrl` /
+   * `tunnelUrl` carry channel keys, so it has no remote registration and the web
+   * adapter answers it with an all-null stub. This is the half a connected
+   * client may see: running state, port, who is connected, tunnel state, auth
+   * methods, the last listen error and a redacted `tls`
+   * ({@link RemoteStatusView}).
+   *
+   * There is no event twin. `remote:status` is host-local by classification, so
+   * the web view POLLS this while it is on screen; the desktop keeps its push
+   * subscription and its full-fat read.
+   */
+  getRemoteStatusView(): Promise<RemoteStatusView>
+  /**
    * The persisted remote-server config as a UI may see it (fixed port, bind
    * host, autostart, TLS, auth surface, ADR-054 tier + dials, password status;
    * never salt/hash/KDF params).
@@ -1784,6 +1932,14 @@ interface RemoteAPI {
     tlsHttpsPort?: number
     allowTerminal?: boolean
     shellGrantIdleMinutes?: number
+    /** ADR-064: the remote-IDE master switch. */
+    allowIde?: boolean
+    /**
+     * ADR-064: the VS Code CLI override. `null` clears it (back to detection).
+     * A non-absolute path REJECTS the whole write — the host spawns whatever
+     * this names, so it is host-anchor only and validated at the anchor.
+     */
+    ideCliPath?: string | null
     /** `null` restores AUTO. Host-anchor only by construction (ADR-054 dec. 6). */
     authPolicy?: RemoteAuthPolicy | null
     passwordBreakGlass?: boolean
@@ -2183,6 +2339,89 @@ export interface RemoteStatus {
    *  (ADR-056). Empty when not running. Derived exactly the same way as
    *  `/remote/auth-info`'s `methods`. */
   authMethods: RemoteAuthMethod[]
+}
+
+/**
+ * The redacted half of {@link RemoteTlsStatus} — what `remote:status-view`
+ * carries about `tailscale serve` (owner ruling, 2026-08-28).
+ *
+ * Four fields, and the three that are MISSING are the point:
+ *
+ *  - `url` — `https://<dnsName>[:port]`, i.e. the node's tailnet DNS name. It is
+ *    no key, but it is the same disclosure `remote:tailscale-detect` is kept
+ *    desktop-only for ("it discloses the node's DNS name and the owner's login",
+ *    `core/boot/host-anchor.ts`), and a client on the LAN or the tunnel does not
+ *    otherwise learn the tailnet name.
+ *  - `serveError` / `detectionMessage` — FREE TEXT composed from the Tailscale
+ *    CLI's own output. The `not-ready` serve failure copies `detection.message`
+ *    verbatim, and that message embeds `status.AuthURL` on a logged-out node —
+ *    a device-authorization URL, which is capability-bearing. `detection` says
+ *    the same thing as a CLOSED union, into which nothing can be interpolated.
+ *
+ * The three kept are stable numbers/enums the web client can already read as
+ * CONFIG through `authcfg:get` (`tlsMode`, `tlsHttpsPort`), plus the live-port
+ * confirmation of the same pin.
+ */
+export interface RemoteTlsStatusView {
+  /** Mirrors {@link RemoteTlsStatus.mode} — 1 = tailscale-serve. */
+  mode: number
+  /** The HTTPS port serve is CONFIRMED listening on, null until up. */
+  httpsPort: number | null
+  /** The pinned HTTPS port this run binds (ADR-042); known even while serve is down. */
+  pinnedHttpsPort: number
+  /** Last `detect()` state — a closed union, never free text. */
+  detection: RemoteTlsDetection | null
+}
+
+/**
+ * The REDACTED, web-reachable view of {@link RemoteStatus} — what
+ * `remote:status-view` answers (`capability: 'config'`, `kind: 'query'`, both
+ * transports). Owner ruling, 2026-08-28: "a remote web view should be able to
+ * see the connected clients. though they should not be able to disable the
+ * remote mode themselves, as it will kill themselves."
+ *
+ * ## What it must never carry, and how that is enforced
+ *
+ * `lanUrl` and `tunnelUrl` carry the LAN channel key / the ephemeral tunnel key
+ * in their fragments (ADR-056 item C) — secrets, which is why `remote:status`
+ * has no remote registration at all. NOTHING derived from either may appear
+ * here: not the URLs, not their host halves, not `tunnelError` (free text from
+ * the tunnel provider, which names the tunnel hostname).
+ *
+ * The redaction is therefore an explicit FIELD PICK — `remoteStatusView()` in
+ * `core/ipc/remote-view-commands.ts` names every field it copies — never a
+ * spread-and-delete. A field added to `RemoteStatus` tomorrow does not appear
+ * here by default, which is the only version of this rule that survives future
+ * edits.
+ *
+ * ## What it deliberately DOES carry
+ *
+ * `clientIps` / `clientLogins` are the one genuinely new cross-client
+ * disclosure: a connected client learns who else is connected. That is the
+ * ruling — the operator's own devices, on the operator's own server — and it is
+ * what makes the view worth having at all.
+ *
+ * ## What it is NOT
+ *
+ * A control surface. Every remote-server MUTATION (`remote:start` / `stop` /
+ * `set-config` / `set-password` / `clear-password` / `force-reserve`) stays raw
+ * `ipcMain.handle` on the host anchor with no registration on either the remote
+ * OR the shared-declaration side, so a remote client cannot cut the connection
+ * it is talking through. That is structural, not a UI courtesy.
+ */
+export interface RemoteStatusView {
+  running: boolean
+  port: number | null
+  connectedClients: number
+  clientIps: string[]
+  /** Parallel to `clientIps`; `null` where the server has no username hint. */
+  clientLogins: (string | null)[]
+  tunnelState: TunnelState | null
+  authMethods: RemoteAuthMethod[]
+  /** Most recent failed `start()` listen attempt (e.g. EADDRINUSE), or null. */
+  lastError: string | null
+  /** {@link RemoteTlsStatusView} — null when the running server is not in TLS mode. */
+  tls: RemoteTlsStatusView | null
 }
 
 // ---------------------------------------------------------------------------

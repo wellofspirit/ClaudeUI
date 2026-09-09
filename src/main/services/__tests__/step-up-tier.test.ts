@@ -20,6 +20,7 @@ import { describe, it, expect } from 'vitest'
 import {
   AUTHCFG_CHANNELS,
   AUTHCFG_FREE_CHANNELS,
+  BENIGN_CACHE_WRITE_CHANNELS,
   SHELL_ACT_VERBS,
   SHELL_READ_VERBS,
   TERM_INPUT_CLASS,
@@ -141,10 +142,21 @@ describe('classifyDispatch', () => {
     ['terminal:write', 'shell', 'command', 'shell-act'],
     ['terminal:kill', 'shell', 'command', 'shell-act'],
     ['terminal:kill-by-cwd', 'shell', 'command', 'shell-act'],
+    // The remote IDE (ADR-064). Minting an entry opens an editor + integrated
+    // terminal on the host, so it rides the same act window a `terminal:create`
+    // does. `ide:availability` declares `config`, not `ide`, so it classifies by
+    // `kind` like every other query — which is the whole point of the two-channel
+    // split (asking "may I?" must be free).
+    ['ide:mint-entry', 'ide', 'command', 'shell-act'],
+    ['ide:availability', 'config', 'query', 'read'],
     // The settings area.
     ['authcfg:apply', 'admin', 'command', 'authcfg'],
     ['authcfg:end', 'admin', 'command', 'read'],
     ['authcfg:set-password', 'admin', 'command', 'authcfg'],
+    // The benign ambient cache write (2026-08-28 ruling): a `command` that costs
+    // no freshness, because the engine fires it and it can only rewrite one
+    // fixed, self-healing, cosmetic file.
+    ['config:save-slash-commands', 'config', 'command', 'read'],
     // Ordinary mutations and reads.
     ['session:send', 'chat', 'command', 'mutation'],
     ['git:commit', 'git', 'command', 'mutation'],
@@ -198,6 +210,34 @@ describe('classifyDispatch', () => {
     expect(unclassified, `unclassified shell verbs: ${unclassified.join(', ')}`).toEqual([])
   })
 
+  it('every `ide`-PINNED channel costs the act window (ADR-064)', () => {
+    // The `ide` twin of the pin above, and it has to be phrased differently
+    // because the IDE has no read/act VERB SET to check membership in — the arm
+    // is keyed on the capability, so what this asserts is the OUTCOME: an `ide`
+    // query is a free read BY DESIGN, and everything else costs the act window.
+    // What can never come out of this arm is a plain `mutation` — an `ide`
+    // command that dodged the act window would fail here.
+    const pinnedIde = Object.entries(PINNED_CAPABILITIES)
+      .filter(([, cap]) => cap === 'ide')
+      .map(([channel]) => channel)
+    expect(pinnedIde.length, 'the ide pin table went empty').toBeGreaterThan(0)
+    for (const channel of pinnedIde) {
+      for (const kind of ['command', 'query'] as const) {
+        const cls = classifyDispatch({ channel, capability: 'ide', kind })
+        expect(cls, `${channel} (${kind})`).toBe(kind === 'query' ? 'read' : 'shell-act')
+      }
+    }
+  })
+
+  it('classifies an UNKNOWN `ide` command as ACTING (fail closed)', () => {
+    expect(classifyDispatch({ channel: 'ide:brand-new', capability: 'ide', kind: 'command' })).toBe(
+      'shell-act'
+    )
+    expect(classifyDispatch({ channel: 'ide:brand-new', capability: 'ide', kind: undefined })).toBe(
+      'shell-act'
+    )
+  })
+
   it('the terminal FRAMES mirror their invoke twins', () => {
     // A frame and the invoke that does the same thing must never be judged
     // differently — `term-input` is `terminal:write`, `term-resize` is
@@ -237,6 +277,74 @@ describe('classifyDispatch', () => {
     expect(
       classifyDispatch({ channel: 'authcfg:rotate-lan-key', capability: 'admin', kind: 'command' })
     ).toBe('authcfg')
+  })
+
+  describe('the benign ambient cache write (owner ruling, 2026-08-28)', () => {
+    it('names EXACTLY one channel — the set is a decision table, not a hole', () => {
+      // The same shape as the shell-verb and authcfg pins: membership is the
+      // whole exemption, so it is asserted as an exact list rather than a
+      // containment check. Widening it has to fail here first, which is where
+      // the three admission criteria (fixed host path / self-healing content /
+      // cosmetic blast radius) are written down.
+      expect([...BENIGN_CACHE_WRITE_CHANNELS].sort()).toEqual(['config:save-slash-commands'])
+    })
+
+    it('classifies `config:save-slash-commands` as `read` despite its `command` kind', () => {
+      // RED before the ruling: the fallthrough classed it `mutation`, so a
+      // `strong`-tier web client with a lapsed window met a biometric prompt on
+      // an ordinary session spawn — the engine announces its command list and
+      // useClaudeEvents writes the warm cache, with no gesture behind it.
+      expect(
+        classifyDispatch({
+          channel: 'config:save-slash-commands',
+          capability: 'config',
+          kind: 'command'
+        })
+      ).toBe('read')
+    })
+
+    it('leaves every OTHER `config` command a mutation', () => {
+      // The exemption is per-channel and named. Nothing about the `config`
+      // capability, the `command` kind, or the `config:save-*` prefix is
+      // exempted — a sibling write that reaches a caller-influenced path still
+      // costs the mutation window.
+      for (const channel of [
+        'config:save-settings',
+        'config:save-engine-config',
+        'config:save-sessions',
+        'config:save-slash-commands-v2'
+      ]) {
+        expect(classifyDispatch({ channel, capability: 'config', kind: 'command' }), channel).toBe(
+          'mutation'
+        )
+      }
+    })
+
+    it('is free on `strong` with a decayed window, and slides NOTHING', () => {
+      // Both halves matter. Free is the fix; refreshing nothing is the guard —
+      // an engine-driven write is not presence, so it must not renew a proof no
+      // human gave. The contrast row is the sibling that still refuses.
+      const cls = classifyDispatch({
+        channel: 'config:save-slash-commands',
+        capability: 'config',
+        kind: 'command'
+      })
+      const d = decide('strong', cls, DECAYED)
+      expect(d).toEqual({ allow: true, refresh: [] })
+      expect(decide('strong', 'mutation', DECAYED).allow).toBe(false)
+      // And it does not slide the window for an ARMED connection either.
+      expect(decide('strong', cls, armed()).refresh).toEqual([])
+    })
+
+    it('cannot exempt a `shell` verb — the read/act split is checked first', () => {
+      // Ordering pin for the decision table. If a future member of the benign
+      // set ever collided with a shell channel, the fail-closed shell branch
+      // still wins, so the exemption can never buy a terminal verb its way out.
+      const shellCollision = [...BENIGN_CACHE_WRITE_CHANNELS][0]
+      expect(
+        classifyDispatch({ channel: shellCollision, capability: 'shell', kind: 'command' })
+      ).toBe('shell-act')
+    })
   })
 })
 

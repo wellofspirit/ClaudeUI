@@ -12,7 +12,10 @@ import {
 } from '../../../../shared/model-capabilities'
 import type { EngineId, VendorId } from '../../../../shared/types'
 import { ENGINE_META, engineMeta } from '../../../../shared/engine-meta'
+import { ChevronIcon } from './ChevronIcon'
 import { EngineLogo } from './EngineLogo'
+import { useAnchoredMenu } from './use-anchored-menu'
+import { useEscapeLayer } from './use-escape-layer'
 
 export interface ModelDisplay {
   value: string
@@ -155,7 +158,9 @@ export function ModelPicker({
   onSelectModel,
   placement = 'up',
   emptyOption,
-  trailingOption
+  trailingOption,
+  variant = 'compact',
+  width = 'min-w-[150px]'
 }: {
   models: ModelDisplay[]
   selectedModel: ModelDisplay
@@ -175,10 +180,40 @@ export function ModelPicker({
    *  a selectable model. Like `emptyOption` it bypasses the Free filter and the
    *  group headers; picking it calls `onSelectModel(trailingOption.value)`. */
   trailingOption?: { value: string; label: string }
+  /** 'compact' (default; the InputBox controls bar and AutomationConfig —
+   *  UNCHANGED) or 'field' — the settings row control, styled exactly like
+   *  `SelectField` (settings-controls.tsx) so the two read as one control in a
+   *  row (ADR-065's one row vocabulary). */
+  variant?: 'compact' | 'field'
+  /** field variant only: a LITERAL Tailwind width class for the trigger
+   *  (Tailwind v4 cannot see built strings). Defaults to `SelectField`'s. */
+  width?: string
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
   useClickOutside(ref, open, () => setOpen(false))
+
+  // BOTH VARIANTS: an open menu is the top Escape layer, so the key closes the
+  // menu and stops there instead of falling through to the sheet or dialog
+  // behind it (see use-escape-layer). A closed picker registers nothing, which
+  // is what lets a settings page hold a dozen of them.
+  useEscapeLayer(() => setOpen(false), true, open)
+
+  const field = variant === 'field'
+
+  // FIELD ONLY: the settings row control lives inside an `overflow-hidden`
+  // group card, which clipped an absolutely-positioned menu (see
+  // use-anchored-menu). The compact composer picker is not clipped by anything
+  // and keeps its absolute menu byte-for-byte.
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const anchored = useAnchoredMenu({
+    open: open && field,
+    anchorRef: triggerRef,
+    menuRef,
+    placement,
+    onClose: () => setOpen(false)
+  })
 
   // Local-only filter toggle — intentionally not persisted across dropdown
   // open/close (or model list changes); it simply resets on remount.
@@ -200,32 +235,62 @@ export function ModelPicker({
   }, [groups, freeOnly, hasFreeModels])
 
   return (
-    <div className="relative" ref={ref} data-testid="ModelPicker">
+    <div className="relative" ref={ref} data-testid="ModelPicker" data-variant={variant}>
       <button
+        ref={triggerRef}
+        type="button"
         onClick={(e) => {
           e.stopPropagation()
           setOpen(!open)
         }}
-        className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer"
+        // The field trigger IS `SelectField`'s trigger (settings-controls.tsx)
+        // plus the flex/centring set, spelled out literally — Tailwind v4
+        // cannot see built strings, and the two controls must not drift.
+        className={
+          field
+            ? `h-7 ${width} max-w-[min(240px,100%)] bg-bg-input border border-border rounded-md px-2.5 text-[12px] text-text-primary outline-none focus:border-accent/50 transition-colors flex items-center justify-between gap-2 text-left cursor-pointer`
+            : 'h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer'
+        }
         title="Model"
+        aria-haspopup="listbox"
+        aria-expanded={open}
         data-testid="ModelPicker.trigger"
       >
-        <span>{selectedModel.shortName}</span>
-        <svg
-          width="8"
-          height="8"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.5"
-          className="shrink-0"
-        >
-          <polyline points="6 9 12 15 18 9" />
-        </svg>
+        {field ? (
+          <span className="truncate">{selectedModel.shortName}</span>
+        ) : (
+          <span>{selectedModel.shortName}</span>
+        )}
+        {field ? (
+          <ChevronIcon open={open} className="text-text-muted" testid="ModelPicker.chevron" />
+        ) : (
+          <svg
+            width="8"
+            height="8"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            className="shrink-0"
+          >
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        )}
       </button>
       {open && (
         <div
-          className={`absolute ${placement === 'down' ? 'top-full mt-1' : 'bottom-full mb-1'} left-0 w-56 max-h-72 overflow-y-auto bg-bg-tertiary border border-border rounded-lg shadow-lg shadow-black/30 z-20`}
+          ref={menuRef}
+          data-side={anchored?.side}
+          style={anchored?.style}
+          // The field menu is placed by the hook — `position: fixed`, offsets and
+          // a min-width measured from the trigger, so no `overflow` ancestor in
+          // the settings tree clips it. The compact one keeps the composer's
+          // absolute menu and its fixed 14rem list.
+          className={
+            field
+              ? 'w-max max-w-[22rem] max-h-72 overflow-y-auto bg-bg-tertiary border border-border rounded-lg shadow-lg shadow-black/30 z-20'
+              : `absolute ${placement === 'down' ? 'top-full mt-1' : 'bottom-full mb-1'} left-0 w-56 max-h-72 overflow-y-auto bg-bg-tertiary border border-border rounded-lg shadow-lg shadow-black/30 z-20`
+          }
         >
           {emptyOption && (
             <button

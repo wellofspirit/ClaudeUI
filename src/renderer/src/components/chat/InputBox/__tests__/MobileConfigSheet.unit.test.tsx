@@ -11,6 +11,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent, within } from '@testing-library/react'
 import { MobileConfigSheet, type MobileConfigSheetProps } from '../MobileConfigSheet'
 import type { ModelDisplay } from '../../../shared/InlinePickers'
+import { useEscapeLayer, __escapeLayerCount } from '../../../shared/use-escape-layer'
 
 const opusModel: ModelDisplay = {
   value: 'claude-opus-4-7',
@@ -487,6 +488,44 @@ describe('MobileConfigSheet — dialog chrome', () => {
     openSheet()
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByTestId('MobileConfigSheet.dialog')).not.toBeInTheDocument()
+  })
+
+  it('is an Escape LAYER while open: the key stops at the sheet, and a closed sheet is not one', () => {
+    // A layer that opened ABOVE the sheet (a picker menu inside it, a confirm)
+    // answers first; the sheet's old bubble-phase listener could not yield to
+    // it and closed the sheet under the menu.
+    function Above({ onClose }: { onClose: () => void }): React.JSX.Element {
+      useEscapeLayer(onClose)
+      return <div />
+    }
+    const behind = vi.fn()
+    document.addEventListener('keydown', behind)
+    try {
+      const { rerender } = render(<MobileConfigSheet {...makeProps()} />)
+      expect(__escapeLayerCount()).toBe(0)
+      openSheet()
+      expect(__escapeLayerCount()).toBe(1)
+
+      const above = vi.fn()
+      rerender(
+        <>
+          <MobileConfigSheet {...makeProps()} />
+          <Above onClose={above} />
+        </>
+      )
+      fireEvent.keyDown(document, { key: 'Escape' })
+      expect(above).toHaveBeenCalledTimes(1)
+      expect(screen.getByTestId('MobileConfigSheet.dialog')).toBeInTheDocument()
+
+      rerender(<MobileConfigSheet {...makeProps()} />)
+      fireEvent.keyDown(document, { key: 'Escape' })
+      expect(screen.queryByTestId('MobileConfigSheet.dialog')).not.toBeInTheDocument()
+      // The sheet stopped the key: nothing behind it saw either press.
+      expect(behind).not.toHaveBeenCalled()
+      expect(__escapeLayerCount()).toBe(0)
+    } finally {
+      document.removeEventListener('keydown', behind)
+    }
   })
 
   it('back returns from a submenu to root without closing the sheet', () => {

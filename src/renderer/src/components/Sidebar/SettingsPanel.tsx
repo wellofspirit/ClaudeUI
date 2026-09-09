@@ -1,11 +1,11 @@
-import { useState, useEffect, useRef, lazy, Suspense } from 'react'
+import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { SettingsDialog, SettingsToggle } from '../SettingsDialog'
-import { SECTION_SCOPE_MAP, type SettingsScope } from '../SettingsDialog/settings-sections'
+import { settingsTargetFromEvent, type SettingsTarget } from '../SettingsDialog/settings-target'
 import { UsageRing } from './UsagePanel'
 
-// Lazy: the modal tree + qrcode must not ride the eager App chunk — the trigger
+// Lazy: the modal tree + qrcode must not ride the eager App chunk — the mount
 // below is desktop-only, so on the web client THIS modal is unreachable. Its
 // `AccessLinks` card is not, as of series M4: Settings › Remote mounts that card
 // on its own (`SettingsDialog/WebAccessLinks`, lazy for the same reason), so the
@@ -14,6 +14,20 @@ import { UsageRing } from './UsagePanel'
 const RemoteAccessModal = lazy(() =>
   import('../RemoteAccessModal').then((m) => ({ default: m.RemoteAccessModal }))
 )
+
+// The web client's overlay behind the same indicator — a redacted STATUS view
+// with no start/stop and no links (see the file). Imported by FILE rather than
+// through `../RemoteAccessModal`, whose barrel would drag the desktop modal,
+// `AccessLinks` and `qrcode` into the web chunk this component exists to keep
+// them out of.
+const WebRemoteStatusModal = lazy(() => import('../RemoteAccessModal/WebRemoteStatusModal'))
+
+/**
+ * How often the WEB client re-reads the redacted status behind the footer icon.
+ * Slower than the settings card's 5s (`SettingsDialog/RemoteStatusCard`): this is
+ * an ambient count in a corner, not a pane the operator opened to watch.
+ */
+const REMOTE_VIEW_POLL_MS = 10_000
 
 export function SettingsPanel(): React.JSX.Element {
   /**
@@ -26,10 +40,8 @@ export function SettingsPanel(): React.JSX.Element {
   const isMobile = useIsMobile()
   const [open, setOpen] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
-  const [settingsTarget, setSettingsTarget] = useState<{
-    scope?: SettingsScope
-    section?: string
-  }>({})
+  // undefined = no target; the dialog opens on its last page for this app run.
+  const [settingsTarget, setSettingsTarget] = useState<SettingsTarget | undefined>(undefined)
   const [remoteModalOpen, setRemoteModalOpen] = useState(false)
   const [remoteRunning, setRemoteRunning] = useState(false)
   const [remoteClients, setRemoteClients] = useState(0)
@@ -37,7 +49,8 @@ export function SettingsPanel(): React.JSX.Element {
   const updateSettings = useSessionStore((s) => s.updateSettings)
   const panelRef = useRef<HTMLDivElement>(null)
 
-  // Track remote server status
+  // Track remote server status — DESKTOP: the host anchor pushes it to its own
+  // window, so read once and subscribe.
   useEffect(() => {
     if (window.api.platform === 'web') return
     window.api.getRemoteStatus().then((s) => {
@@ -55,30 +68,83 @@ export function SettingsPanel(): React.JSX.Element {
     return cleanup
   }, [])
 
-  // Listen for 'open-settings' custom events (e.g. from sandbox pill in InputBox)
+  /**
+   * Track remote server status — WEB: `remote:status` is host-local by
+   * classification and has no event twin over the WS, so the only reachable read
+   * is the REDACTED `remote:status-view` query (`core/ipc/remote-view-commands.ts`),
+   * which must be polled. Same precedent as `SettingsDialog/RemoteStatusCard`,
+   * including the failure rule: a dropped poll says nothing about the server, so
+   * keep the last reading rather than blanking the count to zero.
+   */
+  useEffect(() => {
+    if (window.api.platform !== 'web') return
+    let cancelled = false
+    const read = async (): Promise<void> => {
+      try {
+        const view = await window.api.getRemoteStatusView()
+        if (cancelled || !view) return
+        setRemoteRunning(view.running)
+        setRemoteClients(view.connectedClients)
+      } catch {
+        // Keep the last good reading.
+      }
+    }
+    void read()
+    const timer = setInterval(() => void read(), REMOTE_VIEW_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [])
+
+  // `open-settings` is the app-wide deep-link channel, always a
+  // `{ page, group? }` detail (ADR-065) parsed by the one shared helper both
+  // hosts use. The desktop callers are the composer's sandbox pill, the remote
+  // modal, this panel's own button, and the cross-links inside the dialog (the
+  // pi and opencode provider editors' "managed by a shared provider" notices).
   //
   // Narrowing past the breakpoint hands this dialog to SessionView, so a dialog
   // opened while wide must CLOSE here rather than linger: left open it would
   // render the mobile takeover from inside the drawer, and any `open-settings`
-  // fired from within it (settings-sections' "Open Providers & models",
-  // PiVendors) would mount a SECOND takeover from SessionView on top.
+  // fired from within it would mount a SECOND takeover from SessionView on top.
   useEffect(() => {
     if (isMobile) {
       setDialogOpen(false)
-      setSettingsTarget({})
+      setSettingsTarget(undefined)
       return
     }
     const handler = (event: Event): void => {
-      const detail = (event as CustomEvent<{ scope?: SettingsScope; section?: string }>).detail
-      setSettingsTarget({
-        scope:
-          detail?.scope ?? (detail?.section ? SECTION_SCOPE_MAP.get(detail.section) : undefined),
-        section: detail?.section
-      })
+      setSettingsTarget(settingsTargetFromEvent(event))
       setDialogOpen(true)
     }
     window.addEventListener('open-settings', handler)
     return () => window.removeEventListener('open-settings', handler)
+  }, [isMobile])
+
+  /**
+   * The web overlay's escalation to Settings › Remote (`WebAccessLinks`, behind
+   * the settings-session step-up).
+   *
+   * This is the navigation the footer icon itself used to perform on the web,
+   * unchanged — only its trigger moved, from the indicator's own click to the
+   * overlay's button. It stays HERE rather than inside the overlay because the
+   * destination depends on who hosts the dialog: on mobile this panel lives in
+   * the sidebar drawer that is about to be unmounted, so SessionView answers an
+   * `open-settings` event instead. Both the overlay and the settings popup close
+   * first — leaving either up would put a dismissed surface over the dialog it
+   * just opened.
+   */
+  const openRemoteSettings = useCallback(() => {
+    setRemoteModalOpen(false)
+    setOpen(false)
+    if (isMobile) {
+      window.dispatchEvent(
+        new CustomEvent('open-settings', { detail: { page: 'remote', group: 'server' } })
+      )
+      return
+    }
+    setSettingsTarget({ page: 'remote', group: 'server' })
+    setDialogOpen(true)
   }, [isMobile])
 
   // Close popup on outside click
@@ -148,7 +214,7 @@ export function SettingsPanel(): React.JSX.Element {
                 window.dispatchEvent(new CustomEvent('open-settings', { detail: {} }))
                 return
               }
-              setSettingsTarget({})
+              setSettingsTarget(undefined)
               setDialogOpen(true)
             }}
             className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 mt-1 mb-0.5 text-[12px] text-text-muted hover:text-accent transition-colors cursor-default border-t border-border/30 pt-2"
@@ -175,40 +241,47 @@ export function SettingsPanel(): React.JSX.Element {
         className="border-t border-border/50 flex items-center gap-2.5 text-[11px] text-text-muted"
       >
         <UsageRing />
-        {window.api.platform !== 'web' && (
-          <button
-            data-testid="SettingsPanel.remoteAccess"
-            onClick={() => setRemoteModalOpen(true)}
-            className="flex items-center gap-1 h-6 rounded-md hover:bg-bg-hover transition-colors cursor-default ml-auto px-1"
-            title="Remote Access"
+        {/* Both platforms raise an overlay; only WHICH one differs. The desktop
+            modal renders the access links, which carry channel keys — mounting it
+            on a web client would hand a connected device the credentials to admit
+            further devices, so the web gets `WebRemoteStatusModal`: the same
+            reading as Settings › RemoteStatusCard, with no start/stop and no
+            links. Its own button is the way to the step-up-gated links. */}
+        <button
+          data-testid="SettingsPanel.remoteAccess"
+          onClick={() => setRemoteModalOpen(true)}
+          className="flex items-center gap-1 h-6 rounded-md hover:bg-bg-hover transition-colors cursor-default ml-auto px-1"
+          title={window.api.platform === 'web' ? 'Remote access status' : 'Remote Access'}
+        >
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className={remoteRunning ? 'text-accent' : 'text-text-muted'}
           >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className={remoteRunning ? 'text-accent' : 'text-text-muted'}
-            >
-              <path d="M5 12.55a11 11 0 0114.08 0" />
-              <path d="M1.42 9a16 16 0 0121.16 0" />
-              <path d="M8.53 16.11a6 6 0 016.95 0" />
-              <circle cx="12" cy="20" r="1" />
-            </svg>
-            {remoteRunning && remoteClients > 0 && (
-              <span className="text-accent text-[11px] font-medium leading-none">
-                {remoteClients}
-              </span>
-            )}
-          </button>
-        )}
+            <path d="M5 12.55a11 11 0 0114.08 0" />
+            <path d="M1.42 9a16 16 0 0121.16 0" />
+            <path d="M8.53 16.11a6 6 0 016.95 0" />
+            <circle cx="12" cy="20" r="1" />
+          </svg>
+          {remoteRunning && remoteClients > 0 && (
+            <span className="text-accent text-[11px] font-medium leading-none">
+              {remoteClients}
+            </span>
+          )}
+        </button>
+        {/* The indicator above always carries `ml-auto` now, so the cog no longer
+            needs the web-only variant it used to take when it was the first item
+            after the usage ring. */}
         <button
           data-testid="SettingsPanel.toggle"
           onClick={() => setOpen(!open)}
-          className={`flex items-center justify-center w-6 h-6 rounded-md hover:bg-bg-hover transition-colors cursor-default ${window.api.platform === 'web' ? 'ml-auto' : ''}`}
+          className="flex items-center justify-center w-6 h-6 rounded-md hover:bg-bg-hover transition-colors cursor-default"
           title="Settings"
         >
           <svg
@@ -228,15 +301,18 @@ export function SettingsPanel(): React.JSX.Element {
         </button>
       </div>
       {dialogOpen && (
-        <SettingsDialog
-          onClose={() => setDialogOpen(false)}
-          initialScope={settingsTarget.scope}
-          initialSection={settingsTarget.section}
-        />
+        <SettingsDialog onClose={() => setDialogOpen(false)} initialTarget={settingsTarget} />
       )}
       {remoteModalOpen && (
         <Suspense fallback={null}>
-          <RemoteAccessModal onClose={() => setRemoteModalOpen(false)} />
+          {window.api.platform === 'web' ? (
+            <WebRemoteStatusModal
+              onClose={() => setRemoteModalOpen(false)}
+              onOpenSettings={openRemoteSettings}
+            />
+          ) : (
+            <RemoteAccessModal onClose={() => setRemoteModalOpen(false)} />
+          )}
         </Suspense>
       )}
     </div>

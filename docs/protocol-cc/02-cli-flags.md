@@ -1,6 +1,11 @@
 # 02 — CLI flags
 
-Every flag cli.js accepts. Verified against 2.1.114. Commander builder `Ft1` at char `12942893`; action handler at `~12953900`; pre-parse at `12940601`. Permission-mode enum `bG`/`g6H` at char `1007993`.
+Every flag cli.js accepts. Verified against 2.1.114; flag inventory re-diffed against 2.1.261 `--help` (new flags in §2.14b). Commander builder `Ft1` at char `12942893`; action handler at `~12953900`; pre-parse at `12940601`. Permission-mode enum `bG`/`g6H` at char `1007993`.
+
+> **Anchor staleness (2.1.261):** all char anchors in this doc reference the
+> pre-2.1.261 monolithic cli.js. Since 2.1.261 the bundle is 1,631 ESM chunks
+> concatenated with `// @bun-chunk` delimiters (see 01-transport §1.12) — the
+> offsets no longer resolve; re-locate by string literal instead.
 
 Flags split into two categories:
 
@@ -811,6 +816,31 @@ Early-exits from the action handler (char `12963500+`):
 `GITHUB_ACTIONS`, `GITHUB_ACTION_INPUTS`.
 
 ---
+
+## 2.14b Flags added between 2.1.115 and 2.1.261 (from `--help` diff)
+
+Compact catalog — none are wired into ClaudeUI yet. Descriptions from 2.1.261
+`--help`; none of the hidden flags the harness relies on (`--thinking`,
+`--max-thinking-tokens`, `--max-turns`, `--effort`, `--sdk-url`, `--agent-id`,
+`--parent-session-id`, `--session-id`, `--fork-session`) were removed.
+
+| Flag                                          | Type / values      | Effect                                                                                                                                                                                                                                                                               |
+| --------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--forward-subagent-text`                     | boolean            | Forward subagent text + thinking blocks as assistant/user messages with `parent_tool_use_id` set. Requires `--print` + `--output-format=stream-json`. Overlaps patch/subagent-streaming's message visibility (NOT its stream_event deltas — the patch stays load-bearing for those). |
+| `--prompt-suggestions [bool]`                 | optional bool      | In print/SDK mode emits a `prompt_suggestion` message after each turn with a predicted next user prompt (new outbound message type).                                                                                                                                                 |
+| `--permission-prompts <target>`               | `host` \| `none`   | Who answers permission prompts under `--print`: the SDK host / `--permission-prompt-tool`, or nobody.                                                                                                                                                                                |
+| `--autocompact <auto\|tokens>`                | `auto` or 100k–1M  | Auto-compact window size override.                                                                                                                                                                                                                                                   |
+| `--system-prompt-snapshot <on\|off>`          | enum               | Record the system prompt once per conversation, reuse verbatim on every request/resume (default on for the built-in prompt).                                                                                                                                                         |
+| `--bg`, `--background`                        | boolean            | Start the session in the background, print the id for `claude attach`/`logs`/`stop`/`rm`.                                                                                                                                                                                            |
+| `--cloud [desc\|id\|url]`                     | optional value     | Create a cloud session, or attach by session ID / claude.ai/code URL.                                                                                                                                                                                                                |
+| `--environment <ccpool_…>`                    | string             | Create a cloud session on a self-hosted environment.                                                                                                                                                                                                                                 |
+| `--plugin-url <url>`                          | string, repeatable | Fetch a plugin .zip from a URL for this session only.                                                                                                                                                                                                                                |
+| `--restricted`                                | boolean            | Removes built-in tools that run commands/code (Bash, PowerShell, REPL, …). Also settable via `CLAUDE_CODE_RESTRICTED` env (parsed in the entry stub).                                                                                                                                |
+| `--safe-mode`                                 | boolean            | Start with all customizations (CLAUDE.md, skills, plugins, hooks, MCP, commands/agents, output styles, …) disabled.                                                                                                                                                                  |
+| `--ax-screen-reader`                          | boolean            | Screen-reader-friendly rendering (flat text, no borders/animations).                                                                                                                                                                                                                 |
+| `-n, --name <name>`                           | string             | Set a display name for this session.                                                                                                                                                                                                                                                 |
+| `--allowed-tools` / `--disallowed-tools`      | list               | Kebab-case aliases of `--allowedTools` / `--disallowedTools`.                                                                                                                                                                                                                        |
+| `--append-subagent-system-prompt-file <path>` | string (hidden)    | Subagent system prompt appended from a file (2.1.261; for prompts too large for argv). Not in `--help`; present in the bundle.                                                                                                                                                       |
 
 ## 2.15 Flags our harness doesn't currently use
 

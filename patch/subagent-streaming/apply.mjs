@@ -27,6 +27,103 @@ const V = '[\\w$]+'
 // metachars that silently break pattern matching.
 const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
+// Literal (first-occurrence) replace. String.prototype.replace interprets `$&`,
+// `$1`, `` $` `` etc. in the REPLACEMENT — and minified identifiers may contain
+// `$` — so never build injected code with it.
+const litReplace = (hay, needle, rep) => {
+  const i = hay.indexOf(needle)
+  return i === -1 ? hay : hay.slice(0, i) + rep + hay.slice(i + needle.length)
+}
+
+// ---------------------------------------------------------------------------
+// Chunk scoping (v2.1.261+)
+//
+// <= v2.1.241 shipped ONE monolithic minified bundle. v2.1.261 ships ~1.6k
+// separate minified ESM chunks; the vendored cli.js is their concatenation in
+// module-graph order, each chunk preceded by a delimiter line:
+//   // @bun-chunk B:/~BUN/root/chunk-xxxxxxxx.js
+// Minified identifiers are CHUNK-LOCAL: the same short name means unrelated
+// things in different chunks (`Hr` alone has five independent definitions), and
+// a helper a chunk uses is often an IMPORTED binding aliased per chunk. So any
+// lookback window, and any "find this helper's definition" search, must be
+// clamped to the chunk that contains the anchor — otherwise a lookback can walk
+// into a neighbouring module and capture a name that is not in scope at the
+// injection site. On a pre-split bundle there are no delimiters and the whole
+// file behaves as a single chunk, so these helpers are no-ops there.
+// ---------------------------------------------------------------------------
+
+const CHUNK_MARK = '// @bun-chunk '
+
+/**
+ * The chunk containing `off` in the CURRENT `src`. Recomputed per call because
+ * `src` grows as patches are injected (offsets shift, chunk membership does not).
+ */
+function chunkAt(off) {
+  const head = src.lastIndexOf('\n' + CHUNK_MARK, off)
+  // head === -1 means either the very first chunk (its delimiter sits at offset
+  // 0, with no leading newline) or a monolithic pre-split bundle.
+  if (head === -1 && !src.startsWith(CHUNK_MARK)) {
+    return { name: '(monolithic bundle)', start: 0, end: src.length }
+  }
+  const delimStart = head === -1 ? 0 : head + 1
+  const nameEnd = src.indexOf('\n', delimStart)
+  const next = src.indexOf('\n' + CHUNK_MARK, off)
+  return {
+    name: src.slice(delimStart + CHUNK_MARK.length, nameEnd),
+    start: nameEnd + 1,
+    end: next === -1 ? src.length : next + 1
+  }
+}
+
+/** `src.slice(off - size, off)` clamped so it can never reach into a previous chunk. */
+function prefixWindow(off, size) {
+  const { start } = chunkAt(off)
+  return src.slice(Math.max(start, off - size), off)
+}
+
+/** `src.slice(off, off + size)` clamped so it can never run into the next chunk. */
+function suffixWindow(off, size) {
+  const { end } = chunkAt(off)
+  return src.slice(off, Math.min(end, off + size))
+}
+
+/**
+ * Resolve the session-id getter that is IN SCOPE at `off`, for injections that
+ * emit `session_id:<fn>()`.
+ *
+ * Must not be searched globally. In v2.1.261 the getter is an imported binding
+ * (`import{...,Y,...}from"…chunk-….js"`) whose local alias differs per chunk, so
+ * a whole-file `session_id:X()` scan resolved to `s` — Zod's `string()` builder
+ * from an unrelated schema chunk, which is also imported (under a different
+ * meaning) into the injection chunk. That compiles and then emits a Zod object
+ * as `session_id` at runtime.
+ *
+ * So: scan only the anchor's own chunk, and only sites that sit next to
+ * `parent_tool_use_id` (i.e. real SDK-message yields, not schema builders).
+ * Require a single unambiguous name.
+ */
+function findSessionIdFn(off, label) {
+  const { name: chunkName, start, end } = chunkAt(off)
+  const body = src.slice(start, end)
+  const counts = new Map()
+  for (const m of body.matchAll(/session_id:([\w$]+)\(\)/g)) {
+    const near = body.slice(Math.max(0, m.index - 400), m.index + 400)
+    if (!near.includes('parent_tool_use_id')) continue
+    counts.set(m[1], (counts.get(m[1]) || 0) + 1)
+  }
+  if (counts.size !== 1) {
+    console.error(
+      `ERROR: ${counts.size} candidate session-id functions for ${label} in chunk ${chunkName} ` +
+        `(expected 1): ${[...counts.entries()].map(([n, c]) => `${n}()x${c}`).join(', ') || 'none'}. ` +
+        'Aborting rather than emitting an out-of-scope binding.'
+    )
+    process.exit(1)
+  }
+  const [[fn, hits]] = [...counts.entries()]
+  console.log(`${label} session ID function: ${fn}() (${hits} SDK yields in chunk ${chunkName})`)
+  return fn
+}
+
 // ---------------------------------------------------------------------------
 // Step 1: Read cli.js
 // ---------------------------------------------------------------------------
@@ -122,7 +219,10 @@ if (src.includes(patchFMarker)) {
   // `async function*` decl in the window confirms the injected `yield` is legal.
   // v2.1.219 grew the generator body: the decl now sits ~10.9k chars before the
   // RVY gate (was <10k), so widen the window to 20000 to keep the sanity check.
-  const before = src.slice(Math.max(0, idx - 20000), idx)
+  // v2.1.261: ~14.5k (`async function*dw(`). The window is clamped to the
+  // anchor's chunk so it can never pick up a generator from a neighbouring
+  // module in the concatenated bundle.
+  const before = prefixWindow(idx, 20000)
   if (!/async function\*[\w$]+\(/.test(before)) {
     console.error('ERROR: RVY call site is not inside an async generator. Aborting.')
     process.exit(1)
@@ -168,9 +268,25 @@ if (src.includes(patchFMarker)) {
 // stream_event then flows to `nt` (Patch B, sync) / BVe's h.push (Patch E,
 // background) exactly as designed.
 //
-// Anchor is unique: `IVe(MSG)){FHO(MSG,CFG,N),yield*BUF,BUF.length=0;continue}`.
+// Anchor: `IVe(MSG)){FHO(MSG,CFG,N),yield*BUF,BUF.length=0;continue}`.
 // We only patch when it exists (older CLIs without the pre-filter skip it —
 // Patch F alone was sufficient there).
+//
+// v2.1.261 interposed a stream-mode bookkeeping statement between the branch
+// head and the fHo call, so the branch is no longer one contiguous string:
+//
+//   if(en?.(),bq(Rn)){
+//     if(tn&&Rn.type==="stream_event"){                       ← NEW in v2.1.261
+//       if(Rn.event.type==="message_start")Gm();
+//       else if(Rn.event.type==="message_stop")km()
+//     }
+//     lut(Rn,Jd,ZS),yield*la,la.length=0;continue
+//   }
+//
+// So the anchor is matched in TWO parts, the same way Patch E's BVe anchor is:
+// the (unique) fHo+flush TAIL, then the IVe gate HEAD required within a small
+// window before it. Only the tail is rewritten — whatever upstream splices into
+// the gap is left verbatim, so the next interposed statement won't break this.
 // ===========================================================================
 
 console.log('\n--- Patch F2: yield stream_event past IVe/fHo pre-filter ---')
@@ -183,58 +299,102 @@ let patchF2Applicable = true
 if (src.includes(patchF2Marker)) {
   console.log('Already applied. Skipping.')
 } else {
-  // Match: if(CB?.(),IVe(MSG)){FHO(MSG,CFG,N),yield*BUF,BUF.length=0;continue}
-  // - CB (optional-call callback), IVe (the Bam.has type-gate),
-  //   FHO (the stream-handler), CFG/N (fHo config args), BUF (buffer array).
-  const preFilterRe = new RegExp(
-    `if\\((${V})\\?\\.\\(\\),(${V})\\((${V})\\)\\)\\{` +
-      `(${V})\\(\\3,(${V}),(${V})\\),` +
-      `yield\\*(${V}),\\7\\.length=0;continue\\}`
+  // TAIL: FHO(MSG,CFG1,CFG2),yield*BUF,BUF.length=0;continue}
+  //   FHO = the streaming display handler, CFG1/CFG2 = its config args,
+  //   BUF  = the buffer the handler fills, flushed and cleared on every message.
+  const preFilterTailRe = new RegExp(
+    `(${V})\\((${V}),(${V}),(${V})\\),yield\\*(${V}),\\5\\.length=0;continue\\}`
   )
-  const pfMatch = src.match(preFilterRe)
+  // HEAD: if(CB?.(),IVe(MSG)){
+  //   CB = optional-call progress callback, IVe = the Bam/DCo `.has(MSG.type)` gate.
+  const preFilterHeadRe = new RegExp(`if\\((${V})\\?\\.\\(\\),(${V})\\((${V})\\)\\)\\{`, 'g')
+  /** Chars before the tail in which the IVe gate head must appear (117 in v2.1.261). */
+  const F2_HEAD_WINDOW = 600
 
-  if (!pfMatch) {
+  const tailMatch = src.match(preFilterTailRe)
+
+  if (!tailMatch) {
+    // Distinguish "this CLI has no pre-filter" (pre-v2.1.197 — F2 genuinely
+    // inapplicable) from "the pre-filter exists but was reshaped" (a silent
+    // skip there would ship dead sub-agent streaming).
+    const strayHead = [...src.matchAll(preFilterHeadRe)].find((m) =>
+      src.slice(m.index, m.index + 4000).includes(patchFMarker)
+    )
+    if (strayHead) {
+      console.error(
+        `ERROR: IVe gate head found at char ${strayHead.index} ("${strayHead[0]}") but no ` +
+          `fHo+flush tail (\`FHO(MSG,CFG1,CFG2),yield*BUF,BUF.length=0;continue}\`) after it. ` +
+          'The sub-agent generator pre-filter has changed shape — re-anchor Patch F2.'
+      )
+      process.exit(1)
+    }
     console.log(
       'IVe/fHo streaming pre-filter not found — pre-v2.1.197 CLI. Patch F alone forwards stream_events. Skipping.'
     )
     patchF2Applicable = false
   } else {
-    const pfStr = pfMatch[0]
-    const msgVar = pfMatch[3] // MSG (the loop variable)
-    const idx = src.indexOf(pfStr)
+    const tailStr = tailMatch[0]
+    const tailIdx = src.indexOf(tailStr)
 
-    if (src.indexOf(pfStr, idx + 1) !== -1) {
-      console.error('ERROR: Multiple matches for Patch F2. Aborting.')
+    if (src.indexOf(tailStr, tailIdx + 1) !== -1) {
+      console.error('ERROR: Multiple matches for Patch F2 tail. Aborting.')
+      process.exit(1)
+    }
+
+    // The tail must be the body of the IVe gate — require exactly one gate head
+    // in the bounded window before it. (Without this the tail alone would not
+    // prove we are in the sub-agent generator's streaming branch.)
+    const headWindowStart = Math.max(chunkAt(tailIdx).start, tailIdx - F2_HEAD_WINDOW)
+    const headWindow = src.slice(headWindowStart, tailIdx)
+    const heads = [...headWindow.matchAll(preFilterHeadRe)]
+    if (heads.length !== 1) {
+      console.error(
+        `ERROR: ${heads.length} IVe gate heads (\`if(CB?.(),IVe(MSG)){\`) in the ${F2_HEAD_WINDOW} ` +
+          'chars before the fHo+flush tail (expected 1). Aborting.'
+      )
+      process.exit(1)
+    }
+    const [, cbVar, iveFn, gateArg] = heads[0]
+
+    const fhoFn = tailMatch[1]
+    const msgVar = tailMatch[2] // MSG (the for-await loop variable)
+    const cfg1 = tailMatch[3]
+    const cfg2 = tailMatch[4]
+    const buf = tailMatch[5]
+
+    // The gate must test the same message the handler consumes — otherwise the
+    // head and tail belong to different statements.
+    if (gateArg !== msgVar) {
+      console.error(
+        `ERROR: IVe gate tests ${gateArg} but fHo consumes ${msgVar} — head/tail mismatch. Aborting.`
+      )
       process.exit(1)
     }
 
     // Sanity: this branch must live inside the same sub-agent async generator
-    // Patch F targeted (verify a Patch-F marker is nearby downstream).
-    const after = src.slice(idx, idx + 6000)
+    // Patch F targeted (verify a Patch-F marker is nearby downstream, in the
+    // same chunk — a marker in a neighbouring module would prove nothing).
+    const after = suffixWindow(tailIdx, 6000)
     if (!after.includes(patchFMarker)) {
       console.error('ERROR: IVe pre-filter is not co-located with Patch F. Context mismatch.')
       process.exit(1)
     }
 
-    // Rebuild the branch: keep the fHo side-effects and BUF flush, but insert
-    // a stream_event yield between them. The comma-sequenced `(yield MSG)`
-    // expression is valid inside a generator body.
-    const fhoFn = pfMatch[4]
-    const cfg1 = pfMatch[5]
-    const cfg2 = pfMatch[6]
-    const buf = pfMatch[7]
-    const cbVar = pfMatch[1]
-    const iveFn = pfMatch[2]
-    const gateArg = pfMatch[3]
-    const newStr =
-      `if(${cbVar}?.(),${iveFn}(${gateArg})){` +
-      `${patchF2Marker}${fhoFn}(${msgVar},${cfg1},${cfg2}),` +
-      `${msgVar}.type==="stream_event"&&(yield ${msgVar}),` +
+    // Rewrite the TAIL only: keep the fHo side-effects and the BUF flush, and
+    // insert a stream_event yield between them. Everything upstream splices
+    // between the gate head and the tail is left byte-for-byte intact. The
+    // comma-sequenced `(yield MSG)` expression is valid inside a generator body.
+    const newTail =
+      `${fhoFn}(${msgVar},${cfg1},${cfg2}),` +
+      `${patchF2Marker}${msgVar}.type==="stream_event"&&(yield ${msgVar}),` +
       `yield*${buf},${buf}.length=0;continue}`
 
-    src = src.slice(0, idx) + newStr + src.slice(idx + pfStr.length)
+    src = src.slice(0, tailIdx) + newTail + src.slice(tailIdx + tailStr.length)
     patchCount++
-    console.log(`Applied at char ${idx}. msg=${msgVar}, IVe=${iveFn}, fHo=${fhoFn}, buf=${buf}`)
+    console.log(
+      `Applied at char ${tailIdx}. msg=${msgVar}, CB=${cbVar}, IVe=${iveFn}, fHo=${fhoFn}, buf=${buf}, ` +
+        `head gap=${tailIdx - (headWindowStart + heads[0].index + heads[0][0].length)} chars`
+    )
   }
 }
 
@@ -458,7 +618,9 @@ if (src.includes(patchBMarker)) {
   // v2.1.143+: upstream added outer `type:"progress",` and moved agentId inside
   //   `data:{...,agentId:VAR,agentType,description}`. Allow agentId to be
   //   followed by either `,` or `}`.
-  const nearby = src.slice(idx, idx + 1200)
+  // Chunk-clamped: the captured callback/parent/agent names must be bindings
+  // that are in scope at the injection site, so never look past this chunk.
+  const nearby = suffixWindow(idx, 1200)
   const cbReGated = new RegExp(
     `if\\((${V})\\)\\1\\(\\{(?:type:"progress",)?toolUseID:\`agent_\\$\\{(${V})\\.message\\.id\\}\`.*?agentId:(${V})[,}]`
   )
@@ -524,32 +686,79 @@ if (src.includes(patchCMarker)) {
   // v2.1.47: else if(A.data.type==="bash_progress"){
   // v2.1.49: else if(A.data.type==="bash_progress"||A.data.type==="powershell_progress"){
   // v2.1.87: else if(q.data.type==="bash_progress"||q.data.type==="powershell_progress"){
+  // v2.1.261: else if(e.data.type==="bash_progress"||e.data.type==="powershell_progress"){
   const anchorRe = new RegExp(
     `else if\\((${V})\\.data\\.type==="bash_progress"` +
-      `(?:\\|\\|\\1\\.data\\.type==="powershell_progress")?\\)\\{`
+      `(?:\\|\\|\\1\\.data\\.type==="powershell_progress")?\\)\\{`,
+    'g'
   )
-  const anchorMatch = src.match(anchorRe)
-  if (!anchorMatch) {
+  const anchorMatches = [...src.matchAll(anchorRe)]
+  if (anchorMatches.length === 0) {
     console.error('ERROR: Cannot locate bash_progress handler in ZhA.')
     process.exit(1)
   }
-  const anchor = anchorMatch[0]
-  const anchorIdx = src.indexOf(anchor)
-  const progressVar = anchorMatch[1]
+  if (anchorMatches.length > 1) {
+    console.error(
+      `ERROR: ${anchorMatches.length} bash_progress else-if handlers found ` +
+        `(at ${anchorMatches.map((m) => m.index).join(', ')}). Ambiguous — aborting.`
+    )
+    process.exit(1)
+  }
+  const anchorIdx = anchorMatches[0].index
+  const progressVar = anchorMatches[0][1]
 
-  // Extract session_id function name from nearby ZhA code
-  const ctx = src.slice(anchorIdx - 1500, anchorIdx)
-  if (!ctx.includes('agent_progress')) {
-    console.error('ERROR: bash_progress found but not in expected ZhA context.')
+  // Verify we are inside the SDK converter's `case"progress":` dispatch chain
+  // (not some other bash_progress consumer), and that the chain routes
+  // agent_progress — that branch is what Patch A's messages ride on, and our
+  // `else if` is spliced into the same chain.
+  const ctx = prefixWindow(anchorIdx, 1500)
+  const caseIdx = ctx.lastIndexOf('case"progress":')
+  if (caseIdx === -1) {
+    console.error(
+      'ERROR: bash_progress found but no `case"progress":` dispatch within 1500 chars before it. ' +
+        'Not the ZhA/WOe SDK converter — aborting.'
+    )
+    process.exit(1)
+  }
+  const dispatch = ctx.slice(caseIdx)
+
+  // <= v2.1.241 tested the literal inline: `if(A.data.type==="agent_progress")`.
+  // v2.1.261 extracted it into a predicate helper defined in the same chunk:
+  //   case"progress":if(lmn(e))yield*cmn(e,r);else if(...bash_progress...)
+  //   function lmn(e){return e.type==="progress"&&(e.data.type==="agent_progress"||e.data.type==="skill_progress")}
+  let routesAgentProgress = dispatch.includes('agent_progress')
+  if (!routesAgentProgress) {
+    const predMatch = dispatch.match(new RegExp(`^case"progress":if\\((${V})\\(${V}\\)\\)`))
+    if (predMatch) {
+      // Minified names are chunk-local — resolve the predicate inside the
+      // anchor's own chunk, never across the whole concatenated bundle.
+      const predDefRe = new RegExp(
+        `function ${reEsc(predMatch[1])}\\(${V}\\)\\{[^{}]*"agent_progress"`
+      )
+      const { name: chunkName, start, end } = chunkAt(anchorIdx)
+      if (predDefRe.test(src.slice(start, end))) {
+        routesAgentProgress = true
+        console.log(`  agent_progress routed via predicate ${predMatch[1]}() (chunk ${chunkName})`)
+      }
+    }
+  }
+  if (!routesAgentProgress) {
+    console.error(
+      'ERROR: bash_progress found but its `case"progress":` chain does not route agent_progress ' +
+        '(neither inline nor via a predicate helper defined in the same chunk). Context mismatch.'
+    )
     process.exit(1)
   }
 
-  const sessFnMatch = ctx.match(/session_id:([\w$]+)\(\)/)
-  if (!sessFnMatch) {
+  // Session-id function: take the NEAREST `session_id:X()` before the anchor —
+  // it is a sibling yield in the same switch arm, so its binding is guaranteed
+  // to be in scope (and in the same chunk) at the injection site.
+  const sessFnMatches = [...ctx.matchAll(/session_id:([\w$]+)\(\)/g)]
+  if (sessFnMatches.length === 0) {
     console.error('ERROR: Cannot extract session ID function from ZhA.')
     process.exit(1)
   }
-  const sessFn = sessFnMatch[1]
+  const sessFn = sessFnMatches[sessFnMatches.length - 1][1]
 
   const injection =
     `${patchCMarker}else if(${progressVar}.data.type==="agent_stream_event"){` +
@@ -677,15 +886,29 @@ if (src.includes(patchDMarker)) {
 
   if (bgm) {
     const oldBg = bgm[0]
+    const bgIdx = src.indexOf(oldBg)
+    if (src.indexOf(oldBg, bgIdx + 1) !== -1) {
+      console.error('ERROR: Multiple matches for the background output writer map. Aborting.')
+      process.exit(1)
+    }
     const bgP = bgm[2]
-    const newBg = oldBg
-      .replace(`${bgP}.type==="text"`, `${bgP}.type==="text"||${bgP}.type==="thinking"`)
-      .replace(
-        `("text"in ${bgP})?${bgP}.text:""`,
-        `("text"in ${bgP})?${bgP}.text:("thinking"in ${bgP})?${bgP}.thinking:""`
-      )
-    src = src.replace(oldBg, newBg)
-    console.log('Patched background agent output writer.')
+    let newBg = litReplace(
+      oldBg,
+      `${bgP}.type==="text"`,
+      `${bgP}.type==="text"||${bgP}.type==="thinking"`
+    )
+    newBg = litReplace(
+      newBg,
+      `("text"in ${bgP})?${bgP}.text:""`,
+      `("text"in ${bgP})?${bgP}.text:("thinking"in ${bgP})?${bgP}.thinking:""`
+    )
+    // Splice by index, not String.replace(str, str): minified names can contain
+    // `$`, and `$&`/`$'`/`$\`` in a replacement string are substitution patterns
+    // that would silently corrupt the injected code.
+    src = src.slice(0, bgIdx) + newBg + src.slice(bgIdx + oldBg.length)
+    console.log(
+      `Patched background agent output writer at char ${bgIdx} (msg=${bgm[1]}, blk=${bgP}).`
+    )
   } else {
     // This sub-patch inserts NO marker of its own, so the final verify loop
     // (which only checks patchDMarker from the primary text-fn patch above)
@@ -737,16 +960,8 @@ const patchEMarker = '/*PATCHED:subagent-E*/'
 if (src.includes(patchEMarker)) {
   console.log('Already applied. Skipping.')
 } else {
-  // Find the session ID function from mI8/ihA/ZhA/ATt yields
-  const sessFnRe = /session_id:([\w$]+)\(\).*?parent_tool_use_id/
-  const sessFnMatch = src.match(sessFnRe)
-  if (!sessFnMatch) {
-    console.error('ERROR: Cannot locate session ID function.')
-    process.exit(1)
-  }
-  const sessFn = sessFnMatch[1]
-  console.log(`Session ID function: ${sessFn}()`)
-
+  // The session-id getter is resolved per injection site (see findSessionIdFn):
+  // it is chunk-local, so it can only be looked up once the anchor is known.
   const uuidFn = 'globalThis.crypto.randomUUID'
   console.log(`UUID function: ${uuidFn}() (web crypto global)`)
 
@@ -792,7 +1007,7 @@ if (src.includes(patchEMarker)) {
     // Minified names can contain `$`, which is a regex metacharacter.
     const msgVarLit = bveHeadMatch[2].replace(/[$]/g, '\\$&')
     const windowStart = headIdx + bveHeadMatch[0].length
-    const window = src.slice(windowStart, windowStart + BVE_PUSH_WINDOW)
+    const window = suffixWindow(windowStart, BVE_PUSH_WINDOW)
     const pushMatch = window.match(new RegExp(`(${V})\\.push\\(${msgVarLit}\\)`))
     if (!pushMatch) {
       console.error(
@@ -814,6 +1029,7 @@ if (src.includes(patchEMarker)) {
     // v2.1.197+ BVe path
     const { watchdogFn, msgVar, arrVar, pushGap } = bveAnchorMatch
     const anchorIdx = bveAnchorMatch.headIdx
+    const sessFn = findSessionIdFn(anchorIdx, 'Patch E (BVe)')
 
     // Detect the toolUseContext variable by binding structurally to the
     // BVe function's destructured parameter. The minified name changes
@@ -823,7 +1039,10 @@ if (src.includes(patchEMarker)) {
     // signatures in the bounded prefix. Exactly one must exist — the BVe
     // (sje/async background runner) function. If zero or multiple match,
     // fail closed: we cannot safely distinguish the correct scope.
-    const sigBefore = src.slice(Math.max(0, anchorIdx - 15000), anchorIdx)
+    // Clamped to the anchor's chunk: in the v2.1.261 concat a raw 15KB lookback
+    // can cross a chunk boundary and capture a binding that is not in scope here.
+    const sigBefore = prefixWindow(anchorIdx, 15000)
+    const sigBeforeStart = anchorIdx - sigBefore.length
     const globalSigRe = new RegExp(`async function (${V})\\([^)]*toolUseContext:(${V})[,)]`, 'g')
     const sigCandidates = [...sigBefore.matchAll(globalSigRe)].map((m) => ({
       fn: m[1],
@@ -856,18 +1075,46 @@ if (src.includes(patchEMarker)) {
     // instead — gate always falsy, so background/spawned agents never got stdout
     // stream_events, and the run-settled callback fired spuriously per message.
     // Match the destructured param + its defaulted alias structurally.
-    const notifyRe = new RegExp(
-      `shouldNotifyOwner:(${V})[^)]*\\)\\{let (${V})=\\1\\?\\?\\(\\(\\)=>!0\\)`
-    )
-    const notifyMatches = [...sigBefore.matchAll(new RegExp(notifyRe, 'g'))]
-    if (notifyMatches.length !== 1) {
+    //
+    // Until v2.1.241 the alias was the runner's FIRST statement, so signature
+    // and alias were adjacent (`shouldNotifyOwner:d}){let m=d??(()=>!0)`).
+    // v2.1.261 opens the body with watchdog/registry wiring first, and the alias
+    // is now a `let`-continuation further in:
+    //   ...shouldNotifyOwner:N,reviewInlineHandoff:F=!1,onRunSettled:U,onTerminalSuccess:q}){
+    //     let re=qUt(e,t);KUt(e,k,t),ghe(k);let ue=()=>{re(),U?.()},de=N??(()=>!0),...
+    // So: capture the param from the signature, then find its `??(()=>!0)`
+    // defaulting within a bounded window after the signature — accepting either
+    // `let X=` or a `,X=` continuation.
+    const notifySigRe = new RegExp(`shouldNotifyOwner:(${V})[^)]*\\)\\{`, 'g')
+    /** Chars after the runner signature in which the defaulted alias must appear (57 in v2.1.261). */
+    const NOTIFY_ALIAS_WINDOW = 1500
+    const notifySigs = [...sigBefore.matchAll(notifySigRe)]
+    if (notifySigs.length !== 1) {
       console.error(
-        `ERROR: shouldNotifyOwner alias pattern matched ${notifyMatches.length} times in the 15KB prefix (expected 1). Aborting.`
+        `ERROR: shouldNotifyOwner signature matched ${notifySigs.length} times in the 15KB prefix (expected 1). Aborting.`
       )
       process.exit(1)
     }
-    const notifyFn = notifyMatches[0][2]
-    console.log(`  shouldNotifyOwner gate: ${notifyFn}() (param ${notifyMatches[0][1]})`)
+    const notifyParam = notifySigs[0][1]
+    const aliasSearchFrom = sigBeforeStart + notifySigs[0].index + notifySigs[0][0].length
+    const aliasWindow = suffixWindow(aliasSearchFrom, NOTIFY_ALIAS_WINDOW)
+    const aliasMatches = [
+      ...aliasWindow.matchAll(
+        new RegExp(`(?:let |,)(${V})=${reEsc(notifyParam)}\\?\\?\\(\\(\\)=>!0\\)`, 'g')
+      )
+    ]
+    if (aliasMatches.length !== 1) {
+      console.error(
+        `ERROR: found ${aliasMatches.length} \`X=${notifyParam}??(()=>!0)\` aliases within ` +
+          `${NOTIFY_ALIAS_WINDOW} chars of the shouldNotifyOwner signature (expected 1). ` +
+          'The gate must never be hardcoded — aborting.'
+      )
+      process.exit(1)
+    }
+    const notifyFn = aliasMatches[0][1]
+    console.log(
+      `  shouldNotifyOwner gate: ${notifyFn}() (param ${notifyParam}, alias ${aliasMatches[0].index} chars into the body)`
+    )
 
     // v2.1.219's runner refactor (the one that added onRunSettled/onTerminalSuccess
     // to this signature) also added a native relay that forwards spawned/background
@@ -877,7 +1124,7 @@ if (src.includes(patchEMarker)) {
     // stream_events are still NOT natively forwarded. So on relay-capable builds,
     // Patch E must forward ONLY stream_events; on older builds (v2.1.197–2.1.207,
     // no onRunSettled param) it must keep forwarding assistant/user as well.
-    const hasNativeRelay = notifyMatches[0][0].includes('onRunSettled:')
+    const hasNativeRelay = notifySigs[0][0].includes('onRunSettled:')
     console.log(
       `  native assistant/user relay: ${hasNativeRelay ? 'present (skip assistant/user writes)' : 'absent (write assistant/user)'}`
     )
@@ -983,6 +1230,9 @@ if (src.includes(patchEMarker)) {
     // Apply in reverse order so indices stay valid
     for (let i = legacyMatches.length - 1; i >= 0; i--) {
       const { fullMatch, msgVar, index } = legacyMatches[i]
+      // Resolved per loop: on a chunked bundle each loop could live in its own
+      // module, where the session-id getter carries a different local alias.
+      const sessFn = findSessionIdFn(index, `Patch E (legacy loop ${i + 1})`)
       const body = fullMatch.slice(2) // strip leading "))"
       const ptuLookup =
         `let _ptu=null;for(let _b of ${parentMsgVar}.message.content)` +
@@ -1047,14 +1297,9 @@ if (src.includes(patchGMarker)) {
     )
     patchGApplicable = false
   } else {
-    // Re-discover session ID and UUID functions (same as Patch E but in Patch G scope)
-    const sessFnReG = /session_id:([\w$]+)\(\).*?parent_tool_use_id/
-    const sessFnMatchG = src.match(sessFnReG)
-    if (!sessFnMatchG) {
-      console.error('ERROR: Cannot locate session ID function for Patch G.')
-      process.exit(1)
-    }
-    const sessFnG = sessFnMatchG[1]
+    // Re-discover session ID and UUID functions (same as Patch E but in Patch G scope).
+    // Scoped to iu8()'s own chunk — see findSessionIdFn.
+    const sessFnG = findSessionIdFn(iu8Match.index, 'Patch G (iu8)')
 
     // Same rationale as Patch E — use the web crypto global, not a module-local.
     const uuidFnG = 'globalThis.crypto.randomUUID'

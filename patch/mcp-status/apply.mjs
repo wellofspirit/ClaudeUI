@@ -53,6 +53,51 @@ console.log(`CLI version: ${ver}`)
 const PATCH_A_MARKER = '/*PATCHED:mcp-status-store-promise*/'
 const PATCH_B_MARKER = '/*PATCHED:mcp-status-await-refresh*/'
 
+// ---------------------------------------------------------------------------
+// Chunk-boundary helpers (2.1.261+)
+// ---------------------------------------------------------------------------
+// 2.1.261 replaced the single monolithic bundle with 1,631 code-split ESM
+// chunks; vendor/claude-cli/cli.js is their concatenation, each chunk preceded
+// by a `// @bun-chunk <path>` delimiter line. Every chunk is its own MODULE
+// SCOPE: a minified name captured in chunk X is meaningless in chunk Y, and
+// similar code now repeats across chunks with different local names.
+//
+// So every cross-site capture this patch makes (promise var -> handler,
+// refresh fn -> handler) must be proven to stay inside ONE chunk. These
+// helpers make that check cheap; the search windows below are clamped to the
+// enclosing chunk so an anchor can never be picked up from a neighbour.
+const CHUNK_DELIM = '\n// @bun-chunk '
+
+function chunkStartAt(text, idx) {
+  const i = text.lastIndexOf(CHUNK_DELIM, idx)
+  return i === -1 ? 0 : i + 1
+}
+
+function chunkEndAt(text, idx) {
+  const i = text.indexOf(CHUNK_DELIM, idx)
+  return i === -1 ? text.length : i
+}
+
+function chunkNameAt(text, idx) {
+  const s = chunkStartAt(text, idx)
+  if (s === 0 && !text.startsWith('// @bun-chunk ')) return '(monolith)'
+  const nl = text.indexOf('\n', s)
+  return text.slice(s + '// @bun-chunk '.length, nl === -1 ? undefined : nl)
+}
+
+function sameChunk(text, a, b) {
+  const lo = Math.min(a, b)
+  const hi = Math.max(a, b)
+  return !text.slice(lo, hi).includes(CHUNK_DELIM)
+}
+
+// Escape a captured minified name for use inside a RegExp. Minified
+// identifiers legitimately contain `$` (2.1.241's promise var was literally
+// `$l`), which is an end-of-input anchor in a pattern.
+function reEsc(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 // =====================================================================
 // Part A: Always store the plugin refresh promise (V6)
 // =====================================================================
@@ -138,15 +183,25 @@ if (!skipA) {
   //   async-IIFE assign and the INSTALL anchor within bounded BACK-windows of
   //   that site, and require the captured promise var to actually be awaited
   //   in a forward window (the `if(M){await M;M=null}` join Part B relies on).
+  //
+  //   2.1.261 (chunked bundle): shape unchanged, names are now
+  //   `Is` (promise) / `Vi` (fire-forget) / `D_` (wrapper) / `qd` (refresh),
+  //   all inside chunk-gj501zgt.js (the print.ts headless run loop). Exactly
+  //   one `})()}else X=Y(Z);` candidate exists bundle-wide. Both windows are
+  //   additionally CLAMPED TO THE ENCLOSING CHUNK so the INSTALL anchor / IIFE
+  //   assign / `await <promise>` join can never be harvested from a
+  //   neighbouring module that happens to sit adjacent in the concat.
   const elseCandRe = new RegExp(`\\}\\)\\(\\)\\}else (${V})=(${V})\\((${V})\\);`, 'g')
   let v163Match = null
   for (const cand of src.matchAll(elseCandRe)) {
-    const back = src.slice(Math.max(0, cand.index - 2500), cand.index)
+    const cStart = chunkStartAt(src, cand.index)
+    const cEnd = chunkEndAt(src, cand.index)
+    const back = src.slice(Math.max(cStart, cand.index - 2500), cand.index)
     if (!/[\w$]+\.CLAUDE_CODE_SYNC_PLUGIN_INSTALL\)\{/.test(back)) continue
     const iifeAssigns = [...back.matchAll(new RegExp(`(${V})=\\(async\\(\\)=>\\{`, 'g'))]
     if (iifeAssigns.length === 0) continue
     const promiseVar = iifeAssigns[iifeAssigns.length - 1][1]
-    const fwd = src.slice(cand.index, cand.index + 20000)
+    const fwd = src.slice(cand.index, Math.min(cEnd, cand.index + 20000))
     if (!fwd.includes(`await ${promiseVar}`)) {
       console.error(
         `ERROR: v163-site candidate at char ${cand.index} captured promise var ` +
@@ -160,6 +215,10 @@ if (!skipA) {
     }
     v163Match = {
       index: cand.index,
+      // Offset of the `else ...` sub-string inside the candidate — the exact
+      // byte range we rewrite. `})()}` is 5 chars.
+      elseIndex: cand.index + cand[0].indexOf('else '),
+      chunk: chunkNameAt(src, cand.index),
       1: promiseVar,
       2: cand[1],
       3: cand[2],
@@ -173,7 +232,7 @@ if (!skipA) {
     const wrapperFn = v163Match[3] // ux4 — fire-and-forget wrapper
     const refreshFn = v163Match[4] // T_ — plugin refresh function
 
-    console.log(`Found v163 pattern at char ${v163Match.index}`)
+    console.log(`Found v163 pattern at char ${v163Match.index} (chunk ${v163Match.chunk})`)
     console.log(`  Promise variable: ${promiseVar}`)
     console.log(`  Fire-forget variable: ${fireForgetVar}`)
     console.log(`  Wrapper function: ${wrapperFn}`)
@@ -194,6 +253,16 @@ if (!skipA) {
     }
     if (src.indexOf(oldElse, elseIdx + 1) !== -1) {
       console.error(`ERROR: else branch "${oldElse}" matched multiple times. Aborting.`)
+      process.exit(1)
+    }
+    // The vetted site is the one the local finder qualified; refuse to rewrite
+    // any other textually identical `else X=Y(Z);` (chunked bundles repeat
+    // shapes across modules).
+    if (elseIdx !== v163Match.elseIndex) {
+      console.error(
+        `ERROR: the unique "${oldElse}" is at char ${elseIdx} but the vetted ` +
+          `site is at ${v163Match.elseIndex}. Aborting.`
+      )
       process.exit(1)
     }
 
@@ -220,7 +289,9 @@ if (!skipA) {
     const oldCode = oldMatch[0]
     const newCode = PATCH_A_MARKER + `${x6Var}=null;${guard}${x6Var}=${j6Fn}()`
 
-    src = src.replace(oldCode, newCode)
+    // Offset splice, not String.replace — minified names may contain `$`, and
+    // `$&`/`$'`/`` $` ``/`$1` in a replacement STRING are substitution patterns.
+    src = src.slice(0, oldMatch.index) + newCode + src.slice(oldMatch.index + oldCode.length)
     console.log(`Replaced fire-and-forget with always-stored promise`)
   } else if (v144Match) {
     const promiseVar = v144Match[1] // TH
@@ -388,20 +459,30 @@ if (!skipB) {
     console.error('ERROR: Cannot locate "Headless MCP refresh" string in cli.js.')
     process.exit(1)
   }
+  // The log line must be unique — a second copy would mean a second (possibly
+  // wrong-chunk) refresh implementation and we would silently take the first.
+  if (src.indexOf(anchorStr, anchorIdx + 1) !== -1) {
+    console.error(`ERROR: "${anchorStr}" appears more than once. Aborting.`)
+    process.exit(1)
+  }
   // Backward window: in 2.1.163 the enclosing `async function OH(...)` sits
   // ~540 chars before the "Headless MCP refresh" string (its body grew), so a
   // 500-char window misses it. 2000 comfortably spans the body while the
   // last-match logic still resolves to the function containing the string.
+  // 2.1.261: `async function xs(f,M)` sits ~766 chars before the string.
+  // The window is clamped to the enclosing chunk — in the chunked bundle a raw
+  // 2000-char reach could otherwise land in the previous module.
   const BACK = 2000
+  const backFrom = Math.max(chunkStartAt(src, anchorIdx), anchorIdx - BACK)
   {
-    const before = src.slice(Math.max(0, anchorIdx - BACK), anchorIdx)
+    const before = src.slice(backFrom, anchorIdx)
     // Accept zero-or-more args: older versions had `()`, 2.1.114+ has `(param)`.
     const fnRe = new RegExp(`async function (${V})\\([^)]*\\)\\{`, 'g')
     let m, last
     while ((m = fnRe.exec(before)) !== null) last = m
     if (last) {
       refreshFn = last[1]
-      const fnGlobalOffset = Math.max(0, anchorIdx - BACK) + last.index
+      const fnGlobalOffset = backFrom + last.index
       console.log(`  Headless MCP refresh function: ${refreshFn} (at char ${fnGlobalOffset})`)
     } else {
       console.error('ERROR: Cannot find async function before "Headless MCP refresh" string.')
@@ -409,25 +490,22 @@ if (!skipB) {
     }
   }
 
-  // Verify the refresh function is in scope at the mcp_status handler.
-  // Both should be inside the same parent function (the main run loop).
   const refreshFnIdx =
-    Math.max(0, anchorIdx - BACK) +
-    src.slice(Math.max(0, anchorIdx - BACK), anchorIdx).lastIndexOf(`async function ${refreshFn}`)
-  const mcpHandlerIdx = src.indexOf('"mcp_status"', refreshFnIdx)
-  if (mcpHandlerIdx === -1 || mcpHandlerIdx - refreshFnIdx > 50000) {
-    console.warn(
-      `  WARNING: Refresh function at ${refreshFnIdx}, mcp_status at ${mcpHandlerIdx} — may not share scope`
-    )
-  } else {
-    console.log(
-      `  Scope check OK: refresh fn and mcp_status handler are ${mcpHandlerIdx - refreshFnIdx} chars apart`
-    )
-  }
+    backFrom + src.slice(backFrom, anchorIdx).lastIndexOf(`async function ${refreshFn}`)
 
-  // Try new pattern first (0.2.87+): inline call without block
+  // Try new pattern first (0.2.87+): inline call without block.
+  //
+  //   <msg>.request.subtype==="mcp_status")<respond>(<msg>,{mcpServers:<expr>});
+  //
+  // The status payload expression is captured VERBATIM (group 3) instead of
+  // being re-synthesised, because its shape keeps changing:
+  //   <=2.1.241  {mcpServers:K_()}            — nullary serializer
+  //    2.1.261   {mcpServers:g_n(e,Hd())}     — imported serializer + local reader
+  // A bounded, newline-free class covers both without the patch having to know
+  // the arity. Excluding `\n` also guarantees the span cannot bridge a
+  // `// @bun-chunk` delimiter line in the concatenated chunked bundle.
   const mcpInlineRe = new RegExp(
-    `(${V})\\.request\\.subtype==="mcp_status"\\)(${V})\\(\\1,\\{mcpServers:(${V})\\(\\)\\}\\);`
+    `(${V})\\.request\\.subtype==="mcp_status"\\)(${V})\\(\\1,(\\{mcpServers:[^;\\n]{1,300}\\})\\);`
   )
   const mcpInlineMatch = mcpInlineRe.exec(src)
 
@@ -447,19 +525,59 @@ if (!skipB) {
 
     const msgVar = mcpInlineMatch[1]
     const respondFn = mcpInlineMatch[2]
-    const getMcpFn = mcpInlineMatch[3]
-    console.log(`Found mcp_status handler (inline form) at char ${mcpInlineMatch.index}`)
+    const statusPayload = mcpInlineMatch[3] // e.g. {mcpServers:g_n(e,Hd())} — re-emitted verbatim
+    const handlerIdx = mcpInlineMatch.index
+    console.log(
+      `Found mcp_status handler (inline form) at char ${handlerIdx} (chunk ${chunkNameAt(src, handlerIdx)})`
+    )
     console.log(`  Message variable: ${msgVar}`)
     console.log(`  Respond function: ${respondFn}`)
-    console.log(`  getMcp function: ${getMcpFn}`)
+    console.log(`  Status payload: ${statusPayload}`)
+
+    // --- Scope proof (2.1.261 chunked bundle) -------------------------------
+    // Both names we inject — the refresh fn and the plugin-refresh promise var
+    // — are minified locals of ONE module. If the handler lives in a different
+    // chunk they are simply not bound there, and the branch would blow up with
+    // a ReferenceError the first time an mcp_status request arrives. Fail loudly.
+    if (!sameChunk(src, refreshFnIdx, handlerIdx)) {
+      console.error(
+        `ERROR: refresh fn ${refreshFn} (char ${refreshFnIdx}, chunk ` +
+          `${chunkNameAt(src, refreshFnIdx)}) and the mcp_status handler (char ` +
+          `${handlerIdx}, chunk ${chunkNameAt(src, handlerIdx)}) are in DIFFERENT ` +
+          `chunks — ${refreshFn} is not in scope at the handler. Aborting.`
+      )
+      process.exit(1)
+    }
+    const partAIdx = src.indexOf(PATCH_A_MARKER)
+    if (partAIdx !== -1 && !sameChunk(src, partAIdx, handlerIdx)) {
+      console.error(
+        `ERROR: Part A's promise var ${x6Var} was captured in chunk ` +
+          `${chunkNameAt(src, partAIdx)} but the mcp_status handler is in ` +
+          `${chunkNameAt(src, handlerIdx)} — cross-chunk capture. Aborting.`
+      )
+      process.exit(1)
+    }
+    console.log(
+      `  Scope check OK: refresh fn, Part A promise var and handler all in ${chunkNameAt(src, handlerIdx)}`
+    )
+    // Corroboration only: the run loop normally calls the refresh fn from a
+    // sibling branch of the same dispatch chain (2.1.261: `await xs(_e,"set_cwd")`
+    // ~850 chars earlier). Absence is suspicious but not proof of misbinding.
+    const near = src.slice(Math.max(0, handlerIdx - 8000), handlerIdx + 8000)
+    if (!new RegExp(`[^\\w$]${reEsc(refreshFn)}\\(`).test(near)) {
+      console.warn(
+        `  WARNING: ${refreshFn} is not called anywhere within 8000 chars of the ` +
+          `handler — verify it really is the enclosing run loop's refresh fn.`
+      )
+    }
 
     // Replace: wrap in block, call refresh fn to load servers, then await plugin refresh
     const oldMcp = mcpInlineMatch[0]
     const newMcp =
       PATCH_B_MARKER +
-      `${msgVar}.request.subtype==="mcp_status"){await ${refreshFn}();if(${x6Var})await ${x6Var};${respondFn}(${msgVar},{mcpServers:${getMcpFn}()})}`
+      `${msgVar}.request.subtype==="mcp_status"){await ${refreshFn}();if(${x6Var})await ${x6Var};${respondFn}(${msgVar},${statusPayload})}`
 
-    src = src.replace(oldMcp, newMcp)
+    src = src.slice(0, handlerIdx) + newMcp + src.slice(handlerIdx + oldMcp.length)
     console.log(
       `Injected await ${refreshFn}() + await ${x6Var} in mcp_status handler (inline->block)`
     )
@@ -484,12 +602,15 @@ if (!skipB) {
       PATCH_B_MARKER +
       `${msgVar}.request.subtype==="mcp_status"){${awaitPart}await ${refreshFn}();if(${x6Var})await ${x6Var};let`
 
-    src = src.replace(oldMcp, newMcp)
+    // Offset splice, not String.replace — minified names may contain `$`, and
+    // `$&`/`$'`/`` $` ``/`$1` in a replacement STRING are substitution patterns.
+    src =
+      src.slice(0, mcpBlockMatch.index) + newMcp + src.slice(mcpBlockMatch.index + oldMcp.length)
     console.log(`Injected await ${refreshFn}() + await ${x6Var} in mcp_status handler (block form)`)
   } else {
     console.error('ERROR: Cannot locate mcp_status handler pattern.')
     console.error(
-      'Tried inline pattern: <msg>.request.subtype==="mcp_status")<respondFn>(<msg>,{mcpServers:<fn>()});'
+      'Tried inline pattern: <msg>.request.subtype==="mcp_status")<respondFn>(<msg>,{mcpServers:<expr>});'
     )
     console.error('Tried block pattern: <msg>.request.subtype==="mcp_status"){(await <fn>();)?let')
     process.exit(1)

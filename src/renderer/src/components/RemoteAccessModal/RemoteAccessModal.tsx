@@ -83,10 +83,11 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps): React.JS
    */
   const handleSetPassword = useCallback(() => {
     onClose()
-    // `remote` is the SECTION id (`SECTION_SCOPE_MAP` is keyed by those, not by
-    // the item keys inside them) — the password field lives in its remote-server
-    // block.
-    window.dispatchEvent(new CustomEvent('open-settings', { detail: { section: 'remote' } }))
+    // The password field lives in the Remote access page's Server group
+    // (ADR-065); `open-settings` details are `{ page, group? }`.
+    window.dispatchEvent(
+      new CustomEvent('open-settings', { detail: { page: 'remote', group: 'server' } })
+    )
   }, [onClose])
 
   useEffect(() => {

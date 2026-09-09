@@ -52,6 +52,11 @@ const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf
  *    session-gated anyway, because it hands out a channel key. The `off` master
  *    switch is deliberately not among them: it stays in `remote:set-config`,
  *    which has no remote registration at all.
+ *  - `ide` (ADR-064) — the remote VS Code mint. The `shell` shape on its own
+ *    toggle: no static grant set holds it, the step-up ceremony arms it iff
+ *    `allow_ide` is on, and toggle-off revokes it in place. Its sibling
+ *    `ide:availability` is deliberately ABSENT from this list — it declares
+ *    `config`, because asking "may I?" must be answerable without the grant.
  *
  * "Invoked but not grantable at connect time" is the POINT for all three, which
  * is why this list is an allowlist rather than an emptiness assertion: a new
@@ -65,6 +70,7 @@ const UNGRANTED_AT_CONNECT_REMOTE_CHANNELS = [
   'authcfg:lan-link',
   'authcfg:rotate-lan-key',
   'authcfg:set-password',
+  'ide:mint-entry',
   'terminal:attach',
   'terminal:create',
   'terminal:detach',
@@ -103,7 +109,14 @@ const SHARED_DECLARATION_SOURCES = [
   'src/core/ipc/config-commands.ts',
   'src/core/ipc/automation-commands.ts',
   // S4 (ADR-057) — the vendor-OAuth / account / native-OAuth family.
-  'src/core/ipc/auth-commands.ts'
+  'src/core/ipc/auth-commands.ts',
+  // ADR-064 — the remote-IDE pair, spread by both transports from one
+  // declaration (`registerIdeIpc` on the desktop side, from core-services).
+  'src/core/ipc/ide-commands.ts',
+  // The redacted status read (owner ruling, 2026-08-28) — the ONE `remote:*`
+  // channel served on both transports. Every `remote:*` MUTATION is absent from
+  // this list because it is absent from the registry entirely.
+  'src/core/ipc/remote-view-commands.ts'
 ]
 
 /**
@@ -125,6 +138,11 @@ const S1B_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'que
   'config:save-opencode-settings': { capability: 'config', kind: 'command' },
   'config:read-opencode-native-raw': { capability: 'config', kind: 'query' },
   'config:patch-opencode-native': { capability: 'config', kind: 'command' },
+  'config:read-pi-native-raw': { capability: 'config', kind: 'query' },
+  'config:patch-pi-native': { capability: 'config', kind: 'command' },
+  'config:write-pi-native-text': { capability: 'config', kind: 'command' },
+  'config:read-pi-models-raw': { capability: 'config', kind: 'query' },
+  'config:patch-pi-models': { capability: 'config', kind: 'command' },
   'opencode-agents:list': { capability: 'config', kind: 'query' },
   'opencode-agents:read': { capability: 'config', kind: 'query' },
   'opencode-agents:save': { capability: 'config', kind: 'command' },
@@ -150,6 +168,62 @@ const S1B_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'que
   'automation:cancel': { capability: 'config', kind: 'command' },
   'automation:send-message': { capability: 'config', kind: 'command' },
   'automation:dismiss-run': { capability: 'config', kind: 'command' }
+}
+
+/**
+ * ADR-065 phase 4 — the shared classifier trust lists, declared in the same
+ * shared module as the S1b family and therefore checked by the same equality.
+ *
+ * Its own table for the reason {@link REMOTE_VIEW_SWEEP} has one: S1B_SWEEP is
+ * the record of ONE dated sweep, and folding a later decision into it would
+ * make both unreadable. `config` because it is engine configuration like every
+ * other `config:*` verb here — what it writes is the judge's view of which
+ * hosts, registries and resources the user trusts, so the shape is validated at
+ * the perimeter (`config-commands-shared-automode.test.ts`) rather than by the
+ * id-segment guard the engine/vendor pairs use: this path carries no id.
+ */
+const TRUST_LIST_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'query' }> = {
+  'config:load-shared-automode': { capability: 'config', kind: 'query' },
+  'config:save-shared-automode': { capability: 'config', kind: 'command' }
+}
+
+/** Every channel the two shared config modules declare: S1b plus what followed. */
+const SHARED_CONFIG_SWEEP = { ...S1B_SWEEP, ...TRUST_LIST_SWEEP }
+
+/**
+ * The 2026-08-28 status-view ruling, in the same shape as {@link S1B_SWEEP} and
+ * deliberately NOT inside it — that table is the record of one dated sweep, and
+ * folding a later decision into it would make both unreadable.
+ *
+ * ONE channel, and the reason it is worth its own table is the namespace it
+ * lives in: `remote:*` is otherwise host-anchor-only by construction, so this is
+ * the single exception and it must read as the decision it is. A `query`, and
+ * `config` rather than `admin` because it carries no credential, no key and no
+ * configuration write — the redaction (`shared/types.ts` → `RemoteStatusView`)
+ * is what makes that true, and `remote-view-commands.test.ts` pins it.
+ */
+const REMOTE_VIEW_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'query' }> = {
+  'remote:status-view': { capability: 'config', kind: 'query' }
+}
+
+/**
+ * ADR-065 phase 6 — the unified provider list, declared in
+ * `ipc/auth-commands.ts` beside the `shared-provider:*` family whose stores it
+ * reads.
+ *
+ * Its own table, for the reason {@link TRUST_LIST_SWEEP} has one: S1B_SWEEP and
+ * S4 are records of dated sweeps. `config` and a `query` — it composes the
+ * shared definitions, opencode's provider catalog and pi's vendor entries into
+ * one row set and returns counts, badges and chips; no key material crosses it,
+ * and every mutation the rows drive is an EXISTING channel already on this
+ * surface. Being on both transports from one declaration is the point: the
+ * phone's provider page must read the same list the desktop does.
+ */
+const PROVIDER_REGISTRY_SWEEP: Record<
+  string,
+  { capability: Capability; kind: 'command' | 'query' }
+> = {
+  'provider-registry:list': { capability: 'config', kind: 'query' }
 }
 
 /** channel → declared capability, parsed from remote-handlers.ts registrations. */
@@ -223,14 +297,14 @@ describe('remote channel parity (R5)', () => {
       found.set(m[1], { capability: m[2] as Capability, kind: m[3] })
     }
     expect(Object.fromEntries([...found].sort())).toEqual(
-      Object.fromEntries(Object.entries(S1B_SWEEP).sort())
+      Object.fromEntries(Object.entries(SHARED_CONFIG_SWEEP).sort())
     )
 
     const registrars = [
       read('src/core/ipc/session.ipc.ts'),
       read('src/core/ipc/remote-handlers.ts')
     ].join('\n')
-    const inline = Object.keys(S1B_SWEEP)
+    const inline = Object.keys(SHARED_CONFIG_SWEEP)
       .filter((c) => registrars.includes(`channel: '${c}'`))
       .sort()
     expect(
@@ -261,14 +335,74 @@ describe('remote channel parity (R5)', () => {
     // from the remote UI. `git`, `config` and `chat` are all in AUTH_OFF_GRANTS,
     // so an ordinary authenticated connection reaches every one of them.
     const declared = remoteDeclarations()
-    const missing = Object.keys(S1B_SWEEP)
+    const missing = Object.keys(SHARED_CONFIG_SWEEP)
       .filter((c) => !declared.has(c))
       .sort()
     expect(missing, `S1b channels with no remote registration: ${missing.join(', ')}`).toEqual([])
-    const ungranted = Object.keys(S1B_SWEEP)
+    const ungranted = Object.keys(SHARED_CONFIG_SWEEP)
       .filter((c) => !AUTH_OFF_GRANTS.has(declared.get(c)!))
       .sort()
     expect(ungranted).toEqual([])
+  })
+
+  it('the status view is declared ONCE, spread by both transports, and is the only remote:* channel', () => {
+    // Same two halves as the S1b case above, applied to the one channel that
+    // widens the `remote:*` namespace (owner ruling, 2026-08-28).
+    const shared = read('src/core/ipc/remote-view-commands.ts')
+    const declRe = /channel:\s*'([^']+)',\s*capability:\s*'([^']+)',\s*kind:\s*'([^']+)'/g
+    const found = new Map<string, { capability: Capability; kind: string }>()
+    for (let m = declRe.exec(shared); m; m = declRe.exec(shared)) {
+      found.set(m[1], { capability: m[2] as Capability, kind: m[3] })
+    }
+    expect(Object.fromEntries(found)).toEqual(REMOTE_VIEW_SWEEP)
+
+    // Both transports spread it: `registerRemoteViewIpc` (desktop, called from
+    // core-services once the server exists) and `registerRemoteHandlers`.
+    expect(shared).toMatch(/for \(const cmd of remoteViewCommands\(host\)\) handleIpc\(cmd\)/)
+    expect(read('src/core/ipc/remote-handlers.ts')).toMatch(
+      /for \(const cmd of remoteViewCommands\(enrollTokens \?\? null\)\) \{\s*handleRemote\(cmd\)/
+    )
+
+    // And it is the ONLY `remote:*` channel any shared declaration or transport
+    // registrar contributes. The mutations — start/stop/set-config/set-password/
+    // clear-password/force-reserve — are raw `ipcMain.handle` on the host anchor
+    // with no registration at all, which is what stops a remote client cutting
+    // the connection it is riding. Structural, not a hidden button.
+    const declared = remoteDeclarations()
+    expect([...declared.keys()].filter((c) => c.startsWith('remote:'))).toEqual([
+      'remote:status-view'
+    ])
+  })
+
+  it('the provider registry is declared ONCE in the shared auth family and is base-reachable', () => {
+    // Same two halves as the S1b case: declared exactly once in the shared
+    // module with the capability/kind this table freezes, never re-declared
+    // inline in a transport registrar — and reachable on the base grant set, so
+    // the remote provider page is not a desktop-only surface by omission.
+    const shared = read('src/core/ipc/auth-commands.ts')
+    const declRe = /channel:\s*'([^']+)',\s*capability:\s*'([^']+)',\s*kind:\s*'([^']+)'/g
+    const found = new Map<string, { capability: Capability; kind: string }>()
+    for (let m = declRe.exec(shared); m; m = declRe.exec(shared)) {
+      if (!(m[1] in PROVIDER_REGISTRY_SWEEP)) continue
+      expect(found.has(m[1]), `${m[1]} is declared twice in auth-commands.ts`).toBe(false)
+      found.set(m[1], { capability: m[2] as Capability, kind: m[3] })
+    }
+    expect(Object.fromEntries(found)).toEqual(PROVIDER_REGISTRY_SWEEP)
+
+    const registrars = [
+      read('src/core/ipc/session.ipc.ts'),
+      read('src/core/ipc/remote-handlers.ts')
+    ].join('\n')
+    const inline = Object.keys(PROVIDER_REGISTRY_SWEEP).filter((c) =>
+      registrars.includes(`channel: '${c}'`)
+    )
+    expect(inline, `re-declared inline in a transport registrar: ${inline.join(', ')}`).toEqual([])
+
+    const declared = remoteDeclarations()
+    for (const channel of Object.keys(PROVIDER_REGISTRY_SWEEP)) {
+      expect(declared.get(channel), `${channel} has no remote registration`).toBe('config')
+      expect(AUTH_OFF_GRANTS.has(declared.get(channel)!)).toBe(true)
+    }
   })
 
   it('the passkey channels declare enroll/admin, not anything grantable (ADR-052)', () => {

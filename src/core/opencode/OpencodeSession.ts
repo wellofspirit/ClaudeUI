@@ -17,6 +17,7 @@ import type {
   AccountRef,
   MeteringSnapshot,
   AutoModeConfig,
+  SharedAutoModeConfig,
   AskUserQuestion,
   StatusLineData,
   SkillInfo,
@@ -76,7 +77,7 @@ import {
   type RepoVisibility,
   type ToolOutcome
 } from '../automode/ground-truth'
-import { loadEngineConfig } from '../services/ui-config'
+import { loadEngineConfig, loadSharedAutoModeConfig } from '../services/ui-config'
 import type { ClaudePermissions, PermissionScope } from '../../shared/types'
 import { blockUsageService } from '../services/block-usage'
 import {
@@ -253,6 +254,10 @@ export class OpencodeSession extends BaseSession {
   private childSessions = new Map<string, string>()
   // Auto-mode (full) LLM gatekeeper state (ADR-023).
   private _autoModeConfig: AutoModeConfig | undefined
+  /** Memoized `~/.claude/ui/automode.json` — the engine-SHARED trust lists
+   *  (ADR-065 phase 4). Same lifetime as `_autoModeConfig`: one read per
+   *  session, and a mid-session edit is not hot-reloaded. */
+  private _sharedAutoMode: SharedAutoModeConfig | undefined
   // Consecutive / same-rule / total denial caps, shared with pi (denial-tracker.ts).
   private autoDenials = new AutoModeDenialTracker()
   // Whether THIS session's opencode server exposes the patched tool-less
@@ -1644,6 +1649,21 @@ export class OpencodeSession extends BaseSession {
     return this._autoModeConfig
   }
 
+  /** The engine-shared trust lists, DERIVED into this session's classifier
+   *  environment at session start (ADR-065 § Shared trust lists). They live in
+   *  one file for every engine, so they are read from there rather than from
+   *  `autoModeConfig()`, which is opencode's own judge block. */
+  private sharedAutoModeConfig(): SharedAutoModeConfig {
+    if (this._sharedAutoMode === undefined) {
+      try {
+        this._sharedAutoMode = loadSharedAutoModeConfig()
+      } catch {
+        this._sharedAutoMode = {}
+      }
+    }
+    return this._sharedAutoMode
+  }
+
   /** The user-authored (compiled) rules the last patched ruleset carried. Falls
    *  back to compiling them on demand: the SSE consumer is started before the
    *  first `applyPermissionMode`, so a `permission.asked` can arrive before the
@@ -1682,16 +1702,17 @@ export class OpencodeSession extends BaseSession {
   }
 
   /** Host-supplied ground truth for the classifier's Environment section
-   *  (plan phase 2 + 3). Trust slots come from the user's engine config and
-   *  default to EMPTY — the policy renders "nothing is trusted" for an empty
-   *  slot, so omitting a list is the restrictive choice, not the permissive one.
+   *  (plan phase 2 + 3). Trust slots come from the engine-SHARED
+   *  `~/.claude/ui/automode.json` and default to EMPTY — the policy renders
+   *  "nothing is trusted" for an empty slot, so omitting a list is the
+   *  restrictive choice, not the permissive one.
    *
    *  `repoVisibility` is only filled with a DEFINITE answer: leaving it unset
    *  renders the policy's "unknown — assume PRIVATE for confidentiality, assume
    *  PUBLIC for secret exposure" guidance, which is strictly more useful than
    *  the bare word "unknown". */
   private async classifierEnvironment(): Promise<EnvironmentInfo> {
-    const cfg = this.autoModeConfig()
+    const trust = this.sharedAutoModeConfig()
     const additionalDirectories = [...new Set(this.mergedUserPermissions().additionalDirectories)]
     const remotes = await this.sessionGitRemotes()
     const visibility = this.sessionRepoVisibility
@@ -1701,9 +1722,9 @@ export class OpencodeSession extends BaseSession {
       ...(remotes.length ? { remotes } : {}),
       ...(visibility && visibility !== 'unknown' ? { repoVisibility: visibility } : {}),
       ...(additionalDirectories.length ? { additionalDirectories } : {}),
-      ...(cfg.trustedDomains?.length ? { trustedDomains: cfg.trustedDomains } : {}),
-      ...(cfg.trustedRegistries?.length ? { trustedRegistries: cfg.trustedRegistries } : {}),
-      ...(cfg.protectedPatterns?.length ? { protectedPatterns: cfg.protectedPatterns } : {})
+      ...(trust.trustedDomains?.length ? { trustedDomains: trust.trustedDomains } : {}),
+      ...(trust.trustedRegistries?.length ? { trustedRegistries: trust.trustedRegistries } : {}),
+      ...(trust.protectedPatterns?.length ? { protectedPatterns: trust.protectedPatterns } : {})
     }
   }
 
@@ -1905,12 +1926,18 @@ export class OpencodeSession extends BaseSession {
         this.fallbackToHuman(approval)
         return
       }
-      logger.info(
-        'OpencodeSession',
+      const verdictLine =
         `auto-mode ${result.block ? 'BLOCK' : 'allow'} (stage=${result.stage}` +
-          `${result.category ? `, rule=${result.category}` : ''}) ${category}` +
-          (result.reason ? ` — ${result.reason}` : '')
-      )
+        `${result.category ? `, rule=${result.category}` : ''}) ${category}` +
+        (result.reason ? ` — ${result.reason}` : '')
+      if (result.stage === 'error') {
+        // stage=error means no verdict was obtained — a WARN carrying the
+        // transport's own message, since a bare `stage=error` line says
+        // nothing about the cause (mirrors PiSession's identical treatment).
+        logger.warn('OpencodeSession', verdictLine + (result.error ? ` — ${result.error}` : ''))
+      } else {
+        logger.info('OpencodeSession', verdictLine)
+      }
       // Set only on a fail-closed unparseable verdict — the one block whose
       // reason says nothing about WHY the judge's answer was unreadable.
       if (result.raw !== undefined) {

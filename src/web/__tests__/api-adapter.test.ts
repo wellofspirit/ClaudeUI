@@ -292,3 +292,433 @@ describe('web api-adapter — auth / account / vendor-auth reach the remote hand
     expect(connection.invoke).toHaveBeenCalledWith('vendor-auth:set-key', 'pi', 'openai', 'sk-x')
   })
 })
+
+// ---------------------------------------------------------------------------
+// Method → channel parity, both directions
+// ---------------------------------------------------------------------------
+
+type AnyFn = (...args: unknown[]) => unknown
+
+/** Call an adapter method by name without widening the ClaudeAPI surface. */
+function callMethod(name: string, args: readonly unknown[]): unknown {
+  return (api as unknown as Record<string, AnyFn>)[name](...args)
+}
+
+/**
+ * The FORWARD direction: every wired method, the channel it must reach, and the
+ * arguments it must forward — written out rather than derived, because "which
+ * channel does this verb speak" is precisely the fact that drifted.
+ *
+ * The config/agent half of this table is the drift that made it necessary. Those
+ * channels have been registered for both transports since the everything-remote
+ * ruling (`core/ipc/config-commands.ts`, `capability: 'config'`), but the adapter
+ * still answered them with `async () => {}` — so on the web client every
+ * engine-config-backed settings pane rendered and then resolved a save that went
+ * nowhere. A stub cannot be spotted at the call site; this table can.
+ */
+const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unknown[] }> = [
+  // Engine / vendor config (plain handlers — preload uses a bare invoke here).
+  { method: 'loadEngineConfig', channel: 'config:load-engine-config', args: ['opencode'] },
+  {
+    method: 'saveEngineConfig',
+    channel: 'config:save-engine-config',
+    args: ['opencode', { autoMode: { enabled: true } }]
+  },
+  { method: 'loadSharedAutoMode', channel: 'config:load-shared-automode', args: [] },
+  {
+    method: 'saveSharedAutoMode',
+    channel: 'config:save-shared-automode',
+    args: [{ trustedDomains: ['files.acme.com'] }]
+  },
+  { method: 'loadVendorConfig', channel: 'config:load-vendor-config', args: ['anthropic'] },
+  {
+    method: 'saveVendorConfig',
+    channel: 'config:save-vendor-config',
+    args: ['anthropic', { endpoint: { baseUrl: 'https://x' } }]
+  },
+  // opencode engine-native settings + the raw (schema-driven) pair.
+  { method: 'loadOpencodeSettings', channel: 'config:load-opencode-settings', args: [] },
+  {
+    method: 'saveOpencodeSettings',
+    channel: 'config:save-opencode-settings',
+    args: [{ theme: 'dark' }]
+  },
+  { method: 'readOpencodeNativeRaw', channel: 'config:read-opencode-native-raw', args: [] },
+  {
+    method: 'patchOpencodeNative',
+    channel: 'config:patch-opencode-native',
+    args: [[{ path: ['model'], value: 'anthropic/x' }]]
+  },
+  // pi's raw trio — the in-file precedent this pass extended to its neighbours.
+  { method: 'readPiNativeRaw', channel: 'config:read-pi-native-raw', args: [] },
+  {
+    method: 'patchPiNative',
+    channel: 'config:patch-pi-native',
+    args: [[{ path: ['thinking'], value: 'high' }]]
+  },
+  { method: 'writePiNativeText', channel: 'config:write-pi-native-text', args: ['{}\n'] },
+  // pi's models.json pair — the same raw shape for the model catalog file.
+  { method: 'readPiModelsRaw', channel: 'config:read-pi-models-raw', args: [] },
+  {
+    method: 'patchPiModels',
+    channel: 'config:patch-pi-models',
+    args: [[{ path: ['providers', 'my-api', 'models', 0, 'contextWindow'], value: 200_000 }]]
+  },
+  // opencode agent CRUD — five `config` verbs plus one `chat` verb.
+  { method: 'listOpencodeAgents', channel: 'opencode-agents:list', args: ['/repo/app'] },
+  {
+    method: 'readOpencodeAgent',
+    channel: 'opencode-agents:read',
+    args: ['reviewer', 'global', '/repo/app']
+  },
+  {
+    method: 'saveOpencodeAgent',
+    channel: 'opencode-agents:save',
+    args: [{ name: 'reviewer', scope: 'global' }, '/repo/app']
+  },
+  {
+    method: 'deleteOpencodeAgent',
+    channel: 'opencode-agents:delete',
+    args: ['reviewer', 'project', '/repo/app']
+  },
+  {
+    method: 'setOpencodeAgentDisabled',
+    channel: 'opencode-agents:set-disabled',
+    args: ['reviewer', 'global', '/repo/app', true]
+  },
+  {
+    method: 'generateOpencodeAgent',
+    channel: 'opencode-agents:generate',
+    args: ['an agent that reviews diffs', '/repo/app']
+  },
+  // Engine-routed per-vendor auth (S4, ADR-057) — the other block that used to
+  // be stubbed here, kept in the table so the two cannot regress separately.
+  { method: 'vendorAuthProbe', channel: 'vendor-auth:probe', args: ['opencode'] },
+  { method: 'vendorAuthListOptions', channel: 'vendor-auth:list-options', args: ['pi'] },
+  { method: 'vendorAuthListKeys', channel: 'vendor-auth:list-keys', args: ['pi'] },
+  { method: 'vendorAuthSetKey', channel: 'vendor-auth:set-key', args: ['pi', 'openai', 'sk-x'] },
+  {
+    method: 'vendorAuthOauthAuthorize',
+    channel: 'vendor-auth:oauth-authorize',
+    args: ['pi', 'openai-codex', 0, { team: 'x' }]
+  },
+  {
+    method: 'vendorAuthOauthCallback',
+    channel: 'vendor-auth:oauth-callback',
+    args: ['pi', 'openai-codex', 0, 'code-1']
+  },
+  { method: 'vendorAuthRemove', channel: 'vendor-auth:remove', args: ['pi', 'openai'] },
+  { method: 'vendorAuthOauthCancel', channel: 'vendor-auth:oauth-cancel', args: ['pi'] },
+
+  // Worktrees — `capability: 'git'`, the same one the `git:*` mutations ride.
+  // These threw "Worktrees not available in remote mode" (and `listWorktrees`
+  // answered `[]`, which the modal read as "this repo has none").
+  { method: 'createWorktree', channel: 'worktree:create', args: ['/repo/app', 'feature-x'] },
+  {
+    method: 'getWorktreeStatus',
+    channel: 'worktree:status',
+    args: ['/repo/app-feature-x', 'abc1234']
+  },
+  {
+    method: 'removeWorktree',
+    channel: 'worktree:remove',
+    args: ['/repo/app-feature-x', 'feature-x', '/repo/app']
+  },
+  { method: 'listWorktrees', channel: 'worktree:list', args: ['/repo/app'] },
+
+  // Automations — one frozen declaration shared by both transports
+  // (`core/ipc/automation-commands.ts`, `config`). Plain handlers, so preload
+  // uses a bare invoke and so does the adapter.
+  { method: 'listAutomations', channel: 'automation:list', args: [] },
+  {
+    method: 'saveAutomation',
+    channel: 'automation:save',
+    args: [{ id: 'nightly', name: 'Nightly review', schedule: '0 3 * * *' }]
+  },
+  { method: 'deleteAutomation', channel: 'automation:delete', args: ['nightly'] },
+  { method: 'runAutomationNow', channel: 'automation:run-now', args: ['nightly'] },
+  { method: 'toggleAutomation', channel: 'automation:toggle', args: ['nightly', false] },
+  { method: 'listAutomationRuns', channel: 'automation:list-runs', args: ['nightly'] },
+  {
+    method: 'loadAutomationRunHistory',
+    channel: 'automation:load-run-history',
+    args: ['nightly', 'run-1']
+  },
+  { method: 'cancelAutomationRun', channel: 'automation:cancel', args: ['nightly'] },
+  { method: 'dismissAutomationRun', channel: 'automation:dismiss-run', args: ['nightly', 'run-1'] },
+  {
+    method: 'sendAutomationMessage',
+    channel: 'automation:send-message',
+    args: ['nightly', 'stop after this step']
+  },
+
+  // MCP writes — `config`, both transports. The three LIVE verbs (a running
+  // session) are safeHandler-wrapped; the three FILE verbs are plain handlers.
+  { method: 'mcpToggleServer', channel: 'mcp:toggle', args: ['sess-1', 'lsphub', false] },
+  { method: 'mcpReconnectServer', channel: 'mcp:reconnect', args: ['sess-1', 'lsphub'] },
+  {
+    method: 'mcpSetServers',
+    channel: 'mcp:set-servers',
+    args: ['sess-1', { lsphub: { command: 'lsphub' } }]
+  },
+  {
+    method: 'saveMcpServers',
+    channel: 'mcp:save-servers',
+    args: ['project', { lsphub: { command: 'lsphub' } }, '/repo/app']
+  },
+  {
+    method: 'removeMcpServer',
+    channel: 'mcp:remove-server',
+    args: ['project', 'lsphub', '/repo/app']
+  },
+  {
+    method: 'mcpToggleDisabled',
+    channel: 'mcp:toggle-disabled',
+    args: ['/repo/app', 'lsphub', true]
+  },
+
+  // The unified provider list (ADR-065 phase 6) — a READ, declared in the same
+  // shared module as the writes below so the phone gets it too, and unwrapped
+  // because its handler is safeHandler-wrapped.
+  { method: 'listProviderRegistry', channel: 'provider-registry:list', args: [] },
+
+  // Shared-provider writes — `config` since ADR-056, registered beside the three
+  // reads that were already wired (`core/ipc/auth-commands.ts`).
+  {
+    method: 'saveSharedProvider',
+    channel: 'shared-provider:save',
+    args: [{ id: 'local', name: 'Local', kind: 'custom', models: [{ id: 'local-1' }] }]
+  },
+  { method: 'removeSharedProvider', channel: 'shared-provider:remove', args: ['local'] },
+  {
+    method: 'setSharedProviderRoute',
+    channel: 'shared-provider:set-route',
+    args: ['local', 'pi', true]
+  },
+  {
+    method: 'setSharedProviderApiKey',
+    channel: 'shared-provider:set-key',
+    args: ['local', 'sk-local']
+  },
+  { method: 'syncSharedProvider', channel: 'shared-provider:sync', args: ['local'] },
+  { method: 'disconnectSharedProvider', channel: 'shared-provider:disconnect', args: ['local'] },
+  {
+    method: 'setSharedProviderDefaultModel',
+    channel: 'shared-provider:set-default',
+    args: ['local', 'pi', 'local-1']
+  },
+
+  // The three singletons. `saveSlashCommands` is the cache write
+  // `useClaudeEvents` makes when cli.js announces the command list (plain
+  // handler, bare invoke). The other two are safeHandler-wrapped and both act on
+  // the HOST rather than this browser — `proxy:test-connection` dials through the
+  // host's proxy settings, `usage:refresh-prices` refreshes the host's price
+  // cache — which is exactly why running them there is the right answer for a
+  // remote caller, not a compromise.
+  {
+    method: 'saveSlashCommands',
+    channel: 'config:save-slash-commands',
+    args: [[{ name: 'review', description: 'Review the diff' }]]
+  },
+  {
+    method: 'testProxyConnection',
+    channel: 'proxy:test-connection',
+    args: [{ type: 'http', hostname: '127.0.0.1', port: 8080 }]
+  },
+  { method: 'refreshPrices', channel: 'usage:refresh-prices', args: [] },
+
+  // The REDACTED remote status (owner ruling, 2026-08-28). A `config` query,
+  // declared for both transports in `core/ipc/remote-view-commands.ts`. Its
+  // full-fat sibling `getRemoteStatus` stays a stub below, and must: the object
+  // it answers carries the LAN / tunnel channel keys.
+  { method: 'getRemoteStatusView', channel: 'remote:status-view', args: [] }
+]
+
+describe('web api-adapter — wired methods reach the channel they claim', () => {
+  it.each(WIRED)('$method → $channel', async ({ method, channel, args }) => {
+    await callMethod(method, args)
+    expect(connection.invoke).toHaveBeenCalledWith(channel, ...args)
+  })
+
+  it('the SAVES surface a refusal instead of resolving — envelope half (GUARD)', async () => {
+    // The half of the drift that mattered most: a stubbed mutation resolved
+    // `undefined`, so a denied or failed save looked identical to a successful
+    // one. These channels are safeHandler-wrapped server-side, so the envelope is
+    // what carries the reason back — and `unwrap` is what turns it into a throw.
+    // One representative per family the wiring pass covered.
+    const mutations = WIRED.filter(({ method }) =>
+      [
+        'saveOpencodeSettings',
+        'patchOpencodeNative',
+        'saveOpencodeAgent',
+        'deleteOpencodeAgent',
+        'setOpencodeAgentDisabled',
+        'generateOpencodeAgent',
+        'createWorktree',
+        'mcpToggleServer',
+        'saveSharedProvider'
+      ].includes(method)
+    )
+    expect(mutations).toHaveLength(9)
+    for (const { method, args } of mutations) {
+      connection.invoke.mockResolvedValueOnce({ ok: false, error: 'permission denied' })
+      await expect(callMethod(method, args)).rejects.toThrow('permission denied')
+    }
+  })
+
+  it('the SAVES surface a refusal instead of resolving — plain-handler half (GUARD)', async () => {
+    // Not every channel this family reaches is safeHandler-wrapped: the
+    // automation table and the MCP *file* verbs are plain handlers, so a refusal
+    // arrives as a rejected invoke rather than an `{ ok: false }` envelope, and
+    // preload uses a bare `ipcRenderer.invoke` for them. The property is the same
+    // one and it is the one the stubs broke — the method must RETURN the
+    // connection's promise, not fire-and-forget it and resolve.
+    //
+    // The MCP family is deliberately split across the two guards: three of its
+    // six writes are wrapped and three are not, and mirroring that split is
+    // exactly what "mirror preload 1:1" means here.
+    const mutations = WIRED.filter(({ method }) =>
+      ['saveAutomation', 'saveMcpServers', 'saveSlashCommands'].includes(method)
+    )
+    expect(mutations).toHaveLength(3)
+    for (const { method, args } of mutations) {
+      connection.invoke.mockRejectedValueOnce(new Error('permission denied'))
+      await expect(callMethod(method, args)).rejects.toThrow('permission denied')
+    }
+  })
+
+  it('the four engine/vendor channels are NOT unwrapped — their handlers are plain', async () => {
+    // `config:load-engine-config` and its three siblings are the only members of
+    // this family registered without `safeHandler`, so their reply is the config
+    // object itself. Routing them through `unwrap()` would be harmless only for
+    // as long as no config gains an `ok` field; mirroring preload keeps that
+    // accident impossible.
+    connection.invoke.mockResolvedValueOnce({ ok: true, autoMode: { enabled: false } })
+    await expect(api.loadEngineConfig('opencode')).resolves.toEqual({
+      ok: true,
+      autoMode: { enabled: false }
+    })
+  })
+})
+
+/**
+ * The REVERSE direction: everything the adapter answers WITHOUT the connection.
+ *
+ * Membership here is a decision, not an accident — a stub is invisible at the
+ * call site, which is exactly how the config family stayed inert for a whole
+ * release cycle. Adding a method that never touches the wire fails this test
+ * until someone writes down why, and wiring one that used to be local fails it
+ * until the row comes out.
+ *
+ * This table used to hold TWO kinds of row, and the distinction was the whole
+ * point of writing it down:
+ *
+ *  - **No channel to invoke.** The desktop verb is a raw `ipcMain.handle` (or a
+ *    `host`-capability registration) with no remote twin, so a stub is the only
+ *    possible answer. Nothing to decide.
+ *  - **Registered, unwired.** The channel IS declared for both transports, so
+ *    the client could reach it and chose not to. That was a live question, and
+ *    the rows carrying it spelled the channel out so the next reader could weigh
+ *    it instead of assuming, as the config family was assumed, that no twin
+ *    exists.
+ *
+ * **The second kind is now empty**, and that is the state this file pins. The
+ * thirty rows that carried it — worktrees, automations, the MCP writes, the
+ * shared-provider writes, `config:save-slash-commands`, `proxy:test-connection`,
+ * `usage:refresh-prices` — were the pre-registry stubs the everything-remote
+ * ruling (2026-08-17) outran, and they are all in {@link WIRED} now. So every
+ * remaining row means the SAME thing: there is no channel to invoke, on either
+ * transport. If a future change ever needs the second kind back, it owes this
+ * table the channel name, the capability, and the reason a reachable channel is
+ * being answered locally anyway — the shape the retired rows used.
+ */
+
+const HOST_PHYSICAL =
+  'host-physical (dialog/window/native shell) — capability `host`, no remote registration'
+const NO_REMOTE_CHANNEL = 'no remote registration at all — desktop-only `ipcMain.handle`'
+const DESKTOP_ANCHOR_ONLY =
+  'no remote registration: a remote client must never reconfigure the transport it rides (ADR-042/054)'
+const QUIT_HANDSHAKE =
+  'no remote registration — the quit handshake is the host shell talking to itself'
+const VOICE_SERVER_VERBS =
+  'no remote registration; starting cli.js’s transcription server is `voice:start`’s business'
+const NO_MAIN_LOG_FILE =
+  'a `log:*` send, not an invoke — no main-process log file here, so both relays hit the console'
+
+const NOT_ON_THE_WIRE: Readonly<Record<string, string>> = {
+  pickFolder: HOST_PHYSICAL,
+  openInVSCode: HOST_PHYSICAL,
+  minimizeWindow: HOST_PHYSICAL,
+  maximizeWindow: HOST_PHYSICAL,
+  closeWindow: HOST_PHYSICAL,
+  confirmQuit: QUIT_HANDSHAKE,
+  cancelQuit: QUIT_HANDSHAKE,
+  acquireSyncPort:
+    'no port to acquire — the connection installed its sync client before `window.api` existed (web/main.tsx)',
+  killTerminalsByCwd:
+    'no remote registration: the cold-session sweep is off the remote surface so a web client never mass-kills the operator’s shells',
+  getSentFilePreview:
+    'real client-side implementation: the src IS an authenticated same-origin /sent-file URL, so no RPC',
+  getMockupPreviewUrl:
+    'real client-side implementation: a same-origin URL built from `__MOCKUP_TOKEN__`',
+  getNetworkInterfaces: DESKTOP_ANCHOR_ONLY,
+  startRemoteServer: DESKTOP_ANCHOR_ONLY,
+  stopRemoteServer: DESKTOP_ANCHOR_ONLY,
+  getRemoteStatus: `${DESKTOP_ANCHOR_ONLY}; its lanUrl/tunnelUrl carry channel keys — the readable half is the redacted \`remote:status-view\` (getRemoteStatusView, wired above)`,
+  onRemoteStatus: `${DESKTOP_ANCHOR_ONLY}; \`remote:status\` is a host-local EVENT, so the web view polls \`remote:status-view\` instead of subscribing`,
+  setRemoteConfig:
+    'no remote registration: the only writer that can reach the `off` master switch, so refusing locally is what lets the pane say why',
+  setRemotePassword: DESKTOP_ANCHOR_ONLY,
+  clearRemotePassword: DESKTOP_ANCHOR_ONLY,
+  detectTailscale: DESKTOP_ANCHOR_ONLY,
+  forceReserve: DESKTOP_ANCHOR_ONLY,
+  voiceStartServer: VOICE_SERVER_VERBS,
+  voiceStopServer: VOICE_SERVER_VERBS,
+  logError: NO_MAIN_LOG_FILE,
+  logRelay: NO_MAIN_LOG_FILE,
+  openLogViewer: NO_REMOTE_CHANNEL,
+  listPlugins: NO_REMOTE_CHANNEL,
+  reloadPlugin: NO_REMOTE_CHANNEL,
+  getPluginViews: NO_REMOTE_CHANNEL,
+  getPluginPreloadPath: NO_REMOTE_CHANNEL,
+  onPluginViewsChanged: NO_REMOTE_CHANNEL
+}
+
+describe('web api-adapter — the local surface is an explicit list', () => {
+  /**
+   * A member is ON THE WIRE if its body reaches the connection (directly, or
+   * through this module's `unwrap` helper), or if it IS a connection listener —
+   * `on(channel)` returns the SyncClient's registrar, so those share one source
+   * string that the probe below captures rather than hard-codes.
+   */
+  function localSurface(): string[] {
+    const probe = makeConnection()
+    const listenerSource = (probe.on('probe:channel') as unknown as AnyFn).toString()
+    return Object.entries(api as unknown as Record<string, unknown>)
+      .filter(([, value]) => typeof value === 'function')
+      .filter(([, value]) => {
+        const source = (value as AnyFn).toString()
+        if (source === listenerSource) return false
+        return !/\bconnection\./.test(source) && !/\bunwrap\(/.test(source)
+      })
+      .map(([name]) => name)
+      .sort()
+  }
+
+  it('the classifier actually separates the two halves (non-vacuity)', () => {
+    const local = new Set(localSurface())
+    // Wired through `connection.invoke`, through `unwrap`, and through `on()`.
+    expect(local.has('gitCommit')).toBe(false)
+    expect(local.has('loadEngineConfig')).toBe(false)
+    expect(local.has('readPiNativeRaw')).toBe(false)
+    expect(local.has('onVoiceState')).toBe(false)
+    expect(local.size).toBeGreaterThan(20)
+  })
+
+  it('every method that never touches the connection is listed with a reason', () => {
+    expect(localSurface()).toEqual(Object.keys(NOT_ON_THE_WIRE).sort())
+    for (const [name, reason] of Object.entries(NOT_ON_THE_WIRE)) {
+      expect(reason.length, `${name} needs a real reason`).toBeGreaterThan(20)
+    }
+  })
+})

@@ -25,8 +25,9 @@ shaped every decision:
 Code home: `src/core/pi/`. Auth: `src/core/auth/PiAuthProvider.ts`. Sidebar/history:
 `src/core/services/pi-session-list.ts`. Renderer tool map:
 `src/renderer/src/components/chat/tool-registry/PiEngineToolMap.ts`. Settings:
-`src/renderer/src/components/SettingsDialog/PiVendors.tsx` + the `'pi'` scope in
-`settings-sections.tsx`.
+the unified provider list (`ProviderList.tsx` / `ProviderSheet.tsx` / `ProviderAddSheet.tsx`,
+ADR-065 phase 6c — pi vendors are `pi:<vendorId>` rows of `provider-registry:list`) plus the
+Engines › pi page (`pi-*` sections in `settings-sections.tsx`).
 
 ## 2. Branch state — what's SHIPPED (all gate-green + real-app verified)
 

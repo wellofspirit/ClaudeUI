@@ -8,8 +8,12 @@
  *
  *  1. **fork build (default)** — clone `package.json#opencodeFork` (our
  *     `sst/opencode` fork, branch `claudeui`, forked from the vendored tag) into
- *     `.cache/opencode-fork`, build it with opencode's own release pipeline
+ *     `.cache/opencode-fork`, check out `opencodeFork.ref` (a tag on the fork
+ *     or a commit reachable from the branch; branch HEAD when unset), build it
+ *     with opencode's own release pipeline
  *     (`packages/opencode/script/build.ts --single`), and vendor the result.
+ *     `opencodeFork.tag` is provenance only — the upstream release the branch
+ *     was last merged with — and is recorded as `forkedFrom`.
  *     This is how ClaudeUI's patches (P1: the tool-less `/judge/completion`
  *     route) reach the running binary. The upstream release tarball has no
  *     patches, so this path is what production uses.
@@ -125,7 +129,13 @@ function isCacheHit(version, expect) {
     const savedSource = saved.source ?? 'release'
     if (savedSource !== expect.source) return false
     if (expect.source === 'fork') {
-      return saved.fork?.repo === expect.repo && saved.fork?.branch === expect.branch
+      // A pinned ref is part of the binary's identity: changing (or adding) the
+      // pin must miss, otherwise the old branch-HEAD build silently survives.
+      return (
+        saved.fork?.repo === expect.repo &&
+        saved.fork?.branch === expect.branch &&
+        (saved.fork?.ref ?? null) === (expect.ref ?? null)
+      )
     }
     return true
   } catch {
@@ -465,7 +475,10 @@ function ensureBun(forkDir) {
   return exe
 }
 
-/** Clone (or refresh) the fork branch and return its HEAD sha. */
+/**
+ * Clone (or refresh) the fork branch, check out the pinned ref (or branch HEAD)
+ * and return the sha that will be built.
+ */
 function syncFork(fork) {
   mkdirSync(CACHE_BASE, { recursive: true })
   if (!existsSync(join(FORK_DIR, '.git'))) {
@@ -479,16 +492,46 @@ function syncFork(fork) {
     )
   } else {
     info(`[ensure-opencode] Refreshing ${FORK_DIR} (${fork.branch}) ...`)
-    gitRun(['fetch', 'origin', fork.branch], FORK_DIR)
-    // `-f` is load-bearing: a previous run's `bun install` rewrites bun.lock in
-    // this clone, and a plain checkout refuses to switch over a dirty file.
-    gitRun(['checkout', '-f', '-B', fork.branch, `origin/${fork.branch}`], FORK_DIR)
+    // `--tags` so a pinned fork tag that post-dates the clone is visible.
+    gitRun(['fetch', '--tags', 'origin', fork.branch], FORK_DIR)
   }
+  // The pin is a tag on the fork or a commit reachable from the branch; the
+  // fetch above brings both. Resolve it before touching the working tree so a
+  // typo fails here, not three minutes into a build of the wrong thing.
+  const target = (() => {
+    if (!fork.ref) return gitOut(['rev-parse', `origin/${fork.branch}`], FORK_DIR)
+    try {
+      return gitOut(['rev-parse', '--verify', '--quiet', `${fork.ref}^{commit}`], FORK_DIR)
+    } catch {
+      throw new Error(
+        `opencodeFork.ref "${fork.ref}" is not a tag on ${fork.repo} nor a commit on ${fork.branch}`
+      )
+    }
+  })()
+  if (fork.ref) {
+    // Not fatal — a hotfix may be pinned before it is merged — but worth a line:
+    // a pin the branch does not contain is either drift or a mistake.
+    try {
+      execFileSync('git', ['merge-base', '--is-ancestor', target, `origin/${fork.branch}`], {
+        cwd: FORK_DIR,
+        stdio: 'ignore'
+      })
+    } catch {
+      console.warn(
+        `[ensure-opencode] WARN: pinned ref ${fork.ref} (${target.slice(0, 8)}) is not on ${fork.branch}`
+      )
+    }
+  }
+  // `-f` is load-bearing: a previous run's `bun install` rewrites bun.lock in
+  // this clone, and a plain checkout refuses to switch over a dirty file. The
+  // local branch is re-pointed at the target (not left detached) because
+  // opencode's build reads `git branch --show-current`.
+  gitRun(['checkout', '-f', '-B', fork.branch, target], FORK_DIR)
   // Any local edit (a rewritten lockfile, the install workaround below, a stray
   // build artifact) must not leak into the vendored binary. NOT `git clean` —
   // that would delete the cached node_modules and turn every run into a cold
   // install.
-  gitRun(['reset', '--hard', `origin/${fork.branch}`], FORK_DIR)
+  gitRun(['reset', '--hard', target], FORK_DIR)
   return gitOut(['rev-parse', 'HEAD'], FORK_DIR)
 }
 
@@ -524,7 +567,7 @@ async function buildFork(version, fork) {
   })
 
   info(
-    `[ensure-opencode] Building opencode ${version} from ${fork.branch}@${commit.slice(0, 8)} ...`
+    `[ensure-opencode] Building opencode ${version} from ${fork.ref ?? fork.branch}@${commit.slice(0, 8)} ...`
   )
   const pkgDir = join(FORK_DIR, 'packages', 'opencode')
   execFileSync(bun, ['run', 'script/build.ts', '--single', '--skip-install'], {
@@ -552,6 +595,7 @@ async function buildFork(version, fork) {
     fork: {
       repo: fork.repo,
       branch: fork.branch,
+      ...(fork.ref ? { ref: fork.ref } : {}),
       commit,
       ...(fork.tag ? { forkedFrom: fork.tag } : {})
     },
@@ -559,7 +603,7 @@ async function buildFork(version, fork) {
   })
 
   console.log(
-    `[ensure-opencode] opencode ${version} (fork ${fork.branch}@${commit.slice(0, 8)}, ` +
+    `[ensure-opencode] opencode ${version} (fork ${fork.ref ?? fork.branch}@${commit.slice(0, 8)}, ` +
       `${(statSync(dest).size / 1024 / 1024).toFixed(1)} MB) installed to vendor/opencode-cli/${binName}`
   )
 }

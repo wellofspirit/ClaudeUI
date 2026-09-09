@@ -268,15 +268,22 @@ describe('RemoteDispatcher', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Guard: RemoteStatus stays desktop-only.
+// Guard: the FULL RemoteStatus stays desktop-only.
 //
 // `RemoteServer.notifyStatus()` pushes `remote:status` via
 // `win.webContents.send` (the real desktop window, not the RemoteBridge), and
-// `remote-handlers.ts` registers NO `remote:*` channel for the remote
-// transport — and unregistered channels are unreachable. Together that means
-// widening `RemoteStatus` (Phase 2 added `authMethods`; Phase 3 adds
-// tls/clientLogins) cannot leak server internals or one remote user's identity
-// to another.
+// no `remote:*` channel is registered for the remote transport EXCEPT the
+// redacted `remote:status-view` (owner ruling, 2026-08-28) — and unregistered
+// channels are unreachable. Together that means widening `RemoteStatus`
+// (Phase 2 added `authMethods`; Phase 3 added tls/clientLogins) cannot leak
+// server internals or one remote user's identity to another: the new field is
+// invisible remotely until somebody adds it to `remoteStatusView()`'s explicit
+// pick list, which is a reviewed edit.
+//
+// The scan covers BOTH files that can contribute a remote registration in this
+// namespace — the registrar and the shared declaration module it spreads —
+// because a scan that only read the registrar would report "no remote:*" while
+// a spread quietly added one.
 //
 // This is a source-level assertion on purpose: importing remote-handlers.ts
 // pulls in the SDK + every service, which a unit test must not do.
@@ -284,20 +291,27 @@ describe('RemoteDispatcher', () => {
 
 describe('remote-handlers registration surface (guard)', () => {
   const HANDLERS_PATH = resolve(__dirname, '../../../core/ipc/remote-handlers.ts')
+  const VIEW_PATH = resolve(__dirname, '../../../core/ipc/remote-view-commands.ts')
+  const sources = (): string[] => [HANDLERS_PATH, VIEW_PATH].map((p) => readFileSync(p, 'utf-8'))
 
-  it('registers no remote:* channel for the remote transport', () => {
-    const src = readFileSync(HANDLERS_PATH, 'utf-8')
-    // Every registration in that file goes through `channel: '<channel>'`.
+  it('registers exactly one remote:* channel — the redacted read — for the remote transport', () => {
+    const src = sources().join('\n')
+    // Every registration in these files goes through `channel: '<channel>'`.
     const registered = [...src.matchAll(/channel:\s*['"]([^'"]+)['"]/g)].map((m) => m[1])
     expect(registered.length).toBeGreaterThan(50) // non-vacuity: we did parse it
-    expect(registered.filter((c) => c.startsWith('remote:'))).toEqual([])
+    // A `query` carrying no link fields. Every MUTATION in the namespace —
+    // start/stop/set-config/set-password/clear-password/force-reserve — stays
+    // raw `ipcMain.handle` on the host anchor, which is what keeps a remote
+    // client from cutting the connection it is riding.
+    expect(registered.filter((c) => c.startsWith('remote:'))).toEqual(['remote:status-view'])
   })
 
   it('registers no remote:* channel via a template/computed channel name either', () => {
-    const src = readFileSync(HANDLERS_PATH, 'utf-8')
-    // A backtick channel or a `'remote:' + x` concatenation would slip past the
-    // literal scan above.
-    expect(src).not.toMatch(/channel:\s*`remote:/)
-    expect(src).not.toMatch(/['"`]remote:['"`]\s*\+/)
+    for (const src of sources()) {
+      // A backtick channel or a `'remote:' + x` concatenation would slip past the
+      // literal scan above.
+      expect(src).not.toMatch(/channel:\s*`remote:/)
+      expect(src).not.toMatch(/['"`]remote:['"`]\s*\+/)
+    }
   })
 })

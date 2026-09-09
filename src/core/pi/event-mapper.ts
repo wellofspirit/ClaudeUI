@@ -3,8 +3,13 @@
  * or more engine-neutral `PiMapperOutput`s. Mirrors `src/main/opencode/event-mapper.ts`'s
  * shape (pure function, caller-owned state) with one difference: pi's events
  * carry NO stable message id and are strictly sequential per process (pi has
- * no server/subagent-interleaving concept in M1), so `state` only needs a
- * single in-flight message slot rather than a Map of accumulators.
+ * no server/subagent-interleaving concept in M1), so `state` needs only ONE
+ * in-flight message slot rather than opencode's Map keyed by message id.
+ *
+ * Within that single slot the mapper DOES accumulate per content block: since
+ * pi 0.84.0 `message_update` carries deltas only (no cumulative `message`, no
+ * `assistantMessageEvent.partial`), so the mid-turn upsert must be assembled
+ * from the `*_end` events keyed by `contentIndex` — see `PiMapperState.blocks`.
  *
  * Event order relied on (verified — docs/protocol-pi/README.md):
  *   agent_start → turn_start → message_start(assistant) → message_update* →
@@ -33,6 +38,12 @@ export interface PiMapperState {
    *  message_update/message_end reuse the same synthesized ChatMessage id —
    *  pi's wire events carry no stable message id of their own. */
   currentMessageId: string | null
+  /** Content blocks of the in-flight assistant message, keyed by the wire's
+   *  `contentIndex`. Fed by `message_update`'s `text_end`/`thinking_end`/
+   *  `toolcall_end` (pi 0.84+ sends no cumulative snapshot), read to build the
+   *  mid-turn upsert. Reset with `currentMessageId` at both ends of the
+   *  message's life so nothing bleeds into the next one. */
+  blocks: Map<number, PiAssistantContentBlock>
   /** Wall-clock run start (ms), set by the caller (PiSession) when a prompt is
    *  sent; read at agent_settled to compute `result.durationMs`. */
   startTimeMs: number
@@ -59,6 +70,7 @@ export interface PiMapperState {
 export function createPiMapperState(): PiMapperState {
   return {
     currentMessageId: null,
+    blocks: new Map(),
     startTimeMs: 0,
     totalCostUsd: 0,
     sessionId: null,
@@ -152,6 +164,7 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
       const msg = (ev as Extract<PiEvent, { type: 'message_start' }>).message
       if (msg.role === 'assistant') {
         state.currentMessageId = uuid()
+        state.blocks.clear()
       }
       // user/bashExecution (and any other role) → ignore: the renderer already
       // renders the user's prompt optimistically; bashExecution messages never
@@ -160,40 +173,56 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
     }
 
     case 'message_update': {
-      const { message, assistantMessageEvent } = ev as Extract<PiEvent, { type: 'message_update' }>
+      const { assistantMessageEvent: amEvent } = ev as Extract<PiEvent, { type: 'message_update' }>
       const messageId = ensureMessageId(state)
 
-      if (
-        assistantMessageEvent.type === 'text_delta' ||
-        assistantMessageEvent.type === 'thinking_delta'
-      ) {
-        const delta = assistantMessageEvent.delta ?? ''
+      if (amEvent.type === 'text_delta' || amEvent.type === 'thinking_delta') {
+        const delta = amEvent.delta ?? ''
         if (!delta) return [{ kind: 'ignore' }]
         return [
           {
             kind: 'stream',
-            streamType: assistantMessageEvent.type === 'text_delta' ? 'text' : 'thinking',
+            streamType: amEvent.type === 'text_delta' ? 'text' : 'thinking',
             delta,
             messageId
           }
         ]
       }
 
-      if (assistantMessageEvent.type === 'toolcall_end') {
-        // The partial assistant message already carries everything generated
-        // so far (including the just-completed tool call) — no per-part
-        // accumulator needed, unlike opencode. Upsert-by-id makes this safe
-        // to emit repeatedly (once per completed tool call in the turn).
-        const content = message.role === 'assistant' ? message.content : []
+      // The `*_end` events carry the block's FULL accumulated value, so each
+      // simply overwrites its slot — no string concatenation, and replaying one
+      // is idempotent.
+      if (amEvent.type === 'text_end') {
+        setPiBlock(state, amEvent.contentIndex, { type: 'text', text: amEvent.content ?? '' })
+        return [{ kind: 'ignore' }]
+      }
+
+      if (amEvent.type === 'thinking_end') {
+        setPiBlock(state, amEvent.contentIndex, {
+          type: 'thinking',
+          thinking: amEvent.content ?? ''
+        })
+        return [{ kind: 'ignore' }]
+      }
+
+      if (amEvent.type === 'toolcall_end') {
+        // A completed tool call is the one mid-turn moment the renderer needs a
+        // whole message for (the tool card can't be drawn from text deltas), so
+        // this is where the accumulated blocks are published. Upsert-by-id makes
+        // it safe to emit once per completed tool call in the turn; the
+        // following message_end replaces the approximation wholesale.
+        if (!amEvent.toolCall) return [{ kind: 'ignore' }]
+        setPiBlock(state, amEvent.contentIndex, amEvent.toolCall)
+        const content = orderedPiBlocks(state)
         recordPiEditToolPaths(state, content)
         return [{ kind: 'message', message: buildPiChatMessage(messageId, content) }]
       }
 
-      // start/text_start/text_end/thinking_start/thinking_end/toolcall_start/
-      // toolcall_delta/done/error: no visible output needed in M1 — text/thinking
-      // rendering is driven purely by the `stream` deltas above, and the terminal
-      // state (success or error/aborted) is fully captured by the following
-      // message_end event's stopReason.
+      // start/text_start/thinking_start/toolcall_start/toolcall_delta/done/
+      // error: no visible output needed — text/thinking rendering is driven
+      // purely by the `stream` deltas above, partial tool arguments are never
+      // streamed, and the terminal state (success or error/aborted) is fully
+      // captured by the following message_end event's stopReason.
       return [{ kind: 'ignore' }]
     }
 
@@ -203,6 +232,7 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
       if (msg.role === 'assistant') {
         const messageId = ensureMessageId(state)
         state.currentMessageId = null
+        state.blocks.clear()
         recordPiEditToolPaths(state, msg.content)
 
         const message = buildPiChatMessage(messageId, msg.content)
@@ -402,6 +432,30 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
 function ensureMessageId(state: PiMapperState): string {
   if (!state.currentMessageId) state.currentMessageId = uuid()
   return state.currentMessageId
+}
+
+/**
+ * Store one completed content block of the in-flight assistant message.
+ * `contentIndex` is documented and always present on the real wire, but a
+ * malformed event must never crash the mapper — an absent/non-numeric index
+ * appends past the current slots instead.
+ */
+function setPiBlock(
+  state: PiMapperState,
+  contentIndex: number | undefined,
+  block: PiAssistantContentBlock
+): void {
+  const index = typeof contentIndex === 'number' ? contentIndex : state.blocks.size
+  state.blocks.set(index, block)
+}
+
+/**
+ * The in-flight message's blocks in wire order. Sorting rather than relying on
+ * Map insertion order: a provider that interleaves blocks (finishing a later
+ * one first) would otherwise render them out of order.
+ */
+function orderedPiBlocks(state: PiMapperState): PiAssistantContentBlock[] {
+  return [...state.blocks.entries()].sort((a, b) => a[0] - b[0]).map(([, block]) => block)
 }
 
 /**

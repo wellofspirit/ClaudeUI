@@ -1,6 +1,5 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-import { useShallow } from 'zustand/react/shallow'
-import { useActiveSession, useSessionStore, PI_DEFAULT_MODEL } from '../../stores/session-store'
+import { useState, useEffect, useCallback, useSyncExternalStore } from 'react'
+import { DEFAULT_SETTINGS, useActiveSession, useSessionStore } from '../../stores/session-store'
 import type { AppSettings } from '../../stores/session-store'
 import { PermissionsDialog } from '../PermissionsDialog'
 import {
@@ -19,14 +18,10 @@ import type {
   AnthropicEndpointSettings,
   ModelOverrideSettings,
   SandboxSettings,
-  VendorAuthOption,
   AutoModeConfig,
   DispatchConfig,
   ModelInfo,
-  OpencodeProviderSettings,
-  OpencodeConfigSettings,
-  OpencodeProviderCatalogEntry,
-  ProviderRemoveKind
+  OpencodeConfigSettings
 } from '../../../../shared/types'
 import { VOICE_LANGUAGES } from '../../../../shared/types'
 import {
@@ -34,11 +29,8 @@ import {
   defaultEffort,
   type EffortLevel,
   type AutonomyMode,
-  type EngineCapabilities,
   CLAUDE_ENGINE_CAPABILITIES
 } from '../../../../shared/model-capabilities'
-import { engineMeta, ENGINE_META } from '../../../../shared/engine-meta'
-import { findModelReferences, formatModelReferences } from '../../../../shared/model-references'
 import { AUTONOMY_TO_PERMISSION, AUTONOMY_LABELS } from '../../../../shared/permission-modes'
 import {
   SettingsToggle,
@@ -47,29 +39,62 @@ import {
   SettingsTextarea,
   SandboxListSetting,
   ChatRetentionSetting,
-  InfoTooltip
+  ChipSet,
+  SettingRow,
+  RadioRow,
+  ActionRow,
+  SelectField,
+  TextField,
+  NumberField,
+  Segmented,
+  Button
 } from './settings-controls'
-import { ModelPicker, type ModelDisplay } from '../shared/InlinePickers'
-import { SelectMenu } from '../shared/SelectMenu'
+import type { SettingsRenderContext } from './settings-target'
+import { ModelPicker } from '../shared/InlinePickers'
+import { toModelDisplays, selectedModelDisplay, StaleModelNotice } from './settings-model-display'
 import { OpencodeAgentsSection } from './OpencodeAgents'
-import { RemoteServerSettings } from './RemoteServerSettings'
-import { PiVendors } from './PiVendors'
-import { SharedProviders } from './SharedProviders'
-import { PiModelAllowlistDialog } from './PiModelAllowlistDialog'
-import { ConfirmModal } from '../shared/ConfirmModal'
+import { TrustListsSection } from './TrustLists'
 import {
-  IconButton,
-  KeyIcon,
-  PencilIcon,
-  PowerIcon,
-  SlidersIcon,
-  TrashIcon
-} from './ProviderRowIcons'
+  RemoteAccessSection,
+  RemoteLinksSection,
+  RemoteSecuritySection,
+  RemoteServerSection
+} from './RemoteServerSettings'
+import { ProviderList } from './ProviderList'
 import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
+import { useOpencodeInstalled, usePiInstalled } from './use-engine-installed'
+import {
+  OpencodeSessionBehaviorSection,
+  OpencodeToolOutputSection,
+  OpencodeAttachmentsSection,
+  OpencodeWorkspaceSection,
+  OpencodeToolsSection,
+  OpencodeDiagnosticsSection,
+  OpencodeManagedKeysSection
+} from './OpencodeConfigPanes'
+import {
+  PiSessionBehaviorSection,
+  PiModelsSection,
+  PiToolsSection,
+  PiImagesSection,
+  PiWorkspaceSection,
+  PiNetworkSection,
+  PiRawConfigSection,
+  PiRetrySection,
+  PiResourcesSection
+} from './PiConfigPanes'
 import { diffToPatches } from '../../../../shared/opencode-config-diff'
-import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.18.9.json'
+import opencodeConfigSchema from '../../../../shared/opencode-config-schema.1.18.29.json'
 
 // ── Section definitions ──────────────────────────────────────────────
+//
+// This file is the ITEM SOURCE and nothing else: `SECTIONS` holds every
+// setting's render body, and `settings-pages.tsx` arranges those very objects
+// into the ADR-065 pages. The store-derived scope tree that used to live at the
+// tail of this file (SCOPES / SECTION_SCOPE_MAP / the per-scope id sets) went
+// with phase 7 — organisation is the page model's job, and a second, disagreeing
+// tree of the same sections is exactly what that redesign removed. The import
+// edge is one-way: settings-pages imports from here, never the reverse.
 
 export interface SettingItem {
   key: string
@@ -81,7 +106,15 @@ export interface SettingItem {
     engineConfig: EngineConfig,
     updateEngineConfig: (p: Partial<EngineConfig>) => void,
     vendorConfig: VendorConfig,
-    updateVendorConfig: (p: Partial<VendorConfig>) => void
+    updateVendorConfig: (p: Partial<VendorConfig>) => void,
+    /**
+     * Shell context (ADR-065): app metadata and cross-page navigation. Kept
+     * POSITIONAL and last so the ~130 existing bodies — which declare fewer
+     * parameters and ignore it — did not have to be touched. Optional because
+     * the type must stay satisfiable by a body that ignores it; both
+     * presentations do pass one.
+     */
+    ctx?: SettingsRenderContext
   ) => React.JSX.Element
 }
 
@@ -90,6 +123,26 @@ export interface Section {
   label: string
   icon: React.JSX.Element
   items: SettingItem[]
+}
+
+/**
+ * The changed-from-default state of a row backed by ClaudeUI's own settings
+ * (ADR-065): an accent dot after the label, and a Reset link on row hover.
+ *
+ * Scalars only — comparison is by identity, so an object-valued key (e.g.
+ * `modelEffortDefaults`) would read as permanently modified. Engine-native keys
+ * get the same treatment in phase 2, where "modified" means "present in the
+ * engine's own config file" rather than "differs from a constant".
+ */
+function appDefault<K extends keyof AppSettings>(
+  settings: AppSettings,
+  update: (p: Partial<AppSettings>) => void,
+  key: K
+): { modified: boolean; onReset: () => void } {
+  return {
+    modified: !Object.is(settings[key], DEFAULT_SETTINGS[key]),
+    onReset: () => update({ [key]: DEFAULT_SETTINGS[key] } as Partial<AppSettings>)
+  }
 }
 
 // ── Default engine/vendor config values ─────────────────────────────
@@ -120,11 +173,24 @@ const DEFAULT_PROXY: ProxySettings = {
   proxySubprocesses: false
 }
 
-// ── Proxy test connection button ─────────────────────────────────────
+// ── Proxy test connection row ────────────────────────────────────────
 
+/**
+ * The "Test connection" row (ADR-065). The outcome IS the row's description,
+ * so there is no bespoke status text beside a bespoke button; a failure's
+ * message goes to the row's `error` slot and reads in the danger colour.
+ *
+ * A `SettingRow` with a `Button` rather than `ActionRow`: this is a dependent
+ * row that has to nest and dim with the rest of the proxy fields and show an
+ * error, none of which `ActionRow` takes, and its chevron link means "opens an
+ * editor" rather than "runs a check".
+ */
 function ProxyTestButton({ proxy }: { proxy: ProxySettings }): React.JSX.Element {
   const [state, setState] = useState<'idle' | 'testing' | 'success' | 'error'>('idle')
   const [result, setResult] = useState<{ latencyMs?: number; error?: string } | null>(null)
+
+  // Nothing to reach until the proxy is on and points somewhere.
+  const ready = proxy.enabled && !!proxy.hostname
 
   const handleTest = async (): Promise<void> => {
     setState('testing')
@@ -144,27 +210,32 @@ function ProxyTestButton({ proxy }: { proxy: ProxySettings }): React.JSX.Element
     }
   }
 
+  const outcome =
+    state === 'testing'
+      ? 'Testing…'
+      : state === 'success'
+        ? `Reachable · ${result?.latencyMs ?? 0} ms`
+        : state === 'error'
+          ? 'The proxy did not answer.'
+          : 'Not tested yet.'
+
   return (
-    <div data-testid="ProxyTestButton" className="px-3 py-1.5 text-[13px] text-text-secondary">
-      <div className="flex items-center gap-2">
-        <button
-          data-testid="ProxyTestButton.test"
-          onClick={handleTest}
-          disabled={state === 'testing'}
-          className="px-2.5 py-1 text-[11px] font-medium text-accent hover:text-accent-hover bg-accent/10 hover:bg-accent/15 rounded-md transition-colors cursor-default disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {state === 'testing' ? 'Testing...' : 'Test Connection'}
-        </button>
-        {state === 'success' && result && (
-          <span className="text-[11px] text-success">Connected ({result.latencyMs}ms)</span>
-        )}
-        {state === 'error' && result && (
-          <span className="text-[11px] text-danger truncate max-w-[300px]" title={result.error}>
-            Failed: {result.error}
-          </span>
-        )}
-      </div>
-    </div>
+    <SettingRow
+      testid="ClaudeProxy.test"
+      label="Test connection"
+      description={outcome}
+      error={state === 'error' ? result?.error : undefined}
+      indent
+      dimmed={!ready}
+    >
+      <Button
+        testid="ClaudeProxy.test.action"
+        onClick={() => void handleTest()}
+        disabled={!ready || state === 'testing'}
+      >
+        Test
+      </Button>
+    </SettingRow>
   )
 }
 
@@ -184,38 +255,39 @@ function GlobalPermissionsSummary(): React.JSX.Element {
 
   const totalRules = perms ? perms.allow.length + perms.ask.length + perms.deny.length : 0
 
+  // The counts ARE the description (the board): "58 allow · 3 ask · 7 deny".
+  const summary = !perms
+    ? undefined
+    : totalRules === 0 && perms.additionalDirectories.length === 0
+      ? 'No rules configured'
+      : [
+          `${perms.allow.length} allow`,
+          `${perms.ask.length} ask`,
+          `${perms.deny.length} deny`,
+          ...(perms.additionalDirectories.length > 0
+            ? [
+                `${perms.additionalDirectories.length} dir${perms.additionalDirectories.length !== 1 ? 's' : ''}`
+              ]
+            : [])
+        ].join(' · ')
+
   return (
-    <div
-      data-testid="GlobalPermissionsSummary"
-      className="px-3 py-1.5 text-[13px] text-text-secondary"
-    >
-      <div className="flex items-center justify-between">
-        <div>
-          <div className="text-text-secondary mb-0.5">Global permission rules</div>
-          {perms && (
-            <div className="text-[11px] text-text-muted">
-              {perms.allow.length} allow · {perms.ask.length} ask · {perms.deny.length} deny
-              {perms.additionalDirectories.length > 0 &&
-                ` · ${perms.additionalDirectories.length} dir${perms.additionalDirectories.length !== 1 ? 's' : ''}`}
-              {totalRules === 0 && 'No rules configured'}
-            </div>
-          )}
-        </div>
-        <button
-          data-testid="GlobalPermissionsSummary.edit"
-          onClick={() => setDialogOpen(true)}
-          className="px-2.5 py-1 text-[11px] font-medium text-accent hover:text-accent-hover bg-accent/10 hover:bg-accent/15 rounded-md transition-colors cursor-default"
-        >
-          Edit...
-        </button>
-      </div>
+    <>
+      <ActionRow
+        testid="GlobalPermissionsSummary"
+        label="Permission rules"
+        description={summary}
+        engine="claude"
+        action="Edit rules"
+        onAction={() => setDialogOpen(true)}
+      />
       <PermissionsDialog
         open={dialogOpen}
         onClose={() => setDialogOpen(false)}
         cwd={cwd}
         initialTab="user"
       />
-    </div>
+    </>
   )
 }
 
@@ -237,31 +309,44 @@ const EFFORT_MODELS: ReadonlyArray<{ id: string; label: string }> = [
   { id: 'claude-fable-5', label: 'Fable 5' }
 ]
 
+/**
+ * One row per Claude model, on the ADR-065 vocabulary: the display name is the
+ * label, the canonical model id is the config key under it (11px mono, not the
+ * old 10px `text-muted/50` at the right edge), and the effort levels are a
+ * `SelectField`.
+ *
+ * `modified` is passed in rather than derived from `current`: the phase-1
+ * `appDefault` helper excludes `modelEffortDefaults` because it is object-valued,
+ * so "changed from default" for THIS row means its key is present in that
+ * object — which only the caller holding the whole object can answer.
+ */
 function ModelEffortRow({
   modelId,
   modelLabel,
   current,
+  modified,
   onChange
 }: {
   modelId: string
   modelLabel: string
   current: EffortLevel | undefined
+  modified: boolean
   onChange: (next: EffortLevel | undefined) => void
 }): React.JSX.Element {
   const levels = supportedEffortLevels(modelId)
   const fallback = defaultEffort(modelId)
   return (
-    <div
-      data-testid="ModelEffortRow"
-      data-id={modelId}
-      className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary"
+    <SettingRow
+      testid="ModelEffortRow"
+      dataId={modelId}
+      label={modelLabel}
+      keyText={modelId}
+      modified={modified}
+      onReset={() => onChange(undefined)}
     >
-      <div className="mb-1 flex items-baseline justify-between gap-2">
-        <span>{modelLabel}</span>
-        <span className="text-[10px] text-text-muted/50">{modelId}</span>
-      </div>
-      <SelectMenu
+      <SelectField
         testid="ModelEffortRow.effort"
+        dataId={modelId}
         value={current ?? ''}
         onChange={(v) => onChange(v === '' ? undefined : (v as EffortLevel))}
         options={[
@@ -269,7 +354,7 @@ function ModelEffortRow({
           ...levels.map((lvl) => ({ value: lvl, label: EFFORT_LEVEL_LABEL[lvl] }))
         ]}
       />
-    </div>
+    </SettingRow>
   )
 }
 
@@ -315,107 +400,105 @@ function AccountsSetting(): React.JSX.Element {
   }
 
   return (
-    <div data-testid="AccountsSetting" className="px-3 py-1.5 space-y-2.5">
+    <div data-testid="AccountsSetting" className="divide-y divide-border/55">
       <SettingsToggle
-        label="Enable multiple account support"
+        testid="AccountsSetting.multiAccount"
+        label="Multiple accounts"
         checked={enabled}
         onChange={(v) => void run(() => window.api.setMultiAccountEnabled(v))}
-        tooltip="Store credentials per-account in plaintext files instead of the macOS Keychain, so you can hold and switch between multiple Claude subscriptions."
+        description="Hold several Claude subscriptions and switch between them; credentials are stored per account in plaintext files rather than the macOS Keychain."
       />
 
       {enabled && isMac && (
-        <div className="text-[11px] leading-relaxed text-warning/90 bg-warning/10 border border-warning/30 rounded-md px-2.5 py-1.5">
-          Multi-account mode uses file-based credentials, separate from your macOS Keychain login.
-          You may need to <b>log in again</b> for each account.
-        </div>
+        // A real row, not an 11px callout box: the warning colour rides on the
+        // row's background rather than on a type size ADR-065 retired.
+        <SettingRow
+          testid="AccountsSetting.keychainNotice"
+          className="bg-warning/10"
+          description="Multi-account mode uses file-based credentials, separate from your macOS Keychain login — you may need to sign in again for each account."
+        />
       )}
 
-      {enabled && (
-        <div className="space-y-1">
-          {(accounts?.accounts ?? []).map((a) => {
-            const active = a.id === accounts?.activeId
-            return (
-              <div
-                key={a.id}
-                data-testid="AccountsSetting.accountRow"
-                data-id={a.id}
-                className={`flex items-center gap-2.5 rounded-md border px-2.5 py-1.5 ${
-                  active ? 'border-accent/50 bg-accent/5' : 'border-border'
-                }`}
-              >
-                <button
-                  disabled={busy || active}
-                  onClick={() => void run(() => window.api.switchAccount(a.id))}
-                  title={active ? 'Active account' : 'Switch to this account'}
-                  className="shrink-0 w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center disabled:cursor-default"
-                  style={{
-                    borderColor: active ? 'var(--color-accent)' : 'var(--color-border-bright)'
-                  }}
-                >
-                  {active && <span className="w-1.5 h-1.5 rounded-full bg-accent" />}
-                </button>
-                <div className="flex-1 min-w-0">
-                  <div className="text-[12px] text-text-primary truncate">
-                    {a.email || 'Account'}
-                  </div>
-                  {a.subscriptionType && (
-                    <div className="text-[10px] text-text-muted">{a.subscriptionType}</div>
-                  )}
-                </div>
-                <button
+      {enabled &&
+        (accounts?.accounts ?? []).map((a) => {
+          const active = a.id === accounts?.activeId
+          return (
+            // `as="label"` rather than `as="button"`: the row carries a Remove
+            // BUTTON, and a button inside a button is invalid HTML (the same
+            // reason SettingRow's own Reset is a role="button" span). A click on
+            // an interactive descendant of a <label> does not activate the
+            // label's control, so Remove never doubles as "switch to this one".
+            <SettingRow
+              key={a.id}
+              as="label"
+              testid="AccountsSetting.accountRow"
+              dataId={a.id}
+              label={a.email || 'Account'}
+              description={a.subscriptionType ?? undefined}
+              className={active ? 'bg-accent/5' : 'hover:bg-bg-hover/40'}
+              leading={
+                <input
+                  type="radio"
+                  name="claude-account"
+                  value={a.id}
+                  checked={active}
                   disabled={busy}
-                  onClick={() => void run(() => window.api.deleteAccount(a.id))}
-                  title="Delete account"
-                  className="shrink-0 text-text-muted hover:text-danger transition-colors disabled:opacity-50"
-                >
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                  >
-                    <path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6" />
-                  </svg>
-                </button>
-              </div>
-            )
-          })}
-          <button
-            data-testid="AccountsSetting.addAccount"
+                  onChange={() => void run(() => window.api.switchAccount(a.id))}
+                  className="appearance-none w-4 h-4 shrink-0 rounded-full border-[1.5px] border-border-bright bg-transparent checked:border-accent checked:bg-accent checked:shadow-[inset_0_0_0_3.5px_var(--color-bg-secondary)] cursor-pointer"
+                />
+              }
+            >
+              <Button
+                testid="AccountsSetting.removeAccount"
+                dataId={a.id}
+                variant="danger"
+                disabled={busy}
+                onClick={() => void run(() => window.api.deleteAccount(a.id))}
+              >
+                Remove
+              </Button>
+            </SettingRow>
+          )
+        })}
+
+      {enabled && (
+        <SettingRow
+          testid="AccountsSetting.addRow"
+          description="Signs in to another Claude subscription and adds it to the list."
+        >
+          <Button
+            testid="AccountsSetting.addAccount"
+            variant="tinted"
             disabled={busy}
             onClick={() => void run(() => window.api.addAccount())}
-            className="text-[12px] font-medium text-accent hover:text-accent-hover bg-accent/10 hover:bg-accent/15 rounded-md px-2.5 py-1.5 transition-colors disabled:opacity-50"
           >
             + Add account
-          </button>
+          </Button>
+        </SettingRow>
+      )}
 
-          {pasteBack && (
-            <div
-              data-testid="AccountsSetting.signInFlow"
-              className="mt-1.5 rounded-md border border-border/40 bg-bg-secondary/40 p-2.5 space-y-2"
-            >
-              <OAuthPasteBackFlow
-                variant="code"
-                url={authState?.manualUrl}
-                busy={submittingCode}
-                onSubmit={(pasted) => {
-                  setSubmittingCode(true)
-                  void submitOAuthCode(pasted)
-                    .then(() => void window.api.getAccounts().then(setAccounts))
-                    .finally(() => setSubmittingCode(false))
-                }}
-                onCancel={() => void cancelSignIn()}
-              />
-            </div>
-          )}
-          {isWeb && authState?.status === 'error' && authState.error && (
-            <OAuthOutcomeNotice
-              kind={classifyOAuthError(authState.error)}
-              message={authState.error}
-            />
-          )}
+      {enabled && pasteBack && (
+        <div data-testid="AccountsSetting.signInFlow" className="px-3.5 py-2.5">
+          <OAuthPasteBackFlow
+            variant="code"
+            url={authState?.manualUrl}
+            busy={submittingCode}
+            onSubmit={(pasted) => {
+              setSubmittingCode(true)
+              void submitOAuthCode(pasted)
+                .then(() => void window.api.getAccounts().then(setAccounts))
+                .finally(() => setSubmittingCode(false))
+            }}
+            onCancel={() => void cancelSignIn()}
+          />
+        </div>
+      )}
+      {enabled && isWeb && authState?.status === 'error' && authState.error && (
+        <div className="px-3.5 py-2.5">
+          <OAuthOutcomeNotice
+            kind={classifyOAuthError(authState.error)}
+            message={authState.error}
+          />
         </div>
       )}
     </div>
@@ -423,6 +506,18 @@ function AccountsSetting(): React.JSX.Element {
 }
 
 // ── Autonomy mode picker ─────────────────────────────────────────────
+
+/**
+ * One sentence per mode, so the choice is legible without a tooltip (ADR-065).
+ * Kept next to the picker rather than in `shared/permission-modes.ts`: the mode
+ * PILL next to the composer shows the label alone and has no room for these.
+ */
+const AUTONOMY_DESCRIPTIONS: Record<AutonomyMode, string> = {
+  plan: 'Explore and plan. Never edits or runs anything.',
+  ask: 'Confirms every tool call with you.',
+  autoEdit: 'Edits freely, asks before running commands.',
+  full: 'A judge model approves routine calls; risky ones still ask you.'
+}
 
 export function AutonomyModePicker(): React.JSX.Element {
   const setDefaultPermissionMode = useSessionStore((s) => s.setDefaultPermissionMode)
@@ -442,75 +537,40 @@ export function AutonomyModePicker(): React.JSX.Element {
   }
 
   return (
-    <div data-testid="AutonomyModePicker" className="px-3 py-1.5 text-[13px] text-text-secondary">
-      <div className="mb-0.5">Autonomy mode</div>
-      <div className="mb-1.5 text-[11px] text-text-muted">
+    <div data-testid="AutonomyModePicker" className="divide-y divide-border/55">
+      {availableModes.map((mode) => (
+        <RadioRow
+          key={mode}
+          testid="AutonomyModePicker.mode"
+          dataId={mode}
+          name="autonomyMode"
+          value={mode}
+          label={AUTONOMY_LABELS[mode]}
+          description={AUTONOMY_DESCRIPTIONS[mode]}
+          checked={currentMode === mode}
+          onSelect={() => handleChange(mode)}
+        />
+      ))}
+      {/* The group's closing note. It stays INSIDE this component rather than
+          becoming a card-level note so the copy guard in
+          AutonomyModePicker.component.test.tsx keeps testing the thing that
+          must not overclaim: this setting governs NEW sessions only. */}
+      <div className="px-3.5 py-2.5 text-[12px] leading-4 text-text-secondary">
         Applies to new sessions on every engine. Running sessions keep their own mode — change it
         from the mode control next to the chat input.
-      </div>
-      <div className="space-y-1">
-        {availableModes.map((mode) => (
-          <label
-            key={mode}
-            className="flex items-center gap-2 cursor-pointer rounded-md px-2 py-1 hover:bg-bg-hover"
-          >
-            <input
-              type="radio"
-              name="autonomyMode"
-              value={mode}
-              checked={currentMode === mode}
-              onChange={() => handleChange(mode)}
-              className="accent-accent"
-            />
-            <span className="text-[12px] text-text-secondary">{AUTONOMY_LABELS[mode]}</span>
-          </label>
-        ))}
       </div>
     </div>
   )
 }
 
 // ── opencode availability probe ──────────────────────────────────────
-
-/**
- * Whether a given engine is installed.
- *
- * Uses `engineIsInstalled(engineId)` — a cheap, deterministic binary-on-disk
- * check that NEVER spawns a server/process. The earlier `vendorAuthProbe`/
- * `getEngineModels` approaches both required a successful server spawn + HTTP
- * round-trip, so any transient spawn failure (e.g. an opencode startup crash)
- * made the engine read as "not installed" and hid the very sections that
- * configure it. Auth/model state is a separate, allowed-to-fail concern — not
- * "installed".
- *
- * Returns null while probing, then true/false.
- */
-function useEngineInstalled(engineId: EngineId): boolean | null {
-  const [installed, setInstalled] = useState<boolean | null>(null)
-  useEffect(() => {
-    let cancelled = false
-    window.api
-      .engineIsInstalled(engineId)
-      .then((v) => {
-        if (!cancelled) setInstalled(v)
-      })
-      .catch(() => {
-        if (!cancelled) setInstalled(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [engineId])
-  return installed
-}
-
-function useOpencodeInstalled(): boolean | null {
-  return useEngineInstalled('opencode')
-}
-
-function usePiInstalled(): boolean | null {
-  return useEngineInstalled('pi')
-}
+//
+// `useEngineInstalled` / `useOpencodeInstalled` / `usePiInstalled` moved to
+// ./use-engine-installed (imported above). They gate engine-scoped sections on
+// a cheap, deterministic binary-on-disk check that NEVER spawns a
+// server/process — the earlier `vendorAuthProbe`/`getEngineModels` approaches
+// needed a successful spawn + HTTP round-trip, so any transient spawn failure
+// hid the very sections that configure the engine.
 
 // ── opencode auto-mode (Full) LLM gatekeeper settings (ADR-023) ──────
 
@@ -527,120 +587,10 @@ const DISPATCH_MODEL_DEFAULT_LABEL = '(not set)'
 /** Label for the opencode default/small model pickers' "no explicit choice" row. */
 const OPENCODE_MODEL_DEFAULT_LABEL = 'Default (use opencode default)'
 
-/**
- * `ModelInfo` → `ModelDisplay` for the shared picker. `value` stays the picker
- * VALUE (`<provider>/<modelId>`) that `decodeModelValue` consumes.
- */
-function toModelDisplays(models: ModelInfo[]): ModelDisplay[] {
-  return models.map((m) => ({ ...m, shortName: m.displayName || m.value }))
-}
-
-/**
- * A configured value that is missing from a NON-EMPTY discovered list is STALE
- * — the engine reported its models and this one was not among them. An empty
- * list means discovery hasn't run (or nothing is authenticated), which says
- * nothing about the value, so it is never flagged.
- */
-function isStaleModelValue(models: ModelInfo[], value: string): boolean {
-  return !!value && models.length > 0 && !models.some((m) => m.value === value)
-}
-
-/** Suffix marking a configured model the engine no longer offers. */
-const UNAVAILABLE_SUFFIX = ' (unavailable)'
-
-/**
- * The `ModelDisplay` a settings ModelPicker should show as selected.
- *
- * An unset value ('') means "inherit / not set" and reads as `emptyLabel`,
- * matching the pinned empty row. A CONFIGURED-but-undiscovered model
- * (hand-edited, or a provider not authenticated yet) is shown VERBATIM rather
- * than collapsing to the empty label, which would misreport what is saved —
- * and once discovery HAS reported models without it, it is marked unavailable
- * in place. Keeping the value visible is the point: the fix is to change this
- * setting, which the user cannot do without seeing what it currently says.
- */
-function selectedModelDisplay(
-  models: ModelInfo[],
-  value: string,
-  emptyLabel: string
-): ModelDisplay {
-  const known = models.find((m) => m.value === value)
-  if (known) return { ...known, shortName: known.displayName || known.value }
-  const label = value
-    ? `${value}${isStaleModelValue(models, value) ? UNAVAILABLE_SUFFIX : ''}`
-    : emptyLabel
-  return { value, displayName: label, shortName: label }
-}
-
-/**
- * Inline warning under a settings model picker whose saved value no longer
- * exists. Rendered next to the picker rather than folded into it so the
- * warning styling does not have to leak into the shared ModelPicker.
- */
-function StaleModelNotice({
-  testid,
-  models,
-  value
-}: {
-  testid: string
-  models: ModelInfo[]
-  value: string
-}): React.JSX.Element | null {
-  if (!isStaleModelValue(models, value)) return null
-  return (
-    <div
-      data-testid={`${testid}.staleModel`}
-      data-model={value}
-      className="mt-1 text-[10px] text-yellow-400 leading-relaxed"
-    >
-      “{value}” is no longer available. Pick another model — this one will fail when it is used.
-    </div>
-  )
-}
-
-/** The `AutoModeConfig` keys that hold a classifier trust/protection list. */
-type TrustListKey = 'trustedDomains' | 'trustedRegistries' | 'protectedPatterns'
-
-/**
- * The three trust lists spliced into the classifier environment
- * (src/main/automode/rules/policy.ts). Each `description` states what an EMPTY
- * list means, because for all three that is the load-bearing, non-obvious half
- * of the semantics — and for `protectedPatterns` a non-empty list REPLACES a
- * built-in heuristic rather than adding to it.
- */
-const TRUST_LISTS: ReadonlyArray<{
-  key: TrustListKey
-  label: string
-  placeholder: string
-  tooltip: string
-  description: string
-}> = [
-  {
-    key: 'trustedDomains',
-    label: 'Trusted domains',
-    placeholder: 'files.example.com',
-    tooltip:
-      'External destinations the judge may treat as safe to reach or send data to (web fetch, uploads, curl targets). Host names, not URLs.',
-    description: 'Empty = no external destination is trusted.'
-  },
-  {
-    key: 'trustedRegistries',
-    label: 'Trusted package registries',
-    placeholder: 'https://npm.internal.example',
-    tooltip:
-      'Registries the judge may treat as safe to install from. Anything else is an untrusted supply-chain source.',
-    description: "Empty = only the project manifest's default registry."
-  },
-  {
-    key: 'protectedPatterns',
-    label: 'Production / protected patterns',
-    placeholder: 'acme-live-*',
-    tooltip:
-      'Names, hosts, or resource patterns the judge must treat as production and refuse to mutate without a human. Setting any pattern REPLACES the built-in heuristic entirely.',
-    description:
-      "Empty = built-in heuristic: 'prod'/'production' as a whole word or segment. Setting this REPLACES the heuristic."
-  }
-]
+// The three classifier trust lists are NOT here any more: they are the same
+// values for every engine, so ADR-065 phase 4 moved them out of
+// `engines/<engine>.json#autoMode` into one shared file, edited by
+// `TrustLists.tsx` under Sessions & autonomy › Trust & protection.
 
 /**
  * Shared render/load/save core for the per-engine auto-mode editor.
@@ -662,30 +612,26 @@ const TRUST_LISTS: ReadonlyArray<{
  * exactly what both sessions feed to `engineMeta(<engine>).decodeModelValue()`
  * when resolving `autoMode.judgeModel`.
  *
- * `AutoModeConfig`'s trust lists (trustedDomains / trustedRegistries /
- * protectedPatterns) are edited here too, and are engine-neutral for the same
- * reason: both sessions splice them into the classifier environment with the
- * SAME `?.length` guard, so an EMPTY array and an ABSENT key are
- * indistinguishable to the backend. `updateList` therefore deletes the key
- * rather than storing `[]` — one on-disk representation for one meaning, and
- * `engines/<engine>.json` stays clean for hand-editing.
+ * What this editor does NOT own is the three trust lists: they are the same
+ * values for every engine, so ADR-065 phase 4 moved them to one shared file with
+ * its own group (`TrustLists.tsx`). Judge model, two-stage mode and the master
+ * switch are genuinely per engine and stay here.
  */
 function AutoModeSection({
   engineId,
   testid,
   installed,
   notInstalledMessage,
-  toggleTooltip,
-  judgeModelTooltip,
-  footerText
+  toggleDescription,
+  judgeModelDescription
 }: {
   engineId: EngineId
   testid: string
   installed: boolean | null
   notInstalledMessage: string
-  toggleTooltip: string
-  judgeModelTooltip: string
-  footerText: string
+  /** One sentence under the master switch — the ⓘ is gone (ADR-065). */
+  toggleDescription: string
+  judgeModelDescription: string
 }): React.JSX.Element {
   const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
@@ -704,20 +650,20 @@ function AutoModeSection({
       .catch(() => {})
   }, [engineId])
 
+  // Both gated states are description-only ROWS, not bespoke markup: a card of
+  // rows that sometimes isn't one was three of the six row grammars ADR-065
+  // counted. Same testid on every branch, per ADR-027.
   if (engineCfg === null || installed === null) {
     return (
-      <div data-testid={testid} className="px-3 py-1.5 text-[13px] text-text-muted">
-        Loading…
+      <div data-testid={testid}>
+        <SettingRow description="Loading…" />
       </div>
     )
   }
   if (!installed) {
     return (
-      <div
-        data-testid={testid}
-        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
-      >
-        {notInstalledMessage}
+      <div data-testid={testid}>
+        <SettingRow description={notInstalledMessage} />
       </div>
     )
   }
@@ -736,75 +682,52 @@ function AutoModeSection({
     window.api.saveEngineConfig(engineId, next).catch(() => {})
   }
 
-  // Trust lists: an empty list is written as an ABSENT key, never `[]`. The
-  // classifier reads them behind `?.length`, so `[]` is not a distinct state —
-  // storing it would invent a second encoding of "restrictive default".
-  const updateList = (key: TrustListKey, items: string[]): void => {
-    const nextAuto: AutoModeConfig = { ...auto }
-    if (items.length > 0) nextAuto[key] = items
-    else delete nextAuto[key]
-    const next: EngineConfig = { ...engineCfg, autoMode: nextAuto }
-    setEngineCfg(next)
-    window.api.saveEngineConfig(engineId, next).catch(() => {})
-  }
-
   return (
-    <div data-testid={testid} className="space-y-1">
+    <div data-testid={testid} className="divide-y divide-border/55">
       <SettingsToggle
         testid={`${testid}.enabled`}
         label="Auto mode (LLM gatekeeper)"
         checked={enabled}
         onChange={(v) => update({ enabled: v })}
-        tooltip={toggleTooltip}
+        description={toggleDescription}
       />
       {enabled && (
         <>
-          <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-            <div className="mb-1 flex items-center gap-1">
-              Judge model
-              <InfoTooltip text={judgeModelTooltip} />
-            </div>
-            {/* Themed dropdown, not a native <select>: a native option list is
-                painted by the OS with UA colors, so the inherited light-on-dark
-                text was unreadable under Monokai. ModelPicker (the InputBox /
-                AutomationConfig picker) renders options as real DOM styled from
-                the same theme tokens as everything else. The section-scoped
-                `.judgeModel` testid moves to this wrapper; the picker keeps its
-                own `ModelPicker.trigger` / `ModelPicker.option` ids. */}
-            <div data-testid={`${testid}.judgeModel`} data-value={judgeModel}>
+          {/* Themed dropdown, not a native <select>: a native option list is
+              painted by the OS with UA colors, so the inherited light-on-dark
+              text was unreadable under Monokai. ModelPicker (the InputBox /
+              AutomationConfig picker) renders options as real DOM styled from
+              the same theme tokens as everything else. The section-scoped
+              `.judgeModel` testid stays on the wrapper; the picker keeps its
+              own `ModelPicker.trigger` / `ModelPicker.option` ids. */}
+          <SettingRow
+            testid={`${testid}.judgeModelRow`}
+            label="Judge model"
+            description={judgeModelDescription}
+          >
+            <span data-testid={`${testid}.judgeModel`} data-value={judgeModel}>
               <ModelPicker
+                variant="field"
                 placement="down"
                 emptyOption={{ label: JUDGE_MODEL_DEFAULT_LABEL }}
                 models={judgeModelOptions}
                 selectedModel={selectedJudgeModel}
                 onSelectModel={(v) => update({ judgeModel: v || undefined })}
               />
-            </div>
-            <StaleModelNotice testid={`${testid}.judgeModel`} models={models} value={judgeModel} />
-          </div>
+            </span>
+          </SettingRow>
+          <StaleModelNotice testid={`${testid}.judgeModel`} models={models} value={judgeModel} />
+          {/* `SettingsSelect` IS a `SettingRow` + `Segmented` (settings-controls),
+              so using it keeps the row vocabulary and the `.twoStageMode` /
+              `.twoStageMode.option` testids the call sites already assert. */}
           <SettingsSelect
             testid={`${testid}.twoStageMode`}
             label="Two-stage judging"
+            description="Fast pass first, thinking pass only when it is unsure."
             value={twoStageMode}
             options={TWO_STAGE_OPTIONS}
             onChange={(v) => update({ twoStageMode: v })}
           />
-          {TRUST_LISTS.map((f) => (
-            <SandboxListSetting
-              key={f.key}
-              testid={`${testid}.${f.key}`}
-              label={f.label}
-              labelColor="text-text-secondary"
-              items={auto[f.key] ?? []}
-              placeholder={f.placeholder}
-              onUpdate={(items) => updateList(f.key, items)}
-              tooltip={f.tooltip}
-              description={f.description}
-            />
-          ))}
-          <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
-            {footerText}
-          </div>
         </>
       )}
     </div>
@@ -823,9 +746,8 @@ function OpencodeAutoModeSection(): React.JSX.Element {
       testid="OpencodeAutoModeSection"
       installed={installed}
       notInstalledMessage="opencode is not installed. Auto mode gates risky tool calls for opencode sessions in Full autonomy."
-      toggleTooltip="In Full autonomy, an LLM judges each risky tool call (bash / web fetch) instead of prompting you; reads and edits are auto-allowed. Fails closed to a human prompt when unsure or unavailable. When off, Full prompts you like Ask mode. See ADR-023."
-      judgeModelTooltip="The model that decides allow/block. Defaults to the session's own model. Pick a cheaper model to reduce cost, or a stronger one for safety-critical work."
-      footerText="Applies to Full autonomy on opencode. The judge sees tool calls, not their output. No per-turn call cap (parity with Claude) — pick a cheaper judge model if cost matters."
+      toggleDescription="In Full autonomy a judge model approves each risky tool call instead of prompting you, and asks you when it is unsure; off, Full prompts you like Ask."
+      judgeModelDescription="Sees each tool call and decides whether to allow it; unset uses the session's own model."
     />
   )
 }
@@ -845,9 +767,8 @@ export function PiAutoModeSection(): React.JSX.Element {
       testid="PiAutoModeSection"
       installed={installed}
       notInstalledMessage="pi is not installed. Auto mode gates risky tool calls for pi sessions in Auto and Full autonomy."
-      toggleTooltip="In Auto and Full autonomy, an LLM judges each risky tool call (bash / web fetch) instead of prompting you; reads and edits are auto-allowed. Fails closed to a human prompt when unsure or unavailable. When off, Auto/Full prompt you like Ask mode. See ADR-023."
-      judgeModelTooltip="The model that decides allow/block. Format: provider/model-id. Defaults to the session's own model. Pick a cheaper model to reduce cost, or a stronger one for safety-critical work."
-      footerText="Applies to Auto and Full autonomy on pi. The judge runs in its own short-lived pi process. It sees tool calls, not their output. Config is read once per session — reopen a session to pick up changes."
+      toggleDescription="In Auto and Full autonomy a judge model approves each risky tool call instead of prompting you, and asks you when it is unsure; off, both prompt you like Ask."
+      judgeModelDescription="Sees each tool call and decides whether to allow it, in its own short-lived pi process; unset uses the session's own model."
     />
   )
 }
@@ -855,79 +776,214 @@ export function PiAutoModeSection(): React.JSX.Element {
 // ── cross-engine dispatch settings (ADR-033) ─────────────────────────
 
 /**
- * Shared render/load/save core for the per-engine dispatch-config editor.
- * Both `OpencodeDispatchSection` and `ClaudeDispatchSection` are thin
- * copy/gating wrappers around this — the load/merge/toggle logic and markup
- * are otherwise identical (DRY per CLAUDE.md), so they keep distinct root
- * testids via the `testid` prop while sharing everything else.
+ * The dispatch page is TWO groups (ADR-065): "Dispatch into" — what a caller
+ * may ask for — and "Limits" — what the target will spend on it. A divider is a
+ * group boundary, so the one pane that used to draw both is now two exported
+ * bodies per engine.
  *
- * `installed`: null = still probing (shows Loading), false = gate closed
- * (shows `notInstalledMessage`), true = render the editor. Claude has no
- * "not installed" state (it's the bundled default engine — `engine:is-installed`
- * always returns true for it), so `ClaudeDispatchSection` passes a literal `true`.
+ * ## Why a shared external store and not a hook-local `useState`
+ *
+ * `saveEngineConfig` takes the WHOLE `EngineConfig` and replaces the file with
+ * it — unlike `setRemoteConfig`, which takes a partial that main merges, and
+ * which is the only reason the four Remote sections can each hold their own
+ * copy. Two halves each holding their own copy of an engine's config would lose
+ * data the moment both are on screen, which on the dispatch page is always:
+ * pick a default model in "Dispatch into" (it saves A′), then commit a max cost
+ * in "Limits" (which still holds the pre-edit A, and saves A + maxCost) — and
+ * the model choice is silently reverted on disk.
+ *
+ * So there is exactly ONE config object per engine, in a module-level store the
+ * halves subscribe to through `useSyncExternalStore`:
+ *
+ *  - the entry is created by the FIRST subscriber, which starts the single
+ *    `loadEngineConfig` read; later subscribers join the entry and the in-flight
+ *    read, so mounting both halves is one IPC round trip, not two;
+ *  - every `update` writes the entry and notifies both halves before persisting,
+ *    so the second edit is always computed against the first;
+ *  - the entry is DROPPED when the last subscriber unsubscribes, so a fresh
+ *    mount re-reads the file (the behaviour every other settings pane has) and
+ *    one test cannot leak an engine's config into the next.
+ *
+ * The MODEL probe stays per-component (`useDispatchModels`) and runs in the
+ * into-half only: it is the expensive half of the load and the limits-half has
+ * no picker to fill.
  */
-function DispatchSection({
-  engineId,
-  testid,
-  installed,
-  notInstalledMessage,
-  defaultModelTooltip,
-  noModelsMessage,
-  footerText
-}: {
-  engineId: EngineId
-  testid: string
-  installed: boolean | null
-  notInstalledMessage?: string
-  defaultModelTooltip: string
-  noModelsMessage: string
-  footerText: string
-}): React.JSX.Element {
-  const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
-  const [models, setModels] = useState<ModelInfo[]>([])
+interface DispatchStoreEntry {
+  /** null until the first read resolves — the halves render a Loading row. */
+  config: EngineConfig | null
+  listeners: Set<() => void>
+}
 
+const DISPATCH_STORES = new Map<EngineId, DispatchStoreEntry>()
+
+function emitDispatchConfig(entry: DispatchStoreEntry): void {
+  for (const listener of entry.listeners) listener()
+}
+
+/**
+ * The entry for one engine, creating it — and starting its single read — on
+ * first use. A late-resolving read is dropped if the entry it belongs to has
+ * since been discarded, so an unmounted pane cannot resurrect stale config.
+ */
+function dispatchEntry(engineId: EngineId): DispatchStoreEntry {
+  const existing = DISPATCH_STORES.get(engineId)
+  if (existing) return existing
+
+  const entry: DispatchStoreEntry = { config: null, listeners: new Set() }
+  DISPATCH_STORES.set(engineId, entry)
+
+  const adopt = (config: EngineConfig): void => {
+    if (DISPATCH_STORES.get(engineId) !== entry) return
+    entry.config = config
+    emitDispatchConfig(entry)
+  }
+  window.api
+    .loadEngineConfig(engineId)
+    .then(adopt)
+    .catch(() => adopt({}))
+
+  return entry
+}
+
+function subscribeDispatchConfig(engineId: EngineId, listener: () => void): () => void {
+  const entry = dispatchEntry(engineId)
+  entry.listeners.add(listener)
+  return () => {
+    entry.listeners.delete(listener)
+    // Last one out drops the entry, so the next mount re-reads the file.
+    if (entry.listeners.size === 0 && DISPATCH_STORES.get(engineId) === entry) {
+      DISPATCH_STORES.delete(engineId)
+    }
+  }
+}
+
+/**
+ * Read during render, so it must NOT create the entry (React calls this before
+ * it calls `subscribe`) and must return a stable reference between updates.
+ */
+function dispatchSnapshot(engineId: EngineId): EngineConfig | null {
+  return DISPATCH_STORES.get(engineId)?.config ?? null
+}
+
+/** Merge a patch into the engine's `dispatch` block and persist the whole file. */
+function updateDispatchConfig(engineId: EngineId, patch: Partial<DispatchConfig>): void {
+  const entry = DISPATCH_STORES.get(engineId)
+  if (!entry || entry.config === null) return
+  const next: EngineConfig = {
+    ...entry.config,
+    dispatch: { ...(entry.config.dispatch ?? {}), ...patch }
+  }
+  entry.config = next
+  emitDispatchConfig(entry)
+  window.api.saveEngineConfig(engineId, next).catch(() => {})
+}
+
+interface DispatchConfigApi {
+  /** null until the first read resolves — the halves render a Loading row. */
+  engineCfg: EngineConfig | null
+  dispatch: DispatchConfig
+  /** Merge a patch into the `dispatch` block and persist the WHOLE config. */
+  update: (patch: Partial<DispatchConfig>) => void
+}
+
+function useDispatchConfig(engineId: EngineId): DispatchConfigApi {
+  const subscribe = useCallback(
+    (listener: () => void) => subscribeDispatchConfig(engineId, listener),
+    [engineId]
+  )
+  const getSnapshot = useCallback(() => dispatchSnapshot(engineId), [engineId])
+  const engineCfg = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+
+  return {
+    engineCfg,
+    dispatch: engineCfg?.dispatch ?? {},
+    update: (patch) => updateDispatchConfig(engineId, patch)
+  }
+}
+
+/** The engine's own models, for the into-half's picker and chip set. */
+function useDispatchModels(engineId: EngineId): ModelInfo[] {
+  const [models, setModels] = useState<ModelInfo[]>([])
   useEffect(() => {
-    window.api
-      .loadEngineConfig(engineId)
-      .then(setEngineCfg)
-      .catch(() => setEngineCfg({}))
+    let cancelled = false
     window.api
       .getEngineModels()
       .then((groups) => {
-        const own = groups.filter((g) => g.engineId === engineId)
-        setModels(own.flatMap((g) => g.models))
+        if (cancelled) return
+        setModels(groups.filter((g) => g.engineId === engineId).flatMap((g) => g.models))
       })
       .catch(() => {})
+    return () => {
+      cancelled = true
+    }
   }, [engineId])
+  return models
+}
 
-  if (engineCfg === null || installed === null) {
+/**
+ * Gate shared by both halves: `null` = still probing (Loading), `false` = no
+ * possible caller / target (the explanatory row), `true` = render the rows.
+ * A gated state is a description-only ROW now, not a bare paragraph — the id is
+ * on the same root either way, so the halves stay assertable in every state
+ * (ADR-027).
+ */
+function dispatchGateRow(
+  testid: string,
+  installed: boolean | null,
+  loaded: boolean,
+  notInstalledMessage: string
+): React.JSX.Element | null {
+  if (installed === null || !loaded) {
     return (
-      <div data-testid={testid} className="px-3 py-1.5 text-[13px] text-text-muted">
-        Loading…
+      <div data-testid={testid} className="divide-y divide-border/55">
+        <SettingRow testid={`${testid}.status`} dataId="loading" description="Loading…" />
       </div>
     )
   }
   if (!installed) {
     return (
-      <div
-        data-testid={testid}
-        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
-      >
-        {notInstalledMessage}
+      <div data-testid={testid} className="divide-y divide-border/55">
+        <SettingRow
+          testid={`${testid}.status`}
+          dataId="not-installed"
+          dimmed
+          description={notInstalledMessage}
+        />
       </div>
     )
   }
+  return null
+}
 
-  const dispatch = engineCfg.dispatch ?? {}
+/** Past this many models the chip set collapses behind a "Show all N" link. */
+const DISPATCH_CHIP_PREVIEW = 8
+
+/**
+ * "Dispatch into <engine>" — the two rows that say what a calling agent may ask
+ * this target for: the model used when it names none, and the set it may name.
+ */
+function DispatchIntoSection({
+  engineId,
+  testid,
+  installed,
+  notInstalledMessage,
+  noModelsMessage
+}: {
+  engineId: EngineId
+  testid: string
+  installed: boolean | null
+  notInstalledMessage: string
+  noModelsMessage: string
+}): React.JSX.Element {
+  const { engineCfg, dispatch, update } = useDispatchConfig(engineId)
+  const models = useDispatchModels(engineId)
+  const [showAll, setShowAll] = useState(false)
+
+  const gate = dispatchGateRow(testid, installed, engineCfg !== null, notInstalledMessage)
+  if (gate) return gate
+
   const defaultModel = dispatch.defaultModel ?? ''
   const allowedModels = dispatch.allowedModels ?? []
-  const maxCostUsd = dispatch.maxCostUsd
-
-  const update = (patch: Partial<DispatchConfig>): void => {
-    const next: EngineConfig = { ...engineCfg, dispatch: { ...dispatch, ...patch } }
-    setEngineCfg(next)
-    window.api.saveEngineConfig(engineId, next).catch(() => {})
-  }
 
   const toggleAllowed = (model: string): void => {
     const nextList = allowedModels.includes(model)
@@ -938,127 +994,317 @@ function DispatchSection({
     update({ allowedModels: nextList.length > 0 ? nextList : undefined })
   }
 
+  const collapsed = !showAll && models.length > DISPATCH_CHIP_PREVIEW
+  const shownModels = collapsed ? models.slice(0, DISPATCH_CHIP_PREVIEW) : models
+
   return (
-    <div data-testid={testid} className="space-y-1">
-      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-        <div className="mb-1 flex items-center gap-1">
-          Default model
-          <InfoTooltip text={defaultModelTooltip} />
-        </div>
-        {/* Themed ModelPicker, not a native <select> — see the AutoModeSection
-            judge-model note: OS-painted option lists are unreadable in dark
-            themes. The section-scoped `.defaultModel` testid moves to this
-            wrapper and carries `data-value`; the picker keeps its own
-            `ModelPicker.trigger` / `ModelPicker.option` ids. */}
-        <div data-testid={`${testid}.defaultModel`} data-value={defaultModel}>
-          <ModelPicker
-            placement="down"
-            emptyOption={{ label: DISPATCH_MODEL_DEFAULT_LABEL }}
-            models={toModelDisplays(models)}
-            selectedModel={selectedModelDisplay(models, defaultModel, DISPATCH_MODEL_DEFAULT_LABEL)}
-            onSelectModel={(v) => update({ defaultModel: v || undefined })}
-          />
-        </div>
+    <div data-testid={testid} className="divide-y divide-border/55">
+      {/* The row and its stale-value warning are ONE child of the divider, so
+          the warning reads as part of the row rather than as its own. */}
+      <div>
+        <SettingRow
+          testid={`${testid}.defaultModelRow`}
+          label="Default model"
+          description="Used when the calling agent does not name one. Required."
+          modified={dispatch.defaultModel !== undefined}
+          onReset={() => update({ defaultModel: undefined })}
+        >
+          {/* Themed ModelPicker, not a native <select> — see the AutoModeSection
+              judge-model note: OS-painted option lists are unreadable in dark
+              themes. The section-scoped `.defaultModel` testid stays on this
+              wrapper and carries `data-value`; the picker keeps its own
+              `ModelPicker.trigger` / `ModelPicker.option` ids. `variant="field"`
+              is what draws the bordered control the row vocabulary asks for —
+              the wrapper no longer borrows those classes. */}
+          <span data-testid={`${testid}.defaultModel`} data-value={defaultModel}>
+            <ModelPicker
+              variant="field"
+              placement="down"
+              emptyOption={{ label: DISPATCH_MODEL_DEFAULT_LABEL }}
+              models={toModelDisplays(models)}
+              selectedModel={selectedModelDisplay(
+                models,
+                defaultModel,
+                DISPATCH_MODEL_DEFAULT_LABEL
+              )}
+              onSelectModel={(v) => update({ defaultModel: v || undefined })}
+            />
+          </span>
+        </SettingRow>
         <StaleModelNotice testid={`${testid}.defaultModel`} models={models} value={defaultModel} />
       </div>
-      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-        <div className="mb-1 flex items-center gap-1">
-          Allowed models
-          <InfoTooltip text="Models a dispatching agent may request explicitly. With NONE checked, all models are allowed." />
-        </div>
-        <div className="space-y-0.5">
-          {models.length === 0 && (
-            <div className="text-[11px] text-text-muted/70">{noModelsMessage}</div>
-          )}
-          {models.map((m) => {
-            const checked = allowedModels.includes(m.value)
-            return (
-              <button
-                key={m.value}
-                data-testid={`${testid}.allowedModel`}
-                data-id={m.value}
-                onClick={() => toggleAllowed(m.value)}
-                className="w-full flex items-center justify-between py-1 text-[12px] text-text-secondary hover:bg-bg-hover rounded transition-colors cursor-default"
-              >
-                <span className="truncate">{m.displayName || m.value}</span>
-                <span
-                  className={`w-7 h-4 shrink-0 rounded-full relative transition-colors ${checked ? 'bg-accent' : 'bg-text-muted/30'}`}
+
+      <SettingRow
+        testid={`${testid}.allowedModelsRow`}
+        layout="stacked"
+        label="Allowed models"
+        description="Empty allows any model the provider offers. Only these can be requested otherwise."
+        modified={dispatch.allowedModels !== undefined}
+        onReset={() => update({ allowedModels: undefined })}
+      >
+        {models.length === 0 ? (
+          <span className="block text-[12px] leading-4 text-text-secondary">{noModelsMessage}</span>
+        ) : (
+          <ChipSet
+            testid={`${testid}.allowedModels`}
+            chipTestid={`${testid}.allowedModel`}
+            value={allowedModels}
+            options={shownModels.map((m) => ({ value: m.value, label: m.displayName || m.value }))}
+            onToggle={toggleAllowed}
+            trailing={
+              collapsed ? (
+                <Button
+                  testid={`${testid}.showAllModels`}
+                  variant="link"
+                  onClick={() => setShowAll(true)}
                 >
-                  <span
-                    className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${checked ? 'left-3.5' : 'left-0.5'}`}
-                  />
-                </span>
-              </button>
-            )
-          })}
-        </div>
-      </div>
-      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-        <div className="mb-1 flex items-center gap-1">
-          Max cost per dispatched agent (USD)
-          <InfoTooltip text="Per-dispatch-target cumulative cost cap (ADR-033 M4-C). Once a target's tracked cost meets/exceeds this value, further continuation turns on it are rejected — the target stays alive, so raising the cap or starting a fresh dispatch both recover. Leave blank for no cap." />
-        </div>
-        <input
-          data-testid={`${testid}.maxCost`}
-          type="number"
-          min="0"
-          step="0.01"
-          value={maxCostUsd ?? ''}
-          onChange={(e) => {
-            const raw = e.target.value
-            update({ maxCostUsd: raw === '' ? undefined : Number(raw) })
-          }}
-          placeholder="(no cap)"
-          className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-        />
-      </div>
-      <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">{footerText}</div>
+                  Show all {models.length}
+                </Button>
+              ) : undefined
+            }
+          />
+        )}
+      </SettingRow>
     </div>
   )
 }
 
 /**
- * Governs `dispatch_agent` calls INTO opencode (the live Claude→opencode
- * direction). Self-contained: loads/saves its own opencode EngineConfig via
- * window.api, editing only the `dispatch` block (never clobbers autoMode etc.).
+ * "Limits" — the budget the target enforces on a dispatched agent. Its own
+ * group on the page, and its own body here, but the SAME config block: it calls
+ * `useDispatchConfig` for its own read and edits keys the into-half never
+ * touches.
  */
-export function OpencodeDispatchSection(): React.JSX.Element {
+function DispatchLimitsSection({
+  engineId,
+  testid,
+  installed,
+  notInstalledMessage,
+  showTurnTimeouts = false
+}: {
+  engineId: EngineId
+  /**
+   * The DIRECTION's namespace (`ClaudeDispatchSection`), not this half's root.
+   * The half's own root is `<testid>.limits`, but each ROW keeps the id it had
+   * before the split — `.maxCost`, `.turnTimeout`, `.idleTimeout` name parts
+   * that did not move, and ADR-027 ties an id to the part, not to whichever
+   * component happens to render it.
+   */
+  testid: string
+  installed: boolean | null
+  notInstalledMessage: string
+  /** Render the turn/inactivity timeout editors. OPENCODE ONLY: the watchdog
+   *  they configure lives in the opencode dispatch direction (ADR-033's
+   *  2026-09-01 amendment); the Claude/pi directions still run on the fixed
+   *  10-minute `DISPATCH_TIMEOUT_MS`, so showing these there would be an inert
+   *  control that silently writes config nothing reads. */
+  showTurnTimeouts?: boolean
+}): React.JSX.Element {
+  const { engineCfg, dispatch, update } = useDispatchConfig(engineId)
+  const root = `${testid}.limits`
+
+  const gate = dispatchGateRow(root, installed, engineCfg !== null, notInstalledMessage)
+  if (gate) return gate
+
+  // Both timeouts are stored in MILLISECONDS (DispatchConfig) but edited in
+  // MINUTES — nobody wants to type 3600000. Blank = the built-in default,
+  // 0 = disabled; both round-trip through the same undefined-vs-number
+  // convention the maxCost field uses. A NEGATIVE minute count drops the key
+  // rather than persisting a negative duration: the watchdog's `> 0` gates read
+  // a persisted negative as "cap disabled", silently — not what someone
+  // fumbling a keystroke meant to configure. (Which is also why these fields
+  // carry no `min`: clamping -5 to 0 would MEAN "disabled".)
+  const toMinutes = (ms: number | undefined): number | undefined =>
+    ms === undefined ? undefined : ms / 60000
+  const fromMinutes = (minutes: number | undefined): number | undefined =>
+    minutes === undefined || !Number.isFinite(minutes) || minutes < 0 ? undefined : minutes * 60000
+
+  return (
+    <div data-testid={root} className="divide-y divide-border/55">
+      <SettingRow
+        testid={`${testid}.maxCostRow`}
+        label="Max cost per dispatched agent"
+        description="A continuation past this cumulative cost is refused; the target survives."
+        modified={dispatch.maxCostUsd !== undefined}
+        onReset={() => update({ maxCostUsd: undefined })}
+      >
+        <NumberField
+          testid={`${testid}.maxCost`}
+          value={dispatch.maxCostUsd}
+          min={0}
+          unit="USD"
+          placeholder="no cap"
+          onChange={(v) => update({ maxCostUsd: v })}
+        />
+      </SettingRow>
+
+      {showTurnTimeouts && (
+        <>
+          <SettingRow
+            testid={`${testid}.turnTimeoutRow`}
+            label="Max turn duration"
+            description="One dispatched turn is cut off after this long. 0 disables."
+            modified={dispatch.turnTimeoutMs !== undefined}
+            onReset={() => update({ turnTimeoutMs: undefined })}
+          >
+            <NumberField
+              testid={`${testid}.turnTimeout`}
+              value={toMinutes(dispatch.turnTimeoutMs)}
+              unit="min"
+              placeholder="60"
+              onChange={(v) => update({ turnTimeoutMs: fromMinutes(v) })}
+            />
+          </SettingRow>
+
+          <SettingRow
+            testid={`${testid}.idleTimeoutRow`}
+            label="Inactivity timeout"
+            description="Give up on a target that stops producing output."
+            modified={dispatch.idleTimeoutMs !== undefined}
+            onReset={() => update({ idleTimeoutMs: undefined })}
+          >
+            <NumberField
+              testid={`${testid}.idleTimeout`}
+              value={toMinutes(dispatch.idleTimeoutMs)}
+              unit="min"
+              placeholder="15"
+              onChange={(v) => update({ idleTimeoutMs: fromMinutes(v) })}
+            />
+          </SettingRow>
+        </>
+      )}
+    </div>
+  )
+}
+
+// ── The six exported bodies, two per direction ───────────────────────
+//
+// Dispatch INTO Claude can only be CALLED from another engine, and opencode is
+// the only one installed separately — so both Claude halves gate on the same
+// opencode-installed probe as the opencode twin (ADR-030/ADR-033 M4-A: no
+// possible caller means the config has nothing to configure). pi gates on pi.
+
+const CLAUDE_DISPATCH_ABSENT =
+  'opencode is not installed. Cross-engine dispatch lets an opencode session delegate a task to a Claude agent — with no other engine installed, there is no possible caller.'
+const OPENCODE_DISPATCH_ABSENT =
+  'opencode is not installed. Cross-engine dispatch lets a Claude or pi session delegate a task to an opencode agent (e.g. a GPT-backed review).'
+const PI_DISPATCH_ABSENT =
+  'pi is not installed. Cross-engine dispatch lets a Claude or opencode session delegate a task to a pi agent.'
+
+export function ClaudeDispatchIntoSection(): React.JSX.Element {
   const installed = useOpencodeInstalled()
   return (
-    <DispatchSection
+    <DispatchIntoSection
+      engineId="claude"
+      testid="ClaudeDispatchSection"
+      installed={installed}
+      notInstalledMessage={CLAUDE_DISPATCH_ABSENT}
+      noModelsMessage="No Claude models detected."
+    />
+  )
+}
+
+export function ClaudeDispatchLimitsSection(): React.JSX.Element {
+  const installed = useOpencodeInstalled()
+  return (
+    <DispatchLimitsSection
+      engineId="claude"
+      testid="ClaudeDispatchSection"
+      installed={installed}
+      notInstalledMessage={CLAUDE_DISPATCH_ABSENT}
+    />
+  )
+}
+
+export function OpencodeDispatchIntoSection(): React.JSX.Element {
+  const installed = useOpencodeInstalled()
+  return (
+    <DispatchIntoSection
       engineId="opencode"
       testid="OpencodeDispatchSection"
       installed={installed}
-      notInstalledMessage="opencode is not installed. Cross-engine dispatch lets a Claude session delegate a task to an opencode agent (e.g. a GPT-backed review)."
-      defaultModelTooltip="Used when the dispatching agent doesn't request a model. Format: provider/model-id. With no default set, dispatch_agent calls without an explicit model are rejected."
+      notInstalledMessage={OPENCODE_DISPATCH_ABSENT}
       noModelsMessage="No opencode models detected."
-      footerText="Governs dispatch_agent calls INTO opencode (e.g. a Claude session asking a GPT-backed agent for a second opinion). Empty allowed-models list = any model may be requested."
+    />
+  )
+}
+
+export function OpencodeDispatchLimitsSection(): React.JSX.Element {
+  const installed = useOpencodeInstalled()
+  return (
+    <DispatchLimitsSection
+      engineId="opencode"
+      testid="OpencodeDispatchSection"
+      installed={installed}
+      notInstalledMessage={OPENCODE_DISPATCH_ABSENT}
+      showTurnTimeouts
     />
   )
 }
 
 /**
- * Governs `dispatch_agent` calls INTO Claude (the M2 opencode→Claude
- * direction, plus any future engine). Self-contained: loads/saves its own
- * Claude EngineConfig via window.api, editing only the `dispatch` block
- * (never clobbers `sandbox`/`proxy`). Claude ITSELF is always installed (the
- * bundled default engine), but dispatch INTO Claude can only be CALLED from
- * opencode today — so this section gates on the same opencode-installed
- * probe as the opencode twin (ADR-030/ADR-033 M4-A: no possible caller means
- * the config has nothing to configure).
+ * pi as a dispatch TARGET. Core has accepted it since M4c —
+ * `cross-engine-dispatcher.ts`'s `resolveAndRunPi` reads
+ * `engines/pi.json#dispatch` and its error text already points at this pane —
+ * the settings UI simply never gained one (ADR-065 § Cross-engine dispatch into
+ * pi). No timeouts: the watchdog is the opencode target path's.
  */
-export function ClaudeDispatchSection(): React.JSX.Element {
-  const installed = useOpencodeInstalled()
+export function PiDispatchIntoSection(): React.JSX.Element {
+  const installed = usePiInstalled()
   return (
-    <DispatchSection
-      engineId="claude"
-      testid="ClaudeDispatchSection"
+    <DispatchIntoSection
+      engineId="pi"
+      testid="PiDispatchSection"
       installed={installed}
-      notInstalledMessage="opencode is not installed. Cross-engine dispatch lets an opencode session delegate a task to a Claude agent — with no other engine installed, there is no possible caller."
-      defaultModelTooltip="Used when the dispatching agent doesn't request a model. Claude model aliases (e.g. sonnet, haiku, opus). With no default set, dispatch_agent calls without an explicit model are rejected."
-      noModelsMessage="No Claude models detected."
-      footerText="Governs dispatch_agent calls INTO Claude from other engines (e.g. an opencode session asking Claude for a second opinion). Empty allowed-models list = any model may be requested."
+      notInstalledMessage={PI_DISPATCH_ABSENT}
+      noModelsMessage="No pi models detected."
     />
+  )
+}
+
+export function PiDispatchLimitsSection(): React.JSX.Element {
+  const installed = usePiInstalled()
+  return (
+    <DispatchLimitsSection
+      engineId="pi"
+      testid="PiDispatchSection"
+      installed={installed}
+      notInstalledMessage={PI_DISPATCH_ABSENT}
+    />
+  )
+}
+
+// ── Whole-direction compositions ─────────────────────────────────────
+//
+// One direction's two halves, in page order. The dialog mounts the halves
+// separately (one per group); these keep the pre-split name and testid so a
+// caller — or a test — that wants "the whole dispatch pane for this engine"
+// still has one thing to render.
+
+export function ClaudeDispatchSection(): React.JSX.Element {
+  return (
+    <>
+      <ClaudeDispatchIntoSection />
+      <ClaudeDispatchLimitsSection />
+    </>
+  )
+}
+
+export function OpencodeDispatchSection(): React.JSX.Element {
+  return (
+    <>
+      <OpencodeDispatchIntoSection />
+      <OpencodeDispatchLimitsSection />
+    </>
+  )
+}
+
+export function PiDispatchSection(): React.JSX.Element {
+  return (
+    <>
+      <PiDispatchIntoSection />
+      <PiDispatchLimitsSection />
+    </>
   )
 }
 
@@ -1073,6 +1319,31 @@ const DEFAULT_MODEL_OVERRIDE: ModelOverrideSettings = {
   haikuModel: ''
 }
 
+/** The four `ANTHROPIC_DEFAULT_*_MODEL` env vars claude-spawn-prep writes. */
+const MODEL_OVERRIDE_FIELDS: ReadonlyArray<{
+  field: keyof ModelOverrideSettings
+  label: string
+  placeholder: string
+}> = [
+  { field: 'model', label: 'Model id', placeholder: 'claude-3-5-sonnet-latest' },
+  { field: 'sonnetModel', label: 'Sonnet alias', placeholder: 'claude-sonnet-latest' },
+  { field: 'opusModel', label: 'Opus alias', placeholder: 'claude-opus-latest' },
+  { field: 'haikuModel', label: 'Haiku alias', placeholder: 'claude-haiku-latest' }
+]
+
+/**
+ * The Anthropic endpoint group, on the row vocabulary (ADR-065).
+ *
+ * The uppercase ENDPOINT / MODEL OVERRIDE sub-headers and the prose footer are
+ * gone: a sub-header inside a card is a group boundary the page model expresses
+ * itself, and "applies on next session start / persists to vendors/anthropic.json"
+ * is the group's `appliesOn` badge plus its storage tag. Dependent fields stay
+ * MOUNTED when their master toggle is off — indented, dimmed and disabled — so
+ * what is configured is readable without flipping the switch to find out.
+ *
+ * Every write still goes through `updateVendorConfig` with the same whole-object
+ * patch shape the pre-ADR-065 form used; nothing about the file changed.
+ */
 function VendorAnthropicEditableForm({
   vendorConfig,
   updateVendorConfig
@@ -1082,1189 +1353,102 @@ function VendorAnthropicEditableForm({
 }): React.JSX.Element {
   const endpoint: AnthropicEndpointSettings = vendorConfig.endpoint ?? DEFAULT_ENDPOINT
   const modelOverride: ModelOverrideSettings = vendorConfig.modelOverride ?? DEFAULT_MODEL_OVERRIDE
+  /** Reveal is per-view and deliberately not persisted anywhere. */
+  const [revealToken, setRevealToken] = useState(false)
 
-  const inputClass =
-    'bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors'
-
-  const modelFields: { field: keyof ModelOverrideSettings; label: string }[] = [
-    { field: 'model', label: 'Model (default)' },
-    { field: 'sonnetModel', label: 'Sonnet model' },
-    { field: 'opusModel', label: 'Opus model' },
-    { field: 'haikuModel', label: 'Haiku model' }
-  ]
+  const endpointOff = !endpoint.enabled
+  const overrideOff = !modelOverride.enabled
 
   return (
-    <div
-      data-testid="VendorAnthropicEditableForm"
-      className="px-3 py-1.5 text-[13px] text-text-secondary space-y-4"
-    >
-      {/* Endpoint */}
-      <div className="space-y-2">
-        <div className="text-[11px] text-text-muted uppercase tracking-wide">Endpoint</div>
-        <SettingsToggle
-          label="Enable custom endpoint"
-          checked={endpoint.enabled}
-          onChange={(v) => updateVendorConfig({ endpoint: { ...endpoint, enabled: v } })}
+    <div data-testid="VendorAnthropicEditableForm" className="divide-y divide-border/55">
+      <SettingsToggle
+        testid="VendorAnthropicEditableForm.endpointEnabled"
+        label="Custom endpoint"
+        checked={endpoint.enabled}
+        description="Route Claude through a gateway or proxy instead of api.anthropic.com."
+        onChange={(v) => updateVendorConfig({ endpoint: { ...endpoint, enabled: v } })}
+      />
+
+      <SettingRow
+        testid="VendorAnthropicEditableForm.baseUrlRow"
+        layout="stacked"
+        indent
+        dimmed={endpointOff}
+        label="Base URL"
+        description="The gateway's Anthropic-compatible base address."
+      >
+        <TextField
+          className="w-full"
+          testid="VendorAnthropicEditableForm.baseUrl"
+          value={endpoint.baseUrl}
+          placeholder="https://api.anthropic.com"
+          disabled={endpointOff}
+          onChange={(v) => updateVendorConfig({ endpoint: { ...endpoint, baseUrl: v } })}
         />
-        {endpoint.enabled && (
-          <div className="space-y-1.5 pl-1">
-            <div>
-              <div className="text-[10px] text-text-muted mb-0.5">Base URL</div>
-              <input
-                type="text"
-                className={`${inputClass} w-full`}
-                placeholder="https://api.anthropic.com"
-                value={endpoint.baseUrl}
-                onChange={(e) =>
-                  updateVendorConfig({ endpoint: { ...endpoint, baseUrl: e.target.value } })
-                }
-              />
-            </div>
-            <div>
-              <div className="text-[10px] text-text-muted mb-0.5">Auth token</div>
-              <input
-                type="password"
-                className={`${inputClass} w-full`}
-                placeholder="sk-ant-..."
-                value={endpoint.authToken}
-                onChange={(e) =>
-                  updateVendorConfig({ endpoint: { ...endpoint, authToken: e.target.value } })
-                }
-              />
-            </div>
-          </div>
-        )}
-      </div>
+      </SettingRow>
 
-      {/* Model override */}
-      <div className="space-y-2">
-        <div className="text-[11px] text-text-muted uppercase tracking-wide">Model override</div>
-        <SettingsToggle
-          label="Enable model override"
-          checked={modelOverride.enabled}
-          onChange={(v) => updateVendorConfig({ modelOverride: { ...modelOverride, enabled: v } })}
+      <SettingRow
+        testid="VendorAnthropicEditableForm.authTokenRow"
+        indent
+        dimmed={endpointOff}
+        label="Auth token"
+        description="Sent as the gateway's bearer credential; leave empty to use your Claude login."
+      >
+        <TextField
+          testid="VendorAnthropicEditableForm.authToken"
+          type={revealToken ? 'text' : 'password'}
+          className="w-[184px]"
+          value={endpoint.authToken}
+          placeholder="sk-ant-…"
+          disabled={endpointOff}
+          onChange={(v) => updateVendorConfig({ endpoint: { ...endpoint, authToken: v } })}
         />
-        {modelOverride.enabled && (
-          <div className="space-y-1.5 pl-1">
-            {modelFields.map(({ field, label }) => (
-              <div key={String(field)}>
-                <div className="text-[10px] text-text-muted mb-0.5">{label}</div>
-                <input
-                  type="text"
-                  className={`${inputClass} w-full`}
-                  placeholder={`e.g. claude-${field === 'model' ? '3-5-sonnet-latest' : String(field).replace('Model', '-latest')}`}
-                  value={modelOverride[field] as string}
-                  onChange={(e) =>
-                    updateVendorConfig({
-                      modelOverride: { ...modelOverride, [field]: e.target.value }
-                    })
-                  }
-                />
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <div className="text-[10px] text-text-muted/50 leading-relaxed">
-        Changes apply on next session start. Persists to vendors/anthropic.json.
-      </div>
-    </div>
-  )
-}
-
-// ── Vendor opencode auth UI ──────────────────────────────────────────
-
-type VendorOAuthFlowState =
-  | { stage: 'idle' }
-  | { stage: 'instructions'; url: string; instructions: string; method: number; vendorId: string }
-  | { stage: 'submitting'; vendorId: string }
-
-/**
- * Per-provider model-allowlist dialog. Lists every catalog model for a provider
- * so the user picks which appear in the model picker — preventing huge providers
- * (openrouter ships 300+) from flooding it.
- *
- * Semantics: an undefined incoming allowlist means "all currently shown", so we
- * pre-check every model (saving then writes an explicit list). A defined list
- * pre-checks exactly those ids. Saving an empty selection writes [] → no models.
- */
-function ModelAllowlistDialog({
-  providerId,
-  providerName,
-  current,
-  error,
-  onSave,
-  onClose
-}: {
-  providerId: string
-  providerName: string
-  current: string[] | undefined
-  /** Blocking orphan-guard message from the last save attempt; keeps the dialog open. */
-  error?: string | null
-  onSave: (ids: string[]) => void
-  onClose: () => void
-}): React.JSX.Element {
-  const [models, setModels] = useState<
-    import('../../../../shared/types').OpencodeCatalogModel[] | null
-  >(null)
-  const [checked, setChecked] = useState<Set<string>>(new Set(current ?? []))
-  const [search, setSearch] = useState('')
-  const [freeOnly, setFreeOnly] = useState(false)
-  // When the incoming allowlist is undefined (legacy "show all"), default every
-  // model to checked once the list loads so saving doesn't silently hide them.
-  const seededRef = useRef(current !== undefined)
-
-  useEffect(() => {
-    let cancelled = false
-    window.api
-      .getOpencodeProviderModels(providerId)
-      .then((list) => {
-        if (cancelled) return
-        setModels(list)
-        if (!seededRef.current) {
-          seededRef.current = true
-          setChecked(new Set(list.map((m) => m.id)))
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setModels([])
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [providerId])
-
-  const hasFreeModels = (models ?? []).some((m) => m.free)
-  const filtered = (models ?? []).filter((m) => {
-    // Ignore a stale toggle when the loaded entries contain no free models — the
-    // chip is unmounted then, so an active filter would otherwise leave a
-    // permanently empty list (same dead-end guard as ModelPicker.displayedGroups).
-    if (freeOnly && hasFreeModels && !m.free) return false
-    const q = search.trim().toLowerCase()
-    if (!q) return true
-    return m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)
-  })
-
-  const toggle = (id: string): void => {
-    setChecked((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
-
-  return (
-    <div
-      data-testid="ModelAllowlistDialog"
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fade-in"
-      onClick={onClose}
-    >
-      <div
-        className="w-[min(560px,92vw)] max-h-[80vh] flex flex-col bg-bg-primary border border-border rounded-lg shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="px-4 py-3 border-b border-border/50 flex items-center justify-between">
-          <div>
-            <div className="text-[13px] font-medium text-text-primary">Models · {providerName}</div>
-            <div className="text-[11px] text-text-muted/70">
-              Pick which models appear in the picker. {checked.size} selected.
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            className="text-text-muted/60 hover:text-text-primary transition-colors text-[16px] leading-none px-1"
-          >
-            ✕
-          </button>
-        </div>
-
-        <div className="px-4 py-2 border-b border-border/30 flex items-center gap-2">
-          <input
-            type="text"
-            data-testid="ModelAllowlistDialog.search"
-            placeholder="Search models…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="flex-1 px-2 py-1 text-[11px] rounded bg-bg-input border border-border/40 text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent/60"
-          />
-          <button
-            data-testid="ModelAllowlistDialog.selectAll"
-            onClick={() => setChecked(new Set((models ?? []).map((m) => m.id)))}
-            className="text-[10px] text-accent hover:text-accent/80 transition-colors whitespace-nowrap"
-          >
-            Select all
-          </button>
-          <button
-            data-testid="ModelAllowlistDialog.clear"
-            onClick={() => setChecked(new Set())}
-            className="text-[10px] text-text-muted/70 hover:text-text-primary transition-colors whitespace-nowrap"
-          >
-            Clear
-          </button>
-          {hasFreeModels && (
-            <button
-              type="button"
-              data-testid="ModelAllowlistDialog.freeFilter"
-              aria-pressed={freeOnly}
-              onClick={() => setFreeOnly((v) => !v)}
-              className={`text-[10px] px-2 py-0.5 rounded-full font-medium uppercase tracking-wide transition-colors cursor-pointer border whitespace-nowrap ${
-                freeOnly
-                  ? 'bg-emerald-500/25 text-emerald-300 border-emerald-500/40'
-                  : 'bg-bg-hover text-text-muted border-border hover:text-text-secondary'
-              }`}
-            >
-              Free only
-            </button>
-          )}
-        </div>
-
-        <div className="flex-1 overflow-y-auto px-2 py-1">
-          {models === null ? (
-            <div className="px-2 py-3 text-[11px] text-text-muted/60">Loading models…</div>
-          ) : filtered.length === 0 ? (
-            <div className="px-2 py-3 text-[11px] text-text-muted/60">No models match.</div>
-          ) : (
-            filtered.map((m) => (
-              <button
-                key={m.id}
-                data-testid="ModelAllowlistDialog.modelRow"
-                data-id={m.id}
-                onClick={() => toggle(m.id)}
-                className="w-full flex items-center gap-2 px-2 py-1 rounded hover:bg-bg-hover transition-colors text-left cursor-default"
-              >
-                <span
-                  className={`w-3.5 h-3.5 rounded-sm border flex items-center justify-center text-[9px] ${
-                    checked.has(m.id)
-                      ? 'bg-accent border-accent text-white'
-                      : 'border-border/60 text-transparent'
-                  }`}
-                >
-                  ✓
-                </span>
-                <span className="flex-1 min-w-0">
-                  <span className="flex items-center gap-1.5">
-                    <span className="text-[12px] text-text-secondary truncate">{m.name}</span>
-                    {m.free && (
-                      <span
-                        data-testid="ModelAllowlistDialog.freeBadge"
-                        className="text-[9px] px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-medium uppercase tracking-wide shrink-0"
-                      >
-                        Free
-                      </span>
-                    )}
-                  </span>
-                  <span className="text-[10px] text-text-muted/50 truncate block">
-                    {m.id}
-                    {m.releaseDate ? ` · ${m.releaseDate}` : ''}
-                    {m.toolCalling ? ' · tools' : ''}
-                    {m.reasoning ? ' · reasoning' : ''}
-                  </span>
-                </span>
-              </button>
-            ))
-          )}
-        </div>
-
-        {error && (
-          <div
-            data-testid="ModelAllowlistDialog.orphanError"
-            className="px-4 pt-2 text-[11px] text-red-400 leading-relaxed"
-          >
-            {error}
-          </div>
-        )}
-
-        <div className="px-4 py-3 border-t border-border/50 flex items-center justify-end gap-2">
-          <button
-            data-testid="ModelAllowlistDialog.cancel"
-            onClick={onClose}
-            className="px-3 py-1 text-[11px] rounded hover:bg-bg-hover text-text-muted transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            data-testid="ModelAllowlistDialog.save"
-            onClick={() => onSave([...checked])}
-            className="px-3 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent transition-colors"
-          >
-            Save
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/**
- * opencode provider manager — the catalog-driven add/auth/curate experience.
- *
- * Surfaces the FULL provider catalog (~146 providers, incl. ones with no custom
- * auth loader like openrouter) so users can ADD any supported provider, authenticate
- * it (OAuth or plain API key), and then pick which of its models appear in the
- * picker (per-provider allowlist). Replaces the old narrow vendor-auth list that
- * only showed providers from /provider/auth ∪ /config/providers.
- */
-function VendorOpencodeSection(): React.JSX.Element {
-  const installed = useOpencodeInstalled()
-  const [catalog, setCatalog] = useState<
-    import('../../../../shared/types').OpencodeProviderCatalogEntry[] | null
-  >(null)
-  const [opencodeCfg, setOpencodeCfg] = useState<OpencodeConfigSettings | null>(null)
-  const [options, setOptions] = useState<Record<string, VendorAuthOption[]>>({})
-  const [apiKeys, setApiKeys] = useState<Record<string, string>>({})
-  const [saving, setSaving] = useState<Record<string, boolean>>({})
-  const [removing, setRemoving] = useState<Record<string, boolean>>({})
-  const [oauthFlow, setOauthFlow] = useState<VendorOAuthFlowState>({ stage: 'idle' })
-  const [oauthCode, setOauthCode] = useState('')
-  const [oauthError, setOauthError] = useState<string | null>(null)
-  // Add-provider picker state.
-  const [pickerOpen, setPickerOpen] = useState(false)
-  const [addSearch, setAddSearch] = useState('')
-  // Provider currently mid-add (auth UI expanded inline in the picker).
-  const [addingId, setAddingId] = useState<string | null>(null)
-  // Provider whose model-allowlist dialog is open.
-  const [modelDialogId, setModelDialogId] = useState<string | null>(null)
-  // Declaration being configured: a provider id to edit, or '' for a new one
-  // (null = closed). '' is distinguishable from a real id, which is never blank.
-  const [configId, setConfigId] = useState<string | null>(null)
-  // Provider awaiting remove confirmation, with the resolved kind so the dialog
-  // can name exactly what it will destroy.
-  const [removeTarget, setRemoveTarget] = useState<OpencodeProviderCatalogEntry | null>(null)
-  // Provider whose credential panel is expanded inline on its row.
-  const [credentialId, setCredentialId] = useState<string | null>(null)
-  // Orphan guard (see `findModelReferences`): the last edit refused because it
-  // would have deleted a model some setting still names. Cleared on the next
-  // successful edit; the allowlist dialog gets its own copy so the message lands
-  // where the edit was attempted.
-  const [orphanError, setOrphanError] = useState<string | null>(null)
-  const [allowlistOrphanError, setAllowlistOrphanError] = useState<string | null>(null)
-  // opencode's DISCOVERED models — the set an edit can make disappear. Loaded
-  // here (not read from the store) so the guard does not depend on whether a
-  // chat surface has populated `availableModels` yet.
-  const [opencodeModels, setOpencodeModels] = useState<ModelInfo[]>([])
-  // Every engine's ClaudeUI config, so a reference from ANOTHER engine (claude's
-  // cross-engine `dispatch.defaultModel` names opencode models) is caught too.
-  const [engineConfigs, setEngineConfigs] = useState<Partial<Record<EngineId, EngineConfig>>>({})
-  const mountedRef = useRef(true)
-  const { vendorOAuth, authorizeVendorOAuth, cancelVendorOAuth, submitVendorOAuthCode } =
-    useSessionStore(
-      useShallow((s) => ({
-        vendorOAuth: s.vendorOAuth,
-        authorizeVendorOAuth: s.authorizeVendorOAuth,
-        cancelVendorOAuth: s.cancelVendorOAuth,
-        submitVendorOAuthCode: s.submitVendorOAuthCode
-      }))
-    )
-  // Web drives ADR-057's paste-back flow off `vendorOAuth`; desktop keeps the
-  // local `oauthFlow` machinery below, untouched.
-  const isWeb = window.api.platform === 'web'
-  const [pasteBusy, setPasteBusy] = useState(false)
-
-  useEffect(() => {
-    mountedRef.current = true
-    return () => {
-      mountedRef.current = false
-    }
-  }, [])
-
-  const reload = (): void => {
-    Promise.all([
-      window.api.getOpencodeProviders().catch(() => []),
-      window.api.loadOpencodeSettings().catch(() => ({})),
-      window.api.vendorAuthListOptions('opencode').catch(() => ({})) as Promise<
-        Record<string, VendorAuthOption[]>
-      >
-    ]).then(([cat, settings, opts]) => {
-      if (!mountedRef.current) return
-      setCatalog(cat)
-      setOpencodeCfg(settings)
-      setOptions(opts)
-    })
-    window.api
-      .getEngineModels()
-      .then((groups) => {
-        if (!mountedRef.current) return
-        setOpencodeModels(groups.filter((g) => g.engineId === 'opencode').flatMap((g) => g.models))
-      })
-      .catch(() => {})
-    Promise.all(
-      (Object.keys(ENGINE_META) as EngineId[]).map(async (id) => {
-        const cfg = await window.api.loadEngineConfig(id).catch(() => ({}) as EngineConfig)
-        return [id, cfg] as const
-      })
-    ).then((entries) => {
-      if (!mountedRef.current) return
-      setEngineConfigs(Object.fromEntries(entries))
-    })
-  }
-
-  useEffect(() => {
-    reload()
-  }, [])
-
-  const cfg = opencodeCfg ?? {}
-  const disabled = cfg.disabledProviders ?? []
-  const allowlist = cfg.modelAllowlist ?? {}
-
-  /** Merge a patch into opencode settings, persist, and refresh the picker model list. */
-  const updateCfg = (
-    patch: Partial<import('../../../../shared/types').OpencodeConfigSettings>
-  ): OpencodeConfigSettings => {
-    const next: OpencodeConfigSettings = { ...cfg, ...patch }
-    setOpencodeCfg(next)
-    window.api.saveOpencodeSettings(next).catch(() => {})
-    useSessionStore.getState().reloadModels()
-    return next
-  }
-
-  // A provider belongs in the list when it is usable now (authenticated/free)
-  // OR explicitly disabled.
-  //
-  // Disabled providers are INCLUDED deliberately. They used to be filtered out
-  // here and re-offered only in the "Add provider" picker, which made a disabled
-  // provider look identical to one that was never set up — and hid the fact that
-  // opencode was ignoring it. Disable is reversible state, so it must be visible
-  // and toggleable in place, which is the whole point of separating it from
-  // removal. Discovery supplies these entries (GET /provider omits disabled ids
-  // entirely, so their name/modelCount are re-synthesized there).
-  const listedProviders = (catalog ?? []).filter(
-    (p) => p.authState === 'authenticated' || p.authState === 'free' || p.disabled
-  )
-  const activeIds = new Set(listedProviders.map((p) => p.id))
-  const addable = (catalog ?? [])
-    .filter((p) => !activeIds.has(p.id))
-    .filter((p) => {
-      const q = addSearch.trim().toLowerCase()
-      if (!q) return true
-      return p.id.toLowerCase().includes(q) || p.name.toLowerCase().includes(q)
-    })
-
-  const allowlistLabel = (id: string): string => {
-    const a = allowlist[id]
-    if (a === undefined) return 'all models'
-    return `${a.length} model${a.length === 1 ? '' : 's'}`
-  }
-
-  /** Every discovered opencode model VALUE this provider contributes. */
-  const modelsOfProvider = (providerId: string): string[] =>
-    opencodeModels.filter((m) => m.vendorId === providerId).map((m) => m.value)
-
-  /**
-   * The orphan guard: `null` when the removal is safe, otherwise the message to
-   * show INSTEAD of applying it. Refusing beats applying-and-warning — after the
-   * write the reference is already broken, and the config that named it is a
-   * different dialog away.
-   */
-  const blockingReferences = (removedValues: string[]): string | null => {
-    const refs = findModelReferences({ opencode: cfg, engines: engineConfigs }, removedValues)
-    return refs.length > 0 ? formatModelReferences(refs) : null
-  }
-
-  // Finalize adding a provider: clear it from disabledProviders, seed an empty
-  // model allowlist (so it doesn't flood the picker), close the picker, and open
-  // the model dialog so the user curates its models.
-  const finishAdd = (id: string): void => {
-    const nextDisabled = disabled.filter((d) => d !== id)
-    updateCfg({
-      disabledProviders: nextDisabled.length > 0 ? nextDisabled : undefined,
-      modelAllowlist: { ...allowlist, [id]: allowlist[id] ?? [] }
-    })
-    setAddingId(null)
-    setPickerOpen(false)
-    setApiKeys((prev) => ({ ...prev, [id]: '' }))
-    reload()
-    setModelDialogId(id)
-  }
-
-  const handleSaveKey = async (vendorId: string): Promise<void> => {
-    const key = (apiKeys[vendorId] ?? '').trim()
-    if (!key) return
-    setSaving((prev) => ({ ...prev, [vendorId]: true }))
-    try {
-      await window.api.vendorAuthSetKey('opencode', vendorId, key)
-      finishAdd(vendorId)
-    } catch {
-      setOauthError(`Failed to save key for ${vendorId}`)
-    } finally {
-      if (mountedRef.current) setSaving((prev) => ({ ...prev, [vendorId]: false }))
-    }
-  }
-
-  /**
-   * Replace an ALREADY-ADDED provider's credential.
-   *
-   * Deliberately not finishAdd(): that seeds an empty model allowlist (correct
-   * when adding, since a fresh provider would otherwise flood the picker) and
-   * opens the model dialog. Doing either here would silently hide the models an
-   * existing provider is already showing — a "0 models" surprise from what the
-   * user asked to be a credential change.
-   */
-  const handleUpdateKey = async (vendorId: string): Promise<void> => {
-    const key = (apiKeys[vendorId] ?? '').trim()
-    if (!key) return
-    setSaving((prev) => ({ ...prev, [vendorId]: true }))
-    try {
-      await window.api.vendorAuthSetKey('opencode', vendorId, key)
-      setApiKeys((prev) => ({ ...prev, [vendorId]: '' }))
-      setCredentialId(null)
-      useSessionStore.getState().reloadModels()
-      reload()
-    } catch {
-      setOauthError(`Failed to save key for ${vendorId}`)
-    } finally {
-      if (mountedRef.current) setSaving((prev) => ({ ...prev, [vendorId]: false }))
-    }
-  }
-
-  /**
-   * Toggle opencode's `disabled_providers` veto — reversible, destroys nothing.
-   *
-   * Goes through the main-process owner rather than writing the array here: it is
-   * the same config key removal has to clean up, and having two writers for it is
-   * how the original bug (a veto outliving what it vetoed) became possible.
-   */
-  const handleToggleDisabled = async (vendorId: string, nextDisabled: boolean): Promise<void> => {
-    // Disabling hides every model this provider contributes — refuse while one
-    // of them is still named by a setting.
-    if (nextDisabled) {
-      const blocked = blockingReferences(modelsOfProvider(vendorId))
-      if (blocked) {
-        setOrphanError(blocked)
-        return
-      }
-    }
-    setOrphanError(null)
-    setRemoving((prev) => ({ ...prev, [vendorId]: true }))
-    try {
-      await window.api.setOpencodeProviderDisabled(vendorId, nextDisabled)
-      // Re-read opencode's config so the row reflects the write, not our guess.
-      const settings = await window.api.loadOpencodeSettings().catch(() => null)
-      if (settings && mountedRef.current) setOpencodeCfg(settings)
-      useSessionStore.getState().reloadModels()
-      reload()
-    } finally {
-      if (mountedRef.current) setRemoving((prev) => ({ ...prev, [vendorId]: false }))
-    }
-  }
-
-  /**
-   * Destroy what ClaudeUI owns for this provider. `kind` comes from the entry's
-   * resolved actions and is passed through untouched — widening it here would
-   * delete something the confirmation never mentioned.
-   */
-  const handleRemove = async (entry: OpencodeProviderCatalogEntry): Promise<void> => {
-    if (!entry.actions.removeKind) return
-    // Throwing (rather than a section-level banner) is deliberate: ConfirmModal
-    // keeps itself open and renders the reason under "Could not remove", which is
-    // exactly where the user is looking.
-    const blocked = blockingReferences(modelsOfProvider(entry.id))
-    if (blocked) throw new Error(blocked)
-    await window.api.removeOpencodeProvider(entry.id, entry.actions.removeKind)
-    const settings = await window.api.loadOpencodeSettings().catch(() => null)
-    if (settings && mountedRef.current) setOpencodeCfg(settings)
-    useSessionStore.getState().reloadModels()
-    reload()
-  }
-
-  const handleOAuthStart = async (vendorId: string): Promise<void> => {
-    setOauthError(null)
-    try {
-      const result = await authorizeVendorOAuth('opencode', vendorId)
-      if (result.ok) {
-        finishAdd(vendorId)
-        return
-      }
-      // Web: the store has already parked the flow — `paste` (the two-step
-      // form below) or `error` (opencode's remote-`auto` refusal, rendered as
-      // the desktop-only outcome). Nothing local to set.
-      if (isWeb) return
-      if (result.needsPaste) {
-        setOauthFlow({
-          stage: 'instructions',
-          url: result.needsPaste.url,
-          instructions: result.needsPaste.instructions,
-          method: result.needsPaste.method,
-          vendorId
-        })
-      }
-    } catch (err) {
-      setOauthError(err instanceof Error ? err.message : 'Failed to start OAuth flow')
-    }
-  }
-
-  /** Step 2 of the remote flow — see `submitVendorOAuthCode` in the store. */
-  const handlePasteBackSubmit = (vendorId: string, pasted: string): void => {
-    setPasteBusy(true)
-    void submitVendorOAuthCode(pasted)
-      .then((result) => {
-        if (result.ok) finishAdd(vendorId)
-      })
-      .finally(() => {
-        if (mountedRef.current) setPasteBusy(false)
-      })
-  }
-
-  const handleOAuthSubmit = async (): Promise<void> => {
-    if (oauthFlow.stage !== 'instructions') return
-    const { vendorId, method } = oauthFlow
-    const code = oauthCode.trim()
-    if (!code) return
-    setOauthFlow({ stage: 'submitting', vendorId })
-    try {
-      await window.api.vendorAuthOauthCallback('opencode', vendorId, method, code)
-      setOauthFlow({ stage: 'idle' })
-      setOauthCode('')
-      finishAdd(vendorId)
-    } catch (err) {
-      setOauthError(err instanceof Error ? err.message : 'OAuth callback failed')
-      setOauthFlow({ stage: 'idle' })
-    }
-  }
-
-  if (installed === null || catalog === null) {
-    return (
-      <div
-        data-testid="VendorOpencodeSection"
-        className="px-3 py-1.5 text-[11px] text-text-muted/60"
-      >
-        Loading…
-      </div>
-    )
-  }
-  if (!installed) {
-    return (
-      <div
-        data-testid="VendorOpencodeSection"
-        className="px-3 py-1.5 text-[11px] text-text-muted/60 leading-relaxed"
-      >
-        opencode is not installed. Install it to add providers and authenticate them.
-      </div>
-    )
-  }
-
-  const dialogProvider = modelDialogId
-    ? (catalog.find((p) => p.id === modelDialogId) ?? null)
-    : null
-
-  return (
-    <div
-      data-testid="VendorOpencodeSection"
-      className="px-3 py-1.5 space-y-3 text-[13px] text-text-secondary"
-    >
-      {oauthError && <div className="text-[11px] text-red-400 leading-relaxed">{oauthError}</div>}
-      {orphanError && (
-        <div
-          data-testid="VendorOpencodeSection.orphanError"
-          className="text-[11px] text-red-400 leading-relaxed"
+        <Button
+          testid="VendorAnthropicEditableForm.revealToken"
+          variant="link"
+          disabled={endpointOff}
+          onClick={() => setRevealToken((v) => !v)}
         >
-          {orphanError}
-        </div>
-      )}
+          {revealToken ? 'Hide' : 'Reveal'}
+        </Button>
+      </SettingRow>
 
-      {/* All providers — enabled and disabled, in one list. */}
-      <div className="space-y-1.5">
-        <div className="text-[11px] text-text-muted uppercase tracking-wide">Providers</div>
-        {listedProviders.length === 0 && (
-          <div className="text-[10px] text-text-muted/60 leading-relaxed">
-            No providers yet. Add a catalog provider, or add a custom OpenAI-compatible endpoint.
-          </div>
-        )}
-        {listedProviders.map((p) => {
-          const isFree = p.authState === 'free'
-          const busy = removing[p.id]
-          const claim = p.sharedProviderClaim
-          const rowOauth = (options[p.id] ?? []).filter((o) => o.type === 'oauth')
-          const canRowOauth = p.authMethods.includes('oauth') && rowOauth.length > 0
-          return (
-            <div
-              key={p.id}
-              data-testid="VendorOpencodeSection.providerRow"
-              data-id={p.id}
-              data-disabled={p.disabled ? 'true' : 'false'}
-              className={`border rounded-md p-2 transition-opacity ${
-                p.disabled ? 'border-border/20 opacity-55' : 'border-border/30'
-              }`}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1.5">
-                    <span className="font-medium text-[12px] truncate">{p.name}</span>
-                    {/* Disabled wins the badge: opencode ignores the provider
-                      entirely, so its auth state is not the useful fact. */}
-                    {p.disabled ? (
-                      <span
-                        data-testid="VendorOpencodeSection.disabledBadge"
-                        data-id={p.id}
-                        className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-muted"
-                      >
-                        Disabled
-                      </span>
-                    ) : isFree ? (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400">
-                        Free
-                      </span>
-                    ) : (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/10 text-green-400">
-                        Authenticated
-                      </span>
-                    )}
-                    {claim && (
-                      <span
-                        data-testid="VendorOpencodeSection.sharedBadge"
-                        data-id={p.id}
-                        title={`Credentials are vended by the shared provider "${claim.name}"`}
-                        className="text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent"
-                      >
-                        Shared · {claim.name}
-                      </span>
-                    )}
-                  </div>
-                  <div className="text-[10px] text-text-muted/60 truncate">
-                    {/* A disabled provider surfaces NO models whatever its allowlist
-                      says, so "showing all models" would be a plain lie — the exact
-                      class of misleading label this rework exists to remove. */}
-                    {p.id} ·{' '}
-                    {p.disabled
-                      ? 'ignored by opencode while disabled'
-                      : `showing ${allowlistLabel(p.id)}`}
-                  </div>
-                </div>
-                <div className="flex items-center gap-0.5 shrink-0">
-                  <IconButton
-                    testId="VendorOpencodeSection.providerRow.models"
-                    id={p.id}
-                    label="Manage models"
-                    onClick={() => setModelDialogId(p.id)}
-                  >
-                    <SlidersIcon />
-                  </IconButton>
-                  {p.actions.canSetCredential && (
-                    <IconButton
-                      testId="VendorOpencodeSection.providerRow.credential"
-                      id={p.id}
-                      label="Update credential"
-                      active={credentialId === p.id}
-                      onClick={() => setCredentialId(credentialId === p.id ? null : p.id)}
-                    >
-                      <KeyIcon />
-                    </IconButton>
-                  )}
-                  {p.actions.canEditDeclaration && (
-                    <IconButton
-                      testId="VendorOpencodeSection.providerRow.edit"
-                      id={p.id}
-                      label="Configure provider"
-                      onClick={() => setConfigId(p.id)}
-                    >
-                      <PencilIcon />
-                    </IconButton>
-                  )}
-                  <IconButton
-                    testId="VendorOpencodeSection.providerRow.disable"
-                    id={p.id}
-                    label={p.disabled ? 'Enable provider' : 'Disable provider (reversible)'}
-                    active={!p.disabled}
-                    disabled={busy}
-                    onClick={() => void handleToggleDisabled(p.id, !p.disabled)}
-                  >
-                    <PowerIcon />
-                  </IconButton>
-                  <IconButton
-                    testId="VendorOpencodeSection.providerRow.remove"
-                    id={p.id}
-                    // A greyed trash with no explanation reads as a broken button,
-                    // so the blocked reason IS the label here.
-                    label={
-                      p.actions.canRemove
-                        ? removeActionLabel(p.actions.removeKind)
-                        : (p.actions.blockedReason ?? 'Cannot be removed')
-                    }
-                    danger
-                    disabled={!p.actions.canRemove || busy}
-                    onClick={() => setRemoveTarget(p)}
-                  >
-                    <TrashIcon />
-                  </IconButton>
-                </div>
-              </div>
+      <SettingsToggle
+        testid="VendorAnthropicEditableForm.modelOverrideEnabled"
+        label="Model override"
+        checked={modelOverride.enabled}
+        description="Pin every session to one model id regardless of the picker."
+        onChange={(v) => updateVendorConfig({ modelOverride: { ...modelOverride, enabled: v } })}
+      />
 
-              {credentialId === p.id && (
-                <div
-                  data-testid="VendorOpencodeSection.credentialPanel"
-                  data-id={p.id}
-                  className="mt-2 pt-2 border-t border-border/20 space-y-1.5"
-                >
-                  {claim && (
-                    <div className="text-[10px] text-yellow-400/90 leading-relaxed">
-                      This credential is vended by the shared provider &quot;{claim.name}&quot;. A
-                      key set here is replaced on its next sync.
-                    </div>
-                  )}
-                  {canRowOauth && (
-                    <button
-                      data-testid="VendorOpencodeSection.credentialOauth"
-                      data-id={p.id}
-                      onClick={() => void handleOAuthStart(p.id)}
-                      className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent transition-colors"
-                    >
-                      {rowOauth[0]?.label ?? 'Sign in with OAuth'}
-                    </button>
-                  )}
-                  <div className="flex items-center gap-1.5">
-                    <input
-                      type="password"
-                      data-testid="VendorOpencodeSection.credentialKey"
-                      data-id={p.id}
-                      placeholder="Replace API key"
-                      value={apiKeys[p.id] ?? ''}
-                      onChange={(e) => setApiKeys((prev) => ({ ...prev, [p.id]: e.target.value }))}
-                      className="flex-1 px-2 py-1 text-[11px] rounded bg-bg-input border border-border/40 text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent/60"
-                    />
-                    <button
-                      data-testid="VendorOpencodeSection.credentialSave"
-                      data-id={p.id}
-                      onClick={() => void handleUpdateKey(p.id)}
-                      disabled={saving[p.id] || !(apiKeys[p.id] ?? '').trim()}
-                      className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                    >
-                      {saving[p.id] ? 'Saving…' : 'Save'}
-                    </button>
-                  </div>
-                  <div className="text-[10px] text-text-muted/50">
-                    Replaces the stored credential. To delete it instead, use Remove.
-                  </div>
-                </div>
-              )}
-            </div>
-          )
-        })}
-      </div>
-
-      {/* Add provider — a catalog provider, or a custom endpoint we declare. */}
-      {!pickerOpen ? (
-        <div className="flex items-center gap-3">
-          <button
-            data-testid="VendorOpencodeSection.addProvider"
-            onClick={() => {
-              setPickerOpen(true)
-              setAddSearch('')
-              setAddingId(null)
-            }}
-            className="text-[11px] text-accent hover:text-accent/80 transition-colors"
-          >
-            + Add provider
-          </button>
-          <button
-            data-testid="VendorOpencodeSection.addCustomProvider"
-            onClick={() => setConfigId('')}
-            className="text-[11px] text-accent hover:text-accent/80 transition-colors"
-          >
-            + Add custom provider
-          </button>
-        </div>
-      ) : (
-        <div className="border border-border/40 rounded-md p-2 space-y-2">
-          <div className="flex items-center gap-2">
-            <input
-              type="text"
-              autoFocus
-              placeholder="Search providers (e.g. openrouter, anthropic, google)…"
-              value={addSearch}
-              onChange={(e) => setAddSearch(e.target.value)}
-              className="flex-1 px-2 py-1 text-[11px] rounded bg-bg-input border border-border/40 text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent/60"
-            />
-            <button
-              onClick={() => {
-                setPickerOpen(false)
-                setAddingId(null)
-              }}
-              className="text-[10px] text-text-muted/70 hover:text-text-primary transition-colors"
-            >
-              Close
-            </button>
-          </div>
-          <div className="max-h-[280px] overflow-y-auto -mx-1">
-            {addable.length === 0 ? (
-              <div className="px-2 py-2 text-[11px] text-text-muted/60">No providers match.</div>
-            ) : (
-              addable.slice(0, 60).map((p) => {
-                const opts = options[p.id] ?? []
-                const apiOption = opts.find((o) => o.type === 'api')
-                const oauthOptions = opts.filter((o) => o.type === 'oauth')
-                const canOauth = p.authMethods.includes('oauth') && oauthOptions.length > 0
-                const expanded = addingId === p.id
-                return (
-                  <div
-                    key={p.id}
-                    data-testid="VendorOpencodeSection.catalogRow"
-                    data-id={p.id}
-                    className="px-1 py-0.5"
-                  >
-                    <button
-                      onClick={() => setAddingId(expanded ? null : p.id)}
-                      className="w-full flex items-center justify-between gap-2 px-2 py-1 rounded hover:bg-bg-hover transition-colors text-left cursor-default"
-                    >
-                      <span className="min-w-0">
-                        <span className="text-[12px] text-text-secondary truncate block">
-                          {p.name}
-                        </span>
-                        <span className="text-[10px] text-text-muted/50 truncate block">
-                          {p.id}
-                          {p.modelCount > 0 ? ` · ${p.modelCount} models` : ''}
-                          {canOauth ? ' · OAuth' : ''}
-                        </span>
-                      </span>
-                      <span className="text-[11px] text-accent shrink-0">
-                        {expanded ? '−' : 'Add'}
-                      </span>
-                    </button>
-                    {/* No free-provider branch here any more. A credential-free
-                        gateway always carries authState 'free', so it is always in
-                        the Providers list above — enabled, or disabled with an
-                        Enable action. It can never be an addable row, so the old
-                        keyless "Add" path was unreachable. */}
-                    {expanded && (
-                      <div className="px-2 pb-2 pt-1 space-y-1.5">
-                        {canOauth && (
-                          <button
-                            onClick={() => void handleOAuthStart(p.id)}
-                            className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent transition-colors"
-                          >
-                            {oauthOptions[0]?.label ?? 'Sign in with OAuth'}
-                          </button>
-                        )}
-                        {/* API key (always offered for non-free providers — the
-                            generic /auth path accepts a key even when the provider
-                            has no custom auth loader, e.g. openrouter). */}
-                        <div className="flex items-center gap-1.5">
-                          <input
-                            type="password"
-                            placeholder={apiOption?.prompts?.[0]?.message ?? 'API key'}
-                            value={apiKeys[p.id] ?? ''}
-                            onChange={(e) =>
-                              setApiKeys((prev) => ({ ...prev, [p.id]: e.target.value }))
-                            }
-                            className="flex-1 px-2 py-1 text-[11px] rounded bg-bg-input border border-border/40 text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent/60"
-                          />
-                          <button
-                            onClick={() => void handleSaveKey(p.id)}
-                            disabled={saving[p.id] || !(apiKeys[p.id] ?? '').trim()}
-                            className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                          >
-                            {saving[p.id] ? 'Saving…' : 'Add'}
-                          </button>
-                        </div>
-
-                        {vendorOAuth?.vendorId === p.id && vendorOAuth.stage === 'waiting' && (
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-[10px] text-text-muted/80">
-                              Waiting for browser authorization…
-                            </span>
-                            <button
-                              onClick={() => cancelVendorOAuth()}
-                              className="px-2 py-0.5 text-[10px] rounded hover:bg-bg-hover text-text-muted/70 transition-colors"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        )}
-                        {vendorOAuth?.vendorId === p.id &&
-                          vendorOAuth.stage === 'error' &&
-                          (vendorOAuth.error ? (
-                            // ADR-057 outcome: the remote-`auto` refusal reads as
-                            // "use the desktop", a CSRF mismatch as "start again".
-                            <OAuthOutcomeNotice
-                              kind={classifyOAuthError(vendorOAuth.error)}
-                              message={vendorOAuth.error}
-                              id={p.id}
-                            />
-                          ) : (
-                            <div className="text-[10px] text-red-400">
-                              Authentication failed. Try again.
-                            </div>
-                          ))}
-
-                        {/* Remote two-step flow. Never reached on desktop — the
-                            store only parks `paste` for a web caller. */}
-                        {vendorOAuth?.vendorId === p.id && vendorOAuth.stage === 'paste' && (
-                          <OAuthPasteBackFlow
-                            variant="url"
-                            id={p.id}
-                            url={vendorOAuth.url}
-                            busy={pasteBusy}
-                            onSubmit={(pasted) => handlePasteBackSubmit(p.id, pasted)}
-                            onCancel={cancelVendorOAuth}
-                          />
-                        )}
-
-                        {oauthFlow.stage === 'instructions' && oauthFlow.vendorId === p.id && (
-                          <div className="space-y-1.5">
-                            <div className="text-[10px] text-text-muted/70 leading-relaxed whitespace-pre-wrap">
-                              {oauthFlow.instructions}
-                            </div>
-                            <div className="flex items-center gap-1.5">
-                              <input
-                                type="text"
-                                placeholder="Paste code here"
-                                value={oauthCode}
-                                onChange={(e) => setOauthCode(e.target.value)}
-                                className="flex-1 px-2 py-1 text-[11px] rounded bg-bg-input border border-border/40 text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent/60"
-                              />
-                              <button
-                                onClick={() => void handleOAuthSubmit()}
-                                disabled={!oauthCode.trim()}
-                                className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                              >
-                                Submit
-                              </button>
-                              <button
-                                onClick={() => {
-                                  void window.api.vendorAuthOauthCancel('opencode').catch(() => {})
-                                  setOauthFlow({ stage: 'idle' })
-                                  setOauthCode('')
-                                }}
-                                className="px-2 py-1 text-[11px] rounded hover:bg-bg-hover text-text-muted transition-colors"
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          </div>
-                        )}
-                        {oauthFlow.stage === 'submitting' && oauthFlow.vendorId === p.id && (
-                          <div className="text-[10px] text-text-muted/60">Submitting code…</div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )
-              })
-            )}
-            {addable.length > 60 && (
-              <div className="px-2 py-1 text-[10px] text-text-muted/50">
-                {addable.length - 60} more — refine your search.
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      <div className="text-[10px] text-text-muted/50 leading-relaxed">
-        Credentials are stored in opencode&apos;s own auth.json. After adding a provider, pick which
-        of its models appear in the picker via “Manage models”.
-      </div>
-
-      {dialogProvider && (
-        <ModelAllowlistDialog
-          providerId={dialogProvider.id}
-          providerName={dialogProvider.name}
-          current={allowlist[dialogProvider.id]}
-          error={allowlistOrphanError}
-          onClose={() => {
-            setAllowlistOrphanError(null)
-            setModelDialogId(null)
-          }}
-          onSave={(ids) => {
-            // `ids` are BARE model ids; references are stored as picker VALUES.
-            const kept = new Set(ids.map((id) => `${dialogProvider.id}/${id}`))
-            const blocked = blockingReferences(
-              modelsOfProvider(dialogProvider.id).filter((value) => !kept.has(value))
-            )
-            if (blocked) {
-              setAllowlistOrphanError(blocked)
-              return
+      {MODEL_OVERRIDE_FIELDS.map(({ field, label, placeholder }) => (
+        <SettingRow
+          key={String(field)}
+          testid="VendorAnthropicEditableForm.modelFieldRow"
+          dataId={String(field)}
+          indent
+          dimmed={overrideOff}
+          label={label}
+          description={
+            field === 'model'
+              ? 'Used for every session that does not hit one of the aliases below.'
+              : `Substituted wherever the ${label.replace(' alias', '')} alias is requested.`
+          }
+        >
+          <TextField
+            testid="VendorAnthropicEditableForm.modelField"
+            dataId={String(field)}
+            className="w-[240px]"
+            value={modelOverride[field] as string}
+            placeholder={placeholder}
+            disabled={overrideOff}
+            onChange={(v) =>
+              updateVendorConfig({ modelOverride: { ...modelOverride, [field]: v } })
             }
-            setAllowlistOrphanError(null)
-            updateCfg({ modelAllowlist: { ...allowlist, [dialogProvider.id]: ids } })
-            setModelDialogId(null)
-            reload()
-          }}
-        />
-      )}
-
-      {configId !== null && (
-        <OpencodeProviderConfigModal
-          providerId={configId === '' ? null : configId}
-          onClose={() => {
-            setConfigId(null)
-            reload()
-          }}
-        />
-      )}
-
-      {removeTarget && (
-        <ConfirmModal
-          testId="VendorOpencodeSection.removeConfirm"
-          title={`Remove ${removeTarget.name}?`}
-          confirmLabel="Remove"
-          busyLabel="Removing…"
-          errorTitle="Could not remove"
-          detail={removeTarget.id}
-          body={removeConfirmBody(removeTarget)}
-          onCancel={() => setRemoveTarget(null)}
-          onConfirm={async () => {
-            const target = removeTarget
-            await handleRemove(target)
-            // Only clear AFTER success — on failure ConfirmModal keeps itself open
-            // and shows the error with a Retry, so the dialog must stay mounted.
-            if (mountedRef.current) setRemoveTarget(null)
-          }}
-        />
-      )}
+          />
+        </SettingRow>
+      ))}
     </div>
-  )
-}
-
-/** Short verb phrase for the trash tooltip, matching what will actually happen. */
-function removeActionLabel(kind: ProviderRemoveKind | null): string {
-  switch (kind) {
-    case 'credential':
-      return 'Remove stored credential'
-    case 'declaration':
-      return 'Remove provider definition'
-    case 'both':
-      return 'Remove credential and provider definition'
-    default:
-      return 'Remove provider'
-  }
-}
-
-/**
- * Confirmation copy that names exactly what is destroyed. Vague destructive
- * prompts are how people lose configuration they cannot get back — the
- * declaration case is unrecoverable from ClaudeUI, so it says so.
- */
-function removeConfirmBody(entry: OpencodeProviderCatalogEntry): React.ReactNode {
-  const kind = entry.actions.removeKind
-  const claim = entry.sharedProviderClaim
-  return (
-    <>
-      {(kind === 'credential' || kind === 'both') && (
-        <>
-          This deletes <span className="font-medium text-text-primary">{entry.name}</span>&apos;s
-          stored credential from opencode&apos;s auth store. You will need to sign in again to use
-          it.{' '}
-        </>
-      )}
-      {(kind === 'declaration' || kind === 'both') && (
-        <>
-          This deletes its provider definition — base URL, model definitions, and options — from
-          opencode&apos;s config file. This cannot be undone.{' '}
-        </>
-      )}
-      {claim && (
-        <>
-          <br />
-          <br />
-          <span className="text-yellow-400">
-            Heads up: the shared provider &quot;{claim.name}&quot; still vends this credential, so
-            it will be restored on the next sync. Turn its opencode route off in Common · Providers
-            &amp; models to remove it for good.
-          </span>
-        </>
-      )}
-    </>
   )
 }
 
@@ -2295,18 +1479,20 @@ function OpencodeModelsSection(): React.JSX.Element {
 
   if (cfg === null || installed === null) {
     return (
-      <div data-testid="OpencodeModelsSection" className="px-3 py-1.5 text-[13px] text-text-muted">
-        Loading…
+      <div data-testid="OpencodeModelsSection" className="divide-y divide-border/55">
+        <SettingRow testid="OpencodeModelsSection.status" dataId="loading" description="Loading…" />
       </div>
     )
   }
   if (!installed) {
     return (
-      <div
-        data-testid="OpencodeModelsSection"
-        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
-      >
-        opencode is not installed. Model settings apply to opencode sessions.
+      <div data-testid="OpencodeModelsSection" className="divide-y divide-border/55">
+        <SettingRow
+          testid="OpencodeModelsSection.status"
+          dataId="not-installed"
+          dimmed
+          description="opencode is not installed. These settings apply to opencode sessions."
+        />
       </div>
     )
   }
@@ -2329,682 +1515,66 @@ function OpencodeModelsSection(): React.JSX.Element {
   const modelDisplays = toModelDisplays(models)
 
   return (
-    <div data-testid="OpencodeModelsSection" className="space-y-1">
-      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-        <div className="mb-1 flex items-center gap-1">
-          Default model
-          <InfoTooltip text="The primary model for opencode sessions. Format: provider/model-id, e.g. anthropic/claude-sonnet-4-6. Applies on next cwd spawn." />
-        </div>
-        <div data-testid="OpencodeModelsSection.model" data-value={cfg.model ?? ''}>
-          <ModelPicker
-            placement="down"
-            emptyOption={{ label: OPENCODE_MODEL_DEFAULT_LABEL }}
-            models={modelDisplays}
-            selectedModel={selectedModelDisplay(
-              models,
-              cfg.model ?? '',
-              OPENCODE_MODEL_DEFAULT_LABEL
-            )}
-            onSelectModel={(v) => update({ model: v || undefined })}
-          />
-        </div>
+    <div data-testid="OpencodeModelsSection" className="divide-y divide-border/55">
+      {/* Row + stale-value warning are ONE child of the divider, so the warning
+          reads as part of the row rather than as a row of its own. */}
+      <div>
+        <SettingRow
+          testid="OpencodeModelsSection.modelRow"
+          label="Default model"
+          description="Model a new opencode session starts with."
+          modified={cfg.model !== undefined}
+          onReset={() => update({ model: undefined })}
+        >
+          <span data-testid="OpencodeModelsSection.model" data-value={cfg.model ?? ''}>
+            <ModelPicker
+              variant="field"
+              placement="down"
+              emptyOption={{ label: OPENCODE_MODEL_DEFAULT_LABEL }}
+              models={modelDisplays}
+              selectedModel={selectedModelDisplay(
+                models,
+                cfg.model ?? '',
+                OPENCODE_MODEL_DEFAULT_LABEL
+              )}
+              onSelectModel={(v) => update({ model: v || undefined })}
+            />
+          </span>
+        </SettingRow>
         <StaleModelNotice
           testid="OpencodeModelsSection.model"
           models={models}
           value={cfg.model ?? ''}
         />
       </div>
-      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-        <div className="mb-1 flex items-center gap-1">
-          Small model
-          <InfoTooltip text="A cheaper/faster model used by opencode for lightweight tasks (titles, summaries). Format: provider/model-id." />
-        </div>
-        <div data-testid="OpencodeModelsSection.smallModel" data-value={cfg.smallModel ?? ''}>
-          <ModelPicker
-            placement="down"
-            emptyOption={{ label: OPENCODE_MODEL_DEFAULT_LABEL }}
-            models={modelDisplays}
-            selectedModel={selectedModelDisplay(
-              models,
-              cfg.smallModel ?? '',
-              OPENCODE_MODEL_DEFAULT_LABEL
-            )}
-            onSelectModel={(v) => update({ smallModel: v || undefined })}
-          />
-        </div>
+      <div>
+        <SettingRow
+          testid="OpencodeModelsSection.smallModelRow"
+          label="Small model"
+          description="Cheaper model for titles, summaries and compaction."
+          modified={cfg.smallModel !== undefined}
+          onReset={() => update({ smallModel: undefined })}
+        >
+          <span data-testid="OpencodeModelsSection.smallModel" data-value={cfg.smallModel ?? ''}>
+            <ModelPicker
+              variant="field"
+              placement="down"
+              emptyOption={{ label: OPENCODE_MODEL_DEFAULT_LABEL }}
+              models={modelDisplays}
+              selectedModel={selectedModelDisplay(
+                models,
+                cfg.smallModel ?? '',
+                OPENCODE_MODEL_DEFAULT_LABEL
+              )}
+              onSelectModel={(v) => update({ smallModel: v || undefined })}
+            />
+          </span>
+        </SettingRow>
         <StaleModelNotice
           testid="OpencodeModelsSection.smallModel"
           models={models}
           value={cfg.smallModel ?? ''}
         />
-      </div>
-      <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
-        Changes apply on the next opencode server start for each working directory.
-      </div>
-    </div>
-  )
-}
-
-// ── pi Default model section (M3) ────────────────────────────────────
-
-/**
- * pi's per-engine default model — lives in `EngineConfig.piConfig.defaultModel`
- * (engines/pi.json via loadEngineConfig/saveEngineConfig), NOT a dedicated
- * opencode.json-style settings file like OpencodeModelsSection's `cfg.model`
- * (pi has no native-config-passthrough schema to mirror in M3). Discovered
- * models use a visible select, with an explicit custom-ID escape hatch and a
- * ClaudeUI-private allowlist for picker visibility and default resolution.
- */
-function PiDefaultModelSection(): React.JSX.Element {
-  const [cfg, setCfg] = useState<EngineConfig | null>(null)
-  const [models, setModels] = useState<ModelInfo[]>([])
-  const [customMode, setCustomMode] = useState(false)
-  const [managingModels, setManagingModels] = useState(false)
-  const installed = usePiInstalled()
-
-  useEffect(() => {
-    window.api
-      .loadEngineConfig('pi')
-      .then(setCfg)
-      .catch(() => setCfg({}))
-    window.api
-      .getEngineModels()
-      .then((groups) => {
-        const pi = groups.filter((g) => g.engineId === 'pi')
-        setModels(pi.flatMap((g) => g.models))
-      })
-      .catch(() => {})
-  }, [])
-
-  if (cfg === null || installed === null) {
-    return (
-      <div data-testid="PiDefaultModelSection" className="px-3 py-1.5 text-[13px] text-text-muted">
-        Loading…
-      </div>
-    )
-  }
-  if (!installed) {
-    return (
-      <div
-        data-testid="PiDefaultModelSection"
-        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
-      >
-        pi is not installed. Model settings apply to pi sessions.
-      </div>
-    )
-  }
-
-  const current = cfg.piConfig?.defaultModel ?? ''
-  const known = current === '' || models.some((m) => m.value === current)
-  const allowlist = cfg.piConfig?.modelAllowlist
-  const defaultExcluded = !!current && allowlist !== undefined && !allowlist.includes(current)
-
-  const saveAllowlist = async (modelAllowlist: string[]): Promise<void> => {
-    const latest = await window.api.loadEngineConfig('pi')
-    const next: EngineConfig = {
-      ...latest,
-      piConfig: { ...latest.piConfig, modelAllowlist }
-    }
-    await window.api.saveEngineConfig('pi', next)
-    setCfg(next)
-    useSessionStore.getState().reloadModels()
-    window.api
-      .getEngineModels()
-      .then((groups) =>
-        setModels(
-          groups.filter((group) => group.engineId === 'pi').flatMap((group) => group.models)
-        )
-      )
-      .catch(() => {})
-  }
-
-  const update = (value: string): void => {
-    const next: EngineConfig = {
-      ...cfg,
-      piConfig: { ...cfg.piConfig, defaultModel: value || undefined }
-    }
-    setCfg(next)
-    window.api.saveEngineConfig('pi', next).catch(() => {})
-    // Mirror the default-model choice into the store so new/reopened pi
-    // sessions pick it up immediately, and refresh the picker model list.
-    // The RAW value (not the constant): an empty string is what tells the store
-    // that nothing is configured, which is what separates "the builtin default
-    // may fall back silently" from "the user named this model".
-    useSessionStore.getState().setPiDefaultModel(value)
-    useSessionStore.getState().reloadModels()
-  }
-
-  return (
-    <div data-testid="PiDefaultModelSection" className="space-y-1">
-      <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-        <div className="mb-1 flex items-center gap-1">
-          Default model
-          <InfoTooltip text="The primary model for new pi sessions. Format: provider/model-id, e.g. openai-codex/gpt-5.6-luna. Free text is allowed for models pi supports locally that ClaudeUI hasn't discovered yet." />
-        </div>
-        {models.length > 0 ? (
-          // Themed ModelPicker rather than a native <select> (OS-painted option
-          // lists are unreadable in dark themes). `__custom__` stays a real
-          // selectable VALUE — it is a mode switch, not a model, so it rides
-          // the picker's pinned trailing row instead of the model groups.
-          <div
-            data-testid="PiDefaultModelSection.defaultModel"
-            data-value={customMode || !known ? '__custom__' : current}
-          >
-            <ModelPicker
-              placement="down"
-              emptyOption={{ label: `Default (${PI_DEFAULT_MODEL})` }}
-              trailingOption={{ value: '__custom__', label: 'Custom model ID...' }}
-              models={toModelDisplays(models)}
-              selectedModel={
-                customMode || !known
-                  ? {
-                      value: '__custom__',
-                      displayName: 'Custom model ID...',
-                      shortName: 'Custom model ID...'
-                    }
-                  : selectedModelDisplay(models, current, `Default (${PI_DEFAULT_MODEL})`)
-              }
-              onSelectModel={(v) => {
-                if (v === '__custom__') setCustomMode(true)
-                else {
-                  setCustomMode(false)
-                  update(v)
-                }
-              }}
-            />
-          </div>
-        ) : (
-          <div data-testid="PiDefaultModelSection.empty" className="text-[11px] text-warning">
-            No pi models discovered. Authenticate a provider, then refresh models.
-          </div>
-        )}
-        {(models.length === 0 || customMode || !known) && (
-          <input
-            data-testid="PiDefaultModelSection.customModel"
-            type="text"
-            value={current}
-            onChange={(e) => update(e.target.value)}
-            placeholder="Custom provider/model-id"
-            className="mt-1 w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary"
-          />
-        )}
-        <button
-          data-testid="PiDefaultModelSection.refresh"
-          onClick={() => {
-            window.api
-              .getEngineModels()
-              .then((groups) =>
-                setModels(groups.filter((g) => g.engineId === 'pi').flatMap((g) => g.models))
-              )
-              .catch(() => {})
-          }}
-          className="mt-1 text-[11px] text-accent"
-        >
-          Refresh models
-        </button>
-        <button
-          data-testid="PiDefaultModelSection.manageModels"
-          onClick={() => setManagingModels(true)}
-          className="mt-1 ml-3 text-[11px] text-accent"
-        >
-          Manage models (
-          {allowlist === undefined
-            ? 'all'
-            : allowlist.length === 0
-              ? 'none'
-              : `${allowlist.length} selected`}
-          )
-        </button>
-        {defaultExcluded ? (
-          <div
-            data-testid="PiDefaultModelSection.excludedDefaultWarning"
-            className="mt-1 text-[10px] text-warning/90"
-          >
-            The configured default is excluded by the model allowlist. New pi sessions will start
-            with no model selected until it is enabled or replaced.
-          </div>
-        ) : (
-          <StaleModelNotice
-            testid="PiDefaultModelSection.defaultModel"
-            models={models}
-            value={current}
-          />
-        )}
-        {!known && !defaultExcluded && (
-          <div
-            data-testid="PiDefaultModelSection.unknownWarning"
-            className="mt-1 text-[10px] text-warning/90"
-          >
-            Not in pi&rsquo;s currently-discovered model list — used as-is. Double-check the
-            provider is authenticated and the model id is spelled correctly.
-          </div>
-        )}
-      </div>
-      <div className="px-3 pb-1 text-[10px] text-text-muted/50 leading-relaxed">
-        Applies to new pi sessions. Falls back to pi&rsquo;s own default ({PI_DEFAULT_MODEL}) when
-        unset.
-      </div>
-      {managingModels && (
-        <PiModelAllowlistDialog
-          providerName="pi"
-          current={allowlist}
-          onClose={() => setManagingModels(false)}
-          onSave={saveAllowlist}
-        />
-      )}
-    </div>
-  )
-}
-
-// ── opencode Providers section ───────────────────────────────────────
-
-const inputClass =
-  'bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors'
-
-/**
- * A provider row carries two distinct identities:
- *   _key — stable React/list key + transient-state map key (apiKeys, expandedCaps);
- *          never changes during the session, so editing the provider id doesn't
- *          remount the row.
- *   _id  — the EDITABLE opencode provider id (the map key used at save time).
- */
-type ProviderRow = OpencodeProviderSettings & { _key: string; _id: string; _managed?: boolean }
-
-/** Empty provider row factory — stable _key, blank editable id. */
-function newProvider(): ProviderRow {
-  return { _key: crypto.randomUUID(), _id: '', name: '', baseURL: '', models: [] }
-}
-
-/**
- * Configure ONE opencode provider declaration — the OpenAI-compatible custom
- * provider form, as a dialog stacked over the settings dialog.
- *
- * This form used to be a permanently-expanded row inside a separate "Custom
- * providers" settings section, which meant declared providers lived somewhere
- * different from every other provider — and a declared+disabled one (opencode
- * ignoring it entirely) appeared in neither list. The provider list is now
- * single and this form is a dialog, so the complex fields get room without
- * splitting the surface.
- *
- * Edits apply as you type, matching the old inline form. That is deliberate:
- * ModelCapabilityEditor writes model capability fields straight to opencode.json
- * via patchOpencodeNative and needs a SAVED provider id + model id to target, so
- * a staged save/cancel here would desync from it.
- *
- * @param providerId Existing declaration to edit, or null to create one.
- */
-export function OpencodeProviderConfigModal({
-  providerId,
-  onClose
-}: {
-  providerId: string | null
-  onClose: () => void
-}): React.JSX.Element {
-  const [cfg, setCfg] = useState<OpencodeConfigSettings | null>(null)
-  const [row, setRow] = useState<ProviderRow | null>(null)
-  const [expandedCaps, setExpandedCaps] = useState<Set<string>>(new Set())
-  const [apiKey, setApiKey] = useState('')
-  const [keyBusy, setKeyBusy] = useState(false)
-  const [keyError, setKeyError] = useState<string | null>(null)
-  const [credIds, setCredIds] = useState<Record<string, 'api' | 'oauth'>>({})
-  // True when a ClaudeUI shared provider compiles this declaration. Editing it
-  // here would be silently overwritten on the shared provider's next sync, so the
-  // form is replaced by a pointer to its real owner.
-  const [managed, setManaged] = useState(false)
-
-  const reloadCredIds = (): void => {
-    window.api
-      .vendorAuthListKeys('opencode')
-      .then(setCredIds)
-      .catch(() => {})
-  }
-
-  useEffect(() => {
-    Promise.all([
-      window.api.loadOpencodeSettings(),
-      window.api.listSharedProviders().catch(() => [])
-    ])
-      .then(([settings, sharedProviders]) => {
-        setCfg(settings)
-        const managedIds = new Set(
-          sharedProviders.map((provider) => provider.routes.opencode.providerId ?? provider.id)
-        )
-        if (providerId) setManaged(managedIds.has(providerId))
-        const existing = providerId ? settings.providers?.[providerId] : undefined
-        setRow(
-          providerId
-            ? {
-                _key: providerId,
-                _id: providerId,
-                name: existing?.name ?? '',
-                npm: existing?.npm,
-                baseURL: existing?.baseURL ?? '',
-                models: existing?.models ?? []
-              }
-            : newProvider()
-        )
-      })
-      .catch(() => {
-        setCfg({})
-        setRow(newProvider())
-      })
-    reloadCredIds()
-  }, [providerId])
-
-  /**
-   * Splice this one declaration into the FULL providers record.
-   *
-   * Reading the whole record and replacing only our key matters: the old editor
-   * rebuilt the entire record from its own row list, so any declaration it had
-   * not loaded would have been dropped. A rename deletes the previous key, which
-   * the ADR-031 writer turns into `delete ['provider', oldId]` — user intent.
-   */
-  const persist = (next: ProviderRow): void => {
-    if (!cfg) return
-    const providers: Record<string, OpencodeProviderSettings> = { ...(cfg.providers ?? {}) }
-    if (next._key && next._key !== next._id) delete providers[next._key]
-
-    const nextId = next._id.trim()
-    if (nextId) {
-      const models = (next.models ?? [])
-        .filter((m) => m.id.trim())
-        .map((m) =>
-          m.name?.trim() ? { id: m.id.trim(), name: m.name.trim() } : { id: m.id.trim() }
-        )
-      const entry: OpencodeProviderSettings = {}
-      if (next.name) entry.name = next.name
-      if (next.npm) entry.npm = next.npm
-      if (next.baseURL) entry.baseURL = next.baseURL
-      if (models.length > 0) entry.models = models
-      providers[nextId] = entry
-    }
-
-    const updated: OpencodeConfigSettings = {
-      ...cfg,
-      providers: Object.keys(providers).length > 0 ? providers : undefined
-    }
-    setCfg(updated)
-    window.api.saveOpencodeSettings(updated).catch(() => {})
-    useSessionStore.getState().reloadModels()
-  }
-
-  const update = (patch: Partial<ProviderRow>): void => {
-    setRow((prev) => {
-      if (!prev) return prev
-      const next = { ...prev, ...patch }
-      persist(next)
-      return next
-    })
-  }
-
-  // Model-list edits mirror the old inline editor's semantics exactly. Adding
-  // stages an empty row without saving — persist() skips blank model ids anyway.
-  const addModel = (): void =>
-    setRow((prev) => (prev ? { ...prev, models: [...(prev.models ?? []), { id: '' }] } : prev))
-
-  const updateModel = (idx: number, patch: { id?: string; name?: string }): void =>
-    update({ models: (row?.models ?? []).map((m, i) => (i === idx ? { ...m, ...patch } : m)) })
-
-  const removeModel = (idx: number): void =>
-    update({ models: (row?.models ?? []).filter((_, i) => i !== idx) })
-
-  const toggleCaps = (capKey: string): void =>
-    setExpandedCaps((prev) => {
-      const n = new Set(prev)
-      if (n.has(capKey)) n.delete(capKey)
-      else n.add(capKey)
-      return n
-    })
-
-  const id = (row?._id ?? '').trim()
-  const hasKey = id.length > 0 && credIds[id] !== undefined
-
-  const saveKey = async (): Promise<void> => {
-    const key = apiKey.trim()
-    if (!key || !id) return
-    setKeyBusy(true)
-    setKeyError(null)
-    try {
-      await window.api.vendorAuthSetKey('opencode', id, key)
-      setApiKey('')
-      reloadCredIds()
-    } catch {
-      setKeyError('Failed to save key.')
-    } finally {
-      setKeyBusy(false)
-    }
-  }
-
-  const removeKey = async (): Promise<void> => {
-    if (!id) return
-    setKeyBusy(true)
-    setKeyError(null)
-    try {
-      await window.api.vendorAuthRemove('opencode', id)
-      reloadCredIds()
-    } catch {
-      setKeyError('Failed to remove key.')
-    } finally {
-      setKeyBusy(false)
-    }
-  }
-
-  return (
-    <div
-      data-testid="OpencodeProviderConfigModal"
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fade-in"
-      onClick={onClose}
-    >
-      <div
-        className="w-[min(620px,94vw)] max-h-[85vh] flex flex-col bg-bg-primary border border-border rounded-lg shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="px-4 py-3 border-b border-border/50 flex items-center justify-between">
-          <div>
-            <div className="text-[13px] font-medium text-text-primary">
-              {providerId ? `Configure · ${row?.name || providerId}` : 'Add custom provider'}
-            </div>
-            <div className="text-[11px] text-text-muted/70">
-              OpenAI-compatible endpoint. Changes apply on each working directory&apos;s next
-              opencode server start.
-            </div>
-          </div>
-          <button
-            data-testid="OpencodeProviderConfigModal.close"
-            onClick={onClose}
-            className="text-text-muted/60 hover:text-text-primary transition-colors text-[16px] leading-none px-1"
-          >
-            ✕
-          </button>
-        </div>
-
-        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3 text-[13px] text-text-secondary">
-          {row === null ? (
-            <div className="text-[11px] text-text-muted/60">Loading…</div>
-          ) : managed ? (
-            <div
-              data-testid="OpencodeProviderConfigModal.managed"
-              className="space-y-1.5 text-[11px] leading-relaxed"
-            >
-              <div className="text-text-primary font-medium">
-                {row.name || row._id} is managed by a shared provider.
-              </div>
-              <div className="text-text-muted/70">
-                Its definition and credential are compiled from ClaudeUI&apos;s shared provider, so
-                edits made here would be overwritten on the next sync. Change it where it is owned.
-              </div>
-              <button
-                data-testid="OpencodeProviderConfigModal.openShared"
-                onClick={() =>
-                  window.dispatchEvent(
-                    new CustomEvent('open-settings', {
-                      detail: { scope: 'common', section: 'shared-providers' }
-                    })
-                  )
-                }
-                className="text-accent hover:text-accent/80 transition-colors"
-              >
-                Open shared provider
-              </button>
-            </div>
-          ) : (
-            <>
-              <div className="space-y-1.5">
-                <label className="block text-[10px] text-text-muted">Provider id</label>
-                <input
-                  type="text"
-                  data-testid="OpencodeProviderConfigModal.id"
-                  placeholder="my-ollama"
-                  value={row._id}
-                  onChange={(e) => update({ _id: e.target.value })}
-                  className={`${inputClass} w-full`}
-                />
-                <label className="block text-[10px] text-text-muted">Display name (optional)</label>
-                <input
-                  type="text"
-                  data-testid="OpencodeProviderConfigModal.name"
-                  placeholder="My Ollama"
-                  value={row.name ?? ''}
-                  onChange={(e) => update({ name: e.target.value })}
-                  className={`${inputClass} w-full`}
-                />
-                <label className="block text-[10px] text-text-muted">Base URL</label>
-                <input
-                  type="url"
-                  data-testid="OpencodeProviderConfigModal.baseUrl"
-                  placeholder="http://localhost:11434/v1"
-                  value={row.baseURL ?? ''}
-                  onChange={(e) => update({ baseURL: e.target.value })}
-                  className={`${inputClass} w-full`}
-                />
-              </div>
-
-              <div>
-                <div className="text-[10px] text-text-muted mb-0.5">API key (optional)</div>
-                {hasKey ? (
-                  <div className="flex items-center gap-1.5">
-                    <span
-                      data-testid="OpencodeProviderConfigModal.keyStatus"
-                      className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/10 text-green-400"
-                    >
-                      Key set
-                    </span>
-                    <button
-                      data-testid="OpencodeProviderConfigModal.removeKey"
-                      onClick={() => void removeKey()}
-                      disabled={keyBusy}
-                      className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors disabled:opacity-40"
-                    >
-                      {keyBusy ? 'Removing…' : 'Remove key'}
-                    </button>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-1.5">
-                    <input
-                      type="password"
-                      data-testid="OpencodeProviderConfigModal.apiKey"
-                      placeholder="API key"
-                      value={apiKey}
-                      onChange={(e) => setApiKey(e.target.value)}
-                      className={`${inputClass} flex-1`}
-                    />
-                    <button
-                      data-testid="OpencodeProviderConfigModal.saveKey"
-                      onClick={() => void saveKey()}
-                      disabled={keyBusy || !id || !apiKey.trim()}
-                      className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                    >
-                      {keyBusy ? 'Saving…' : 'Save key'}
-                    </button>
-                  </div>
-                )}
-                {keyError && <div className="text-[10px] text-red-400 mt-0.5">{keyError}</div>}
-              </div>
-
-              <div className="space-y-1.5">
-                <div className="text-[10px] text-text-muted">Models (optional)</div>
-                {(row.models ?? []).map((m, idx) => {
-                  const modelId = m.id.trim()
-                  const capKey = `${row._key}/${idx}`
-                  const capsOpen = expandedCaps.has(capKey)
-                  const canEditCaps = id.length > 0 && modelId.length > 0
-                  return (
-                    <div
-                      key={idx}
-                      data-testid="OpencodeProviderConfigModal.modelRow"
-                      data-id={capKey}
-                      className="border border-border/20 rounded p-1.5 space-y-1"
-                    >
-                      <div className="flex items-center gap-1.5">
-                        <input
-                          type="text"
-                          placeholder="Model id (e.g. llama3.2)"
-                          value={m.id}
-                          onChange={(e) => updateModel(idx, { id: e.target.value })}
-                          className={`${inputClass} flex-1`}
-                        />
-                        <input
-                          type="text"
-                          placeholder="Display name"
-                          value={m.name ?? ''}
-                          onChange={(e) => updateModel(idx, { name: e.target.value })}
-                          className={`${inputClass} flex-1`}
-                        />
-                        <button
-                          type="button"
-                          data-testid="OpencodeProviderConfigModal.removeModel"
-                          data-id={capKey}
-                          onClick={() => removeModel(idx)}
-                          className="text-[10px] text-text-muted/60 hover:text-red-400 transition-colors px-1"
-                          title="Remove model"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                      {canEditCaps ? (
-                        <button
-                          type="button"
-                          data-testid="OpencodeProviderConfigModal.toggleCaps"
-                          data-id={capKey}
-                          onClick={() => toggleCaps(capKey)}
-                          className="text-[10px] text-accent hover:text-accent/80 transition-colors"
-                        >
-                          {capsOpen ? '▾ Capabilities' : '▸ Capabilities'}
-                        </button>
-                      ) : (
-                        <div className="text-[10px] text-text-muted/50">
-                          Set a provider id and model id to edit capabilities.
-                        </div>
-                      )}
-                      {canEditCaps && capsOpen && (
-                        <ModelCapabilityEditor providerId={id} modelId={modelId} />
-                      )}
-                    </div>
-                  )
-                })}
-                <button
-                  type="button"
-                  data-testid="OpencodeProviderConfigModal.addModel"
-                  onClick={addModel}
-                  className="text-[11px] text-accent hover:text-accent/80 transition-colors"
-                >
-                  + Add model
-                </button>
-              </div>
-            </>
-          )}
-        </div>
-
-        <div className="px-4 py-2.5 border-t border-border/50 flex items-center justify-between">
-          <div className="text-[10px] text-text-muted/60">Changes are saved as you type.</div>
-          <button
-            data-testid="OpencodeProviderConfigModal.done"
-            onClick={onClose}
-            className="px-3 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent transition-colors"
-          >
-            Done
-          </button>
-        </div>
       </div>
     </div>
   )
@@ -3014,28 +1584,19 @@ export function OpencodeProviderConfigModal({
 
 const OPENCODE_SCHEMA_DEFS = (opencodeConfigSchema as { $defs: SchemaDefs }).$defs
 const OPENCODE_CONFIG_NODE = OPENCODE_SCHEMA_DEFS.Config as SchemaNode
-/** The provider-model entry schema: $defs.ProviderConfig.properties.models.additionalProperties */
-const OPENCODE_MODEL_ENTRY_SCHEMA = (
-  ((OPENCODE_SCHEMA_DEFS.ProviderConfig as SchemaNode).properties as Record<string, SchemaNode>)
-    .models as SchemaNode
-).additionalProperties as SchemaNode
-/** Model capability fields the provider editor exposes (raw opencode names). */
-const MODEL_CAP_KEYS = [
-  'attachment',
-  'reasoning',
-  'temperature',
-  'tool_call',
-  'modalities',
-  'cost',
-  'limit'
-]
 
 /**
  * Top-level Config keys owned by a DEDICATED UI (rendered as read-only pointers in
  * the raw editor, never editable there). `provider` is patch-writable via the
  * per-model capability editor, but curated as a whole under Custom providers.
+ * The bulk of them are the curated Configuration panes (OpencodeConfigPanes.tsx);
+ * each label here must match that pane's Section label so the pointer is a
+ * usable direction and not just a "not here".
+ *
+ * Exported for the guard test: a key MISSPELLED here silently stays editable in
+ * the raw editor while its curated pane also writes it — two writers, one key.
  */
-const CONFIG_POINTER_KEYS: Record<string, string> = {
+export const CONFIG_POINTER_KEYS: Record<string, string> = {
   model: 'Models',
   small_model: 'Models',
   disabled_providers: 'Providers',
@@ -3043,117 +1604,48 @@ const CONFIG_POINTER_KEYS: Record<string, string> = {
   provider: 'Custom providers',
   agent: 'Agents',
   mcp: 'injected at spawn',
-  permission: 'Autonomy mode'
+  permission: 'Autonomy mode',
+  compaction: 'Session behavior',
+  subagent_depth: 'Session behavior',
+  snapshot: 'Session behavior',
+  tool_output: 'Tool output',
+  attachment: 'Image attachments',
+  instructions: 'Workspace',
+  default_agent: 'Workspace',
+  shell: 'Workspace',
+  watcher: 'Workspace',
+  tools: 'Tools & integrations',
+  formatter: 'Tools & integrations',
+  lsp: 'Tools & integrations',
+  plugin: 'Tools & integrations',
+  skills: 'Tools & integrations',
+  logLevel: 'Diagnostics',
+  experimental: 'Diagnostics',
+  autoupdate: 'Managed keys',
+  share: 'Managed keys'
 }
-/** Config keys the raw editor never renders as editable fields. */
-const CONFIG_EXCLUDED_KEYS = new Set(['$schema', ...Object.keys(CONFIG_POINTER_KEYS)])
-
 /**
- * Per-model capability editor. Reads the model's raw entry from opencode's config
- * file, edits it via the schema-driven form, and saves ONLY changed leaves through
- * patchOpencodeNative (e.g. ['provider','ec2','models','qwen3.6:27b','attachment']).
- * Composes with the projection writer (saveOpencodeSettings) that owns id/name —
- * both are leaf-scoped so neither clobbers the other.
+ * Keys rendered NOWHERE — not editable, not even as a pointer. `$schema` is not
+ * user config; `server.*` is overridden by the CLI flags OpencodeServerManager
+ * spawns with; `layout` and `autoshare` are deprecated upstream. Listing them as
+ * pointers would only imply a UI that owns them.
  */
-function ModelCapabilityEditor({
-  providerId,
-  modelId
-}: {
-  providerId: string
-  modelId: string
-}): React.JSX.Element {
-  const [original, setOriginal] = useState<Record<string, unknown> | null>(null)
-  const [draft, setDraft] = useState<Record<string, unknown>>({})
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [saved, setSaved] = useState(false)
-
-  const load = useCallback(() => {
-    window.api
-      .readOpencodeNativeRaw()
-      .then(({ config }) => {
-        const prov = (config.provider as Record<string, unknown> | undefined)?.[providerId] as
-          Record<string, unknown> | undefined
-        const models = prov?.models as Record<string, unknown> | undefined
-        const entry = (models?.[modelId] as Record<string, unknown> | undefined) ?? {}
-        setOriginal(entry)
-        setDraft(structuredClone(entry))
-      })
-      .catch(() => {
-        setOriginal({})
-        setDraft({})
-      })
-  }, [providerId, modelId])
-  useEffect(() => load(), [load])
-
-  if (original === null) {
-    return <div className="text-[10px] text-text-muted/60 px-1">Loading capabilities…</div>
-  }
-
-  const dirty = JSON.stringify(draft) !== JSON.stringify(original)
-  const handleSave = async (): Promise<void> => {
-    const patches = diffToPatches(original, draft, ['provider', providerId, 'models', modelId])
-    if (patches.length === 0) return
-    setSaving(true)
-    setError(null)
-    setSaved(false)
-    try {
-      await window.api.patchOpencodeNative(patches)
-      load()
-      setSaved(true)
-      setTimeout(() => setSaved(false), 1500)
-      useSessionStore.getState().reloadModels()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <div
-      data-testid="ModelCapabilityEditor"
-      data-id={`${providerId}/${modelId}`}
-      className="rounded bg-bg-primary/30 p-1.5 space-y-1"
-    >
-      <OpencodeSchemaForm
-        schema={OPENCODE_MODEL_ENTRY_SCHEMA}
-        defs={OPENCODE_SCHEMA_DEFS}
-        value={draft}
-        onChange={setDraft}
-        pickKeys={MODEL_CAP_KEYS}
-        keyPrefix={`${providerId}.${modelId}`}
-      />
-      <div className="flex items-center gap-2 px-1">
-        <button
-          type="button"
-          data-testid="ModelCapabilityEditor.save"
-          disabled={!dirty || saving}
-          onClick={() => void handleSave()}
-          className="px-2 py-1 text-[11px] rounded bg-accent/20 hover:bg-accent/30 text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-        >
-          {saving ? 'Saving…' : 'Save capabilities'}
-        </button>
-        {saved && <span className="text-[10px] text-success">Saved</span>}
-        {error && (
-          <span
-            data-testid="ModelCapabilityEditor.error"
-            className="text-[10px] text-red-400 truncate max-w-[240px]"
-            title={error}
-          >
-            {error}
-          </span>
-        )}
-      </div>
-    </div>
-  )
-}
+export const CONFIG_HIDDEN_KEYS = new Set(['$schema', 'layout', 'autoshare', 'server'])
+/** Config keys the raw editor never renders as editable fields. */
+const CONFIG_EXCLUDED_KEYS = new Set([...CONFIG_HIDDEN_KEYS, ...Object.keys(CONFIG_POINTER_KEYS)])
 
 /**
- * "Configuration (opencode.json)" — schema-driven editor over the top-level
- * opencode Config, EXCLUDING keys owned by dedicated UIs (rendered as pointers).
- * Loads the raw config on mount, accumulates edits locally, and on Save computes
- * a deep diff → leaf patches → patchOpencodeNative. ajv errors surface inline.
+ * "Raw config (opencode.json)" — schema-driven editor over the top-level
+ * opencode Config, EXCLUDING keys owned by dedicated UIs (rendered as pointers)
+ * and CONFIG_HIDDEN_KEYS (rendered nowhere). What's left is the long tail no
+ * curated pane covers: command, enterprise, mode, reference, references,
+ * username. Loads the raw config on mount, accumulates edits locally, and on
+ * Save computes a deep diff → leaf patches → patchOpencodeNative. ajv errors
+ * surface inline.
+ *
+ * Unlike the curated Configuration panes (OpencodeConfigPanes.tsx), this one
+ * keeps its explicit Save button: a generic form over arbitrary shapes has no
+ * per-field commit point to hang an immediate write on.
  */
 function OpencodeRawConfigSection(): React.JSX.Element {
   const installed = useOpencodeInstalled()
@@ -3180,29 +1672,23 @@ function OpencodeRawConfigSection(): React.JSX.Element {
   useEffect(() => load(), [load])
 
   if (installed === null || original === null) {
-    return (
-      <div
-        data-testid="OpencodeRawConfigSection"
-        className="px-3 py-1.5 text-[13px] text-text-muted"
-      >
-        Loading…
-      </div>
-    )
+    return <SettingRow testid="OpencodeRawConfigSection" description="Loading…" />
   }
   if (!installed) {
     return (
-      <div
-        data-testid="OpencodeRawConfigSection"
-        className="px-3 py-2 text-[12px] text-text-muted/70 leading-relaxed"
-      >
-        opencode is not installed. This edits opencode&apos;s own config file.
-      </div>
+      <SettingRow
+        testid="OpencodeRawConfigSection"
+        dimmed
+        description="opencode is not installed. This edits opencode's own config file."
+      />
     )
   }
 
   const configProps = (OPENCODE_CONFIG_NODE.properties as Record<string, SchemaNode>) ?? {}
   const pickKeys = Object.keys(configProps).filter((k) => !CONFIG_EXCLUDED_KEYS.has(k))
-  const pointerKeys = Object.keys(configProps).filter((k) => k in CONFIG_POINTER_KEYS)
+  const pointerKeys = Object.keys(configProps).filter(
+    (k) => k in CONFIG_POINTER_KEYS && !CONFIG_HIDDEN_KEYS.has(k)
+  )
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(original)
   const handleSave = async (): Promise<void> => {
@@ -3226,14 +1712,10 @@ function OpencodeRawConfigSection(): React.JSX.Element {
   }
 
   return (
-    <div
-      data-testid="OpencodeRawConfigSection"
-      className="px-3 py-1.5 space-y-2 text-[13px] text-text-secondary"
-    >
-      <div className="text-[10px] text-text-muted/60 leading-relaxed">
-        Edit opencode&apos;s own config file directly ({filePath || 'opencode.jsonc'}). Saves touch
-        only the fields you change — comments and keys not listed here are preserved.
-      </div>
+    <div data-testid="OpencodeRawConfigSection" className="divide-y divide-border/55">
+      <SettingRow
+        description={`Edits opencode's own config file directly (${filePath || 'opencode.jsonc'}); a save touches only the fields you change and keeps comments and unlisted keys.`}
+      />
       <OpencodeSchemaForm
         schema={OPENCODE_CONFIG_NODE}
         defs={OPENCODE_SCHEMA_DEFS}
@@ -3241,42 +1723,34 @@ function OpencodeRawConfigSection(): React.JSX.Element {
         onChange={setDraft}
         pickKeys={pickKeys}
       />
-      {pointerKeys.length > 0 && (
-        <div className="border-t border-border/20 pt-1.5 space-y-0.5">
-          {pointerKeys.map((k) => (
-            <div
-              key={k}
-              data-testid="OpencodeRawConfigSection.pointer"
-              data-id={k}
-              className="flex items-center justify-between text-[10px] text-text-muted/60 px-3"
-            >
-              <span className="font-mono text-text-muted">{k}</span>
-              <span>managed in {CONFIG_POINTER_KEYS[k]}</span>
-            </div>
-          ))}
-        </div>
-      )}
-      <div className="flex items-center gap-2 px-3 pt-1">
-        <button
-          type="button"
-          data-testid="OpencodeRawConfigSection.save"
+      {/* Keys this editor deliberately does not own: each names the page that
+          does. Dimmed rows, not links — a pointer is information (ADR-065). */}
+      {pointerKeys.map((k) => (
+        <SettingRow
+          key={k}
+          testid="OpencodeRawConfigSection.pointer"
+          dataId={k}
+          dimmed
+          label={k}
+          labelClassName="font-mono text-[12px] text-text-primary"
+          description={`Managed in ${CONFIG_POINTER_KEYS[k]}.`}
+        />
+      ))}
+      <SettingRow
+        label="Save changes"
+        description={saved ? 'Saved.' : dirty ? 'Unsaved edits above.' : 'Nothing to save.'}
+        error={error ?? undefined}
+        errorTestid="OpencodeRawConfigSection.error"
+      >
+        <Button
+          variant="primary"
+          testid="OpencodeRawConfigSection.save"
           disabled={!dirty || saving}
           onClick={() => void handleSave()}
-          className="px-2.5 py-1 text-[11px] font-medium text-accent hover:text-accent-hover bg-accent/10 hover:bg-accent/15 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         >
           {saving ? 'Saving…' : 'Save'}
-        </button>
-        {saved && <span className="text-[11px] text-success">Saved</span>}
-        {error && (
-          <span
-            data-testid="OpencodeRawConfigSection.error"
-            className="text-[11px] text-red-400 truncate max-w-[360px]"
-            title={error}
-          >
-            {error}
-          </span>
-        )}
-      </div>
+        </Button>
+      </SettingRow>
     </div>
   )
 }
@@ -3318,6 +1792,7 @@ export const SECTIONS: Section[] = [
           <SettingsSelect
             testid="SettingsTheme"
             label="Theme"
+            {...appDefault(s, u, 'theme')}
             value={s.theme}
             options={[
               { value: 'dark' as const, label: 'Dark' },
@@ -3335,6 +1810,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSlider
             label="UI font size"
+            {...appDefault(s, u, 'uiFontScale')}
             value={s.uiFontScale}
             min={1}
             max={1.5}
@@ -3351,6 +1827,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSlider
             label="Chat font size"
+            {...appDefault(s, u, 'chatFontScale')}
             value={s.chatFontScale}
             min={1}
             max={1.5}
@@ -3367,6 +1844,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSelect
             label="Mermaid diagram theme"
+            {...appDefault(s, u, 'mermaidTheme')}
             value={s.mermaidTheme}
             options={[
               { value: 'auto' as const, label: 'Auto' },
@@ -3406,6 +1884,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSelect
             label="Chat width"
+            {...appDefault(s, u, 'chatWidthMode')}
             value={s.chatWidthMode}
             options={[
               { value: 'px' as const, label: 'Pixels' },
@@ -3424,6 +1903,7 @@ export const SECTIONS: Section[] = [
             <SettingsSlider
               label="Width"
               value={s.chatWidthPx}
+              {...appDefault(s, u, 'chatWidthPx')}
               min={500}
               max={3420}
               step={10}
@@ -3434,6 +1914,7 @@ export const SECTIONS: Section[] = [
             <SettingsSlider
               label="Width"
               value={s.chatWidthPercent}
+              {...appDefault(s, u, 'chatWidthPercent')}
               min={60}
               max={100}
               step={1}
@@ -3449,6 +1930,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSlider
             label="Recent sessions"
+            {...appDefault(s, u, 'maxRecentSessions')}
             value={s.maxRecentSessions}
             min={1}
             max={10}
@@ -3484,12 +1966,13 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSelect
             label="Idle timeout"
+            {...appDefault(s, u, 'sessionTimeoutMins')}
             value={String(s.sessionTimeoutMins)}
             options={[
-              { value: '5', label: '5 min' },
-              { value: '15', label: '15 min' },
-              { value: '30', label: '30 min' },
-              { value: '60', label: '1 hour' },
+              { value: '5', label: '5m' },
+              { value: '15', label: '15m' },
+              { value: '30', label: '30m' },
+              { value: '60', label: '1h' },
               { value: '0', label: 'Never' }
             ]}
             onChange={(v) => u({ sessionTimeoutMins: Number(v) })}
@@ -3531,6 +2014,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsToggle
             label="Expand tool calls"
+            {...appDefault(s, u, 'expandToolCalls')}
             checked={s.expandToolCalls}
             onChange={(v) => u({ expandToolCalls: v })}
           />
@@ -3540,16 +2024,19 @@ export const SECTIONS: Section[] = [
         key: 'expandReadResults',
         label: 'Include read results',
         keywords: 'file content tool',
+        // Dependent rows nest exactly one level and stay READABLE when
+        // disabled (ADR-065) — the old 40%-opacity wrapper did not.
         render: (s, u) => (
-          <div className={s.expandToolCalls ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="pl-4">
-              <SettingsToggle
-                label="Include read results"
-                checked={s.expandReadResults}
-                onChange={(v) => u({ expandReadResults: v })}
-              />
-            </div>
-          </div>
+          <SettingsToggle
+            label="Include read results"
+            {...appDefault(s, u, 'expandReadResults')}
+            description="File contents of Read calls, inside the expanded call."
+            checked={s.expandReadResults}
+            onChange={(v) => u({ expandReadResults: v })}
+            indent
+            dimmed={!s.expandToolCalls}
+            disabled={!s.expandToolCalls}
+          />
         )
       },
       {
@@ -3559,6 +2046,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsToggle
             label="Hide tool input"
+            {...appDefault(s, u, 'hideToolInput')}
             checked={s.hideToolInput}
             onChange={(v) => u({ hideToolInput: v })}
           />
@@ -3571,6 +2059,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsToggle
             label="Expand thinking"
+            {...appDefault(s, u, 'expandThinking')}
             checked={s.expandThinking}
             onChange={(v) => u({ expandThinking: v })}
           />
@@ -3583,6 +2072,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSlider
             label="Max output chars"
+            {...appDefault(s, u, 'toolOutputMaxChars')}
             value={s.toolOutputMaxChars}
             min={500}
             max={50000}
@@ -3620,6 +2110,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsToggle
             label="Split diff view"
+            {...appDefault(s, u, 'diffViewSplit')}
             checked={s.diffViewSplit}
             onChange={(v) => u({ diffViewSplit: v })}
           />
@@ -3632,6 +2123,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsToggle
             label="Ignore whitespace"
+            {...appDefault(s, u, 'diffIgnoreWhitespace')}
             checked={s.diffIgnoreWhitespace}
             onChange={(v) => u({ diffIgnoreWhitespace: v })}
           />
@@ -3644,6 +2136,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsToggle
             label="Wrap lines"
+            {...appDefault(s, u, 'diffWrapLines')}
             checked={s.diffWrapLines}
             onChange={(v) => u({ diffWrapLines: v })}
           />
@@ -3678,6 +2171,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSelect
             label="Default commit"
+            {...appDefault(s, u, 'gitCommitMode')}
             value={s.gitCommitMode}
             options={[
               { value: 'commit' as const, label: 'Commit' },
@@ -3694,6 +2188,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSelect
             label="Panel layout"
+            {...appDefault(s, u, 'gitPanelLayout')}
             value={s.gitPanelLayout}
             options={[
               { value: 'single' as const, label: 'Single' },
@@ -3733,6 +2228,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSelect
             label="Alignment"
+            {...appDefault(s, u, 'statusLineAlign')}
             value={s.statusLineAlign}
             options={[
               { value: 'left' as const, label: 'Left' },
@@ -3748,20 +2244,21 @@ export const SECTIONS: Section[] = [
         label: 'Status line template',
         keywords: 'format tokens cost context',
         render: (s, u) => (
-          <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-            <div className="mb-1">Template</div>
-            <input
-              type="text"
+          <SettingRow
+            testid="StatusLineTemplateSetting"
+            {...appDefault(s, u, 'statusLineTemplate')}
+            layout="stacked"
+            label="Template"
+            description="Tokens: {in} {out} {total} · Cost: {cost} · Context: {used} {remaining} · Lines: {lines+} {lines-} · Time: {duration}"
+          >
+            <TextField
+              className="w-full"
+              testid="StatusLineTemplateSetting.input"
               value={s.statusLineTemplate}
-              onChange={(e) => u({ statusLineTemplate: e.target.value })}
-              className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
+              onChange={(v) => u({ statusLineTemplate: v })}
               placeholder="{in} / {out} / {total} · {used}%"
             />
-            <div className="text-[9px] text-text-muted/60 mt-0.5">
-              Tokens: {'{in} {out} {total}'} · Cost: {'{cost}'} · Context: {'{used} {remaining}'} ·
-              Lines: {'{lines+} {lines-}'} · Time: {'{duration}'}
-            </div>
-          </div>
+          </SettingRow>
         )
       }
     ]
@@ -3789,23 +2286,19 @@ export const SECTIONS: Section[] = [
         label: 'API polling interval',
         keywords: 'polling rate limit 5hr refresh update frequency api',
         render: (s, u) => (
-          <div>
-            <SettingsSlider
-              label="API polling interval"
-              value={s.usageRefreshSecs}
-              min={60}
-              max={3600}
-              step={60}
-              onChange={(v) => u({ usageRefreshSecs: v })}
-              formatValue={(v) =>
-                v >= 60 ? `${Math.floor(v / 60)}m${v % 60 ? ` ${v % 60}s` : ''}` : `${v}s`
-              }
-            />
-            <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-              How often to call the usage API for detailed plan data. Rate limits update in
-              real-time from inference headers.
-            </div>
-          </div>
+          <SettingsSlider
+            label="API polling interval"
+            {...appDefault(s, u, 'usageRefreshSecs')}
+            description="How often to call the usage API for detailed plan data. Rate limits update in real-time from inference headers."
+            value={s.usageRefreshSecs}
+            min={60}
+            max={3600}
+            step={60}
+            onChange={(v) => u({ usageRefreshSecs: v })}
+            formatValue={(v) =>
+              v >= 60 ? `${Math.floor(v / 60)}m${v % 60 ? ` ${v % 60}s` : ''}` : `${v}s`
+            }
+          />
         )
       },
       {
@@ -3813,20 +2306,17 @@ export const SECTIONS: Section[] = [
         label: 'Analytics refresh interval',
         keywords: 'analytics token recalculate jsonl refresh block usage',
         render: (s, u) => (
-          <div>
-            <SettingsSlider
-              label="Analytics refresh interval"
-              value={s.analyticsRefreshSecs}
-              min={10}
-              max={120}
-              step={5}
-              onChange={(v) => u({ analyticsRefreshSecs: v })}
-              formatValue={(v) => `${v}s`}
-            />
-            <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-              How often to recalculate token analytics from session transcripts.
-            </div>
-          </div>
+          <SettingsSlider
+            label="Analytics refresh interval"
+            {...appDefault(s, u, 'analyticsRefreshSecs')}
+            description="How often to recalculate token analytics from session transcripts."
+            value={s.analyticsRefreshSecs}
+            min={10}
+            max={120}
+            step={5}
+            onChange={(v) => u({ analyticsRefreshSecs: v })}
+            formatValue={(v) => `${v}s`}
+          />
         )
       }
     ]
@@ -3860,6 +2350,7 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsSelect
             label="Log level"
+            {...appDefault(s, u, 'logLevel')}
             value={s.logLevel}
             options={[
               { value: 'debug' as const, label: 'Debug' },
@@ -3876,26 +2367,21 @@ export const SECTIONS: Section[] = [
         label: 'Source filter',
         keywords: 'debug log filter sources verbose',
         render: (s, u) => (
-          <div className="px-3 py-1.5">
-            <div className="text-[13px] text-text-secondary mb-1.5">Per-source overrides</div>
-            <input
-              type="text"
+          <SettingRow
+            testid="LogFilterSetting"
+            {...appDefault(s, u, 'logFilter')}
+            layout="stacked"
+            label="Per-source overrides"
+            description="Comma-separated. A bare name enables debug for that source; use source:level for an explicit one. Logs are written to ~/.claude/ui/logs/."
+          >
+            <TextField
+              className="w-full"
+              testid="LogFilterSetting.input"
               value={s.logFilter}
-              onChange={(e) => u({ logFilter: e.target.value })}
-              className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[12px] font-mono text-text-secondary outline-none focus:border-accent/50 transition-colors"
+              onChange={(v) => u({ logFilter: v })}
               placeholder="UsageFetcher,BlockUsage:debug"
-              spellCheck={false}
             />
-            <div className="text-[10px] text-text-muted/60 mt-1.5 space-y-0.5">
-              <div>Comma-separated. Bare names enable debug for that source.</div>
-              <div>
-                Use <span className="font-mono">source:level</span> for explicit levels.
-              </div>
-              <div>
-                Logs are written to <span className="font-mono">~/.claude/ui/logs/</span>
-              </div>
-            </div>
-          </div>
+          </SettingRow>
         )
       }
     ]
@@ -3926,17 +2412,13 @@ export const SECTIONS: Section[] = [
         label: 'Enable voice input',
         keywords: 'voice microphone speech dictation audio',
         render: (s, u) => (
-          <div>
-            <SettingsToggle
-              label="Enable voice input"
-              checked={s.voiceEnabled}
-              onChange={(v) => u({ voiceEnabled: v })}
-              tooltip="Show a microphone button in the input box. Hold to record, release to transcribe."
-            />
-            <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-              Hold the mic button to dictate messages
-            </div>
-          </div>
+          <SettingsToggle
+            label="Enable voice input"
+            {...appDefault(s, u, 'voiceEnabled')}
+            description="Shows a microphone button in the input box. Hold to record, release to transcribe."
+            checked={s.voiceEnabled}
+            onChange={(v) => u({ voiceEnabled: v })}
+          />
         )
       },
       {
@@ -3944,17 +2426,21 @@ export const SECTIONS: Section[] = [
         label: 'Voice language',
         keywords: 'voice language speech locale',
         render: (s, u) => (
-          <div className={s.voiceEnabled ? '' : 'opacity-40 pointer-events-none'}>
-            <div className="px-3 py-1.5 text-[13px] text-text-secondary">
-              <div className="mb-1">Language</div>
-              <SelectMenu
-                testid="VoiceLanguageSetting.language"
-                value={s.voiceLanguage}
-                onChange={(v) => u({ voiceLanguage: v as VoiceLanguageCode })}
-                options={VOICE_LANGUAGES.map((lang) => ({ value: lang.code, label: lang.label }))}
-              />
-            </div>
-          </div>
+          <SettingRow
+            testid="VoiceLanguageSetting"
+            {...appDefault(s, u, 'voiceLanguage')}
+            label="Language"
+            description="What the transcriber expects to hear."
+            dimmed={!s.voiceEnabled}
+          >
+            <SelectField
+              testid="VoiceLanguageSetting.language"
+              value={s.voiceLanguage}
+              disabled={!s.voiceEnabled}
+              onChange={(v) => u({ voiceLanguage: v as VoiceLanguageCode })}
+              options={VOICE_LANGUAGES.map((lang) => ({ value: lang.code, label: lang.label }))}
+            />
+          </SettingRow>
         )
       }
     ]
@@ -3993,12 +2479,33 @@ export const SECTIONS: Section[] = [
           />
         )
       },
+      // Four items, one per Remote-access group (ADR-065 phase 3B). The item
+      // key `remoteServerConfig` predates the split and stays, so the deep
+      // links and the inventory guard that name it keep resolving.
       {
         key: 'remoteServerConfig',
         label: 'Remote server',
+        keywords: 'remote port autostart bind interface server listen tailscale https tls',
+        render: () => <RemoteServerSection />
+      },
+      {
+        key: 'remoteAccess',
+        label: 'Remote terminal and VS Code',
+        keywords: 'remote terminal shell vs code ide cli path license serve-web',
+        render: () => <RemoteAccessSection />
+      },
+      {
+        key: 'remoteSecurity',
+        label: 'Sign-in and passkeys',
         keywords:
-          'remote port password autostart bind interface server passkey webauthn biometric fingerprint face authentication sign-in enroll device credential',
-        render: () => <RemoteServerSettings />
+          'remote password passkey webauthn biometric fingerprint face authentication sign-in enroll device credential step-up session security break-glass',
+        render: () => <RemoteSecuritySection />
+      },
+      {
+        key: 'remoteLinks',
+        label: 'Access links',
+        keywords: 'remote access links url qr code rotate status connected devices tunnel',
+        render: () => <RemoteLinksSection />
       }
     ]
   },
@@ -4060,6 +2567,39 @@ export const SECTIONS: Section[] = [
     ]
   },
   {
+    // The classifier trust lists, ONCE for every engine (ADR-065 phase 4).
+    // Its own section rather than three rows inside each engine's auto-mode
+    // pane: they are stored in one shared file and derived into whichever
+    // engine's judge runs, so an engine-scoped home would misdescribe them.
+    id: 'trust-lists',
+    label: 'Trust & protection',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        <line x1="12" y1="8" x2="12" y2="12" />
+        <line x1="12" y1="16" x2="12.01" y2="16" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'trustLists',
+        label: 'Trust & protection',
+        keywords:
+          'trusted domains registries production protected patterns judge auto mode classifier supply chain hosts allowlist',
+        render: () => <TrustListsSection />
+      }
+    ]
+  },
+  {
     id: 'accounts',
     label: 'Accounts',
     icon: (
@@ -4117,34 +2657,6 @@ export const SECTIONS: Section[] = [
     ]
   },
   {
-    id: 'vendor-opencode',
-    label: 'Providers',
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <circle cx="12" cy="12" r="3" />
-        <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'vendorOpencodeAuth',
-        label: 'Providers & models',
-        keywords:
-          'opencode provider add auth api key oauth login openai google anthropic openrouter model allowlist enable disable',
-        render: () => <VendorOpencodeSection />
-      }
-    ]
-  },
-  {
     id: 'mockup',
     label: 'Mockups',
     icon: (
@@ -4171,13 +2683,13 @@ export const SECTIONS: Section[] = [
         render: (s, u) => (
           <SettingsTextarea
             label="Network allowlist"
+            {...appDefault(s, u, 'mockupConnectAllowlist')}
             value={s.mockupConnectAllowlist}
             onChange={(v) => u({ mockupConnectAllowlist: v })}
             placeholder={'api.openweathermap.org\n*.my-startup.com'}
             rows={4}
             monospace
-            tooltip="Extends the mockup iframe's CSP connect-src directive. By default mockups can only talk to the pinned CDN allowlist (jsDelivr, cdnjs, Tailwind Play, unpkg, jQuery) plus their own origin. Add one origin per line to permit additional fetch/XHR/WebSocket targets."
-            description="One origin per line (no scheme prefix needed, no quotes). Only turn this on for endpoints you trust — a compromised or prompt-injected mockup could exfiltrate to entries on this list."
+            description="Extends the iframe's CSP connect-src, which otherwise allows only the pinned CDNs and the mockup's own origin. One origin per line, no scheme and no quotes. Add only endpoints you trust — a prompt-injected mockup could exfiltrate to anything on this list."
           />
         )
       },
@@ -4186,17 +2698,13 @@ export const SECTIONS: Section[] = [
         label: 'Allow plaintext (http://) connections',
         keywords: 'mockup http plaintext insecure localhost',
         render: (s, u) => (
-          <div>
-            <SettingsToggle
-              label="Allow plaintext (http:// & ws://) connections"
-              checked={s.mockupAllowHttp}
-              onChange={(v) => u({ mockupAllowHttp: v })}
-              tooltip="When on, mockups may fetch from http:// and ws:// URLs in addition to https:// / wss://. Useful for demoing local APIs (http://localhost:8080) or legacy internal services without TLS. Off by default."
-            />
-            <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-              Needed for localhost APIs and legacy non-TLS services
-            </div>
-          </div>
+          <SettingsToggle
+            label="Allow plaintext (http:// & ws://) connections"
+            {...appDefault(s, u, 'mockupAllowHttp')}
+            description="Lets a mockup reach http:// and ws:// URLs as well as TLS ones — needed for localhost APIs and legacy internal services."
+            checked={s.mockupAllowHttp}
+            onChange={(v) => u({ mockupAllowHttp: v })}
+          />
         )
       },
       {
@@ -4204,10 +2712,10 @@ export const SECTIONS: Section[] = [
         label: 'Mockup security info',
         keywords: 'mockup info csp security',
         render: () => (
-          <div className="px-3 py-1.5 text-[11px] text-text-muted/60 leading-relaxed">
-            Mockups render in a sandboxed iframe on a per-mockup origin. Changes apply when the
-            mockup is next loaded or reloaded — open mockups keep the CSP they were served with.
-          </div>
+          <SettingRow
+            testid="MockupSecurityNote"
+            description="Mockups render in a sandboxed iframe on a per-mockup origin. Changes apply when the mockup is next loaded or reloaded — open mockups keep the CSP they were served with."
+          />
         )
       }
     ]
@@ -4238,17 +2746,13 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div>
-              <SettingsToggle
-                label="Command sandbox"
-                checked={sb.enabled}
-                onChange={(v) => ue({ sandbox: { ...sb, enabled: v } })}
-                tooltip="Uses macOS sandbox-exec (Seatbelt profiles) or Linux bubblewrap (bwrap) to restrict filesystem and process access. Commands run in a sandboxed shell with deny-by-default policies. Only macOS and Linux are supported — Windows is not."
-              />
-              <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                Run bash commands in an isolated environment
-              </div>
-            </div>
+            <SettingsToggle
+              testid="ClaudeSandbox.enabled"
+              label="Command sandbox"
+              description="Runs shell commands in an isolated environment — macOS sandbox-exec or Linux bubblewrap, deny-by-default. Not available on Windows."
+              checked={sb.enabled}
+              onChange={(v) => ue({ sandbox: { ...sb, enabled: v } })}
+            />
           )
         }
       },
@@ -4259,19 +2763,16 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4">
-                <SettingsToggle
-                  label="Auto-approve sandboxed commands"
-                  checked={sb.autoAllowBashIfSandboxed}
-                  onChange={(v) => ue({ sandbox: { ...sb, autoAllowBashIfSandboxed: v } })}
-                  tooltip="When enabled, bash commands that run inside the sandbox are automatically approved without prompting. Commands matching deny or ask permission rules are still blocked. This is the main UX benefit of sandbox mode."
-                />
-                <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                  Skip permission prompts for sandboxed bash
-                </div>
-              </div>
-            </div>
+            <SettingsToggle
+              testid="ClaudeSandbox.autoAllow"
+              label="Auto-approve sandboxed commands"
+              description="Skips the permission prompt for bash that runs inside the sandbox, though deny and ask rules still block it."
+              checked={sb.autoAllowBashIfSandboxed}
+              onChange={(v) => ue({ sandbox: { ...sb, autoAllowBashIfSandboxed: v } })}
+              indent
+              dimmed={!sb.enabled}
+              disabled={!sb.enabled}
+            />
           )
         }
       },
@@ -4282,19 +2783,16 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4">
-                <SettingsToggle
-                  label="Allow unsandboxed escape"
-                  checked={sb.allowUnsandboxedCommands}
-                  onChange={(v) => ue({ sandbox: { ...sb, allowUnsandboxedCommands: v } })}
-                  tooltip="When a sandboxed command fails due to restrictions, the model can retry it outside the sandbox. You'll still be prompted to approve the unsandboxed execution. Disable this to enforce strict sandbox-only execution."
-                />
-                <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                  Let the model retry outside sandbox on failure
-                </div>
-              </div>
-            </div>
+            <SettingsToggle
+              testid="ClaudeSandbox.allowUnsandboxed"
+              label="Allow unsandboxed escape"
+              description="Lets the model retry a command outside the sandbox when the restrictions make it fail, with a permission prompt each time."
+              checked={sb.allowUnsandboxedCommands}
+              onChange={(v) => ue({ sandbox: { ...sb, allowUnsandboxedCommands: v } })}
+              indent
+              dimmed={!sb.enabled}
+              disabled={!sb.enabled}
+            />
           )
         }
       },
@@ -4305,21 +2803,18 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4">
-                <SettingsToggle
-                  label="Allow local port binding"
-                  checked={sb.network.allowLocalBinding}
-                  onChange={(v) =>
-                    ue({ sandbox: { ...sb, network: { ...sb.network, allowLocalBinding: v } } })
-                  }
-                  tooltip="Lets processes inside the sandbox listen on localhost ports (e.g. webpack-dev-server, vite, flask). Without this, dev servers started by the model will fail to bind."
-                />
-                <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                  Allow sandboxed processes to bind to local ports
-                </div>
-              </div>
-            </div>
+            <SettingsToggle
+              testid="ClaudeSandbox.localBinding"
+              label="Allow local port binding"
+              description="Lets sandboxed processes listen on localhost ports, which dev servers like vite and flask need to start."
+              checked={sb.network.allowLocalBinding}
+              onChange={(v) =>
+                ue({ sandbox: { ...sb, network: { ...sb.network, allowLocalBinding: v } } })
+              }
+              indent
+              dimmed={!sb.enabled}
+              disabled={!sb.enabled}
+            />
           )
         }
       },
@@ -4330,21 +2825,18 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4">
-                <SettingsToggle
-                  label="Restrict network access"
-                  checked={sb.network.restrictNetwork}
-                  onChange={(v) =>
-                    ue({ sandbox: { ...sb, network: { ...sb.network, restrictNetwork: v } } })
-                  }
-                  tooltip="When enabled, sandboxed commands can only reach explicitly whitelisted domains via a local proxy. All other network access is blocked. When disabled, sandboxed commands have unrestricted network access."
-                />
-                <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                  Only allow connections to whitelisted domains
-                </div>
-              </div>
-            </div>
+            <SettingsToggle
+              testid="ClaudeSandbox.restrictNetwork"
+              label="Restrict network access"
+              description="Blocks every outbound connection except the domains listed below; off leaves the sandbox's network open."
+              checked={sb.network.restrictNetwork}
+              onChange={(v) =>
+                ue({ sandbox: { ...sb, network: { ...sb.network, restrictNetwork: v } } })
+              }
+              indent
+              dimmed={!sb.enabled}
+              disabled={!sb.enabled}
+            />
           )
         }
       },
@@ -4355,24 +2847,20 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div
-              className={
-                sb.enabled && sb.network.restrictNetwork ? '' : 'opacity-40 pointer-events-none'
+            <SandboxListSetting
+              testid="ClaudeSandbox.allowedDomains"
+              label="Allowed domains"
+              labelColor="text-text-primary"
+              description="Domains sandboxed commands may reach, wildcards like *.npmjs.org included; empty blocks all outbound traffic."
+              items={sb.network.allowedDomains}
+              placeholder="e.g. registry.npmjs.org"
+              onUpdate={(items) =>
+                ue({ sandbox: { ...sb, network: { ...sb.network, allowedDomains: items } } })
               }
-            >
-              <div className="pl-8">
-                <SandboxListSetting
-                  label="Allowed domains"
-                  labelColor="text-success"
-                  items={sb.network.allowedDomains}
-                  placeholder="e.g. registry.npmjs.org"
-                  onUpdate={(items) =>
-                    ue({ sandbox: { ...sb, network: { ...sb.network, allowedDomains: items } } })
-                  }
-                  tooltip="Domains that sandboxed commands can reach. Supports wildcards like *.npmjs.org. Traffic is routed through a local HTTP/SOCKS proxy. Leave empty to block all outbound network access."
-                />
-              </div>
-            </div>
+              indent
+              dimmed={!(sb.enabled && sb.network.restrictNetwork)}
+              disabled={!(sb.enabled && sb.network.restrictNetwork)}
+            />
           )
         }
       },
@@ -4383,27 +2871,20 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div
-              className={
-                sb.enabled && sb.network.restrictNetwork ? '' : 'opacity-40 pointer-events-none'
+            <SettingsToggle
+              testid="ClaudeSandbox.managedDomainsOnly"
+              label="Managed domains only"
+              description="An enterprise policy that honours only the domains from managed settings and ignores the user, project and local ones."
+              checked={sb.network.allowManagedDomainsOnly}
+              onChange={(v) =>
+                ue({
+                  sandbox: { ...sb, network: { ...sb.network, allowManagedDomainsOnly: v } }
+                })
               }
-            >
-              <div className="pl-8">
-                <SettingsToggle
-                  label="Managed domains only"
-                  checked={sb.network.allowManagedDomainsOnly}
-                  onChange={(v) =>
-                    ue({
-                      sandbox: { ...sb, network: { ...sb.network, allowManagedDomainsOnly: v } }
-                    })
-                  }
-                  tooltip="Enterprise feature. When enabled, only allowedDomains from managed settings and WebFetch(domain:...) allow rules from managed settings are used. Domains from user, project, local, and flag settings are ignored. Denied domains are still respected from all sources."
-                />
-                <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                  Ignore user/project domain settings, only respect managed policy
-                </div>
-              </div>
-            </div>
+              indent
+              dimmed={!(sb.enabled && sb.network.restrictNetwork)}
+              disabled={!(sb.enabled && sb.network.restrictNetwork)}
+            />
           )
         }
       },
@@ -4414,21 +2895,18 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4">
-                <SettingsToggle
-                  label="Allow all Unix sockets"
-                  checked={sb.network.allowAllUnixSockets}
-                  onChange={(v) =>
-                    ue({ sandbox: { ...sb, network: { ...sb.network, allowAllUnixSockets: v } } })
-                  }
-                  tooltip="Disables Unix socket blocking on both macOS and Linux. This grants access to all Unix sockets including the Docker socket, which effectively gives full host access. Only enable if you trust the commands being run."
-                />
-                <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                  Disable Unix socket blocking (allows Docker, etc.)
-                </div>
-              </div>
-            </div>
+            <SettingsToggle
+              testid="ClaudeSandbox.allowAllUnixSockets"
+              label="Allow all Unix sockets"
+              description="Unblocks every Unix socket including Docker's, which hands sandboxed commands full host access."
+              checked={sb.network.allowAllUnixSockets}
+              onChange={(v) =>
+                ue({ sandbox: { ...sb, network: { ...sb.network, allowAllUnixSockets: v } } })
+              }
+              indent
+              dimmed={!sb.enabled}
+              disabled={!sb.enabled}
+            />
           )
         }
       },
@@ -4439,26 +2917,20 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div
-              className={
-                sb.enabled && !sb.network.allowAllUnixSockets
-                  ? ''
-                  : 'opacity-40 pointer-events-none'
+            <SandboxListSetting
+              testid="ClaudeSandbox.unixSockets"
+              label="Unix socket paths"
+              labelColor="text-text-primary"
+              description="The socket paths sandboxed commands may open on macOS; Linux filters with seccomp, which cannot match a path."
+              items={sb.network.allowUnixSockets}
+              placeholder="e.g. /var/run/docker.sock"
+              onUpdate={(items) =>
+                ue({ sandbox: { ...sb, network: { ...sb.network, allowUnixSockets: items } } })
               }
-            >
-              <div className="pl-8">
-                <SandboxListSetting
-                  label="Unix socket paths"
-                  labelColor="text-warning"
-                  items={sb.network.allowUnixSockets}
-                  placeholder="e.g. /var/run/docker.sock"
-                  onUpdate={(items) =>
-                    ue({ sandbox: { ...sb, network: { ...sb.network, allowUnixSockets: items } } })
-                  }
-                  tooltip="macOS only — specific Unix socket paths to allow. Linux uses seccomp which cannot filter by path. Allowing /var/run/docker.sock grants full host access through the Docker API."
-                />
-              </div>
-            </div>
+              indent
+              dimmed={!(sb.enabled && !sb.network.allowAllUnixSockets)}
+              disabled={!(sb.enabled && !sb.network.allowAllUnixSockets)}
+            />
           )
         }
       },
@@ -4469,22 +2941,22 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4">
-                <SandboxListSetting
-                  label="Additional write paths"
-                  labelColor="text-success"
-                  items={sb.filesystem.allowWrite}
-                  placeholder="e.g. /usr/local/bin"
-                  onUpdate={(items) =>
-                    ue({
-                      sandbox: { ...sb, filesystem: { ...sb.filesystem, allowWrite: items } }
-                    })
-                  }
-                  tooltip="Paths outside the project directory where sandboxed commands can write files. The project directory and $TMPDIR are always writable."
-                />
-              </div>
-            </div>
+            <SandboxListSetting
+              testid="ClaudeSandbox.allowWrite"
+              label="Additional write paths"
+              labelColor="text-text-primary"
+              description="Paths outside the project directory that sandboxed commands may write to."
+              items={sb.filesystem.allowWrite}
+              placeholder="e.g. /usr/local/bin"
+              onUpdate={(items) =>
+                ue({
+                  sandbox: { ...sb, filesystem: { ...sb.filesystem, allowWrite: items } }
+                })
+              }
+              indent
+              dimmed={!sb.enabled}
+              disabled={!sb.enabled}
+            />
           )
         }
       },
@@ -4495,22 +2967,22 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4">
-                <SandboxListSetting
-                  label="Read-only paths"
-                  labelColor="text-warning"
-                  items={sb.filesystem.denyWrite}
-                  placeholder="e.g. /etc"
-                  onUpdate={(items) =>
-                    ue({
-                      sandbox: { ...sb, filesystem: { ...sb.filesystem, denyWrite: items } }
-                    })
-                  }
-                  tooltip="Paths that should be read-only even within writable areas. Useful for protecting config files or build artifacts from accidental modification."
-                />
-              </div>
-            </div>
+            <SandboxListSetting
+              testid="ClaudeSandbox.denyWrite"
+              label="Read-only paths"
+              labelColor="text-text-primary"
+              description="Paths that stay read-only even when they sit inside a writable area."
+              items={sb.filesystem.denyWrite}
+              placeholder="e.g. /etc"
+              onUpdate={(items) =>
+                ue({
+                  sandbox: { ...sb, filesystem: { ...sb.filesystem, denyWrite: items } }
+                })
+              }
+              indent
+              dimmed={!sb.enabled}
+              disabled={!sb.enabled}
+            />
           )
         }
       },
@@ -4521,22 +2993,22 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const sb = e.sandbox ?? DEFAULT_SANDBOX
           return (
-            <div className={sb.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4">
-                <SandboxListSetting
-                  label="Hidden paths"
-                  labelColor="text-danger"
-                  items={sb.filesystem.denyRead}
-                  placeholder="e.g. ~/.ssh"
-                  onUpdate={(items) =>
-                    ue({
-                      sandbox: { ...sb, filesystem: { ...sb.filesystem, denyRead: items } }
-                    })
-                  }
-                  tooltip="Paths completely hidden from sandboxed commands — they cannot read or detect these files exist. Good for credentials, SSH keys, cloud configs."
-                />
-              </div>
-            </div>
+            <SandboxListSetting
+              testid="ClaudeSandbox.denyRead"
+              label="Hidden paths"
+              labelColor="text-text-primary"
+              description="Paths the sandbox cannot read at all, such as ~/.ssh."
+              items={sb.filesystem.denyRead}
+              placeholder="e.g. ~/.ssh"
+              onUpdate={(items) =>
+                ue({
+                  sandbox: { ...sb, filesystem: { ...sb.filesystem, denyRead: items } }
+                })
+              }
+              indent
+              dimmed={!sb.enabled}
+              disabled={!sb.enabled}
+            />
           )
         }
       },
@@ -4545,10 +3017,10 @@ export const SECTIONS: Section[] = [
         label: 'Sandbox info',
         keywords: 'sandbox info macos linux bwrap',
         render: () => (
-          <div className="px-3 py-1.5 text-[11px] text-text-muted/60">
-            Filesystem defaults: project dir + $TMPDIR writable. Changes take effect on next session
-            start.
-          </div>
+          <SettingRow
+            testid="ClaudeSandbox.note"
+            description="Filesystem defaults: the project directory and $TMPDIR are writable."
+          />
         )
       }
     ]
@@ -4575,22 +3047,20 @@ export const SECTIONS: Section[] = [
     items: [
       {
         key: 'proxyEnabled',
-        label: 'Enable proxy',
-        keywords: 'proxy http socks5 network tunnel',
+        // The label is the search term AND the row's visible label, so it
+        // follows the row; the wording it replaces stays in the keywords.
+        label: 'Route through a proxy',
+        keywords: 'proxy enable http socks5 network tunnel',
         render: (_s, _u, e, ue) => {
           const px = e.proxy ?? DEFAULT_PROXY
           return (
-            <div>
-              <SettingsToggle
-                label="Enable proxy"
-                checked={px.enabled}
-                onChange={(v) => ue({ proxy: { ...px, enabled: v } })}
-                tooltip="Route all SDK traffic through a proxy server. Applies to new sessions."
-              />
-              <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                Route Claude API traffic through a proxy server
-              </div>
-            </div>
+            <SettingsToggle
+              testid="ClaudeProxy.enabled"
+              label="Route through a proxy"
+              description="Sends Claude API traffic through an HTTP or SOCKS5 proxy."
+              checked={px.enabled}
+              onChange={(v) => ue({ proxy: { ...px, enabled: v } })}
+            />
           )
         }
       },
@@ -4601,19 +3071,19 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const px = e.proxy ?? DEFAULT_PROXY
           return (
-            <div className={px.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4">
-                <SettingsSelect
-                  label="Proxy type"
-                  value={px.type}
-                  options={[
-                    { value: 'http' as const, label: 'HTTP' },
-                    { value: 'socks5' as const, label: 'SOCKS5' }
-                  ]}
-                  onChange={(v) => ue({ proxy: { ...px, type: v } })}
-                />
-              </div>
-            </div>
+            <SettingRow testid="ClaudeProxy.type" label="Type" indent dimmed={!px.enabled}>
+              <Segmented
+                testid="ClaudeProxy.type.segmented"
+                optionTestid="ClaudeProxy.type.option"
+                value={px.type}
+                options={[
+                  { value: 'http' as const, label: 'HTTP' },
+                  { value: 'socks5' as const, label: 'SOCKS5' }
+                ]}
+                onChange={(v) => ue({ proxy: { ...px, type: v } })}
+                disabled={!px.enabled}
+              />
+            </SettingRow>
           )
         }
       },
@@ -4624,18 +3094,22 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const px = e.proxy ?? DEFAULT_PROXY
           return (
-            <div className={px.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
-                <div className="mb-1">Hostname</div>
-                <input
-                  type="text"
-                  value={px.hostname}
-                  onChange={(ev) => ue({ proxy: { ...px, hostname: ev.target.value } })}
-                  className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-                  placeholder="e.g. proxy.company.com"
-                />
-              </div>
-            </div>
+            <SettingRow
+              testid="ClaudeProxy.hostname"
+              label="Hostname"
+              layout="stacked"
+              indent
+              dimmed={!px.enabled}
+            >
+              <TextField
+                className="w-full"
+                testid="ClaudeProxy.hostname.input"
+                value={px.hostname}
+                onChange={(v) => ue({ proxy: { ...px, hostname: v } })}
+                placeholder="proxy.company.com"
+                disabled={!px.enabled}
+              />
+            </SettingRow>
           )
         }
       },
@@ -4646,23 +3120,19 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const px = e.proxy ?? DEFAULT_PROXY
           return (
-            <div className={px.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
-                <div className="mb-1">Port</div>
-                <input
-                  type="number"
-                  value={px.port}
-                  min={1}
-                  max={65535}
-                  onChange={(ev) => {
-                    const n = parseInt(ev.target.value, 10)
-                    if (!isNaN(n) && n >= 1 && n <= 65535) ue({ proxy: { ...px, port: n } })
-                  }}
-                  className="w-24 bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-                  placeholder="8080"
-                />
-              </div>
-            </div>
+            <SettingRow testid="ClaudeProxy.port" label="Port" indent dimmed={!px.enabled}>
+              <NumberField
+                testid="ClaudeProxy.port.input"
+                value={px.port}
+                min={1}
+                max={65535}
+                placeholder={String(DEFAULT_PROXY.port)}
+                // The field commits `undefined` when it is cleared, but the port
+                // is a required number: an empty field means "the default".
+                onChange={(v) => ue({ proxy: { ...px, port: v ?? DEFAULT_PROXY.port } })}
+                disabled={!px.enabled}
+              />
+            </SettingRow>
           )
         }
       },
@@ -4673,22 +3143,21 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const px = e.proxy ?? DEFAULT_PROXY
           return (
-            <div className={px.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
-                <div className="mb-1">
-                  <span>Username</span>
-                  <span className="text-[10px] text-text-muted/50 ml-1.5">optional</span>
-                </div>
-                <input
-                  type="text"
-                  value={px.username}
-                  onChange={(ev) => ue({ proxy: { ...px, username: ev.target.value } })}
-                  className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-                  placeholder="username"
-                  autoComplete="off"
-                />
-              </div>
-            </div>
+            <SettingRow
+              testid="ClaudeProxy.username"
+              label="Username"
+              description="Optional."
+              indent
+              dimmed={!px.enabled}
+            >
+              <TextField
+                testid="ClaudeProxy.username.input"
+                value={px.username}
+                onChange={(v) => ue({ proxy: { ...px, username: v } })}
+                className="w-[240px]"
+                disabled={!px.enabled}
+              />
+            </SettingRow>
           )
         }
       },
@@ -4699,22 +3168,22 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const px = e.proxy ?? DEFAULT_PROXY
           return (
-            <div className={px.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4 px-3 py-1.5 text-[13px] text-text-secondary">
-                <div className="mb-1">
-                  <span>Password</span>
-                  <span className="text-[10px] text-text-muted/50 ml-1.5">optional</span>
-                </div>
-                <input
-                  type="password"
-                  value={px.password}
-                  onChange={(ev) => ue({ proxy: { ...px, password: ev.target.value } })}
-                  className="w-full bg-bg-primary/50 border border-border/50 rounded px-2 py-1 text-[11px] text-text-secondary outline-none focus:border-accent/50 transition-colors"
-                  placeholder="password"
-                  autoComplete="off"
-                />
-              </div>
-            </div>
+            <SettingRow
+              testid="ClaudeProxy.password"
+              label="Password"
+              description="Optional."
+              indent
+              dimmed={!px.enabled}
+            >
+              <TextField
+                testid="ClaudeProxy.password.input"
+                type="password"
+                value={px.password}
+                onChange={(v) => ue({ proxy: { ...px, password: v } })}
+                className="w-[240px]"
+                disabled={!px.enabled}
+              />
+            </SettingRow>
           )
         }
       },
@@ -4724,13 +3193,7 @@ export const SECTIONS: Section[] = [
         keywords: 'test verify check ping connectivity',
         render: (_s, _u, e) => {
           const px = e.proxy ?? DEFAULT_PROXY
-          return (
-            <div className={px.enabled && px.hostname ? '' : 'opacity-40 pointer-events-none'}>
-              <div className="pl-4">
-                <ProxyTestButton proxy={px} />
-              </div>
-            </div>
-          )
+          return <ProxyTestButton proxy={px} />
         }
       },
       {
@@ -4740,17 +3203,16 @@ export const SECTIONS: Section[] = [
         render: (_s, _u, e, ue) => {
           const px = e.proxy ?? DEFAULT_PROXY
           return (
-            <div className={px.enabled ? '' : 'opacity-40 pointer-events-none'}>
-              <SettingsToggle
-                label="Also proxy shell commands"
-                checked={px.proxySubprocesses === true}
-                onChange={(v) => ue({ proxy: { ...px, proxySubprocesses: v } })}
-                tooltip="When on, git/curl/npm and other commands Claude runs in the shell also route through the proxy. When off (default), only Claude's API traffic is proxied."
-              />
-              <div className="text-[10px] text-text-muted/50 mt-0.5 pl-3">
-                Off by default — shell commands stay direct
-              </div>
-            </div>
+            <SettingsToggle
+              testid="ClaudeProxy.subprocesses"
+              label="Also proxy shell commands"
+              description="Sets HTTP_PROXY and HTTPS_PROXY for commands the agent runs; off keeps them direct."
+              checked={px.proxySubprocesses === true}
+              onChange={(v) => ue({ proxy: { ...px, proxySubprocesses: v } })}
+              indent
+              dimmed={!px.enabled}
+              disabled={!px.enabled}
+            />
           )
         }
       },
@@ -4759,9 +3221,10 @@ export const SECTIONS: Section[] = [
         label: 'Proxy info',
         keywords: 'proxy info env environment variable',
         render: () => (
-          <div className="px-3 py-1.5 text-[11px] text-text-muted/60">
-            Sets HTTP_PROXY/HTTPS_PROXY environment variables. Changes apply to new sessions.
-          </div>
+          <SettingRow
+            testid="ClaudeProxy.note"
+            description="Applies to the Claude API connection; shell commands only when the toggle above is on."
+          />
         )
       }
     ]
@@ -4792,7 +3255,13 @@ export const SECTIONS: Section[] = [
         label: 'Cross-engine dispatch',
         keywords:
           'claude dispatch cross engine agent delegate collab model allowlist default sonnet haiku opus',
-        render: () => <ClaudeDispatchSection />
+        render: () => <ClaudeDispatchIntoSection />
+      },
+      {
+        key: 'claudeDispatchLimits',
+        label: 'Dispatch limits',
+        keywords: 'claude dispatch cost cap budget usd limit timeout',
+        render: () => <ClaudeDispatchLimitsSection />
       }
     ]
   },
@@ -4814,10 +3283,17 @@ export const SECTIONS: Section[] = [
     ),
     items: [
       {
+        // ADR-065 phase 6b/6c: ONE list over the three provider stores. The item
+        // KEY is unchanged — it is what the page model, the deep links and the
+        // inventory guard address — while what it renders is the unified list,
+        // whose Manage and Add sheets are now the ONLY provider surface: the
+        // vault's own pane, opencode's `vendor-opencode` and pi's `vendor-pi`
+        // were retired with 6c.
         key: 'sharedProviders',
-        label: 'Providers & models',
-        keywords: 'shared provider chatgpt codex api key model pi opencode',
-        render: () => <SharedProviders />
+        label: 'Providers',
+        keywords:
+          'shared provider add chatgpt codex api key oauth credential subscription custom endpoint model pi opencode anthropic openrouter ollama',
+        render: (_s, _u, _e, _ue, _v, _uv, ctx) => <ProviderList navigate={ctx?.navigate} />
       }
     ]
   },
@@ -4848,6 +3324,7 @@ export const SECTIONS: Section[] = [
             modelId={m.id}
             modelLabel={m.label}
             current={s.modelEffortDefaults?.[m.id]}
+            modified={m.id in (s.modelEffortDefaults ?? {})}
             onChange={(next) => {
               const map = { ...(s.modelEffortDefaults ?? {}) }
               if (next === undefined) delete map[m.id]
@@ -4862,11 +3339,10 @@ export const SECTIONS: Section[] = [
         label: 'Effort defaults info',
         keywords: 'effort default fallback per-session',
         render: () => (
-          <div className="px-3 py-1.5 text-[11px] text-text-muted/60">
-            Picked here when starting a new session with the matching model. A per-session effort
-            choice (chip next to the input) always wins. Applies to the canonical model and its
-            aliases (e.g. selecting <code>opus</code> in the picker uses your Opus 4.8 default).
-          </div>
+          <SettingRow
+            testid="EffortDefaultsNote"
+            description="Applied when a new session starts on the matching model or one of its aliases (picking opus uses the Opus 4.8 row); the per-session effort chip always wins."
+          />
         )
       }
     ]
@@ -4894,7 +3370,7 @@ export const SECTIONS: Section[] = [
         key: 'opencodeAutoMode',
         label: 'Auto mode',
         keywords:
-          'opencode auto mode full autonomy classifier gatekeeper judge llm permission bash security monitor',
+          'opencode auto mode full autonomy classifier gatekeeper judge model llm permission bash security monitor',
         render: () => <OpencodeAutoModeSection />
       }
     ]
@@ -4953,13 +3429,218 @@ export const SECTIONS: Section[] = [
         label: 'Cross-engine dispatch',
         keywords:
           'opencode dispatch cross engine agent delegate collab gpt gemini model allowlist default',
-        render: () => <OpencodeDispatchSection />
+        render: () => <OpencodeDispatchIntoSection />
+      },
+      {
+        key: 'opencodeDispatchLimits',
+        label: 'Dispatch limits',
+        keywords: 'opencode dispatch cost cap budget usd limit turn duration inactivity timeout',
+        render: () => <OpencodeDispatchLimitsSection />
+      }
+    ]
+  },
+  // ── opencode > Configuration subgroup ──────────────────────────────
+  // Seven curated panes over the config keys worth a real control, plus the
+  // generic editor for the long tail. Panes live in OpencodeConfigPanes.tsx;
+  // every key they own is also listed in CONFIG_POINTER_KEYS so the raw editor
+  // points here instead of offering a second, conflicting editor for it.
+  {
+    id: 'opencode-session',
+    label: 'Session behavior',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M3 12a9 9 0 1 0 3-6.7" />
+        <path d="M3 4v5h5" />
+        <path d="M12 8v4l3 2" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeSessionBehavior',
+        label: 'Session behavior',
+        keywords:
+          'opencode compaction auto prune tail_turns preserve_recent_tokens reserved subagent_depth snapshot context window compact undo revert',
+        render: () => <OpencodeSessionBehaviorSection />
+      }
+    ]
+  },
+  {
+    id: 'opencode-tool-output',
+    label: 'Tool output',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <polyline points="4 17 10 11 4 5" />
+        <line x1="12" y1="19" x2="20" y2="19" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeToolOutput',
+        label: 'Tool output',
+        keywords: 'opencode tool_output max_lines max_bytes truncate truncation preview',
+        render: () => <OpencodeToolOutputSection />
+      }
+    ]
+  },
+  {
+    id: 'opencode-attachments',
+    label: 'Image attachments',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <rect x="3" y="3" width="18" height="18" rx="2" />
+        <circle cx="8.5" cy="8.5" r="1.5" />
+        <path d="M21 15l-5-5L5 21" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeAttachments',
+        label: 'Image attachments',
+        keywords:
+          'opencode attachment image auto_resize max_width max_height max_base64_bytes paste screenshot resize',
+        render: () => <OpencodeAttachmentsSection />
+      }
+    ]
+  },
+  {
+    id: 'opencode-workspace',
+    label: 'Workspace',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeWorkspace',
+        label: 'Workspace',
+        keywords:
+          'opencode instructions default_agent shell watcher ignore AGENTS.md context primary agent terminal bash',
+        render: () => <OpencodeWorkspaceSection />
+      }
+    ]
+  },
+  {
+    id: 'opencode-tools',
+    label: 'Tools & integrations',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M14.7 6.3a4 4 0 01-5 5L4 17v3h3l5.7-5.7a4 4 0 015-5l-2.5-2.5 2.1-2.1a4 4 0 00-2.6 1.6z" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeTools',
+        label: 'Tools & integrations',
+        keywords:
+          'opencode tools bash read glob grep edit write task webfetch websearch todowrite skill apply_patch question lsp formatter plugin skills paths disable',
+        render: () => <OpencodeToolsSection />
+      }
+    ]
+  },
+  {
+    id: 'opencode-diagnostics',
+    label: 'Diagnostics',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <polyline points="3 12 7 12 10 4 14 20 17 12 21 12" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeDiagnostics',
+        label: 'Diagnostics',
+        keywords:
+          'opencode logLevel log level debug info warn error experimental mcp_timeout batch_tool troubleshoot',
+        render: () => <OpencodeDiagnosticsSection />
+      }
+    ]
+  },
+  {
+    id: 'opencode-managed',
+    label: 'Managed keys',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <rect x="4" y="10" width="16" height="10" rx="2" />
+        <path d="M8 10V7a4 4 0 018 0v3" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'opencodeManagedKeys',
+        label: 'Managed keys',
+        keywords:
+          'opencode autoupdate share autoshare continue_loop_on_deny server layout forced managed self-update sharing cloud',
+        render: () => <OpencodeManagedKeysSection />
       }
     ]
   },
   {
     id: 'opencode-config',
-    label: 'Configuration',
+    label: 'Raw config',
     icon: (
       <svg
         width="14"
@@ -4978,9 +3659,9 @@ export const SECTIONS: Section[] = [
     items: [
       {
         key: 'opencodeConfig',
-        label: 'Configuration (opencode.json)',
+        label: 'Raw config (opencode.json)',
         keywords:
-          'opencode config raw schema attachment modalities tool_call reasoning cost limit instructions layout formatter lsp advanced',
+          'opencode config raw schema command username enterprise reference references mode advanced json',
         render: () => <OpencodeRawConfigSection />
       }
     ]
@@ -5041,14 +3722,114 @@ export const SECTIONS: Section[] = [
         key: 'piAutoMode',
         label: 'Auto mode',
         keywords:
-          'pi auto mode full autonomy classifier gatekeeper judge llm permission bash security monitor',
+          'pi auto mode full autonomy classifier gatekeeper judge model llm permission bash security monitor',
         render: () => <PiAutoModeSection />
       }
     ]
   },
   {
-    id: 'pi-models',
-    label: 'Models',
+    id: 'pi-dispatch',
+    label: 'Cross-engine dispatch',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M17 3l4 4-4 4" />
+        <path d="M21 7H9a4 4 0 00-4 4v1" />
+        <path d="M7 21l-4-4 4-4" />
+        <path d="M3 17h12a4 4 0 004-4v-1" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piDispatch',
+        label: 'Cross-engine dispatch',
+        keywords:
+          'pi dispatch cross engine agent delegate collab model allowlist default target incoming',
+        render: () => <PiDispatchIntoSection />
+      },
+      {
+        key: 'piDispatchLimits',
+        label: 'Dispatch limits',
+        keywords: 'pi dispatch cost cap budget usd limit',
+        render: () => <PiDispatchLimitsSection />
+      }
+    ]
+  },
+  // ── pi > Configuration subgroup ────────────────────────────────────
+  // Six curated panes over pi's own settings.json plus a full-file text editor
+  // for the long tail (pi publishes no config schema, so there is no generic
+  // schema-driven form the way opencode has one). Panes live in
+  // PiConfigPanes.tsx. `pi-config-models` also carries ClaudeUI's OWN pi
+  // session-default model + allowlist, which is what the old `pi-models`
+  // ENGINE section used to be on its own.
+  {
+    id: 'pi-config-session',
+    label: 'Session behavior',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M3 12a9 9 0 1 0 3-6.7" />
+        <path d="M3 4v5h5" />
+        <path d="M12 8v4l3 2" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piSessionBehavior',
+        label: 'Session behavior',
+        keywords:
+          'pi compaction enabled reserveTokens keepRecentTokens branchSummary retry maxRetries baseDelayMs provider timeoutMs maxRetryDelayMs backoff context window compact summarise thinkingBudgets thinking budget tokens effort',
+        render: () => <PiSessionBehaviorSection />
+      }
+    ]
+  },
+  {
+    id: 'pi-config-retry',
+    label: 'Automatic retry',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <polyline points="23 4 23 10 17 10" />
+        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piRetry',
+        label: 'Automatic retry',
+        keywords:
+          'pi retry enabled maxRetries baseDelayMs provider timeoutMs maxRetryDelayMs backoff transient errors',
+        render: () => <PiRetrySection />
+      }
+    ]
+  },
+  {
+    id: 'pi-config-models',
+    label: 'Models & thinking',
     icon: (
       <svg
         width="14"
@@ -5067,16 +3848,17 @@ export const SECTIONS: Section[] = [
     ),
     items: [
       {
-        key: 'piDefaultModel',
-        label: 'Default model',
-        keywords: 'pi model default provider openai-codex anthropic',
-        render: () => <PiDefaultModelSection />
+        key: 'piModels',
+        label: 'Models & thinking',
+        keywords:
+          'pi model default provider openai-codex anthropic allowlist defaultModel reasoning effort',
+        render: () => <PiModelsSection />
       }
     ]
   },
   {
-    id: 'vendor-pi',
-    label: 'Providers',
+    id: 'pi-config-tools',
+    label: 'Tools & shell',
     icon: (
       <svg
         width="14"
@@ -5088,263 +3870,156 @@ export const SECTIONS: Section[] = [
         strokeLinecap="round"
         strokeLinejoin="round"
       >
-        <circle cx="12" cy="12" r="3" />
-        <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
+        <path d="M14.7 6.3a4 4 0 01-5 5L4 17v3h3l5.7-5.7a4 4 0 015-5l-2.5-2.5 2.1-2.1a4 4 0 00-2.6 1.6z" />
       </svg>
     ),
     items: [
       {
-        key: 'vendorPiAuth',
-        label: 'Providers & subscriptions',
+        key: 'piTools',
+        label: 'Tools & shell',
         keywords:
-          'pi provider add auth api key oauth subscription login openai anthropic radius xai copilot',
-        render: () => <PiVendors />
+          'pi defaultTools read bash powershell edit write grep find ls shellPath shellCommandPrefix npmCommand shell prefix npm',
+        render: () => <PiToolsSection />
+      }
+    ]
+  },
+  {
+    id: 'pi-config-images',
+    label: 'Image attachments',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <rect x="3" y="3" width="18" height="18" rx="2" />
+        <circle cx="8.5" cy="8.5" r="1.5" />
+        <path d="M21 15l-5-5L5 21" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piImages',
+        label: 'Image attachments',
+        keywords: 'pi images autoResize blockImages resize paste screenshot attachment',
+        render: () => <PiImagesSection />
+      }
+    ]
+  },
+  {
+    id: 'pi-config-workspace',
+    label: 'Workspace & trust',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piWorkspace',
+        label: 'Workspace & trust',
+        keywords:
+          'pi defaultProjectTrust ask always never sessionDir enableSkillCommands packages extensions skills prompts resources trust',
+        render: () => <PiWorkspaceSection />
+      }
+    ]
+  },
+  {
+    id: 'pi-config-resources',
+    label: 'Resources',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+        <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
+        <line x1="12" y1="22.08" x2="12" y2="12" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piResources',
+        label: 'Resources',
+        keywords: 'pi packages extensions skills prompts paths npm git resources',
+        render: () => <PiResourcesSection />
+      }
+    ]
+  },
+  {
+    id: 'pi-config-network',
+    label: 'Network & telemetry',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <circle cx="12" cy="12" r="9" />
+        <path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piNetwork',
+        label: 'Network & telemetry',
+        keywords:
+          'pi httpProxy transport sse websocket cached httpIdleTimeoutMs websocketConnectTimeoutMs enableInstallTelemetry enableAnalytics proxy telemetry analytics',
+        render: () => <PiNetworkSection />
+      }
+    ]
+  },
+  {
+    id: 'pi-config-raw',
+    label: 'Raw config',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M12 15a3 3 0 100-6 3 3 0 000 6z" />
+        <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'piRawConfig',
+        label: 'Raw config (settings.json)',
+        keywords:
+          'pi config raw json settings theme tuiMode fullscreen markdown terminal keybindings externalEditor enabledModels warnings defaultProvider defaultThinkingLevel advanced',
+        render: () => <PiRawConfigSection />
       }
     ]
   }
 ]
-
-// ── Navigation groups tree ───────────────────────────────────────────
-
-/** Section ids that belong to the App group (flat, directly visible) */
-const APP_SECTION_IDS = new Set([
-  'appearance',
-  'chat',
-  'session',
-  'autonomy',
-  'shared-providers',
-  'tool-output',
-  'diff',
-  'git',
-  'status-line',
-  'usage',
-  'logging',
-  'voice',
-  'remote',
-  'mockup'
-])
-
-/** Section ids that belong to Engines > Claude */
-const ENGINE_CLAUDE_SECTION_IDS = new Set(['permissions', 'sandbox', 'proxy', 'claude-dispatch'])
-
-/** Section ids that belong to Engines > opencode (content self-gates on install) */
-const ENGINE_OPENCODE_SECTION_IDS = new Set([
-  'opencode-automode',
-  'opencode-models',
-  'opencode-dispatch',
-  'opencode-config'
-])
-
-/** Section ids that belong to Vendors > Anthropic */
-const VENDOR_ANTHROPIC_SECTION_IDS = new Set(['vendor-anthropic', 'effortDefaults'])
-
-/** Section ids that belong to Vendors > opencode (gated: only shown when opencode engine installs) */
-const VENDOR_OPENCODE_SECTION_IDS = new Set(['vendor-opencode'])
-
-/** Section ids that belong to opencode Agents subgroup */
-const AGENTS_OPENCODE_SECTION_IDS = new Set(['opencode-agents'])
-
-/** Section ids that belong to Engines > pi (content self-gates on install).
- *  Auto mode + default model. `pi-automode` edits the same
- *  `EngineConfig.autoMode` block opencode's does — PiSession reads
- *  `loadEngineConfig('pi').autoMode` since the phase-4 gatekeeper wiring, so
- *  the setting was live but unreachable from the UI until this section.
- *  No dispatch section: the Claude/opencode dispatch sections configure
- *  dispatches INTO that engine (allowlist/default/cap for incoming targets),
- *  and pi is a dispatch SOURCE only so far — nothing to configure until
- *  pi-as-target ships (crossEngineDispatch is true for the source direction as
- *  of M4b). */
-const ENGINE_PI_SECTION_IDS = new Set(['pi-automode', 'pi-models'])
-
-/** Section ids that belong to Vendors > pi (gated: only shown when pi engine installs) */
-const VENDOR_PI_SECTION_IDS = new Set(['vendor-pi'])
-
-/** Section ids that belong to Accounts (flat) */
-const ACCOUNTS_SECTION_IDS = new Set(['accounts'])
-
-function getSectionsForIds(ids: Set<string>, order?: string[]): Section[] {
-  if (!order) return SECTIONS.filter((s) => ids.has(s.id))
-  return order
-    .filter((id) => ids.has(id))
-    .map((id) => SECTIONS.find((s) => s.id === id)!)
-    .filter(Boolean)
-}
-
-// ── Scoped navigation (Option A, ADR settings-ia-refactor) ──────────
-
-export type SettingsScope = 'common' | 'claude' | 'opencode' | 'pi'
-
-export interface ScopeSubgroup {
-  id: string
-  label?: string // undefined = flat (no header)
-  sections: Section[]
-}
-
-export interface ScopeDef {
-  id: SettingsScope
-  label: string
-  subgroups: ScopeSubgroup[]
-}
-
-/**
- * Ordered scope→section mapping. This is the authoritative section order
- * within each scope (fixes the flat SECTIONS order divergence bug).
- */
-export const SCOPES: ScopeDef[] = [
-  {
-    id: 'common',
-    label: 'Common',
-    subgroups: [
-      {
-        id: 'common-app',
-        label: undefined,
-        sections: getSectionsForIds(APP_SECTION_IDS, [
-          'appearance',
-          'chat',
-          'session',
-          'autonomy',
-          'shared-providers',
-          'tool-output',
-          'diff',
-          'git',
-          'status-line',
-          'usage',
-          'logging',
-          'voice',
-          'remote',
-          'mockup'
-        ])
-      }
-    ]
-  },
-  {
-    id: 'claude',
-    label: 'Claude',
-    subgroups: [
-      {
-        id: 'claude-engine',
-        label: 'Engine',
-        sections: getSectionsForIds(ENGINE_CLAUDE_SECTION_IDS, [
-          'permissions',
-          'sandbox',
-          'proxy',
-          'claude-dispatch'
-        ])
-      },
-      {
-        id: 'claude-vendor',
-        label: 'Vendor · Anthropic',
-        sections: getSectionsForIds(VENDOR_ANTHROPIC_SECTION_IDS, [
-          'vendor-anthropic',
-          'effortDefaults'
-        ])
-      },
-      {
-        id: 'claude-account',
-        label: 'Account',
-        sections: getSectionsForIds(ACCOUNTS_SECTION_IDS, ['accounts'])
-      }
-    ]
-  },
-  {
-    id: 'opencode',
-    label: 'opencode',
-    subgroups: [
-      {
-        id: 'opencode-engine',
-        label: 'Engine',
-        sections: getSectionsForIds(ENGINE_OPENCODE_SECTION_IDS, [
-          'opencode-automode',
-          'opencode-models',
-          'opencode-dispatch',
-          'opencode-config'
-        ])
-      },
-      {
-        id: 'opencode-vendor',
-        label: 'Vendor',
-        sections: getSectionsForIds(VENDOR_OPENCODE_SECTION_IDS, ['vendor-opencode'])
-      },
-      {
-        id: 'opencode-agents',
-        label: 'Agents',
-        sections: getSectionsForIds(AGENTS_OPENCODE_SECTION_IDS, ['opencode-agents'])
-      }
-    ]
-  },
-  {
-    id: 'pi',
-    label: 'pi',
-    subgroups: [
-      {
-        id: 'pi-engine',
-        label: 'Engine',
-        sections: getSectionsForIds(ENGINE_PI_SECTION_IDS, ['pi-automode', 'pi-models'])
-      },
-      {
-        id: 'pi-vendor',
-        label: 'Vendor',
-        sections: getSectionsForIds(VENDOR_PI_SECTION_IDS, ['vendor-pi'])
-      }
-    ]
-  }
-]
-
-/**
- * The section a scope opens on: its first CAPABILITY-VISIBLE section, so a
- * gated-out one is never selected. Shared by the desktop container and the
- * mobile view (which uses it to tell a deep link apart from a plain tab
- * switch), so the two can't drift.
- */
-export function firstSectionOfScope(scope: SettingsScope): string {
-  const scopeDef = SCOPES.find((s) => s.id === scope)
-  if (!scopeDef) return ''
-  const caps = scopeCapabilities(scope)
-  for (const sg of scopeDef.subgroups) {
-    const sec = sg.sections.find((s) => isSectionVisible(s.id, caps))
-    if (sec) return sec.id
-  }
-  return ''
-}
-
-/** Map from section id → scope id, for search + selection logic */
-export const SECTION_SCOPE_MAP: ReadonlyMap<string, SettingsScope> = new Map(
-  SCOPES.flatMap((scope) =>
-    scope.subgroups.flatMap((sg) =>
-      sg.sections.map((sec): [string, SettingsScope] => [sec.id, scope.id])
-    )
-  )
-)
-
-// ── Per-section capability gating (ROADMAP #12) ──────────────────────
-//
-// A section listed here renders only when the scope's engine has the named
-// EngineCapabilities flag. Sections NOT listed are always visible. Today only
-// the Claude launch-param sections are gated; Claude has both flags true, so
-// there is no user-visible change — the gating is structure-ready for an engine
-// that lacks sandbox/proxy (or for surfacing one of these under opencode later).
-
-/** Boolean EngineCapabilities keys that can gate a section. */
-type GatingCapability = 'sandbox' | 'proxy'
-
-/** sectionId → the EngineCapabilities flag it requires (absent = always shown). */
-export const SECTION_CAPABILITY: Readonly<Record<string, GatingCapability>> = {
-  sandbox: 'sandbox',
-  proxy: 'proxy'
-}
-
-/** Static per-engine capabilities for a settings scope ('common' = engine-agnostic → null). */
-export function scopeCapabilities(scope: SettingsScope): EngineCapabilities | null {
-  return scope === 'common' ? null : engineMeta(scope).capabilities
-}
-
-/**
- * Whether a section should render, given the scope's engine capabilities.
- * Gated sections hide when the engine lacks the capability; ungated sections
- * (and the engine-agnostic 'common' scope, caps=null) always show.
- */
-export function isSectionVisible(sectionId: string, caps: EngineCapabilities | null): boolean {
-  const flag = SECTION_CAPABILITY[sectionId]
-  if (!flag || !caps) return true
-  return caps[flag] === true
-}

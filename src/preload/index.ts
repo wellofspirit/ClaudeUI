@@ -244,6 +244,14 @@ const api: ClaudeAPI = {
   // pool is main-process state, and the desktop is just as capable of reopening
   // a slot whose shell is still running as a phone is.
   terminalPool: (cwd: string) => ipcRenderer.invoke('terminal:pool', cwd),
+  // Remote IDE (ADR-064). Real IPC on the desktop too, and deliberately not a
+  // constant like `terminalAvailability` is: the answer depends on the host's
+  // toggle and on whether a VS Code CLI is actually installed, neither of which
+  // the renderer can know — and the desktop settings pane is the surface that
+  // renders the typed probe result.
+  ideAvailability: () => ipcRenderer.invoke('ide:availability'),
+  ideMintEntry: (folder: string, themeKind?: 'dark' | 'light') =>
+    ipcRenderer.invoke('ide:mint-entry', { folder, themeKind }),
   // The volatile lane's subscription verb (phase 5 S1). Real IPC on the desktop
   // too: the renderer is client #1 and its deltas ride the same watched lane a
   // phone's do — there is no privileged local path any more.
@@ -436,6 +444,13 @@ const api: ClaudeAPI = {
   readOpencodeNativeRaw: () => unwrap('config:read-opencode-native-raw'),
   patchOpencodeNative: (patches: import('../shared/types').RawConfigPatch[]) =>
     unwrap('config:patch-opencode-native', patches),
+  readPiNativeRaw: () => unwrap('config:read-pi-native-raw'),
+  patchPiNative: (patches: import('../shared/types').RawConfigPatch[]) =>
+    unwrap('config:patch-pi-native', patches),
+  writePiNativeText: (text: string) => unwrap('config:write-pi-native-text', text),
+  readPiModelsRaw: () => unwrap('config:read-pi-models-raw'),
+  patchPiModels: (patches: import('../shared/types').RawConfigPatch[]) =>
+    unwrap('config:patch-pi-models', patches),
   listOpencodeAgents: (cwd?: string) => unwrap('opencode-agents:list', cwd),
   readOpencodeAgent: (
     name: string,
@@ -460,6 +475,10 @@ const api: ClaudeAPI = {
   loadVendorConfig: (vendorId: string) => ipcRenderer.invoke('config:load-vendor-config', vendorId),
   saveVendorConfig: (vendorId: string, config: import('../shared/types').VendorConfig) =>
     ipcRenderer.invoke('config:save-vendor-config', vendorId, config),
+  loadSharedAutoMode: () => ipcRenderer.invoke('config:load-shared-automode'),
+  saveSharedAutoMode: (config: import('../shared/types').SharedAutoModeConfig) =>
+    ipcRenderer.invoke('config:save-shared-automode', config),
+  listProviderRegistry: () => unwrap('provider-registry:list'),
   listSharedProviders: () => unwrap('shared-provider:list'),
   getSharedProviderStatuses: () => unwrap('shared-provider:statuses'),
   listSharedProviderModels: (id: string) => unwrap('shared-provider:models', id),
@@ -484,6 +503,13 @@ const api: ClaudeAPI = {
   stopRemoteServer: () => ipcRenderer.invoke('remote:stop'),
   getRemoteStatus: () => ipcRenderer.invoke('remote:status'),
   onRemoteStatus: onEvent('remote:status'),
+  // The redacted twin (owner ruling, 2026-08-28), registered for BOTH transports
+  // in `core/ipc/remote-view-commands.ts`. Real IPC here rather than a local
+  // projection, for the same reason the `authcfg:*` verbs are: one declaration,
+  // one redaction, so the desktop cannot drift from what a phone is shown. The
+  // desktop UI keeps using the full `remote:status` above — it is the host
+  // anchor, and it needs the link fields this view drops.
+  getRemoteStatusView: () => ipcRenderer.invoke('remote:status-view'),
   getRemoteConfig: () => ipcRenderer.invoke('remote:get-config'),
   setRemoteConfig: (partial) => ipcRenderer.invoke('remote:set-config', partial),
   setRemotePassword: (password: string) => ipcRenderer.invoke('remote:set-password', password),

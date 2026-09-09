@@ -88,9 +88,12 @@ export const SHELL_ACT_VERBS: ReadonlySet<string> = new Set([
  *
  * Routine remote-access settings are web-reachable behind a step-up, so a
  * headless deployment is administrable without SSH. They get their own namespace
- * because the structural guard has to survive: no `remote:*` channel is ever
+ * because the structural guard has to survive: no remote-server MUTATION is ever
  * registered on the remote transport, and the `off` writer stays in
- * `remote:set-config` where only the host anchor can reach it.
+ * `remote:set-config` where only the host anchor can reach it. (Since 2026-08-28
+ * the namespace has exactly one remote registration — `remote:status-view`, a
+ * redacted READ classified `read` by the `kind` rule below, carrying no key and
+ * no writer.)
  *
  * Every member demands a live SETTINGS-EDITING SESSION (the §6 amendment) — see
  * {@link evaluateStepUp}.
@@ -140,14 +143,70 @@ export const AUTHCFG_FREE_CHANNELS: ReadonlySet<string> = new Set(['authcfg:get'
  */
 export const SETTINGS_SESSION_TTL_MS = 5 * 60_000
 
+// ---------------------------------------------------------------------------
+// Benign ambient cache writes (ADR-054 amendment, owner ruling 2026-08-28)
+// ---------------------------------------------------------------------------
+
+/**
+ * `command`-kind channels that cost NO freshness — host writes that cannot be
+ * an attack, so demanding a presence proof for them only trains the operator to
+ * dismiss ceremonies.
+ *
+ * The channel that forced the class: `config:save-slash-commands` is the
+ * slash-menu warm cache `useClaudeEvents` writes when the engine ANNOUNCES its
+ * command list. It is an ambient engine-event write, not a user gesture, so
+ * once it was wired for web clients a `strong`-tier connection with a lapsed
+ * mutation window met an UNREQUESTED biometric prompt on an ordinary session
+ * spawn — a prompt the operator cannot connect to anything they did.
+ *
+ * ## Admission bar
+ *
+ * A channel joins this set only when ALL THREE hold, plus an owner ruling:
+ *
+ * 1. **FIXED HOST PATH** — the destination is a constant the caller cannot
+ *    influence (`SLASH_COMMANDS_FILE` in `core/services/ui-config.ts`); the
+ *    caller controls content only, never where it lands.
+ * 2. **SELF-HEALING CONTENT** — ordinary use overwrites it wholesale. Every
+ *    session spawn rewrites this cache from the engine's real list, so a
+ *    hostile write survives at most until the next spawn.
+ * 3. **COSMETIC BLAST RADIUS** — nothing executes off it. The cache only seeds
+ *    the composer's slash menu; execution semantics live in cli.js, which
+ *    ignores names it does not know.
+ *
+ * ## What is NOT relaxed
+ *
+ * Only the FRESHNESS cost moves. The write still requires an authenticated
+ * connection holding `config` (the registry's capability check runs after this
+ * gate and is untouched), and it is still AUDITED — which is precisely why the
+ * exemption lives here as an explicit set rather than as a `kind: 'query'`
+ * relabel in the registry: `dispatch()` skips the audit row for queries, so
+ * "fixing" it there would buy the same freshness waiver by silently dropping
+ * the channel out of the audit log.
+ *
+ * Classifying `read` also means these writes REFRESH NOTHING (see the refresh
+ * discipline on {@link evaluateStepUp}). That is a tightening, not a waiver: an
+ * engine-driven write is not presence, and letting it slide the mutation window
+ * would have let a session spawn renew a proof no human gave.
+ */
+export const BENIGN_CACHE_WRITE_CHANNELS: ReadonlySet<string> = new Set([
+  'config:save-slash-commands'
+])
+
 /**
  * What a dispatch costs, freshness-wise. The ONE vocabulary the enforcement
  * path and the tests share.
  *
- * - `read`      — any `query`. Free on every tier (ADR-054: reads and the sync
- *                 stream are free even in `strong`).
+ * - `read`      — any `query`, plus the explicitly-named free channels
+ *                 ({@link AUTHCFG_FREE_CHANNELS},
+ *                 {@link BENIGN_CACHE_WRITE_CHANNELS}). Free on every tier
+ *                 (ADR-054: reads and the sync stream are free even in
+ *                 `strong`).
  * - `shell-read`— a shell verb that only watches: one arming proof ever.
- * - `shell-act` — a shell verb that acts: the 10-minute act window.
+ * - `shell-act` — a shell verb that acts: the 10-minute act window. Since
+ *                 ADR-064 the `ide` capability's verbs land here too — minting
+ *                 an IDE entry opens an editor and an integrated terminal on
+ *                 the host, so it costs what a `terminal:create` costs. The
+ *                 class keeps its name (there is one act window, not two).
  * - `authcfg`   — the settings area: a live settings-editing SESSION, on every
  *                 tier (§6 amendment — this used to be the mutation window).
  * - `mutation`  — any other `command`: free below `strong`, the mutation window
@@ -168,17 +227,46 @@ export const TERM_RESIZE_CLASS: DispatchClass = 'shell-read'
  * neither set is treated as ACTING, so the failure mode of forgetting to
  * classify a new terminal channel is "it demands freshness" rather than "it is
  * free forever". `shell-verb-sets-cover-the-registry` pins that nobody has to
- * rely on that fallback in practice.
+ * rely on that fallback in practice. The `ide` arm fails closed the same way —
+ * anything that is not a `query` acts.
  */
 export function classifyDispatch(args: {
   channel: string
   capability: Capability | undefined
   kind: CommandKind | undefined
 }): DispatchClass {
-  // Order matters: the free set is checked FIRST so a channel can never be both,
-  // and so `authcfg:end` cannot be caught by a future widening of the gated set.
+  // A DECISION TABLE, read top down. The order is load-bearing at every step:
+  //
+  //  1. the free `authcfg` verbs FIRST, so a channel can never be both free and
+  //     gated and so `authcfg:end` cannot be caught by a future widening of the
+  //     gated set;
+  //  2. the gated `authcfg` namespace;
+  //  3. `ide` and `shell`, both of which fail CLOSED — checked BEFORE the named
+  //     exemption below so that no future member of that set could ever buy an
+  //     IDE or shell verb its way out by being named lower down;
+  //  4. the benign ambient cache writes: `command`s that meet the three
+  //     admission criteria on {@link BENIGN_CACHE_WRITE_CHANNELS}. Above the
+  //     `kind` line because that is the whole point — they ARE commands, and the
+  //     fallthrough would class them `mutation`;
+  //  5. `kind`: a `query` reads, anything else mutates.
   if (AUTHCFG_FREE_CHANNELS.has(args.channel)) return 'read'
   if (AUTHCFG_CHANNELS.has(args.channel)) return 'authcfg'
+  // The remote IDE (ADR-064), directly above the `shell` arm and sharing its
+  // fail-closed shape. An `ide` verb rides `shell-act`: minting an IDE entry is
+  // the act of opening an editor + integrated terminal on the host, which is the
+  // same authority a `terminal:create` buys and must cost the same freshness.
+  //
+  // There is no read/act VERB SET here and that is deliberate, not an omission.
+  // The terminal split exists because an ATTACHED view keeps streaming after
+  // decay — there are verbs that only watch. The IDE has no such verb: the whole
+  // surface is one mint, and everything after it is HTTP the registry never
+  // sees. So the split is by `kind`, and a `command` (the only kind that exists
+  // today) is an act. A future `ide` query would be free — which is correct for
+  // a read — while anything else fails CLOSED into the act window, so forgetting
+  // to think about a new `ide` verb costs a ceremony rather than nothing.
+  if (args.capability === 'ide') {
+    return args.kind === 'query' ? 'read' : 'shell-act'
+  }
   if (args.capability === 'shell') {
     // The explicit set wins over `kind` in BOTH directions: `terminal:attach` is
     // a `command` that reads, `terminal:pool` is a `query` that is still a shell
@@ -187,6 +275,7 @@ export function classifyDispatch(args: {
     if (SHELL_READ_VERBS.has(args.channel)) return 'shell-read'
     return 'shell-act'
   }
+  if (BENIGN_CACHE_WRITE_CHANNELS.has(args.channel)) return 'read'
   if (args.kind === 'query') return 'read'
   return 'mutation'
 }

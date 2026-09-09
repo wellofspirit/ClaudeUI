@@ -205,7 +205,16 @@ export class OpencodeSharedProviderAdapter {
   }
 }
 
-function opencodeProviderId(definition: SharedProviderDefinition): string {
+/**
+ * The opencode vendor id a definition's opencode route lands on.
+ *
+ * Exported (rather than re-derived at each call site) because "which native row
+ * does this shared definition own" is asked in three places now — this adapter,
+ * `decorateSharedProviderClaims` in `session.ipc.ts`, and the provider registry
+ * — and the three must never disagree. `PiSharedProviderAdapter.nativeProviderId`
+ * is the pi twin.
+ */
+export function opencodeProviderId(definition: SharedProviderDefinition): string {
   return definition.routes.opencode.providerId ?? definition.id
 }
 

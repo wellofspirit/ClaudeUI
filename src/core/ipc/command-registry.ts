@@ -42,6 +42,15 @@ import type { StepUpTier } from '../../shared/types'
  * enrollment link can add a device but cannot read a conversation, list
  * credentials, or revoke the operator's own passkey. (The docs' vocabulary list
  * grows by this one entry; the amendment lands with series 2.)
+ *
+ * `ide` is ADR-064's addition and exists for the same separability reason one
+ * step further out: a remote VS Code session is shell-EQUIVALENT (its integrated
+ * terminal is a shell, and its editor reaches whatever the host user can), but
+ * it is deliberately NOT `shell`. Two toggles, two capabilities: an operator who
+ * wants a remote editor must not be handed a raw pty by the same switch, and an
+ * operator who wants a pty must not be handed an unaudited editing surface. Like
+ * `shell` it appears in NO static grant set — the step-up ceremony arms it iff
+ * `remote_config.allow_ide` is on, and toggle-off revokes it in place.
  */
 export const CAPABILITIES = [
   'chat',
@@ -50,6 +59,7 @@ export const CAPABILITIES = [
   'git',
   'fs-read',
   'shell',
+  'ide',
   'admin',
   'enroll',
   'host'
@@ -430,9 +440,13 @@ interface Declaration {
  * remaining guarantee is the narrower — and still load-bearing — one: a pinned
  * channel can never be RECLASSIFIED into a capability the base grant set holds.
  * The channels that must stay desktop-only are kept so by the OTHER half of the
- * reachability rule (they have no remote registration at all: `remote:*`,
- * `auth:*`, `account:*` and `window:*` are raw `ipcMain.handle` wiring in
- * boot-core.ts / index.ts). `remote-handlers.ipc.test.ts` pins that absence.
+ * reachability rule (they have no remote registration at all: the `remote:*`
+ * host-anchor verbs and `window:*` are raw `ipcMain.handle` wiring in
+ * boot-core.ts / index.ts). `remote-handlers.ipc.test.ts` pins that absence —
+ * including for the six pinned `remote:*` entries below, none of which the
+ * 2026-08-28 status-view ruling touched: what that added is `remote:status-view`,
+ * a `config` QUERY with no entry in this table because `config` is grantable and
+ * a pin whose capability is grantable would break this table's one guarantee.
  *
  * **What ADR-056 changed.** `admin` shrank to EXACTLY the session-security area
  * — the `authcfg:*` and `webauthn:*` families, plus their host-anchor twin
@@ -468,6 +482,15 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   'terminal:kill-by-cwd': 'shell',
   'terminal:attach': 'shell',
   'terminal:detach': 'shell',
+  // The remote IDE's minting verb (ADR-064). Pinned for exactly the reason the
+  // terminal verbs are: `ide` is not in AUTH_OFF_GRANTS, so authenticating never
+  // suffices on its own, and a future edit that relabelled this `config` would
+  // hand every authenticated connection a VS Code session on the host — an
+  // editor, a marketplace and an integrated terminal — with no ceremony and no
+  // toggle. `ide:availability` is deliberately NOT pinned: it declares `config`
+  // (asking "may I?" must be answerable without holding the grant), and `config`
+  // is grantable, which this table's one invariant forbids.
+  'ide:mint-entry': 'ide',
   // `auth:*` (native OAuth), `account:*` and `usage:refresh-prices` were pinned
   // to `admin` here until ADR-056 shrank `admin` to the session-security area.
   // They declare `config` now, which is grantable, so a pin would be a

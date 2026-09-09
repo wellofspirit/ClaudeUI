@@ -15,6 +15,9 @@ const baseConfig: RemoteConfig = {
   tlsMode: 1,
   tlsHttpsPort: 443,
   allowTerminal: false,
+  // ADR-064: the remote-IDE toggle at its closed default.
+  allowIde: false,
+  ideCliPath: null,
   shellGrantIdleMinutes: 10,
   authPolicy: null,
   effectiveAuthPolicy: 'password',
@@ -60,20 +63,18 @@ const api = {
   })
 }
 
+/**
+ * The pane no longer takes `onConfigChange`: the settings EDITOR it used to
+ * relay that to is mounted BESIDE this pane by `RemoteSecuritySection` now
+ * (ADR-065), not from inside it, so the only config write this pane can cause is
+ * a revoke — and that goes through `onReload`.
+ */
 function renderPane(config: Partial<RemoteConfig> = {}): {
-  onConfigChange: ReturnType<typeof vi.fn>
   onReload: ReturnType<typeof vi.fn>
 } {
-  const onConfigChange = vi.fn()
   const onReload = vi.fn(async () => {})
-  render(
-    <RemotePasskeySettings
-      config={{ ...baseConfig, ...config }}
-      onConfigChange={onConfigChange}
-      onReload={onReload}
-    />
-  )
-  return { onConfigChange, onReload }
+  render(<RemotePasskeySettings config={{ ...baseConfig, ...config }} onReload={onReload} />)
+  return { onReload }
 }
 
 describe('RemotePasskeySettings', () => {

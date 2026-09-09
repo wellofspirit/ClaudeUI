@@ -28,9 +28,12 @@ describe('getContextWindowSize', () => {
   describe('implicit-1M models (no [1m] in the name)', () => {
     it.each([
       'claude-fable-5',
+      'claude-fable-5-1',
       'claude-mythos-5',
+      'claude-mythos-5-1',
       'claude-opus-4-7',
       'claude-opus-4-8',
+      'claude-opus-5',
       'claude-sonnet-5'
     ])('%s → 1M', (model) => {
       expect(getContextWindowSize(model)).toBe(ONE_M)
