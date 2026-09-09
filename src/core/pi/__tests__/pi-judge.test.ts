@@ -19,6 +19,12 @@ interface FakeOptions {
   rejectPrompt?: boolean
   /** `new_session` resolves `{success:true,data:{cancelled:true}}`. */
   cancelReset?: boolean
+  /** `set_model` REJECTS (transport-level failure). */
+  rejectSetModel?: boolean
+  /** `set_model` resolves `{success:false}`. */
+  failSetModel?: boolean
+  /** `set_model` echoes this id back in `data.id` (absent → no `data` at all). */
+  setModelReturnsId?: string
   /** `start()` rejects. */
   startError?: Error
   /** Awaited inside `get_last_assistant_text`, to hold a call open. */
@@ -74,6 +80,18 @@ function makeFake(
             success: true,
             data: { cancelled: !!cfg.cancelReset }
           }
+        case 'set_model': {
+          if (cfg.rejectSetModel) throw new Error('set_model transport died')
+          return {
+            type: 'response',
+            command: 'set_model',
+            success: !cfg.failSetModel,
+            // Real pi echoes `{id, provider, …}`; a fake with no configured id
+            // returns NO data at all, which the transport treats as "can't
+            // verify, assume it took" (see applyModel's comment).
+            ...(cfg.setModelReturnsId ? { data: { id: cfg.setModelReturnsId } } : {})
+          }
+        }
         default:
           return { type: 'response', command: cmd.type, success: true }
       }
@@ -147,26 +165,66 @@ describe('PiJudge — spawn shape', () => {
     )
   })
 
-  it('applies the resolved judge model, best-effort (a set_model failure never fails the call)', async () => {
+  it('applies the resolved judge model', async () => {
     const { judge, spawned } = makeJudge()
     await judge.transport(REQ)
     expect(spawned[0].calls).toContain('set_model')
+  })
 
-    const boom = new PiJudge({
+  // set_model used to be best-effort ("a judge on pi's default beats no
+  // judge"). It is now FAIL-CLOSED: pi's default is a different security
+  // posture from the configured model, nothing in the UI reveals the
+  // substitution, so an unappliable model must reach the human instead.
+  it('fails CLOSED when set_model rejects — the call throws, the process is retired, and the next call spawns fresh', async () => {
+    const spawned: FakeClient[] = []
+    let first = true
+    const judge = new PiJudge({
       cwd: '/cwd',
-      resolveModel: () => ({ vendorId: 'v', modelId: 'm' }),
+      resolveModel: () => ({ vendorId: 'openai-codex', modelId: 'gpt-5.6-luna' }),
       locateBinary: () => '/fake/pi',
       createClient: (bin, opts) => {
-        const fake = makeFake(bin, opts, {})
-        const inner = fake.request
-        fake.request = ((cmd: PiRpcCommand) =>
-          cmd.type === 'set_model'
-            ? Promise.reject(new Error('nope'))
-            : inner(cmd)) as PiJudgeClient['request']
+        const fake = makeFake(bin, opts, first ? { rejectSetModel: true } : {})
+        first = false
+        spawned.push(fake)
         return fake
       }
     })
-    await expect(boom.transport(REQ)).resolves.toBe('<block>no</block>')
+
+    await expect(judge.transport(REQ)).rejects.toThrow(
+      /set_model failed for openai-codex\/gpt-5\.6-luna/
+    )
+    expect(spawned[0].disposeCalls).toBe(1)
+    // The throwing set_model must not have been followed by a prompt — a
+    // verdict on the wrong model is exactly what this guards against.
+    expect(spawned[0].calls).toEqual(['set_model'])
+
+    await expect(judge.transport(REQ)).resolves.toBe('<block>no</block>')
+    expect(spawned).toHaveLength(2)
+  })
+
+  it('fails CLOSED when set_model resolves success:false', async () => {
+    const { judge, spawned } = makeJudge({ failSetModel: true })
+    await expect(judge.transport(REQ)).rejects.toThrow(/set_model failed/)
+    expect(spawned[0].disposeCalls).toBe(1)
+  })
+
+  it('fails CLOSED when set_model echoes back a DIFFERENT model id than the one requested', async () => {
+    const { judge, spawned } = makeJudge({ setModelReturnsId: 'some-other-model' })
+    await expect(judge.transport(REQ)).rejects.toThrow(
+      /set_model failed for openai-codex\/gpt-5\.4-mini/
+    )
+    expect(spawned[0].disposeCalls).toBe(1)
+  })
+
+  it('accepts a set_model that echoes back the id it was asked for', async () => {
+    const { judge } = makeJudge({ setModelReturnsId: 'gpt-5.4-mini' })
+    await expect(judge.transport(REQ)).resolves.toBe('<block>no</block>')
+  })
+
+  it('resolveModel() === null still leaves pi on its own default (the ONE documented stand-in case) — no set_model, no throw', async () => {
+    const { judge, spawned } = makeJudge({}, null)
+    await expect(judge.transport(REQ)).resolves.toBe('<block>no</block>')
+    expect(spawned[0].calls).not.toContain('set_model')
   })
 
   it('throws when the pi binary cannot be located (→ unavailable → the human decides)', async () => {
@@ -185,15 +243,42 @@ describe('PiJudge — warm reuse and statelessness', () => {
 
     await expect(judge.transport(REQ)).resolves.toBe('<block>yes</block>')
     expect(spawned).toHaveLength(1)
-    // The reset precedes the second prompt — the judge must never see call 1.
+    // The reset precedes the second prompt — the judge must never see call 1 —
+    // and the model is re-applied after it (pi 0.84.3 forgets it on reset).
     expect(spawned[0].calls).toEqual([
       'set_model',
       'prompt',
       'get_last_assistant_text',
       'new_session',
+      'set_model',
       'prompt',
       'get_last_assistant_text'
     ])
+  })
+
+  it('re-applies set_model after every new_session (pi 0.84.3 resets the model on reset)', async () => {
+    // Regression guard for the live symptom: pi 0.84.3's `new_session` drops
+    // the set_model selection back to pi's own default, so the second prompt
+    // ran on a model that answered with an EMPTY assistant message —
+    // `get_last_assistant_text` → `{}` → "no assistant text" → the verdict
+    // became `unavailable`, producing strictly alternating
+    // `allow (stage=fast)` / `BLOCK (stage=error)` log lines. The fix is a
+    // `set_model` IMMEDIATELY after each successful reset.
+    const { judge, spawned } = makeJudge({
+      replies: ['<block>no</block>', '<block>no</block>', '<block>no</block>']
+    })
+
+    await judge.transport(REQ)
+    await judge.transport(REQ)
+    await judge.transport(REQ)
+
+    expect(spawned).toHaveLength(1)
+    const calls = spawned[0].calls
+    const resetIdxs = calls.flatMap((c, i) => (c === 'new_session' ? [i] : []))
+    expect(resetIdxs).toHaveLength(2) // one before each of calls 2 and 3
+    for (const i of resetIdxs) {
+      expect(calls[i + 1]).toBe('set_model')
+    }
   })
 
   it('respawns when the system prompt changes (an environment update rewrites the policy)', async () => {

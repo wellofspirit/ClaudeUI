@@ -49,6 +49,19 @@ See `vendor/pi-cli/docs/rpc.md` for full shapes. The integration surface:
 | `compact` / `set_auto_compaction`                                                    | compaction                                                                                                          |
 | `extension_ui_response`                                                              | reply to extension dialog requests                                                                                  |
 
+### `new_session` resets the MODEL too (pi 0.84.3, probed 2026-09-09)
+
+`new_session` empties the conversation and mints a new `sessionId` (probed 2026-08-01), and
+`--system-prompt` survives it — but the `set_model` selection does **not**. After
+`set_model {openai-codex, gpt-5.6-luna}` → `prompt` → `new_session`, `get_state` reports pi's own
+default (`gpt-5.4-mini`), and the next `prompt` on it returns an assistant message with
+`content: []` in ~0.7 s, so `get_last_assistant_text` answers `{}` with no `text` key.
+
+This bit the auto-mode judge (`src/core/pi/pi-judge.ts`), whose warm process resets between
+verdicts: every second verdict threw `no assistant text` and landed on the human — strictly
+alternating `auto-mode allow (stage=fast)` / `auto-mode BLOCK (stage=error)` in the log. **Any
+warm-process design must re-apply `set_model` after every `new_session`.**
+
 ## Events (verified sequence)
 
 `response(prompt)` → `agent_start` → `turn_start` → `message_start` →
