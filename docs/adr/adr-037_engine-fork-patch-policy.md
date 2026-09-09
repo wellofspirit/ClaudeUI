@@ -109,3 +109,20 @@ works. Measured: 3840/4958 input tokens cached from call 2 on gpt-5.6-luna,
 depends on is pinned by tests rather than assumed. The one known in-session
 prefix break is deliberate: `repoVisibility` is absent until a command triggers
 its capture, so the document has two forms per session, not one.
+
+## Bump to v1.18.29 + P4 status — SHIPPED 2026-09-09
+
+Fork @ `385b1062e`. P4 is the first _bugfix_ patch rather than a feature: an
+upstream import cycle (`packages/core/src/filesystem.ts` ↔
+`filesystem/search.ts`) that only works because bun 1.3.14 happens to emit the
+modules in the safe order. Built with bun 1.4.2 — the developer's and CI's
+version — `FileSystemSearch.node` is `undefined` inside `FileSystem.node`'s
+`deps` and every prompt on every model died in `SystemPrompt.environment`
+(`TypeError … evaluating 'a.name'`). Fixed at the source by making the
+`search → filesystem` edge type-only and importing `Entry`/`Match` from
+`@opencode-ai/schema/filesystem`; verified with an unminified debug bundle
+(graph walk: no undefined deps under 1.4.2), a compiled binary against a dead
+provider, and the core test suite. Decision recorded: we keep building with
+the current bun rather than pinning the fork's `packageManager` version — the
+fork carries the fix, and the §3 protocol gains a network-free smoke step
+(`patch/opencode-fork/README.md` P4). Not upstreamed, per this ADR.

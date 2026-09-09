@@ -15,7 +15,7 @@ Policy: **ADR-037** — fork + patch, narrow diffs, **never upstream**.
 | ----------- | ----------------------------------------------------------------------- |
 | Upstream    | `github.com/sst/opencode` (MIT)                                         |
 | Fork        | `github.com/wellofspirit/opencode`, branch `claudeui`                   |
-| Forked from | tag `v1.18.9`, currently merged up to **`v1.18.10`**                    |
+| Forked from | tag `v1.18.9`, currently merged up to **`v1.18.29`**                    |
 | Pinned by   | `package.json#opencodeCliVersion` + `package.json#opencodeFork`         |
 | Provenance  | `vendor/opencode-cli/version.json` (`source`, `fork.commit`, `builtAt`) |
 
@@ -189,6 +189,52 @@ is exactly why `usage` was added. The `--vary-system` negative control drives
 both back to `cacheRead 0`, confirming the metric is prefix-keyed and not a
 constant the provider echoes.
 
+### P4 — `filesystem` ↔ `filesystem/search` import-cycle fix (build-order bug)
+
+**File:** `packages/core/src/filesystem/search.ts` (fork commit `385b1062e`).
+
+**Why.** Upstream `filesystem.ts` imports `FileSystemSearch` (for
+`FileSystem.node`'s `deps` and the search layer) and `filesystem/search.ts`
+imports `FileSystem` back (for the `Entry`/`Match` constructors and the input
+types). A bundler may emit the two halves of that cycle in either order. bun
+1.3.14 (upstream's `packageManager` pin) happens to emit `search` first; bun
+1.4.x emits `filesystem` first, so `FileSystemSearch.node` is a hoisted,
+still-`undefined` `var` when `FileSystem.node`'s `deps` array is built. The
+location service graph then dies on the **first prompt of every session**, in
+`LayerNode.walk`'s `resolve` (`replacementMap.get(node.name)`), as
+`TypeError: undefined is not an object (evaluating 'a.name')` surfacing from
+`SystemPrompt.environment`. Model-independent; it was first seen as a
+"GPT-6 through opencode" bug. Upstream is only safe by bundler accident, and we
+build with the developer's / CI's bun (1.4.2 at the time).
+
+**Fix.** Make the `search → filesystem` edge type-only (`import type
+{ FileSystem }`) and take `Entry` / `Match` straight from
+`@opencode-ai/schema/filesystem`, which is where `filesystem.ts` re-exports
+them from. No runtime edge remains, so module order is irrelevant. Nine
+mechanical `FileSystem.Entry.make` / `FileSystem.Match.make` → `Entry.make` /
+`Match.make` rewrites; `packages/core` `tsgo` and its 1092-test suite pass.
+
+**Re-derivation.** If a future merge reintroduces the runtime import (or any
+other cycle among `make*Node` modules), the symptom is the same. Diagnose by
+building the fork **without `compile`** (same `Bun.build` options, unminified,
+`outdir`), appending `export { locationServices as __ls_debug }` to the chunk
+that logs `"booting location services"`, and walking `dependencies`
+recursively for `undefined` — the parent node names the cycle. Then compare
+where the two `Context.Service(...)("@opencode/v2/...")` classes land in the
+chunk under each bun version.
+
+**Verification (no network, no API spend).** A dead local provider exercises
+the whole pre-LLM path, which is exactly where this fails:
+
+```bash
+OPENCODE_CONFIG_CONTENT='{"provider":{"deadp":{"npm":"@ai-sdk/openai-compatible","name":"deadp","options":{"baseURL":"http://127.0.0.1:9/v1","apiKey":"x"},"models":{"m1":{"name":"m1"}}}},"model":"deadp/m1","small_model":"deadp/m1"}' \
+  vendor/opencode-cli/opencode.exe run --print-logs --log-level ERROR -m deadp/m1 "say hi"
+```
+
+A good build ends in `Cannot connect to API`; a bad one in the `a.name`
+`TypeError` (also logged as `prompt_async failed … Die(TypeError …)` in
+`~/.local/share/opencode/log/opencode.log`).
+
 ## ClaudeUI side
 
 | File                                   | Role                                                                                               |
@@ -232,6 +278,7 @@ git tag -l "v1.*" --sort=-v:refname | head    # newest release tag
    ```bash
    bun test test/permission/hermetic.test.ts        # in the fork clone
    bun run ensure-opencode -- --force               # rebuild + re-vendor
+   # P4 smoke: dead-provider run (see P4) — must end in "Cannot connect to API"
    OPENCODE_INTEGRATION_TESTS=1 bunx vitest run --project integration
    python patch/opencode-fork/live-judge.py vendor/opencode-cli/opencode.exe
    python patch/opencode-fork/live-judge-cache.py vendor/opencode-cli/opencode.exe
@@ -253,6 +300,9 @@ recorded because they are non-obvious if the pipeline is ever rebuilt.
 upgrade`, the script drops a pinned standalone bun in `.cache/bun-<version>/`.
   It extracts with PowerShell `Expand-Archive`, **not** `tar` — Windows bsdtar
   reads `D:\...` as `host:path`.
+  The script accepts any local bun in the `^packageManager` range and CI builds
+  with a newer bun on purpose — bundler **module order differs between bun
+  versions**, which is how P4 bit; the fork must not rely on cycle ordering.
 - **`tree-sitter-powershell`.** Its node-gyp postinstall fails without a matching
   MSVC toolchain _and aborts the rest of `bun install`_, leaving a half-extracted
   `node_modules` (an `effect` package containing only `dist/`) whose eventual
