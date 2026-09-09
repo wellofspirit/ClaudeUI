@@ -4,20 +4,21 @@ ClaudeUI's opencode patches, unlike the `cli.js` ones in the sibling directories
 are **source patches on a git fork**, not surgery on a minified bundle. There is
 no `.patch` file to re-anchor: the patches live as commits on
 `github.com/wellofspirit/opencode` branch `claudeui`, and `scripts/ensure-opencode.mjs`
-clones that branch, builds it with opencode's own release pipeline, and vendors
-the binary into `vendor/opencode-cli/`.
+clones that branch, checks out the pinned fork tag (`package.json#opencodeFork.ref`),
+builds it with opencode's own release pipeline, and vendors the binary into
+`vendor/opencode-cli/`.
 
 Policy: **ADR-037** — fork + patch, narrow diffs, **never upstream**.
 
 ## Affected component
 
-| Component   | Value                                                                   |
-| ----------- | ----------------------------------------------------------------------- |
-| Upstream    | `github.com/sst/opencode` (MIT)                                         |
-| Fork        | `github.com/wellofspirit/opencode`, branch `claudeui`                   |
-| Forked from | tag `v1.18.9`, currently merged up to **`v1.18.29`**                    |
-| Pinned by   | `package.json#opencodeCliVersion` + `package.json#opencodeFork`         |
-| Provenance  | `vendor/opencode-cli/version.json` (`source`, `fork.commit`, `builtAt`) |
+| Component   | Value                                                                    |
+| ----------- | ------------------------------------------------------------------------ |
+| Upstream    | `github.com/sst/opencode` (MIT)                                          |
+| Fork        | `github.com/wellofspirit/opencode`, branch `claudeui`                    |
+| Forked from | tag `v1.18.9`, currently merged up to **`v1.18.29`**                     |
+| Pinned by   | `package.json#opencodeCliVersion` + `opencodeFork.ref` (fork tag/commit) |
+| Provenance  | `vendor/opencode-cli/version.json` (`source`, `fork.commit`, `builtAt`)  |
 
 Upstream's release branch is **`dev`**, not `main`. Release tags (`vX.Y.Z`) are
 CI commits created _on top of_ `dev` and never merged back, so `git merge-base
@@ -237,12 +238,12 @@ A good build ends in `Cannot connect to API`; a bad one in the `a.name`
 
 ## ClaudeUI side
 
-| File                                   | Role                                                                                               |
-| -------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `src/main/opencode/judge-transport.ts` | direct P1 transport + `/doc` probe + fallback to the session judge                                 |
-| `src/main/opencode/OpencodeSession.ts` | `SEALED_THROWAWAY_PATCH`; `makeJudgeFn` prefers the endpoint, `makeSessionJudgeFn` is the fallback |
-| `src/main/opencode/agent-generate.ts`  | seals its throwaway session                                                                        |
-| `scripts/ensure-opencode.mjs`          | clone → build → vendor; `--from-release` falls back to the unpatched upstream tarball              |
+| File                                   | Role                                                                                                                 |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `src/main/opencode/judge-transport.ts` | direct P1 transport + `/doc` probe + fallback to the session judge                                                   |
+| `src/main/opencode/OpencodeSession.ts` | `SEALED_THROWAWAY_PATCH`; `makeJudgeFn` prefers the endpoint, `makeSessionJudgeFn` is the fallback                   |
+| `src/main/opencode/agent-generate.ts`  | seals its throwaway session                                                                                          |
+| `scripts/ensure-opencode.mjs`          | clone → check out `opencodeFork.ref` → build → vendor; `--from-release` falls back to the unpatched upstream tarball |
 
 The judge transport probes **`GET /doc`**, never a speculative `POST`. An
 unpatched opencode does not 404 on an unknown path — it serves the web UI (`200
@@ -287,8 +288,12 @@ git tag -l "v1.*" --sort=-v:refname | head    # newest release tag
    provider transports, and it is where both P1 regressions were caught. The
    cache run is the only thing that catches a _silent_ P3 regression — a lost
    marker or a newly injected per-call value costs money and breaks nothing.
-6. Bump `package.json#opencodeCliVersion` and `opencodeFork.tag`, then confirm
-   `vendor/opencode-cli/version.json` records the new `fork.commit`.
+6. Tag the fork commit (`v<upstream>-claudeui.<n>`, annotated, pushed) and pin
+   it: bump `package.json#opencodeCliVersion`, `opencodeFork.tag` (the upstream
+   release merged — provenance only) and `opencodeFork.ref` (the fork tag the
+   pipeline actually builds; branch HEAD when unset). Confirm
+   `vendor/opencode-cli/version.json` records the new `fork.ref` + `fork.commit`.
+   A hotfix commit on the branch is invisible to builds until the pin moves.
 
 ## Build environment notes (Windows)
 

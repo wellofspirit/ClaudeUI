@@ -11,7 +11,8 @@
   "opencodeFork": {
     "repo": "https://github.com/wellofspirit/opencode.git",
     "branch": "claudeui",
-    "tag": "v1.18.29"
+    "tag": "v1.18.29",
+    "ref": "v1.18.29-claudeui.1"
   },
   "piCliVersion": "0.84.3",
   "ripgrepVersion": "14.1.1",

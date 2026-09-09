@@ -125,4 +125,6 @@ version — `FileSystemSearch.node` is `undefined` inside `FileSystem.node`'s
 provider, and the core test suite. Decision recorded: we keep building with
 the current bun rather than pinning the fork's `packageManager` version — the
 fork carries the fix, and the §3 protocol gains a network-free smoke step
-(`patch/opencode-fork/README.md` P4). Not upstreamed, per this ADR.
+(`patch/opencode-fork/README.md` P4). Not upstreamed, per this ADR. Builds are
+now pinned to a fork tag (`opencodeFork.ref`, first `v1.18.29-claudeui.1`)
+rather than branch HEAD, so a bump is an explicit pin move.
