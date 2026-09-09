@@ -191,8 +191,8 @@ Each judge call is stage-bounded — 60 s stage 1 / 120 s stage 2, cli.js's
 behind a spinner.
 
 **Ground truth.** `src/core/automode/ground-truth.ts`: `{"outcome":…}`
-annotations (ok / error / rejected-by-user / automode-blocked only — sticky
-decisions), session-start remotes captured once and frozen, measured
+annotations (ok / error / rejected-by-user / automode-blocked, plus pi's bridge-measured
+`unanswered` since 2026-09-09 — sticky decisions), session-start remotes captured once and frozen, measured
 `gitStatus` meta before tree-affecting commands, `gh`-resolved repoVisibility
 for exfil-capable ones. All captures spawn(shell:false), time-budgeted, and
 emit nothing on failure.

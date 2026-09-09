@@ -1875,6 +1875,12 @@ export class PiSession extends BaseSession {
         // no longer usefully answer.
         this.send('session:approval-dismiss', { requestId })
       }
+      // Auto-mode ground truth: the call never ran and nobody refused it. pi
+      // reports it as a failed tool moments from now; `unanswered` is a
+      // sticky decision outcome so that `error` cannot overwrite it, and the
+      // judge reads a re-attempt as a fresh proposal rather than a retry of a
+      // denied one (Transient Retry stays available).
+      this.recordToolOutcome(info.toolCallId, 'unanswered')
       // A grant minted for this call (the allow may have landed just as pi
       // gave up) must not survive as a usable /hosted-tool ticket…
       this.hostedGrants.delete(info.toolCallId)

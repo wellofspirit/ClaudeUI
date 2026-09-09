@@ -2586,6 +2586,29 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     session.dispose()
   })
 
+  it('an ABANDONED gate records `unanswered` for the judge (nobody decided — a re-attempt is a fresh proposal)', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>no</block>']
+    const win = new MockWindow()
+    // default mode: a human card is pending when pi stops polling the bridge.
+    const session = new PiSession('rid-auto-unanswered', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const pending = gate('call_a7', 'bash', { command: 'npm publish' })
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+    abandon('tool-call', 'call_a7', 'bash')
+    await expect(pending).resolves.toMatchObject({ behavior: 'deny' })
+
+    pushToolCall(session, 'call_a7', 'bash', { command: 'npm publish' })
+    await session.setPermissionMode('auto')
+    await gate('call_a8', 'bash', { command: 'npm publish' })
+
+    const retryPrompt = judgeInstances[0].prompts.at(-1) ?? ''
+    expect(retryPrompt).toContain('{"outcome":"unanswered"}')
+    expect(retryPrompt).not.toContain('{"outcome":"rejected-by-user"}')
+    session.dispose()
+  })
+
   it('G9 — an explicit USER ask rule goes to the human with ZERO judge calls', async () => {
     enableAutoMode()
     mockLoadClaudePermissions.mockImplementation((scope: string) =>

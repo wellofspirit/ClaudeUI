@@ -548,6 +548,12 @@ describe('recordToolOutcome', () => {
     recordToolOutcome(m, 't2', 'automode-blocked')
     recordToolOutcome(m, 't2', 'ok')
     expect(m.get('t2')).toBe('automode-blocked')
+
+    // pi reports an abandoned gate as a failed tool ("approval service
+    // unreachable") right after the bridge gives up on it.
+    recordToolOutcome(m, 't3', 'unanswered')
+    recordToolOutcome(m, 't3', 'error')
+    expect(m.get('t3')).toBe('unanswered')
   })
 
   it('lets one decision replace another (human overrules the monitor)', () => {
