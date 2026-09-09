@@ -181,6 +181,38 @@ All **verified against the standalone `pi.exe`** (this was the M0 go/no-go):
   `examples/rpc-extension-ui.ts` + `examples/extensions/rpc-demo.ts`, `examples/extensions/subagent/`,
   `examples/extensions/plan-mode/`.
 
+### Long-poll protocol (bridge v6, probed 2026-09-09)
+
+**Bun's `fetch` has a default idle timeout, and it kills held bridge requests.** Probed inside pi's
+embedded Bun 1.3.14 (pi 0.84.3) with a throwaway `-e` extension: a `fetch` to a server that never answers
+rejects after **300.6 s** with a `DOMException` named `TimeoutError`. A standalone Bun 1.4.2 does the
+same at 360 s. The original design held ONE request open until the decision was made — which for a
+human approval is however long the card sits, and for a `dispatch_agent` run is the whole child run —
+so anything past five minutes failed the tool call closed with
+`ClaudeUI approval service unreachable (DOMException)` while ClaudeUI still displayed a live card.
+
+So each exchange is now a sequence of BOUNDED requests (`pi-bridge-source.ts`'s single
+`bridgeExchange` helper, `PiBridgeHost.ts`'s `inFlight` state machine):
+
+- `POST /tool-call` and `POST /hosted-tool` START the work and hold the response for at most
+  `holdMs` (**45 s** default). Settled in time → the decision / tool result inline, unchanged.
+  Otherwise → `200 {"pending": true}`.
+- `POST /tool-call/wait` and `POST /hosted-tool/wait`, body `{toolCallId}`, re-park on the same
+  exchange under the same rules. Keys are `${route}:${toolCallId}` — the route MUST be part of the
+  key, since a hosted tool passes through both routes carrying the same `toolCallId`. An unknown
+  key → `404`, which the extension treats like any non-2xx: fail closed.
+- A repeated INITIAL post for a live exchange parks like a wait; the handler never runs twice (no
+  duplicate approval card, no double hosted-tool execution).
+- At most one parked response per exchange; a result produced with nobody parked is buffered for the
+  next wait.
+- With nobody parked (after a `pending`, after a parked socket closed, or while a settled result
+  sits uncollected) an `abandonMs` (**30 s** default) timer runs — the extension re-polls
+  immediately, so that much loopback silence means the pi child is gone. On expiry the host drops
+  the exchange and fires `onAbandoned`, which is how PiSession dismisses the now-pointless approval
+  card and stops an orphaned dispatched child.
+- Node's `http.Server` defaults (`requestTimeout` 300 s, `headersTimeout` 60 s) bound RECEIVING a
+  request, not holding a response — no server option changes were needed.
+
 Probed for M5a (2026-07-20, same binary):
 
 - **Imports work in `-e` extensions** — node builtins (`node:fs`) AND relative imports

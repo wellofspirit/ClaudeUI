@@ -169,3 +169,39 @@ Two facts drove the design, both **probed against the real binary before any pro
   **ADR-033/034**; hosted-tool rendering via the neutral ToolKind registry.
 - Built via the **ADR-026** workflow (Opus orchestrates + reviews every line; Sonnet implements;
   gates + real-app verification before each commit).
+
+## Amendment 2026-09-09 — bridge long-poll + abandonment callback
+
+**Why.** Bun's `fetch` has a default idle timeout, and pi's extension runtime is Bun. Probed inside
+pi 0.84.3's embedded Bun 1.3.14: a `fetch` to a server that never answers rejects after **300.6 s**
+with a `DOMException` named `TimeoutError` (standalone Bun 1.4.2: 360 s). The original bridge design
+held
+ONE request open until the handler settled — which for a human approval is however long the card
+sits, and for a `dispatch_agent` run is the entire child run. Past five minutes the `tool_call` hook
+therefore failed CLOSED with `ClaudeUI approval service unreachable (DOMException)` while ClaudeUI
+still showed a live approval card, and the host went on holding a dead socket: the card lingered, a
+late click resolved a promise nobody was reading, `gateToolCall` still minted a `hostedGrants`
+ticket for a `toolCallId` pi had already failed, and a dispatched child kept running with no
+consumer.
+
+**What.** Every exchange became a sequence of bounded requests. `POST /tool-call` /
+`POST /hosted-tool` start the work and hold for at most `holdMs` (45 s), then answer
+`200 {"pending": true}`; new `POST /tool-call/wait` / `POST /hosted-tool/wait` routes (body
+`{toolCallId}`) re-park on the same exchange, keyed `${route}:${toolCallId}` so the two routes never
+collide on the shared id. A repeated initial post parks like a wait rather than re-running the
+handler. `PI_BRIDGE_VERSION` went to `6`; the extension routes both exchanges through one
+`bridgeExchange` long-poll helper, and every fail-closed reason/isError literal is unchanged.
+`PiBridgeHost` gained an optional third constructor arg
+(`{holdMs, abandonMs, onAbandoned}`) and, when nobody is parked on an exchange for `abandonMs`
+(30 s), drops it and calls `onAbandoned({route, toolCallId, toolName, settled})`. PiSession's
+handler force-denies the matching `pendingGates` entry with `pi stopped waiting for this approval`,
+sends `session:approval-dismiss`, revokes the hosted grant, and — on the `/hosted-tool` route —
+calls `crossEngineDispatcher.stopDispatch(toolCallId, routingId)` for an in-flight dispatch. Node's
+`requestTimeout`/`headersTimeout` bound RECEIVING a request rather than holding a response, so no
+server options changed. Full protocol in `docs/protocol-pi/README.md` §
+"Long-poll protocol (bridge v6)".
+
+**Consequence.** Approvals may now sit indefinitely — the five-minute ceiling is gone. In exchange
+there is a new failure mode with an explicit owner: an abandoned exchange retracts its own approval
+card and stops the child it was gating, instead of leaving both alive with nothing on the other end.
+The cost is one extra loopback round trip per 45 s that a decision is outstanding.

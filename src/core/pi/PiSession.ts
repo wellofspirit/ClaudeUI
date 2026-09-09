@@ -48,6 +48,7 @@ import { recordUsageEvent } from '../services/usage-recorder'
 import { PiBridgeHost, writeBridgeExtension, writeSubagentExtension } from './PiBridgeHost'
 import type {
   GateDecision,
+  PiBridgeAbandoned,
   PiHostedToolHandler,
   PiHostedToolPayload,
   PiHostedToolResult,
@@ -381,6 +382,28 @@ export class PiSession extends BaseSession {
    * unboundedly.
    */
   private hostedGrants = new Map<string, string>()
+  /**
+   * SECURITY (abandonment race): `toolCallId`s whose `/tool-call` exchange
+   * PiBridgeHost abandoned (its "Long-poll protocol") while the gate decision
+   * was still being computed. `handleBridgeAbandoned` adds them;
+   * `gateToolCall` consumes one to WITHHOLD the grant a late `allow` would
+   * otherwise mint.
+   *
+   * Needed because the two events are not ordered: `handleBridgeAbandoned` can
+   * only force-deny a `pendingGates` entry, and an auto-mode-judged call has
+   * none — the judge runs for tens of seconds inside `gateToolCallInner` with
+   * nothing registered anywhere, then resolves 'allow' into `gateToolCall`'s
+   * wrapper long after the host stopped waiting. Deleting the grant at abandon
+   * time (which we also do) therefore misses the grant that has not been
+   * minted yet.
+   *
+   * A `Set`, not a `Map`: only membership matters. Bounded to 256 with
+   * oldest-first eviction, the same way `hostedGrants` above is — a session
+   * whose pi child repeatedly dies must not grow this without limit. Eviction
+   * is safe: the worst case of dropping an old id is the pre-fix behavior for
+   * a gate that has been in flight past 256 later abandonments.
+   */
+  private recentlyAbandonedToolCallIds = new Set<string>()
 
   // ── In-pi subagents (M5b) ─────────────────────────────────────────────────
   /**
@@ -647,9 +670,14 @@ export class PiSession extends BaseSession {
     // hostedGrants below), a session with hostedMcp off should never expose a
     // working /hosted-tool route at all, matching what the bridge extension
     // itself is told to register (CLAUDEUI_PI_HOSTED_TOOLS below).
+    // The THIRD arg is the long-poll options bag (PiBridgeHost's "Long-poll
+    // protocol"): hold/abandon budgets stay at their defaults, but the
+    // abandonment callback is wired so a pi child that stops polling can't
+    // leave a live approval card or an orphaned dispatched child behind.
     const bridgeHost = new PiBridgeHost(
       this.gateToolCall,
-      this.capabilities.hostedMcp ? this.handleHostedTool : undefined
+      this.capabilities.hostedMcp ? this.handleHostedTool : undefined,
+      { onAbandoned: this.handleBridgeAbandoned }
     )
     let bridge: { url: string; token: string }
     try {
@@ -1764,10 +1792,31 @@ export class PiSession extends BaseSession {
    * resumes the awaited promise gateToolCallInner returned, which resolves
    * right back through here before the caller ever sees it). See
    * handleHostedTool for the consuming side.
+   *
+   * SECURITY (abandonment race): the decision can land AFTER PiBridgeHost gave
+   * up on the exchange — an auto-mode judge takes tens of seconds and has no
+   * `pendingGates` entry for `handleBridgeAbandoned` to force-deny, so nothing
+   * else stops this wrapper from minting a grant for a `toolCallId` pi already
+   * failed closed. The host itself drops such a late result, but the GRANT
+   * would survive as a live one-shot `/hosted-tool` ticket usable by anything
+   * holding the bearer token (which sits in the pi child's env, reachable from
+   * any already-approved shell command). Hence the
+   * {@link recentlyAbandonedToolCallIds} check below.
    */
   private gateToolCall = async (payload: PiToolCallPayload): Promise<GateDecision> => {
     const decision = await this.gateToolCallInner(payload)
     if (decision.behavior === 'allow' && PI_HOSTED_TOOL_NAMES.has(payload.toolName)) {
+      if (this.recentlyAbandonedToolCallIds.delete(payload.toolCallId)) {
+        // Consumed one-shot: this exact exchange was abandoned, so the allow
+        // is authority for a call pi will never make. A LATER exchange that
+        // legitimately reuses the id is unaffected. The decision itself is
+        // still returned unchanged — only the grant is withheld.
+        logger.debug(
+          'PiSession',
+          `withholding the hosted-tool grant for ${payload.toolName} (${payload.toolCallId}) — pi abandoned that exchange before the gate resolved`
+        )
+        return decision
+      }
       this.hostedGrants.set(payload.toolCallId, payload.toolName)
       // Bound the map — evict the OLDEST entry (Map iteration/insertion
       // order) rather than letting an abandoned session's never-executed
@@ -1792,6 +1841,69 @@ export class PiSession extends BaseSession {
     }
     this.pendingGates.clear()
     this.hostedGrants.clear()
+  }
+
+  /**
+   * PiBridgeHost's `onAbandoned` (its "Long-poll protocol" section): the pi
+   * child stopped polling a bridge exchange, so nothing on the other side is
+   * waiting for our answer any more. Bound as a class field so a bare
+   * reference can be handed to the constructor.
+   *
+   * Without this the abandonment was invisible: the approval card stayed on
+   * screen and a late click resolved a promise whose response socket was
+   * already dead (Node no-ops the write), gateToolCall still minted a
+   * `hostedGrants` entry for a toolCallId pi had already failed, and a
+   * dispatched child kept running — and spending — with no consumer.
+   */
+  private handleBridgeAbandoned = (info: PiBridgeAbandoned): void => {
+    if (info.route === 'tool-call') {
+      // pendingGates is keyed by requestId, so find the entry by its
+      // toolCallId. Resolving it (rather than just dropping it) is what
+      // releases whatever `gateToolCallInner` promise is still awaited.
+      let requestId: string | null = null
+      for (const [id, pending] of this.pendingGates) {
+        if (pending.toolCallId === info.toolCallId) {
+          requestId = id
+          break
+        }
+      }
+      if (requestId !== null) {
+        const pending = this.pendingGates.get(requestId)
+        this.pendingGates.delete(requestId)
+        pending?.resolve({ behavior: 'deny', reason: 'pi stopped waiting for this approval' })
+        // Same channel claude/opencode use to retract an approval the user can
+        // no longer usefully answer.
+        this.send('session:approval-dismiss', { requestId })
+      }
+      // A grant minted for this call (the allow may have landed just as pi
+      // gave up) must not survive as a usable /hosted-tool ticket…
+      this.hostedGrants.delete(info.toolCallId)
+      // …and one that has NOT been minted yet must never be. See
+      // `recentlyAbandonedToolCallIds`: an auto-mode-judged call has no
+      // pendingGates entry to force-deny above, so its 'allow' can arrive here
+      // seconds from now, after the host already dropped the exchange.
+      this.recentlyAbandonedToolCallIds.add(info.toolCallId)
+      if (this.recentlyAbandonedToolCallIds.size > 256) {
+        const oldest = this.recentlyAbandonedToolCallIds.values().next().value
+        if (oldest !== undefined) this.recentlyAbandonedToolCallIds.delete(oldest)
+      }
+      logger.warn(
+        'PiSession',
+        `pi abandoned the /tool-call gate for ${info.toolName} (${info.toolCallId})` +
+          (requestId !== null ? ' — dismissed its approval card' : '')
+      )
+      return
+    }
+
+    if (this.inFlightDispatchIds.has(info.toolCallId)) {
+      // The same call interrupt() and TaskCard's Stop button make — the child
+      // has no consumer left, so letting it run would only burn tokens.
+      crossEngineDispatcher.stopDispatch(info.toolCallId, this.routingId)
+    }
+    logger.warn(
+      'PiSession',
+      `pi abandoned the /hosted-tool call for ${info.toolName} (${info.toolCallId})`
+    )
   }
 
   /** Lazily load (and cache) the merged user/project/local Claude permission rules for this session's cwd. */

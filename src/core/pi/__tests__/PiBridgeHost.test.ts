@@ -34,6 +34,7 @@ vi.mock('../../services/logger', () => ({
 import { PiBridgeHost, writeBridgeExtension, writeSubagentExtension } from '../PiBridgeHost'
 import type {
   GateDecision,
+  PiBridgeAbandoned,
   PiHostedToolPayload,
   PiHostedToolResult,
   PiToolCallPayload
@@ -131,7 +132,7 @@ describe('PiBridgeHost', () => {
     expect(res.status).toBe(401)
   })
 
-  it('404s any route other than POST /tool-call or POST /hosted-tool', async () => {
+  it('404s any route other than POST /tool-call, /hosted-tool and their /wait twins', async () => {
     host = new PiBridgeHost(
       async () => ({ behavior: 'allow' }),
       async () => ({ content: [{ type: 'text', text: 'ok' }] })
@@ -476,6 +477,362 @@ describe('PiBridgeHost — POST /hosted-tool (M4a+b)', () => {
         body: '{}'
       })
     ).rejects.toThrow()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Long-poll protocol (2026-09-09) — every exchange is now a sequence of
+// BOUNDED requests instead of one held open until the handler settles, because
+// Bun's `fetch` inside pi gives up after ~300 s and failed the tool call
+// closed. Real server, real sockets; hold/abandon budgets shrunk to
+// milliseconds so the state machine is observable in a unit test.
+// ---------------------------------------------------------------------------
+
+interface PostResult {
+  status: number
+  body: Record<string, unknown> | null
+}
+
+async function post(
+  url: string,
+  token: string | null,
+  path: string,
+  body: unknown
+): Promise<PostResult> {
+  const res = await fetch(`${url}${path}`, {
+    method: 'POST',
+    headers: {
+      ...(token === null ? {} : { authorization: `Bearer ${token}` }),
+      'content-type': 'application/json'
+    },
+    body: typeof body === 'string' ? body : JSON.stringify(body)
+  })
+  const text = await res.text()
+  return {
+    status: res.status,
+    body: text.length > 0 ? (JSON.parse(text) as Record<string, unknown>) : null
+  }
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((r) => {
+    resolve = r
+  })
+  return { promise, resolve }
+}
+
+/** Poll `/wait` the way the extension does — until the host answers with something other than `{pending:true}`. */
+async function pollUntilDecided(
+  url: string,
+  token: string,
+  route: string,
+  toolCallId: string,
+  maxPolls = 50
+): Promise<PostResult> {
+  for (let i = 0; i < maxPolls; i++) {
+    const res = await post(url, token, `${route}/wait`, { toolCallId })
+    if (res.status !== 200 || res.body?.pending !== true) return res
+  }
+  throw new Error(`still pending after ${maxPolls} polls`)
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+describe('PiBridgeHost — long-poll protocol', () => {
+  let host: PiBridgeHost | null = null
+  let abandoned: PiBridgeAbandoned[] = []
+
+  beforeEach(() => {
+    abandoned = []
+  })
+
+  afterEach(() => {
+    host?.dispose()
+    host = null
+  })
+
+  it('answers {pending:true} when the hold expires, then hands the decision to /tool-call/wait and retires the entry', async () => {
+    const gate = deferred<GateDecision>()
+    host = new PiBridgeHost(() => gate.promise, undefined, {
+      holdMs: 50,
+      abandonMs: 5_000,
+      onAbandoned: (i) => abandoned.push(i)
+    })
+    const { url, token } = await host.start()
+
+    const first = await post(url, token, '/tool-call', {
+      toolCallId: 'c1',
+      toolName: 'bash',
+      input: { command: 'ls' }
+    })
+    expect(first.status).toBe(200)
+    expect(first.body).toEqual({ pending: true })
+
+    gate.resolve({ behavior: 'allow' })
+
+    const decided = await pollUntilDecided(url, token, '/tool-call', 'c1')
+    expect(decided.status).toBe(200)
+    expect(decided.body).toEqual({ behavior: 'allow' })
+
+    // Delivered exactly once — the entry is gone, so a repeat wait 404s.
+    const again = await post(url, token, '/tool-call/wait', { toolCallId: 'c1' })
+    expect(again.status).toBe(404)
+    expect(abandoned).toEqual([])
+  })
+
+  it('answers inline (no {pending:true}) when the handler settles inside the hold — the fast path is unchanged', async () => {
+    host = new PiBridgeHost(async () => ({ behavior: 'deny', reason: 'nope' }), undefined, {
+      holdMs: 5_000,
+      abandonMs: 5_000,
+      onAbandoned: (i) => abandoned.push(i)
+    })
+    const { url, token } = await host.start()
+
+    const res = await post(url, token, '/tool-call', {
+      toolCallId: 'c-fast',
+      toolName: 'bash',
+      input: {}
+    })
+    expect(res.body).toEqual({ behavior: 'deny', reason: 'nope' })
+    // Nothing is left in flight, so nothing can be abandoned.
+    const wait = await post(url, token, '/tool-call/wait', { toolCallId: 'c-fast' })
+    expect(wait.status).toBe(404)
+  })
+
+  it('abandons an exchange nobody re-polls after a {pending:true} — once, with settled:false', async () => {
+    const gate = deferred<GateDecision>()
+    host = new PiBridgeHost(() => gate.promise, undefined, {
+      holdMs: 30,
+      abandonMs: 60,
+      onAbandoned: (i) => abandoned.push(i)
+    })
+    const { url, token } = await host.start()
+
+    const first = await post(url, token, '/tool-call', {
+      toolCallId: 'c-gone',
+      toolName: 'write',
+      input: { path: 'a.ts' }
+    })
+    expect(first.body).toEqual({ pending: true })
+
+    await vi.waitFor(() => expect(abandoned).toHaveLength(1), { timeout: 2_000 })
+    expect(abandoned[0]).toEqual({
+      route: 'tool-call',
+      toolCallId: 'c-gone',
+      toolName: 'write',
+      settled: false
+    })
+
+    // A late handler settlement on an abandoned entry must not resurrect it,
+    // re-arm a timer, or fire onAbandoned a second time.
+    gate.resolve({ behavior: 'allow' })
+    await sleep(150)
+    expect(abandoned).toHaveLength(1)
+    expect((await post(url, token, '/tool-call/wait', { toolCallId: 'c-gone' })).status).toBe(404)
+  })
+
+  it('abandons with settled:true when a decision the handler already produced is never collected', async () => {
+    const gate = deferred<GateDecision>()
+    host = new PiBridgeHost(() => gate.promise, undefined, {
+      holdMs: 30,
+      abandonMs: 200,
+      onAbandoned: (i) => abandoned.push(i)
+    })
+    const { url, token } = await host.start()
+
+    expect(
+      (await post(url, token, '/tool-call', { toolCallId: 'c-lost', toolName: 'bash', input: {} }))
+        .body
+    ).toEqual({ pending: true })
+
+    // Settles with nobody parked → buffered, and abandonment re-armed.
+    gate.resolve({ behavior: 'allow' })
+
+    await vi.waitFor(() => expect(abandoned).toHaveLength(1), { timeout: 2_000 })
+    expect(abandoned[0]).toMatchObject({ toolCallId: 'c-lost', settled: true })
+  })
+
+  it('abandons when the parked client destroys its socket mid-hold', async () => {
+    const gate = deferred<GateDecision>()
+    host = new PiBridgeHost(() => gate.promise, undefined, {
+      holdMs: 5_000,
+      abandonMs: 40,
+      onAbandoned: (i) => abandoned.push(i)
+    })
+    const { url, token } = await host.start()
+
+    const parsed = new URL(url)
+    const req = http.request({
+      hostname: parsed.hostname,
+      port: Number(parsed.port),
+      path: '/tool-call',
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }
+    })
+    req.on('error', () => {
+      // Expected — we destroy this request ourselves below.
+    })
+    req.end(JSON.stringify({ toolCallId: 'c-dead', toolName: 'bash', input: {} }))
+
+    // Give the server time to receive the body and park the response, then
+    // vanish the way a killed pi child does.
+    await sleep(60)
+    req.destroy()
+
+    await vi.waitFor(() => expect(abandoned).toHaveLength(1), { timeout: 2_000 })
+    expect(abandoned[0]).toMatchObject({ route: 'tool-call', toolCallId: 'c-dead' })
+    gate.resolve({ behavior: 'allow' })
+  })
+
+  it('a client that keeps re-polling is never abandoned, and collects the decision on the poll parked when the handler settles', async () => {
+    const gate = deferred<GateDecision>()
+    host = new PiBridgeHost(() => gate.promise, undefined, {
+      holdMs: 25,
+      abandonMs: 1_000,
+      onAbandoned: (i) => abandoned.push(i)
+    })
+    const { url, token } = await host.start()
+
+    expect(
+      (await post(url, token, '/tool-call', { toolCallId: 'c-poll', toolName: 'bash', input: {} }))
+        .body
+    ).toEqual({ pending: true })
+
+    // Settle after a few hold windows have already elapsed.
+    setTimeout(() => gate.resolve({ behavior: 'allow', updatedInput: { command: 'ls -la' } }), 90)
+
+    const decided = await pollUntilDecided(url, token, '/tool-call', 'c-poll')
+    expect(decided.body).toEqual({ behavior: 'allow', updatedInput: { command: 'ls -la' } })
+    expect(abandoned).toEqual([])
+  })
+
+  it('a repeated INITIAL post for a live exchange parks like a wait instead of running the handler again', async () => {
+    const gate = deferred<GateDecision>()
+    let handlerCalls = 0
+    host = new PiBridgeHost(
+      () => {
+        handlerCalls++
+        return gate.promise
+      },
+      undefined,
+      { holdMs: 25, abandonMs: 1_000, onAbandoned: (i) => abandoned.push(i) }
+    )
+    const { url, token } = await host.start()
+
+    const body = { toolCallId: 'c-idem', toolName: 'bash', input: {} }
+    expect((await post(url, token, '/tool-call', body)).body).toEqual({ pending: true })
+    expect((await post(url, token, '/tool-call', body)).body).toEqual({ pending: true })
+    expect(handlerCalls).toBe(1)
+
+    gate.resolve({ behavior: 'allow' })
+    expect((await pollUntilDecided(url, token, '/tool-call', 'c-idem')).body).toEqual({
+      behavior: 'allow'
+    })
+    expect(handlerCalls).toBe(1)
+  })
+
+  it('/wait 404s an unknown toolCallId, 400s a malformed body, and 401s without the bearer token', async () => {
+    host = new PiBridgeHost(async () => ({ behavior: 'allow' }), undefined, {
+      holdMs: 25,
+      abandonMs: 1_000,
+      onAbandoned: (i) => abandoned.push(i)
+    })
+    const { url, token } = await host.start()
+
+    expect((await post(url, token, '/tool-call/wait', { toolCallId: 'nope' })).status).toBe(404)
+    expect((await post(url, token, '/tool-call/wait', 'not json')).status).toBe(400)
+    expect((await post(url, token, '/tool-call/wait', { toolCallId: 7 })).status).toBe(400)
+    expect((await post(url, null, '/tool-call/wait', { toolCallId: 'nope' })).status).toBe(401)
+    expect((await post(url, token, '/hosted-tool/wait', { toolCallId: 'nope' })).status).toBe(404)
+    expect((await post(url, null, '/hosted-tool/wait', { toolCallId: 'nope' })).status).toBe(401)
+  })
+
+  it('/hosted-tool long-polls too, and the two routes never share an entry even for the SAME toolCallId', async () => {
+    const gate = deferred<GateDecision>()
+    const hosted = deferred<PiHostedToolResult>()
+    host = new PiBridgeHost(
+      () => gate.promise,
+      () => hosted.promise,
+      { holdMs: 30, abandonMs: 2_000, onAbandoned: (i) => abandoned.push(i) }
+    )
+    const { url, token } = await host.start()
+
+    // The SAME toolCallId is legitimately in flight on both routes: pi gates a
+    // hosted tool through /tool-call and then executes it via /hosted-tool.
+    expect(
+      (
+        await post(url, token, '/tool-call', {
+          toolCallId: 'shared',
+          toolName: 'dispatch_agent',
+          input: {}
+        })
+      ).body
+    ).toEqual({ pending: true })
+    expect(
+      (
+        await post(url, token, '/hosted-tool', {
+          toolName: 'dispatch_agent',
+          toolCallId: 'shared',
+          input: {}
+        })
+      ).body
+    ).toEqual({ pending: true })
+
+    gate.resolve({ behavior: 'allow' })
+    hosted.resolve({ content: [{ type: 'text', text: 'child answered' }] })
+
+    expect((await pollUntilDecided(url, token, '/tool-call', 'shared')).body).toEqual({
+      behavior: 'allow'
+    })
+    expect((await pollUntilDecided(url, token, '/hosted-tool', 'shared')).body).toEqual({
+      content: [{ type: 'text', text: 'child answered' }]
+    })
+    expect(abandoned).toEqual([])
+  })
+
+  // NOTE: this pins the observable INVARIANT (nothing abandons after
+  // teardown), not the mechanism. `remove()`'s identity guard alone is enough
+  // to make it hold, so the test still passes if dispose()'s timer-clearing
+  // loop is deleted — that loop is hygiene (no orphaned timers/entries
+  // outliving the host), and it is not separately observable from out here.
+  it('no abandonment fires after dispose(), with both an armed abandon timer and a still-parked response', async () => {
+    const gate = deferred<GateDecision>()
+    const h = new PiBridgeHost(() => gate.promise, undefined, {
+      holdMs: 200,
+      abandonMs: 100,
+      onAbandoned: (i) => abandoned.push(i)
+    })
+    const { url, token } = await h.start()
+
+    // Exchange A: awaited to completion, so its hold has definitely expired
+    // and its ABANDON timer is armed (it would fire ~100 ms from now).
+    expect(
+      (
+        await post(url, token, '/tool-call', {
+          toolCallId: 'c-abandoning',
+          toolName: 'bash',
+          input: {}
+        })
+      ).body
+    ).toEqual({ pending: true })
+
+    // Exchange B: still PARKED — issued a moment ago, and its 200 ms hold has
+    // not expired. So dispose() below has to clear both timer kinds at once,
+    // and must not let B's socket destruction arm a fresh abandon.
+    const parked = post(url, token, '/tool-call', {
+      toolCallId: 'c-parked',
+      toolName: 'write',
+      input: {}
+    }).catch(() => null)
+    await sleep(20)
+
+    h.dispose()
+    await parked
+
+    // Well past both A's abandon (~100 ms) and B's hold (~180 ms).
+    await sleep(500)
+    expect(abandoned).toEqual([])
   })
 })
 

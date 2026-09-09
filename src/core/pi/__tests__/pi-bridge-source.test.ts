@@ -16,8 +16,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 5 (M5a addendum bumped it for the exit_plan session_start visibility guard)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('5')
+  it("is version 6 (both bridge exchanges became long polls, so Bun's ~300 s fetch idle timeout can no longer kill a held approval)", () => {
+    expect(PI_BRIDGE_VERSION).toBe('6')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -110,6 +110,18 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
   it('posts to <bridgeUrl>/hosted-tool and fails closed with the documented literal', () => {
     expect(PI_BRIDGE_EXTENSION_SOURCE).toContain("bridgeUrl + '/hosted-tool'")
     expect(PI_BRIDGE_EXTENSION_SOURCE).toContain('ClaudeUI hosted-tool service unreachable')
+  })
+
+  it('routes BOTH exchanges through the single bridgeExchange long-poll helper (bridge v6)', () => {
+    // One helper, both call sites — a second hand-rolled fetch loop would be
+    // the thing that quietly reintroduces an unbounded held request.
+    expect(PI_BRIDGE_EXTENSION_SOURCE).toContain('var bridgeExchange = async function')
+    expect(PI_BRIDGE_EXTENSION_SOURCE).toContain("bridgeUrl + '/tool-call'")
+    expect(PI_BRIDGE_EXTENSION_SOURCE).toContain("baseUrl + '/wait'")
+    expect(PI_BRIDGE_EXTENSION_SOURCE).toContain('parsed.pending !== true')
+    // Exactly two fetch() call sites' worth of URL construction: the helper's
+    // own fetch, and nothing else.
+    expect(PI_BRIDGE_EXTENSION_SOURCE.match(/await fetch\(/g)).toHaveLength(1)
   })
 
   it('references the hosted-tools and dispatch-enabled env vars', () => {
@@ -625,6 +637,200 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — tool_call gate hook (executed in-proces
       expect(result?.block).toBe(true)
       expect(result?.reason).toBe('not allowed right now')
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Long-poll protocol (bridge v6) — `bridgeExchange` re-polls
+// `<route>/wait` for as long as the host keeps answering `{pending:true}`, so
+// no single request can outlive Bun's ~300 s fetch idle timeout. These tests
+// stub global fetch with a SCRIPT of responses and assert the URL/body/header
+// of every follow-up poll, plus that the documented fail-closed literals
+// survive the restructuring.
+// ---------------------------------------------------------------------------
+
+describe('PI_BRIDGE_EXTENSION_SOURCE — long-poll exchange (executed in-process)', () => {
+  const originalFetch = globalThis.fetch
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  type FetchCall = { url: string; init: RequestInit }
+
+  /**
+   * Stub `fetch` with one canned response per call, in order. Each entry is
+   * either a body to serve with `ok:true, status:200`, a `{status}` to serve
+   * as a non-2xx, or an Error to reject with.
+   */
+  function scriptFetch(
+    steps: Array<{ body?: unknown; status?: number; reject?: Error }>
+  ): FetchCall[] {
+    const calls: FetchCall[] = []
+    globalThis.fetch = (async (url: string, init: RequestInit) => {
+      calls.push({ url, init })
+      const step = steps[calls.length - 1]
+      if (!step) throw new Error(`unexpected fetch #${calls.length} to ${url}`)
+      if (step.reject) throw step.reject
+      if (step.status !== undefined) return { ok: false, status: step.status } as Response
+      return { ok: true, status: 200, json: async () => step.body } as Response
+    }) as typeof fetch
+
+    return calls
+  }
+
+  type ToolCallEvent = { toolCallId: string; toolName: string; input: Record<string, unknown> }
+  type HookResult = { block?: boolean; reason?: string } | undefined
+
+  function getToolCallHook(): (event: ToolCallEvent) => Promise<HookResult> {
+    const { events } = runExtension()
+    const hook = events.get('tool_call')
+    if (!hook) throw new Error('tool_call hook was not registered')
+    return hook as (event: ToolCallEvent) => Promise<HookResult>
+  }
+
+  it('gate hook: two {pending:true} answers then an allow — re-polls /tool-call/wait with just the toolCallId and the bearer header', async () => {
+    const calls = scriptFetch([
+      { body: { pending: true } },
+      { body: { pending: true } },
+      { body: { behavior: 'allow' } }
+    ])
+
+    await withEnv(BRIDGE_CREDS, async () => {
+      const result = await getToolCallHook()({
+        toolCallId: 'c1',
+        toolName: 'bash',
+        input: { command: 'ls' }
+      })
+      expect(result).toBeUndefined()
+    })
+
+    expect(calls).toHaveLength(3)
+    expect(calls[0].url).toBe('http://127.0.0.1:9/tool-call')
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({
+      toolCallId: 'c1',
+      toolName: 'bash',
+      input: { command: 'ls' }
+    })
+    for (const call of calls.slice(1)) {
+      expect(call.url).toBe('http://127.0.0.1:9/tool-call/wait')
+      expect(String(call.init.body)).toBe('{"toolCallId":"c1"}')
+      expect((call.init.headers as Record<string, string>).authorization).toBe('Bearer tok')
+    }
+  })
+
+  it('gate hook: allow-with-edits still mutates event.input in place after a pending round trip', async () => {
+    scriptFetch([
+      { body: { pending: true } },
+      { body: { behavior: 'allow', updatedInput: { command: 'ls -la' } } }
+    ])
+
+    await withEnv(BRIDGE_CREDS, async () => {
+      const event: ToolCallEvent = { toolCallId: 'c1', toolName: 'bash', input: { command: 'ls' } }
+      expect(await getToolCallHook()(event)).toBeUndefined()
+      expect(event.input).toEqual({ command: 'ls -la' })
+    })
+  })
+
+  it('gate hook: a deny that arrives on a WAIT poll still propagates its reason', async () => {
+    scriptFetch([
+      { body: { pending: true } },
+      { body: { behavior: 'deny', reason: 'not allowed right now' } }
+    ])
+
+    await withEnv(BRIDGE_CREDS, async () => {
+      const result = await getToolCallHook()({ toolCallId: 'c1', toolName: 'bash', input: {} })
+      expect(result?.block).toBe(true)
+      expect(result?.reason).toBe('not allowed right now')
+    })
+  })
+
+  it('gate hook: a non-2xx on the WAIT poll fails closed with the documented HTTP literal', async () => {
+    scriptFetch([{ body: { pending: true } }, { status: 500 }])
+
+    await withEnv(BRIDGE_CREDS, async () => {
+      const result = await getToolCallHook()({ toolCallId: 'c1', toolName: 'bash', input: {} })
+      expect(result?.block).toBe(true)
+      expect(result?.reason).toBe('ClaudeUI approval service unreachable (HTTP 500)')
+    })
+  })
+
+  it('gate hook: a 404 on the WAIT poll (the host abandoned the exchange) fails closed too', async () => {
+    scriptFetch([{ body: { pending: true } }, { status: 404 }])
+
+    await withEnv(BRIDGE_CREDS, async () => {
+      const result = await getToolCallHook()({ toolCallId: 'c1', toolName: 'bash', input: {} })
+      expect(result?.reason).toBe('ClaudeUI approval service unreachable (HTTP 404)')
+    })
+  })
+
+  it('gate hook: a rejecting WAIT poll fails closed with the error-class literal, never the bridge URL', async () => {
+    scriptFetch([{ body: { pending: true } }, { reject: new TypeError('socket hang up') }])
+
+    await withEnv(BRIDGE_CREDS, async () => {
+      const result = await getToolCallHook()({ toolCallId: 'c1', toolName: 'bash', input: {} })
+      expect(result?.reason).toBe('ClaudeUI approval service unreachable (TypeError)')
+      expect(result?.reason).not.toContain('127.0.0.1')
+      expect(result?.reason).not.toContain('tok')
+    })
+  })
+
+  it('hosted tool: {pending:true} then the real result — returned verbatim, wait POSTed to /hosted-tool/wait', async () => {
+    const calls = scriptFetch([
+      { body: { pending: true } },
+      { body: { content: [{ type: 'text', text: 'child answered' }] } }
+    ])
+
+    await withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1' }, async () => {
+      const { tools } = runExtension()
+      const result = await tools.get('render_mermaid')!.execute('call-lp', { source: 'x' })
+      expect(result).toEqual({ content: [{ type: 'text', text: 'child answered' }] })
+    })
+
+    expect(calls[0].url).toBe('http://127.0.0.1:9/hosted-tool')
+    expect(calls[1].url).toBe('http://127.0.0.1:9/hosted-tool/wait')
+    expect(String(calls[1].init.body)).toBe('{"toolCallId":"call-lp"}')
+  })
+
+  it('hosted tool: {pending:true} then a rejecting fetch fails closed with the isError error-class literal', async () => {
+    scriptFetch([{ body: { pending: true } }, { reject: new Error('ECONNREFUSED') }])
+
+    await withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1' }, async () => {
+      const { tools } = runExtension()
+      const result = (await tools.get('render_mermaid')!.execute('call-lp2', { source: 'x' })) as {
+        content: Array<{ text: string }>
+        isError?: boolean
+      }
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toBe('ClaudeUI hosted-tool service unreachable (Error)')
+    })
+  })
+
+  it('hosted tool: {pending:true} then a non-2xx fails closed with the isError HTTP literal', async () => {
+    scriptFetch([{ body: { pending: true } }, { status: 503 }])
+
+    await withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1' }, async () => {
+      const { tools } = runExtension()
+      const result = (await tools.get('render_mermaid')!.execute('call-lp3', { source: 'x' })) as {
+        content: Array<{ text: string }>
+        isError?: boolean
+      }
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toBe('ClaudeUI hosted-tool service unreachable (HTTP 503)')
+    })
+  })
+
+  it('a pending body with anything OTHER than pending===true is treated as the final answer (no infinite poll)', async () => {
+    // Guards the strict `parsed.pending !== true` check: a decision body that
+    // happens to carry a falsy `pending` field must terminate the loop.
+    const calls = scriptFetch([{ body: { pending: false, behavior: 'allow' } }])
+
+    await withEnv(BRIDGE_CREDS, async () => {
+      expect(
+        await getToolCallHook()({ toolCallId: 'c1', toolName: 'bash', input: {} })
+      ).toBeUndefined()
+    })
+    expect(calls).toHaveLength(1)
   })
 })
 

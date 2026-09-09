@@ -215,16 +215,22 @@ const {
   // Mutable holder so tests can read the LATEST captured handler(s) after each
   // spawn (a fresh PiBridgeHost is constructed per doStart() call).
   // hostedToolHandler (M4a+b) is the SECOND constructor arg.
+  // onAbandoned (long-poll protocol) is the THIRD constructor arg's only
+  // field — captured so a test can fire the callback the real host fires when
+  // pi stops polling an exchange.
   const bridgeCaptured: {
     handler: ((payload: unknown) => Promise<unknown>) | null
     hostedToolHandler: ((payload: unknown) => Promise<unknown>) | null
-  } = { handler: null, hostedToolHandler: null }
+    onAbandoned: ((info: unknown) => void) | null
+  } = { handler: null, hostedToolHandler: null, onAbandoned: null }
   const MockPiBridgeHost = vi.fn().mockImplementation(function (
     handler: (payload: unknown) => Promise<unknown>,
-    hostedToolHandler?: (payload: unknown) => Promise<unknown>
+    hostedToolHandler?: (payload: unknown) => Promise<unknown>,
+    options?: { onAbandoned?: (info: unknown) => void }
   ) {
     bridgeCaptured.handler = handler
     bridgeCaptured.hostedToolHandler = hostedToolHandler ?? null
+    bridgeCaptured.onAbandoned = options?.onAbandoned ?? null
     return { start: mockBridgeHostStart, dispose: mockBridgeHostDispose }
   })
   const mockWriteBridgeExtension = vi.fn().mockReturnValue('/fake/tmp/claudeui-bridge.ts')
@@ -520,6 +526,7 @@ beforeEach(() => {
   mockWriteSubagentExtension.mockClear().mockReturnValue('/fake/tmp/claudeui-subagent.ts')
   bridgeCaptured.handler = null
   bridgeCaptured.hostedToolHandler = null
+  bridgeCaptured.onAbandoned = null
   mockLoadClaudePermissions.mockReset().mockReturnValue({
     allow: [],
     deny: [],
@@ -903,6 +910,195 @@ describe('PiSession.interrupt', () => {
     await session.interrupt()
 
     await expect(pending).resolves.toEqual({ behavior: 'deny', reason: 'Interrupted' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Bridge abandonment (long-poll protocol) — PiBridgeHost's onAbandoned fires
+// when the pi child stops polling an exchange (it crashed, was killed, or its
+// own bounded fetch finally gave up). PiSession must undo whatever the
+// exchange was holding open, because nothing on the pi side is listening for
+// our answer any more.
+// ---------------------------------------------------------------------------
+
+/** Fire the LAST captured onAbandoned callback — what the real host calls when its abandon timer expires. */
+function abandon(
+  route: 'tool-call' | 'hosted-tool',
+  toolCallId: string,
+  toolName: string,
+  settled = false
+): void {
+  if (!bridgeCaptured.onAbandoned) {
+    throw new Error('no onAbandoned captured — was doStart() ever awaited?')
+  }
+  bridgeCaptured.onAbandoned({ route, toolCallId, toolName, settled })
+}
+
+describe('PiSession — bridge abandonment cleanup', () => {
+  it('an abandoned /tool-call gate force-denies the pending approval and dismisses its card', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-abandon-1', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const pending = gate('call_ab_1', 'write', { path: 'new.ts', content: 'x' }) // default mode → asks
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+    const approval = (
+      sentPayloads(win, 'session:approval-request') as Array<{
+        requestId: string
+        toolUseId: string
+      }>
+    ).find((a) => a.toolUseId === 'call_ab_1')!
+
+    abandon('tool-call', 'call_ab_1', 'write')
+
+    await expect(pending).resolves.toEqual({
+      behavior: 'deny',
+      reason: 'pi stopped waiting for this approval'
+    })
+    expect(sentPayloads(win, 'session:approval-dismiss')).toEqual([
+      { requestId: approval.requestId }
+    ])
+  })
+
+  it('only the abandoned call is dismissed — a second concurrent gate stays pending', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-abandon-2', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const first = gate('call_ab_a', 'write', { path: 'a.ts', content: 'x' })
+    const second = gate('call_ab_b', 'write', { path: 'b.ts', content: 'y' })
+    await vi.waitFor(() => {
+      const approvals = sentPayloads(win, 'session:approval-request') as Array<{
+        toolUseId: string
+      }>
+      expect(approvals.map((a) => a.toolUseId)).toEqual(
+        expect.arrayContaining(['call_ab_a', 'call_ab_b'])
+      )
+    })
+    const approvals = sentPayloads(win, 'session:approval-request') as Array<{
+      requestId: string
+      toolUseId: string
+    }>
+    const a = approvals.find((x) => x.toolUseId === 'call_ab_a')!
+    const b = approvals.find((x) => x.toolUseId === 'call_ab_b')!
+
+    abandon('tool-call', 'call_ab_a', 'write')
+    await expect(first).resolves.toMatchObject({ behavior: 'deny' })
+    expect(sentPayloads(win, 'session:approval-dismiss')).toEqual([{ requestId: a.requestId }])
+
+    // The surviving gate is still answerable.
+    session.resolveApproval(b.requestId, 'allow')
+    await expect(second).resolves.toEqual({ behavior: 'allow' })
+  })
+
+  it('an abandoned /tool-call revokes any one-shot hosted-tool grant it had already minted', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-abandon-3', win as never, '/cwd', {})
+    await session.run('hi')
+
+    // render_mermaid auto-allows, so the grant exists the moment the gate answers.
+    await grantAutoAllow('call_ab_grant', 'render_mermaid', { source: 'graph TD; A-->B' })
+
+    abandon('tool-call', 'call_ab_grant', 'render_mermaid', true)
+
+    const result = await hostedTool('render_mermaid', { source: 'x' }, 'call_ab_grant')
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('not approved through the tool gate')
+    expect(mockMermaidHandler).not.toHaveBeenCalled()
+  })
+
+  it('an abandoned /tool-call with no matching pending gate is a safe no-op (no dismiss broadcast)', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-abandon-4', win as never, '/cwd', {})
+    await session.run('hi')
+
+    abandon('tool-call', 'call_never_seen', 'bash')
+
+    expect(sentChannels(win)).not.toContain('session:approval-dismiss')
+  })
+
+  it('an abandoned /hosted-tool stops the in-flight dispatched child (toolCallId, routingId)', async () => {
+    let resolveDispatch: ((v: { text: string; sessionId: string }) => void) | null = null
+    mockDispatch.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveDispatch = resolve
+        })
+    )
+    const win = new MockWindow()
+    const session = new PiSession('rid-abandon-5', win as never, '/cwd', {})
+    await session.run('hi')
+
+    await grantViaApproval(win, session, 'call_ab_disp', { engine: 'opencode', prompt: 'x' })
+    const hostedToolPromise = hostedTool(
+      'dispatch_agent',
+      { engine: 'opencode', prompt: 'x' },
+      'call_ab_disp'
+    )
+    await vi.waitFor(() => expect(mockDispatch).toHaveBeenCalledTimes(1))
+
+    abandon('hosted-tool', 'call_ab_disp', 'dispatch_agent')
+
+    expect(mockStopDispatch).toHaveBeenCalledWith('call_ab_disp', 'rid-abandon-5')
+
+    resolveDispatch!({ text: 'done', sessionId: 'oc-sess' })
+    await hostedToolPromise
+  })
+
+  it('an abandoned /hosted-tool for a call with no in-flight dispatch never calls stopDispatch', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-abandon-6', win as never, '/cwd', {})
+    await session.run('hi')
+
+    abandon('hosted-tool', 'call_ab_mermaid', 'render_mermaid')
+
+    expect(mockStopDispatch).not.toHaveBeenCalled()
+  })
+
+  // SECURITY: deleting hostedGrants at abandon time is not enough — the gate
+  // decision can land AFTERWARDS (an auto-mode judge runs for tens of seconds
+  // inside gateToolCallInner with no pendingGates entry for the abandon
+  // handler to force-deny), and gateToolCall's wrapper would then mint a live
+  // one-shot /hosted-tool ticket for a toolCallId pi has already failed
+  // closed. That ticket is reachable by anything holding the bearer token,
+  // which sits in the pi child's env.
+  it('a gate that resolves allow AFTER its exchange was abandoned leaves NO usable grant', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-abandon-race', win as never, '/cwd', {})
+    await session.run('hi')
+
+    // render_mermaid auto-allows, so its decision is a microtask away —
+    // firing abandon SYNCHRONOUSLY after `gate()` returns its promise (before
+    // gateToolCallInner's first continuation runs) reproduces the
+    // abandon-then-late-allow ordering deterministically, without needing a
+    // held judge.
+    const gatePromise = gate('call_race', 'render_mermaid', { source: 'graph TD; A-->B' })
+    abandon('tool-call', 'call_race', 'render_mermaid')
+    // The decision itself is unchanged — only the grant is withheld.
+    await expect(gatePromise).resolves.toEqual({ behavior: 'allow' })
+
+    const result = await hostedTool('render_mermaid', { source: 'x' }, 'call_race')
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain('not approved through the tool gate')
+    expect(mockMermaidHandler).not.toHaveBeenCalled()
+  })
+
+  it('the withheld-grant marker is ONE-SHOT — a later exchange reusing the same toolCallId mints normally', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-abandon-race-2', win as never, '/cwd', {})
+    await session.run('hi')
+
+    const suppressed = gate('call_reuse', 'render_mermaid', { source: 'a' })
+    abandon('tool-call', 'call_reuse', 'render_mermaid')
+    await suppressed
+
+    // A genuinely NEW exchange for the same id (pi restarted, ids are only
+    // unique per pi process) must not inherit the suppression.
+    await grantAutoAllow('call_reuse', 'render_mermaid', { source: 'b' })
+
+    const result = await hostedTool('render_mermaid', { source: 'b' }, 'call_reuse')
+    expect(result.isError).toBeUndefined()
+    expect(mockMermaidHandler).toHaveBeenCalledTimes(1)
   })
 })
 
