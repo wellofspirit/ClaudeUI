@@ -18,6 +18,8 @@ const byId = (testid: string, id: string): HTMLElement =>
 
 function renderView(overrides: Partial<SettingsDialogViewProps> = {}): {
   props: SettingsDialogViewProps
+  /** Re-render the SAME view with changed props — what the container does. */
+  rerender: (next: Partial<SettingsDialogViewProps>) => void
 } {
   const props: SettingsDialogViewProps = {
     settings: { ...DEFAULT_SETTINGS },
@@ -40,8 +42,14 @@ function renderView(overrides: Partial<SettingsDialogViewProps> = {}): {
     onClose: vi.fn(),
     ...overrides
   }
-  render(<SettingsDialogView {...props} />)
-  return { props }
+  const view = render(<SettingsDialogView {...props} />)
+  return {
+    props,
+    rerender: (next) => {
+      Object.assign(props, next)
+      view.rerender(<SettingsDialogView {...props} />)
+    }
+  }
 }
 
 let app: TestApp
@@ -100,7 +108,7 @@ describe('the rail', () => {
     ])
   })
 
-  it('clicking a page calls onSelectPage', () => {
+  it('clicking another page calls onSelectPage', () => {
     const { props } = renderView()
     fireEvent.click(byId('SettingsDialog.railItem', 'mockups'))
     expect(props.onSelectPage).toHaveBeenCalledWith('mockups')
@@ -124,6 +132,211 @@ describe('the rail', () => {
     renderView({ activeGroup: null })
     expect(byId('SettingsDialog.railSub', 'theme')).toHaveAttribute('data-active', 'true')
     expect(byId('SettingsDialog.railSub', 'diff')).toHaveAttribute('data-active', 'false')
+  })
+
+  it('fades the selection layer instead of mounting/unmounting the dot', () => {
+    const { rerender } = renderView({ activeGroup: 'theme' })
+    const button = byId('SettingsDialog.railSub', 'theme')
+    const layer = byId('SettingsDialog.railSubSelection', 'theme')
+    const dot = layer.firstElementChild
+    const nextLayer = byId('SettingsDialog.railSubSelection', 'diff')
+    expect(button).toContainElement(layer)
+    expect(layer).toHaveAttribute('aria-hidden', 'true')
+    expect(nextLayer).toHaveClass('opacity-0')
+
+    // Same node reused across an activeGroup change — only its class list
+    // (opacity) moves, nothing is torn down and remounted.
+    rerender({ activeGroup: 'diff' })
+    expect(byId('SettingsDialog.railSub', 'theme')).toBe(button)
+    expect(byId('SettingsDialog.railSubSelection', 'theme')).toBe(layer)
+    expect(layer.firstElementChild).toBe(dot)
+    expect(byId('SettingsDialog.railSubSelection', 'diff')).toBe(nextLayer)
+    expect(nextLayer).toHaveClass('opacity-100')
+
+    // Inactive now: layer still holds both the bg and the dot, just faded.
+    expect(layer).toHaveClass('bg-accent/15', 'opacity-0')
+    expect(layer.querySelector('span')).toHaveClass('bg-accent')
+
+    // Timing: opacity-only transition, explicitly killed under
+    // prefers-reduced-motion — never a background-color transition on the
+    // layer or the button.
+    expect(layer).toHaveClass('transition-opacity', 'duration-100', 'motion-reduce:transition-none')
+    expect(layer.className).not.toMatch(/transition-colors/)
+    expect(button.className).not.toMatch(/transition-colors/)
+    expect(button).toHaveClass('transition-[color]', 'duration-100', 'motion-reduce:transition-none')
+
+    // Active again: same nodes, opacity flips back on.
+    rerender({ activeGroup: 'theme' })
+    expect(byId('SettingsDialog.railSubSelection', 'theme')).toBe(layer)
+    expect(layer).toHaveClass('opacity-100')
+  })
+})
+
+describe('the rail accordion', () => {
+  it('opens the active page and nothing else', () => {
+    renderView({ activePage: 'chat' })
+    const lists = screen.getAllByTestId('SettingsDialog.railSubList')
+    expect(lists.map((el) => el.dataset.id)).toEqual(['chat'])
+    expect(byId('SettingsDialog.railItem', 'chat')).toHaveAttribute('aria-expanded', 'true')
+    expect(byId('SettingsDialog.railItem', 'appearance')).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('clicking the ACTIVE header collapses it, and does not renavigate or scroll', () => {
+    const { props } = renderView({ activePage: 'appearance', activeGroup: 'diff' })
+    const header = byId('SettingsDialog.railItem', 'appearance')
+    fireEvent.click(header)
+
+    expect(screen.queryAllByTestId('SettingsDialog.railSub')).toHaveLength(0)
+    expect(screen.queryByTestId('SettingsDialog.railSubList')).not.toBeInTheDocument()
+    expect(header).toHaveAttribute('aria-expanded', 'false')
+    expect(header).not.toHaveAttribute('aria-controls')
+    // Collapsing is a rail affordance only: it re-selects nothing and the page
+    // keeps every card it was showing.
+    expect(props.onSelectPage).not.toHaveBeenCalled()
+    expect(props.onActiveGroupChange).not.toHaveBeenCalled()
+    expect(screen.getAllByTestId('SettingsGroup').map((el) => el.dataset.id)).toEqual([
+      'theme',
+      'layout',
+      'diff',
+      'status-line',
+      'git-panel'
+    ])
+    expect(byId('SettingsGroup', 'diff')).toBeInTheDocument()
+  })
+
+  it('reopening restores the sub-entries with the same one marked', () => {
+    const { props } = renderView({ activePage: 'appearance', activeGroup: 'diff' })
+    const header = byId('SettingsDialog.railItem', 'appearance')
+    fireEvent.click(header)
+    fireEvent.click(header)
+
+    expect(screen.getAllByTestId('SettingsDialog.railSub').map((el) => el.dataset.id)).toEqual([
+      'theme',
+      'layout',
+      'diff',
+      'status-line',
+      'git-panel'
+    ])
+    expect(byId('SettingsDialog.railSub', 'diff')).toHaveAttribute('data-active', 'true')
+    expect(props.onActiveGroupChange).not.toHaveBeenCalled()
+    // …and the sub-entries still report, so the callback survives the round trip.
+    fireEvent.click(byId('SettingsDialog.railSub', 'git-panel'))
+    expect(props.onActiveGroupChange).toHaveBeenCalledWith('git-panel')
+  })
+
+  it('names the list it controls, and only while that list exists', () => {
+    renderView({ activePage: 'appearance' })
+    const header = byId('SettingsDialog.railItem', 'appearance')
+    const listId = header.getAttribute('aria-controls')
+    expect(listId).toBeTruthy()
+    expect(document.getElementById(listId!)).toBe(byId('SettingsDialog.railSubList', 'appearance'))
+  })
+
+  it('navigating to another page opens ONLY that page, even after a collapse', () => {
+    const { rerender } = renderView({ activePage: 'appearance', activeGroup: 'diff' })
+    fireEvent.click(byId('SettingsDialog.railItem', 'appearance'))
+    expect(screen.queryByTestId('SettingsDialog.railSubList')).not.toBeInTheDocument()
+
+    // What the container does on a rail click or a cross-page row link.
+    rerender({ activePage: 'chat', activeGroup: null })
+    const lists = screen.getAllByTestId('SettingsDialog.railSubList')
+    expect(lists.map((el) => el.dataset.id)).toEqual(['chat'])
+    expect(screen.getAllByTestId('SettingsDialog.railSub').map((el) => el.dataset.id)).toEqual([
+      'tool-output',
+      'thinking',
+      'voice',
+      'git-actions'
+    ])
+  })
+
+  it('a deep link into the page ALREADY shown reopens it', () => {
+    // `navigate({ page:'appearance', group:'git-panel' })` from the page it is
+    // already on changes no prop but the group and the nonce — so the nonce is
+    // the only thing the rail can answer.
+    const { rerender } = renderView({
+      activePage: 'appearance',
+      activeGroup: 'diff',
+      scrollNonce: 1
+    })
+    fireEvent.click(byId('SettingsDialog.railItem', 'appearance'))
+    expect(screen.queryByTestId('SettingsDialog.railSubList')).not.toBeInTheDocument()
+
+    rerender({ activeGroup: 'git-panel', scrollNonce: 2 })
+    expect(byId('SettingsDialog.railSubList', 'appearance')).toBeInTheDocument()
+    expect(byId('SettingsDialog.railSub', 'git-panel')).toHaveAttribute('data-active', 'true')
+  })
+
+  it('marks the sub-entry the pane is on as the current LOCATION', () => {
+    renderView({ activePage: 'appearance', activeGroup: 'diff' })
+    expect(byId('SettingsDialog.railSub', 'diff')).toHaveAttribute('aria-current', 'location')
+    expect(byId('SettingsDialog.railSub', 'theme')).not.toHaveAttribute('aria-current')
+    // The page header itself is not a location — its children are.
+    expect(byId('SettingsDialog.railItem', 'appearance')).not.toHaveAttribute('aria-current')
+  })
+
+  it('falls back to the first sub-entry when no group is active yet', () => {
+    renderView({ activePage: 'appearance', activeGroup: null })
+    expect(byId('SettingsDialog.railSub', 'theme')).toHaveAttribute('aria-current', 'location')
+    expect(byId('SettingsDialog.railSub', 'diff')).not.toHaveAttribute('aria-current')
+  })
+
+  it('makes a ONE-group page a plain navigation item — no child, no chevron', () => {
+    // About and Mockups hold a single group, so a sub-entry would repeat the
+    // page label and the chevron would reveal that repetition.
+    const { props, rerender } = renderView({ activePage: 'about' })
+    const about = byId('SettingsDialog.railItem', 'about')
+    expect(about).not.toHaveAttribute('aria-expanded')
+    expect(within(about).queryByTestId('SettingsDialog.railChevron')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('SettingsDialog.railSubList')).not.toBeInTheDocument()
+    expect(screen.queryAllByTestId('SettingsDialog.railSub')).toHaveLength(0)
+    // It is the leaf, so IT carries the current-page semantics.
+    expect(about).toHaveAttribute('aria-current', 'page')
+    // Clicking the page you are on does nothing at all — there is nothing to
+    // toggle and re-selecting would reset the pane.
+    fireEvent.click(about)
+    expect(props.onSelectPage).not.toHaveBeenCalled()
+
+    // A multi-group page is the other case: chevron, and no `aria-current`.
+    rerender({ activePage: 'appearance' })
+    const appearance = byId('SettingsDialog.railItem', 'appearance')
+    expect(within(appearance).getByTestId('SettingsDialog.railChevron')).toBeInTheDocument()
+    expect(appearance).not.toHaveAttribute('aria-current')
+    expect(
+      within(byId('SettingsDialog.railItem', 'about')).queryByTestId('SettingsDialog.railChevron')
+    ).not.toBeInTheDocument()
+  })
+
+  it('an inactive one-group page still navigates', () => {
+    const { props } = renderView({ activePage: 'appearance' })
+    fireEvent.click(byId('SettingsDialog.railItem', 'about'))
+    expect(props.onSelectPage).toHaveBeenCalledWith('about')
+  })
+
+  it('disables the whole rail while searching, and restores it after', () => {
+    // Dimming with `pointer-events-none` stops the mouse only; without
+    // `disabled` the buttons stay in the tab order and a keyboard user can
+    // still fire a navigation the dimmed rail says is unavailable.
+    const { rerender } = renderView({ activePage: 'appearance', search: 'mermaid' })
+    for (const item of screen.getAllByTestId('SettingsDialog.railItem')) {
+      expect(item).toBeDisabled()
+    }
+
+    rerender({ search: '' })
+    for (const item of screen.getAllByTestId('SettingsDialog.railItem')) {
+      expect(item).not.toBeDisabled()
+    }
+    for (const sub of screen.getAllByTestId('SettingsDialog.railSub')) {
+      expect(sub).not.toBeDisabled()
+    }
+  })
+
+  it('disables the sub-entries too while searching', () => {
+    // They only exist while the active page is open, so they need their own
+    // assertion: search does not close the accordion, it dims it.
+    renderView({ activePage: 'appearance', search: 'mermaid' })
+    const subs = screen.getAllByTestId('SettingsDialog.railSub')
+    expect(subs.length).toBeGreaterThan(0)
+    for (const sub of subs) expect(sub).toBeDisabled()
   })
 })
 

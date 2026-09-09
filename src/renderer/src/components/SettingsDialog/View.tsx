@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useSessionStore, type AppSettings } from '../../stores/session-store'
 import type { EngineConfig, EngineId, VendorConfig } from '../../../../shared/types'
 import { engineMeta } from '../../../../shared/engine-meta'
@@ -18,6 +18,7 @@ import {
   type SettingsGroup
 } from './settings-pages'
 import { groupKey } from './settings-target'
+import { ChevronIcon } from '../shared/ChevronIcon'
 import type {
   SettingsPageId,
   SettingsRenderContext,
@@ -277,6 +278,23 @@ export function SettingsDialogView({
    */
   const highlighted = activeGroup ?? groups[0]?.id
 
+  // Collapsing the rail must preserve the selected group and pane scroll.
+  const [railOpen, setRailOpen] = useState(true)
+  useEffect(() => {
+    setRailOpen(true)
+  }, [activePage])
+  // Same-page deep links also reopen the rail; scroll-spy updates do not.
+  useEffect(() => {
+    if (scrollNonce > 0) setRailOpen(true)
+  }, [scrollNonce])
+
+  // Capability visibility is static; one-group pages need no disclosure.
+  const expandablePages = useMemo(
+    () => new Set(PAGES.filter((p) => visibleGroups(p).length > 1).map((p) => p.id)),
+    []
+  )
+  const railId = useId()
+
   /**
    * The render arguments every item body takes. `ctx` is the 7th, positional
    * argument (see `SettingItem`) — the rows that show app metadata or link to
@@ -455,7 +473,12 @@ export function SettingsDialogView({
         {/* Body: rail + one scrolling page */}
         <div className="flex flex-1 min-h-0">
           <nav
+            aria-label="Settings pages"
             className={`w-[204px] shrink-0 border-r border-border bg-bg-primary/35 overflow-y-auto px-2 py-1 transition-opacity ${
+              // Search replaces the page, so the rail describes nothing the pane
+              // is showing. Dimmed AND disabled: `pointer-events-none` stops the
+              // mouse but leaves every button in the tab order, so a keyboard
+              // user could still "navigate" to a page they cannot see.
               searching ? 'opacity-50 pointer-events-none' : ''
             }`}
           >
@@ -466,48 +489,112 @@ export function SettingsDialogView({
                 </div>
                 {PAGES.filter((p) => p.rail === railGroup.id).map((p) => {
                   const active = p.id === activePage
+                  const expandable = expandablePages.has(p.id)
+                  const open = active && expandable && railOpen
+                  // A one-group page has no sub-entry to mark, so the page row
+                  // is itself the leaf — and wears the accent a child would.
+                  const leaf = active && !expandable
+                  const listId = `${railId}-rail-${p.id}`
                   return (
                     <div key={p.id}>
                       <button
                         data-testid="SettingsDialog.railItem"
                         data-id={p.id}
                         data-active={active ? 'true' : 'false'}
-                        onClick={() => onSelectPage(p.id)}
-                        className={`w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[13px] leading-[18px] text-left transition-colors cursor-default ${
-                          active
+                        data-expanded={expandable ? (open ? 'true' : 'false') : undefined}
+                        disabled={searching}
+                        aria-expanded={expandable ? open : undefined}
+                        // Only while the list is mounted: `aria-controls` naming
+                        // an element that is not in the DOM is a broken
+                        // reference, not a hint.
+                        aria-controls={open ? listId : undefined}
+                        aria-current={leaf ? 'page' : undefined}
+                        onClick={() => {
+                          // On the page you are already on the header is the
+                          // accordion's own trigger; anywhere else it navigates,
+                          // and arriving somewhere always opens it.
+                          if (!active) {
+                            onSelectPage(p.id)
+                            setRailOpen(true)
+                          } else if (expandable) {
+                            setRailOpen((v) => !v)
+                          }
+                        }}
+                        className={`w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[13px] leading-[18px] text-left transition-colors cursor-default outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${
+                          leaf
                             ? 'bg-accent/15 text-accent font-medium'
-                            : 'text-text-secondary hover:bg-bg-hover'
+                            : active
+                              ? 'bg-bg-hover/60 text-text-primary font-medium'
+                              : 'text-text-secondary hover:bg-bg-hover'
                         }`}
                       >
-                        <span className={active ? 'text-accent' : 'text-text-muted'}>{p.icon}</span>
-                        <span className="min-w-0 truncate">{p.label}</span>
+                        <span
+                          className={
+                            leaf ? 'text-accent' : active ? 'text-text-primary' : 'text-text-muted'
+                          }
+                        >
+                          {p.icon}
+                        </span>
+                        <span className="flex-1 min-w-0 truncate">{p.label}</span>
+                        {expandable && (
+                          <ChevronIcon
+                            open={open}
+                            className={active ? 'text-text-secondary' : 'text-text-muted'}
+                            testid="SettingsDialog.railChevron"
+                          />
+                        )}
                       </button>
-                      {active &&
-                        groups.map((g) => {
-                          const on = g.id === highlighted
-                          return (
-                            <button
-                              key={g.id}
-                              data-testid="SettingsDialog.railSub"
-                              data-id={g.id}
-                              data-active={on ? 'true' : 'false'}
-                              onClick={() => {
-                                onActiveGroupChange(g.id)
-                                scrollToGroup(g.id)
-                              }}
-                              className={`relative w-full text-left pl-[34px] pr-2.5 py-[3px] text-[12px] leading-4 transition-colors cursor-default ${
-                                on
-                                  ? 'text-text-primary'
-                                  : 'text-text-muted hover:text-text-secondary'
-                              }`}
-                            >
-                              {on && (
-                                <span className="absolute left-[24px] top-[8px] w-1 h-1 rounded-full bg-accent" />
-                              )}
-                              <span className="block truncate">{g.label}</span>
-                            </button>
-                          )
-                        })}
+                      {open && (
+                        <div
+                          id={listId}
+                          data-testid="SettingsDialog.railSubList"
+                          data-id={p.id}
+                          // The rule the indent draws: these belong to the page
+                          // above them. Hanging off one hairline, starting under
+                          // the page label, never a second column.
+                          className="mt-px mb-1 ml-[17px] pl-[6px] border-l border-border"
+                        >
+                          {groups.map((g) => {
+                            const on = g.id === highlighted
+                            return (
+                              <button
+                                key={g.id}
+                                data-testid="SettingsDialog.railSub"
+                                data-id={g.id}
+                                data-active={on ? 'true' : 'false'}
+                                disabled={searching}
+                                // `location`, not `page`: the page is the page,
+                                // this is the place within it.
+                                aria-current={on ? 'location' : undefined}
+                                onClick={() => {
+                                  onActiveGroupChange(g.id)
+                                  scrollToGroup(g.id)
+                                }}
+                                className={`relative isolate w-full min-h-8 my-0.5 flex items-center pl-2 pr-5 py-1.5 rounded-md text-left text-[12px] leading-4 transition-[color] duration-100 motion-reduce:transition-none cursor-default outline-none focus-visible:ring-2 focus-visible:ring-accent/60 ${
+                                  on
+                                    ? 'text-accent'
+                                    : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+                                }`}
+                              >
+                                {/* One opacity transition keeps the background and dot in sync. */}
+                                <span
+                                  data-testid="SettingsDialog.railSubSelection"
+                                  data-id={g.id}
+                                  aria-hidden="true"
+                                  className={`pointer-events-none absolute inset-0 rounded-md bg-accent/15 transition-opacity duration-100 motion-reduce:transition-none ${
+                                    on ? 'opacity-100' : 'opacity-0'
+                                  }`}
+                                >
+                                  <span className="absolute right-2 top-1/2 -translate-y-1/2 w-1 h-1 rounded-full bg-accent" />
+                                </span>
+                                <span className="relative z-10 flex-1 min-w-0 truncate">
+                                  {g.label}
+                                </span>
+                              </button>
+                            )
+                          })}
+                        </div>
+                      )}
                     </div>
                   )
                 })}
