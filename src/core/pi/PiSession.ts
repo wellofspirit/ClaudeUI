@@ -2220,12 +2220,19 @@ export class PiSession extends BaseSession {
         return ASK_HUMAN
       }
 
-      logger.info(
-        'PiSession',
+      const verdictLine =
         `auto-mode ${result.block ? 'BLOCK' : 'allow'} (stage=${result.stage}` +
-          `${result.category ? `, rule=${result.category}` : ''}) ${toolName}` +
-          (result.reason ? ` — ${result.reason}` : '')
-      )
+        `${result.category ? `, rule=${result.category}` : ''}) ${toolName}` +
+        (result.reason ? ` — ${result.reason}` : '')
+      if (result.stage === 'error') {
+        // stage=error means no verdict was obtained — a WARN with the
+        // transport's own message, because a bare `stage=error` line is
+        // undiagnosable (it is how the pi 0.84.3 new_session model reset hid
+        // for a whole release).
+        logger.warn('PiSession', verdictLine + (result.error ? ` — ${result.error}` : ''))
+      } else {
+        logger.info('PiSession', verdictLine)
+      }
       // Set only on a fail-closed unparseable verdict — the one block whose
       // reason says nothing about WHY the judge's answer was unreadable.
       if (result.raw !== undefined) {

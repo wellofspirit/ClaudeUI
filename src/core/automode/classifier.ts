@@ -110,6 +110,16 @@ export interface ClassifyResult {
    */
   category?: string
   /**
+   * Why the judge produced no verdict — set ONLY together with
+   * `stage: 'error'`: either the transport's own thrown message or the
+   * stage-budget timeout text. Exists purely so the engine wiring can put a
+   * CAUSE in its log line (a bare `stage=error` is undiagnosable — it was the
+   * whole reason the pi 0.84.3 model-reset bug went unnoticed). Never shown to
+   * the model and never shown to the user: an approval card's copy comes from
+   * `reason`/`decisionReason`, not from here.
+   */
+  error?: string
+  /**
    * The judge's RAW completion text, present ONLY on a fail-closed unparseable
    * verdict (the one whose `reason` is {@link UNPARSEABLE_REASON}), so engine
    * wiring can debug-log what the judge actually said. Never present on a
@@ -507,8 +517,9 @@ export function parseVerdict(text: string): { block: boolean; reason?: string; c
  *
  * A transport throw at either stage — or a stage that blows its
  * {@link STAGE1_TIMEOUT_MS}/{@link STAGE2_TIMEOUT_MS} budget — →
- * `{ block: true, unavailable: true }`, which the wiring maps to "ask the
- * human".
+ * `{ block: true, unavailable: true, error }`, which the wiring maps to "ask
+ * the human" (and logs `error` as the cause — see
+ * {@link ClassifyResult.error}).
  */
 export async function classify(
   input: ClassifyInput,
@@ -523,38 +534,49 @@ export async function classify(
   // by `buildPolicyPrompt — byte-stability` in `__tests__/rules.test.ts`.
   const system = buildPolicyPrompt(input.environment)
 
-  const errored = (): ClassifyResult => ({ block: true, stage: 'error', unavailable: true })
+  const errored = (error: string): ClassifyResult => ({
+    block: true,
+    stage: 'error',
+    unavailable: true,
+    error
+  })
 
   /**
-   * Returns the raw completion, or `null` if the transport threw OR blew its
-   * stage budget. A timeout is deliberately collapsed into the same `null` as a
-   * throw: both mean "no verdict was obtained", which is the definition of
-   * `unavailable` → ask the human. (Nothing here retries — a stage that already
-   * burned its full minute is not made more likely to answer by asking again,
-   * and the human is one card away.)
+   * Returns the raw completion, or the failure MESSAGE if the transport threw
+   * OR blew its stage budget. A timeout is deliberately collapsed into the same
+   * failure outcome as a throw: both mean "no verdict was obtained", which is
+   * the definition of `unavailable` → ask the human. (Nothing here retries — a
+   * stage that already burned its full minute is not made more likely to answer
+   * by asking again, and the human is one card away.)
+   *
+   * The message rides out on {@link ClassifyResult.error} rather than being
+   * logged here: this module is pure and must not import a logger (its tests
+   * import it without mocking one).
    */
   const call = async (
     req: Omit<JudgeRequest, 'system' | 'user'> & { instruction: string; timeoutMs: number }
-  ) => {
+  ): Promise<{ ok: true; raw: string } | { ok: false; error: string }> => {
     const { instruction, timeoutMs, ...rest } = req
     try {
-      return await withTimeout(
+      const raw = await withTimeout(
         judge({ system, user: buildUserPrompt(input, instruction), ...rest }),
         timeoutMs,
         'auto-mode judge'
       )
-    } catch {
-      return null
+      return { ok: true, raw }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
   }
 
   const runStage2 = async (): Promise<ClassifyResult> => {
-    const raw = await call({
+    const out = await call({
       instruction: STAGE2_INSTRUCTION,
       maxTokens: STAGE2_MAX_TOKENS,
       timeoutMs: STAGE2_TIMEOUT_MS
     })
-    if (raw === null) return errored()
+    if (!out.ok) return errored(out.error)
+    const raw = out.raw
     const v = parseVerdictOrNull(raw)
     // Fail-closed, but NOT `unavailable`: we did get an answer, we just can't
     // read it — retrying is not obviously the right move, so this is a block.
@@ -574,12 +596,13 @@ export async function classify(
   if (mode === 'fast') {
     // Sole decider: no stop sequence (cli.js omits it in `fast` so the reason
     // survives), a larger budget, and an unparseable reply blocks.
-    const raw = await call({
+    const out = await call({
       instruction: STAGE1_FAST_INSTRUCTION,
       maxTokens: STAGE1_FAST_MAX_TOKENS,
       timeoutMs: STAGE1_TIMEOUT_MS
     })
-    if (raw === null) return errored()
+    if (!out.ok) return errored(out.error)
+    const raw = out.raw
     const v = parseVerdictOrNull(raw)
     if (!v) return { block: true, stage: 'fast', reason: UNPARSEABLE_REASON, raw }
     // `fast` is not asked for a <category>, but one that arrives anyway has
@@ -593,15 +616,15 @@ export async function classify(
   }
 
   // `both` — stage 1 is a veto-free filter: allow, or escalate.
-  const raw1 = await call({
+  const out1 = await call({
     instruction: STAGE1_BOTH_INSTRUCTION,
     maxTokens: STAGE1_BOTH_MAX_TOKENS,
     timeoutMs: STAGE1_TIMEOUT_MS,
     // Copy — the exported constant must not be mutable by a transport.
     stopSequences: [...STAGE1_STOP_SEQUENCES]
   })
-  if (raw1 === null) return errored()
-  const v1 = parseVerdictOrNull(raw1)
+  if (!out1.ok) return errored(out1.error)
+  const v1 = parseVerdictOrNull(out1.raw)
   if (v1 && !v1.block) {
     return { block: false, ...(v1.reason ? { reason: v1.reason } : {}), stage: 'fast' }
   }

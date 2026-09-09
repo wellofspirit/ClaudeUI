@@ -1926,12 +1926,18 @@ export class OpencodeSession extends BaseSession {
         this.fallbackToHuman(approval)
         return
       }
-      logger.info(
-        'OpencodeSession',
+      const verdictLine =
         `auto-mode ${result.block ? 'BLOCK' : 'allow'} (stage=${result.stage}` +
-          `${result.category ? `, rule=${result.category}` : ''}) ${category}` +
-          (result.reason ? ` — ${result.reason}` : '')
-      )
+        `${result.category ? `, rule=${result.category}` : ''}) ${category}` +
+        (result.reason ? ` — ${result.reason}` : '')
+      if (result.stage === 'error') {
+        // stage=error means no verdict was obtained — a WARN carrying the
+        // transport's own message, since a bare `stage=error` line says
+        // nothing about the cause (mirrors PiSession's identical treatment).
+        logger.warn('OpencodeSession', verdictLine + (result.error ? ` — ${result.error}` : ''))
+      } else {
+        logger.info('OpencodeSession', verdictLine)
+      }
       // Set only on a fail-closed unparseable verdict — the one block whose
       // reason says nothing about WHY the judge's answer was unreadable.
       if (result.raw !== undefined) {

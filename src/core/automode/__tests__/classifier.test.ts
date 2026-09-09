@@ -643,10 +643,14 @@ describe('classify (orchestrator)', () => {
     expect(errored.raw).toBeUndefined()
   })
 
-  it('transport throws at STAGE 1 → block + unavailable, no escalation', async () => {
+  it('transport throws at STAGE 1 → block + unavailable, no escalation, with the thrown message on `error`', async () => {
     const judge = vi.fn().mockRejectedValue(new Error('judge down'))
     const r = await classify({ ...base, twoStageMode: 'both' }, judge)
     expect(r).toMatchObject({ block: true, unavailable: true, stage: 'error' })
+    // The CAUSE has to survive: engine wiring logs it, and a bare
+    // `stage=error` line is undiagnosable (that is how the pi 0.84.3
+    // new_session model reset stayed invisible).
+    expect(r.error).toContain('judge down')
     expect(judge).toHaveBeenCalledTimes(1)
   })
 
@@ -659,6 +663,7 @@ describe('classify (orchestrator)', () => {
       .mockRejectedValueOnce(new Error('judge down'))
     const r = await classify({ ...base, twoStageMode: 'both' }, judge)
     expect(r).toMatchObject({ block: true, unavailable: true, stage: 'error' })
+    expect(r.error).toContain('judge down')
     expect(judge).toHaveBeenCalledTimes(2)
   })
 
@@ -711,7 +716,12 @@ describe('classify — stage timeouts', () => {
       expect(settled).toBe(false)
 
       await vi.advanceTimersByTimeAsync(1)
-      expect(await p).toEqual({ block: true, stage: 'error', unavailable: true })
+      expect(await p).toEqual({
+        block: true,
+        stage: 'error',
+        unavailable: true,
+        error: `auto-mode judge timed out after ${STAGE1_TIMEOUT_MS} ms`
+      })
       // A timeout is a transport failure, not a stage-1 verdict: escalating a
       // wedged stage 1 to stage 2 would double the wait before the human is asked.
       expect(judge).toHaveBeenCalledTimes(1)
@@ -736,7 +746,12 @@ describe('classify — stage timeouts', () => {
       expect(settled).toBe(false)
 
       await vi.advanceTimersByTimeAsync(STAGE2_TIMEOUT_MS - STAGE1_TIMEOUT_MS)
-      expect(await p).toEqual({ block: true, stage: 'error', unavailable: true })
+      expect(await p).toEqual({
+        block: true,
+        stage: 'error',
+        unavailable: true,
+        error: `auto-mode judge timed out after ${STAGE2_TIMEOUT_MS} ms`
+      })
       expect(judge).toHaveBeenCalledTimes(2)
     } finally {
       vi.useRealTimers()
