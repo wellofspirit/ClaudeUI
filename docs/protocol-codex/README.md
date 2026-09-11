@@ -1,6 +1,8 @@
 # Codex transport protocol
 
-M1a and the M1b typed service are unregistered foundations, not a complete M1 or a usable fourth engine.
+This is the transport reference. Codex is registered as the fourth engine and
+runs under the shared permission model (ADR-067); the phase-1 release gates in
+the [integration spec](../codex-integration-spec.md) are still open.
 The pin is `package.json#codexCliVersion`, currently `0.154.0`. No Codex command
 is hooked into postinstall, ordinary builds or release packaging yet.
 

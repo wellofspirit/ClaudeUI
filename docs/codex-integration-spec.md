@@ -1,6 +1,6 @@
 # Codex integration kickoff
 
-**State:** M1 foundations independently tested. M2 native runtime, command/UI wiring, and an M3 read/list baseline are implemented for main review. The user accepted upstream native multi-process auth behavior; the main reviewer passed the authorized sanitized authenticated ChatGPT status probe, resolving the prior approval block. Queue, hosted tools, verified fork/delete, interrupted presentation persistence, and M4-M5 remain incomplete. Branch `codex-integration`. [ADR-066](adr/adr-066_codex-fourth-engine.md) records accepted direction and open decisions; [architecture](architecture/codex.md) separates implemented behavior from plans. This spec is not permission to commit, install dependencies, mutate real credentials, or run real-provider turns without main review.
+**State:** M1 foundations, the M2 native runtime and command/UI wiring, an M3 read/list baseline, and the slice-3 shared permission model are reviewed and committed on `codex-integration`. The user accepted upstream native multi-process auth behavior; the main reviewer passed the authorized sanitized authenticated ChatGPT status probe, resolving the prior approval block. Queue and steer, hosted tools, fork, delete and archive, interrupted presentation persistence, and M4-M5 remain incomplete. [ADR-066](adr/adr-066_codex-fourth-engine.md) records the accepted direction and open decisions, [ADR-067](adr/adr-067_codex-shared-permission-model.md) the permission model; [architecture](architecture/codex.md) separates implemented behavior from plans. This spec is not permission to install dependencies, mutate real credentials, push, or run real-provider turns without the user asking.
 
 ## Evidence and limits
 
@@ -12,22 +12,22 @@ Pin 0.154.0 as the candidate and generate types from its executable with experim
 
 Phase 1 spans the staged rollout below, not just M1. MUST means required for phase-1 release, even if currently gated. A failed gate blocks that feature/release claim and requires a recorded scope decision; it is not implicit permission to drop the requirement. Capability flags stay false until complete end-to-end evidence exists.
 
-| Area                                                                                              | Phase-1 expectation                                                                                     | Gate or explicit deferral                                                                            |
-| ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| Binary, RPC, session identity                                                                     | MUST: pinned binary, generated types, stdio lifecycle, start/resume/interrupt/disconnect                | Per-platform provenance and process cleanup                                                          |
-| Auth                                                                                              | MUST: Codex-native login/storage/refresh and truthful account status                                    | Native flow and concurrent-process tests; optional native-to-vault token adoption deferred           |
-| Native approvals and UI                                                                           | MUST: typed policy/sandbox/reviewer state, command/file approvals, questions, no shared-default leakage | Ratify effective native default; test advertised decisions and mode changes                          |
-| Model catalog and effort                                                                          | MUST: native catalog, dynamic effort values, explicit-model errors                                      | Real account catalog; no closed-list coercion or silent fallback                                     |
-| Transcript and history                                                                            | MUST: live/cold rich results, list/resume, completed-turn fork, safe delete/pins/descendants            | Pagination, interrupted presentation supplement, native delete semantics                             |
-| Application queue                                                                                 | MUST: boundary-held steer, identity ack, honest recall and ambiguous-send recovery                      | Shared queue races and restart/reconciliation tests                                                  |
-| Hosted tools                                                                                      | MUST: existing handler reuse and rich output; host authorization distinct from native approvals         | Experimental API, cold definitions, redefine/fork/namespace gates                                    |
-| Native subagents                                                                                  | MUST: visible child lifecycle/history/approvals/cancellation without ID collisions                      | v1 is fixture evidence only; v2 is gated, not required as an implementation choice                   |
-| Cross-engine dispatch                                                                             | MUST goal: Codex source and target with enforced restrictions and approval forwarding                   | Definition scrub, policy envelopes, budget semantics; no legacy escalation reuse                     |
-| Metering                                                                                          | MUST: available tokens/rate limits and effective account/model attribution                              | USD optional and labeled unknown/estimate; no unsupported hard billing-cap promise                   |
-| Both hosts and clients                                                                            | MUST: Electron and headless core, desktop/web/mobile replication                                        | Null-window, reconnect, authorization and release-platform gates                                     |
-| Shared rules/classifier parity                                                                    | Deferred to a later Codex fork/patch                                                                    | Not native Auto/plan parity                                                                          |
-| Title generation and automation                                                                   | Track explicitly; gated follow-up unless separately accepted for phase 1                                | Truthful fallback titles; no automatic exposure through generic engine selectors                     |
-| Skills/slash commands, side questions, voice/realtime, background controls, native MCP management | Gated/deferred individually                                                                             | Inventory capability and unflagged method callers; native tool support does not imply product parity |
+| Area                                                                                              | Phase-1 expectation                                                                                                                                                                                                                                                                                                                  | Gate or explicit deferral                                                                                                     |
+| ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| Binary, RPC, session identity                                                                     | MUST: pinned binary, generated types, stdio lifecycle, start/resume/interrupt/disconnect                                                                                                                                                                                                                                             | Per-platform provenance and process cleanup                                                                                   |
+| Auth                                                                                              | MUST: Codex-native login/storage/refresh and truthful account status                                                                                                                                                                                                                                                                 | Native flow and concurrent-process tests; optional native-to-vault token adoption deferred                                    |
+| Permissions and approvals                                                                         | MUST: the session's shared `PermissionMode` and the shared rules decide every gated command and file change, plus native questions. ~~typed policy/sandbox/reviewer state, command/file approvals, questions, no shared-default leakage~~ superseded by [ADR-067](adr/adr-067_codex-shared-permission-model.md), see "Slice 3" below | Real-app mode drive; per-mode `turn/start` parameters; `auto` guardian behaviour on a real account                            |
+| Model catalog and effort                                                                          | MUST: native catalog, dynamic effort values, explicit-model errors                                                                                                                                                                                                                                                                   | Real account catalog; no closed-list coercion or silent fallback                                                              |
+| Transcript and history                                                                            | MUST: live/cold rich results, list/resume, completed-turn fork, safe delete/pins/descendants                                                                                                                                                                                                                                         | Pagination, interrupted presentation supplement, native delete semantics                                                      |
+| Application queue                                                                                 | MUST: boundary-held steer, identity ack, honest recall and ambiguous-send recovery                                                                                                                                                                                                                                                   | Shared queue races and restart/reconciliation tests                                                                           |
+| Hosted tools                                                                                      | MUST: existing handler reuse and rich output; host authorization distinct from native approvals                                                                                                                                                                                                                                      | Experimental API, cold definitions, redefine/fork/namespace gates                                                             |
+| Native subagents                                                                                  | MUST: visible child lifecycle/history/approvals/cancellation without ID collisions                                                                                                                                                                                                                                                   | v1 is fixture evidence only; v2 is gated, not required as an implementation choice                                            |
+| Cross-engine dispatch                                                                             | MUST goal: Codex source and target with enforced restrictions and approval forwarding                                                                                                                                                                                                                                                | Definition scrub, policy envelopes, budget semantics; no legacy escalation reuse                                              |
+| Metering                                                                                          | MUST: available tokens/rate limits and effective account/model attribution                                                                                                                                                                                                                                                           | USD optional and labeled unknown/estimate; no unsupported hard billing-cap promise                                            |
+| Both hosts and clients                                                                            | MUST: Electron and headless core, desktop/web/mobile replication                                                                                                                                                                                                                                                                     | Null-window, reconnect, authorization and release-platform gates                                                              |
+| Shared rules/classifier parity                                                                    | Rules and modes are built (ADR-067). ~~Deferred to a later Codex fork/patch~~                                                                                                                                                                                                                                                        | ClaudeUI's classifier and judge are deliberately NOT used for Codex `auto`; the native `auto_review` guardian reviews instead |
+| Title generation and automation                                                                   | Track explicitly; gated follow-up unless separately accepted for phase 1                                                                                                                                                                                                                                                             | Truthful fallback titles; no automatic exposure through generic engine selectors                                              |
+| Skills/slash commands, side questions, voice/realtime, background controls, native MCP management | Gated/deferred individually                                                                                                                                                                                                                                                                                                          | Inventory capability and unflagged method callers; native tool support does not imply product parity                          |
 
 ## Current source map
 
@@ -200,11 +200,11 @@ Implemented:
 
 - Codex factory/spawn preparation, native auth provider, catalog discovery and selection on actual discovered models. No installed binary means no model group. Dynamic native effort choices are separate from Claude's closed effort list. Explicit model failures do not select aliases or other engines.
 - One native command registrar serves desktop and remote: `session:codex-settings` requires `session-config`; native approval replies require `chat`; auth status/device-flow operations require `config`. Core checks the live engine and validates exact setting keys/values and pending offered decisions.
-- The native policy pill can initialize without a prompt, displays effective unknown/granular policy unchanged, and exposes explicit policy/sandbox/human-reviewer/effort controls. Updates use generated `thread/settings/update`; `thread/settings/updated` supplies effective replicated state. Shared mode and reasoning-default paths do not govern Codex.
-- Migration 15 stores sparse accepted native requests in `codex_session_overrides`, separate from client-projected metadata lifetime. Real testing found unconsumed updates did not survive a new native process; the adapter now reapplies accepted choices on resume. Listing preserves app model choices and verified native identity cannot be pruned/reclassified by a stale client map. Rejected requests are not saved. An explicit idle-only reset clears app policy/effort replay, preserves model choice, and disconnects; it does not reset settings Codex has retained itself. Actual native deletion must eventually remove this row too.
+- **Superseded by Slice 3 below.** ~~The native policy pill can initialize without a prompt, displays effective unknown/granular policy unchanged, and exposes explicit policy/sandbox/human-reviewer/effort controls. Updates use generated `thread/settings/update`; `thread/settings/updated` supplies effective replicated state. Shared mode and reasoning-default paths do not govern Codex.~~
+- Migration 15 stores sparse accepted native requests in `codex_session_overrides`, separate from client-projected metadata lifetime. **Slice 3 narrowed the row to model and effort; the policy keys below no longer apply.** Real testing found unconsumed updates did not survive a new native process; the adapter now reapplies accepted choices on resume. Listing preserves app model choices and verified native identity cannot be pruned/reclassified by a stale client map. Rejected requests are not saved. An explicit idle-only reset clears app policy/effort replay, preserves model choice, and disconnects; it does not reset settings Codex has retained itself. Actual native deletion must eventually remove this row too.
 - `codexModelExplicit` is replicated selection-origin metadata. Catalog previews do not override the native working-directory model/default, and no Claude/default aliases are passed. An explicit selection or existing thread model is preserved. Native status supplies the resulting model to every replica.
 - Device-code Settings UI starts only on a user action, returns a validated HTTPS URL/code, polls metadata, supports cancellation, and refreshes discovered models on completion. It does not open a host browser. Real sign-in remains untested.
-- Native command/file approvals, offered session/decline/cancel choices, disabled amendment explanations, and typed user questions are reachable in inline/floating cards. Secret questions are declined without accepting or storing secret answers. Permission-profile requests return an empty grant and a visible unsupported explanation. Pending grants are independent of replicated choice arrays and include process-generation identity.
+- **Partly superseded by Slice 3 below:** command and file approvals now render as the standard card, and `acceptForSession`/amendment choices are never offered. ~~Native command/file approvals, offered session/decline/cancel choices, disabled amendment explanations,~~ and typed user questions are reachable in inline/floating cards. Secret questions are declined without accepting or storing secret answers. Permission-profile requests return an empty grant and a visible unsupported explanation. Pending grants are independent of replicated choice arrays and include process-generation identity.
 - Stop during pending `turn/start` records intent and interrupts when either native start notification or response supplies the owning turn. Late/duplicate replies remain invalid. Item-scoped delta upserts prevent text from independent items being concatenated; final command results replace, rather than duplicate, prior results.
 - Core-created user IDs travel to native `clientUserMessageId`; native acknowledgements replace the host row by identity. This is tested through real core birth/rekey/commands/snapshot restore with a mock engine and no window, not just through renderer optimism.
 - Native inline image inputs and corresponding native image history items are mapped. Live available tokens populate metering/status data. USD is not reported: equivalent cost is null and native cost UI is hidden rather than displaying a zero bill.
@@ -225,28 +225,84 @@ replace the root. The initializer UI warns about this. Empty-root
 materialization/cold reopen remains a mandatory M3 gate, distinct from the
 passing completed-turn cold read/list checks.
 
-The new-process policy-resume assertion initially failed (`untrusted` became
+~~The new-process policy-resume assertion initially failed (`untrusted` became
 `on-request`); it passes with the real in-memory SQLite repository plus replay of
-accepted overrides. Reset verification asserts omission of app policy fields and
-equality with the native response, not an invented return to global defaults:
-Codex may retain its own per-thread state after app replay is cleared.
+accepted overrides.~~ Superseded by Slice 3: policy is no longer persisted or
+replayed, so the per-turn derivation makes that assertion moot. Reset
+verification asserts omission of app fields and equality with the native
+response, not an invented return to global defaults: Codex may retain its own
+per-thread state after app replay is cleared.
 
 Latest implementer gates: full typecheck and lint passed; 83 focused
 unit/component files passed 1,807 tests; all four isolated native integration
 tests passed. Protocol generation/check matched the pinned binary. These are not
 the default/CI/build/real-Electron release gates, which remain with main.
 
-Mandatory remaining work is not deferred by implication: M3 identity-aware held
-queue/steer/recall/ambiguous delivery, hosted tools and their cancellation/security,
-completed-turn fork, verified asynchronous delete/descendant/pin handling, and
-the interrupted-tool presentation supplement. Native children, dispatch, full
-account/rate-limit metering, large-history/media gates, platform packaging and
-real Electron/headless/account gates remain M4/M5 work. Item-scoped message
-upserts are correct but not yet a high-throughput per-item volatile stream.
-The read/list baseline is not lossless coverage of every `ThreadItem` variant:
-native MCP/web-search/image-generation/collaboration/dynamic-tool outputs,
-compaction markers and full question/media/artifact reconstruction still need
-their M3/M4 mappers and tests. No completed M3 or phase-1 release is claimed.
+#### Slice 3 (2026-09-11): shared permission model
+
+[ADR-067](adr/adr-067_codex-shared-permission-model.md) replaced the native
+policy surface described above. Codex executes; ClaudeUI decides.
+
+Removed: the native policy pill, `CodexPolicyOptions` and the `codex` field of
+`EngineSpawnOptions`, the policy keys in `codex_session_overrides` (rows that
+still carry them load leniently and replay only model and effort), the native
+policy fields of `SessionStatus.codex`, and every renderer carve-out that hid the
+mode tab, the mode picker and the Shift+Tab cycle for Codex.
+Native reasoning effort moved into the standard effort picker, and model and
+effort now travel over the engine-neutral `session:set-model` and
+`session:set-effort` commands.
+
+In its place, `CodexSession` derives `approvalPolicy`, `sandboxPolicy` and
+`approvalsReviewer` from the session's shared `PermissionMode` and sends them on
+every `turn/start`, with the same values as the `thread/start` and
+`thread/resume` baseline. A mode change applies from the next turn. Every
+approval request the server sends is answered by the engine-neutral evaluator pi
+already uses (`src/core/pi/permission-engine.ts`) against the same merged
+`~/.claude` rules. Commands gate as `bash` on the command string; file changes
+gate per file from the transcript item, `add` as a write and every other change
+type as an edit, any-deny denies and any-ask asks. Deny answers `decline` plus a
+`session:error` naming the rule or the plan reason, because no native reply
+carries a reason. Ask raises the standard `PendingApproval` with always-allow
+suggestions in the Claude rule vocabulary. `acceptForSession` and
+`acceptWithExecpolicyAmendment` are never sent. `auto` maps to `on-request` plus
+`auto_review`, so Codex's own guardian reviews escalations and whatever still
+reaches the client is gated like `default`; ClaudeUI's classifier and judge are
+not used for Codex. ADR-067 holds the mode table and the reasoning.
+
+Evidence: the repo-resident probe in
+`src/integration/codex/codex-policy-probe.integration.test.ts`, with findings in
+[codex-spike.md](codex-spike.md) section "Native approval surface probe", plus
+the Codex source at tag `rust-v0.154.0` checked out under `.cache/codex-src/`
+and not vendored.
+
+Gates met: guard tests in `src/core/codex/__tests__/codex-session.test.ts` cover
+the per-mode `turn/start` parameters, plan declines, rule-sourced verdicts,
+acceptEdits workspace narrowing, the standard card shape, `allowForSession` and
+legacy override rows; two real-binary integration cases cover plan declining a
+write with no file left behind, and default asking, the human allowing, and the
+file existing. Still open: `auto` guardian behaviour against a real account, and
+sandbox containment, which the integration fixture cannot measure because macOS
+refuses to nest a second seatbelt profile.
+
+#### Mandatory remaining work
+
+None of this is deferred by implication.
+
+- **Application queue and steer.** Still pending in full, not partially built: `CodexSession.enqueuePrompt` throws, `capabilities.queue` and `steer` are false, and shared `SessionQueue` still correlates by text. Identity-aware acknowledgment, honest recall and ambiguous-delivery reconciliation are unbuilt.
+- **Hosted tools**, with authorization separate from approvals, at-most-once execution and real cancellation.
+- **Completed-turn fork.** `engine-history.ts` refuses Codex fork anchors today.
+- **Delete and archive.** Refused today. The lifecycle probe (`src/integration/codex/codex-lifecycle.integration.test.ts`) pins the native rule: `thread/list` never lists forks, in either archived state; delete and archive are both refused while the owning root process holds the thread, and that refusal is inert (the live thread keeps accepting turns); stopping the holder is not sufficient, because a thread with a surviving descendant fork stays undeletable, listed and readable; archiving the descendant does not lift that, only deleting it does. A native delete of a forked thread is therefore a whole-subtree operation, leaf-first, and the UI must either walk the tree that way or fail non-destructively.
+- **Interrupted-tool presentation supplement.** The interrupted dynamic call is absent from both immediate and cold native history.
+- **Metering.** Available tokens reach status; USD is unknown rather than zero, and full account/rate-limit/child/dispatch attribution is M4.
+- **Platform packaging.** macOS arm64 only, acquisition opt-in with no build/postinstall/release hook; Windows and Linux provisioning, paths and process trees are unverified.
+- **Real-account and host gates.** Live device login, real-provider turns, real catalog and media, and the full default/CI/build/Electron/headless gates remain with main.
+
+Item-scoped message upserts are correct but not yet a high-throughput per-item
+volatile stream. The read/list baseline is not lossless coverage of every
+`ThreadItem` variant: native MCP/web-search/image-generation/collaboration/dynamic-tool
+outputs, compaction markers and full question/media/artifact reconstruction still
+need their M3/M4 mappers and tests. No completed M3 or phase-1 release is
+claimed.
 
 ### M3: history, queue, hosted tools
 
