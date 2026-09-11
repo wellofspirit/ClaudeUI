@@ -182,6 +182,162 @@ profiles via `permissions`, network approvals through a managed proxy (the
 `curl` step reached a closed local port and exited 7 rather than being gated),
 and `apply_patch` as a first-class tool.
 
+## Native reviewer and judge-thread probe (2026-09-11)
+
+A third probe of the same pinned `0.154.0` binary, asking three questions the
+approval-surface probe left open: what `approvalsReviewer: "auto_review"` does on
+the wire, whether that reviewer honours a rule set, and how toolless a judge
+thread can be made. The probes live in
+`src/integration/codex/codex-auto-review-probe.integration.test.ts` and run with
+`CODEX_INTEGRATION=1 bun run test:integration src/integration/codex`. Twelve
+probes, all passing, each assertion pinning an observed value. Mechanism claims
+are cited to the pinned source at `.cache/codex-src` (tag `rust-v0.154.0`); every
+one is confirmed at runtime by a probe. Facts only; no adapter decision is made
+here.
+
+The turn each auto-review probe drives is four steps chosen to be gated
+deterministically under `on-request`: one `exec_command` carrying
+`sandbox_permissions: "require_escalated"`, then three `apply_patch` heredocs (in
+cwd, outside cwd, in cwd again). A plain command is deliberately absent, for the
+reason in "What the fixture cannot express" below.
+
+### Q1. `approvalsReviewer: "auto_review"`
+
+| Question                                                        | Observed                                                                                                                                                                                                                                                                                                                                                                        |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Does any `requestApproval` still reach the client?              | No. Under `on-request` and under `granular`, `clientCalls` is empty for all four steps. The reviewer replaces the client entirely, and there is no copy, no notification of the request, and no way to intervene.                                                                                                                                                               |
+| What arrives instead?                                           | `item/autoApprovalReview/started` and `item/autoApprovalReview/completed`, one pair per gated action, plus one `guardianWarning` per decision. None of the three has a generated type in `src/core/codex/protocol/v2/`.                                                                                                                                                         |
+| What do those notifications carry?                              | `threadId`, `turnId`, `reviewId`, `targetItemId` (the tool call id), `startedAtMs`/`completedAtMs`, `decisionSource` (`"agent"`), `review: {status, riskLevel, userAuthorization, rationale}`, and `action`. `action.type` is `"command"` (with `source`, `command`, `cwd`) or `"applyPatch"` (with `cwd`, `files`).                                                            |
+| Any reviewer/subagent item, `collabAgent*`, `multi_agent` item? | No. `item/started` / `item/completed` carried only `userMessage`, `commandExecution`, `fileChange` and `agentMessage`. The reviewer thread produces no thread item and no child in the parent's item stream.                                                                                                                                                                    |
+| Does the reviewer call the model?                               | Yes, once per review, on the SAME provider as the agent. `client_metadata` marks it: `x-openai-subagent: "guardian"`, `subagent_kind: "guardian"`, `thread_source: "guardian_review"`, its own `thread_id` with `parent_thread_id`/`parent_turn_id` pointing at the agent, and `auto_review_enabled: false` on its own turn (no recursion).                                     |
+| On which model?                                                 | Not necessarily the one selected. `model-provider/src/provider.rs` sets `DEFAULT_APPROVAL_REVIEW_PREFERRED_MODEL = "codex-auto-review"`; `core/src/guardian/review.rs` uses that slug when the offline catalog lists it, else the ACTIVE model's resolved slug. In the fixture the reviewer ran on `gpt-5.6-luna` for BOTH an active `gpt-5.6-luna` and an active `mock-model`. |
+| Does the reviewer's verdict control execution?                  | Yes. `{"outcome":"allow"}` ran all four actions and every artifact landed, the escalated write outside the workspace included. A `deny` verdict ran nothing and left nothing behind. The reviewer is an authority, not an advisory layer.                                                                                                                                       |
+| Does `guardian_subagent` differ?                                | No. `protocol/src/config_types.rs` declares `ApprovalsReviewer` with two variants and `#[serde(rename = "auto_review", alias = "guardian_subagent")]`; the three-value string in the generated TS type comes from a hand-written `JsonSchema` impl. The probe confirms it: same four reviews, same notifications, same artifacts.                                               |
+| Does it work on a model with no catalog entry?                  | Yes. `core/src/guardian/reviewer_config.rs` falls back to `BUNDLED_GUARDIAN_POLICY_TEMPLATE` (`core/assets/guardian/policy_template.md`) when the review model's catalog metadata has no `auto_review.policy_template`. With `mock-model` active, four reviews still ran; the only difference on the wire is the `Model metadata for \`mock-model\` not found` warning.         |
+| Which approval policies route to it?                            | `on-request` and `granular` only. `core/src/guardian/review.rs` `routes_approval_policy_to_guardian` matches `OnRequest \| Granular(_)` and `ApprovalsReviewer::AutoReview`. Under `untrusted` the probe saw zero reviewer calls and all four requests on the client, so "ask before everything" and "decide automatically" cannot be combined.                                 |
+| What is the reviewer's own sandbox and tool set?                | Read-only, code-mode. Its request advertises `functions.exec` and `functions.wait`, `reasoning: {effort: "low", context: "all_turns"}`, `tool_choice: "auto"`, and a developer message stating `sandbox_mode` is `read-only`, approval policy `never`, and "Do not provide the `sandbox_permissions` for any reason".                                                           |
+| What does it see?                                               | The full agent transcript between `>>> TRANSCRIPT START` / `END`, labelled untrusted evidence, then the planned action as JSON between `>>> APPROVAL REQUEST START` / `END` (argv, cwd, tool, tty, `sandbox_permissions`, `justification`). Its system prompt is an 18,446-char developer message, not `instructions`, which is absent on a code-mode model.                    |
+
+Failure modes, observed:
+
+| Input                                   | Observed                                                                                                                                                                                                                                                                                              |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Three consecutive `deny` verdicts       | A circuit breaker fires and interrupts the turn: three of the four steps were reviewed, then `guardianWarning` reported `rejected too many approval requests for this turn (3 consecutive, 3 in the last 50 reviews); interrupting the turn.` It arrives on the same channel as every other decision. |
+| A final message that is not strict JSON | Fail closed, after THREE provider attempts per review (12 calls for 4 reviews). Each review completed `denied`, `riskLevel: "high"`, rationale `Automatic approval review failed: guardian assessment was not valid JSON`. The breaker did NOT fire, so it counts deny VERDICTS, not review failures. |
+| Either denial, as the model sees it     | `exec_command failed: CreateProcess { message: "Rejected(\"This action was rejected due to unacceptable risk.\nReason: <rationale>\nThe agent must not attempt to achieve the same outcome via workaround, indirect execution, or policy circumvention. …\")" }`, with no exit code.                  |
+
+### Q2. Does the native reviewer honour a rule set?
+
+`core/src/exec_policy.rs` `load_exec_policy` walks the config layers
+low-to-high and parses every `*.rules` file in `<layer config folder>/rules/`
+(`RULES_DIR_NAME = "rules"`, `RULE_EXTENSION = "rules"`). Files are Starlark;
+`prefix_rule` / `network_rule` / `host_executable` are defined in
+`execpolicy/src/parser.rs`. `Decision::{Forbidden, Prompt, Allow}` map to
+`ExecApprovalRequirement::{Forbidden, NeedsApproval, Skip}`.
+
+| Rule set at                                                | `prefix_rule(pattern=["echo"], decision=…)` | Observed for `echo hi` (with `ls` as the unruled control in the same turn)                                                                                                           |
+| ---------------------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `$CODEX_HOME/rules/fixture.rules` (user layer)             | `forbidden`                                 | Not asked, never ran, no exit code. Model told `` `/bin/zsh -lc 'echo hi'` rejected: policy forbids commands starting with `echo` ``. `ls` still asked.                              |
+| `<cwd>/.codex/rules/fixture.rules`, untrusted              | `forbidden`                                 | NO EFFECT. Asked, accepted, ran, exit 0. An untrusted project layer is disabled and `layers_low_to_high` skips disabled layers (`config/src/state.rs`), so it contributes no rules.  |
+| `<cwd>/.codex/rules/fixture.rules`, trusted                | `forbidden`                                 | Blocked, identically to the user layer. Trust comes from `[projects."<path>"] trust_level = "trusted"` in `config.toml`.                                                             |
+| `$CODEX_HOME/fixture.rules` (control, no `rules/`)         | `forbidden`                                 | Ignored. Asked, ran, exit 0. The file must sit in a `rules/` directory under the layer's config folder.                                                                              |
+| `$CODEX_HOME/rules/fixture.rules`                          | `allow`                                     | Not asked, ran. A rule file widens permissions as readily as it narrows them (`Decision::Allow` sets `bypass_sandbox`).                                                              |
+| `$CODEX_HOME/rules/fixture.rules`, `auto_review`           | `forbidden`                                 | Blocked with ZERO reviews and zero reviewer provider calls. The rule decides before the reviewer, which cannot override it because it is never asked.                                |
+| `$CODEX_HOME/rules/fixture.rules`, `auto_review`           | `prompt`                                    | Routed TO the reviewer: one review, `approved`, one provider call. The approved command then ran SANDBOXED (exit 71), unlike a user `accept`, which runs unsandboxed.                |
+| `$CODEX_HOME/rules/fixture.rules`, `granular.rules: false` | `prompt`                                    | Local deny, not a skip: not asked, never ran, model told `approval required by policy rule, but AskForApproval::Granular.rules is false`. The flag suppresses the ASK, not the RULE. |
+
+Not a rule source, confirmed at runtime: a `[rules] prefix_rules = […]` table in
+`config.toml`, a `requirements.toml` in `CODEX_HOME`, and a `requirements.toml`
+in `<cwd>/.codex`. `config/read` shows `rules` present in the user layer's RAW
+config and absent from the effective `Config`; `configRequirements/read` has no
+`rules` field at all, so a client cannot even read back an enterprise rule set.
+`config/read` with `includeLayers` reported exactly three layers for the fixture
+cwd: `project` (`<cwd>/.codex`), `user` (`$CODEX_HOME/config.toml`), `system`
+(`/etc/codex/config.toml`). The TOML rule table belongs to the enterprise
+requirements layer, loaded only from `<mdm>/requirements.toml` and
+`<enterprise-managed>/requirements.toml`
+(`config/src/requirements_exec_policy.rs` holds its shape:
+`prefix_rules = [{ pattern = [{ token = "echo" }], decision = "forbidden" }]`).
+
+`codex execpolicy check --rules <path> <argv>` evaluates the same parser out of
+process and is pinned separately: `echo hi` against the forbid rule returns
+`{"matchedRules":[{"prefixRuleMatch":{"matchedPrefix":["echo"],"decision":"forbidden"}}],"decision":"forbidden"}`,
+and `ls` returns `{"matchedRules":[]}` with no decision of its own.
+
+One detail worth keeping: Codex parses INSIDE its own shell wrapper. A bare-argv
+rule (`["echo"]`) matched a command whose argv is
+`["/bin/zsh", "-lc", "echo hi"]`, which is not what
+`proposedExecpolicyAmendment` suggests on the approval path.
+
+### Q3. Can a judge thread be made toolless?
+
+Every variant is an `ephemeral: true` thread with `baseInstructions` set to a
+54-char fixed prompt, `approvalPolicy: "never"`, sandbox `readOnly`, on
+`mock-model` (a catalog model reports no top-level `tools` at all, see below).
+The turn's single scripted step is `exec_command` with `cmd: "ls"`.
+
+`core/src/tools/spec_plan.rs` gates the exec tool on
+`Feature::ShellTool && Feature::UnifiedExec` (plus `Feature::UnifiedExecTty` for
+the tty variant) and `view_image` on `Feature::ViewImage`, so the `[features]`
+table is the tool switch.
+
+| Variant                                                                                                                              | `tools` in the provider request                                                     | Did `ls` run?                        |
+| ------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- | ------------------------------------ |
+| baseline                                                                                                                             | `exec_command`, `write_stdin`, `request_user_input`, `view_image`, `multi_agent_v1` | Yes, exit 71 (containment sandbox)   |
+| `dynamicTools: []`                                                                                                                   | unchanged                                                                           | Yes, exit 71                         |
+| `thread/start` `config: {features: {unified_exec, unified_exec_tty, shell_tool, view_image, multi_agent, goals, sleep_tool: false}}` | `request_user_input` only                                                           | No: `unsupported call: exec_command` |
+| the same seven flags in `config.toml`'s `[features]`                                                                                 | `request_user_input` only                                                           | No: `unsupported call: exec_command` |
+| those flags plus `[tools] experimental_request_user_input = false`, `update_plan = false`                                            | n/a                                                                                 | `thread/start` rejected, `-32600`    |
+| those flags plus `[tools.experimental_request_user_input] enabled = false` and `[tools.update_plan] enabled = false`                 | `[]` (empty)                                                                        | No: `unsupported call: exec_command` |
+| `experimental_use_unified_exec_tool = false`                                                                                         | unchanged                                                                           | Yes, exit 71                         |
+
+A fully empty `tools` array IS reachable. Both delivery routes work identically
+and a per-thread `config` override is enough, so a judge thread needs no global
+change. `[tools]` entries are structs, not booleans: the boolean form fails
+config load (`invalid type: boolean false, expected struct UpdatePlanToolConfig`)
+and the app-server answers `thread/start` with a bare `-32600` that names no key.
+
+`baseInstructions` REPLACES Codex's defaults rather than prefixing them. In every
+variant that started, the provider request's `instructions` was the 54-char fixed
+prompt byte for byte. Without it, the same `ephemeral` thread sent a 16,979-char
+Codex prompt beginning `You are a coding agent running in the Codex CLI…`, plus a
+separate `<skills_instructions>` developer message.
+
+### What the fixture cannot express
+
+The containment caveat from the approval-surface probe applies unchanged: every
+spawn is wrapped in `sandbox-exec`, macOS refuses to nest a different seatbelt
+profile, so anything Codex runs sandboxed dies at exit 71 and only what it runs
+unsandboxed executes for real.
+
+That caveat has a sharper consequence here. Under `granular`, Codex reviews a
+plain command only AFTER a sandboxed attempt fails, and the containment
+profile's exit-71 failure is not reliably classified as a sandbox denial: repeat
+runs reviewed different subsets of the same commands. The auto-review probes
+therefore use only actions that are gated deterministically (a model-initiated
+`require_escalated` command, and `apply_patch`), and the extra commands
+`granular` would also review are not probed.
+
+Also not expressed:
+
+- The reviewer's own tool calls. The fixture answers the reviewer with a verdict
+  immediately, so nothing exercises the read-only `functions.exec` it is offered,
+  and `thread/approveGuardianDeniedAction` (the method that retries a denied
+  action after a human approves it) is never reached.
+- `autoApprovalReview/strictReviewRequired`, which exists on the wire and did not
+  fire in any probe.
+- The enterprise requirements layer, and therefore `guardian_policy_config` (the
+  `{{ tenant_policy_config }}` slot in the reviewer's prompt, empty here) and
+  `allowedApprovalsReviewers`. `/etc/codex` is root-owned and read-denied to the
+  fixture.
+- `codex-auto-review` as the actual reviewer model. It is hidden from the offline
+  catalog in this fixture, so the fallback to the active model's slug is the only
+  branch observed.
+- Whether a catalog model's non-code-mode tool surface can be emptied the same
+  way. Catalog models here are `tool_mode: "code_mode_only"` and send their tools
+  as an `additional_tools` developer item instead of a top-level `tools` array,
+  so Q3 was measured on `mock-model`.
+
 ## Phase-1 adapter decisions
 
 These are scoped decisions for later implementation, not product changes made
