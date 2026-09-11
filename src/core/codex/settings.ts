@@ -5,16 +5,17 @@ const isSettableValue = (value: unknown): boolean =>
   typeof value === 'string' && !!value.trim() && value.length <= 256
 
 /**
- * Validate a settings request from the app. Strict: an unknown key (including
- * the retired `approvalPolicy`/`sandbox`/`approvalsReviewer` policy keys — the
- * session's shared PermissionMode owns those now) is a rejection, so a stale
- * client cannot quietly reconfigure native policy behind the gate.
+ * Validate a native settings write — the `session:set-model` / `session:set-effort`
+ * commands on their way to `thread/settings/update`, and the overrides row they
+ * persist. Strict: an unknown key (including the retired
+ * `approvalPolicy`/`sandbox`/`approvalsReviewer` policy keys — the session's
+ * shared PermissionMode owns those now) is a rejection, so nothing can quietly
+ * reconfigure native policy behind the gate.
  */
 export function parseCodexSettings(value: unknown): CodexSettings {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error('Invalid Codex settings')
   const settings = value as Record<string, unknown>
-  if (settings.reset === true && Object.keys(settings).length === 1) return { reset: true }
   for (const [key, entry] of Object.entries(settings)) {
     if (!['model', 'effort'].includes(key) || !isSettableValue(entry))
       throw new Error('Unsupported Codex setting or value')
@@ -29,7 +30,7 @@ export function parseCodexSettings(value: unknown): CodexSettings {
  * make every such session unopenable. Unknown and malformed keys are dropped,
  * so only model/effort survive to be replayed.
  */
-export function savedCodexOverrides(value: unknown): Omit<CodexSettings, 'reset'> {
+export function savedCodexOverrides(value: unknown): CodexSettings {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
   const row = value as Record<string, unknown>
   return {

@@ -483,7 +483,6 @@ describe('InputBox FC — rendered', () => {
         ]
       }))
       mirrorStoreIntoReplica()
-      app.bridge.ipcMain.handle('session:codex-settings', () => undefined)
       renderFC()
       expect(viewProps.selectedModel.shortName).toBe(explicit ? 'Native preview' : 'Native default')
       // The pill's "initialize without a prompt" button is gone; a real send is
@@ -532,7 +531,6 @@ describe('InputBox FC — rendered', () => {
       ]
     }))
     mirrorStoreIntoReplica()
-    app.bridge.ipcMain.handle('session:codex-settings', () => undefined)
     renderFC()
     expect(viewProps.selectedModel.shortName).toBe('GPT-5.6-Codex')
     expect(viewProps.models[0].shortName).toBe('GPT-5.6-Codex')
@@ -1058,6 +1056,68 @@ describe('InputBox FC — rendered', () => {
     })
     expect(ipcCalls['session:set-effort']).toEqual([[FC_ROUTE, 'ultra']])
     expect(ipcCalls['session:cancel']).toBeUndefined()
+  })
+
+  it('pre-turn native effort is the model’s own default, not the first catalog tier', () => {
+    const nativeEffortOptions = [
+      { value: 'low', description: 'Low' },
+      { value: 'high', description: 'High' }
+    ]
+    codexSession(resolveCodexCapabilities({ nativeEffortOptions }))
+    useSessionStore.setState({
+      availableModels: [
+        {
+          value: 'native',
+          displayName: 'Native',
+          description: '',
+          engineId: 'codex',
+          nativeEffortOptions,
+          nativeDefaultEffort: 'high'
+        }
+      ]
+    })
+    mirrorStoreIntoReplica()
+    renderFC()
+    // No turn has acknowledged an effort yet, so the catalog's `high` default
+    // shows — picking the first option would claim `low` the engine never said.
+    expect(viewProps.effort).toBe('high')
+  })
+
+  it('lets the acknowledged native effort override the model default', () => {
+    const nativeEffortOptions = [
+      { value: 'low', description: 'Low' },
+      { value: 'high', description: 'High' }
+    ]
+    codexSession(resolveCodexCapabilities({ nativeEffortOptions }))
+    useSessionStore.setState((state) => ({
+      availableModels: [
+        {
+          value: 'native',
+          displayName: 'Native',
+          description: '',
+          engineId: 'codex',
+          nativeEffortOptions,
+          nativeDefaultEffort: 'high'
+        }
+      ],
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          status: {
+            ...state.sessions[FC_ROUTE].status,
+            codex: {
+              modelProvider: 'openai',
+              reasoningEffort: 'low',
+              effortOptions: nativeEffortOptions
+            }
+          }
+        }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    expect(viewProps.effort).toBe('low')
   })
 
   it('derives capability props from selectedModel: sonnet-4-5 → no adaptive, no effort', () => {

@@ -189,9 +189,6 @@ describe('Codex first session', () => {
       threadId: 'root',
       effort: 'ultra'
     })
-    await resumed.session.setCodexSettings({ reset: true })
-    expect(overrides.get('root')).toEqual({ model: 'native' })
-    await expect(resumed.session.run(null)).rejects.toThrow('disconnected')
   })
 
   it('drops policy keys left in an overrides row written before the shared gate', async () => {

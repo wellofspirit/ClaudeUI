@@ -318,11 +318,6 @@ function callMethod(name: string, args: readonly unknown[]): unknown {
  */
 const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unknown[] }> = [
   {
-    method: 'codexSettings',
-    channel: 'session:codex-settings',
-    args: ['native-root', { effort: 'ultra' }]
-  },
-  {
     method: 'codexApproval',
     channel: 'session:codex-approval',
     args: ['native-root', 'opaque-request', 'acceptForSession']

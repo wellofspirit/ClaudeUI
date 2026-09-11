@@ -61,7 +61,6 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
 
   return {
     platform: process.platform,
-    codexSettings: (id, settings) => unwrap('session:codex-settings', id, settings),
     codexApproval: (id, requestId, decision) =>
       unwrap('session:codex-approval', id, requestId, decision),
     codexAuthStatus: () => unwrap('codex:auth-status'),

@@ -59,7 +59,6 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
   }
 
   const api: ClaudeAPI = {
-    codexSettings: (id, settings) => unwrap('session:codex-settings', id, settings),
     codexApproval: (id, requestId, decision) =>
       unwrap('session:codex-approval', id, requestId, decision),
     codexAuthStatus: () => unwrap('codex:auth-status'),

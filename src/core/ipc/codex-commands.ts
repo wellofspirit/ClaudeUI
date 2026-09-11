@@ -1,11 +1,9 @@
 import type { CommandRegistration } from './command-registry'
 import type { SessionManager } from '../services/session-manager'
 import { codexAuthProvider } from '../auth/CodexAuthProvider'
-import { parseCodexSettings } from '../codex/settings'
 import type { CodexApprovalDecision } from '../../shared/codex-types'
 
 export const CODEX_CHANNELS = [
-  'session:codex-settings',
   'session:codex-approval',
   'codex:auth-status',
   'codex:login-start',
@@ -24,17 +22,6 @@ export function codexCommands(
     return current
   }
   return [
-    {
-      channel: 'session:codex-settings',
-      capability: 'session-config',
-      kind: 'command',
-      sessionIdArg: 0,
-      handler: async (id: string, settings: unknown) => {
-        const current = session(id)
-        if (!current.setCodexSettings) throw new Error('Native settings are unavailable')
-        await current.setCodexSettings(parseCodexSettings(settings))
-      }
-    },
     {
       channel: 'session:codex-approval',
       capability: 'chat',

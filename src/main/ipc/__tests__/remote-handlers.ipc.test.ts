@@ -1738,7 +1738,6 @@ describe('remote surface parity (phase 1 port)', () => {
         'codex:login-start',
         'codex:login-status',
         'codex:login-cancel',
-        'session:codex-settings',
         'session:codex-approval'
       ].sort()
     )

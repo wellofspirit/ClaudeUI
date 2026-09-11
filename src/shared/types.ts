@@ -2518,7 +2518,6 @@ export interface ClaudeAPI
     VoiceAPI,
     SharedProviderAPI,
     PluginAPI {
-  codexSettings(routingId: string, settings: import('./codex-types').CodexSettings): Promise<void>
   codexApproval(
     routingId: string,
     requestId: string,

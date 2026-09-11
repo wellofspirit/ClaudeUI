@@ -3,8 +3,6 @@ import { afterEach, expect, it, vi } from 'vitest'
 import type { CodexClientOptions } from '../CodexAppServerClient'
 import { SessionManager } from '../../services/session-manager'
 import { prepareAndCreateSession } from '../../ipc/create-session'
-import { codexCommands } from '../../ipc/codex-commands'
-import { CommandRegistry, hostConnection } from '../../ipc/command-registry'
 import { emitEvent, syncCore } from '../../services/sync-host'
 import { fromSnapshot } from '../../shared/sync/state'
 
@@ -169,15 +167,9 @@ it('birth, identity acknowledgement, native commands and reconnect agree without
   expect(approval.toolName).toBe('commandExecution')
   native.resolveApproval!(approval.requestId, 'deny')
   expect(await pending).toEqual({ decision: 'decline' })
-  const registry = new CommandRegistry()
-  for (const command of codexCommands(manager))
-    registry.register({ ...command, transport: 'remote' })
-  await registry.dispatch(
-    'session:codex-settings',
-    'remote',
-    ['root', { effort: 'ultra' }],
-    hostConnection()
-  )
+  // Effort travels over the engine-neutral `session:set-effort` command, which
+  // lands on ISession.setEffort — no native settings channel in between.
+  await native.setEffort!('ultra')
   const restored = fromSnapshot(syncCore.getSnapshot())
   expect(restored.sessions.root.pendingApprovals).toEqual([])
   expect(restored.sessions.root.status.codex?.reasoningEffort).toBe('ultra')

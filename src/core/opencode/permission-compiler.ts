@@ -1,5 +1,7 @@
 import { join } from 'node:path'
 import type { ClaudePermissions, PermissionSuggestion } from '../../shared/types'
+import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
+import { logger } from '../services/logger'
 
 /**
  * Compile ClaudeUI's neutral permission rules (stored in Claude's
@@ -274,5 +276,54 @@ export function suggestionDestinationToScope(
       return 'local'
     default:
       return null
+  }
+}
+
+/**
+ * Write "always allow" suggestions to the shared Claude permission store — the
+ * ONE copy behind `CodexSession`, `PiSession` and `OpencodeSession`, which all
+ * answer an approval the same way: group the suggested rules by the scope their
+ * `destination` maps to, then merge each group into that scope's allow list.
+ *
+ * Destinations with no on-disk scope (`session`, `cliArg`) are skipped — those
+ * are the engines' own in-memory grants (opencode's `replyPermission('always')`,
+ * Codex's `sessionAllows`), already applied by the caller.
+ *
+ * Returns whether any scope was written, so a caller holding a cached rules
+ * merge (PiSession) knows to invalidate it and honour the new rule on its very
+ * next gate call. A failing store write is logged and swallowed: losing the
+ * "always" is not worth failing the approval the user just answered.
+ *
+ * `source` is only the log label — pass the calling session's name.
+ */
+export function persistAllowSuggestions(
+  suggestions: PermissionSuggestion[],
+  cwd: string,
+  source = 'permissions'
+): boolean {
+  try {
+    const byScope = new Map<'user' | 'project' | 'local', string[]>()
+    for (const suggestion of suggestions) {
+      if (suggestion.type !== 'addRules' || suggestion.behavior !== 'allow' || !suggestion.rules)
+        continue
+      const scope = suggestionDestinationToScope(suggestion.destination)
+      if (!scope) continue
+      const entries = byScope.get(scope) ?? []
+      for (const rule of suggestion.rules) entries.push(suggestionRuleToClaudeString(rule))
+      byScope.set(scope, entries)
+    }
+    for (const [scope, ruleStrings] of byScope) {
+      const perms = loadClaudePermissions(scope, cwd)
+      const allow = new Set(perms.allow)
+      for (const rule of ruleStrings) allow.add(rule)
+      saveClaudePermissions(scope, { ...perms, allow: [...allow] }, cwd)
+    }
+    return byScope.size > 0
+  } catch (err) {
+    logger.warn(
+      source,
+      `persisting allow rules failed: ${err instanceof Error ? err.message : String(err)}`
+    )
+    return false
   }
 }

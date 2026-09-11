@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { codexCommands } from '../../ipc/codex-commands'
+import { codexCommands, CODEX_CHANNELS } from '../../ipc/codex-commands'
 import { CommandRegistry, hostConnection } from '../../ipc/command-registry'
 import type { SessionManager } from '../../services/session-manager'
 
@@ -16,7 +16,6 @@ vi.mock('../../services/db', () => ({ appendAuditLog: vi.fn() }))
 function fixture(engineId = 'codex') {
   const session = {
     engineId,
-    setCodexSettings: vi.fn(async () => {}),
     resolveCodexApproval: vi.fn()
   }
   const manager = {
@@ -30,18 +29,23 @@ function fixture(engineId = 'codex') {
 }
 
 describe('native command authorization', () => {
-  it('requires session-config for policy mutation, and chat for native approval replies', async () => {
+  it('registers exactly the native approval + auth channels', () => {
+    const { registry } = fixture()
+    // Model and effort now travel over the engine-neutral `session:set-model` /
+    // `session:set-effort` commands, so no native settings channel survives.
+    expect([...CODEX_CHANNELS]).toEqual([
+      'session:codex-approval',
+      'codex:auth-status',
+      'codex:login-start',
+      'codex:login-status',
+      'codex:login-cancel'
+    ])
+    expect(registry.channels('remote')).toEqual([...CODEX_CHANNELS].sort())
+  })
+
+  it('answers native approvals with `chat`, and keeps login behind `config`', async () => {
     const { registry, session } = fixture()
     const connection = { ...hostConnection(), grants: new Set(['chat'] as const) }
-    await expect(
-      registry.dispatch(
-        'session:codex-settings',
-        'remote',
-        ['native-root', { approvalPolicy: 'never' }],
-        connection
-      )
-    ).rejects.toThrow('session-config')
-    expect(session.setCodexSettings).not.toHaveBeenCalled()
     await registry.dispatch(
       'session:codex-approval',
       'remote',
@@ -49,33 +53,16 @@ describe('native command authorization', () => {
       connection
     )
     expect(session.resolveCodexApproval).toHaveBeenCalledExactlyOnceWith('pending', 'cancel')
+    // A chat-only connection must not reach the native login ceremony.
+    await expect(registry.dispatch('codex:login-start', 'remote', [], connection)).rejects.toThrow(
+      'config'
+    )
   })
+
   it.each(['desktop', 'remote'] as const)(
-    'validates native schema and engine on %s',
+    'validates the native approval reply and engine on %s',
     async (transport) => {
-      const { registry, session } = fixture()
-      for (const settings of [
-        { approvalsReviewer: 'auto_review' },
-        { permissionMode: 'auto' },
-        { sandboxPolicy: { type: 'dangerFullAccess' } },
-        { reset: true, approvalPolicy: 'never' },
-        { effort: '' }
-      ])
-        await expect(
-          registry.dispatch(
-            'session:codex-settings',
-            transport,
-            ['native-root', settings],
-            hostConnection()
-          )
-        ).rejects.toThrow('Unsupported')
-      await registry.dispatch(
-        'session:codex-settings',
-        transport,
-        ['native-root', { effort: 'ultra' }],
-        hostConnection()
-      )
-      expect(session.setCodexSettings).toHaveBeenCalledExactlyOnceWith({ effort: 'ultra' })
+      const { registry } = fixture()
       await expect(
         fixture('claude').registry.dispatch(
           'session:codex-approval',
@@ -92,6 +79,9 @@ describe('native command authorization', () => {
           hostConnection()
         )
       ).rejects.toThrow('Invalid')
+      await expect(
+        registry.dispatch('session:codex-approval', transport, [''], hostConnection())
+      ).rejects.toThrow('routing ID')
     }
   )
 })

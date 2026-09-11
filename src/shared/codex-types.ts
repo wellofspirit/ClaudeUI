@@ -26,8 +26,6 @@ export interface CodexApprovalChoices {
  * them from the session's shared PermissionMode on every turn.
  */
 export interface CodexSettings {
-  /** Clear saved effort and disconnect an idle root. Model selection and native credential/config files are unchanged. */
-  reset?: true
   model?: string
   effort?: string
 }
@@ -49,7 +47,7 @@ export interface CodexLoginState {
 
 /** Native state the UI still needs. Policy is ClaudeUI's, so it is not mirrored here. */
 export interface CodexSessionState {
-  overrides?: Omit<CodexSettings, 'reset'>
+  overrides?: CodexSettings
   modelProvider: string
   reasoningEffort: string | null
   effortOptions: Array<{ value: string; description: string }>

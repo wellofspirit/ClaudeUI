@@ -924,9 +924,12 @@ export function InputBox(): React.JSX.Element {
   const effectiveEffort = useMemo<string>(
     () =>
       nativeEffortOptions
-        ? // The engine's ACKNOWLEDGED tier, never a locally guessed one: for a
-          // native axis there is no ClaudeUI-side default to fall back to.
-          (status.codex?.reasoningEffort ?? nativeEffortOptions[0]?.value ?? '')
+        ? // The engine's ACKNOWLEDGED tier first — it is the live thread's
+          // truth. Before any turn acknowledges one, the selected model's OWN
+          // catalog default (`nativeDefaultEffort`, from model-discovery), never
+          // the first catalog row: that row is just the lowest tier the catalog
+          // happens to list, so it claimed a tier the engine never said.
+          (status.codex?.reasoningEffort ?? selectedModel.nativeDefaultEffort ?? '')
         : (effort ?? modelDefaultEffort(selectedModel)),
     [effort, selectedModel, nativeEffortOptions, status.codex?.reasoningEffort]
   )

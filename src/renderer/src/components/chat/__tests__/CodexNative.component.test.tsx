@@ -9,7 +9,6 @@ import { CodexAccount } from '../../SettingsDialog/CodexAccount'
 
 const api = {
   getEngineModels: vi.fn(async (): Promise<EngineModelGroup[]> => []),
-  codexSettings: vi.fn(async () => {}),
   codexApproval: vi.fn(async () => {}),
   respondApproval: vi.fn(async () => {}),
   codexAuthStatus: vi.fn(async () => ({ available: true, authenticated: false, authKind: null })),

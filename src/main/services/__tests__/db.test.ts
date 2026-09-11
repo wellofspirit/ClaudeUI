@@ -74,8 +74,9 @@ describe('Codex session overrides', () => {
       expect(() =>
         setCodexSessionOverrides('native', { approvalPolicy: 'never' } as never, db)
       ).toThrow('Unsupported')
+      // `reset` is no longer a settings verb at all (no channel ever sent one).
       expect(() => setCodexSessionOverrides('native', { reset: true } as never, db)).toThrow(
-        'reset action'
+        'Unsupported'
       )
       expect(() =>
         setCodexSessionOverrides('native', { credential: 'synthetic' } as never, db)

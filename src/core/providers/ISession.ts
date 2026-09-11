@@ -17,7 +17,6 @@ import type { HostWindowHandle } from '../host'
  * are gated behind `capabilities` flags.
  */
 export interface ISession {
-  setCodexSettings?(settings: import('../../shared/codex-types').CodexSettings): Promise<void>
   resolveCodexApproval?(
     requestId: string,
     decision: import('../../shared/codex-types').CodexApprovalDecision

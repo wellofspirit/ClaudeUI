@@ -581,11 +581,17 @@ it.skipIf(!enabled)(
         'curl',
         'http://127.0.0.1:1/'
       ])
-      // THE ONE THAT MATTERS: an accepted command runs UNSANDBOXED. `ls` exits
-      // 0 instead of dying at the nested-seatbelt code, and every write lands
-      // — inside AND outside the workspace — under `readOnly` exactly as under
-      // `dangerFullAccess`. There is no "approve but keep it sandboxed".
-      expect(record.steps[0].exitCode).toBe(0)
+      // THE ONE THAT MATTERS: acceptance is what decides, not the sandbox. The
+      // ask arrives UP FRONT (`reason: null`, above) and an accepted write
+      // LANDS — inside AND outside the workspace — under `readOnly` exactly as
+      // under `dangerFullAccess`. There is no "approve but keep it sandboxed".
+      //
+      // The accepted command's exit code is deliberately NOT pinned: whether
+      // the containment profile nests on any given run is a fixture artefact
+      // (observation 1 at the top of this file), so an approved `ls` is seen
+      // both as 0 and as EXIT_NESTED_SANDBOX. Only "it ran and reported an
+      // outcome to the model" is a property of Codex.
+      expect(record.steps[0].exitCode).not.toBeNull()
       expect(record.artifacts).toEqual(ALL_LANDED)
     }
   },
@@ -688,8 +694,9 @@ it.skipIf(!enabled)(
       // Same split as `on-request` on the file-change path.
       expect(record.steps[3].approval!.reason).toBe(label === 'readOnly' ? null : RETRY)
       expect(record.steps[4].approval!.reason).toBeNull()
-      // The accepted retry runs unsandboxed, so everything lands anyway.
-      expect(record.steps[0].exitCode).toBe(0)
+      // The accepted retry runs, and everything lands anyway. Its exact exit
+      // code is a containment artefact — see the `untrusted` matrix above.
+      expect(record.steps[0].exitCode).not.toBeNull()
       expect(record.artifacts).toEqual(ALL_LANDED)
     }
   },
@@ -906,7 +913,10 @@ it.skipIf(!enabled)(
     expect(observed[0].asked).toBe(true)
     expect(observed[1].asked).toBe(false)
     expect(observed[2].asked).toBe(true)
-    expect(observed[1].exitCode).toBe(0)
+    // The suppressed repeat still RAN and reported back (a declined command
+    // reports nothing — see the probe above). Its exact exit code is the same
+    // containment artefact the `untrusted` matrix documents, so it is not pinned.
+    expect(observed[1].exitCode).not.toBeNull()
     expect(fixture.errors).toEqual([])
   },
   120000

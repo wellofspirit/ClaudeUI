@@ -390,7 +390,7 @@ it.skipIf(!enabled)(
 )
 
 it.skipIf(!enabled)(
-  'default mode asks the human, runs the approved command and keeps resume/reset intact',
+  'default mode asks the human, runs the approved command and keeps resume/overrides intact',
   async () => {
     const { cwd, env, errors } = await setupFixture(true, true, true)
     session = new CodexSession('isolated-approval', null, cwd, {}, { env, requestTimeoutMs: 15000 })
@@ -450,7 +450,10 @@ it.skipIf(!enabled)(
     )
     await session.run(null)
     expect(session.getSessionId()).toBe(nativeId)
-    await session.setCodexSettings({ reset: true })
+    // Persist the resumed model as an explicit override the way the app does
+    // (`session:set-model` → setModel), then hand the thread to a fresh session.
+    await session.setModel(resumedModel)
+    session.dispose()
     const requestSpy = vi.spyOn(CodexClient.prototype, 'request')
     try {
       session = new CodexSession(

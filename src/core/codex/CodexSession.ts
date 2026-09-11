@@ -33,12 +33,7 @@ import {
   PI_TOOL_TO_CLAUDE_TOOL,
   PLAN_MODE_DENY_REASON
 } from '../pi/permission-engine'
-import {
-  suggestionDestinationToScope,
-  suggestionRuleToClaudeString
-} from '../opencode/permission-compiler'
-import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
-import { logger } from '../services/logger'
+import { persistAllowSuggestions } from '../opencode/permission-compiler'
 import type { ThreadSettings } from './protocol/v2/ThreadSettings'
 import type { ThreadTokenUsage } from './protocol/v2/ThreadTokenUsage'
 import { resolveCodexCapabilities } from '../../shared/model-capabilities'
@@ -57,8 +52,7 @@ import {
   setSessionMeta,
   getCodexSessionOverrides,
   setCodexSessionOverrides,
-  ensureCodexSessionOverrides,
-  hasCodexSessionOverrides
+  ensureCodexSessionOverrides
 } from '../services/db'
 
 const serverMethods = [
@@ -134,7 +128,7 @@ export class CodexSession extends BaseSession {
   private effectiveModel?: string
   private effort?: string
   private native?: CodexSessionState
-  private overrides: Omit<CodexSettings, 'reset'> = {}
+  private overrides: CodexSettings = {}
   private account: SessionStatus['account'] = null
   private permissionMode: string
   /** "Allow for this session" clicks, in the shared engine's key vocabulary. */
@@ -377,21 +371,13 @@ export class CodexSession extends BaseSession {
     await this.setCodexSettings({ model })
   }
 
+  /**
+   * The single funnel both native settings writes take — `setModel` and
+   * `setEffort` are the only callers, and the only channels that reach them are
+   * the engine-neutral `session:set-model` / `session:set-effort`.
+   */
   async setCodexSettings(value: CodexSettings): Promise<void> {
     const settings = parseCodexSettings(value)
-    if (settings.reset) {
-      if (this.willQueue) throw new Error('Stop the native turn before clearing saved overrides')
-      const id = this.threadId ?? this.options.resumeSessionId
-      let model = this.threadId ? this.model : undefined
-      if (!model && id) model = savedCodexOverrides(getCodexSessionOverrides(id)).model
-      this.overrides = model ? { model } : {}
-      if (id && (this.threadId || hasCodexSessionOverrides(id)))
-        setCodexSessionOverrides(id, this.overrides)
-      const wasClosed = this.closed
-      this.dispose()
-      if (wasClosed) this.status('disconnected')
-      return
-    }
     if (!this.starting) {
       if (settings.model !== undefined) this.model = settings.model
       if (settings.effort !== undefined) this.effort = settings.effort
@@ -992,41 +978,9 @@ export class CodexSession extends BaseSession {
     if (decision === 'allowForSession')
       for (const key of pending.allowKeys) this.sessionAllows.add(key)
     pending.settle({ decision: decision === 'deny' ? 'decline' : 'accept' })
+    // No rules cache to invalidate here: `gate()` re-reads the merged rules per
+    // request, so a newly persisted rule is honoured on the very next approval.
     if (updatedPermissions && updatedPermissions.length > 0)
-      this.persistAllowRules(updatedPermissions)
-  }
-
-  /**
-   * Write "always allow" suggestions to the shared Claude permission store —
-   * mirrors `PiSession.persistAllowRules` / `OpencodeSession.persistAllowRules`
-   * (same shared `suggestionDestinationToScope`/`suggestionRuleToClaudeString`
-   * helpers). No rules cache to invalidate here: `gate()` re-reads the merged
-   * rules per request, so a newly persisted rule is honoured on the very next
-   * native approval.
-   */
-  private persistAllowRules(suggestions: PermissionSuggestion[]): void {
-    try {
-      const byScope = new Map<'user' | 'project' | 'local', string[]>()
-      for (const suggestion of suggestions) {
-        if (suggestion.type !== 'addRules' || suggestion.behavior !== 'allow' || !suggestion.rules)
-          continue
-        const scope = suggestionDestinationToScope(suggestion.destination)
-        if (!scope) continue
-        const entries = byScope.get(scope) ?? []
-        for (const rule of suggestion.rules) entries.push(suggestionRuleToClaudeString(rule))
-        byScope.set(scope, entries)
-      }
-      for (const [scope, ruleStrings] of byScope) {
-        const perms = loadClaudePermissions(scope, this.cwd)
-        const allow = new Set(perms.allow)
-        for (const rule of ruleStrings) allow.add(rule)
-        saveClaudePermissions(scope, { ...perms, allow: [...allow] }, this.cwd)
-      }
-    } catch (err) {
-      logger.warn(
-        'CodexSession',
-        `persisting allow rules failed: ${err instanceof Error ? err.message : String(err)}`
-      )
-    }
+      persistAllowSuggestions(updatedPermissions, this.cwd, 'CodexSession')
   }
 }

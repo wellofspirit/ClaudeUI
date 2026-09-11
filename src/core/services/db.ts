@@ -810,11 +810,10 @@ export function getCodexSessionOverrides(sessionId: string, db: Db = getDb()): u
 
 export function setCodexSessionOverrides(
   sessionId: string,
-  settings: Omit<import('../../shared/codex-types').CodexSettings, 'reset'>,
+  settings: import('../../shared/codex-types').CodexSettings,
   db: Db = getDb()
 ): void {
   const parsed = parseCodexSettings(settings)
-  if (parsed.reset) throw new Error('A reset action cannot be stored as native overrides')
   db.prepare(
     `INSERT INTO codex_session_overrides (session_id, settings_json, updated_at) VALUES (?, ?, ?)
     ON CONFLICT(session_id) DO UPDATE SET settings_json = excluded.settings_json, updated_at = excluded.updated_at`
