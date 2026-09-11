@@ -4,6 +4,8 @@
 **Date:** 2026-06-19
 **Supersedes:** [ADR-017](adr-017_codex-app-server-backend.md)
 
+**Scoped amendment:** [ADR-066](adr-066_codex-fourth-engine.md) supersedes only the dormant-Codex restriction below and plans a fourth engine. This opencode decision remains accepted and as built; its historical Codex removal is not reversed by documentation alone.
+
 ## Context
 
 The V2 multi-engine model (ADR-018) needs a concrete second engine. We **pivot from Codex to

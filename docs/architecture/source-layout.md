@@ -31,6 +31,9 @@ src/
                          model-discovery, PiBridgeHost (loopback approval + hosted-tool
                          host), pi-bridge-source (the -e extension), permission-engine,
                          pi-locate, pi-protocol (ADR-035)
+    codex/             — M1a foundation only: CodexAppServerClient (stdio JSONL),
+                         vendored locator and generated initialize/envelope types;
+                         no CodexSession or engine registration yet (ADR-066)
     automode/          — engine-neutral auto-mode judge: classifier.ts, rules/,
                          ground-truth.ts, denial-tracker.ts (ADR-023/050)
     auth/              — EngineAuthProvider + opencode/pi implementations; vault/
