@@ -59,6 +59,13 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
   }
 
   const api: ClaudeAPI = {
+    codexSettings: (id, settings) => unwrap('session:codex-settings', id, settings),
+    codexApproval: (id, requestId, decision) =>
+      unwrap('session:codex-approval', id, requestId, decision),
+    codexAuthStatus: () => unwrap('codex:auth-status'),
+    codexLoginStart: () => unwrap('codex:login-start'),
+    codexLoginStatus: () => unwrap('codex:login-status'),
+    codexLoginCancel: () => unwrap('codex:login-cancel'),
     platform: 'web',
 
     // Desktop-only: return null or no-op on web

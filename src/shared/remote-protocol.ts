@@ -1072,6 +1072,7 @@ export interface PerSessionSnapshot {
   selectedEngineId?: EngineId
   /** Model picker value within the selected engine. */
   selectedModel?: string
+  codexModelExplicit?: boolean
 }
 
 export interface FullStateSnapshot {

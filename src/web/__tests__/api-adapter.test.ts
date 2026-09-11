@@ -317,6 +317,20 @@ function callMethod(name: string, args: readonly unknown[]): unknown {
  * nowhere. A stub cannot be spotted at the call site; this table can.
  */
 const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unknown[] }> = [
+  {
+    method: 'codexSettings',
+    channel: 'session:codex-settings',
+    args: ['native-root', { effort: 'ultra' }]
+  },
+  {
+    method: 'codexApproval',
+    channel: 'session:codex-approval',
+    args: ['native-root', 'opaque-request', 'acceptForSession']
+  },
+  { method: 'codexAuthStatus', channel: 'codex:auth-status', args: [] },
+  { method: 'codexLoginStart', channel: 'codex:login-start', args: [] },
+  { method: 'codexLoginStatus', channel: 'codex:login-status', args: [] },
+  { method: 'codexLoginCancel', channel: 'codex:login-cancel', args: [] },
   // Engine / vendor config (plain handlers — preload uses a bare invoke here).
   { method: 'loadEngineConfig', channel: 'config:load-engine-config', args: ['opencode'] },
   {

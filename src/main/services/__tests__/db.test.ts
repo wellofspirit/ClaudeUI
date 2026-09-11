@@ -29,6 +29,13 @@ import {
   type Migration,
   type Db
 } from '../../../core/services/db'
+import {
+  getCodexSessionOverrides,
+  setCodexSessionOverrides,
+  ensureCodexSessionOverrides,
+  hasCodexSessionOverrides,
+  deleteCodexSessionOverrides
+} from '../../../core/services/db'
 import { logger } from '../../../core/services/logger'
 
 // Each test gets a fresh in-memory DB (closeDb() resets the singleton).
@@ -43,6 +50,38 @@ afterEach(() => {
 function openRawDb(): Db {
   return new BetterSqlite3(':memory:')
 }
+
+describe('Codex session overrides', () => {
+  it('preserves accepted choices independently of projected metadata and validates stored fields', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      expect(getCodexSessionOverrides('native', db)).toBeUndefined()
+      ensureCodexSessionOverrides('native', db)
+      expect(hasCodexSessionOverrides('native', db)).toBe(true)
+      expect(getCodexSessionOverrides('native', db)).toEqual({})
+      setCodexSessionOverrides('native', { approvalPolicy: 'untrusted', effort: 'ultra' }, db)
+      ensureCodexSessionOverrides('native', db)
+      db.exec(
+        "INSERT INTO session_meta (session_id, engine_id, updated_at) VALUES ('native', 'codex', 0); DELETE FROM session_meta WHERE session_id = 'native'"
+      )
+      expect(getCodexSessionOverrides('native', db)).toEqual({
+        approvalPolicy: 'untrusted',
+        effort: 'ultra'
+      })
+      expect(() => setCodexSessionOverrides('native', { reset: true } as never, db)).toThrow(
+        'reset action'
+      )
+      expect(() =>
+        setCodexSessionOverrides('native', { credential: 'synthetic' } as never, db)
+      ).toThrow('Unsupported')
+      deleteCodexSessionOverrides('native', db)
+      expect(hasCodexSessionOverrides('native', db)).toBe(false)
+    } finally {
+      db.close()
+    }
+  })
+})
 
 /** Read user_version off a db. */
 function userVersion(db: Db): number {
@@ -134,7 +173,7 @@ describe('migration framework — user_version guard', () => {
     }
   })
 
-  it('applies the real production migration set (v1–v14)', () => {
+  it('applies the real production migration set (v1–v15)', () => {
     const db = openRawDb()
     try {
       // Default migration list (production MIGRATIONS).
@@ -147,7 +186,9 @@ describe('migration framework — user_version guard', () => {
       // v12: step-up tier columns + audit detail/retention (ADR-054),
       // v13: LAN channel key + the `legacy` policy retirement (ADR-056),
       // v14: remote-IDE posture columns (ADR-064)
-      expect(userVersion(db)).toBe(14)
+      // v15: accepted native Codex session overrides and verified identity marker
+      expect(userVersion(db)).toBe(15)
+      expect(db.prepare('SELECT * FROM codex_session_overrides').all()).toEqual([])
       // session_meta must exist and be queryable.
       const rows = db.prepare('SELECT * FROM session_meta').all()
       expect(rows).toEqual([])
@@ -226,7 +267,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(14)
+      expect(userVersion(db)).toBe(15)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',
@@ -370,7 +411,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(14)
+      expect(userVersion(db)).toBe(15)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         auth_policy: null,
         step_up_tier: 'medium',
@@ -709,11 +750,11 @@ describe('importSessionEnginesOnce', () => {
     expect(getSessionMeta('s2')?.model).toBeUndefined()
   })
 
-  it('clamps unknown/codex engineId to claude', () => {
+  it('preserves codex engineId during legacy import', () => {
     importSessionEnginesOnce({
       'legacy-codex': { engineId: 'codex' }
     })
-    expect(getSessionMeta('legacy-codex')?.engineId).toBe('claude')
+    expect(getSessionMeta('legacy-codex')?.engineId).toBe('codex')
   })
 
   it('accepts "pi" as a legitimate engineId (not clamped to claude)', () => {

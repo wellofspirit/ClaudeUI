@@ -114,7 +114,8 @@ export abstract class BaseSession implements ISession {
   abstract getSessionId(): string | null
   abstract run(
     prompt: string | null,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>,
+    clientUserMessageId?: string
   ): Promise<void>
   abstract interrupt(): Promise<void>
   abstract cancel(): void

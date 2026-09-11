@@ -2,7 +2,7 @@ import type { HostWindowHandle } from '../host'
 import type { SessionManager } from '../services/session-manager'
 import { emitEvent } from '../services/sync-host'
 import { syncCore } from '../services/sync-host'
-import { loadSessionHistory } from '../services/session-history'
+import { readSessionHistory as loadSessionHistory } from '../services/engine-history'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { buildTodosFromMessages, buildSentFilesFromMessages } from '../../shared/derive-session'
 import { logger } from '../services/logger'
@@ -14,6 +14,7 @@ import { spawnPrepRegistry } from '../providers/SpawnPrepRegistry'
 import '../providers/register-engines'
 import type { EngineId } from '../../shared/types'
 import type { EngineSpawnOptions } from '../providers/ISession'
+import { getSessionMeta } from '../services/db'
 
 // ---------------------------------------------------------------------------
 // Shared session:create implementation (desktop IPC + remote WebSocket)
@@ -48,13 +49,15 @@ async function seedCanonicalTranscript(
   routingId: string,
   resumeSessionId: string,
   cwd: string,
-  resumeSessionAt?: string
+  resumeSessionAt?: string,
+  engineId?: EngineId
 ): Promise<void> {
   try {
     const { messages, taskNotifications, statusLine } = await loadSessionHistory(
       resumeSessionId,
       cwdToProjectKey(cwd),
-      resumeSessionAt
+      resumeSessionAt,
+      engineId
     )
     syncCore.seedSession(routingId, {
       cwd,
@@ -67,6 +70,11 @@ async function seedCanonicalTranscript(
       sentFiles: buildSentFilesFromMessages(messages) ?? []
     })
   } catch (err) {
+    if (engineId === 'codex')
+      emitEvent('session:error', [
+        routingId,
+        'Codex history could not be loaded; native context was not replaced.'
+      ])
     logger.warn(
       'create-session',
       `canonical seed failed for ${routingId} (shadow state starts empty): ${
@@ -109,15 +117,20 @@ export async function prepareAndCreateSession(
   // engineId ?? 'claude' is the legacy default at the IPC/WS boundary (old callers
   // omit engineId). Any OTHER unrecognised id must throw — no silent Claude default.
   const resolvedEngineId = engineId ?? 'claude'
+  const storedEngine = resumeSessionId ? getSessionMeta(resumeSessionId)?.engineId : undefined
+  if (storedEngine && storedEngine !== resolvedEngineId)
+    throw new Error('Resume engine does not match persisted session identity')
+  if (resolvedEngineId === 'codex' && (forkSession || resumeSessionAt))
+    throw new Error('Codex fork is not enabled')
   const engineCfg = loadEngineConfig(resolvedEngineId)
   const prep = spawnPrepRegistry.require(resolvedEngineId)
   const { resolvedModel } = await prep(model, engineCfg)
   const spawnOpts: EngineSpawnOptions = {
     effort,
     resumeSessionId,
-    permissionMode,
+    permissionMode: resolvedEngineId === 'codex' ? undefined : permissionMode,
     model: resolvedModel,
-    sandboxConfig: engineCfg.sandbox,
+    sandboxConfig: resolvedEngineId === 'codex' ? undefined : engineCfg.sandbox,
     thinkingMode,
     resumeSessionAt,
     forkSession
@@ -177,7 +190,11 @@ export async function prepareAndCreateSession(
       // alone"). `resolvedModel` is legitimately undefined when pi's catalog
       // probe fails — then no client is told anything and each keeps the model
       // it already had.
-      ...(permissionMode != null ? { permissionMode } : {}),
+      ...(resolvedEngineId === 'codex'
+        ? { permissionMode: 'default' }
+        : permissionMode != null
+          ? { permissionMode }
+          : {}),
       // BOTH guards: `model` (the request) and `resolvedModel` (the outcome).
       // The opencode/pi resolvers return a catalog fallback for an ABSENT
       // request — announcing that would rewrite the user's pick on every
@@ -197,6 +214,6 @@ export async function prepareAndCreateSession(
   // must never break session creation. `seedSession` only fills an EMPTY
   // transcript, so live events that arrive first always win.
   if (resumeSessionId) {
-    void seedCanonicalTranscript(routingId, resumeSessionId, cwd, resumeSessionAt)
+    void seedCanonicalTranscript(routingId, resumeSessionId, cwd, resumeSessionAt, resolvedEngineId)
   }
 }

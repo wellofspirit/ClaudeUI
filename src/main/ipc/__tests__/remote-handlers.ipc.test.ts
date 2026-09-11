@@ -19,6 +19,23 @@ import * as os from 'os'
 import * as path from 'path'
 import type { WsInvokeRequest } from '../../../shared/remote-protocol'
 
+vi.mock('../../../core/codex/codex-locate', () => ({ codexBinaryAvailable: () => false }))
+vi.mock('../../../core/codex/model-discovery', () => ({
+  discoverCodexModels: vi.fn(async () => [])
+}))
+vi.mock('../../../core/codex/history', () => ({
+  listCodexSessions: vi.fn(async () => []),
+  loadCodexHistory: vi.fn()
+}))
+vi.mock('../../../core/auth/CodexAuthProvider', () => ({
+  codexAuthProvider: {
+    status: vi.fn(async () => ({ available: false, authenticated: false, authKind: null })),
+    loginStart: vi.fn(),
+    loginStatus: vi.fn(() => ({ status: 'idle' })),
+    loginCancel: vi.fn()
+  }
+}))
+
 // ---------------------------------------------------------------------------
 // Mocks for every service remote-handlers.ts imports.
 // ---------------------------------------------------------------------------
@@ -269,6 +286,8 @@ import { setModelEnv } from '../../../core/sdk/model-env'
 import { usageFetcher } from '../../../core/services/usage-fetcher'
 import { blockUsageService } from '../../../core/services/block-usage'
 import { logger } from '../../../core/services/logger'
+import { query } from '../../../core/sdk'
+import { discoverCodexModels } from '../../../core/codex/model-discovery'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -402,6 +421,25 @@ describe('registerRemoteHandlers', () => {
     gitWatchRegistry.releaseConnection(remoteConn.connectionId)
     clearSyncSubscribersForTests()
     vi.clearAllMocks()
+  })
+
+  it('still discovers Codex when the unrelated Claude catalog fails', async () => {
+    vi.mocked(query).mockImplementationOnce(() => {
+      throw new Error('Claude unavailable')
+    })
+    const native = {
+      engineId: 'codex' as const,
+      vendorId: 'openai',
+      vendorName: 'Native OpenAI',
+      models: [
+        { value: 'native', displayName: 'Native', description: '', engineId: 'codex' as const }
+      ]
+    }
+    vi.mocked(discoverCodexModels).mockResolvedValueOnce([native])
+    const groups = await dispatcher.handle(makeRequest('session:get-engine-models'), remoteConn)
+    expect(groups).toEqual(
+      expect.arrayContaining([native, expect.objectContaining({ engineId: 'claude', models: [] })])
+    )
   })
 
   it("routes 'xeng:'-prefixed approval responses to the cross-engine dispatcher (ADR-033)", async () => {
@@ -1695,7 +1733,13 @@ describe('remote surface parity (phase 1 port)', () => {
         ...S4_VENDOR_CREDENTIAL_CHANNELS,
         ...PROVIDER_REGISTRY_CHANNELS,
         ...REMOTE_VIEW_CHANNELS,
-        ...IDE_CHANNELS
+        ...IDE_CHANNELS,
+        'codex:auth-status',
+        'codex:login-start',
+        'codex:login-status',
+        'codex:login-cancel',
+        'session:codex-settings',
+        'session:codex-approval'
       ].sort()
     )
   })

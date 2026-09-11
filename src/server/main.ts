@@ -47,6 +47,7 @@
 // distribution died at startup until the entrypoint pulled it in explicitly.
 // Electron's main process never hit this because it is not bundled this way.
 import 'reflect-metadata'
+import { codexAuthProvider } from '../core/auth/CodexAuthProvider'
 import * as fs from 'fs'
 import * as path from 'path'
 import { setSqliteDriver, type SqliteDriver } from '../core/services/sqlite-driver'
@@ -283,7 +284,8 @@ async function main(): Promise<void> {
     // remote UI would render a different app on a server than on a desktop) and
     // fail with a message that names the reason.
     authDeps: {
-      requireEngineAuth: () => {
+      requireEngineAuth: (engineId) => {
+        if (engineId === 'codex') return codexAuthProvider
         throw new Error(
           'Engine sign-in is not available on the headless server yet — sign in on the desktop app; ' +
             'the credential vault is shared.'
@@ -345,6 +347,10 @@ async function main(): Promise<void> {
   const shutdown = (signal: string): void => {
     if (stopping) return
     stopping = true
+    codexAuthProvider.dispose()
+    core.sessionManager.forEach((session) => {
+      if (session.engineId === 'codex') session.dispose()
+    })
     logger.info('server', `${signal} received — shutting down`)
     anchor.stop()
     // Give the listener a moment to close before the process goes, but never

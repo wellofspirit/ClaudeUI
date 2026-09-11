@@ -438,6 +438,8 @@ export interface EngineCapabilities {
  * ThinkingMode/EffortLevel come from this module (the single source of truth).
  */
 export interface ReasoningCapability {
+  /** Native catalog values, not coerced into Claude's effort vocabulary. */
+  nativeEffort?: { options: Array<{ value: string; description: string }> }
   /** Thinking mode picker (adaptive|enabled|disabled). Present when model supports thinking. */
   thinking?: { modes: readonly ThinkingMode[]; supportsBudget?: boolean }
   /** Effort tier picker. Present when model supports effort levels. */
@@ -488,6 +490,43 @@ export const CLAUDE_ENGINE_CAPABILITIES: EngineCapabilities = {
   autonomyModes: ['plan', 'ask', 'autoEdit', 'full'],
   auth: { canDriveLogin: true, multiAccount: true },
   crossEngineDispatch: true
+}
+
+export const CODEX_ENGINE_CAPABILITIES: EngineCapabilities = {
+  voice: false,
+  hostedMcp: false,
+  backgroundTasks: false,
+  subagents: false,
+  plan: false,
+  fork: false,
+  forkFromMessage: false,
+  steer: false,
+  queue: false,
+  slashCommands: false,
+  skills: false,
+  sideQuestion: false,
+  interactiveApprovals: true,
+  sandbox: false,
+  proxy: false,
+  autonomyModes: [],
+  auth: { canDriveLogin: true, multiAccount: false },
+  crossEngineDispatch: false
+}
+
+export function resolveCodexCapabilities(model?: {
+  vision?: boolean
+  nativeEffortOptions?: Array<{ value: string; description: string }>
+}): ResolvedCapabilities {
+  return resolveCapabilities(CODEX_ENGINE_CAPABILITIES, {
+    reasoning: model?.nativeEffortOptions?.length
+      ? { nativeEffort: { options: model.nativeEffortOptions } }
+      : {},
+    vision: model?.vision ?? false,
+    toolCalling: true,
+    contextWindow: 0,
+    maxOutput: 0,
+    promptCaching: false
+  })
 }
 
 /**

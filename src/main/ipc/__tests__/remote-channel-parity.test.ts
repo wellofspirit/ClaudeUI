@@ -116,7 +116,10 @@ const SHARED_DECLARATION_SOURCES = [
   // The redacted status read (owner ruling, 2026-08-28) — the ONE `remote:*`
   // channel served on both transports. Every `remote:*` MUTATION is absent from
   // this list because it is absent from the registry entirely.
-  'src/core/ipc/remote-view-commands.ts'
+  'src/core/ipc/remote-view-commands.ts',
+  // ADR-066 — the native-Codex family (settings, approvals, the login
+  // ceremony), spread by both transports from one declaration.
+  'src/core/ipc/codex-commands.ts'
 ]
 
 /**

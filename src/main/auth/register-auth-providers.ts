@@ -7,12 +7,14 @@ import { engineAuthRegistry } from './EngineAuthRegistry'
 import { claudeAuthProvider } from './ClaudeAuthProvider'
 import { opencodeAuthProvider } from '../../core/auth/OpencodeAuthProvider'
 import { piAuthProvider } from '../../core/auth/PiAuthProvider'
+import { codexAuthProvider } from '../../core/auth/CodexAuthProvider'
 import { credentialSync } from '../../core/auth/vault/CredentialSync'
 import { SharedProviderRepository } from '../../core/shared-providers/SharedProviderRepository'
 
 engineAuthRegistry.register('claude', claudeAuthProvider)
 engineAuthRegistry.register('opencode', opencodeAuthProvider)
 engineAuthRegistry.register('pi', piAuthProvider)
+engineAuthRegistry.register('codex', codexAuthProvider)
 
 // M6b: wire CredentialSync's two engine feed targets here — the composition
 // root. This is the ONLY place that imports both piAuthProvider/

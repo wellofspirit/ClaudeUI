@@ -105,6 +105,7 @@ import type {
  *    present, mirroring the 'claude' branch's opencode-binary check.
  */
 export function crossEngineDispatchAvailable(engineId: EngineId): boolean {
+  if (engineId === 'codex') return false
   if (engineId === 'claude') return opencodeServerManager.isBinaryAvailable()
   if (engineId === 'pi') return piBinaryAvailable()
   return true
@@ -1246,6 +1247,7 @@ export class CrossEngineDispatcher {
   }
 
   private async dispatchInner(req: DispatchRequest, ctx: DispatchContext): Promise<DispatchResult> {
+    if (ctx.fromEngine === 'codex') return errorResult('Codex dispatch is not implemented.')
     // ── Guards ────────────────────────────────────────────────────────────
     if (req.engine === ctx.fromEngine) {
       return errorResult(

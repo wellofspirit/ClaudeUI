@@ -31,6 +31,7 @@ import { cwdToProjectKey } from '../../shared/project-key'
 import { applyProxyEnv, applyEndpointEnv, applyModelEnv } from '../providers/claude-spawn-prep'
 import type { ISession } from '../providers/ISession'
 import { PERMISSION_MODE_CYCLE } from '../../shared/permission-modes'
+import { getSessionMeta } from '../services/db'
 
 // ---------------------------------------------------------------------------
 // Shared session-domain IPC handler bodies (desktop IPC + remote WebSocket)
@@ -98,7 +99,7 @@ export function sendPrompt(
   routingId: string,
   prompt: string,
   attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-): void {
+): void | Promise<void> {
   const session = manager.get(routingId)
   if (!session) throw new Error(`No session for routingId: ${routingId}`)
   // Check before run() — if the session is already active this send queues.
@@ -106,13 +107,15 @@ export function sendPrompt(
     session.enqueuePrompt(prompt, attachments)
     return
   }
-  session.run(prompt, attachments)
+  const id = `msg-${crypto.randomUUID()}`
+  if (session.engineId !== 'codex') session.run(prompt, attachments)
   emitEvent('session:user-message', [
     routingId,
     // `msg-` prefix + randomUUID mirrors what the renderer minted, so nothing
     // downstream (React keys, retraction bookkeeping) sees a new id SHAPE.
-    { id: `msg-${crypto.randomUUID()}`, timestamp: Date.now(), prompt, attachments }
+    { id, timestamp: Date.now(), prompt, attachments }
   ])
+  if (session.engineId === 'codex') return session.run(prompt, attachments, id)
 }
 
 /**
@@ -194,10 +197,17 @@ export async function deleteSession(
   projectKey: string,
   engineId?: EngineId
 ): Promise<void> {
+  const actualEngine = manager.get(sessionId)?.engineId ?? getSessionMeta(sessionId)?.engineId
+  if (engineId && actualEngine && engineId !== actualEngine)
+    throw new Error('Session deletion engine does not match persisted identity')
+  if (engineId === 'codex' || actualEngine === 'codex')
+    throw new Error('Codex deletion is unsupported until native delete verification is complete')
+  if (engineId && !['claude', 'opencode', 'pi'].includes(engineId))
+    throw new Error('Unsupported deletion engine')
   unwatchForDelete(sessionId)
   manager.cancel(sessionId)
   syncCore.removeSession(sessionId)
-  await deleteSessionByEngine(sessionId, projectKey, engineId)
+  await deleteSessionByEngine(sessionId, projectKey, engineId ?? actualEngine)
   // opencode / pi deletes touch no watched path, so nothing else would tell the
   // other clients their sidebar row is stale until the next poll.
   void refreshCanonicalDirectories()
@@ -226,6 +236,14 @@ export async function deleteSession(
 export async function deleteProject(manager: SessionManager, projectKey: string): Promise<void> {
   const state = syncCore.getCanonicalState()
   const group = state.directories.find((g) => g.projectKey === projectKey)
+  if (
+    group?.sessions.some((session) => session.engineId === 'codex') ||
+    Object.values(state.sessions).some(
+      (session) =>
+        session.status.engineId === 'codex' && cwdToProjectKey(session.cwd) === projectKey
+    )
+  )
+    throw new Error('Project contains Codex sessions; native project deletion is not enabled')
   const ids = new Set<string>(group?.sessions.map((s) => s.sessionId) ?? [])
   for (const [routingId, session] of Object.entries(state.sessions)) {
     if (cwdToProjectKey(session.cwd) === projectKey) ids.add(routingId)
@@ -519,10 +537,14 @@ export async function setModel(
   emitConfigChanged(session, routingId, { model, reasoningVariant: null })
 }
 
-export function setEffort(manager: SessionManager, routingId: string, effort: string): void {
+export async function setEffort(
+  manager: SessionManager,
+  routingId: string,
+  effort: string
+): Promise<void> {
   const s = manager.get(routingId)
   if (s && s.capabilities.reasoning.effort == null) return
-  s?.setEffort?.(effort)
+  await s?.setEffort?.(effort)
   emitConfigChanged(s, routingId, { effort })
 }
 

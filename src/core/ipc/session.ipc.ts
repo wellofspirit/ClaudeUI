@@ -1,4 +1,8 @@
 import * as fs from 'fs'
+import { codexBinaryAvailable } from '../codex/codex-locate'
+import { discoverCodexModels } from '../codex/model-discovery'
+import { codexCommands, CODEX_CHANNELS } from './codex-commands'
+import { readSessionHistory as loadSessionHistory, historyFor } from '../services/engine-history'
 import * as path from 'path'
 import * as os from 'os'
 import { query as sdkQuery } from '../sdk'
@@ -15,11 +19,9 @@ import {
   listAllDirectories
 } from '../services/sync-seed'
 import {
-  loadSessionHistory,
   loadSubagentHistory,
   buildSubagentFileMap,
-  loadBackgroundOutput,
-  resolveForkAnchor
+  loadBackgroundOutput
 } from '../services/session-history'
 import { watchSession, unwatchSession } from '../services/session-watcher'
 import { isPathInside, assertSafePathSegment } from '../services/path-containment'
@@ -43,7 +45,7 @@ import { usageFetcher } from '../services/usage-fetcher'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
-import { dispatchedUsageSummary } from '../services/db'
+import { dispatchedUsageSummary, getSessionMeta } from '../services/db'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import { sharedProviderService } from '../shared-providers'
 import { opencodeProviderId } from '../shared-providers/OpencodeSharedProviderAdapter'
@@ -449,10 +451,11 @@ export function getSessionManager(): SessionManager | null {
 export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
   // Remove previous handlers to allow re-registration (e.g. a second bootCore in
   // a test; production boots core exactly once).
-  unbindDesktopChannels(SESSION_IPC_CHANNELS)
+  unbindDesktopChannels([...SESSION_IPC_CHANNELS, ...CODEX_CHANNELS])
 
   const manager = new SessionManager()
   sharedManager = manager
+  for (const command of codexCommands(manager)) handleIpc(command)
 
   // The volatile lane's subscription verb (phase 5 S1). Same declaration the
   // remote transport registers — see `ipc/stream-watch.ts`.
@@ -530,7 +533,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
       engineId: EngineId,
       messageIndex: number
     ) => {
-      return await resolveForkAnchor(sessionId, cwd, messageId, engineId, messageIndex)
+      return await historyFor(engineId).forkAnchor(sessionId, cwd, messageId, messageIndex)
     }
   })
 
@@ -789,7 +792,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
       // pick to the 'claude' engine. Without this, picking a Claude model while on
       // an opencode session leaves engineId undefined and the pick is mis-recorded
       // under the session's current engine (e.g. "opencode/default").
-      const claudeModels = (await fetchModels()).map((m) => ({
+      const claudeModels = (await fetchModels().catch(() => [])).map((m) => ({
         ...m,
         engineId: 'claude' as const,
         vendorId: 'anthropic'
@@ -804,7 +807,12 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
       const opencodeGroups = await discoverOpencodeModels()
       // pi models — returns [] if binary not present, no auth configured, or discovery fails
       const piGroups = await discoverPiModels()
-      return [claudeGroup, ...opencodeGroups, ...piGroups]
+      return [
+        claudeGroup,
+        ...opencodeGroups,
+        ...piGroups,
+        ...(await discoverCodexModels().catch(() => []))
+      ]
     }
   })
 
@@ -889,6 +897,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'config',
     kind: 'command',
     handler: async (sessionId: string, projectKey: string, title: string) => {
+      if (getSessionMeta(sessionId)?.engineId === 'codex')
+        throw new Error('Codex titles must not be written to Claude transcript files')
       // LOW-RW3: both identifiers are caller-supplied and interpolated straight
       // into a path — a `..`/separator segment would append attacker-controlled
       // JSON to any *.jsonl on disk. Same check as deleteSessionFiles(); the
@@ -1131,7 +1141,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: (engineId: EngineId): boolean => {
       if (engineId === 'opencode') return opencodeServerManager.isBinaryAvailable()
       if (engineId === 'pi') return piBinaryAvailable()
-      return true
+      if (engineId === 'codex') return codexBinaryAvailable()
+      return engineId === 'claude'
     }
   })
   // Absolute path to the vendored pi binary, for the Settings › pi subscription

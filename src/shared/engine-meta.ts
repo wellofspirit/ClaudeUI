@@ -13,6 +13,8 @@ import { claudeModel, opencodeModel, piModel } from './types'
 import type { EngineCapabilities, ResolvedCapabilities } from './model-capabilities'
 import {
   CLAUDE_ENGINE_CAPABILITIES,
+  CODEX_ENGINE_CAPABILITIES,
+  resolveCodexCapabilities,
   OPENCODE_ENGINE_CAPABILITIES,
   PI_ENGINE_CAPABILITIES,
   resolveClaudeCapabilities,
@@ -142,6 +144,20 @@ const PI_META: EngineMeta = {
  * new EngineId a compile error until its meta is added.
  */
 export const ENGINE_META = {
+  codex: {
+    id: 'codex',
+    label: 'Codex',
+    capabilities: CODEX_ENGINE_CAPABILITIES,
+    defaultVendorId: 'openai',
+    defaultModelValue: (configured?: string) => configured ?? '',
+    encodeModelValue: (ref: ModelRef) => ref.modelId,
+    decodeModelValue: (value: string): ModelRef => ({
+      engineId: 'codex',
+      vendorId: 'openai',
+      modelId: value
+    }),
+    seedCapabilities: (_value: string, modelInfo?: ModelInfo) => resolveCodexCapabilities(modelInfo)
+  },
   claude: CLAUDE_META,
   opencode: OPENCODE_META,
   pi: PI_META

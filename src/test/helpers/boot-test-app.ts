@@ -61,6 +61,13 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
 
   return {
     platform: process.platform,
+    codexSettings: (id, settings) => unwrap('session:codex-settings', id, settings),
+    codexApproval: (id, requestId, decision) =>
+      unwrap('session:codex-approval', id, requestId, decision),
+    codexAuthStatus: () => unwrap('codex:auth-status'),
+    codexLoginStart: () => unwrap('codex:login-start'),
+    codexLoginStatus: () => unwrap('codex:login-status'),
+    codexLoginCancel: () => unwrap('codex:login-cancel'),
     pickFolder: () => ipcRenderer.invoke('session:pick-folder'),
     createSession: (
       routingId,
@@ -69,7 +76,10 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       resumeSessionId?,
       permissionMode?,
       model?,
-      thinkingMode?
+      thinkingMode?,
+      resumeSessionAt?,
+      forkSession?,
+      engineId?
     ) =>
       ipcRenderer.invoke(
         'session:create',
@@ -79,10 +89,20 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
         resumeSessionId,
         permissionMode,
         model,
-        thinkingMode
+        thinkingMode,
+        resumeSessionAt,
+        forkSession,
+        engineId
       ),
-    resolveForkAnchor: (sessionId, cwd, messageId) =>
-      ipcRenderer.invoke('session:resolve-fork-anchor', sessionId, cwd, messageId),
+    resolveForkAnchor: (sessionId, cwd, messageId, engineId, messageIndex) =>
+      ipcRenderer.invoke(
+        'session:resolve-fork-anchor',
+        sessionId,
+        cwd,
+        messageId,
+        engineId,
+        messageIndex
+      ),
     loadOpencodeHistory: (sessionId) =>
       ipcRenderer.invoke('session:load-opencode-history', sessionId),
     listPiSessionsGlobal: () => ipcRenderer.invoke('session:list-pi'),

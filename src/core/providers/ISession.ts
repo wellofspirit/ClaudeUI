@@ -17,6 +17,11 @@ import type { HostWindowHandle } from '../host'
  * are gated behind `capabilities` flags.
  */
 export interface ISession {
+  setCodexSettings?(settings: import('../../shared/codex-types').CodexSettings): Promise<void>
+  resolveCodexApproval?(
+    requestId: string,
+    decision: import('../../shared/codex-types').CodexApprovalDecision
+  ): void
   readonly engineId: EngineId
   readonly routingId: string
   readonly cwd: string
@@ -34,7 +39,8 @@ export interface ISession {
   /** Run a prompt turn. Passing null spawns the process without sending a message. */
   run(
     prompt: string | null,
-    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
+    attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>,
+    clientUserMessageId?: string
   ): Promise<void>
 
   /** Queue of record (ADR-053): items still awaiting consumption, oldest first. */
@@ -114,7 +120,7 @@ export interface ISession {
   voiceStopRecording?(): Promise<void>
 
   /** Reasoning-effort tier (gated by capabilities.reasoning.effort != null). */
-  setEffort?(effort: string): void
+  setEffort?(effort: string): void | Promise<void>
   /** Thinking mode (gated by capabilities.reasoning.thinking != null). */
   setThinkingMode?(mode: string): void
 
@@ -190,6 +196,7 @@ export interface ISession {
  * ignore options they do not consume (noted per member).
  */
 export interface EngineSpawnOptions {
+  codex?: import('../../shared/codex-types').CodexPolicyOptions
   /** Reasoning-effort tier. Claude + pi (M2b: applied via `set_thinking_level`
    *  at spawn when the resolved model supports it) — opencode uses per-model
    *  reasoning variants instead. */

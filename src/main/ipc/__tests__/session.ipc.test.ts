@@ -14,6 +14,23 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
+vi.mock('../../../core/codex/codex-locate', () => ({ codexBinaryAvailable: () => false }))
+vi.mock('../../../core/codex/model-discovery', () => ({
+  discoverCodexModels: vi.fn(async () => [])
+}))
+vi.mock('../../../core/codex/history', () => ({
+  listCodexSessions: vi.fn(async () => []),
+  loadCodexHistory: vi.fn()
+}))
+vi.mock('../../../core/auth/CodexAuthProvider', () => ({
+  codexAuthProvider: {
+    status: vi.fn(async () => ({ available: false, authenticated: false, authKind: null })),
+    loginStart: vi.fn(),
+    loginStatus: vi.fn(() => ({ status: 'idle' })),
+    loginCancel: vi.fn()
+  }
+}))
+
 // ---------------------------------------------------------------------------
 // Mocks — every service that session.ipc.ts imports needs a stand-in so we
 // don't touch the real FS, network, or spawn subprocesses.

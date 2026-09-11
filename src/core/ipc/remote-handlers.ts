@@ -1,4 +1,8 @@
 import * as fs from 'fs'
+import { codexBinaryAvailable } from '../codex/codex-locate'
+import { discoverCodexModels } from '../codex/model-discovery'
+import { codexCommands } from './codex-commands'
+import { readSessionHistory as loadSessionHistory, historyFor } from '../services/engine-history'
 import * as os from 'os'
 import * as path from 'path'
 import { RemoteDispatcher } from '../services/remote-dispatcher'
@@ -6,11 +10,9 @@ import { STREAM_WATCH_COMMAND } from './stream-watch'
 import { GIT_WATCH_COMMAND } from './git-watch'
 import { SessionManager } from '../services/session-manager'
 import {
-  loadSessionHistory,
   loadSubagentHistory,
   buildSubagentFileMap,
-  loadBackgroundOutput,
-  resolveForkAnchor
+  loadBackgroundOutput
 } from '../services/session-history'
 import { isPathInside, assertSafePathSegment } from '../services/path-containment'
 import { gitServiceManager } from '../services/git-service'
@@ -55,7 +57,7 @@ import type {
 } from '../../shared/types'
 import { getSdkExecutableOpts } from '../services/claude-session'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
-import { dispatchedUsageSummary } from '../services/db'
+import { dispatchedUsageSummary, getSessionMeta } from '../services/db'
 import { emitEvent } from '../services/sync-host'
 import { listAllDirectories } from '../services/sync-seed'
 import { getHostWindow } from '../services/host-window'
@@ -391,7 +393,7 @@ export function registerRemoteHandlers(
       engineId: EngineId,
       messageIndex: number
     ) => {
-      return await resolveForkAnchor(sessionId, cwd, messageId, engineId, messageIndex)
+      return await historyFor(engineId).forkAnchor(sessionId, cwd, messageId, messageIndex)
     }
   })
 
@@ -587,7 +589,7 @@ export function registerRemoteHandlers(
     capability: 'config',
     kind: 'query',
     handler: async (): Promise<EngineModelGroup[]> => {
-      const claudeModels = (await claudeSupportedModels()).map((m) => ({
+      const claudeModels = (await claudeSupportedModels().catch(() => [])).map((m) => ({
         ...m,
         engineId: 'claude' as const,
         vendorId: 'anthropic'
@@ -600,7 +602,12 @@ export function registerRemoteHandlers(
       }
       const opencodeGroups = await discoverOpencodeModels()
       const piGroups = await discoverPiModels()
-      return [claudeGroup, ...opencodeGroups, ...piGroups]
+      return [
+        claudeGroup,
+        ...opencodeGroups,
+        ...piGroups,
+        ...(await discoverCodexModels().catch(() => []))
+      ]
     }
   })
 
@@ -738,6 +745,8 @@ export function registerRemoteHandlers(
     capability: 'config',
     kind: 'command',
     handler: async (sessionId: string, projectKey: string, title: string) => {
+      if (getSessionMeta(sessionId)?.engineId === 'codex')
+        throw new Error('Codex titles must not be written to Claude transcript files')
       // LOW-RW3: reachable by any token-holding remote client. Without this,
       // projectKey='../..' + a crafted sessionId appends attacker-controlled
       // JSON to an arbitrary *.jsonl on the host. Mirrors the desktop handler
@@ -1157,7 +1166,8 @@ export function registerRemoteHandlers(
     handler: async (engineId: EngineId): Promise<boolean> => {
       if (engineId === 'opencode') return opencodeServerManager.isBinaryAvailable()
       if (engineId === 'pi') return piBinaryAvailable()
-      return true
+      if (engineId === 'codex') return codexBinaryAvailable()
+      return engineId === 'claude'
     }
   })
   handleRemote({
@@ -1638,6 +1648,7 @@ export function registerRemoteHandlers(
   for (const cmd of authCommands(resolvedAuthDeps)) {
     handleRemote(cmd)
   }
+  for (const command of codexCommands(manager)) handleRemote(command)
 
   logger.info('remote-handlers', `Registered ${dispatcher.channels().length} remote handlers`)
 }

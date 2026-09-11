@@ -9,6 +9,7 @@ import {
   crashReporter,
   dialog
 } from 'electron'
+import { codexAuthProvider } from '../core/auth/CodexAuthProvider'
 import { join } from 'path'
 import { pathToFileURL } from 'url'
 import { execFileSync } from 'child_process'
@@ -708,6 +709,10 @@ app.whenReady().then(() => {
       currentPluginManager?.stopAll()
       core?.automationManager.stopAll()
       credentialSync.stop()
+      codexAuthProvider.dispose()
+      core?.sessionManager.forEach((session) => {
+        if (session.engineId === 'codex') session.dispose()
+      })
       void core?.remoteServer.stop()
       // Stop the service session (lightweight CLI subprocess for usage polling)
       serviceSession.stop()

@@ -118,6 +118,8 @@ export interface FileAttachment {
 }
 
 export interface ChatMessage {
+  /** Native acknowledgement replaces a host-minted pending user row by identity. */
+  replacesMessageId?: string
   id: string
   role: 'user' | 'assistant' | 'system'
   content: ContentBlock[]
@@ -138,7 +140,7 @@ export interface ChatMessage {
   thinkingDurationMs?: number
 }
 
-export type EngineId = 'claude' | 'opencode' | 'pi'
+export type EngineId = 'claude' | 'opencode' | 'pi' | 'codex'
 
 /** Open-ended union: known vendors are named; unknown ones fall through as plain strings. */
 export type VendorId = 'anthropic' | 'openai' | 'google' | 'local' | (string & {})
@@ -229,6 +231,8 @@ export interface AccountRef {
 }
 
 export interface SessionStatus {
+  /** Native Codex policy is authoritative; shared PermissionMode does not apply. */
+  codex?: import('./codex-types').CodexSessionState
   state: 'idle' | 'running' | 'error' | 'disconnected'
   sessionId: string | null
   /** Vendor-qualified model identity. Null until the engine reports a model. */
@@ -251,6 +255,7 @@ export interface PermissionSuggestion {
 }
 
 export interface PendingApproval {
+  codex?: import('./codex-types').CodexApprovalChoices
   requestId: string
   /**
    * cli.js-assigned tool_use id for the invocation being prompted. The
@@ -968,6 +973,8 @@ export interface WatchUpdate {
 }
 
 export interface ModelInfo {
+  nativeEffortOptions?: Array<{ value: string; description: string }>
+  nativeDefaultEffort?: string
   value: string
   displayName: string
   description: string
@@ -2511,6 +2518,16 @@ export interface ClaudeAPI
     VoiceAPI,
     SharedProviderAPI,
     PluginAPI {
+  codexSettings(routingId: string, settings: import('./codex-types').CodexSettings): Promise<void>
+  codexApproval(
+    routingId: string,
+    requestId: string,
+    decision: import('./codex-types').CodexApprovalDecision
+  ): Promise<void>
+  codexAuthStatus(): Promise<import('./codex-types').CodexAuthStatus>
+  codexLoginStart(): Promise<import('./codex-types').CodexLoginState>
+  codexLoginStatus(): Promise<import('./codex-types').CodexLoginState>
+  codexLoginCancel(): Promise<void>
   /** Relay a log message from the renderer to the main process logger */
   logRelay(level: string, source: string, message: string): void
   /** App + SDK version info for display in Settings */

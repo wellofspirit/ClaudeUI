@@ -135,5 +135,6 @@ export function autoModeAvailableForEngine(
   engineId: EngineId | undefined,
   models: Pick<ModelInfo, 'engineId' | 'supportsAutoMode'>[]
 ): boolean {
+  if (engineId === 'codex') return false
   return (engineId ?? 'claude') === 'claude' ? claudeAutoModeAvailable(models) : true
 }

@@ -59,6 +59,24 @@ async function fresh(): Promise<{
 }
 
 describe('saveSessionConfig — sessionEngines durability (H15)', () => {
+  it('does not erase or reclassify verified native identity from a stale client projection', async () => {
+    const { db, ui } = await fresh()
+    try {
+      db.setSessionMeta('native', { engineId: 'codex' })
+      db.ensureCodexSessionOverrides('native')
+      db.setCodexSessionOverrides('native', { approvalPolicy: 'untrusted', effort: 'ultra' })
+      ui.saveSessionConfig({ sessionEngines: { other: { engineId: 'claude' } } })
+      expect(db.getSessionMeta('native')?.engineId).toBe('codex')
+      ui.saveSessionConfig({ sessionEngines: { native: { engineId: 'claude' } } })
+      expect(db.getSessionMeta('native')?.engineId).toBe('codex')
+      expect(db.getCodexSessionOverrides('native')).toEqual({
+        approvalPolicy: 'untrusted',
+        effort: 'ultra'
+      })
+    } finally {
+      db.closeDb()
+    }
+  })
   it('an EMPTY sessionEngines map does NOT delete existing DB meta', async () => {
     const { db, ui } = await fresh()
     try {

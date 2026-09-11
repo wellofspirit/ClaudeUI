@@ -4,7 +4,13 @@ import * as os from 'os'
 import { logger } from './logger'
 import { emitEvent } from './sync-host'
 import { writeFileAtomicSync } from './write-json-atomic'
-import { allSessionMeta, setSessionMeta, deleteSessionMeta, importSessionEnginesOnce } from './db'
+import {
+  allSessionMeta,
+  setSessionMeta,
+  deleteSessionMeta,
+  importSessionEnginesOnce,
+  hasCodexSessionOverrides
+} from './db'
 import { assertSafeIdSegment, isPathInside } from './path-containment'
 
 const CONFIG_DIR = path.join(os.homedir(), '.claude', 'ui')
@@ -359,6 +365,8 @@ export function saveSessionConfig(config: UISessionConfig): void {
 
     // Add/update entries present in the incoming map
     for (const [sessionId, meta] of Object.entries(incoming)) {
+      // Native-discovered identity is authoritative; a stale client projection cannot change its engine.
+      if (meta.engineId !== 'codex' && hasCodexSessionOverrides(sessionId)) continue
       setSessionMeta(sessionId, meta)
     }
 
@@ -375,7 +383,7 @@ export function saveSessionConfig(config: UISessionConfig): void {
     if (incomingIds.length > 0) {
       const currentMeta = allSessionMeta()
       for (const sessionId of Object.keys(currentMeta)) {
-        if (!(sessionId in incoming)) {
+        if (!(sessionId in incoming) && !hasCodexSessionOverrides(sessionId)) {
           deleteSessionMeta(sessionId)
         }
       }

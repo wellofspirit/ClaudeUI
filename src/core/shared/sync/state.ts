@@ -64,6 +64,8 @@ export interface CanonicalSessionState {
   sdkActive: boolean
   selectedEngineId: EngineId
   selectedModel: string
+  /** A catalog preview is not an explicit native model override. */
+  codexModelExplicit?: boolean
   /**
    * Core-internal, never serialized: has this session's transcript been seeded
    * from its on-disk history yet? The shadow comparator masks unseeded sessions,
@@ -217,6 +219,7 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
       sdkActive: s.sdkActive ?? false,
       selectedEngineId: s.selectedEngineId ?? 'claude',
       selectedModel: s.selectedModel ?? 'default',
+      ...(s.codexModelExplicit !== undefined ? { codexModelExplicit: s.codexModelExplicit } : {}),
       seeded: true
     }
   }
@@ -275,7 +278,8 @@ export function toSnapshot(state: CanonicalState, seq: number): FullStateSnapsho
       sdkSkillNames: state.sdkSkillNames,
       sdkActive: s.sdkActive,
       selectedEngineId: s.selectedEngineId,
-      selectedModel: s.selectedModel
+      selectedModel: s.selectedModel,
+      ...(s.codexModelExplicit !== undefined ? { codexModelExplicit: s.codexModelExplicit } : {})
     }
   }
   return {

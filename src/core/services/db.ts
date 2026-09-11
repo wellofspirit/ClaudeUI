@@ -21,6 +21,7 @@
  */
 
 import * as fs from 'fs'
+import { parseCodexSettings } from '../codex/settings'
 import * as path from 'path'
 import * as os from 'os'
 import { getSqliteDriver, setDbOpenProbe, type SqliteDatabase } from './sqlite-driver'
@@ -543,6 +544,16 @@ export const MIGRATIONS: Migration[] = [
         ALTER TABLE remote_config ADD COLUMN ide_cli_path TEXT;
       `)
     }
+  },
+  {
+    version: 15,
+    up(db) {
+      db.exec(`CREATE TABLE codex_session_overrides (
+        session_id TEXT PRIMARY KEY,
+        settings_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`)
+    }
   }
 ]
 
@@ -751,7 +762,9 @@ interface SessionMetaRow {
 
 function rowToMeta(row: SessionMetaRow): SessionMeta {
   const engineId: EngineId =
-    row.engine_id === 'opencode' || row.engine_id === 'pi' ? row.engine_id : 'claude'
+    row.engine_id === 'opencode' || row.engine_id === 'pi' || row.engine_id === 'codex'
+      ? row.engine_id
+      : 'claude'
   if (row.model_id != null) {
     return {
       engineId,
@@ -780,6 +793,49 @@ export function getSessionMeta(sessionId: string): SessionMeta | undefined {
   const row = db.prepare('SELECT * FROM session_meta WHERE session_id = ?').get(sessionId) as
     SessionMetaRow | undefined
   return row ? rowToMeta(row) : undefined
+}
+
+/** Explicit accepted native choices, independent of client-projected session_meta deletion. */
+export function getCodexSessionOverrides(sessionId: string, db: Db = getDb()): unknown {
+  const row = db
+    .prepare('SELECT settings_json FROM codex_session_overrides WHERE session_id = ?')
+    .get(sessionId) as { settings_json: string } | undefined
+  if (!row) return undefined
+  try {
+    return JSON.parse(row.settings_json)
+  } catch {
+    throw new Error('Saved Codex session overrides are invalid')
+  }
+}
+
+export function setCodexSessionOverrides(
+  sessionId: string,
+  settings: Omit<import('../../shared/codex-types').CodexSettings, 'reset'>,
+  db: Db = getDb()
+): void {
+  const parsed = parseCodexSettings(settings)
+  if (parsed.reset) throw new Error('A reset action cannot be stored as native overrides')
+  db.prepare(
+    `INSERT INTO codex_session_overrides (session_id, settings_json, updated_at) VALUES (?, ?, ?)
+    ON CONFLICT(session_id) DO UPDATE SET settings_json = excluded.settings_json, updated_at = excluded.updated_at`
+  ).run(sessionId, JSON.stringify(parsed), Date.now())
+}
+
+export function ensureCodexSessionOverrides(sessionId: string, db: Db = getDb()): void {
+  db.prepare(
+    'INSERT OR IGNORE INTO codex_session_overrides (session_id, settings_json, updated_at) VALUES (?, ?, ?)'
+  ).run(sessionId, '{}', Date.now())
+}
+
+export function hasCodexSessionOverrides(sessionId: string, db: Db = getDb()): boolean {
+  return (
+    db.prepare('SELECT 1 FROM codex_session_overrides WHERE session_id = ?').get(sessionId) !==
+    undefined
+  )
+}
+
+export function deleteCodexSessionOverrides(sessionId: string, db: Db = getDb()): void {
+  db.prepare('DELETE FROM codex_session_overrides WHERE session_id = ?').run(sessionId)
 }
 
 /**
@@ -860,7 +916,7 @@ export function renameSessionMeta(oldId: string, newId: string, fallback?: Sessi
 /**
  * Import session metadata from a legacy sessionEngines record (from sessions.json).
  * Only runs if the session_meta table is empty — ensures a one-time migration.
- * Codex/unknown engineIds are clamped to 'claude', matching the Phase-1 clamp.
+ * Recognized engine IDs are preserved. Unknown legacy IDs retain the existing clamp.
  *
  * Call this after the first DB open, before any reads.
  */
@@ -880,9 +936,12 @@ export function importSessionEnginesOnce(
   )
 
   for (const [sessionId, entry] of entries) {
-    // Clamp unknown/codex engineIds to 'claude'
+    // Do not infer recovery of previously clamped rows from model names.
     const engineId: EngineId =
-      entry.engineId === 'claude' || entry.engineId === 'opencode' || entry.engineId === 'pi'
+      entry.engineId === 'claude' ||
+      entry.engineId === 'opencode' ||
+      entry.engineId === 'pi' ||
+      entry.engineId === 'codex'
         ? (entry.engineId as EngineId)
         : 'claude'
 
