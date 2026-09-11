@@ -1,14 +1,14 @@
-/** Explicit session overrides only. Absence preserves native user configuration. */
-export interface CodexPolicyOptions {
-  approvalPolicy?: 'untrusted' | 'on-request' | 'never'
-  sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access'
-  approvalsReviewer?: 'user'
-}
-
 export type CodexApprovalDecision = 'accept' | 'acceptForSession' | 'decline' | 'cancel'
 
+/**
+ * The ONLY approval shape that still carries a `codex` field: the native
+ * `item/tool/requestUserInput` question card, which has no shared analogue.
+ * Commands and file changes are gated by ClaudeUI's own permission engine
+ * (ADR-066 / slice 3) and render through the standard approval card, so their
+ * `PendingApproval` carries no engine-specific payload at all.
+ */
 export interface CodexApprovalChoices {
-  questions?: Array<{
+  questions: Array<{
     id: string
     question: string
     header: string
@@ -16,12 +16,17 @@ export interface CodexApprovalChoices {
     allowOther: boolean
   }>
   routingId?: string
+  /** Native replies the card may send for a question — `cancel` only. */
   decisions: CodexApprovalDecision[]
-  unsupportedDecisions: string[]
 }
 
-export interface CodexSettings extends CodexPolicyOptions {
-  /** Clear saved policy/effort and disconnect an idle root. Model selection and native credential/config files are unchanged. */
+/**
+ * Explicit session overrides only. Absence preserves native user
+ * configuration. Approval/sandbox/reviewer are NOT settable: ClaudeUI derives
+ * them from the session's shared PermissionMode on every turn.
+ */
+export interface CodexSettings {
+  /** Clear saved effort and disconnect an idle root. Model selection and native credential/config files are unchanged. */
   reset?: true
   model?: string
   effort?: string
@@ -42,13 +47,9 @@ export interface CodexLoginState {
   userCode?: string
 }
 
-/** JSON-native effective values retain granular and future policy representations. */
+/** Native state the UI still needs. Policy is ClaudeUI's, so it is not mirrored here. */
 export interface CodexSessionState {
   overrides?: Omit<CodexSettings, 'reset'>
-  approvalPolicy: unknown
-  approvalsReviewer: string
-  sandbox: unknown
-  activePermissionProfile: unknown
   modelProvider: string
   reasoningEffort: string | null
   effortOptions: Array<{ value: string; description: string }>

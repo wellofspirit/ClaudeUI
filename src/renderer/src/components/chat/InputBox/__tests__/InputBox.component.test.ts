@@ -486,8 +486,13 @@ describe('InputBox FC — rendered', () => {
       app.bridge.ipcMain.handle('session:codex-settings', () => undefined)
       renderFC()
       expect(viewProps.selectedModel.shortName).toBe(explicit ? 'Native preview' : 'Native default')
+      // The pill's "initialize without a prompt" button is gone; a real send is
+      // now the only spawn trigger, and it must resolve the model the same way.
       await act(async () => {
-        await viewProps.onInitializeCodex!()
+        useSessionStore.getState().setDraftText('go')
+      })
+      await act(async () => {
+        await viewProps.onSend()
       })
       expect(ipcCalls['session:create'][0][5]).toBe(explicit ? 'native-preview' : undefined)
       expect(ipcCalls['session:create'][0][2]).toBeUndefined()
@@ -997,6 +1002,62 @@ describe('InputBox FC — rendered', () => {
     expect(viewProps.adaptiveSupported).toBe(true)
     expect(viewProps.effortSupported).toBe(true)
     expect(viewProps.allowedEffortLevels).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+  })
+
+  function codexSession(capabilities = resolveCodexCapabilities()): void {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedEngineId: 'codex',
+          selectedModel: 'native',
+          codexModelExplicit: true,
+          permissionMode: 'acceptEdits',
+          status: {
+            ...state.sessions[FC_ROUTE].status,
+            engineId: 'codex',
+            sessionId: 'thread',
+            capabilities
+          }
+        }
+      },
+      availableModels: [
+        { value: 'native', displayName: 'Native', description: '', engineId: 'codex' }
+      ]
+    }))
+    mirrorStoreIntoReplica()
+  }
+
+  it('gives a codex session the shared mode picker and its real permission mode', () => {
+    codexSession()
+    renderFC()
+    expect(viewProps.showModePicker).toBe(true)
+    expect(viewProps.permissionMode).toBe('acceptEdits')
+    expect(viewProps.autoAvailable).toBe(true)
+    expect(viewProps.canPlan).toBe(true)
+  })
+
+  it('offers native effort for codex and applies it over IPC without a respawn', async () => {
+    codexSession(
+      resolveCodexCapabilities({
+        nativeEffortOptions: [
+          { value: 'high', description: 'High' },
+          { value: 'ultra', description: 'Native ultra' }
+        ]
+      })
+    )
+    renderFC()
+    expect(viewProps.effortSupported).toBe(true)
+    expect(viewProps.nativeEffortOptions).toEqual([
+      { value: 'high', description: 'High' },
+      { value: 'ultra', description: 'Native ultra' }
+    ])
+    await act(async () => {
+      await viewProps.onSelectEffort('ultra')
+    })
+    expect(ipcCalls['session:set-effort']).toEqual([[FC_ROUTE, 'ultra']])
+    expect(ipcCalls['session:cancel']).toBeUndefined()
   })
 
   it('derives capability props from selectedModel: sonnet-4-5 → no adaptive, no effort', () => {

@@ -239,7 +239,6 @@ export function SessionView(): React.JSX.Element {
         const { activeSessionId, sessions } = state
         if (!activeSessionId) return
         const session = sessions[activeSessionId]
-        if (session?.selectedEngineId === 'codex') return
         const permissionMode = session?.permissionMode ?? 'default'
         // Engine capability gate: skip modes the engine can't offer (e.g. 'plan'
         // when !capabilities.plan). Claude has plan=true, so the full cycle stands.

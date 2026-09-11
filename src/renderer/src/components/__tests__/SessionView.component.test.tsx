@@ -26,6 +26,7 @@ import { render, screen, act, cleanup } from '@testing-library/react'
 import { useSessionStore } from '../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
+import { resolveCodexCapabilities } from '../../../../shared/model-capabilities'
 
 // ---------------------------------------------------------------------------
 // Mobile flag — mutated per-test, read lazily by the mocked hook
@@ -164,6 +165,37 @@ describe('SessionView — mobile task takeover', () => {
       render(React.createElement(SessionView))
     })
   }
+
+  it('Shift+Tab cycles the permission mode of a codex session like any other engine', async () => {
+    const modes: unknown[][] = []
+    app.bridge.ipcMain.handle('session:set-permission-mode', (_e: unknown, ...args: unknown[]) => {
+      modes.push(args)
+      return null
+    })
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          selectedEngineId: 'codex',
+          permissionMode: 'default',
+          status: {
+            ...state.sessions[ROUTE].status,
+            engineId: 'codex',
+            capabilities: resolveCodexCapabilities()
+          }
+        }
+      }
+    }))
+    mirrorStoreIntoReplica()
+
+    await renderSessionView()
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true }))
+    })
+
+    expect(modes).toEqual([[ROUTE, 'acceptEdits']])
+  })
 
   it('mobile + rightPanel=task: renders MobileTaskView full-screen, not ChatPanel', async () => {
     mockIsMobile = true

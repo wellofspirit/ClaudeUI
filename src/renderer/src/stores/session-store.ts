@@ -837,7 +837,6 @@ export function bootstrapPermissionMode(
   >,
   engineId: EngineId
 ): PermissionMode {
-  if (engineId === 'codex') return 'default'
   if (state.defaultPermissionMode !== 'auto') return state.defaultPermissionMode
   const autoBlocked =
     !autoModeAvailableForEngine(engineId, state.availableModels) ||
@@ -1635,7 +1634,13 @@ export const useSessionStore = create<SessionState>((set) => ({
       selectedModel: model,
       reasoningVariant: null,
       ...(engineId === 'codex' ? { codexModelExplicit: false } : {}),
-      permissionMode: engineId === 'codex' ? 'default' : session.permissionMode,
+      // Engine-neutral: a mode the TARGET engine cannot offer would otherwise
+      // survive the switch and show a pill the Shift+Tab cycle skips over.
+      permissionMode:
+        session.permissionMode === 'auto' &&
+        !autoModeAvailableForEngine(engineId, state.availableModels)
+          ? 'default'
+          : session.permissionMode,
       status: {
         ...session.status,
         engineId,

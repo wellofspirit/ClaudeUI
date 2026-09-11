@@ -64,13 +64,13 @@ describe('saveSessionConfig — sessionEngines durability (H15)', () => {
     try {
       db.setSessionMeta('native', { engineId: 'codex' })
       db.ensureCodexSessionOverrides('native')
-      db.setCodexSessionOverrides('native', { approvalPolicy: 'untrusted', effort: 'ultra' })
+      db.setCodexSessionOverrides('native', { model: 'gpt-native', effort: 'ultra' })
       ui.saveSessionConfig({ sessionEngines: { other: { engineId: 'claude' } } })
       expect(db.getSessionMeta('native')?.engineId).toBe('codex')
       ui.saveSessionConfig({ sessionEngines: { native: { engineId: 'claude' } } })
       expect(db.getSessionMeta('native')?.engineId).toBe('codex')
       expect(db.getCodexSessionOverrides('native')).toEqual({
-        approvalPolicy: 'untrusted',
+        model: 'gpt-native',
         effort: 'ultra'
       })
     } finally {

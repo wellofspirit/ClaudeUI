@@ -53,7 +53,9 @@ export function ApprovalButtons({
   }, [approval.suggestions])
 
   const hasSuggestions = showSuggestions && (approval.suggestions?.length ?? 0) > 0
-  if (approval.codex) return <CodexApprovalCard approval={approval} />
+  // Only a native QUESTION still needs the engine-specific card; commands and
+  // file changes come through the shared gate and render here (ADR-066).
+  if (approval.codex?.questions) return <CodexApprovalCard approval={approval} />
   const hasReason = showSuggestions && !!approval.decisionReason
 
   const handleDecision = async (decision: 'allow' | 'deny'): Promise<void> => {

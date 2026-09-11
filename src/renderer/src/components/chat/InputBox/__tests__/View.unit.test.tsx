@@ -95,16 +95,16 @@ function makeProps(overrides: Partial<InputBoxViewProps> = {}): InputBoxViewProp
   }
 }
 
-describe('Codex native policy display', () => {
-  it('never inherits a shared global permission default', () => {
+describe('Codex under the shared permission model', () => {
+  it('follows the global autonomy default, auto included', () => {
     for (const defaultPermissionMode of ['auto', 'acceptEdits', 'plan'] as const) {
       expect(
         bootstrapPermissionMode({ ...useSessionStore.getState(), defaultPermissionMode }, 'codex')
-      ).toBe('default')
+      ).toBe(defaultPermissionMode)
     }
   })
   it.each([false, true])(
-    'shows inherited native state without a shared mode tab, mobile=%s',
+    'shows the shared mode tab and no native policy pill, mobile=%s',
     (isMobile) => {
       render(
         <InputBoxView
@@ -112,25 +112,40 @@ describe('Codex native policy display', () => {
             isMobile,
             selectedEngineId: 'codex',
             permissionMode: 'auto',
-            showModePicker: true,
-            codexPolicy: {
-              approvalPolicy: { granular: { rules: true } },
-              approvalsReviewer: 'auto_review',
-              sandbox: { type: 'readOnly' },
-              activePermissionProfile: null,
-              modelProvider: 'openai',
-              reasoningEffort: 'ultra',
-              effortOptions: []
-            }
+            showModePicker: true
           })}
         />
       )
-      expect(screen.getByTestId('CodexPolicyPill')).toBeInTheDocument()
-      expect(screen.getByTestId('CodexPolicyPill.effective')).toHaveTextContent('auto_review')
-      expect(screen.getByTestId('CodexPolicyPill.effective')).toHaveTextContent('granular')
-      expect(screen.queryByText('Auto ⏵⏵')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('CodexPolicyPill')).not.toBeInTheDocument()
+      if (!isMobile) expect(screen.getByText('Auto ⏵⏵')).toBeInTheDocument()
+      else expect(screen.getByTestId('MobileConfigSheet.trigger')).toBeInTheDocument()
     }
   )
+  it('offers the engine-native effort tiers in place of the Claude ladder', () => {
+    const onSelectEffort = vi.fn()
+    render(
+      <InputBoxView
+        {...makeProps({
+          onSelectEffort,
+          selectedEngineId: 'codex',
+          effort: 'high',
+          effortSupported: true,
+          allowedEffortLevels: [],
+          nativeEffortOptions: [
+            { value: 'high', description: 'High' },
+            { value: 'ultra', description: 'Native ultra' }
+          ]
+        })}
+      />
+    )
+    const dropdown = openPickerDropdown('Effort level')
+    expect(dropdown.getByRole('button', { name: /ultra/ })).not.toBeDisabled()
+    expect(dropdown.getByRole('button', { name: /Native ultra/ })).toBeInTheDocument()
+    // The fixed Claude ladder is gone, not merged in.
+    expect(dropdown.queryByRole('button', { name: /^xhigh$/i })).not.toBeInTheDocument()
+    fireEvent.click(dropdown.getByRole('button', { name: /ultra/ }))
+    expect(onSelectEffort).toHaveBeenCalledWith('ultra')
+  })
 })
 
 beforeEach(() => {

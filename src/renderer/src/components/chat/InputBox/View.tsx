@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef } from 'react'
-import { CodexPolicyPill } from '../CodexPolicyPill'
 import type {
   FileAttachment,
   StatusLineData,
@@ -44,10 +43,6 @@ const DEFAULT_STATUS_LINE: StatusLineData = {
 // ---------------------------------------------------------------------------
 
 export interface InputBoxViewProps {
-  codexPolicy?: import('../../../../../shared/codex-types').CodexSessionState
-  codexRoutingId?: string
-  codexConnected?: boolean
-  onInitializeCodex?: () => Promise<void>
   // Refs
   textareaRef: React.RefObject<HTMLTextAreaElement | null>
   fileInputRef: React.RefObject<HTMLInputElement | null>
@@ -99,6 +94,8 @@ export interface InputBoxViewProps {
   engineLocked: boolean
   showEnginePicker: boolean
   effort: string
+  /** Engine-native effort tiers (Codex's model catalog) in place of the fixed Claude ladder. */
+  nativeEffortOptions?: ReadonlyArray<{ value: string; description: string }>
   effortSupported: boolean
   allowedEffortLevels: readonly EffortLevel[]
   thinkingMode: ThinkingMode
@@ -132,7 +129,7 @@ export interface InputBoxViewProps {
   onSelectMode?: (mode: PermissionMode) => void
   onSelectModel: (value: string) => void
   onSelectEngine: (engineId: EngineId) => void
-  onSelectEffort: (level: EffortLevel) => void
+  onSelectEffort: (level: string) => void
   onSelectThinking: (mode: ThinkingMode) => void
   /** Available reasoning variant keys for the selected opencode model. Empty = hide picker. */
   reasoningVariants?: string[]
@@ -492,14 +489,6 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
       className="shrink-0"
     >
       <div className={`${isMobile ? 'max-w-full' : 'max-w-[740px]'} mx-auto`}>
-        {props.selectedEngineId === 'codex' && (
-          <CodexPolicyPill
-            policy={props.codexPolicy}
-            routingId={props.codexRoutingId}
-            connected={props.codexConnected}
-            onInitialize={props.onInitializeCodex}
-          />
-        )}
         <div
           className={`group relative rounded-2xl bg-bg-input transition-colors ${
             permissionMode === 'acceptEdits'
@@ -512,7 +501,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
           }`}
         >
           {/* Mode tab */}
-          {props.selectedEngineId !== 'codex' && permissionMode !== 'default' && (
+          {permissionMode !== 'default' && (
             <div
               className={`absolute bottom-full left-3 px-1.5 pt-0.5 pb-px rounded-t text-[9px] font-semibold tracking-wider uppercase text-text-primary border border-b-0 transition-colors ${
                 permissionMode === 'acceptEdits'
@@ -586,9 +575,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                   selectedModel={props.selectedModel}
                   selectedEngineId={props.selectedEngineId}
                   engineLocked={props.engineLocked}
-                  showModePicker={
-                    props.selectedEngineId !== 'codex' && (props.showModePicker ?? false)
-                  }
+                  showModePicker={props.showModePicker ?? false}
                   permissionMode={props.permissionMode as PermissionMode}
                   canPlan={props.canPlan ?? true}
                   autoAvailable={props.autoAvailable ?? true}
@@ -602,6 +589,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                   effort={props.effort}
                   effortSupported={props.effortSupported}
                   allowedEffortLevels={props.allowedEffortLevels}
+                  nativeEffortOptions={props.nativeEffortOptions}
                   onSelectMode={props.onSelectMode ?? (() => {})}
                   onSelectEngine={props.onSelectEngine}
                   onSelectModel={props.onSelectModel}
@@ -642,6 +630,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                   <EffortPicker
                     effort={props.effort}
                     allowedEffortLevels={props.allowedEffortLevels}
+                    nativeOptions={props.nativeEffortOptions}
                     supported={props.effortSupported}
                     onSelectEffort={props.onSelectEffort}
                   />

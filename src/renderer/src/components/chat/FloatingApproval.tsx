@@ -32,7 +32,8 @@ export function ApprovalCardView({
   onRespond,
   showAllowForSession = false
 }: ApprovalCardViewProps): React.JSX.Element {
-  if (approval.codex) return <CodexApprovalCard approval={approval} />
+  // See ApprovalButtons: the codex card is the native-question surface only.
+  if (approval.codex?.questions) return <CodexApprovalCard approval={approval} />
   const input = approval.input
   const toolName = approval.toolName
   const isSandboxEscape = !!input?.dangerouslyDisableSandbox

@@ -400,22 +400,40 @@ export function ModelPicker({
   )
 }
 
+/**
+ * `nativeOptions` REPLACES the fixed Claude ladder rather than merging with it:
+ * an engine that publishes its own reasoning tiers (Codex's model catalog, via
+ * `capabilities.reasoning.nativeEffort`) has no low/medium/high/xhigh/max axis
+ * to grey out, and showing five inapplicable rows next to two real ones reads
+ * as five broken options.
+ */
 export function EffortPicker({
   effort,
   allowedEffortLevels,
+  nativeOptions,
   supported,
   onSelectEffort
 }: {
   effort: string
   allowedEffortLevels: readonly EffortLevel[]
+  nativeOptions?: ReadonlyArray<{ value: string; description: string }>
   supported: boolean
-  onSelectEffort: (level: EffortLevel) => void
+  onSelectEffort: (level: string) => void
 }): React.JSX.Element | null {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
   useClickOutside(ref, open, () => setOpen(false))
   if (!supported) return null
   const allowed = new Set<EffortLevel>(allowedEffortLevels)
+  const options: Array<{ value: string; label: string; detail?: string; enabled: boolean }> =
+    nativeOptions?.length
+      ? nativeOptions.map((option) => ({
+          value: option.value,
+          label: option.value,
+          detail: option.description,
+          enabled: true
+        }))
+      : EFFORT_LEVELS.map((level) => ({ value: level, label: level, enabled: allowed.has(level) }))
 
   return (
     <div className="relative" ref={ref} data-testid="EffortPicker">
@@ -441,31 +459,37 @@ export function EffortPicker({
         </svg>
       </button>
       {open && (
-        <div className="absolute bottom-full mb-1 left-0 w-28 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
-          {EFFORT_LEVELS.map((level) => {
-            const enabled = allowed.has(level)
+        <div
+          className={`absolute bottom-full mb-1 left-0 ${nativeOptions?.length ? 'w-48' : 'w-28'} bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20`}
+        >
+          {options.map(({ value, label, detail, enabled }) => {
             return (
               <button
-                key={level}
+                key={value}
                 data-testid="EffortPicker.option"
-                data-value={level}
+                data-value={value}
                 disabled={!enabled}
-                title={enabled ? undefined : unsupportedTooltip(level)}
+                title={enabled ? detail : unsupportedTooltip(value as EffortLevel)}
                 onClick={() => {
                   if (enabled) {
-                    onSelectEffort(level)
+                    onSelectEffort(value)
                     setOpen(false)
                   }
                 }}
-                className={`w-full flex items-center px-3 h-8 text-[12px] transition-colors text-left capitalize ${
+                className={`w-full flex flex-col items-start px-3 py-1.5 text-[12px] transition-colors text-left capitalize ${
                   !enabled
                     ? 'text-text-muted opacity-40 cursor-not-allowed'
-                    : level === effort
+                    : value === effort
                       ? 'text-text-primary bg-bg-hover cursor-pointer'
                       : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary cursor-pointer'
                 }`}
               >
-                {level}
+                <span>{label}</span>
+                {detail && (
+                  <span className="text-[10px] text-text-muted normal-case leading-tight">
+                    {detail}
+                  </span>
+                )}
               </button>
             )
           })}

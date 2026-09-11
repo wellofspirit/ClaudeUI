@@ -6,7 +6,29 @@ import type { EngineSpawnOptions } from '../../providers/ISession'
 
 const events = vi.hoisted(() => vi.fn())
 const overrides = vi.hoisted(() => new Map<string, unknown>())
+/** Hermetic Claude permission rules — never the dev machine's real ~/.claude. */
+const rules = vi.hoisted(() => ({
+  allow: [] as string[],
+  deny: [] as string[],
+  ask: [] as string[]
+}))
+const savedRules = vi.hoisted(() => vi.fn())
 vi.mock('../../services/sync-host', () => ({ emitEvent: events }))
+vi.mock('../../services/claude-settings', () => ({
+  loadClaudePermissions: (scope: string) => ({
+    // One scope only: the engine concatenates all three, so returning the same
+    // list for each would triple every rule and hide an ordering bug.
+    allow: scope === 'user' ? [...rules.allow] : [],
+    deny: scope === 'user' ? [...rules.deny] : [],
+    ask: scope === 'user' ? [...rules.ask] : [],
+    additionalDirectories: [],
+    defaultMode: undefined
+  }),
+  saveClaudePermissions: savedRules
+}))
+vi.mock('../../services/logger', () => ({
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+}))
 vi.mock('../../services/db', () => ({
   dispatchedCostsByRouting: () => [],
   setSessionMeta: vi.fn(),
@@ -25,6 +47,10 @@ afterEach(() => {
   sessions.length = 0
   events.mockClear()
   overrides.clear()
+  savedRules.mockClear()
+  rules.allow = []
+  rules.deny = []
+  rules.ask = []
 })
 
 function fixture(opts: EngineSpawnOptions = {}) {
@@ -78,27 +104,62 @@ function fixture(opts: EngineSpawnOptions = {}) {
   )
   sessions.push(session)
   const notify = (method: string, params: unknown) => callbacks.onNotification!(method, params)
-  const approval = (availableDecisions: unknown[] = ['accept', 'cancel'], threadId = 'root') => {
+  const cards = () =>
+    events.mock.calls.filter((call) => call[0] === 'session:approval-request').map((c) => c[1][1])
+  /**
+   * Drive one server->client approval request. `card` is the approval card this
+   * request produced, or undefined when the shared evaluator answered it
+   * outright (allow/deny) — that distinction is what the mode/rule tests assert.
+   */
+  const approval = (
+    params: Record<string, unknown> = {},
+    method = 'item/commandExecution/requestApproval'
+  ) => {
+    const before = cards().length
     const controller = new AbortController()
     controllers.push(controller)
     const result = callbacks.onServerRequest!(
-      'item/commandExecution/requestApproval',
+      method,
       {
-        threadId,
+        threadId: 'root',
         turnId: 'turn',
         itemId: 'command',
         command: 'pwd',
-        availableDecisions
+        cwd: '/isolated',
+        ...params
       },
       { id: controllers.length, signal: controller.signal }
     )
     void result.catch(() => {})
-    const card = events.mock.calls
-      .filter((call) => call[0] === 'session:approval-request')
-      .at(-1)?.[1][1]
+    const card = cards().length > before ? cards().at(-1) : undefined
     return { result, card, controller }
   }
-  return { session, client, request, notify, approval, callbacks, response, policy }
+  /** Seed the fileChange tool_use row the approval handler reads its paths from. */
+  const fileChange = (paths: string[], kind = 'add', itemId = 'patch') => {
+    notify('item/started', {
+      threadId: 'root',
+      turnId: 'turn',
+      item: {
+        id: itemId,
+        type: 'fileChange',
+        status: 'inProgress',
+        changes: paths.map((path) => ({ path, diff: '+x', kind: { type: kind } }))
+      }
+    })
+    return approval({ itemId }, 'item/fileChange/requestApproval')
+  }
+  return {
+    session,
+    client,
+    request,
+    notify,
+    approval,
+    fileChange,
+    cards,
+    callbacks,
+    response,
+    policy
+  }
 }
 
 describe('Codex first session', () => {
@@ -107,19 +168,22 @@ describe('Codex first session', () => {
     await first.session.run(null)
     expect(overrides.get('root')).toEqual({})
     first.request.mockRejectedValueOnce(new Error('requirements reject change'))
-    await expect(first.session.setCodexSettings({ approvalPolicy: 'never' })).rejects.toThrow(
+    await expect(first.session.setCodexSettings({ effort: 'ultra' })).rejects.toThrow(
       'requirements'
     )
     expect(overrides.get('root')).toEqual({})
-    await first.session.setCodexSettings({ approvalPolicy: 'untrusted', effort: 'ultra' })
-    expect(overrides.get('root')).toEqual({ approvalPolicy: 'untrusted', effort: 'ultra' })
+    await first.session.setCodexSettings({ model: 'native', effort: 'ultra' })
+    expect(overrides.get('root')).toEqual({ model: 'native', effort: 'ultra' })
     first.session.dispose()
     const resumed = fixture({ resumeSessionId: 'root' })
     await resumed.session.run(null)
     expect(resumed.request).toHaveBeenCalledWith('thread/resume', {
       cwd: '/isolated',
       threadId: 'root',
-      approvalPolicy: 'untrusted'
+      model: 'native',
+      approvalPolicy: 'untrusted',
+      sandbox: 'workspace-write',
+      approvalsReviewer: 'user'
     })
     expect(resumed.request).toHaveBeenCalledWith('thread/settings/update', {
       threadId: 'root',
@@ -128,6 +192,29 @@ describe('Codex first session', () => {
     await resumed.session.setCodexSettings({ reset: true })
     expect(overrides.get('root')).toEqual({ model: 'native' })
     await expect(resumed.session.run(null)).rejects.toThrow('disconnected')
+  })
+
+  it('drops policy keys left in an overrides row written before the shared gate', async () => {
+    overrides.set('root', {
+      approvalPolicy: 'never',
+      sandbox: 'danger-full-access',
+      approvalsReviewer: 'user',
+      effort: 'ultra'
+    })
+    const { session, request } = fixture({ resumeSessionId: 'root' })
+    await session.run(null)
+    expect(request).toHaveBeenCalledWith('thread/resume', {
+      cwd: '/isolated',
+      threadId: 'root',
+      approvalPolicy: 'untrusted',
+      sandbox: 'workspace-write',
+      approvalsReviewer: 'user'
+    })
+    expect(request).toHaveBeenCalledWith('thread/settings/update', {
+      threadId: 'root',
+      effort: 'ultra'
+    })
+    expect(overrides.get('root')).toEqual({ effort: 'ultra' })
   })
 
   it('does not adopt a native child as an independent root', async () => {
@@ -167,7 +254,7 @@ describe('Codex first session', () => {
     await next.session.run('hello')
     const current = next.approval()
     expect(current.card.requestId).not.toBe(stale.card.requestId)
-    expect(() => next.session.resolveCodexApproval(stale.card.requestId, 'accept')).toThrow('Stale')
+    expect(() => next.session.resolveApproval(stale.card.requestId, 'allow')).toThrow('Stale')
   })
   it.each(['response', 'notification'])(
     'remembers stop during pending turn/start, ID from %s',
@@ -261,51 +348,45 @@ describe('Codex first session', () => {
     ])
   })
 
-  it('replicates only acknowledged settings and preserves inherited granular policy on rejection', async () => {
+  it('replicates only acknowledged effort and rejects native policy settings outright', async () => {
     const { session, request, notify, policy } = fixture()
     await session.run(null)
-    await session.setCodexSettings({
-      approvalsReviewer: 'user',
-      sandbox: 'read-only',
-      effort: 'ultra'
-    })
+    await session.setCodexSettings({ effort: 'ultra' })
     expect(request).toHaveBeenCalledWith('thread/settings/update', {
       threadId: 'root',
-      approvalsReviewer: 'user',
-      sandboxPolicy: { type: 'readOnly', networkAccess: false },
       effort: 'ultra'
     })
-    expect(
+    const codexOf = () =>
       events.mock.calls.filter(([channel]) => channel === 'session:status').at(-1)![1][1].codex
-        .approvalsReviewer
-    ).toBe(policy.approvalsReviewer)
+    expect(codexOf().reasoningEffort).toBe('ultra')
+    // Policy keys are no longer part of the replicated native state at all.
+    expect(codexOf()).not.toHaveProperty('approvalPolicy')
+    expect(codexOf()).not.toHaveProperty('approvalsReviewer')
+    expect(codexOf()).not.toHaveProperty('sandbox')
+    expect(codexOf()).not.toHaveProperty('activePermissionProfile')
     notify('thread/settings/updated', {
       threadId: 'root',
-      threadSettings: {
-        ...policy,
-        model: 'native',
-        modelProvider: 'openai',
-        sandboxPolicy: { type: 'readOnly', networkAccess: false },
-        approvalsReviewer: 'user',
-        effort: 'ultra'
-      }
+      threadSettings: { ...policy, model: 'native', modelProvider: 'openai', effort: 'ultra' }
     })
-    expect(
-      events.mock.calls.filter(([channel]) => channel === 'session:status').at(-1)![1][1].codex
-        .approvalsReviewer
-    ).toBe('user')
-    await expect(
-      session.setCodexSettings({ approvalsReviewer: 'auto_review' } as never)
-    ).rejects.toThrow('Unsupported')
+    expect(codexOf().reasoningEffort).toBe('ultra')
+    await expect(session.setCodexSettings({ approvalsReviewer: 'user' } as never)).rejects.toThrow(
+      'Unsupported'
+    )
+    await expect(session.setCodexSettings({ sandbox: 'read-only' } as never)).rejects.toThrow(
+      'Unsupported'
+    )
   })
-  it('serializes null startup, publishes native identity and preserves inherited granular policy', async () => {
-    const { session, client, request, policy } = fixture({ permissionMode: 'auto' })
+  it('serializes null startup and publishes native identity without native policy', async () => {
+    const { session, client, request } = fixture({ permissionMode: 'auto' })
     await Promise.all([session.run(null), session.run(null)])
     expect(client.start).toHaveBeenCalledOnce()
     expect(request.mock.calls.filter(([method]) => method === 'thread/start')).toHaveLength(1)
     expect(request).toHaveBeenCalledWith('thread/start', {
       cwd: '/isolated',
       model: 'native',
+      approvalPolicy: 'on-request',
+      sandbox: 'workspace-write',
+      approvalsReviewer: 'auto_review',
       allowProviderModelFallback: false,
       historyMode: 'paginated'
     })
@@ -315,19 +396,26 @@ describe('Codex first session', () => {
       expect.objectContaining({
         sessionId: 'root',
         state: 'idle',
-        codex: expect.objectContaining(policy)
+        codex: {
+          modelProvider: 'openai',
+          reasoningEffort: 'ultra',
+          effortOptions: expect.any(Array),
+          overrides: {}
+        }
       })
     ])
     expect(session.capabilities.reasoning.nativeEffort?.options[0].value).toBe('ultra')
-    await expect(session.setPermissionMode('auto')).rejects.toThrow('native approval')
   })
 
-  it('resumes without overriding native policy or registering hosted tools', async () => {
+  it('resumes with the mode baseline and registers no hosted tools', async () => {
     const { session, request, callbacks } = fixture({ resumeSessionId: 'root' })
     await session.run(null)
     expect(request).toHaveBeenCalledWith('thread/resume', {
       cwd: '/isolated',
-      threadId: 'root'
+      threadId: 'root',
+      approvalPolicy: 'untrusted',
+      sandbox: 'workspace-write',
+      approvalsReviewer: 'user'
     })
     expect(callbacks.serverMethods).not.toContain('item/tool/call')
     expect(callbacks.serverMethods).toContain('item/permissions/requestApproval')
@@ -369,35 +457,11 @@ describe('Codex first session', () => {
     expect(() => session.enqueuePrompt()).toThrow('queue')
   })
 
-  it('retains exact offered decisions, rejects grants and duplicate replies', async () => {
-    const { session, approval } = fixture()
-    await session.run('hello')
-    const pending = approval(['acceptForSession', 'decline', { acceptWithExecpolicyAmendment: {} }])
-    expect(pending.card.codex).toEqual({
-      routingId: 'temporary',
-      decisions: ['acceptForSession', 'decline'],
-      unsupportedDecisions: ['acceptWithExecpolicyAmendment']
-    })
-    expect(() => session.resolveCodexApproval(pending.card.requestId, 'accept')).toThrow(
-      'unoffered'
-    )
-    pending.card.codex.decisions.push('accept')
-    expect(() => session.resolveCodexApproval(pending.card.requestId, 'accept')).toThrow(
-      'unoffered'
-    )
-    expect(() => session.resolveApproval(pending.card.requestId, 'allowForSession')).toThrow(
-      'native decision'
-    )
-    session.resolveCodexApproval(pending.card.requestId, 'acceptForSession')
-    expect(await pending.result).toEqual({ decision: 'acceptForSession' })
-    expect(() => session.resolveCodexApproval(pending.card.requestId, 'decline')).toThrow('Stale')
-  })
-
   it('aborts owning approvals at terminal and rejects child approvals', async () => {
     const { session, approval, notify, client } = fixture()
     await session.run('hello')
     const pending = approval()
-    await expect(approval(['accept'], 'child').result).rejects.toThrow('owning root')
+    await expect(approval({ threadId: 'child' }).result).rejects.toThrow('owning root')
     notify('turn/completed', {
       threadId: 'root',
       turn: { id: 'turn', status: 'interrupted', items: [] }
@@ -408,7 +472,7 @@ describe('Codex first session', () => {
       'temporary',
       { requestId: pending.card.requestId }
     ])
-    expect(() => session.resolveCodexApproval(pending.card.requestId, 'accept')).toThrow('Stale')
+    expect(() => session.resolveApproval(pending.card.requestId, 'allow')).toThrow('Stale')
   })
 
   it('disposes pending approvals and transport exactly once', async () => {
@@ -454,6 +518,200 @@ describe('Codex first session', () => {
     await expect(session.run(null)).rejects.toThrow('only the native OpenAI')
     expect(request.mock.calls.some(([method]) => method === 'thread/start')).toBe(false)
     expect(client.dispose).toHaveBeenCalledOnce()
+  })
+
+  // ---------------------------------------------------------------------------
+  // Slice 3 — Codex executes, ClaudeUI decides. Every turn runs `untrusted`
+  // (`on-request` under auto) so every command and file change comes back as a
+  // server request, and the shared pi permission engine answers it.
+  // ---------------------------------------------------------------------------
+
+  const MODES = [
+    ['plan', 'untrusted', { type: 'readOnly', networkAccess: false }, 'user'],
+    ['default', 'untrusted', { type: 'workspaceWrite' }, 'user'],
+    ['acceptEdits', 'untrusted', { type: 'workspaceWrite' }, 'user'],
+    ['auto', 'on-request', { type: 'workspaceWrite' }, 'auto_review']
+  ] as const
+
+  it.each(MODES)(
+    'sends %s as approvalPolicy=%s with the matching sandbox and reviewer',
+    async (mode, approvalPolicy, sandbox, approvalsReviewer) => {
+      const { session, request } = fixture({ permissionMode: mode })
+      await session.run('hello')
+      expect(request).toHaveBeenCalledWith(
+        'turn/start',
+        expect.objectContaining({
+          approvalPolicy,
+          approvalsReviewer,
+          sandboxPolicy: expect.objectContaining(sandbox)
+        })
+      )
+    }
+  )
+
+  it('applies a mode change from the next turn and broadcasts it', async () => {
+    const { session, request, notify } = fixture()
+    await session.run('hello')
+    expect(request).toHaveBeenCalledWith(
+      'turn/start',
+      expect.objectContaining({ approvalPolicy: 'untrusted', approvalsReviewer: 'user' })
+    )
+    notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn', status: 'completed', items: [] }
+    })
+    await session.setPermissionMode('auto')
+    expect(events).toHaveBeenCalledWith('session:permission-mode', ['temporary', 'auto'])
+    await session.run('again')
+    expect(request).toHaveBeenLastCalledWith(
+      'turn/start',
+      expect.objectContaining({
+        approvalPolicy: 'on-request',
+        approvalsReviewer: 'auto_review',
+        sandboxPolicy: expect.objectContaining({ type: 'workspaceWrite' })
+      })
+    )
+  })
+
+  it('answers plan mode read-only without a card and declines every mutation', async () => {
+    const { session, approval, fileChange, cards } = fixture({ permissionMode: 'plan' })
+    await session.run('hello')
+    const read = approval({ command: 'ls' })
+    expect(read.card).toBeUndefined()
+    expect(await read.result).toEqual({ decision: 'accept' })
+    const write = approval({ command: 'echo x > f', itemId: 'write' })
+    expect(write.card).toBeUndefined()
+    expect(await write.result).toEqual({ decision: 'decline' })
+    const patch = fileChange(['/isolated/a.txt'])
+    expect(patch.card).toBeUndefined()
+    expect(await patch.result).toEqual({ decision: 'decline' })
+    expect(cards()).toHaveLength(0)
+    // The native reply has no reason field, so the denial is only visible here.
+    expect(events).toHaveBeenCalledWith('session:error', [
+      'temporary',
+      expect.stringContaining('Plan mode is read-only')
+    ])
+  })
+
+  it('asks the human in default mode with a standard card and honours every decision', async () => {
+    const first = fixture()
+    await first.session.run('hello')
+    const pending = first.approval({ command: 'git push', reason: 'needs network' })
+    expect(pending.card).toMatchObject({
+      toolName: 'commandExecution',
+      input: { command: 'git push', cwd: '/isolated' },
+      decisionReason: 'needs network'
+    })
+    expect(pending.card.codex).toBeUndefined()
+    expect(pending.card.suggestions).toEqual([
+      {
+        type: 'addRules',
+        behavior: 'allow',
+        destination: 'userSettings',
+        rules: [{ toolName: 'Bash', ruleContent: 'git push:*' }]
+      },
+      {
+        type: 'addRules',
+        behavior: 'allow',
+        destination: 'projectSettings',
+        rules: [{ toolName: 'Bash', ruleContent: 'git push:*' }]
+      },
+      {
+        type: 'addRules',
+        behavior: 'allow',
+        destination: 'localSettings',
+        rules: [{ toolName: 'Bash', ruleContent: 'git push:*' }]
+      }
+    ])
+    first.session.resolveApproval(pending.card.requestId, 'allow')
+    expect(await pending.result).toEqual({ decision: 'accept' })
+
+    const denied = first.approval({ command: 'git push', itemId: 'two' })
+    first.session.resolveApproval(denied.card.requestId, 'deny')
+    expect(await denied.result).toEqual({ decision: 'decline' })
+
+    const session = fixture()
+    await session.session.run('hello')
+    const forSession = session.approval({ command: 'git push' })
+    session.session.resolveApproval(forSession.card.requestId, 'allowForSession')
+    expect(await forSession.result).toEqual({ decision: 'accept' })
+    const repeat = session.approval({ command: 'git  push', itemId: 'two' })
+    expect(repeat.card).toBeUndefined()
+    expect(await repeat.result).toEqual({ decision: 'accept' })
+  })
+
+  it('lets user rules decide before the mode base, in every mode', async () => {
+    rules.deny = ['Bash(rm -rf:*)']
+    rules.allow = ['Bash(pwd)']
+    rules.ask = ['Edit(src/**)']
+    const { session, approval, fileChange } = fixture({ permissionMode: 'acceptEdits' })
+    await session.run('hello')
+    const denied = approval({ command: 'rm -rf /' })
+    expect(denied.card).toBeUndefined()
+    expect(await denied.result).toEqual({ decision: 'decline' })
+    expect(events).toHaveBeenCalledWith('session:error', [
+      'temporary',
+      'Denied by permission rule: Bash(rm -rf:*)'
+    ])
+    const allowed = approval({ command: 'pwd', itemId: 'two' })
+    expect(allowed.card).toBeUndefined()
+    expect(await allowed.result).toEqual({ decision: 'accept' })
+    const asked = fileChange(['/isolated/src/app.ts'], 'update')
+    expect(asked.card).toMatchObject({ toolName: 'fileChange' })
+    expect(asked.card.suggestions[0].rules).toEqual([{ toolName: 'Edit' }])
+  })
+
+  it('auto-accepts in-workspace file changes in acceptEdits and asks outside it', async () => {
+    const { session, fileChange } = fixture({ permissionMode: 'acceptEdits' })
+    await session.run('hello')
+    const inside = fileChange(['/isolated/nested/new.txt'])
+    expect(inside.card).toBeUndefined()
+    expect(await inside.result).toEqual({ decision: 'accept' })
+    const outside = fileChange(['/elsewhere/new.txt'], 'add', 'outside')
+    expect(outside.card).toMatchObject({ toolName: 'fileChange' })
+  })
+
+  it('never suggests a rule that would match every command', async () => {
+    const { session, approval } = fixture()
+    await session.run('hello')
+    // A `writeStdin`-kind request carries no command string; `Bash(:*)` would
+    // be a prefix rule matching everything.
+    const pending = approval({ command: null, kind: 'writeStdin' })
+    expect(pending.card).toMatchObject({ toolName: 'commandExecution' })
+    expect(pending.card.suggestions).toBeUndefined()
+  })
+
+  it('asks when a file change carries no resolvable path', async () => {
+    const { session, approval } = fixture({ permissionMode: 'acceptEdits' })
+    await session.run('hello')
+    const orphan = approval({ itemId: 'ghost' }, 'item/fileChange/requestApproval')
+    expect(orphan.card).toMatchObject({ toolName: 'fileChange', input: { files: [] } })
+    expect(orphan.card.suggestions).toBeUndefined()
+  })
+
+  it('gates a request that still reaches the client under auto like default', async () => {
+    const { session, approval } = fixture({ permissionMode: 'auto' })
+    await session.run('hello')
+    const pending = approval({ command: 'git push' })
+    expect(pending.card).toMatchObject({ toolName: 'commandExecution' })
+    expect(pending.card.codex).toBeUndefined()
+    session.resolveApproval(pending.card.requestId, 'allow')
+    expect(await pending.result).toEqual({ decision: 'accept' })
+  })
+
+  it('persists the allow rules a human ticked on the card', async () => {
+    const { session, approval } = fixture()
+    await session.run('hello')
+    const pending = approval({ command: 'git push' })
+    session.resolveApproval(pending.card.requestId, 'allow', undefined, [
+      pending.card.suggestions[0]
+    ])
+    expect(await pending.result).toEqual({ decision: 'accept' })
+    expect(savedRules).toHaveBeenCalledWith(
+      'user',
+      expect.objectContaining({ allow: ['Bash(git push:*)'] }),
+      '/isolated'
+    )
   })
 
   it('validates model/effort selections and sends native effort on the next turn', async () => {

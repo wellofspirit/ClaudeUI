@@ -64,13 +64,15 @@ export interface MobileConfigSheetProps {
   reasoningVariant: string | null
   effort: string
   effortSupported: boolean
+  /** Engine-native effort tiers, in place of the fixed Claude ladder (see EffortPicker). */
+  nativeEffortOptions?: ReadonlyArray<{ value: string; description: string }>
   allowedEffortLevels: readonly EffortLevel[]
   onSelectMode: (mode: PermissionMode) => void
   onSelectEngine: (engineId: EngineId) => void
   onSelectModel: (value: string) => void
   onSelectThinking: (mode: ThinkingMode) => void
   onSelectReasoningVariant: (variant: string | null) => void
-  onSelectEffort: (level: EffortLevel) => void
+  onSelectEffort: (level: string) => void
 }
 
 // ---------------------------------------------------------------------------
@@ -414,31 +416,39 @@ function VariantPage({
 function EffortPage({
   effort,
   allowedEffortLevels,
+  nativeOptions,
   onSelect
 }: {
   effort: string
   allowedEffortLevels: readonly EffortLevel[]
-  onSelect: (level: EffortLevel) => void
+  nativeOptions?: ReadonlyArray<{ value: string; description: string }>
+  onSelect: (level: string) => void
 }): React.JSX.Element {
   const allowed = new Set<EffortLevel>(allowedEffortLevels)
+  // Same substitution rule as the desktop EffortPicker: native tiers replace
+  // the Claude ladder, they do not join it.
+  const options: Array<{ value: string; detail?: string; enabled: boolean }> = nativeOptions?.length
+    ? nativeOptions.map((option) => ({
+        value: option.value,
+        detail: option.description,
+        enabled: true
+      }))
+    : EFFORT_LEVELS.map((level) => ({ value: level, enabled: allowed.has(level) }))
   return (
     <div>
-      {EFFORT_LEVELS.map((level) => {
-        const enabled = allowed.has(level)
-        return (
-          <OptionButton
-            key={level}
-            testId="MobileConfigSheet.effortOption"
-            dataValue={level}
-            active={level === effort}
-            disabled={!enabled}
-            title={enabled ? undefined : unsupportedTooltip(level)}
-            onClick={() => enabled && onSelect(level)}
-          >
-            <span className="text-[13px] capitalize truncate">{level}</span>
-          </OptionButton>
-        )
-      })}
+      {options.map(({ value, detail, enabled }) => (
+        <OptionButton
+          key={value}
+          testId="MobileConfigSheet.effortOption"
+          dataValue={value}
+          active={value === effort}
+          disabled={!enabled}
+          title={enabled ? detail : unsupportedTooltip(value as EffortLevel)}
+          onClick={() => enabled && onSelect(value)}
+        >
+          <span className="text-[13px] capitalize truncate">{value}</span>
+        </OptionButton>
+      ))}
     </div>
   )
 }
@@ -467,6 +477,7 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
     effort,
     effortSupported,
     allowedEffortLevels,
+    nativeEffortOptions,
     onSelectMode,
     onSelectEngine,
     onSelectModel,
@@ -754,6 +765,7 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
                 <EffortPage
                   effort={effort}
                   allowedEffortLevels={allowedEffortLevels}
+                  nativeOptions={nativeEffortOptions}
                   onSelect={(level) => {
                     onSelectEffort(level)
                     goRoot()

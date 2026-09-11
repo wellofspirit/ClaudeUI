@@ -196,7 +196,6 @@ export interface ISession {
  * ignore options they do not consume (noted per member).
  */
 export interface EngineSpawnOptions {
-  codex?: import('../../shared/codex-types').CodexPolicyOptions
   /** Reasoning-effort tier. Claude + pi (M2b: applied via `set_thinking_level`
    *  at spawn when the resolved model supports it) — opencode uses per-model
    *  reasoning variants instead. */

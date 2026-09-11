@@ -2,6 +2,7 @@ import { createServer } from 'node:http'
 import { WebSocketServer } from 'ws'
 import {
   copyFileSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -25,6 +26,18 @@ import provenance from '../../core/codex/protocol/provenance.json'
 const containment = vi.hoisted(() => ({ profile: '', pids: [] as number[] }))
 const coreEvents = vi.hoisted(() => vi.fn())
 vi.mock('../../core/services/sync-host', () => ({ emitEvent: coreEvents }))
+// The shared permission gate merges the USER's real ~/.claude rules. Pin them
+// empty so these probes measure the mode base, not this machine's settings.
+vi.mock('../../core/services/claude-settings', () => ({
+  loadClaudePermissions: () => ({
+    allow: [],
+    deny: [],
+    ask: [],
+    additionalDirectories: [],
+    defaultMode: undefined
+  }),
+  saveClaudePermissions: vi.fn()
+}))
 const persistence = vi.hoisted(() => ({ close: () => {} }))
 vi.mock('../../core/services/db', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../core/services/db')>()
@@ -345,40 +358,43 @@ it.skipIf(!enabled)(
 )
 
 it.skipIf(!enabled)(
-  'resolves a native command approval and acknowledges native policy settings',
+  'plan mode declines the write command through the shared gate and leaves no file',
+  async () => {
+    const { cwd, env, errors } = await setupFixture(true, true, true)
+    session = new CodexSession(
+      'isolated-plan',
+      null,
+      cwd,
+      { permissionMode: 'plan' },
+      { env, requestTimeoutMs: 15000 }
+    )
+    await session.run(null)
+    await session.run('Execute the isolated fixture command.')
+    await vi.waitFor(() => expect(session!.willQueue).toBe(false), { timeout: 20000 })
+    // `untrusted` asks BEFORE running (reason: null), so nothing was executed
+    // and the macOS nested-seatbelt limitation in codex-spike.md cannot
+    // confound this: the gate, not the sandbox, is what stopped the write.
+    expect(coreEvents.mock.calls.some(([channel]) => channel === 'session:approval-request')).toBe(
+      false
+    )
+    expect(existsSync(join(cwd, 'approval.txt'))).toBe(false)
+    expect(
+      coreEvents.mock.calls.some(
+        ([channel, args]) =>
+          channel === 'session:error' && String(args[1]).includes('Plan mode is read-only')
+      )
+    ).toBe(true)
+    expect(errors).toEqual([])
+  },
+  60000
+)
+
+it.skipIf(!enabled)(
+  'default mode asks the human, runs the approved command and keeps resume/reset intact',
   async () => {
     const { cwd, env, errors } = await setupFixture(true, true, true)
     session = new CodexSession('isolated-approval', null, cwd, {}, { env, requestTimeoutMs: 15000 })
     await session.run(null)
-    await session.setCodexSettings({
-      approvalPolicy: 'never',
-      sandbox: 'danger-full-access',
-      approvalsReviewer: 'user'
-    })
-    await vi.waitFor(() =>
-      expect(
-        coreEvents.mock.calls.some(
-          ([channel, args]) =>
-            channel === 'session:status' &&
-            args[1].codex?.approvalPolicy === 'never' &&
-            args[1].codex?.sandbox?.type === 'dangerFullAccess'
-        )
-      ).toBe(true)
-    )
-    await session.setCodexSettings({
-      approvalPolicy: 'untrusted',
-      sandbox: 'read-only',
-      approvalsReviewer: 'user'
-    })
-    await vi.waitFor(() =>
-      expect(
-        coreEvents.mock.calls.some(
-          ([channel, args]) =>
-            channel === 'session:status' && args[1].codex?.approvalPolicy === 'untrusted'
-        )
-      ).toBe(true)
-    )
-    await session.setCodexSettings({ approvalPolicy: 'on-request', approvalsReviewer: 'user' })
     await session.run('Execute the isolated fixture command.')
     await vi.waitFor(
       () =>
@@ -394,8 +410,11 @@ it.skipIf(!enabled)(
     const card = coreEvents.mock.calls.find(
       ([channel]) => channel === 'session:approval-request'
     )![1][1]
-    expect(card.codex.decisions).toContain('accept')
-    session.resolveCodexApproval(card.requestId, 'accept')
+    // A STANDARD card: no engine-specific decision vocabulary at all.
+    expect(card.codex).toBeUndefined()
+    expect(card.toolName).toBe('commandExecution')
+    expect(card.suggestions).toHaveLength(3)
+    session.resolveApproval(card.requestId, 'allow')
     await vi.waitFor(() => expect(session!.willQueue).toBe(false), { timeout: 20000 })
     expect(readFileSync(join(cwd, 'approval.txt'), 'utf8')).toBe('fixture-approved')
     expect(
@@ -418,21 +437,19 @@ it.skipIf(!enabled)(
         .filter((block) => block.type === 'tool_result')
     ).toHaveLength(1)
     const nativeId = session.getSessionId()!
-    await session.setCodexSettings({ approvalPolicy: 'untrusted', approvalsReviewer: 'user' })
+    const resumedModel = coreEvents.mock.calls
+      .filter(([channel, args]) => channel === 'session:status' && args[0] === 'isolated-approval')
+      .at(-1)![1][1].model.modelId
     session.dispose()
     session = new CodexSession(
       'isolated-resume',
       null,
       cwd,
-      { resumeSessionId: nativeId },
+      { resumeSessionId: nativeId, permissionMode: 'acceptEdits' },
       { env, requestTimeoutMs: 15000 }
     )
     await session.run(null)
     expect(session.getSessionId()).toBe(nativeId)
-    const resumedStatus = coreEvents.mock.calls
-      .filter(([channel, args]) => channel === 'session:status' && args[0] === 'isolated-resume')
-      .at(-1)![1][1]
-    expect(resumedStatus.codex.approvalPolicy).toBe('untrusted')
     await session.setCodexSettings({ reset: true })
     const requestSpy = vi.spyOn(CodexClient.prototype, 'request')
     try {
@@ -450,15 +467,18 @@ it.skipIf(!enabled)(
         )
         .at(-1)![1][1]
       const resumeIndex = requestSpy.mock.calls.findIndex(([method]) => method === 'thread/resume')
+      // The thread BASELINE carries the mode's policy, so a turn that somehow
+      // starts without a per-turn override still runs gated.
       expect(requestSpy.mock.calls[resumeIndex][1]).toEqual({
         threadId: nativeId,
         cwd,
-        model: resumedStatus.model.modelId
+        model: resumedModel,
+        approvalPolicy: 'untrusted',
+        sandbox: 'workspace-write',
+        approvalsReviewer: 'user'
       })
-      const nativeResponse = (await requestSpy.mock.results[resumeIndex]
-        .value) as import('../../core/codex/protocol/v2/ThreadResumeResponse').ThreadResumeResponse
-      expect(inheritedStatus.codex.approvalPolicy).toEqual(nativeResponse.approvalPolicy)
-      expect(inheritedStatus.codex.overrides).toEqual({ model: resumedStatus.model.modelId })
+      expect(inheritedStatus.codex.overrides).toEqual({ model: resumedModel })
+      expect(inheritedStatus.codex).not.toHaveProperty('approvalPolicy')
     } finally {
       requestSpy.mockRestore()
     }

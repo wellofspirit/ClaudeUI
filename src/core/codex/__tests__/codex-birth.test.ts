@@ -64,7 +64,13 @@ it('birth, identity acknowledgement, native commands and reconnect agree without
     if (method === 'account/read') return { account: null }
     if (method === 'model/list')
       return {
-        data: [{ model: 'native', supportedReasoningEfforts: [], inputModalities: ['text'] }],
+        data: [
+          {
+            model: 'native',
+            supportedReasoningEfforts: [{ reasoningEffort: 'ultra', description: 'Native ultra' }],
+            inputModalities: ['text']
+          }
+        ],
         nextCursor: null
       }
     if (method === 'thread/start')
@@ -97,8 +103,7 @@ it('birth, identity acknowledgement, native commands and reconnect agree without
           sandboxPolicy: inherited.sandbox,
           model: 'native',
           modelProvider: 'openai',
-          effort: null,
-          approvalsReviewer: params.approvalsReviewer
+          effort: params.effort ?? null
         }
       })
     return {}
@@ -117,9 +122,14 @@ it('birth, identity acknowledgement, native commands and reconnect agree without
   await manager.get('temporary')!.run('hello', undefined, 'msg-host')
   const native = manager.get('root')!
   expect(native.routingId).toBe('root')
+  // `auto` maps to Codex's own auto_review reviewer under on-request; every
+  // other mode runs `untrusted` so ClaudeUI's gate sees every action.
   expect(fake.request).toHaveBeenCalledWith('thread/start', {
     cwd: '/isolated',
     model: 'native',
+    approvalPolicy: 'on-request',
+    sandbox: 'workspace-write',
+    approvalsReviewer: 'auto_review',
     allowProviderModelFallback: false,
     historyMode: 'paginated'
   })
@@ -129,11 +139,17 @@ it('birth, identity acknowledgement, native commands and reconnect agree without
     role: 'user',
     replacesMessageId: 'msg-host'
   })
-  expect(snapshot.sessions.root.permissionMode).toBe('default')
+  expect(snapshot.sessions.root.permissionMode).toBe('auto')
   expect(snapshot.sessions.root.selectedModel).toBe('native')
   expect(snapshot.sessions.root.codexModelExplicit).toBe(false)
   expect(snapshot.sessionEngines?.root.model?.modelId).toBe('native')
-  expect(snapshot.sessions.root.status.codex).toMatchObject(inherited)
+  // Native policy is no longer mirrored into replicated state — ClaudeUI owns it.
+  expect(snapshot.sessions.root.status.codex).toEqual({
+    modelProvider: 'openai',
+    reasoningEffort: null,
+    effortOptions: [{ value: 'ultra', description: 'Native ultra' }],
+    overrides: {}
+  })
 
   const controller = new AbortController()
   const pending = fake.options!.onServerRequest!(
@@ -147,25 +163,23 @@ it('birth, identity acknowledgement, native commands and reconnect agree without
     { id: 1, signal: controller.signal }
   )
   const approval = syncCore.getSnapshot().sessions.root.pendingApprovals[0]
-  expect(approval.codex?.routingId).toBe('root')
+  // A command approval is a STANDARD card: no engine-specific payload, and the
+  // shared `session:approval-response` path answers it.
+  expect(approval.codex).toBeUndefined()
+  expect(approval.toolName).toBe('commandExecution')
+  native.resolveApproval!(approval.requestId, 'deny')
+  expect(await pending).toEqual({ decision: 'decline' })
   const registry = new CommandRegistry()
   for (const command of codexCommands(manager))
     registry.register({ ...command, transport: 'remote' })
   await registry.dispatch(
-    'session:codex-approval',
-    'remote',
-    ['root', approval.requestId, 'cancel'],
-    hostConnection()
-  )
-  expect(await pending).toEqual({ decision: 'cancel' })
-  await registry.dispatch(
     'session:codex-settings',
     'remote',
-    ['root', { approvalsReviewer: 'user' }],
+    ['root', { effort: 'ultra' }],
     hostConnection()
   )
   const restored = fromSnapshot(syncCore.getSnapshot())
   expect(restored.sessions.root.pendingApprovals).toEqual([])
-  expect(restored.sessions.root.status.codex?.approvalsReviewer).toBe('user')
-  expect(restored.sessions.root.permissionMode).toBe('default')
+  expect(restored.sessions.root.status.codex?.reasoningEffort).toBe('ultra')
+  expect(restored.sessions.root.permissionMode).toBe('auto')
 })

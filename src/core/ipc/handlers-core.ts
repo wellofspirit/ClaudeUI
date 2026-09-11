@@ -543,7 +543,10 @@ export async function setEffort(
   effort: string
 ): Promise<void> {
   const s = manager.get(routingId)
-  if (s && s.capabilities.reasoning.effort == null) return
+  // Either reasoning axis counts: Claude/opencode report `effort` levels, Codex
+  // reports `nativeEffort` options from its own model catalog.
+  if (s && s.capabilities.reasoning.effort == null && s.capabilities.reasoning.nativeEffort == null)
+    return
   await s?.setEffort?.(effort)
   emitConfigChanged(s, routingId, { effort })
 }

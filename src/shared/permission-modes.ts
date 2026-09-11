@@ -127,14 +127,15 @@ export function claudeAutoModeAvailable(
 
 /**
  * Whether 'auto' permission mode is usable for the given engine. Non-Claude
- * engines' 'auto' is a local full-autonomy mode with no account gate, so it's
- * always available there; Claude delegates to `claudeAutoModeAvailable`'s
+ * engines' 'auto' has no account gate, so it's always available there —
+ * including Codex, whose auto mode routes review to the binary's own
+ * `auto_review` subagent (ADR-066), needing neither a ClaudeUI judge transport
+ * nor a subscription check. Claude delegates to `claudeAutoModeAvailable`'s
  * model-fetch-derived gate.
  */
 export function autoModeAvailableForEngine(
   engineId: EngineId | undefined,
   models: Pick<ModelInfo, 'engineId' | 'supportsAutoMode'>[]
 ): boolean {
-  if (engineId === 'codex') return false
   return (engineId ?? 'claude') === 'claude' ? claudeAutoModeAvailable(models) : true
 }

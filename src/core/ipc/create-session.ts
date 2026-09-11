@@ -128,8 +128,9 @@ export async function prepareAndCreateSession(
   const spawnOpts: EngineSpawnOptions = {
     effort,
     resumeSessionId,
-    permissionMode: resolvedEngineId === 'codex' ? undefined : permissionMode,
+    permissionMode,
     model: resolvedModel,
+    // Claude's own sandbox feature, unrelated to Codex's native sandbox policy.
     sandboxConfig: resolvedEngineId === 'codex' ? undefined : engineCfg.sandbox,
     thinkingMode,
     resumeSessionAt,
@@ -190,11 +191,7 @@ export async function prepareAndCreateSession(
       // alone"). `resolvedModel` is legitimately undefined when pi's catalog
       // probe fails — then no client is told anything and each keeps the model
       // it already had.
-      ...(resolvedEngineId === 'codex'
-        ? { permissionMode: 'default' }
-        : permissionMode != null
-          ? { permissionMode }
-          : {}),
+      ...(permissionMode != null ? { permissionMode } : {}),
       // BOTH guards: `model` (the request) and `resolvedModel` (the outcome).
       // The opencode/pi resolvers return a catalog fallback for an ABSENT
       // request — announcing that would rewrite the user's pick on every

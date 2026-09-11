@@ -497,7 +497,9 @@ export const CODEX_ENGINE_CAPABILITIES: EngineCapabilities = {
   hostedMcp: false,
   backgroundTasks: false,
   subagents: false,
-  plan: false,
+  // Plan mode is ClaudeUI's own read-only autonomy, enforced by the shared
+  // permission engine over `untrusted` + a readOnly native sandbox (ADR-066).
+  plan: true,
   fork: false,
   forkFromMessage: false,
   steer: false,
@@ -508,7 +510,7 @@ export const CODEX_ENGINE_CAPABILITIES: EngineCapabilities = {
   interactiveApprovals: true,
   sandbox: false,
   proxy: false,
-  autonomyModes: [],
+  autonomyModes: ['ask', 'autoEdit', 'full', 'plan'],
   auth: { canDriveLogin: true, multiAccount: false },
   crossEngineDispatch: false
 }

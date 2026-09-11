@@ -707,7 +707,9 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
               effort={effort}
               allowedEffortLevels={allowedEffortLevels}
               supported={effortSupported}
-              onSelectEffort={onSelectEffort}
+              // No native-effort engine here (automation targets Claude's fixed
+              // ladder), so every value the picker can emit IS an EffortLevel.
+              onSelectEffort={(level) => onSelectEffort(level as EffortLevel)}
             />
           </div>
         </InspectorRow>

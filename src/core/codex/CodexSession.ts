@@ -1,10 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto'
+import path from 'node:path'
 import type { HostWindowHandle } from '../host'
 import { BaseSession } from '../providers/BaseSession'
 import type { EngineSpawnOptions } from '../providers/ISession'
 import type {
   ApprovalDecision,
+  FileDiff,
   PendingApproval,
+  PermissionSuggestion,
   SessionStatus,
   ChatMessage,
   MeteringSnapshot
@@ -16,7 +19,26 @@ import type {
 } from '../../shared/codex-types'
 import { mergeContentBlocks } from '../../shared/content-blocks'
 import { isImageMediaType } from '../../shared/types'
-import { parseCodexSettings, codexSandboxPolicy } from './settings'
+import { parseCodexSettings, savedCodexOverrides, codexSandboxPolicy } from './settings'
+import type { AskForApproval } from './protocol/v2/AskForApproval'
+import type { ApprovalsReviewer } from './protocol/v2/ApprovalsReviewer'
+import type { SandboxMode } from './protocol/v2/SandboxMode'
+import type { SandboxPolicy } from './protocol/v2/SandboxPolicy'
+import {
+  decideWithSource,
+  mergedClaudeRulesFor,
+  normalizeWhitespace,
+  sessionAllowKey,
+  type PermissionDecision,
+  PI_TOOL_TO_CLAUDE_TOOL,
+  PLAN_MODE_DENY_REASON
+} from '../pi/permission-engine'
+import {
+  suggestionDestinationToScope,
+  suggestionRuleToClaudeString
+} from '../opencode/permission-compiler'
+import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
+import { logger } from '../services/logger'
 import type { ThreadSettings } from './protocol/v2/ThreadSettings'
 import type { ThreadTokenUsage } from './protocol/v2/ThreadTokenUsage'
 import { resolveCodexCapabilities } from '../../shared/model-capabilities'
@@ -45,12 +67,6 @@ const serverMethods = [
   'item/tool/requestUserInput',
   'item/permissions/requestApproval'
 ] as const
-const decisions: readonly CodexApprovalDecision[] = [
-  'accept',
-  'acceptForSession',
-  'decline',
-  'cancel'
-]
 const record = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value)
 
@@ -58,7 +74,42 @@ type Pending = {
   turnId: string
   choices: CodexApprovalDecision[]
   questions?: ToolRequestUserInputParams['questions']
+  /** `sessionAllows` keys to add when a human answers `allowForSession`. */
+  allowKeys: string[]
   settle: (value?: unknown) => void
+}
+
+/** One gated action inside a native request — one command, or one changed file. */
+type Gated = { tool: string; input: Record<string, unknown>; path?: string }
+
+/**
+ * Per-turn native policy. Codex EXECUTES, ClaudeUI DECIDES (ADR-066 slice 3):
+ * every turn but `auto` runs `untrusted`, the one policy the pinned binary asks
+ * before running anything (docs/codex-spike.md, "Native approval surface probe"
+ * answer B), so every command and file change arrives as a server request for
+ * ClaudeUI's own permission engine to answer. `auto` is the exception — it hands
+ * review to Codex's native `auto_review` subagent under `on-request`, and only
+ * what that subagent escalates reaches us, gated exactly like `default`.
+ *
+ * The sandbox is the containment floor, not the decision: an ACCEPTED command
+ * runs unsandboxed on this wire regardless (same probe, "Other observations").
+ */
+const TURN_POLICY: Record<
+  string,
+  { approvalPolicy: AskForApproval; sandbox: SandboxMode; approvalsReviewer: ApprovalsReviewer }
+> = {
+  plan: { approvalPolicy: 'untrusted', sandbox: 'read-only', approvalsReviewer: 'user' },
+  default: { approvalPolicy: 'untrusted', sandbox: 'workspace-write', approvalsReviewer: 'user' },
+  acceptEdits: {
+    approvalPolicy: 'untrusted',
+    sandbox: 'workspace-write',
+    approvalsReviewer: 'user'
+  },
+  auto: {
+    approvalPolicy: 'on-request',
+    sandbox: 'workspace-write',
+    approvalsReviewer: 'auto_review'
+  }
 }
 
 /** One root owns one one-shot client. No native queue, child adoption, or hosted tools. */
@@ -85,6 +136,9 @@ export class CodexSession extends BaseSession {
   private native?: CodexSessionState
   private overrides: Omit<CodexSettings, 'reset'> = {}
   private account: SessionStatus['account'] = null
+  private permissionMode: string
+  /** "Allow for this session" clicks, in the shared engine's key vocabulary. */
+  private sessionAllows = new Set<string>()
   private pending = new Map<string, Pending>()
   private output = new Map<string, string>()
   private bashGate = new BashStreamGate((toolUseId, output) =>
@@ -103,6 +157,7 @@ export class CodexSession extends BaseSession {
     super(routingId, win, cwd)
     this.model = options.model
     this.effort = options.effort
+    this.permissionMode = options.permissionMode ?? 'default'
     this.client = createClient({
       ...transport,
       cwd,
@@ -164,7 +219,8 @@ export class CodexSession extends BaseSession {
           }))
         ],
         ...(this.model !== undefined ? { model: this.model } : {}),
-        ...(this.effort !== undefined ? { effort: this.effort } : {})
+        ...(this.effort !== undefined ? { effort: this.effort } : {}),
+        ...this.turnPolicy()
       })
       if (this.closed) return
       if (!this.endedTurns.has(result.turn.id)) this.turnId = result.turn.id
@@ -188,9 +244,8 @@ export class CodexSession extends BaseSession {
       if (this.options.forkSession || this.options.resumeSessionAt)
         throw new Error('Codex fork is not implemented')
       const saved = this.options.resumeSessionId
-        ? parseCodexSettings(getCodexSessionOverrides(this.options.resumeSessionId) ?? {})
+        ? savedCodexOverrides(getCodexSessionOverrides(this.options.resumeSessionId))
         : {}
-      if (saved.reset) throw new Error('Invalid saved Codex overrides')
       this.overrides = { ...saved }
       if (this.model !== undefined) this.overrides.model = this.model
       else this.model = saved.model
@@ -233,25 +288,16 @@ export class CodexSession extends BaseSession {
           ? undefined
           : selectCodexModel(this.catalog, config.model, this.model)
       this.validateEffort(this.effort)
-      const overrides = this.options.codex ?? {}
-      if (
-        Object.keys(overrides).some(
-          (key) => !['approvalPolicy', 'sandbox', 'approvalsReviewer'].includes(key)
-        ) ||
-        (overrides.approvalPolicy !== undefined &&
-          !['untrusted', 'on-request', 'never'].includes(overrides.approvalPolicy)) ||
-        (overrides.sandbox !== undefined &&
-          !['read-only', 'workspace-write', 'danger-full-access'].includes(overrides.sandbox))
-      )
-        throw new Error('Invalid Codex native policy override')
-      if (overrides.approvalsReviewer !== undefined && overrides.approvalsReviewer !== 'user')
-        throw new Error('Codex only supports explicit human reviewer overrides')
-      this.overrides = { ...this.overrides, ...overrides }
-      const { model: _model, effort: _effort, ...policy } = this.overrides
+      // The thread BASELINE must agree with the per-turn override, so a turn
+      // that somehow starts without one (native queue, a future steer path)
+      // still runs under this mode's policy rather than the user's config.
+      const { approvalPolicy, sandbox, approvalsReviewer } = this.modePolicy()
       const params = {
         cwd: this.cwd,
-        ...policy,
-        ...(this.model !== undefined ? { model: this.model } : {})
+        ...(this.model !== undefined ? { model: this.model } : {}),
+        approvalPolicy,
+        sandbox,
+        approvalsReviewer
       }
       const response = this.options.resumeSessionId
         ? await this.client.request('thread/resume', {
@@ -279,10 +325,6 @@ export class CodexSession extends BaseSession {
           .find((entry) => entry.model === this.model)
           ?.inputModalities?.includes('image') ?? false
       this.native = {
-        approvalPolicy: response.approvalPolicy,
-        approvalsReviewer: response.approvalsReviewer,
-        sandbox: response.sandbox,
-        activePermissionProfile: response.activePermissionProfile,
         modelProvider: response.modelProvider,
         reasoningEffort: response.reasoningEffort,
         effortOptions: this.effortOptions()
@@ -341,13 +383,7 @@ export class CodexSession extends BaseSession {
       if (this.willQueue) throw new Error('Stop the native turn before clearing saved overrides')
       const id = this.threadId ?? this.options.resumeSessionId
       let model = this.threadId ? this.model : undefined
-      if (!model && id) {
-        try {
-          model = parseCodexSettings(getCodexSessionOverrides(id) ?? {}).model
-        } catch {
-          /* Explicit reset may repair invalid saved overrides, without guessing their values. */
-        }
-      }
+      if (!model && id) model = savedCodexOverrides(getCodexSessionOverrides(id)).model
       this.overrides = model ? { model } : {}
       if (id && (this.threadId || hasCodexSessionOverrides(id)))
         setCodexSessionOverrides(id, this.overrides)
@@ -376,11 +412,9 @@ export class CodexSession extends BaseSession {
     this.clearInactivityTimer()
     this.status('running')
     try {
-      const { sandbox, ...rest } = settings
       await this.client.request('thread/settings/update', {
         threadId: this.threadId!,
-        ...rest,
-        ...(sandbox ? { sandboxPolicy: codexSandboxPolicy(sandbox) } : {})
+        ...settings
       })
       if (this.closed) throw new Error('Codex disconnected before settings could be saved')
       if (settings.model !== undefined) this.model = settings.model
@@ -415,8 +449,29 @@ export class CodexSession extends BaseSession {
     return this.setCodexSettings({ effort })
   }
 
-  async setPermissionMode(_mode: string): Promise<void> {
-    throw new Error('Codex uses native approval and sandbox policy, not shared permission modes')
+  /**
+   * Applies from the NEXT turn. A live turn is not re-policied mid-flight:
+   * `turn/steer` is not implemented, and `thread/settings/update` acknowledges
+   * out of band (docs/codex-spike.md answer F), so retro-fitting the running
+   * turn would leave the mode and the in-flight approvals disagreeing.
+   */
+  async setPermissionMode(mode: string): Promise<void> {
+    this.permissionMode = mode
+    this.send('session:permission-mode', mode)
+  }
+
+  /** The native policy this session's shared mode maps onto. Unknown modes fail toward asking. */
+  private modePolicy(): (typeof TURN_POLICY)[string] {
+    return TURN_POLICY[this.permissionMode] ?? TURN_POLICY.default
+  }
+
+  private turnPolicy(): {
+    approvalPolicy: AskForApproval
+    sandboxPolicy: SandboxPolicy
+    approvalsReviewer: ApprovalsReviewer
+  } {
+    const { approvalPolicy, sandbox, approvalsReviewer } = this.modePolicy()
+    return { approvalPolicy, sandboxPolicy: codexSandboxPolicy(sandbox), approvalsReviewer }
   }
 
   async interrupt(): Promise<void> {
@@ -496,10 +551,6 @@ export class CodexSession extends BaseSession {
           ?.inputModalities?.includes('image') ?? false
       this.effort = settings.effort ?? undefined
       this.native = {
-        approvalPolicy: settings.approvalPolicy,
-        approvalsReviewer: settings.approvalsReviewer,
-        sandbox: settings.sandboxPolicy,
-        activePermissionProfile: settings.activePermissionProfile,
         modelProvider: settings.modelProvider,
         reasoningEffort: settings.effort,
         effortOptions: this.effortOptions()
@@ -706,6 +757,7 @@ export class CodexSession extends BaseSession {
     }
     let choices: CodexApprovalDecision[] = []
     let questions: ToolRequestUserInputParams['questions'] | undefined
+    let gated: Gated[] | undefined
     const card: PendingApproval = {
       requestId,
       toolUseId: codexItemId(this.threadId!, value.turnId, value.itemId),
@@ -714,41 +766,44 @@ export class CodexSession extends BaseSession {
     }
     if (method === 'item/commandExecution/requestApproval') {
       const params = value as CommandExecutionRequestApprovalParams
-      // Missing advertised choices is not authority for a policy grant.
-      const available = params.availableDecisions ?? ['decline', 'cancel']
-      choices = available.filter(
-        (choice): choice is CodexApprovalDecision =>
-          typeof choice === 'string' && decisions.includes(choice)
-      )
+      const command = params.command ?? ''
       card.toolName = 'commandExecution'
-      card.input = {
-        command: params.command ?? '',
-        cwd: params.cwd ?? '',
-        additionalPermissions: params.additionalPermissions,
-        kind: params.kind,
-        networkApprovalContext: params.networkApprovalContext
-      }
+      // `commandActions` is display-only (docs/codex-spike.md answer A: it
+      // cannot even separate `pwd` from `echo hi`), so the command STRING is
+      // what gets gated and what a suggested rule is built from.
+      card.input = { command, cwd: params.cwd ?? '' }
       card.decisionReason = params.reason ?? undefined
-      card.codex = {
-        routingId: this.routingId,
-        decisions: choices,
-        unsupportedDecisions: available
-          .filter((choice) => typeof choice !== 'string')
-          .map((choice) => Object.keys(choice)[0])
-      }
+      // NEVER suggest a rule for an empty command: `Bash(:*)` is a prefix rule
+      // that matches every command ever run. An approval with no command string
+      // (e.g. a `writeStdin` kind) gets no persistable suggestion — it still
+      // asks, it just cannot be turned into a standing rule.
+      const normalized = normalizeWhitespace(command)
+      if (normalized) card.suggestions = this.buildApprovalSuggestions('bash', `${normalized}:*`)
+      gated = [{ tool: 'bash', input: { command } }]
     } else if (method === 'item/fileChange/requestApproval') {
       const params = value as FileChangeRequestApprovalParams
-      choices = ['accept', 'decline', 'cancel']
       card.toolName = 'fileChange'
+      // The request itself carries no changes (FileChangeRequestApprovalParams
+      // is threadId/turnId/itemId/startedAtMs/reason/grantRoot only — probe:
+      // "no `availableDecisions`, no `kind` and no `grantRoot` at all"), so the
+      // paths come from the fileChange ITEM already mapped into the transcript.
       const tool = this.messageHistory
         .flatMap((message) => message.content)
         .find((block) => block.type === 'tool_use' && block.toolUseId === card.toolUseId)
-      card.input = {
-        ...(tool?.type === 'tool_use' ? tool.toolInput : {}),
-        grantRoot: params.grantRoot
-      }
+      const files: FileDiff[] =
+        tool?.type === 'tool_use' && Array.isArray(tool.toolInput?.files)
+          ? (tool.toolInput!.files as FileDiff[])
+          : []
+      card.input = { files }
       card.decisionReason = params.reason ?? undefined
-      card.codex = { routingId: this.routingId, decisions: choices, unsupportedDecisions: [] }
+      if (files.length) card.suggestions = this.buildApprovalSuggestions('edit')
+      gated = files.map((file) => ({
+        // `add` is a Write, every other change type (update/move/delete) edits
+        // a file that already exists — mirrors Claude's own Write/Edit split.
+        tool: file.changeType === 'add' ? 'write' : 'edit',
+        input: { path: file.path },
+        path: file.path
+      }))
     } else if (method === 'item/tool/requestUserInput') {
       const params = value as ToolRequestUserInputParams
       if (
@@ -775,7 +830,6 @@ export class CodexSession extends BaseSession {
       card.codex = {
         routingId: this.routingId,
         decisions: choices,
-        unsupportedDecisions: [],
         questions: questions.map((question) => ({
           id: question.id,
           question: question.question,
@@ -785,6 +839,22 @@ export class CodexSession extends BaseSession {
         }))
       }
     } else return Promise.reject(new Error('Unsupported Codex server request'))
+
+    if (gated) {
+      const verdict = this.gate(gated)
+      if (verdict.decision === 'allow') return Promise.resolve({ decision: 'accept' })
+      if (verdict.decision === 'deny') {
+        // The native reply carries a decision and nothing else — neither
+        // response type has a reason field — so a denial is invisible to both
+        // the model and the user unless we say it out loud here.
+        this.send('session:error', verdict.reason!)
+        // `decline` is honoured on both paths despite never appearing in
+        // `availableDecisions` (docs/codex-spike.md, "Other observations"), so
+        // the advertised list is deliberately not consulted.
+        return Promise.resolve({ decision: 'decline' })
+      }
+    }
+    const allowKeys = (gated ?? []).map((entry) => sessionAllowKey(entry.tool, entry.input))
     return new Promise((resolve, reject) => {
       const abort = (): void => settle()
       const settle = (reply?: unknown): void => {
@@ -798,6 +868,7 @@ export class CodexSession extends BaseSession {
         turnId: value.turnId as string,
         choices: [...choices],
         questions,
+        allowKeys,
         settle
       })
       context.signal.addEventListener('abort', abort, { once: true })
@@ -805,37 +876,157 @@ export class CodexSession extends BaseSession {
     })
   }
 
+  /**
+   * Run the shared, engine-neutral permission engine over every action one
+   * native request covers, and collapse the verdicts: any deny denies, else any
+   * ask asks, else allow. A request with NOTHING resolvable to gate asks —
+   * never allows.
+   *
+   * `auto` gates as `default`: under `auto_review` the native subagent has
+   * already approved everything it was willing to, so whatever still reaches
+   * this client is precisely what it escalated, and escalations belong to the
+   * human, not to `acceptEdits`' silent base.
+   */
+  private gate(gated: Gated[]): { decision: PermissionDecision; reason?: string } {
+    if (gated.length === 0) return { decision: 'ask' }
+    const ctx = {
+      mode: this.permissionMode === 'auto' ? 'default' : this.permissionMode,
+      rules: mergedClaudeRulesFor(this.cwd),
+      sessionAllows: this.sessionAllows,
+      cwd: this.cwd
+    }
+    let decision: PermissionDecision = 'allow'
+    for (const entry of gated) {
+      const verdict = decideWithSource(entry.tool, entry.input, ctx)
+      let step = verdict.decision
+      // Composition-seam narrowing, NOT a change to the ladder: `acceptEdits`'
+      // mode base allows fileEdit/fileWrite unconditionally, which for Codex
+      // would silently auto-apply a patch anywhere on disk. Codex's own
+      // workspaceWrite sandbox draws the line at the workspace and asks up
+      // front for anything outside it, so a mode-base allow for a path outside
+      // cwd is downgraded to a human ask. A user rule that named the path still
+      // wins — only `source: 'mode-base'` verdicts are touched.
+      if (
+        step === 'allow' &&
+        verdict.source === 'mode-base' &&
+        entry.path !== undefined &&
+        !this.insideWorkspace(entry.path)
+      )
+        step = 'ask'
+      if (step === 'deny')
+        return {
+          decision: 'deny',
+          reason:
+            verdict.source === 'deny-rule' && verdict.rule
+              ? `Denied by permission rule: ${verdict.rule}`
+              : this.permissionMode === 'plan'
+                ? PLAN_MODE_DENY_REASON
+                : 'Denied by permission rules'
+        }
+      if (step === 'ask') decision = 'ask'
+    }
+    return { decision }
+  }
+
+  private insideWorkspace(target: string): boolean {
+    const relative = path.relative(this.cwd, path.resolve(this.cwd, target))
+    return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)
+  }
+
+  /**
+   * The three "always allow" destinations for this request, mirroring
+   * `PiSession.buildApprovalSuggestions`: bash gets a PREFIX rule (the whole
+   * command plus a trailing glob, which round-trips through the engine's bash
+   * prefix matcher), a file change gets a bare `Edit` rule.
+   */
+  private buildApprovalSuggestions(tool: string, ruleContent?: string): PermissionSuggestion[] {
+    const rule = {
+      toolName: PI_TOOL_TO_CLAUDE_TOOL[tool],
+      ...(ruleContent ? { ruleContent } : {})
+    }
+    return (['userSettings', 'projectSettings', 'localSettings'] as const).map((destination) => ({
+      type: 'addRules',
+      behavior: 'allow',
+      destination,
+      rules: [rule]
+    }))
+  }
+
+  /** Native question cards only — their one reply is `cancel`. */
   resolveCodexApproval(requestId: string, decision: CodexApprovalDecision): void {
     const pending = this.pending.get(requestId)
-    if (!pending || !pending.choices.includes(decision))
+    if (!pending?.questions || !pending.choices.includes(decision))
       throw new Error('Stale or unoffered Codex approval decision')
-    pending.settle(pending.questions ? { answers: {} } : { decision })
+    pending.settle({ answers: {} })
   }
 
   resolveApproval(
     requestId: string,
     decision: ApprovalDecision,
-    answers?: Record<string, string>
+    answers?: Record<string, string>,
+    updatedPermissions?: PermissionSuggestion[]
   ): void {
     const pending = this.pending.get(requestId)
-    if (!pending?.questions) throw new Error('Codex approvals require a native decision')
-    if (decision !== 'allow' || !answers)
-      throw new Error('Codex questions require explicit answers')
-    const nativeAnswers: Record<string, { answers: string[] }> = Object.create(null)
-    for (const question of pending.questions) {
-      const duplicateText =
-        pending.questions.filter((entry) => entry.question === question.question).length > 1
-      const answer =
-        answers[question.id] ?? (duplicateText ? undefined : answers[question.question])
-      if (typeof answer !== 'string') throw new Error('Missing Codex question answer')
-      if (
-        question.options?.length &&
-        !question.isOther &&
-        !question.options.some((option) => option.label === answer)
-      )
-        throw new Error('Codex question answer is not an offered choice')
-      nativeAnswers[question.id] = { answers: [answer] }
+    if (!pending) throw new Error('Stale or unknown Codex approval')
+    if (pending.questions) {
+      if (decision !== 'allow' || !answers)
+        throw new Error('Codex questions require explicit answers')
+      const nativeAnswers: Record<string, { answers: string[] }> = Object.create(null)
+      for (const question of pending.questions) {
+        const duplicateText =
+          pending.questions.filter((entry) => entry.question === question.question).length > 1
+        const answer =
+          answers[question.id] ?? (duplicateText ? undefined : answers[question.question])
+        if (typeof answer !== 'string') throw new Error('Missing Codex question answer')
+        if (
+          question.options?.length &&
+          !question.isOther &&
+          !question.options.some((option) => option.label === answer)
+        )
+          throw new Error('Codex question answer is not an offered choice')
+        nativeAnswers[question.id] = { answers: [answer] }
+      }
+      pending.settle({ answers: nativeAnswers })
+      return
     }
-    pending.settle({ answers: nativeAnswers })
+    if (decision === 'allowForSession')
+      for (const key of pending.allowKeys) this.sessionAllows.add(key)
+    pending.settle({ decision: decision === 'deny' ? 'decline' : 'accept' })
+    if (updatedPermissions && updatedPermissions.length > 0)
+      this.persistAllowRules(updatedPermissions)
+  }
+
+  /**
+   * Write "always allow" suggestions to the shared Claude permission store —
+   * mirrors `PiSession.persistAllowRules` / `OpencodeSession.persistAllowRules`
+   * (same shared `suggestionDestinationToScope`/`suggestionRuleToClaudeString`
+   * helpers). No rules cache to invalidate here: `gate()` re-reads the merged
+   * rules per request, so a newly persisted rule is honoured on the very next
+   * native approval.
+   */
+  private persistAllowRules(suggestions: PermissionSuggestion[]): void {
+    try {
+      const byScope = new Map<'user' | 'project' | 'local', string[]>()
+      for (const suggestion of suggestions) {
+        if (suggestion.type !== 'addRules' || suggestion.behavior !== 'allow' || !suggestion.rules)
+          continue
+        const scope = suggestionDestinationToScope(suggestion.destination)
+        if (!scope) continue
+        const entries = byScope.get(scope) ?? []
+        for (const rule of suggestion.rules) entries.push(suggestionRuleToClaudeString(rule))
+        byScope.set(scope, entries)
+      }
+      for (const [scope, ruleStrings] of byScope) {
+        const perms = loadClaudePermissions(scope, this.cwd)
+        const allow = new Set(perms.allow)
+        for (const rule of ruleStrings) allow.add(rule)
+        saveClaudePermissions(scope, { ...perms, allow: [...allow] }, this.cwd)
+      }
+    } catch (err) {
+      logger.warn(
+        'CodexSession',
+        `persisting allow rules failed: ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
   }
 }

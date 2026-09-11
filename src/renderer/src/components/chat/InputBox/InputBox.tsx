@@ -784,6 +784,11 @@ export function InputBox(): React.JSX.Element {
     [activeSessionId, setSelectedModel, setThinkingMode, setEffort]
   )
 
+  // Engine-native reasoning tiers, published by the live session's capabilities
+  // (Codex reads them off its own model catalog). Absent for Claude/opencode/pi,
+  // which use the fixed EffortLevel ladder derived from the selected model.
+  const nativeEffortOptions = capabilities.reasoning.nativeEffort?.options
+
   // Effort and thinking mode are read at sdkQuery start time, so restart the
   // session (with resume) to apply changes mid-conversation.
   const restartSdkSession = useCallback(async () => {
@@ -808,11 +813,19 @@ export function InputBox(): React.JSX.Element {
   }, [activeSessionId, sdkActive, markSdkActive])
 
   const handleSelectEffort = useCallback(
-    async (level: EffortLevel) => {
-      setEffort(level)
+    async (level: string) => {
+      // An engine with NATIVE effort tiers applies them live over IPC (Codex's
+      // `thread/settings/update`), and the acknowledged value arrives back on
+      // `session:status` — no local optimistic write and no respawn. Claude and
+      // opencode have no live setter, hence the cancel/recreate below.
+      if (nativeEffortOptions) {
+        if (activeSessionId) await window.api.setEffort(activeSessionId, level)
+        return
+      }
+      setEffort(level as EffortLevel)
       await restartSdkSession()
     },
-    [setEffort, restartSdkSession]
+    [activeSessionId, nativeEffortOptions, setEffort, restartSdkSession]
   )
 
   const handleSelectReasoningVariant = useCallback(
@@ -843,7 +856,7 @@ export function InputBox(): React.JSX.Element {
   // gates in SessionView so both surfaces agree on what's selectable. Hidden
   // pre-session: the welcome screen has no session to target (Shift+Tab
   // early-returns there too).
-  const showModePicker = !!activeSessionId && effectiveEngineId !== 'codex'
+  const showModePicker = !!activeSessionId
   const canPlan = capabilities.plan ?? true
   const autoAvailable = useMemo(
     () => autoModeAvailableForEngine(sessionEngineId ?? effectiveEngineId, models),
@@ -908,9 +921,14 @@ export function InputBox(): React.JSX.Element {
   // Effective display values: show the user's explicit pick when set,
   // otherwise fall back to the current model's default so new sessions
   // present the right tier (e.g. xhigh on Opus 4.7, high on Sonnet 4.6).
-  const effectiveEffort = useMemo<EffortLevel>(
-    () => effort ?? modelDefaultEffort(selectedModel),
-    [effort, selectedModel]
+  const effectiveEffort = useMemo<string>(
+    () =>
+      nativeEffortOptions
+        ? // The engine's ACKNOWLEDGED tier, never a locally guessed one: for a
+          // native axis there is no ClaudeUI-side default to fall back to.
+          (status.codex?.reasoningEffort ?? nativeEffortOptions[0]?.value ?? '')
+        : (effort ?? modelDefaultEffort(selectedModel)),
+    [effort, selectedModel, nativeEffortOptions, status.codex?.reasoningEffort]
   )
   const effectiveThinking = useMemo<ThinkingMode>(
     () => thinkingMode ?? modelDefaultThinkingMode(selectedModel),
@@ -929,15 +947,7 @@ export function InputBox(): React.JSX.Element {
       isVoiceActive={isVoiceActive}
       placeholder={placeholder}
       textClassName={textClassName}
-      permissionMode={effectiveEngineId === 'codex' ? 'default' : permissionMode}
-      codexPolicy={status.codex}
-      codexRoutingId={activeSessionId ?? undefined}
-      codexConnected={sdkActive}
-      onInitializeCodex={async () => {
-        if (!activeSessionId) return
-        await ensureSession()
-        await window.api.codexSettings(activeSessionId, {})
-      }}
+      permissionMode={permissionMode}
       showModePicker={showModePicker}
       canPlan={canPlan}
       autoAvailable={autoAvailable}
@@ -967,8 +977,9 @@ export function InputBox(): React.JSX.Element {
       engineLocked={engineLocked}
       showEnginePicker={!engineLocked}
       effort={effectiveEffort}
-      effortSupported={effectiveEngineId !== 'codex' && effortCap != null}
+      effortSupported={nativeEffortOptions != null || effortCap != null}
       allowedEffortLevels={allowedEffortLevels}
+      nativeEffortOptions={nativeEffortOptions}
       thinkingMode={effectiveThinking}
       adaptiveSupported={adaptiveSupported}
       showThinkingPicker={effectiveEngineId !== 'codex' && thinkingCap != null}

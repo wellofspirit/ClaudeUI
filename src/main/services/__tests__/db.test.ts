@@ -60,15 +60,20 @@ describe('Codex session overrides', () => {
       ensureCodexSessionOverrides('native', db)
       expect(hasCodexSessionOverrides('native', db)).toBe(true)
       expect(getCodexSessionOverrides('native', db)).toEqual({})
-      setCodexSessionOverrides('native', { approvalPolicy: 'untrusted', effort: 'ultra' }, db)
+      setCodexSessionOverrides('native', { model: 'gpt-native', effort: 'ultra' }, db)
       ensureCodexSessionOverrides('native', db)
       db.exec(
         "INSERT INTO session_meta (session_id, engine_id, updated_at) VALUES ('native', 'codex', 0); DELETE FROM session_meta WHERE session_id = 'native'"
       )
       expect(getCodexSessionOverrides('native', db)).toEqual({
-        approvalPolicy: 'untrusted',
+        model: 'gpt-native',
         effort: 'ultra'
       })
+      // Native policy keys are no longer a storable setting — the session's
+      // shared PermissionMode owns approval/sandbox/reviewer (ADR-066).
+      expect(() =>
+        setCodexSessionOverrides('native', { approvalPolicy: 'never' } as never, db)
+      ).toThrow('Unsupported')
       expect(() => setCodexSessionOverrides('native', { reset: true } as never, db)).toThrow(
         'reset action'
       )
