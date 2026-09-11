@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { CodexPolicyPill } from '../CodexPolicyPill'
 import type {
   FileAttachment,
   StatusLineData,
@@ -43,6 +44,10 @@ const DEFAULT_STATUS_LINE: StatusLineData = {
 // ---------------------------------------------------------------------------
 
 export interface InputBoxViewProps {
+  codexPolicy?: import('../../../../../shared/codex-types').CodexSessionState
+  codexRoutingId?: string
+  codexConnected?: boolean
+  onInitializeCodex?: () => Promise<void>
   // Refs
   textareaRef: React.RefObject<HTMLTextAreaElement | null>
   fileInputRef: React.RefObject<HTMLInputElement | null>
@@ -487,6 +492,14 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
       className="shrink-0"
     >
       <div className={`${isMobile ? 'max-w-full' : 'max-w-[740px]'} mx-auto`}>
+        {props.selectedEngineId === 'codex' && (
+          <CodexPolicyPill
+            policy={props.codexPolicy}
+            routingId={props.codexRoutingId}
+            connected={props.codexConnected}
+            onInitialize={props.onInitializeCodex}
+          />
+        )}
         <div
           className={`group relative rounded-2xl bg-bg-input transition-colors ${
             permissionMode === 'acceptEdits'
@@ -499,7 +512,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
           }`}
         >
           {/* Mode tab */}
-          {permissionMode !== 'default' && (
+          {props.selectedEngineId !== 'codex' && permissionMode !== 'default' && (
             <div
               className={`absolute bottom-full left-3 px-1.5 pt-0.5 pb-px rounded-t text-[9px] font-semibold tracking-wider uppercase text-text-primary border border-b-0 transition-colors ${
                 permissionMode === 'acceptEdits'
@@ -573,7 +586,9 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                   selectedModel={props.selectedModel}
                   selectedEngineId={props.selectedEngineId}
                   engineLocked={props.engineLocked}
-                  showModePicker={props.showModePicker ?? false}
+                  showModePicker={
+                    props.selectedEngineId !== 'codex' && (props.showModePicker ?? false)
+                  }
                   permissionMode={props.permissionMode as PermissionMode}
                   canPlan={props.canPlan ?? true}
                   autoAvailable={props.autoAvailable ?? true}

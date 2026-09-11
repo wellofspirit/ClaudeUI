@@ -22,6 +22,7 @@ import { resetFactoryCounter } from '@test/factories/messages'
 import type { InputBoxViewProps } from '../View'
 import type { QueuedItem } from '../../../../../../shared/types'
 import { InputBox } from '../InputBox'
+import { resolveCodexCapabilities } from '../../../../../../shared/model-capabilities'
 import { seed, mirrorStoreIntoReplica, resetReplicaSeam } from '@test/helpers/replica-seed'
 
 // ---------------------------------------------------------------------------
@@ -450,6 +451,49 @@ describe('InputBox FC — rendered', () => {
   function renderFC(): void {
     render(createElement(InputBox))
   }
+
+  it.each([false, true])(
+    'does not turn a native catalog preview into a requested model, explicit=%s',
+    async (explicit) => {
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [FC_ROUTE]: {
+            ...state.sessions[FC_ROUTE],
+            selectedEngineId: 'codex',
+            selectedModel: 'native-preview',
+            codexModelExplicit: explicit,
+            sdkActive: false,
+            isHistorical: false,
+            status: {
+              ...state.sessions[FC_ROUTE].status,
+              sessionId: null,
+              engineId: 'codex',
+              capabilities: resolveCodexCapabilities()
+            }
+          }
+        },
+        availableModels: [
+          {
+            value: 'native-preview',
+            displayName: 'Native preview',
+            description: '',
+            engineId: 'codex'
+          }
+        ]
+      }))
+      mirrorStoreIntoReplica()
+      app.bridge.ipcMain.handle('session:codex-settings', () => undefined)
+      renderFC()
+      expect(viewProps.selectedModel.shortName).toBe(explicit ? 'Native preview' : 'Native default')
+      await act(async () => {
+        await viewProps.onInitializeCodex!()
+      })
+      expect(ipcCalls['session:create'][0][5]).toBe(explicit ? 'native-preview' : undefined)
+      expect(ipcCalls['session:create'][0][2]).toBeUndefined()
+      expect(ipcCalls['session:create'][0][9]).toBe('codex')
+    }
+  )
 
   it('renders and passes props to View', () => {
     renderFC()

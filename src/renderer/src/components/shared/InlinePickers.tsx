@@ -4,6 +4,7 @@
  * adaptive-thinking support) consistent wherever the user picks a model.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useSessionStore } from '../../stores/session-store'
 import {
   EFFORT_LEVELS,
   THINKING_MODES,
@@ -93,6 +94,9 @@ export function EnginePicker({
   const ref = useRef<HTMLDivElement | null>(null)
   useClickOutside(ref, open, () => setOpen(false))
   const selected = engineMeta(selectedEngineId)
+  const codexAvailable = useSessionStore((state) =>
+    state.availableModels.some((model) => model.engineId === 'codex')
+  )
 
   return (
     <div className="relative" ref={ref} data-testid="EnginePicker">
@@ -126,26 +130,28 @@ export function EnginePicker({
       </button>
       {open && (
         <div className="absolute bottom-full mb-1 left-0 w-36 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
-          {Object.values(ENGINE_META).map((meta) => (
-            <button
-              key={meta.id}
-              type="button"
-              data-testid="EnginePicker.option"
-              data-engine={meta.id}
-              onClick={() => {
-                onSelectEngine(meta.id)
-                setOpen(false)
-              }}
-              className={`w-full flex items-center gap-2 px-3 h-8 text-[12px] transition-colors text-left cursor-pointer ${
-                meta.id === selectedEngineId
-                  ? 'text-text-primary bg-bg-hover'
-                  : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
-              }`}
-            >
-              <EngineLogo engineId={meta.id} size={12} className="shrink-0" />
-              {meta.label}
-            </button>
-          ))}
+          {Object.values(ENGINE_META)
+            .filter((meta) => meta.id !== 'codex' || codexAvailable)
+            .map((meta) => (
+              <button
+                key={meta.id}
+                type="button"
+                data-testid="EnginePicker.option"
+                data-engine={meta.id}
+                onClick={() => {
+                  onSelectEngine(meta.id)
+                  setOpen(false)
+                }}
+                className={`w-full flex items-center gap-2 px-3 h-8 text-[12px] transition-colors text-left cursor-pointer ${
+                  meta.id === selectedEngineId
+                    ? 'text-text-primary bg-bg-hover'
+                    : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+                }`}
+              >
+                <EngineLogo engineId={meta.id} size={12} className="shrink-0" />
+                {meta.label}
+              </button>
+            ))}
         </div>
       )}
     </div>

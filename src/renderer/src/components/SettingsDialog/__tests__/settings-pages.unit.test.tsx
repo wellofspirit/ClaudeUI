@@ -38,7 +38,7 @@ function allItemsOf(group: SettingsGroup): Array<{ key: string; engine?: string 
 }
 
 describe('PAGES structure', () => {
-  it('has the 12 documented pages, in order', () => {
+  it('has the 13 documented pages, in order', () => {
     expect(PAGES.map((p) => p.id)).toEqual([
       'appearance',
       'chat',
@@ -51,7 +51,8 @@ describe('PAGES structure', () => {
       'remote',
       'claude',
       'opencode',
-      'pi'
+      'pi',
+      'codex'
     ])
   })
 
@@ -65,7 +66,7 @@ describe('PAGES structure', () => {
     const byRail = (rail: string): string[] => PAGES.filter((p) => p.rail === rail).map((p) => p.id)
     expect(byRail('app')).toEqual(['appearance', 'chat', 'sessions', 'advanced', 'about'])
     expect(byRail('features')).toEqual(['models', 'dispatch', 'mockups', 'remote'])
-    expect(byRail('engines')).toEqual(['claude', 'opencode', 'pi'])
+    expect(byRail('engines')).toEqual(['claude', 'opencode', 'pi', 'codex'])
   })
 
   it('only the Engines pages declare an engine', () => {
@@ -112,7 +113,8 @@ describe('PAGES structure', () => {
         'agents',
         'raw'
       ],
-      pi: ['session', 'retry', 'tools', 'attachments', 'workspace', 'resources', 'network', 'raw']
+      pi: ['session', 'retry', 'tools', 'attachments', 'workspace', 'resources', 'network', 'raw'],
+      codex: ['account']
     }
     for (const page of PAGES) expect(page.groups.map((g) => g.id)).toEqual(expected[page.id])
   })
@@ -290,7 +292,12 @@ describe('inventory guard', () => {
 
     const fromSections = SECTIONS.flatMap((s) => s.items.map((i) => i.key))
     const local = PAGE_LOCAL_ITEMS.map((i) => i.key)
-    expect(local).toEqual(['sandboxCrossLink', 'otherEnginePermissions', 'versions'])
+    expect(local).toEqual([
+      'sandboxCrossLink',
+      'otherEnginePermissions',
+      'versions',
+      'codexNativeAccount'
+    ])
 
     expect([...reachable].sort()).toEqual([...fromSections, ...local].sort())
   })

@@ -29,7 +29,7 @@ function openPickerDropdown(triggerTitle: string) {
   return within(dropdown as HTMLElement)
 }
 import { InputBoxView, type InputBoxViewProps, type ModelDisplay } from '../View'
-import { useSessionStore } from '../../../../stores/session-store'
+import { bootstrapPermissionMode, useSessionStore } from '../../../../stores/session-store'
 
 const baseModel: ModelDisplay = {
   value: 'claude-opus-4-7',
@@ -94,6 +94,44 @@ function makeProps(overrides: Partial<InputBoxViewProps> = {}): InputBoxViewProp
     ...overrides
   }
 }
+
+describe('Codex native policy display', () => {
+  it('never inherits a shared global permission default', () => {
+    for (const defaultPermissionMode of ['auto', 'acceptEdits', 'plan'] as const) {
+      expect(
+        bootstrapPermissionMode({ ...useSessionStore.getState(), defaultPermissionMode }, 'codex')
+      ).toBe('default')
+    }
+  })
+  it.each([false, true])(
+    'shows inherited native state without a shared mode tab, mobile=%s',
+    (isMobile) => {
+      render(
+        <InputBoxView
+          {...makeProps({
+            isMobile,
+            selectedEngineId: 'codex',
+            permissionMode: 'auto',
+            showModePicker: true,
+            codexPolicy: {
+              approvalPolicy: { granular: { rules: true } },
+              approvalsReviewer: 'auto_review',
+              sandbox: { type: 'readOnly' },
+              activePermissionProfile: null,
+              modelProvider: 'openai',
+              reasoningEffort: 'ultra',
+              effortOptions: []
+            }
+          })}
+        />
+      )
+      expect(screen.getByTestId('CodexPolicyPill')).toBeInTheDocument()
+      expect(screen.getByTestId('CodexPolicyPill.effective')).toHaveTextContent('auto_review')
+      expect(screen.getByTestId('CodexPolicyPill.effective')).toHaveTextContent('granular')
+      expect(screen.queryByText('Auto ⏵⏵')).not.toBeInTheDocument()
+    }
+  )
+})
 
 beforeEach(() => {
   // The View renders a StatusLine sub-component that reads from the store.

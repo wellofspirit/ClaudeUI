@@ -194,6 +194,7 @@ export function InputBox(): React.JSX.Element {
   // once initialization starts. Historical sessions are committed by definition.
   const startedSessionId = useActiveSession((s) => s.status.sessionId)
   const isHistorical = useActiveSession((s) => s.isHistorical)
+  const codexModelExplicit = useActiveSession((s) => s.codexModelExplicit)
   const sessionEngineId = useActiveSession((s) => s.selectedEngineId)
   // On welcome, the picker controls the engine that createNewSession will seed.
   // Once a session exists, it always reflects that session's own engine instead.
@@ -233,6 +234,23 @@ export function InputBox(): React.JSX.Element {
     }
     const exact = sameEngine.find((m) => m.value === selectedModelValue)
     if (exact) return exact
+    if (engine === 'codex') {
+      if (
+        activeSessionId &&
+        (codexModelExplicit || isHistorical || startedSessionId) &&
+        selectedModelValue
+      ) {
+        return sameEngine.length > 0
+          ? { ...unset, displayName: 'Model unavailable', shortName: 'Model unavailable' }
+          : {
+              ...unset,
+              value: selectedModelValue,
+              displayName: selectedModelValue,
+              shortName: selectedModelValue
+            }
+      }
+      return sameEngine[0] ?? unset
+    }
     if (engine === 'opencode' || engine === 'pi') {
       // The SAME resolver the store seeds sessions with, so the pill shows what
       // will actually spawn. `null` = the user's configured default is gone:
@@ -267,7 +285,10 @@ export function InputBox(): React.JSX.Element {
     selectedModelValue,
     engineDefaults,
     lastSelectedModelByEngine,
-    activeSessionId
+    activeSessionId,
+    codexModelExplicit,
+    isHistorical,
+    startedSessionId
   ])
 
   const statusLine = useActiveSession((s) => s.statusLine)
@@ -339,12 +360,21 @@ export function InputBox(): React.JSX.Element {
    * unsupported user choice against the current model's capabilities.
    */
   function resolveSessionSdkOptions(routingId: string): {
-    effort: EffortLevel
-    thinkingMode: ThinkingMode
+    effort?: string
+    thinkingMode?: ThinkingMode
+    model?: string
   } {
     const state = useSessionStore.getState()
     const session = state.sessions[routingId]
     const engineId = session?.selectedEngineId ?? 'claude'
+    if (engineId === 'codex')
+      return {
+        model:
+          session &&
+          (session.codexModelExplicit || session.isHistorical || session.status.sessionId)
+            ? session.selectedModel || undefined
+            : undefined
+      }
     const modelInfo = state.availableModels.find(
       (m) => m.value === session?.selectedModel && (m.engineId ?? 'claude') === engineId
     )
@@ -356,6 +386,7 @@ export function InputBox(): React.JSX.Element {
     const desiredEffort: EffortLevel =
       session?.effort ?? userDefault ?? modelDefaultEffort(modelInfo)
     return {
+      model: session?.selectedModel,
       effort: modelResolveEffort(modelInfo, desiredEffort) ?? desiredEffort,
       thinkingMode: modelResolveThinkingMode(modelInfo, desiredThinking)
     }
@@ -374,6 +405,13 @@ export function InputBox(): React.JSX.Element {
   function assertModelResolved(routingId: string): void {
     const session = useSessionStore.getState().sessions[routingId]
     const engineId = session?.selectedEngineId ?? 'claude'
+    if (
+      engineId === 'codex' &&
+      !session?.codexModelExplicit &&
+      !session?.isHistorical &&
+      !session?.status.sessionId
+    )
+      return
     if (engineId === 'claude' || session?.selectedModel) return
     throw new Error(
       `No model selected for this ${engineId} session — the configured default model is no longer available. Pick one in the model picker.`
@@ -401,14 +439,17 @@ export function InputBox(): React.JSX.Element {
             opts.effort,
             fork.sourceSessionId,
             session?.permissionMode,
-            session?.selectedModel,
+            opts.model,
             opts.thinkingMode,
             fork.anchorUuid,
             true,
             session?.selectedEngineId
           )
         } else {
-          const isHistorical = session && session.messages.length > 0
+          const isHistorical =
+            session?.selectedEngineId === 'codex'
+              ? !!(session.status.sessionId || session.isHistorical)
+              : session && session.messages.length > 0
           // For opencode sessions, always pass the routingId as resumeSessionId so
           // OpencodeSession can resume a prior session even when messages are empty
           // (history is replayed from the server, not preloaded into the store).
@@ -422,7 +463,7 @@ export function InputBox(): React.JSX.Element {
             opts.effort,
             resumeId,
             session?.permissionMode,
-            session?.selectedModel,
+            opts.model,
             opts.thinkingMode,
             undefined,
             undefined,
@@ -451,14 +492,17 @@ export function InputBox(): React.JSX.Element {
           opts.effort,
           fork.sourceSessionId,
           session?.permissionMode,
-          session?.selectedModel,
+          opts.model,
           opts.thinkingMode,
           fork.anchorUuid,
           true,
           session?.selectedEngineId
         )
       } else {
-        const isHistorical = session && session.messages.length > 0 && !session.sdkActive
+        const isHistorical =
+          session?.selectedEngineId === 'codex'
+            ? !!(session.status.sessionId || session.isHistorical)
+            : session && session.messages.length > 0 && !session.sdkActive
         const resumeId = isHistorical ? activeSessionId : undefined
         await window.api.createSession(
           activeSessionId,
@@ -466,7 +510,7 @@ export function InputBox(): React.JSX.Element {
           opts.effort,
           resumeId,
           session?.permissionMode,
-          session?.selectedModel,
+          opts.model,
           opts.thinkingMode,
           undefined,
           undefined,
@@ -747,7 +791,7 @@ export function InputBox(): React.JSX.Element {
       opts.effort,
       activeSessionId,
       session?.permissionMode,
-      session?.selectedModel,
+      opts.model,
       opts.thinkingMode,
       undefined,
       undefined,
@@ -792,7 +836,7 @@ export function InputBox(): React.JSX.Element {
   // gates in SessionView so both surfaces agree on what's selectable. Hidden
   // pre-session: the welcome screen has no session to target (Shift+Tab
   // early-returns there too).
-  const showModePicker = !!activeSessionId
+  const showModePicker = !!activeSessionId && effectiveEngineId !== 'codex'
   const canPlan = capabilities.plan ?? true
   const autoAvailable = useMemo(
     () => autoModeAvailableForEngine(sessionEngineId ?? effectiveEngineId, models),
@@ -825,8 +869,12 @@ export function InputBox(): React.JSX.Element {
         : !activeSessionId || !cwd
           ? 'Select a folder to get started'
           : isRunning
-            ? 'Type to queue a message...'
-            : 'Ask Claude anything, / for commands'
+            ? capabilities.queue
+              ? 'Type to queue a message...'
+              : 'Wait for this turn, or stop it to send another message'
+            : effectiveEngineId === 'codex'
+              ? 'Ask Codex anything'
+              : 'Ask Claude anything, / for commands'
 
   const textClassName =
     isVoiceActive && voiceInterimTranscript
@@ -874,7 +922,15 @@ export function InputBox(): React.JSX.Element {
       isVoiceActive={isVoiceActive}
       placeholder={placeholder}
       textClassName={textClassName}
-      permissionMode={permissionMode}
+      permissionMode={effectiveEngineId === 'codex' ? 'default' : permissionMode}
+      codexPolicy={status.codex}
+      codexRoutingId={activeSessionId ?? undefined}
+      codexConnected={sdkActive}
+      onInitializeCodex={async () => {
+        if (!activeSessionId) return
+        await ensureSession()
+        await window.api.codexSettings(activeSessionId, {})
+      }}
       showModePicker={showModePicker}
       canPlan={canPlan}
       autoAvailable={autoAvailable}
@@ -888,18 +944,29 @@ export function InputBox(): React.JSX.Element {
       filteredFileMentionEntries={filteredFileMentionEntries}
       attachedFiles={attachedFiles}
       models={pickerModels}
-      selectedModel={selectedModel}
+      selectedModel={
+        effectiveEngineId === 'codex' &&
+        !startedSessionId &&
+        !isHistorical &&
+        !(activeSessionId ? codexModelExplicit : lastSelectedModelByEngine.codex)
+          ? {
+              ...selectedModel,
+              displayName: 'Native configured model',
+              shortName: 'Native default'
+            }
+          : selectedModel
+      }
       selectedEngineId={effectiveEngineId}
       engineLocked={engineLocked}
       showEnginePicker={!engineLocked}
       effort={effectiveEffort}
-      effortSupported={effortCap != null}
+      effortSupported={effectiveEngineId !== 'codex' && effortCap != null}
       allowedEffortLevels={allowedEffortLevels}
       thinkingMode={effectiveThinking}
       adaptiveSupported={adaptiveSupported}
-      showThinkingPicker={thinkingCap != null}
+      showThinkingPicker={effectiveEngineId !== 'codex' && thinkingCap != null}
       showModelPicker={true}
-      showCostInStatusLine={billingType !== 'free'}
+      showCostInStatusLine={effectiveEngineId !== 'codex' && billingType !== 'free'}
       showContextMeter={capabilities.contextWindow > 0}
       visionEnabled={capabilities.vision}
       sandboxEnabled={sandboxEnabled}

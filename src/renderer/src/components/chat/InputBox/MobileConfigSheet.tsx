@@ -9,6 +9,7 @@
  * entirely unaffected — this component is only mounted when isMobile.
  */
 import { useEffect, useMemo, useState } from 'react'
+import { useSessionStore } from '../../../stores/session-store'
 import {
   EFFORT_LEVELS,
   THINKING_MODES,
@@ -245,22 +246,27 @@ function EnginePage({
   selectedEngineId: EngineId
   onSelect: (engineId: EngineId) => void
 }): React.JSX.Element {
+  const codexAvailable = useSessionStore((state) =>
+    state.availableModels.some((model) => model.engineId === 'codex')
+  )
   return (
     <div>
-      {Object.values(ENGINE_META).map((meta) => (
-        <OptionButton
-          key={meta.id}
-          testId="MobileConfigSheet.engineOption"
-          dataValue={meta.id}
-          active={meta.id === selectedEngineId}
-          onClick={() => onSelect(meta.id)}
-        >
-          <span className="flex items-center gap-2 min-w-0">
-            <EngineLogo engineId={meta.id} size={14} className="shrink-0" />
-            <span className="text-[13px] truncate">{meta.label}</span>
-          </span>
-        </OptionButton>
-      ))}
+      {Object.values(ENGINE_META)
+        .filter((meta) => meta.id !== 'codex' || codexAvailable)
+        .map((meta) => (
+          <OptionButton
+            key={meta.id}
+            testId="MobileConfigSheet.engineOption"
+            dataValue={meta.id}
+            active={meta.id === selectedEngineId}
+            onClick={() => onSelect(meta.id)}
+          >
+            <span className="flex items-center gap-2 min-w-0">
+              <EngineLogo engineId={meta.id} size={14} className="shrink-0" />
+              <span className="text-[13px] truncate">{meta.label}</span>
+            </span>
+          </OptionButton>
+        ))}
     </div>
   )
 }

@@ -410,7 +410,12 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
                           ? () => onUnhideProject(group.projectKey)
                           : undefined
                       }
-                      onDelete={group.projectKey ? () => onDeleteProject(group) : undefined}
+                      onDelete={
+                        group.projectKey &&
+                        !group.sessions.some((session) => session.engineId === 'codex')
+                          ? () => onDeleteProject(group)
+                          : undefined
+                      }
                       hiddenSessionIds={hiddenSessionSet}
                       showHidden={showHidden}
                       onHideSession={onHideSession}

@@ -200,6 +200,7 @@ export function resolveEngineDefaultModel(
   models: ModelInfo[],
   defaults: EngineDefaultModels
 ): string | null {
+  if (engineId === 'codex') return models.find((model) => model.engineId === 'codex')?.value ?? null
   if (engineId === 'opencode') {
     const oc = models.filter((model) => isModelForEngine(model, 'opencode'))
     if (defaults.opencodeDefaultModelConfigured && oc.length > 0) {
@@ -230,6 +231,7 @@ export function resolveEngineDefaultModel(
 
 /** The configured-but-missing default model for `engineId`, for error copy. */
 function configuredDefaultModelOf(engineId: EngineId, defaults: EngineDefaultModels): string {
+  if (engineId === 'codex') return ''
   return engineId === 'pi' ? defaults.piDefaultModel : defaults.opencodeDefaultModel
 }
 
@@ -239,6 +241,8 @@ function configuredDefaultModelOf(engineId: EngineId, defaults: EngineDefaultMod
  * found" is what made the silent substitute look preferable in the first place.
  */
 export function staleDefaultModelMessage(engineId: EngineId, model: string): string {
+  if (engineId === 'codex' && !model)
+    return 'No Codex models were discovered. Check installation and native account/model settings.'
   return (
     `The configured ${engineMeta(engineId).label} default model "${model}" is no longer available. ` +
     `Pick a model in the picker, or change the default in Settings → Engines → ${engineMeta(engineId).label}.`
@@ -693,6 +697,7 @@ export interface PerSessionState {
    *  in session A can never be sent from B, and is restored on return to A. */
   draftAttachments: FileAttachment[]
   selectedModel: string
+  codexModelExplicit?: boolean
   /** Engine chosen at session-creation time. Immutable after the session spawns. */
   selectedEngineId: EngineId
   // Worktree state
@@ -832,6 +837,7 @@ export function bootstrapPermissionMode(
   >,
   engineId: EngineId
 ): PermissionMode {
+  if (engineId === 'codex') return 'default'
   if (state.defaultPermissionMode !== 'auto') return state.defaultPermissionMode
   const autoBlocked =
     !autoModeAvailableForEngine(engineId, state.availableModels) ||
@@ -1480,8 +1486,16 @@ export const useSessionStore = create<SessionState>((set) => ({
       let defaultModel = stickyAvailable
         ? (sticky as string)
         : resolveEngineDefaultModel(engineId, state.availableModels, defaults)
+      if (engineId === 'codex' && sticky) {
+        const hasCatalog = state.availableModels.some((model) => model.engineId === 'codex')
+        defaultModel = hasCatalog && !stickyAvailable ? null : sticky
+      }
       const staleDefault =
-        defaultModel === null ? configuredDefaultModelOf(engineId, defaults) : null
+        defaultModel === null
+          ? engineId === 'codex' && sticky
+            ? sticky
+            : configuredDefaultModelOf(engineId, defaults)
+          : null
       if (
         engineId === 'opencode' &&
         !resolveOpencodeModel(state.availableModels, state.opencodeDefaultModel)
@@ -1515,6 +1529,7 @@ export const useSessionStore = create<SessionState>((set) => ({
           permissionMode: bootstrapPermissionMode(state, engineId),
           selectedEngineId: engineId,
           selectedModel: seededModel,
+          ...(engineId === 'codex' ? { codexModelExplicit: !!sticky } : {}),
           // Seed status.engineId/capabilities to match so they're correct before spawn
           status: {
             ...EMPTY_SESSION_STATE.status,
@@ -1619,6 +1634,8 @@ export const useSessionStore = create<SessionState>((set) => ({
       selectedEngineId: engineId,
       selectedModel: model,
       reasoningVariant: null,
+      ...(engineId === 'codex' ? { codexModelExplicit: false } : {}),
+      permissionMode: engineId === 'codex' ? 'default' : session.permissionMode,
       status: {
         ...session.status,
         engineId,
@@ -2412,6 +2429,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     // Always reset reasoningVariant on model change — different models have different variants.
     patchLocalSession(id, {
       selectedModel: model,
+      ...(targetEngine === 'codex' ? { codexModelExplicit: true } : {}),
       reasoningVariant: null,
       ...(reseedCapabilities && session
         ? {

@@ -22,6 +22,8 @@
  * edge would be a cycle). Anything both sides need lives in `settings-target.ts`.
  */
 import type { EngineId } from '../../../../shared/types'
+import { CodexAccount } from './CodexAccount'
+import { EngineLogo } from '../shared/EngineLogo'
 import type { EngineCapabilities } from '../../../../shared/model-capabilities'
 import { engineMeta } from '../../../../shared/engine-meta'
 import { SECTIONS, type Section, type SettingItem } from './settings-sections'
@@ -203,10 +205,17 @@ const VERSIONS: SettingItem = {
 }
 
 /** Item keys defined in THIS file rather than pulled from `SECTIONS`. */
+const CODEX_ACCOUNT: SettingItem = {
+  key: 'codexNativeAccount',
+  label: 'Native Codex account',
+  keywords: 'codex chatgpt openai native device login authentication',
+  render: () => <CodexAccount />
+}
 export const PAGE_LOCAL_ITEMS: readonly SettingItem[] = [
   SANDBOX_CROSS_LINK,
   OTHER_ENGINE_PERMISSIONS,
-  VERSIONS
+  VERSIONS,
+  CODEX_ACCOUNT
 ]
 
 // ── Icons (14px, stroke 1.8 — the rail size on the boards) ───────────
@@ -303,6 +312,7 @@ const engineFile = (engine: EngineId): string => `engines/${engine}.json`
 
 /** Who can dispatch INTO each engine — the other two, named in the Limits note. */
 const DISPATCH_CALLERS: Record<EngineId, string> = {
+  codex: 'unsupported',
   claude: 'an opencode or pi',
   opencode: 'a Claude or pi',
   pi: 'a Claude or opencode'
@@ -314,6 +324,7 @@ const DISPATCH_CALLERS: Record<EngineId, string> = {
  * silent `appliesOn` would be computed and then dropped.
  */
 const DEFAULT_MODEL_NOTES: Record<EngineId, string> = {
+  codex: 'Codex uses its native configured model.',
   claude: 'Applies to new Claude sessions.',
   opencode: 'Changes here apply when the opencode server restarts for a working directory.',
   pi: 'Applies to new pi sessions.'
@@ -747,6 +758,15 @@ export const PAGES: SettingsPage[] = [
         items: itemsOf('pi-config-raw')
       }
     ]
+  },
+  {
+    id: 'codex',
+    label: 'Codex',
+    rail: 'engines',
+    icon: <EngineLogo engineId="codex" size={14} />,
+    engine: 'codex',
+    description: 'Native account, catalog and policy. No shared-vault credentials are copied.',
+    groups: [{ id: 'account', label: 'Native account', items: [CODEX_ACCOUNT] }]
   }
 ]
 

@@ -14,6 +14,7 @@
  */
 
 import { useState, useEffect } from 'react'
+import { CodexApprovalCard } from './CodexApprovalCard'
 import type {
   PendingApproval,
   PermissionSuggestion,
@@ -52,6 +53,7 @@ export function ApprovalButtons({
   }, [approval.suggestions])
 
   const hasSuggestions = showSuggestions && (approval.suggestions?.length ?? 0) > 0
+  if (approval.codex) return <CodexApprovalCard approval={approval} />
   const hasReason = showSuggestions && !!approval.decisionReason
 
   const handleDecision = async (decision: 'allow' | 'deny'): Promise<void> => {

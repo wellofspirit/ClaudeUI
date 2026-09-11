@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { CodexApprovalCard } from './CodexApprovalCard'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import type { ApprovalDecision, ContentBlock, PendingApproval } from '../../../../shared/types'
 import { AlwaysAllowSection } from './PermissionSuggestions'
@@ -31,6 +32,7 @@ export function ApprovalCardView({
   onRespond,
   showAllowForSession = false
 }: ApprovalCardViewProps): React.JSX.Element {
+  if (approval.codex) return <CodexApprovalCard approval={approval} />
   const input = approval.input
   const toolName = approval.toolName
   const isSandboxEscape = !!input?.dangerouslyDisableSandbox

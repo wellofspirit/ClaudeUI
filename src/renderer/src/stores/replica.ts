@@ -767,6 +767,7 @@ function projectSession(
     sdkActive: c.sdkActive,
     selectedEngineId: c.selectedEngineId,
     selectedModel: c.selectedModel,
+    ...(c.codexModelExplicit !== undefined ? { codexModelExplicit: c.codexModelExplicit } : {}),
     // The per-session mirror of the app-level map, so `session:status`'s
     // worktree-exit rule (the reducer drops the entry when cwd returns to
     // `originalCwd`) clears the card without a second code path.

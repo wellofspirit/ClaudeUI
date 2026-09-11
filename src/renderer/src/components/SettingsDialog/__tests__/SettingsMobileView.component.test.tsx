@@ -190,7 +190,7 @@ describe('SettingsDialog mobile fork', () => {
 
       await tapTab('engines')
 
-      expect(idsOf('SettingsMobileView.page')).toEqual(['claude', 'opencode', 'pi'])
+      expect(idsOf('SettingsMobileView.page')).toEqual(['claude', 'opencode', 'pi', 'codex'])
       expect(byId('SettingsMobileView.tab', 'engines')).toHaveAttribute('data-active', 'true')
     })
 

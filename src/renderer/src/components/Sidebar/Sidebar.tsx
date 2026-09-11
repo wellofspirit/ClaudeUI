@@ -19,6 +19,17 @@ type SidebarSessionData = {
   firstUserText?: string
 }
 
+function isCodexSession(sessionId: string): boolean {
+  const state = useSessionStore.getState()
+  return (
+    state.sessions[sessionId]?.selectedEngineId === 'codex' ||
+    state.sessionEngines[sessionId]?.engineId === 'codex' ||
+    state.directories.some((group) =>
+      group.sessions.some((info) => info.sessionId === sessionId && info.engineId === 'codex')
+    )
+  )
+}
+
 /** Structural equality for the sidebar session projection — avoids re-renders from unrelated session changes */
 function sidebarSessionsEqual(
   a: Record<string, SidebarSessionData>,
@@ -121,6 +132,7 @@ export function Sidebar({
   const [renamingKey, setRenamingKey] = useState<string | null>(null)
   const [showHidden, setShowHidden] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
+  const [historyError, setHistoryError] = useState<string | null>(null)
 
   const hiddenSessionSet = useMemo(() => new Set(hiddenSessionIds), [hiddenSessionIds])
   const hiddenProjectSet = useMemo(() => new Set(hiddenProjectKeys), [hiddenProjectKeys])
@@ -141,6 +153,7 @@ export function Sidebar({
   const applyTitle = useCallback(
     (sessionId: string, title: string) => {
       setCustomTitle(sessionId, title)
+      if (isCodexSession(sessionId)) return
       const projectKey = findProjectKey(sessionId)
       if (projectKey && title) {
         window.api.writeCustomTitle(sessionId, projectKey, title)
@@ -152,6 +165,10 @@ export function Sidebar({
   const handleRename = useCallback(
     async (sessionId: string, newTitle: string) => {
       setRenamingKey(null)
+      if (!newTitle.trim() && isCodexSession(sessionId)) {
+        setCustomTitle(sessionId, '')
+        return
+      }
       if (newTitle.trim()) {
         applyTitle(sessionId, newTitle.trim())
         return
@@ -337,6 +354,41 @@ export function Sidebar({
       if (seq !== selectionSeq.current) return
       loadHistoricalSession(routingId, messages, info.cwd)
       if (info.title && info.title !== 'Untitled') setCustomTitle(routingId, info.title)
+      addRecentSession(routingId)
+      switchSession(routingId)
+      if (isMobile && onToggleCollapse) onToggleCollapse()
+      return
+    }
+
+    if (info.engineId === 'codex') {
+      const state = useSessionStore.getState()
+      const sessionEngines = {
+        ...state.sessionEngines,
+        [routingId]: { ...state.sessionEngines[routingId], engineId: 'codex' as const }
+      }
+      useSessionStore.setState({ sessionEngines })
+      setHistoryError(null)
+      const history = await window.api
+        .loadSessionHistory(info.sessionId, info.projectKey)
+        .catch(() => {
+          if (seq === selectionSeq.current)
+            setHistoryError(
+              'Codex history could not be loaded. Check the native installation/account and retry; no transcript was replaced.'
+            )
+          return null
+        })
+      if (!history) return
+      if (seq !== selectionSeq.current) return
+      loadHistoricalSession(
+        routingId,
+        history.messages,
+        info.cwd,
+        history.taskNotifications,
+        undefined,
+        history.statusLine,
+        history.warnings
+      )
+      if (info.title) setCustomTitle(routingId, info.title)
       addRecentSession(routingId)
       switchSession(routingId)
       if (isMobile && onToggleCollapse) onToggleCollapse()
@@ -653,69 +705,83 @@ export function Sidebar({
   }, [directories, sidebarSessions, customTitles, sessionEngines])
 
   return (
-    <SidebarView
-      style={style}
-      platform={window.api.platform}
-      uiFontScale={uiFontScale}
-      activeSessionId={activeSessionId}
-      activeView={activeView}
-      pluginViews={pluginViews}
-      automationBadge={automationBadge}
-      pinnedSessionIds={pinnedSessionIds}
-      pinnedSessions={pinnedSessions}
-      watchingSessions={watchingSessions}
-      recentSessions={recentSessions}
-      augmentedDirs={augmentedDirs}
-      hiddenSessionSet={hiddenSessionSet}
-      hiddenProjectSet={hiddenProjectSet}
-      hasAnyHidden={hasAnyHidden}
-      showHidden={showHidden}
-      expandedDir={expandedDir}
-      renamingKey={renamingKey}
-      worktreesModalCwd={worktreesModalCwd}
-      deleteTarget={deleteTarget}
-      cleanupWorktree={cleanupWorktree}
-      onToggleCollapse={onToggleCollapse}
-      onNewSession={handleNewSession}
-      onNewSessionDblClick={handleNewSessionDblClick}
-      onSetActiveView={setActiveView}
-      onShowHiddenToggle={() => setShowHidden((v) => !v)}
-      onSetRenamingKey={setRenamingKey}
-      onClickSession={handleClickSession}
-      onToggleWatch={handleToggleWatch}
-      onPin={pinSession}
-      onUnpin={unpinSession}
-      onReorderPinned={reorderPinnedSessions}
-      onFinishRename={handleRename}
-      onAutoRename={handleAutoRename}
-      onRemoveRecent={handleRemoveRecent}
-      onDirClick={handleDirClick}
-      onDirDoubleClick={handleDirDoubleClick}
-      onSessionDoubleClick={(info) => addRecentSession(info.sessionId)}
-      onViewWorktrees={(cwd) => setWorktreesModalCwd(cwd)}
-      onCloseWorktreesModal={() => setWorktreesModalCwd(null)}
-      onHideSession={handleHideSession}
-      onUnhideSession={handleUnhideSession}
-      onDeleteSession={handleDeleteSessionRequest}
-      onHideProject={hideProject}
-      onUnhideProject={unhideProject}
-      onDeleteProject={handleDeleteProjectRequest}
-      onConfirmDelete={confirmDelete}
-      onCancelDelete={() => setDeleteTarget(null)}
-      onWorktreeCleanupKeep={() => {
-        if (cleanupWorktree) {
-          removeRecentSession(cleanupWorktree.sessionId)
-          setCleanupWorktree(null)
-        }
-      }}
-      onWorktreeCleanupRemove={() => {
-        if (cleanupWorktree) {
-          clearWorktreeInfo(cleanupWorktree.sessionId)
-          removeRecentSession(cleanupWorktree.sessionId)
-          setCleanupWorktree(null)
-        }
-      }}
-      onWorktreeCleanupCancel={() => setCleanupWorktree(null)}
-    />
+    <>
+      {historyError && (
+        <div
+          role="alert"
+          data-testid="Sidebar.nativeHistoryError"
+          className="fixed top-3 right-3 z-50 max-w-sm rounded-lg border border-border bg-bg-secondary p-3 text-sm"
+        >
+          {historyError}
+          <button onClick={() => setHistoryError(null)} className="block mt-2">
+            Dismiss
+          </button>
+        </div>
+      )}
+      <SidebarView
+        style={style}
+        platform={window.api.platform}
+        uiFontScale={uiFontScale}
+        activeSessionId={activeSessionId}
+        activeView={activeView}
+        pluginViews={pluginViews}
+        automationBadge={automationBadge}
+        pinnedSessionIds={pinnedSessionIds}
+        pinnedSessions={pinnedSessions}
+        watchingSessions={watchingSessions}
+        recentSessions={recentSessions}
+        augmentedDirs={augmentedDirs}
+        hiddenSessionSet={hiddenSessionSet}
+        hiddenProjectSet={hiddenProjectSet}
+        hasAnyHidden={hasAnyHidden}
+        showHidden={showHidden}
+        expandedDir={expandedDir}
+        renamingKey={renamingKey}
+        worktreesModalCwd={worktreesModalCwd}
+        deleteTarget={deleteTarget}
+        cleanupWorktree={cleanupWorktree}
+        onToggleCollapse={onToggleCollapse}
+        onNewSession={handleNewSession}
+        onNewSessionDblClick={handleNewSessionDblClick}
+        onSetActiveView={setActiveView}
+        onShowHiddenToggle={() => setShowHidden((v) => !v)}
+        onSetRenamingKey={setRenamingKey}
+        onClickSession={handleClickSession}
+        onToggleWatch={handleToggleWatch}
+        onPin={pinSession}
+        onUnpin={unpinSession}
+        onReorderPinned={reorderPinnedSessions}
+        onFinishRename={handleRename}
+        onAutoRename={handleAutoRename}
+        onRemoveRecent={handleRemoveRecent}
+        onDirClick={handleDirClick}
+        onDirDoubleClick={handleDirDoubleClick}
+        onSessionDoubleClick={(info) => addRecentSession(info.sessionId)}
+        onViewWorktrees={(cwd) => setWorktreesModalCwd(cwd)}
+        onCloseWorktreesModal={() => setWorktreesModalCwd(null)}
+        onHideSession={handleHideSession}
+        onUnhideSession={handleUnhideSession}
+        onDeleteSession={handleDeleteSessionRequest}
+        onHideProject={hideProject}
+        onUnhideProject={unhideProject}
+        onDeleteProject={handleDeleteProjectRequest}
+        onConfirmDelete={confirmDelete}
+        onCancelDelete={() => setDeleteTarget(null)}
+        onWorktreeCleanupKeep={() => {
+          if (cleanupWorktree) {
+            removeRecentSession(cleanupWorktree.sessionId)
+            setCleanupWorktree(null)
+          }
+        }}
+        onWorktreeCleanupRemove={() => {
+          if (cleanupWorktree) {
+            clearWorktreeInfo(cleanupWorktree.sessionId)
+            removeRecentSession(cleanupWorktree.sessionId)
+            setCleanupWorktree(null)
+          }
+        }}
+        onWorktreeCleanupCancel={() => setCleanupWorktree(null)}
+      />
+    </>
   )
 }
