@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-06-22
-**Scoped amendment:** [ADR-066](adr-066_codex-fourth-engine.md) excludes planned Codex phase 1 from shared-rule/classifier parity. Codex will expose typed native approval/sandbox/reviewer state; hosted callbacks still require ClaudeUI authorization. Existing Claude/opencode/pi rules are unchanged.
+**Scoped amendment:** [ADR-066](adr-066_codex-fourth-engine.md) excluded Codex phase 1 from shared-rule parity; [ADR-067](adr-067_codex-shared-permission-model.md) reversed that. Codex now runs under the shared modes and Claude permission rules through ClaudeUI's own evaluator rather than a compiled native ruleset. Existing Claude/opencode/pi rules are unchanged.
 **Relates to:** [ADR-018](adr-018_v2-engine-vendor-account-model.md) (neutral autonomy modes), [ADR-019](adr-019_opencode-engine-backend.md) (opencode backend)
 
 ## Context

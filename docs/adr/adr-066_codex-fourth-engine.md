@@ -4,6 +4,7 @@
 **Date:** 2026-09-10
 **Supersedes:** [ADR-017](adr-017_codex-app-server-backend.md) as the current Codex design, and only ADR-019's dormant-Codex restriction.
 **Amends:** [ADR-022](adr-022_opencode-permission-mapping.md) and [ADR-050](adr-050_auto-mode-as-the-default-autonomy.md) for Codex only.
+**Amended by:** [ADR-067](adr-067_codex-shared-permission-model.md) (2026-09-11) replaces the section "Phase-1 permissions are native, not shared Auto": Codex now runs under ClaudeUI's shared permission modes and rules, and the ADR-022/ADR-050 carve-outs below no longer apply.
 
 ## Context
 
@@ -26,6 +27,8 @@ The host-minted user-row ID travels as native `clientUserMessageId`. Native user
 Desktop and headless hosts use the same core implementation with `win: null` supported. Browsers never connect to app-server and receive no new engine listener. Commands, domain events, volatile streams, and queries use the existing four SyncCore contract lanes.
 
 ### Phase-1 permissions are native, not shared Auto
+
+> **Superseded by [ADR-067](adr-067_codex-shared-permission-model.md).** Kept as the record of the phase-1 decision; the as-built behaviour is the shared permission model.
 
 Codex uses its native approval policy, sandbox, and reviewer fields. Shared permission-rule and classifier parity is explicitly deferred to a later Codex fork/patch. Claude, opencode, and pi keep their existing behavior.
 
