@@ -89,9 +89,13 @@ function main() {
       primaryRe.test(src)
     )
 
-    // 5. The composer is the secure-store-with-plaintext-fallback facade.
+    // 5. The composer is the secure-store-with-plaintext-fallback facade. The
+    //    facade object literal is not necessarily the FIRST declarator of the
+    //    `let` (2.1.268 hoisted an osGuarded read wrapper ahead of it), so skip
+    //    leading declarators lazily without crossing a `;` and pin the template
+    //    to the composer's own two parameters — mirrors the anchor in apply.mjs.
     const composerRe = new RegExp(
-      `function ${composer.replace(/[$]/g, '\\$&')}\\(${V},${V}\\)\\{let ${V}=\\{name:\`\\$\\{${V}\\.name\\}-with-`
+      `function ${composer.replace(/[$]/g, '\\$&')}\\((${V}),(${V})\\)\\{let [^;]{0,400}?\\{name:\`\\$\\{\\1\\.name\\}-with-\\$\\{\\2\\.name\\}-fallback\``
     )
     t.assert(`composer "${composer}" is the fallback-facade builder`, composerRe.test(src))
   }

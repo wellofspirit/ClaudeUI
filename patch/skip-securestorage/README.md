@@ -119,14 +119,22 @@ So a bare `lK6` is a complete, working store. No consumer requires the two missi
 Located by its template-literal signature (content-stable across versions). On a Linux bundle this matches **zero** times — that is expected and handled by the store-less guard (see the platform note at the top), not an anchor break:
 
 ```
+// <= 2.1.261
 let q={name:`${H.name}-with-${_.name}-fallback`
+
+// 2.1.268 — an osGuarded read wrapper is now hoisted ahead of the facade literal
+let n=r.osGuarded===!0?(o)=>o:ne,a={name:`${e.name}-with-${r.name}-fallback`
 ```
 
-Regex captures the composer fn name (`ev9`):
+Regex captures the composer fn name (`ev9` / `O` / `F`):
 
 ```
-function ([\w$]+)\([\w$]+,[\w$]+\)\{let [\w$]+=\{name:`\$\{[\w$]+\.name\}-with-\$\{[\w$]+\.name\}-fallback`
+function ([\w$]+)\(([\w$]+),([\w$]+)\)\{let [^;]{0,400}?\{name:`\$\{\1\.name\}-with-\$\{\2\.name\}-fallback`
 ```
+
+**Do not pin the facade literal to the first declarator.** 2.1.268 inserted `n=r.osGuarded===!0?(o)=>o:ne,` between `let` and the object literal, which broke the old `let [\w$]+=\{name:` form. The current shape skips any number of leading declarators lazily and — crucially — never crosses a `;`, so the match can't leave the composer's first statement. What makes the anchor unique is not the declarator position but the **backreference pair**: the template must interpolate the composer's own two parameters. Verified 1 match on both 2.1.261 and 2.1.268.
+
+`osGuarded` is a new per-backend flag (`name:"plaintext",osGuarded:!1` vs `name:"windows-credman",osGuarded:!0`) controlling whether fallback reads get wrapped. It does not affect this patch: the SKIP branch returns the plaintext backend object directly, which carries its own `osGuarded:!1`.
 
 ### Anchor 2 — the store getter (unique once the composer is known)
 

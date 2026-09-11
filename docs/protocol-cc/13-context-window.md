@@ -5,7 +5,10 @@ This is not a wire-protocol concern (nothing crosses stdio), but it lives here
 because it's reverse-engineered cli.js behavior that drifts with
 `claudeCliVersion` and ClaudeUI replicates it independently.
 
-Verified against cli.js **2.1.261**.
+Verified against cli.js **2.1.268**. The 2.1.268 catalog is byte-identical to
+2.1.261's except for `effort_cost_index` on fable-5-1/mythos-5-1 (which we do
+not mirror) and a new `CLAUDE_CODE_MODEL_CAPABILITIES` env override — same 30
+models, same context/pricing/capability records.
 
 ---
 

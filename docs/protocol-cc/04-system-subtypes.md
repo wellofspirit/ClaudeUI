@@ -46,6 +46,7 @@ Exception: `session_state_changed` has no `session_id`/`uuid` (raw emit, not thr
 | `elicitation_complete`    | MCP URL-mode elicitation completes               | stream-json module (§4.24)       |
 | `permission_denied`       | Tool call auto-denied without prompt             | Control channel (§4.25)          |
 | `mirror_error`            | Transcript-mirror write failure                  | SessionStore mirror (§4.26)      |
+| `dev_intent`              | Resumed transcript shows iOS-app work            | Dev-intent fold (§4.28)          |
 
 Subtypes that exist in the SDK schema union but are **not** emitted on the SDK stdout wire are cataloged in §4.27.
 
@@ -644,6 +645,7 @@ The outer filter at char `12822512` lists subtypes excluded from `--output-forma
 - **`elicitation_complete`** — dismiss any pending MCP elicitation UI.
 - **`permission_denied`** — render the auto-denial on the tool call instead of only showing an `is_error` tool_result.
 - **`mirror_error`** — log; surfaces transcript-mirror data loss.
+- **`dev_intent`** — advisory only; safe to ignore. ClaudeUI does not handle it (unknown subtypes fall through `handleSystemMessage`'s if-chain). See §4.28.
 
 Unknown subtypes: log and pass through. Don't silently drop.
 
@@ -856,3 +858,43 @@ The SDK schema union (region `~7060000–7100000` in 2.1.170) declares more subt
 | `files_persisted`      | Attachment-file persistence results                                                        |
 
 If one of these is observed on stdout in a future CLI version, promote it to a numbered section.
+
+---
+
+## 4.28 `dev_intent`
+
+**Added in 2.1.268.** A one-shot advisory that cli.js has inferred what kind of
+project the session is working on. Only one kind exists today.
+
+```json
+{ "type": "system", "subtype": "dev_intent", "kind": "ios_app" }
+```
+
+| Field  | Type   | Notes                                                      |
+| ------ | ------ | ---------------------------------------------------------- |
+| `kind` | string | From the kind list `["ios_app"]` — the only one in 2.1.268 |
+
+**Detection.** A per-session fold (chunk `chunk-gm00f911.js`) walks messages
+looking for two independent signals and emits only when BOTH have been seen:
+
+1. `swiftFileEdited` — a Write/Edit-family tool call whose `file_path` ends in
+   `.swift`.
+2. `iosEvidence` — any of: `import UIKit` / `.iOS(` in written content;
+   `SDKROOT = iphoneos|iphonesimulator`, `IPHONEOS_DEPLOYMENT_TARGET` or
+   `TARGETED_DEVICE_FAMILY` in written content or in a tool_result;
+   `simctl`, `-sdk iphonesimulator|iphoneos` or `platform=iOS Simulator` in a
+   Bash command.
+
+It fires **at most once per kind per session**, and a detector that throws is
+swallowed (telemetry `dev_intent_detect/fold_threw`) — never fatal.
+
+**Gate.** Ungated: no env var, no feature flag. But in the headless stream-json
+path the fold only absorbs `initialMessages` at session construction — the TUI
+is the only caller that feeds it live turn messages (it uses the result to pick
+spinner tips). So on our wire `dev_intent` can only appear **at session start,
+on a resume whose transcript already carries both signals**, never mid-turn.
+
+**Consumer note.** Advisory only; nothing downstream depends on it. ClaudeUI
+ignores it — `handleSystemMessage` is an if-chain over known subtypes and
+`SystemMessage['subtype']` admits `string`, so an unhandled subtype is a no-op
+rather than an error.

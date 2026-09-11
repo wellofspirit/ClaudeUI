@@ -824,6 +824,11 @@ Compact catalog — none are wired into ClaudeUI yet. Descriptions from 2.1.261
 `--max-thinking-tokens`, `--max-turns`, `--effort`, `--sdk-url`, `--agent-id`,
 `--parent-session-id`, `--session-id`, `--fork-session`) were removed.
 
+Re-diffed at **2.1.268**: no additions and no removals to the top-level flag set.
+(The bundle gained the literals `--attach-serve`, `--remove-session-state`,
+`--force-remove-worktree` and a dozen others, but none reach `--help` — they are
+subcommand options and tool-description text, not CLI flags.)
+
 | Flag                                          | Type / values      | Effect                                                                                                                                                                                                                                                                               |
 | --------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `--forward-subagent-text`                     | boolean            | Forward subagent text + thinking blocks as assistant/user messages with `parent_tool_use_id` set. Requires `--print` + `--output-format=stream-json`. Overlaps patch/subagent-streaming's message visibility (NOT its stream_event deltas — the patch stays load-bearing for those). |
