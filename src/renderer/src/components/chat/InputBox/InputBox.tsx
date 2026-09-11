@@ -180,7 +180,14 @@ export function InputBox(): React.JSX.Element {
   const models = useMemo(
     () =>
       availableModels.map((m) => {
-        const shortName = m.description?.split('·')[0]?.trim() || m.displayName
+        // claude/opencode/pi discovery all emit "Name · detail" descriptions, so
+        // the head of the split is the name. Codex's native catalog puts a
+        // marketing sentence there instead ("Our most capable model for …"),
+        // which splits to the whole sentence — use its display name directly.
+        const shortName =
+          m.engineId === 'codex'
+            ? m.displayName
+            : m.description?.split('·')[0]?.trim() || m.displayName
         return { ...m, shortName }
       }),
     [availableModels]

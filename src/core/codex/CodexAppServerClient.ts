@@ -170,7 +170,11 @@ export class CodexAppServerClient {
         this.stopVersion = undefined
         this.terminate(child)
         if (valid) resolve()
-        else reject(new CodexTransportError('version-check-failed'))
+        // `fail()` stamps closedError before it trips `stopVersion`, so a
+        // teardown mid-probe already carries the real reason (`disposed`,
+        // `spawn-failed`, …). Minting `version-check-failed` here would
+        // overwrite it and tell `start()`'s caller the wrong thing.
+        else reject(this.closedError ?? new CodexTransportError('version-check-failed'))
       }
       const timer = setTimeout(() => finish(false), this.options.requestTimeoutMs ?? 15000)
       this.stopVersion = () => finish(false)

@@ -654,14 +654,14 @@ it.skipIf(!enabled)(
     expect(errors).toEqual([])
     // Disposal fails the in-flight read with the transport's OWN reason rather
     // than one flat code, which is what tells a caller "we tore this down" apart
-    // from "the native read failed". WHICH reason depends on how far
-    // `client.start()` had got: past the `--version` probe it is the pending
-    // `initialize` rejecting with the close code, inside it the probe's own
-    // `stopVersion()`. Both are payload-free transport codes and the alternation
-    // is asserted rather than picked, because the race is real.
+    // from "the native read failed". The reason is `disposed` no matter how far
+    // `client.start()` had got: past the `--version` probe the pending
+    // `initialize` rejects with the close code, and inside the probe
+    // `checkVersion` now re-raises the already-stamped closedError instead of
+    // minting its own `version-check-failed`.
     const pending = service.readThread({ threadId: thread.id, includeTurns: false })
     service.dispose()
-    await expect(pending).rejects.toThrow(/^Codex transport: (disposed|version-check-failed)$/)
+    await expect(pending).rejects.toThrow(/^Codex transport: disposed$/)
   },
   60000
 )

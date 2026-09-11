@@ -405,6 +405,18 @@ describe('Codex JSONL client', () => {
     await rejection
   })
 
+  it('reports disposal, not a version-check failure, when disposed mid-probe', async () => {
+    // `fail('disposed')` stamps closedError BEFORE tripping stopVersion, so the
+    // probe must surface that reason instead of minting its own generic code.
+    client = new CodexAppServerClient({ cwd: '/isolated', onDisconnect: disconnect })
+    const promise = client.start(init)
+    const rejection = expect(promise).rejects.toMatchObject({ code: 'disposed' })
+    client.dispose()
+    await rejection
+    expect(writes).toEqual([])
+    expect(disconnect).toHaveBeenCalledTimes(1)
+  })
+
   it.each(['mismatch', 'error', 'dispose', 'throw'])(
     'rejects startup %s without initializing',
     async (kind) => {

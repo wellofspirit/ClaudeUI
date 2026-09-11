@@ -495,6 +495,63 @@ describe('InputBox FC — rendered', () => {
     }
   )
 
+  it('codex shortName is the display name, not the native description sentence', () => {
+    // Codex's catalog ships a marketing sentence in `description`; only
+    // claude/opencode/pi discovery follow the "Name · detail" convention the
+    // picker's shortName split assumes.
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedEngineId: 'codex',
+          selectedModel: 'gpt-5.6-codex',
+          codexModelExplicit: true,
+          sdkActive: false,
+          isHistorical: false,
+          status: {
+            ...state.sessions[FC_ROUTE].status,
+            sessionId: null,
+            engineId: 'codex',
+            capabilities: resolveCodexCapabilities()
+          }
+        }
+      },
+      availableModels: [
+        {
+          value: 'gpt-5.6-codex',
+          displayName: 'GPT-5.6-Codex',
+          description: 'Our most capable model for complex, demanding work.',
+          engineId: 'codex'
+        }
+      ]
+    }))
+    mirrorStoreIntoReplica()
+    app.bridge.ipcMain.handle('session:codex-settings', () => undefined)
+    renderFC()
+    expect(viewProps.selectedModel.shortName).toBe('GPT-5.6-Codex')
+    expect(viewProps.models[0].shortName).toBe('GPT-5.6-Codex')
+  })
+
+  it('keeps the "Name · detail" shortName split for non-codex engines', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: 'default' }
+      },
+      availableModels: [
+        {
+          value: 'default',
+          displayName: 'Default (recommended)',
+          description: 'Opus 4.7 with 1M context · Most capable for complex work'
+        }
+      ]
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    expect(viewProps.selectedModel.shortName).toBe('Opus 4.7 with 1M context')
+  })
+
   it('renders and passes props to View', () => {
     renderFC()
     expect(viewProps).toBeDefined()
