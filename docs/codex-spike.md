@@ -67,6 +67,121 @@ resume as unsupported. Use the pinned binary's behavior and generated schema for
 implementation; this small-history probe does not establish large-history paging
 behavior.
 
+## Native approval surface probe (2026-09-11)
+
+A second, repo-resident probe of the same pinned `0.154.0` binary, this time
+asking only one question: which `(approvalPolicy, sandboxPolicy)` pair routes a
+server-to-client approval request, and what the request carries. The probes live
+in `src/integration/codex/codex-policy-probe.integration.test.ts` and run with
+`CODEX_INTEGRATION=1 bun run test:integration src/integration/codex`. Thirteen
+probes, all passing, each assertion pinning an observed value. Facts only; no
+adapter decision is made here.
+
+Every probe drives one scripted turn whose model output requests, in order, a
+read-only shell command (`ls`), a shell write inside the workspace, a shell
+write outside it, an `apply_patch` inside the workspace, an `apply_patch`
+outside it, and `curl http://127.0.0.1:1/`. Approval replies are `accept` unless
+a probe says otherwise. `approvalPolicy` and `sandboxPolicy` are per-turn
+overrides on `turn/start`, because `thread/start` only accepts a `SandboxMode`
+string and cannot express `writableRoots`.
+
+### What fires
+
+`cmd` is `item/commandExecution/requestApproval`, `patch` is
+`item/fileChange/requestApproval`. "up front" means the request arrived with
+`reason: null`, before anything ran. "after failure" means it arrived with
+`reason: "command failed; retry without sandbox?"`, after a sandboxed attempt
+had already been made.
+
+| approvalPolicy                 | readOnly                                              | workspaceWrite (writableRoots = cwd)                                                       | dangerFullAccess     |
+| ------------------------------ | ----------------------------------------------------- | ------------------------------------------------------------------------------------------ | -------------------- |
+| `untrusted`                    | all 6 asked up front (4 `cmd`, 2 `patch`)             | all 6 asked up front                                                                       | all 6 asked up front |
+| `on-request`                   | 4 commands silent; both `patch` asked up front        | 4 commands silent; in-cwd `patch` asked after failure, outside-cwd `patch` up front        | nothing asked        |
+| `never`                        | nothing asked                                         | nothing asked                                                                              | nothing asked        |
+| `granular` (all five flags on) | 4 commands asked after failure; both `patch` up front | 4 commands asked after failure; in-cwd `patch` after failure, outside-cwd `patch` up front | nothing asked        |
+
+On every command request observed, under any policy, `availableDecisions` is
+exactly `["accept", {"acceptWithExecpolicyAmendment": {...}}, "cancel"]`.
+`decline` and `acceptForSession` are in the wire type and are never advertised.
+File-change requests carry no `availableDecisions`, no `kind` and no `grantRoot`
+at all, so a client has nothing to render but accept or reject.
+
+### Answers
+
+| Question                                                                                    | Observed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A. Which commands does `untrusted` run without asking?                                      | None. `ls`, `cat inside.txt`, `pwd`, `git status`, `echo hi` and `rg x .` each produced an approval request. The pinned binary ships no built-in trusted list that bypasses `untrusted`. `commandActions` classifies them coarsely: `listFiles`, `read`, `unknown`, `unknown`, `unknown`, `search` respectively, so `pwd`, `git status` and `echo hi` are indistinguishable on that field.                                                                                                                                                                 |
+| B. Is there a setting that asks before every command and every file change, reads included? | Yes, `untrusted`, under all three sandbox policies. It is the only policy that asks before execution rather than after a sandbox failure. `granular` with `sandbox_approval`, `rules`, `skill_approval`, `request_permissions` and `mcp_elicitations` all `true` asks for commands only after the sandboxed attempt failed, so it cannot vet a command up front.                                                                                                                                                                                           |
+| C. Under `workspaceWrite`, do in-cwd file changes ask?                                      | Not on policy grounds. The in-cwd `apply_patch` request arrived with `reason: "command failed; retry without sandbox?"` under both `on-request` and `granular`, meaning Codex attempted it sandboxed first and only escalated because that attempt failed. The failure is the fixture's (see limits below), so natively this is a silent apply. The outside-cwd `apply_patch` asked up front (`reason: null`) in the same turn, which is the contrast that makes the reading safe.                                                                         |
+| D. How far does `acceptForSession` reach?                                                   | One command string. Replying `acceptForSession` to `echo one` suppressed the ask for a second, identical `echo one` (which then ran, exit 0) and did not suppress the ask for `echo two`.                                                                                                                                                                                                                                                                                                                                                                  |
+| E. Must `approvalsReviewer: 'user'` be set explicitly?                                      | No. With no `approvals_reviewer` line in `config.toml`, `thread/start` reports `approvalsReviewer: "user"` and an `untrusted` command still reached the client. The same response echoes `approvalPolicy` and the legacy `sandbox` field; `activePermissionProfile` is `null`, so that field carries no provenance here.                                                                                                                                                                                                                                   |
+| F. What does `thread/settings/update` return, and is it honoured?                           | It returns `{}`. The applied settings come back only on a `thread/settings/updated` notification carrying the full `ThreadSettings`, and that notification is not ordered against the RPC reply: reading the notification list immediately after the reply finds nothing, so a client has to wait for it. The update is honoured. After switching a thread from `on-request`/`readOnly` to `untrusted`/`dangerFullAccess` mid-thread, the next turn (with no per-turn override) asked for its command and the accepted write landed outside the workspace. |
+
+### Other observations
+
+An accepted command runs unsandboxed. Under `untrusted` plus `readOnly`, `ls`
+exits 0 and both the in-cwd and outside-cwd writes land. Approving is a
+full-access grant on this wire; there is no "approve but keep it sandboxed"
+decision.
+
+`on-request` gates exactly one thing, the model setting
+`sandbox_permissions: "require_escalated"`. That request arrives with the
+model's `justification` as its `reason`. Under `never` the same escalation never
+reaches the client, nothing runs, and the model is told:
+
+```text
+approval policy is Never; reject command — you cannot ask for escalated permissions if the approval policy is Never
+```
+
+`decline` is honoured on both the command and the file-change paths despite
+never appearing in `availableDecisions`, and leaves no file behind. A declined
+command reports no exit code back to the model.
+
+`proposedExecpolicyAmendment` is argv, and any redirection drags the wrapper in:
+`echo x > <cwd>/inside.txt` proposes
+`["/bin/zsh", "-lc", "echo x > <cwd>/inside.txt"]`, a rule that cannot match a
+second time. Plain commands propose the whole argv including arguments, so
+`git status` proposes `["git", "status"]`, not `["git"]`.
+
+`item/permissions/requestApproval` is unreachable by default. It requires the
+`request_permissions` tool, which appears only with the under-development
+`request_permissions_tool` feature enabled (the binary warns about it on
+startup). Its request carries `permissions`, `cwd` and `reason` and no
+`availableDecisions`; the reply is a granted profile plus a `turn` or `session`
+scope rather than an accept/decline. The requested profile arrives in two
+representations at once, a legacy `{read, write}` pair and an `entries` array.
+
+The tool surface is `exec_command`, `write_stdin`, `request_user_input`,
+`view_image`, `multi_agent_v1`, `get_goal`, `create_goal`, `update_goal`. There
+is no `shell` tool (a `shell` call is answered `unsupported call: shell`) and no
+`apply_patch` tool. File changes reach `item/fileChange/requestApproval` only
+because Codex intercepts an `apply_patch` heredoc inside an `exec_command`
+payload. The set did not change with `apply_patch_freeform = true` or with a
+catalog model slug in place of `mock-model`.
+
+### What the fixture cannot express
+
+macOS lets a process re-apply the same seatbelt profile but refuses a different
+one, however permissive either is: `sandbox-exec -f a.sb sandbox-exec -f b.sb
+/bin/echo` fails with `sandbox_apply: Operation not permitted` and exit 71. The
+fixture wraps every spawn in `sandbox-exec` for containment, so any command
+Codex decides to run sandboxed dies at exit 71 before touching the filesystem.
+The last probe in the file pins this directly.
+
+The consequence is that the approval dimension is measurable and the
+sandbox-enforcement dimension is not. Whether Codex's own `readOnly` or
+`workspaceWrite` profile would have blocked a given write cannot be observed
+here, and any approval request whose `reason` is the retry prompt exists only
+because the nested profile failed. Requests with `reason: null` are unaffected,
+since Codex decided to ask before running anything.
+
+Also not expressed: `item/tool/requestUserInput`, MCP elicitations, skill
+approvals, the `rules` half of `granular` (no execpolicy rules were configured),
+`approvalsReviewer: "auto_review"` and `"guardian_subagent"`, named permission
+profiles via `permissions`, network approvals through a managed proxy (the
+`curl` step reached a closed local port and exited 7 rather than being gated),
+and `apply_patch` as a first-class tool.
+
 ## Phase-1 adapter decisions
 
 These are scoped decisions for later implementation, not product changes made
