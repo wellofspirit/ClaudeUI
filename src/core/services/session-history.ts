@@ -881,6 +881,7 @@ export async function resolveForkAnchor(
   messageIndex: number
 ): Promise<ForkAnchorResult> {
   if (engineId === 'pi') return resolvePiForkAnchor(sessionId, messageIndex)
+  if (engineId !== 'claude') throw new Error(`Session fork is unsupported for engine "${engineId}"`)
 
   const projectKey = cwdToProjectKey(cwd)
   const filePath = path.join(CLAUDE_PROJECTS_DIR, projectKey, `${sessionId}.jsonl`)

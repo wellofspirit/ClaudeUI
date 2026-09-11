@@ -6,9 +6,7 @@
  * is engine-neutral and doesn't belong in an opencode-named module.
  */
 
-import { deleteOpencodeSession } from './opencode-session-list'
-import { deletePiSession } from './pi-session-list'
-import { deleteSessionFiles } from './delete-session-files'
+import { historyFor } from './engine-history'
 import type { EngineId } from '../../shared/types'
 
 /**
@@ -24,11 +22,5 @@ export async function deleteSessionByEngine(
   projectKey: string,
   engineId?: EngineId
 ): Promise<void> {
-  if (engineId === 'opencode') {
-    await deleteOpencodeSession(sessionId)
-  } else if (engineId === 'pi') {
-    await deletePiSession(sessionId)
-  } else {
-    await deleteSessionFiles(sessionId, projectKey)
-  }
+  await historyFor(engineId).delete(sessionId, projectKey)
 }

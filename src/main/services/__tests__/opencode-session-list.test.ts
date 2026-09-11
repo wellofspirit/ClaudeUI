@@ -39,6 +39,20 @@ vi.mock('../../../core/services/db', () => ({ readOpencodeSessionRows: mockReadR
 vi.mock('../../../core/services/delete-session-files', () => ({
   deleteSessionFiles: mockDeleteSessionFiles
 }))
+// `deleteSessionByEngine` dispatches through `engine-history`, whose table holds
+// a reader for EVERY engine — so importing it drags Claude's transcript reader
+// into a leaf test about opencode, and with it session-history → block-usage →
+// usage-fetcher → claude-session → collab-tool → the cross-engine dispatcher,
+// which builds its singleton at module load off the `db` module this file mocks
+// narrowly. Nothing here exercises it: the Claude assertions below reach only
+// `deleteSessionFiles`, already mocked above. Severed at the test boundary rather
+// than by widening the `db` mock, which would pull the whole engine graph in
+// behind it.
+vi.mock('../../../core/services/session-history', () => ({
+  listDirectories: vi.fn(),
+  loadSessionHistory: vi.fn(),
+  resolveForkAnchor: vi.fn()
+}))
 
 import {
   listOpencodeSessionsGlobal,

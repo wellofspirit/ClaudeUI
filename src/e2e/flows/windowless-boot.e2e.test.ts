@@ -218,6 +218,16 @@ vi.mock('../../core/pi/pi-locate', () => ({
   piBinaryAvailable: vi.fn(() => false),
   locatePiBinary: vi.fn(() => null)
 }))
+// Same reason as `pi-locate`: the boot seed walks every engine's session list,
+// and `listCodexSessions()` spawns a real `codex app-server` whenever the
+// vendored binary is present (darwin/arm64 dev machines). That is a subprocess
+// this flow never asserts on, and it made the seed slow enough to land AFTER
+// the `sync-full` this file reads — the directory listing raced to empty on a
+// developer's machine and passed on CI, which has no vendored codex.
+vi.mock('../../core/codex/codex-locate', () => ({
+  codexBinaryAvailable: vi.fn(() => false),
+  locateCodexBinary: vi.fn(() => null)
+}))
 vi.mock('../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: {
     dispatch: vi.fn(),

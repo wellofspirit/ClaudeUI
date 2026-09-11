@@ -14,7 +14,7 @@
  * pile up stale rows.
  */
 
-import type { DirectoryGroup, SessionInfo } from './types'
+import type { DirectoryGroup, SessionInfo, EngineId } from './types'
 
 /**
  * Merge opencode SessionInfo[] into an existing DirectoryGroup[] (Claude sessions).
@@ -28,6 +28,14 @@ export function mergeOpencodeIntoDirectories(
   current: DirectoryGroup[],
   opencodeInfos: SessionInfo[]
 ): DirectoryGroup[] {
+  return mergeEngineIntoDirectories(current, opencodeInfos, 'opencode')
+}
+
+export function mergeEngineIntoDirectories(
+  current: DirectoryGroup[],
+  opencodeInfos: SessionInfo[],
+  engineId: EngineId
+): DirectoryGroup[] {
   // Build a mutable copy indexed by cwd (forward-slash normalized for comparison).
   const byProjectKey = new Map<string, DirectoryGroup>()
   const order: string[] = []
@@ -39,7 +47,7 @@ export function mergeOpencodeIntoDirectories(
   // Remove all existing opencode sessions first (so we replace on every poll
   // rather than accumulating stale entries). They're identified by engineId.
   for (const [key, group] of byProjectKey) {
-    const filtered = group.sessions.filter((s) => s.engineId !== 'opencode')
+    const filtered = group.sessions.filter((s) => s.engineId !== engineId)
     byProjectKey.set(key, { ...group, sessions: filtered })
   }
 
