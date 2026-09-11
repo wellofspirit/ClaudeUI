@@ -4,3 +4,5 @@ pnpm-lock.yaml
 LICENSE.md
 tsconfig.json
 tsconfig.*.json
+# Exact output from the pinned Codex generator, checked by check-codex-protocol.
+src/core/codex/protocol/

@@ -15,6 +15,7 @@
     "ref": "v1.18.29-claudeui.1"
   },
   "piCliVersion": "0.84.3",
+  "codexCliVersion": "0.154.0",
   "ripgrepVersion": "14.1.1",
   "overrides": {
     "node-abi": "^4.33.0",
@@ -37,6 +38,10 @@
     "update-opencode": "node scripts/build.mjs update-opencode",
     "ensure-pi": "node scripts/build.mjs ensure-pi",
     "update-pi": "node scripts/build.mjs update-pi",
+    "ensure-codex": "node scripts/ensure-codex.mjs",
+    "update-codex": "node scripts/ensure-codex.mjs --force",
+    "generate-codex-protocol": "node scripts/generate-codex-protocol.mjs",
+    "check-codex-protocol": "node scripts/generate-codex-protocol.mjs --check",
     "postinstall": "node node_modules/electron/install.js && electron-builder install-app-deps && npm run ensure-cli && npm run ensure-opencode && npm run ensure-pi",
     "rebuild:native": "electron-builder install-app-deps",
     "build:unpack": "node scripts/build.mjs build:unpack",
