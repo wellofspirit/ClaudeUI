@@ -112,3 +112,77 @@ describe('CodexEngineToolMap — dispatch_agent', () => {
     })
   })
 })
+
+/**
+ * Native children (slice F). `collab:spawnAgent` is the ONLY collab call that
+ * owns a subagent transcript, so it is the only one that takes the `task` kind;
+ * the rest are agent bookkeeping and render through the generic body.
+ */
+describe('CodexEngineToolMap — collab agent tools', () => {
+  it('gives the spawn call the engine-neutral subagent kind', () => {
+    expect(CodexEngineToolMap.kindOf('collab:spawnAgent')).toBe('task')
+  })
+
+  it('leaves the bookkeeping calls on the generic body', () => {
+    for (const tool of ['wait', 'sendInput', 'closeAgent', 'resumeAgent', 'listAgents'])
+      expect(CodexEngineToolMap.kindOf(`collab:${tool}`)).toBe('unknown')
+  })
+
+  it('names each collab call', () => {
+    expect(CodexEngineToolMap.displayName('collab:spawnAgent')).toBe('Agent')
+    expect(CodexEngineToolMap.displayName('collab:wait')).toBe('Wait for agents')
+    expect(CodexEngineToolMap.displayName('collab:sendInput')).toBe('Message agent')
+    expect(CodexEngineToolMap.displayName('collab:closeAgent')).toBe('Close agent')
+  })
+
+  it('task: a spawn normalizes off receiverThreadIds, never the dispatch shape', () => {
+    expect(
+      CodexEngineToolMap.normalize('task', {
+        prompt: 'survey the tests',
+        model: 'gpt-mock',
+        reasoningEffort: 'high',
+        receiverThreadIds: ['child-1'],
+        agentsStates: { 'child-1': { status: 'running', message: null } }
+      })
+    ).toEqual({
+      kind: 'task',
+      description: 'Agent',
+      prompt: 'survey the tests',
+      subagent: 'gpt-mock',
+      model: 'gpt-mock'
+    })
+  })
+
+  it('task: a spawn with no model still reads as an agent, not as a dispatch', () => {
+    expect(
+      CodexEngineToolMap.normalize('task', { prompt: 'go', model: null, receiverThreadIds: [] })
+    ).toMatchObject({ kind: 'task', description: 'Agent', prompt: 'go' })
+  })
+})
+
+describe('CodexEngineToolMap — v2 sub-agent activity cards', () => {
+  it('task: a v2 spawn card has no prompt or model, so the agent path names it', () => {
+    expect(
+      CodexEngineToolMap.normalize('task', {
+        agentPath: '/root/fixture_child',
+        receiverThreadIds: ['child-1'],
+        agentsStates: {}
+      })
+    ).toEqual({
+      kind: 'task',
+      description: 'Agent',
+      prompt: '',
+      subagent: '/root/fixture_child'
+    })
+  })
+
+  it('task: an explicit model still wins over the agent path', () => {
+    expect(
+      CodexEngineToolMap.normalize('task', {
+        agentPath: '/root/fixture_child',
+        model: 'gpt-mock',
+        receiverThreadIds: ['child-1']
+      })
+    ).toMatchObject({ subagent: 'gpt-mock', model: 'gpt-mock' })
+  })
+})

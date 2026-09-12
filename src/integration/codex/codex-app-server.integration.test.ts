@@ -164,12 +164,29 @@ const isGuardianRequest = (request: Record<string, unknown>): boolean =>
  */
 type ScriptedHostedTool = boolean | { name: string; arguments: Record<string, unknown> }
 
+/**
+ * The prompt the ROOT turn is driven with when the fixture scripts native
+ * agents. A spawned child starts a FRESH thread seeded with the spawn message
+ * only (no fork), so this string appears in the root's request bodies and in no
+ * child's — which is the only reliable way to tell the two apart on one shared
+ * provider, since both speak the same wire on the same socket.
+ */
+const ROOT_TURN_MARKER = 'fixture-root-turn-marker'
+/** The `message` the scripted `spawn_agent` call hands its child. */
+const CHILD_TASK_PROMPT = 'fixture child task'
+
 async function setupFixture(
   plainResponse = false,
   nativeSession = false,
   nativeCommand = false,
   autoReview = false,
-  hostedTool: ScriptedHostedTool = false
+  hostedTool: ScriptedHostedTool = false,
+  // Which native collaboration surface to script. It is chosen by the MODEL,
+  // not by the `multi_agent_v2` feature flag — `Config::multi_agent_version_for_model`
+  // consults the catalog entry's own `multi_agent_version` first — so `'v1'`
+  // pins the one catalogued model that declares v1 and `'v2'` simply takes the
+  // default model, which declares v2.
+  nativeAgent: false | 'v1' | 'v2' = false
 ) {
   const scripted =
     hostedTool === true
@@ -286,6 +303,68 @@ async function setupFixture(
           const agentTurns = requests.filter(
             (entry) => !isGuardianRequest(entry) && entry.generate !== false
           ).length
+          // Native agents (slice F): the CHILD is a separate thread on this same
+          // provider, so the root's own step index must count only the root's
+          // requests — and the child must be answered too, or its turn never
+          // ends and nothing reaches the parent's card.
+          const body = JSON.stringify(request)
+          const root = body.includes(ROOT_TURN_MARKER)
+          const rootTurns = requests.filter(
+            (entry) =>
+              !isGuardianRequest(entry) &&
+              entry.generate !== false &&
+              JSON.stringify(entry).includes(ROOT_TURN_MARKER)
+          ).length
+          // The child id the core handed back as `spawn_agent`'s output, read
+          // out of the root's own next request. JSON-in-JSON, so the quotes may
+          // be escaped.
+          const spawned = /agent_id\\?"\s*:\s*\\?"([0-9a-fA-F-]{8,})/.exec(body)?.[1]
+          const nativeAgentItem =
+            nativeAgent && request.generate !== false && !guardian
+              ? !root
+                ? {
+                    type: 'message',
+                    id: 'msg-child',
+                    role: 'assistant',
+                    content: [{ type: 'output_text', text: 'fixture child complete' }]
+                  }
+                : rootTurns === 1
+                  ? {
+                      type: 'function_call',
+                      call_id: 'fixture-spawn',
+                      name: 'spawn_agent',
+                      namespace: nativeAgent === 'v2' ? 'collaboration' : 'multi_agent_v1',
+                      arguments: JSON.stringify(
+                        nativeAgent === 'v2'
+                          ? {
+                              task_name: 'fixture_child',
+                              message: CHILD_TASK_PROMPT,
+                              // Without this the child FORKS the root's history
+                              // and the marker below stops telling them apart —
+                              // and the child would answer the root's prompt
+                              // rather than its own task.
+                              fork_turns: 'none'
+                            }
+                          : { message: CHILD_TASK_PROMPT }
+                      )
+                    }
+                  : rootTurns === 2 && (nativeAgent === 'v2' || spawned)
+                    ? {
+                        type: 'function_call',
+                        call_id: 'fixture-wait',
+                        name: 'wait_agent',
+                        namespace: nativeAgent === 'v2' ? 'collaboration' : 'multi_agent_v1',
+                        arguments: JSON.stringify(
+                          // v2's `wait_agent` waits for inter-agent ACTIVITY and
+                          // names no targets; v1's waits for the agents it is
+                          // given to reach a final status.
+                          nativeAgent === 'v2'
+                            ? { timeout_ms: 30000 }
+                            : { targets: [spawned], timeout_ms: 30000 }
+                        )
+                      }
+                    : undefined
+              : undefined
           for (const event of [
             { type: 'response.created', response: { id: 'resp-fixture' } },
             {
@@ -297,30 +376,32 @@ async function setupFixture(
                     role: 'assistant',
                     content: [{ type: 'output_text', text: verdict.current }]
                   }
-                : nativeCommand && request.generate !== false && agentTurns === 1
-                  ? {
-                      type: 'function_call',
-                      call_id: 'fixture-command',
-                      name: 'exec_command',
-                      arguments: JSON.stringify({
-                        cmd: `printf fixture-approved > "${cwd}/approval.txt"`,
-                        sandbox_permissions: 'require_escalated',
-                        justification: 'Isolated fixture write inside the test directory'
-                      })
-                    }
-                  : scripted && request.generate !== false && agentTurns === 1
+                : nativeAgentItem
+                  ? nativeAgentItem
+                  : nativeCommand && request.generate !== false && agentTurns === 1
                     ? {
                         type: 'function_call',
-                        call_id: `fixture-${scripted.name}`,
-                        name: scripted.name,
-                        arguments: JSON.stringify(scripted.arguments)
+                        call_id: 'fixture-command',
+                        name: 'exec_command',
+                        arguments: JSON.stringify({
+                          cmd: `printf fixture-approved > "${cwd}/approval.txt"`,
+                          sandbox_permissions: 'require_escalated',
+                          justification: 'Isolated fixture write inside the test directory'
+                        })
                       }
-                    : {
-                        type: 'message',
-                        id: 'msg-fixture',
-                        role: 'assistant',
-                        content: [{ type: 'output_text', text: 'fixture complete' }]
-                      }
+                    : scripted && request.generate !== false && agentTurns === 1
+                      ? {
+                          type: 'function_call',
+                          call_id: `fixture-${scripted.name}`,
+                          name: scripted.name,
+                          arguments: JSON.stringify(scripted.arguments)
+                        }
+                      : {
+                          type: 'message',
+                          id: 'msg-fixture',
+                          role: 'assistant',
+                          content: [{ type: 'output_text', text: 'fixture complete' }]
+                        }
             },
             completed
           ])
@@ -346,7 +427,13 @@ async function setupFixture(
   )
   writeFileSync(
     join(codexHome, 'config.toml'),
-    `${nativeSession ? '' : 'model = "mock-model"'}
+    // `multi_agent_v1` vs `multi_agent_v2` is chosen by the MODEL, not by the
+    // `multi_agent_v2` feature flag: `Config::multi_agent_version_for_model`
+    // consults the catalog entry's own `multi_agent_version` before falling
+    // back to the features, and the default (`gpt-6-astra`) declares v2. Pin
+    // the one catalogued model that declares v1 so this probe exercises the
+    // `collabAgentToolCall` surface it is about.
+    `${nativeAgent === 'v1' ? 'model = "gpt-5.6-luna"' : nativeSession ? '' : 'model = "mock-model"'}
 model_provider = "${nativeSession ? 'openai' : 'fixture'}"
 ${nativeSession ? `openai_base_url = "http://127.0.0.1:${port}/v1"` : ''}
 approval_policy = "on-request"
@@ -391,6 +478,8 @@ shell_snapshot = false
     requests,
     errors,
     verdict,
+    rootPrompt: ROOT_TURN_MARKER,
+    childPrompt: CHILD_TASK_PROMPT,
     env: {
       HOME: home,
       CODEX_HOME: codexHome,
@@ -1343,6 +1432,206 @@ it.skipIf(!enabled)(
     expect(branched.length).toBeGreaterThan(0)
     expect(advertisesHostedTool(branched[0])).toBe(true)
     expect(errors).toEqual([])
+  },
+  180000
+)
+
+/**
+ * Native children (ADR-066 slice F) end to end against the real binary: the
+ * stock `multi_agent_v1` tools spawn a child THREAD in the root's own process,
+ * the app-server attaches this one connection to it, and the child's items
+ * reach the parent's card as a subagent transcript — live, and again on a cold
+ * read of both threads.
+ *
+ * The provider is scripted for BOTH threads: the child is a separate thread
+ * speaking the same wire on the same socket, and an unanswered child never
+ * ends its turn, so the root's `wait_agent` would sit until it times out.
+ */
+it.skipIf(!enabled)(
+  'renders the thread a native spawn_agent creates as a subagent transcript',
+  async () => {
+    const { cwd, env, errors, requests, rootPrompt, childPrompt } = await setupFixture(
+      true,
+      true,
+      false,
+      false,
+      false,
+      'v1'
+    )
+    session = new CodexSession('isolated-agents', null, cwd, {}, { env, requestTimeoutMs: 20000 })
+    await session.run(null)
+    const rootThreadId = session.getSessionId()!
+    await session.run(rootPrompt)
+    await vi.waitFor(() => expect(session!.willQueue).toBe(false), { timeout: 60000 })
+    expect(errors).toEqual([])
+
+    // WIRE FACT 1 — the spawn call the provider scripted was dispatched, and the
+    // core answered it with the new agent's id.
+    const spawnCall = requests.find((request) =>
+      JSON.stringify(request).includes('"name":"spawn_agent"')
+    )
+    expect(spawnCall).toBeDefined()
+    // `{"agent_id":"<uuid>","nickname":"<name>"}` — the v1 spawn result, handed
+    // back to the model as that call's output (JSON inside a JSON string).
+    expect(JSON.stringify(requests)).toContain('agent_id')
+
+    // WIRE FACT 2 — the parent's completed `collabAgentToolCall` names the child.
+    const blocks = session
+      .getMessages()
+      .flatMap((message) => message.content)
+      .filter((block) => block.type === 'tool_use')
+    const card = blocks.find(
+      (block) => block.type === 'tool_use' && block.toolName === 'collab:spawnAgent'
+    ) as { toolUseId: string; toolInput?: Record<string, unknown> } | undefined
+    expect(card).toBeDefined()
+    const childThreadId = (card!.toolInput!.receiverThreadIds as string[])[0]
+    expect(childThreadId).toBeTruthy()
+    expect(childThreadId).not.toBe(rootThreadId)
+    expect(card!.toolInput!.prompt).toContain(childPrompt)
+
+    // WIRE FACT 3 — the CHILD's own items arrived on this connection and were
+    // emitted under the parent card's id.
+    const subagent = coreEvents.mock.calls
+      .filter(([channel]) => channel === 'session:subagent-message')
+      .map((call) => (call[1] as [string, { toolUseId: string; message: { id: string } }])[1])
+    expect(subagent.length).toBeGreaterThan(0)
+    expect(subagent.every((data) => data.toolUseId === card!.toolUseId)).toBe(true)
+    expect(subagent.some((data) => data.message.id.includes(childThreadId))).toBe(true)
+
+    // WIRE FACT 4 — a cold read of BOTH threads reconstructs the same shape.
+    session.dispose()
+    session = undefined
+    const cold = await loadCodexHistory(rootThreadId, { cwd, env })
+    expect(
+      cold.messages
+        .flatMap((message) => message.content)
+        .some((block) => block.type === 'tool_use' && block.toolName === 'collab:spawnAgent')
+    ).toBe(true)
+    expect(Object.keys(cold.subagentMessages ?? {})).toEqual([card!.toolUseId])
+    expect(cold.subagentMessages![card!.toolUseId].length).toBeGreaterThan(0)
+    // The child is a thread of its own, and it is correctly kept out of the
+    // sidebar by its `parentThreadId`.
+    const listed = await listCodexSessions({ cwd, env })
+    expect(listed.some((info) => info.sessionId === childThreadId)).toBe(false)
+    // WIRE FACT 5 — the child's own identity, straight off `thread/read`: it is
+    // a real thread whose `parentThreadId` is this root and whose `source` is
+    // `subAgent.thread_spawn` at depth 1. No `thread/started` notification ever
+    // announced it (the app-server emits that one on `thread/start`,
+    // `thread/fork` and detached review only), which is why the spawn item is
+    // the sole binding this session has.
+    const service = new CodexService({ cwd, env })
+    try {
+      const child = (await service.readThread({ threadId: childThreadId, includeTurns: false }))
+        .thread
+      expect(child.parentThreadId).toBe(rootThreadId)
+      expect(child.threadSource).toBe('subagent')
+      expect(JSON.stringify(child.source)).toContain('thread_spawn')
+    } finally {
+      service.dispose()
+    }
+  },
+  180000
+)
+
+/**
+ * The SAME slice over `multi_agent_v2`, which is what the default model
+ * (`gpt-6-astra`) and most of the current line declare. There is no
+ * `collabAgentToolCall` for a spawn here: the card is a `subAgentActivity`
+ * whose `started` kind names the child, and whose `completed` kind — a separate
+ * item with its own minted id — closes it, routinely AFTER the spawning turn
+ * has already ended, because v2's `wait_agent` waits for inter-agent activity
+ * rather than for the child to finish.
+ */
+it.skipIf(!enabled)(
+  'renders a multi_agent_v2 child from its subAgentActivity pair',
+  async () => {
+    const { cwd, env, errors, requests, rootPrompt } = await setupFixture(
+      true,
+      true,
+      false,
+      false,
+      false,
+      'v2'
+    )
+    session = new CodexSession(
+      'isolated-agents-v2',
+      null,
+      cwd,
+      {},
+      { env, requestTimeoutMs: 20000 }
+    )
+    await session.run(null)
+    const rootThreadId = session.getSessionId()!
+    await session.run(rootPrompt)
+    await vi.waitFor(() => expect(session!.willQueue).toBe(false), { timeout: 60000 })
+
+    // The card is minted by the `started` activity, in the v1 spawn shape.
+    const card = await vi.waitFor(
+      () => {
+        const block = session!
+          .getMessages()
+          .flatMap((message) => message.content)
+          .find((entry) => entry.type === 'tool_use' && entry.toolName === 'collab:spawnAgent')
+        expect(block).toBeDefined()
+        return block as { toolUseId: string; toolInput?: Record<string, unknown> }
+      },
+      { timeout: 60000, interval: 200 }
+    )
+    const childThreadId = (card.toolInput!.receiverThreadIds as string[])[0]
+    expect(childThreadId).toBeTruthy()
+    expect(childThreadId).not.toBe(rootThreadId)
+    expect(card.toolInput!.agentPath).toBe('/root/fixture_child')
+
+    // The child's own items arrive under it, and the terminal activity closes
+    // it with a task notification — both after the root's turn already ended.
+    const notification = await vi.waitFor(
+      () => {
+        const call = coreEvents.mock.calls.find(
+          ([channel]) => channel === 'session:task-notification'
+        )
+        expect(call).toBeDefined()
+        return (call![1] as [string, { taskId: string; toolUseId: string; status: string }])[1]
+      },
+      { timeout: 60000, interval: 200 }
+    )
+    expect(notification).toMatchObject({
+      taskId: childThreadId,
+      toolUseId: card.toolUseId,
+      status: 'completed'
+    })
+    const subagent = coreEvents.mock.calls
+      .filter(([channel]) => channel === 'session:subagent-message')
+      .map((call) => (call[1] as [string, { toolUseId: string; message: { id: string } }])[1])
+    expect(subagent.length).toBeGreaterThan(0)
+    expect(subagent.every((data) => data.toolUseId === card.toolUseId)).toBe(true)
+    expect(subagent.some((data) => data.message.id.includes(childThreadId))).toBe(true)
+    expect(
+      session
+        .getMessages()
+        .flatMap((message) => message.content)
+        .some((block) => block.type === 'tool_result' && block.toolUseId === card.toolUseId)
+    ).toBe(true)
+    expect(errors).toEqual([])
+    // `{"task_name":"/root/fixture_child"}` is all v2's spawn hands the model —
+    // no agent id at all, which is why the `started` activity is the ONLY place
+    // the child's thread id appears.
+    expect(JSON.stringify(requests)).toContain('task_name')
+
+    // Cold: the same pair rebuilds the same card and the same child transcript.
+    session.dispose()
+    session = undefined
+    const cold = await loadCodexHistory(rootThreadId, { cwd, env })
+    expect(Object.keys(cold.subagentMessages ?? {})).toEqual([card.toolUseId])
+    expect(cold.subagentMessages![card.toolUseId].length).toBeGreaterThan(0)
+    const service = new CodexService({ cwd, env })
+    try {
+      const child = (await service.readThread({ threadId: childThreadId, includeTurns: false }))
+        .thread
+      expect(child.parentThreadId).toBe(rootThreadId)
+      expect(child.threadSource).toBe('subagent')
+    } finally {
+      service.dispose()
+    }
   },
   180000
 )

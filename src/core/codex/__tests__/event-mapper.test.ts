@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { codexItemId, mapCodexDelta, mapCodexItem, type CodexMappedEvent } from '../event-mapper'
+import {
+  codexItemId,
+  mapCodexDelta,
+  mapCodexItem,
+  subAgentActivityResult,
+  type CodexMappedEvent
+} from '../event-mapper'
 import { selectCodexModel } from '../model-selection'
 import type { ThreadItem } from '../protocol/v2/ThreadItem'
 import type { Model } from '../protocol/v2/Model'
@@ -309,5 +315,160 @@ describe('Codex file-change patches', () => {
     expect(file.patch).toBe(
       ['--- /dev/null', '+++ b/sample.patch', '@@ -0,0 +1,2 @@', '+--- a/x', '++++ b/x'].join('\n')
     )
+  })
+})
+
+describe('Codex collab agent tool calls', () => {
+  const spawn = (overrides: Record<string, unknown> = {}, completed = true): CodexMappedEvent[] =>
+    mapCodexItem(
+      'root',
+      'turn',
+      {
+        type: 'collabAgentToolCall',
+        id: 'collab-1',
+        tool: 'spawnAgent',
+        status: 'completed',
+        senderThreadId: 'root',
+        receiverThreadIds: ['child-1'],
+        prompt: 'survey the tests',
+        model: 'gpt-mock',
+        reasoningEffort: 'high',
+        agentsStates: { 'child-1': { status: 'running', message: null } },
+        ...overrides
+      } as unknown as ThreadItem,
+      completed,
+      7
+    )
+
+  it('renders an in-progress spawn as a task tool_use with no result yet', () => {
+    const events = spawn({ status: 'inProgress', receiverThreadIds: [] }, false)
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({
+      kind: 'message',
+      message: {
+        id: codexItemId('root', 'turn', 'collab-1'),
+        content: [
+          {
+            type: 'tool_use',
+            toolName: 'collab:spawnAgent',
+            toolInput: { prompt: 'survey the tests', model: 'gpt-mock', receiverThreadIds: [] }
+          }
+        ]
+      }
+    })
+  })
+
+  it('summarises agentsStates on completion', () => {
+    const events = spawn({
+      agentsStates: {
+        'child-1': { status: 'completed', message: 'done surveying' },
+        'child-2': { status: 'running', message: null }
+      },
+      receiverThreadIds: ['child-1', 'child-2']
+    })
+    expect(events[1]).toMatchObject({
+      kind: 'toolResult',
+      toolUseId: codexItemId('root', 'turn', 'collab-1'),
+      isError: false
+    })
+    const result = (events[1] as Extract<CodexMappedEvent, { kind: 'toolResult' }>).result
+    expect(result).toContain('child-1: completed — done surveying')
+    expect(result).toContain('child-2: running')
+  })
+
+  it('marks a failed call and an errored agent as errors', () => {
+    expect(spawn({ status: 'failed', agentsStates: {}, receiverThreadIds: [] })[1]).toMatchObject({
+      kind: 'toolResult',
+      isError: true
+    })
+    expect(
+      spawn({ agentsStates: { 'child-1': { status: 'errored', message: 'boom' } } })[1]
+    ).toMatchObject({ kind: 'toolResult', isError: true })
+    expect(
+      spawn({ agentsStates: { 'child-1': { status: 'notFound', message: null } } })[1]
+    ).toMatchObject({ kind: 'toolResult', isError: true })
+  })
+
+  it('names every collab tool on the wire so the tool map can key off it', () => {
+    const wait = mapCodexItem(
+      'root',
+      'turn',
+      {
+        type: 'collabAgentToolCall',
+        id: 'collab-2',
+        tool: 'wait',
+        status: 'completed',
+        senderThreadId: 'root',
+        receiverThreadIds: ['child-1'],
+        prompt: null,
+        model: null,
+        reasoningEffort: null,
+        agentsStates: { 'child-1': { status: 'completed', message: null } }
+      } as unknown as ThreadItem,
+      true,
+      7
+    )
+    expect(wait[0]).toMatchObject({
+      message: { content: [{ type: 'tool_use', toolName: 'collab:wait' }] }
+    })
+  })
+})
+
+/**
+ * `multi_agent_v2` (the surface every v2-declaring model gets — `gpt-6-astra`
+ * and friends) does NOT emit a `collabAgentToolCall` for a spawn: that item
+ * goes to analytics only, and the transcript gets a `subAgentActivity` instead.
+ */
+describe('Codex sub-agent activity (multi_agent_v2)', () => {
+  const activity = (kind: string, id = 'call-1', completed = true): CodexMappedEvent[] =>
+    mapCodexItem(
+      'root',
+      'turn',
+      {
+        type: 'subAgentActivity',
+        id,
+        kind,
+        agentThreadId: 'child-1',
+        agentPath: '/root/fixture_child'
+      } as unknown as ThreadItem,
+      completed,
+      7
+    )
+
+  it('mints the spawn card from a started activity, in the v1 shape', () => {
+    expect(activity('started')).toEqual([
+      {
+        kind: 'message',
+        message: {
+          id: codexItemId('root', 'turn', 'call-1'),
+          role: 'assistant',
+          timestamp: 7,
+          content: [
+            {
+              type: 'tool_use',
+              toolUseId: codexItemId('root', 'turn', 'call-1'),
+              toolName: 'collab:spawnAgent',
+              toolInput: {
+                agentPath: '/root/fixture_child',
+                receiverThreadIds: ['child-1'],
+                agentsStates: {}
+              }
+            }
+          ]
+        }
+      }
+    ])
+  })
+
+  it('mints nothing for the later activities — their ids are their own', () => {
+    for (const kind of ['interacted', 'interrupted', 'completed'])
+      expect(activity(kind, 'subagent-completed-turn')).toEqual([])
+  })
+
+  it('names the one-line result each terminal kind writes on the spawn card', () => {
+    expect(subAgentActivityResult('completed')).toBe('Agent completed.')
+    expect(subAgentActivityResult('interrupted')).toBe('Agent was interrupted.')
+    expect(subAgentActivityResult('started')).toBeUndefined()
+    expect(subAgentActivityResult('interacted')).toBeUndefined()
   })
 })

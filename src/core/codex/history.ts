@@ -2,7 +2,7 @@ import { homedir } from 'node:os'
 import { CodexService } from './CodexService'
 import type { CodexClientOptions } from './CodexAppServerClient'
 import { codexBinaryAvailable } from './codex-locate'
-import { mapCodexItem } from './event-mapper'
+import { codexItemId, mapCodexItem, subAgentActivityResult } from './event-mapper'
 import { assertCodexProvider } from './model-selection'
 import type { SessionInfo, ChatMessage, ForkAnchorResult } from '../../shared/types'
 import type { SessionHistoryResult } from '../services/session-history'
@@ -19,6 +19,16 @@ type CodexReadOptions = Pick<CodexClientOptions, 'cwd' | 'env'>
 
 /** How many metadata-only reads the fork sweep keeps on the wire at once. */
 const FORK_READ_CONCURRENCY = 4
+
+/**
+ * How many spawned child threads one cold read will reconstruct.
+ *
+ * A root can spawn as many agents as the native depth/thread limits allow, and
+ * each one is a full `thread/read` on the same process. The cap bounds a cold
+ * open of a heavily parallel session; the excess simply has no transcript, the
+ * same as a child whose thread the binary no longer resolves.
+ */
+const CHILD_READ_LIMIT = 16
 
 /** Record a listed thread's identity and project it as one sidebar row. */
 function adoptThread(thread: Thread): SessionInfo {
@@ -152,6 +162,8 @@ export async function loadCodexHistory(
   throughTurnId?: string
 ): Promise<SessionHistoryResult> {
   const service = new CodexService(options)
+  /** Child thread id → the parent `collabAgentToolCall` tool_use it renders under. */
+  const childCards = new Map<string, string>()
   try {
     const thread = await service.history(threadId)
     assertCodexProvider(thread.modelProvider)
@@ -164,6 +176,33 @@ export async function loadCodexHistory(
     const messages = new Map<string, ChatMessage>()
     for (const turn of turns) {
       for (const item of turn.items) {
+        // Native children (ADR-066 slice F). Only `spawnAgent` mints a thread,
+        // so it is the only call that owns a transcript; the later `wait` /
+        // `closeAgent` calls name the SAME children and must not claim them.
+        if (item.type === 'collabAgentToolCall' && item.tool === 'spawnAgent')
+          for (const child of item.receiverThreadIds)
+            if (!childCards.has(child))
+              childCards.set(child, codexItemId(thread.id, turn.id, item.id))
+        // The v2 surface's equivalent pair: `started` is the card, and a
+        // terminal activity — whose item id is its own, never the spawn call's
+        // — closes it through `agentThreadId`.
+        if (item.type === 'subAgentActivity') {
+          if (item.kind === 'started') {
+            if (!childCards.has(item.agentThreadId))
+              childCards.set(item.agentThreadId, codexItemId(thread.id, turn.id, item.id))
+          } else {
+            const card = childCards.get(item.agentThreadId)
+            const result = subAgentActivityResult(item.kind)
+            const message = card ? messages.get(card) : undefined
+            if (card && message && result !== undefined)
+              message.content = [
+                ...message.content.filter(
+                  (block) => block.type !== 'tool_result' || block.toolUseId !== card
+                ),
+                { type: 'tool_result', toolUseId: card, toolResult: result, isError: false }
+              ]
+          }
+        }
         for (const event of mapCodexItem(
           thread.id,
           turn.id,
@@ -197,6 +236,7 @@ export async function loadCodexHistory(
       customTitle: thread.name,
       statusLine: null,
       agentIdToToolUseId: {},
+      subagentMessages: await readCodexChildren(service, childCards),
       warnings: turns.some((turn) => turn.status === 'interrupted')
         ? [
             'Native interrupted-tool history may omit unresolved work. A durable presentation supplement is not implemented.'
@@ -206,4 +246,57 @@ export async function loadCodexHistory(
   } finally {
     service.dispose()
   }
+}
+
+/**
+ * The transcripts of the child threads a cold-read root spawned, by the parent
+ * card's tool_use id.
+ *
+ * DEPTH ONE, deliberately: a grandchild's messages belong to ITS parent's card,
+ * which lives inside a subagent transcript the renderer does not nest, and the
+ * live path refuses the same shape for the same reason. One unreadable child
+ * (deleted, archived, or refused by the binary) costs that child's transcript
+ * and nothing else — the root's own history is what the user asked for.
+ */
+async function readCodexChildren(
+  service: CodexService,
+  childCards: Map<string, string>
+): Promise<Record<string, ChatMessage[]>> {
+  const transcripts: Record<string, ChatMessage[]> = {}
+  for (const [childThreadId, card] of [...childCards].slice(0, CHILD_READ_LIMIT)) {
+    const child = await service.history(childThreadId).catch(() => undefined)
+    if (!child) continue
+    const messages = new Map<string, ChatMessage>()
+    for (const turn of child.turns) {
+      for (const item of turn.items) {
+        for (const event of mapCodexItem(
+          child.id,
+          turn.id,
+          item,
+          true,
+          (turn.startedAt ?? child.createdAt) * 1000
+        )) {
+          if (event.kind === 'message') messages.set(event.message.id, event.message)
+          if (event.kind === 'toolResult') {
+            const message = messages.get(event.toolUseId)
+            if (message)
+              message.content = [
+                ...message.content.filter(
+                  (block) => block.type !== 'tool_result' || block.toolUseId !== event.toolUseId
+                ),
+                {
+                  type: 'tool_result',
+                  toolUseId: event.toolUseId,
+                  toolResult: event.result,
+                  isError: event.isError,
+                  ...(event.fileDiffs ? { fileDiffs: event.fileDiffs } : {})
+                }
+              ]
+          }
+        }
+      }
+    }
+    if (messages.size) transcripts[card] = [...(transcripts[card] ?? []), ...messages.values()]
+  }
+  return transcripts
 }

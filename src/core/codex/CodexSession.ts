@@ -11,7 +11,8 @@ import type {
   QueuedItem,
   SessionStatus,
   ChatMessage,
-  MeteringSnapshot
+  MeteringSnapshot,
+  TaskNotification
 } from '../../shared/types'
 import type {
   CodexApprovalDecision,
@@ -37,6 +38,7 @@ import {
 import { persistAllowSuggestions } from '../opencode/permission-compiler'
 import type { ThreadSettings } from './protocol/v2/ThreadSettings'
 import type { ThreadTokenUsage } from './protocol/v2/ThreadTokenUsage'
+import type { TokenUsageBreakdown } from './protocol/v2/TokenUsageBreakdown'
 import { resolveCodexCapabilities } from '../../shared/model-capabilities'
 import { CodexClient } from './CodexClient'
 import { CodexTransportError, type CodexClientOptions } from './CodexAppServerClient'
@@ -51,7 +53,13 @@ import type { ItemGuardianApprovalReviewCompletedNotification } from './protocol
 import type { FileChangeRequestApprovalParams } from './protocol/v2/FileChangeRequestApprovalParams'
 import type { ToolRequestUserInputParams } from './protocol/v2/ToolRequestUserInputParams'
 import { assertCodexProvider, selectCodexModel } from './model-selection'
-import { codexItemId, mapCodexDelta, mapCodexItem, type CodexMappedEvent } from './event-mapper'
+import {
+  codexItemId,
+  mapCodexDelta,
+  mapCodexItem,
+  subAgentActivityResult,
+  type CodexMappedEvent
+} from './event-mapper'
 import {
   CODEX_HOSTED_TOOL_NAMES,
   codexDynamicToolSpecs,
@@ -256,7 +264,56 @@ type Pending = {
   settle: (value?: unknown) => void
 }
 
-/** Inline images are the only attachment Codex takes on either turn transport. */
+/**
+ * One native child thread this root spawned through its collab tools, and the
+ * parent `tool_use` its transcript hangs off (ADR-066 slice F).
+ *
+ * Children are NOT sessions: the user never drives one directly, so nothing
+ * here is a routing id or a queue. The app-server attaches every initialized
+ * connection to every thread the manager creates
+ * (`app-server/src/lib.rs` ~1174 `try_attach_thread_listener`), which is the
+ * only reason a child's notifications reach this client at all.
+ */
+type CodexChild = {
+  /** The `collabAgentToolCall` tool_use id every subagent event is keyed by. */
+  parentToolUseId: string
+  /** The child's own active turn, for `turn/interrupt`. Null when idle. */
+  turnId: string | null
+  /** The child's last agent message, which becomes the task notification's summary. */
+  summary: string
+  /** Stable observation timestamps for the child's items, by mapped message id. */
+  timestamps: Map<string, number>
+  startedAt: number
+  toolUses: number
+  /** The child thread's own cumulative token totals, added to the root's meter. */
+  usage: TokenUsageBreakdown | null
+  /** A terminal `session:task-notification` is emitted exactly once. */
+  notified: boolean
+}
+
+/** One notification for a thread that is not yet known to be a child. */
+type HeldChildNotification = { method: string; value: Record<string, unknown> }
+
+/**
+ * How many notifications from not-yet-known threads are held while a turn is
+ * running. A spawn's `item/completed` (which carries `receiverThreadIds`) can
+ * lose the race against the child's first notification, so a short hold is the
+ * difference between a complete child transcript and a truncated one. The cap
+ * is what keeps a misbehaving or unrelated thread from growing this without
+ * bound; the hold is dropped wholesale when the turn ends.
+ */
+const CHILD_HOLD_LIMIT = 200
+
+/** Agent states that end a child's card, mapped onto the neutral task status. */
+const CHILD_TERMINAL_STATUS: Record<string, TaskNotification['status']> = {
+  completed: 'completed',
+  errored: 'failed',
+  notFound: 'failed',
+  shutdown: 'stopped',
+  interrupted: 'stopped'
+}
+
+/** Inline images are the only attachment Codex takes on either transport. */
 type CodexAttachments = Array<{ mediaType: string; base64Data: string }>
 
 /**
@@ -387,6 +444,15 @@ export class CodexSession extends BaseSession {
   private ambiguousSteers = new Map<string, AmbiguousSteer>()
   /** Serializes queue boundaries — see {@link queueBoundary}. */
   private flushChain: Promise<void> = Promise.resolve()
+  /** Native child threads by their own thread id (ADR-066 slice F). */
+  private children = new Map<string, CodexChild>()
+  /** Notifications from threads not yet bound to a card, by thread id. */
+  private childHold = new Map<string, HeldChildNotification[]>()
+  private heldChildCount = 0
+  /** One "nested agents are not rendered" error per session, not per spawn. */
+  private nestedAgentWarned = false
+  /** The root's own last token totals — the base every child's usage adds to. */
+  private rootUsage: ThreadTokenUsage | null = null
   private output = new Map<string, string>()
   private bashGate = new BashStreamGate((toolUseId, output) =>
     this.send('session:bash-output', { toolUseId, output })
@@ -928,6 +994,15 @@ export class CodexSession extends BaseSession {
       return
     }
     if (this.willQueue) this.interruptRequested = true
+    // A parent interrupt does NOT stop the children it spawned: `Op::Interrupt`
+    // aborts the tasks of ONE session (`core/src/session/mod.rs`
+    // `interrupt_task` -> `abort_all_tasks`), and the collab handlers have no
+    // cascade. Each running child therefore needs its own `turn/interrupt`,
+    // which the app-server accepts for any thread it can load
+    // (`turn_processor.rs` `turn_interrupt_inner`). Fire-and-forget: that
+    // request only answers once the child's `TurnAborted` arrives, and the
+    // human's Stop must not wait on a child that ignores it.
+    this.interruptChildren()
     if (this.threadId && this.turnId && !this.closed)
       try {
         this.interruptRequested = false
@@ -961,6 +1036,14 @@ export class CodexSession extends BaseSession {
     this.output.clear()
     this.heldDenials.clear()
     this.ambiguousSteers.clear()
+    // The process that hosted them is going, so every child goes with it: the
+    // app-server owns every spawned thread in-process, and killing it kills
+    // them. Say so on each open card rather than leaving a spinner forever.
+    for (const [childThreadId, child] of this.children)
+      this.finishChild(childThreadId, child, 'stopped')
+    this.children.clear()
+    this.childHold.clear()
+    this.heldChildCount = 0
     for (const pending of [...this.pending.values()]) pending.settle()
     this.clearGuardianOverrides()
     // Nothing can consume a dispatch result any more: stop the turns, then
@@ -974,6 +1057,19 @@ export class CodexSession extends BaseSession {
     this.recallQueuedOnEngineLoss()
     if (error && error.code !== 'disposed') this.send('session:error', error.message)
     this.status('disconnected')
+  }
+
+  /** `turn/interrupt` every child that is mid-turn. Best effort, never awaited. */
+  private interruptChildren(): void {
+    if (this.closed) return
+    for (const [childThreadId, child] of this.children) {
+      const turnId = child.turnId
+      if (!turnId) continue
+      child.turnId = null
+      void this.client
+        .request('turn/interrupt', { threadId: childThreadId, turnId })
+        .catch(() => {})
+    }
   }
 
   /** Stop every dispatch this session still has in flight, scoped to it. */
@@ -1001,7 +1097,12 @@ export class CodexSession extends BaseSession {
   }
 
   private notification(method: string, value: unknown): void {
-    if (this.closed || !record(value) || value.threadId !== this.threadId || !this.threadId) return
+    if (this.closed || !record(value) || !this.threadId) return
+    // Every thread this process creates is attached to this one connection, so
+    // a foreign `threadId` is either one of this root's own children or nothing
+    // to do with us. Children route into the subagent channels; the rest are
+    // still dropped, exactly as before.
+    if (value.threadId !== this.threadId) return this.childNotification(method, value)
     if (method === 'turn/started' && record(value.turn) && typeof value.turn.id === 'string') {
       if (this.endedTurns.has(value.turn.id)) return
       this.turnId = value.turn.id
@@ -1029,39 +1130,8 @@ export class CodexSession extends BaseSession {
       })
       this.status(this.busy ? 'running' : 'idle')
     } else if (method === 'thread/tokenUsage/updated' && record(value.tokenUsage)) {
-      const usage = value.tokenUsage as ThreadTokenUsage
-      if (usage.total && usage.last)
-        this.send('session:metering', {
-          engineId: 'codex',
-          vendorId: this.native?.modelProvider ?? 'openai',
-          billingType: this.account?.billingType ?? 'unknown',
-          tokens: {
-            input: usage.total.inputTokens,
-            output: usage.total.outputTokens,
-            cacheRead: usage.total.cachedInputTokens,
-            cacheWrite: usage.total.cacheWriteInputTokens,
-            total: usage.total.totalTokens
-          },
-          equivalentCostUsd: null,
-          contextWindow: { used: usage.last.totalTokens, size: usage.modelContextWindow ?? 0 }
-        } satisfies MeteringSnapshot)
-      if (usage.total && usage.last)
-        this.send('session:status-line', {
-          totalCostUsd: 0,
-          totalDurationMs: 0,
-          totalApiDurationMs: 0,
-          totalInputTokens: usage.total.inputTokens,
-          totalOutputTokens: usage.total.outputTokens,
-          cachedTokens: usage.total.cachedInputTokens,
-          totalTokens: usage.total.totalTokens,
-          contextWindowSize: usage.modelContextWindow ?? 0,
-          usedPercentage: usage.modelContextWindow
-            ? (usage.last.totalTokens / usage.modelContextWindow) * 100
-            : null,
-          remainingPercentage: usage.modelContextWindow
-            ? Math.max(0, 100 - (usage.last.totalTokens / usage.modelContextWindow) * 100)
-            : null
-        })
+      this.rootUsage = value.tokenUsage as ThreadTokenUsage
+      this.emitMetering()
     } else if (method === 'turn/completed' && record(value.turn)) {
       this.finishTurn(value.turn as Turn)
     } else if (
@@ -1097,15 +1167,25 @@ export class CodexSession extends BaseSession {
       )
       // The breaker ABORTS the turn. Without an error the transcript just stops.
       if (GUARDIAN_BREAKER_WARNING.test(message)) this.send('session:error', text)
-    } else if (typeof value.turnId === 'string' && !this.endedTurns.has(value.turnId)) {
+    } else if (typeof value.turnId === 'string') {
+      const ended = this.endedTurns.has(value.turnId)
       if (method === 'item/started' || method === 'item/completed') {
         if (!record(value.item) || typeof value.item.id !== 'string') return
-        this.item(value.turnId, value.item as ThreadItem, method === 'item/completed')
+        const item = value.item as ThreadItem
+        // A child spawned without a blocking wait OUTLIVES the turn that
+        // spawned it, and its completion is emitted raw into that same ended
+        // turn (`core/src/agent/control.rs:244-280` stamps the parent turn id
+        // whatever its state). Dropping it would leave the card spinning for
+        // good, so sub-agent activity — and only that — is still honoured after
+        // the turn's authoritative replay.
+        if (ended && item.type !== 'subAgentActivity') return
+        this.item(value.turnId, item, method === 'item/completed')
         // ADR-053: a completed item is this engine's observable sub-turn
         // boundary — the moment a held message can join the running turn.
-        // Deltas are not (a steer between two tokens is not a boundary).
-        if (method === 'item/completed') this.queueBoundary()
-      } else if (typeof value.itemId === 'string' && typeof value.delta === 'string') {
+        // Deltas are not (a steer between two tokens is not a boundary). An
+        // ENDED turn has no boundary left to offer.
+        if (method === 'item/completed' && !ended) this.queueBoundary()
+      } else if (!ended && typeof value.itemId === 'string' && typeof value.delta === 'string') {
         for (const event of mapCodexDelta(method, {
           threadId: this.threadId,
           turnId: value.turnId,
@@ -1132,6 +1212,247 @@ export class CodexSession extends BaseSession {
         }
       }
     }
+  }
+
+  /**
+   * The root's cumulative usage PLUS every child's, on the one meter the user
+   * looks at. The two never double count: each thread emits its own
+   * `thread/tokenUsage/updated` carrying its own cumulative totals for THAT
+   * thread only (`app-server/src/bespoke_event_handling.rs`
+   * `handle_token_count_event` stamps `conversation_id`), so summing the latest
+   * snapshot per thread id is exactly the work this session paid for.
+   *
+   * The CONTEXT WINDOW stays the root's alone: a child has its own window, and
+   * folding it in would misreport how close this thread is to compaction.
+   */
+  private emitMetering(): void {
+    const usage = this.rootUsage
+    if (!usage?.total || !usage.last) return
+    const totals = [usage.total, ...[...this.children.values()].flatMap((c) => c.usage ?? [])]
+    const sum = (pick: (entry: TokenUsageBreakdown) => number): number =>
+      totals.reduce((carry, entry) => carry + pick(entry), 0)
+    const input = sum((entry) => entry.inputTokens)
+    const output = sum((entry) => entry.outputTokens)
+    const cacheRead = sum((entry) => entry.cachedInputTokens)
+    const cacheWrite = sum((entry) => entry.cacheWriteInputTokens)
+    const total = sum((entry) => entry.totalTokens)
+    this.send('session:metering', {
+      engineId: 'codex',
+      vendorId: this.native?.modelProvider ?? 'openai',
+      billingType: this.account?.billingType ?? 'unknown',
+      tokens: { input, output, cacheRead, cacheWrite, total },
+      equivalentCostUsd: null,
+      contextWindow: { used: usage.last.totalTokens, size: usage.modelContextWindow ?? 0 }
+    } satisfies MeteringSnapshot)
+    this.send('session:status-line', {
+      totalCostUsd: 0,
+      totalDurationMs: 0,
+      totalApiDurationMs: 0,
+      totalInputTokens: input,
+      totalOutputTokens: output,
+      cachedTokens: cacheRead,
+      totalTokens: total,
+      contextWindowSize: usage.modelContextWindow ?? 0,
+      usedPercentage: usage.modelContextWindow
+        ? (usage.last.totalTokens / usage.modelContextWindow) * 100
+        : null,
+      remainingPercentage: usage.modelContextWindow
+        ? Math.max(0, 100 - (usage.last.totalTokens / usage.modelContextWindow) * 100)
+        : null
+    })
+  }
+
+  /**
+   * A notification whose `threadId` is not this root's. It is a CHILD's, or it
+   * is nothing to do with us.
+   *
+   * A child becomes known only when its spawning `collabAgentToolCall`
+   * completes — that is the first (and, at 0.154.0, the ONLY) place its thread
+   * id appears: the app-server emits `thread/started` on `thread/start`,
+   * `thread/fork` and detached review alone, never for a spawned agent
+   * (`ServerNotification::ThreadStarted` has exactly three emit sites in
+   * `app-server/src/request_processors/`). The child is already running by
+   * then, so anything it said in between is HELD and replayed on registration,
+   * the same shape the guardian denials use.
+   */
+  private childNotification(method: string, value: Record<string, unknown>): void {
+    const threadId = value.threadId
+    if (typeof threadId !== 'string' || !this.threadId) return
+    const child = this.children.get(threadId)
+    if (child) return this.routeChild(child, threadId, method, value)
+    // Hold only inside a live turn. Outside one there is no spawn in flight
+    // that could bind this thread, so holding would just be a leak.
+    if (!this.busy || this.heldChildCount >= CHILD_HOLD_LIMIT) return
+    const held = this.childHold.get(threadId) ?? []
+    held.push({ method, value })
+    this.childHold.set(threadId, held)
+    this.heldChildCount++
+  }
+
+  /** Bind one spawned thread to the card its transcript belongs under. */
+  private registerChild(childThreadId: string, parentToolUseId: string): void {
+    if (this.children.has(childThreadId) || childThreadId === this.threadId) return
+    const child: CodexChild = {
+      parentToolUseId,
+      turnId: null,
+      summary: '',
+      timestamps: new Map(),
+      startedAt: Date.now(),
+      toolUses: 0,
+      usage: null,
+      notified: false
+    }
+    this.children.set(childThreadId, child)
+    const held = this.childHold.get(childThreadId) ?? []
+    this.heldChildCount -= held.length
+    this.childHold.delete(childThreadId)
+    for (const entry of held) this.routeChild(child, childThreadId, entry.method, entry.value)
+  }
+
+  /** One known child's notification, on the engine-neutral subagent channels. */
+  private routeChild(
+    child: CodexChild,
+    childThreadId: string,
+    method: string,
+    value: Record<string, unknown>
+  ): void {
+    if (method === 'turn/started' && record(value.turn) && typeof value.turn.id === 'string') {
+      child.turnId = value.turn.id
+      return
+    }
+    if (method === 'turn/completed' && record(value.turn)) {
+      const turn = value.turn as Turn
+      // The child's authoritative replay, exactly as the root's own turn end is
+      // replayed — a corrected item reaches the transcript either way.
+      for (const item of turn.items ?? []) this.childItem(child, childThreadId, turn.id, item, true)
+      if (child.turnId === turn.id) child.turnId = null
+      // Nothing can answer a question from a turn that ended.
+      this.client.abortServerRequests(childThreadId, turn.id)
+      for (const pending of [...this.pending.values()])
+        if (pending.turnId === turn.id) pending.settle()
+      return
+    }
+    if (method === 'thread/tokenUsage/updated' && record(value.tokenUsage)) {
+      child.usage = (value.tokenUsage as ThreadTokenUsage).total
+      this.emitMetering()
+      return
+    }
+    if (typeof value.turnId !== 'string') return
+    const turnId = value.turnId
+    if (method === 'item/started' || method === 'item/completed') {
+      if (!record(value.item) || typeof value.item.id !== 'string') return
+      this.childItem(
+        child,
+        childThreadId,
+        turnId,
+        value.item as ThreadItem,
+        method === 'item/completed'
+      )
+      return
+    }
+    if (typeof value.itemId !== 'string' || typeof value.delta !== 'string') return
+    for (const event of mapCodexDelta(method, {
+      threadId: childThreadId,
+      turnId,
+      itemId: value.itemId,
+      delta: value.delta
+    }))
+      // `commandDelta` is deliberately dropped: `session:bash-output` is keyed
+      // by the tool_use id of a block in the SESSION's transcript, and a child's
+      // command block lives in the subagent transcript instead. The command's
+      // aggregated output still lands with its `tool_result`.
+      if (event.kind === 'stream')
+        this.send('session:subagent-stream', {
+          toolUseId: child.parentToolUseId,
+          type: event.delta.type,
+          text: event.delta.text
+        })
+  }
+
+  /** One child thread item, mapped under its parent card's id. */
+  private childItem(
+    child: CodexChild,
+    childThreadId: string,
+    turnId: string,
+    item: ThreadItem,
+    completed: boolean
+  ): void {
+    const id = codexItemId(childThreadId, turnId, item.id)
+    const fingerprint = completed
+      ? createHash('sha256').update(JSON.stringify(item)).digest('hex')
+      : undefined
+    // The same map the root's items use: ids carry the thread, so they cannot
+    // collide, and a replayed child item is deduped on the same rule.
+    if (this.completedItems.get(id) === fingerprint && fingerprint !== undefined) return
+    if (fingerprint !== undefined) this.completedItems.set(id, fingerprint)
+    // A child that spawns its OWN child is refused rather than flattened: the
+    // grandchild's transcript would have to interleave with its parent's under
+    // one card, which reads as one agent contradicting itself. The native depth
+    // limit already allows this shape, so say so once and drop the rest — the
+    // grandchild is simply an unknown thread from here on.
+    if (
+      (item.type === 'collabAgentToolCall' && item.tool === 'spawnAgent') ||
+      (item.type === 'subAgentActivity' && item.kind === 'started')
+    ) {
+      if (!this.nestedAgentWarned) {
+        this.nestedAgentWarned = true
+        this.send(
+          'session:error',
+          'A Codex agent spawned an agent of its own. Nested agents run natively but their transcripts are not shown.'
+        )
+      }
+    }
+    const timestamp = child.timestamps.get(id) ?? Date.now()
+    child.timestamps.set(id, timestamp)
+    for (const event of mapCodexItem(childThreadId, turnId, item, completed, timestamp)) {
+      if (event.kind === 'message') {
+        const text = event.message.content.find((block) => block.type === 'text')
+        if (item.type === 'agentMessage' && text?.type === 'text') child.summary = text.text
+        if (event.message.content.some((block) => block.type === 'tool_use')) child.toolUses++
+        this.send('session:subagent-message', {
+          toolUseId: child.parentToolUseId,
+          message: event.message
+        })
+      } else if (event.kind === 'toolResult')
+        this.send('session:subagent-tool-result', {
+          toolUseId: child.parentToolUseId,
+          toolResultToolUseId: event.toolUseId,
+          result: event.result,
+          isError: event.isError,
+          ...(event.fileDiffs ? { fileDiffs: event.fileDiffs } : {})
+        })
+    }
+  }
+
+  /**
+   * Close one child's card. Emitted ONCE per child, on the first terminal state
+   * a collab call reports for it (`agentsStates`) or on teardown — never on the
+   * child's own `turn/completed`, which only means "idle until the next
+   * `send_input`" and would append a notification per turn.
+   */
+  private finishChild(
+    childThreadId: string,
+    child: CodexChild,
+    status: TaskNotification['status']
+  ): void {
+    if (child.notified) return
+    child.notified = true
+    this.send('session:task-notification', {
+      taskId: childThreadId,
+      toolUseId: child.parentToolUseId,
+      status,
+      outputFile: '',
+      summary: child.summary.slice(0, 100),
+      ...(child.usage
+        ? {
+            usage: {
+              totalTokens: child.usage.totalTokens,
+              toolUses: child.toolUses,
+              durationMs: Date.now() - child.startedAt
+            }
+          }
+        : {})
+    } satisfies TaskNotification)
   }
 
   /**
@@ -1266,6 +1587,10 @@ export class CodexSession extends BaseSession {
       this.status('idle')
       this.resetInactivityTimer()
     }
+    // Nothing still unbound can ever be bound: a spawn's `item/completed` is
+    // what binds a child, and this turn's items are final.
+    this.childHold.clear()
+    this.heldChildCount = 0
     // Turn end is the other boundary, and the only place an ambiguous steer can
     // be settled: the turn's history is now final.
     this.queueBoundary(turn.id)
@@ -1282,6 +1607,46 @@ export class CodexSession extends BaseSession {
     )
       return
     if (fingerprint !== undefined) this.completedItems.set(id, fingerprint)
+    if (item.type === 'collabAgentToolCall') {
+      // `spawn_agent` is the ONLY collab call that mints a thread, so it is the
+      // only one that binds a card: `wait`/`sendInput`/`closeAgent` name
+      // children that already belong to an earlier spawn's transcript, and
+      // rebinding them would split one agent's messages across two cards.
+      if (item.tool === 'spawnAgent')
+        for (const childThreadId of item.receiverThreadIds) this.registerChild(childThreadId, id)
+      // EVERY collab call carries the current `agentsStates`, which is where a
+      // child's terminal status actually shows up (`wait_agent` reporting
+      // `completed`, `close_agent` reporting `shutdown`).
+      for (const [childThreadId, state] of Object.entries(item.agentsStates ?? {})) {
+        const child = this.children.get(childThreadId)
+        const terminal = state?.status ? CHILD_TERMINAL_STATUS[state.status] : undefined
+        if (child && terminal) this.finishChild(childThreadId, child, terminal)
+      }
+    }
+    // The v2 surface's spawn/finish signal. `started` mints the card and binds
+    // the child; every LATER activity carries its own item id (the call id of
+    // whatever tool raised it, or a minted `subagent-completed-<turn>`), so the
+    // card it belongs to can only be found through `agentThreadId`.
+    if (item.type === 'subAgentActivity') {
+      if (item.kind === 'started') this.registerChild(item.agentThreadId, id)
+      else if (completed) {
+        const child = this.children.get(item.agentThreadId)
+        const result = subAgentActivityResult(item.kind)
+        if (child && result !== undefined) {
+          this.dispatch({
+            kind: 'toolResult',
+            toolUseId: child.parentToolUseId,
+            result,
+            isError: false
+          })
+          this.finishChild(
+            item.agentThreadId,
+            child,
+            item.kind === 'completed' ? 'completed' : 'stopped'
+          )
+        }
+      }
+    }
     const timestamp =
       this.messageHistory.find((message) => message.id === id)?.timestamp ?? Date.now()
     for (const event of mapCodexItem(this.threadId!, turnId, item, completed, timestamp))
@@ -1592,19 +1957,32 @@ export class CodexSession extends BaseSession {
     value: unknown,
     context: Parameters<NonNullable<CodexClientOptions['onServerRequest']>>[2]
   ): Promise<unknown> {
+    // A CHILD's approval is the human's to answer too: the child runs in this
+    // root's process on this root's connection, and under `auto` nothing
+    // reaches here at all (the native reviewer answers first) — so what does
+    // arrive is precisely what was escalated, whoever raised it. The owning
+    // turn is then the child's own, which the root's `turnId`/`endedTurns`
+    // know nothing about.
+    const child =
+      record(value) && typeof value.threadId === 'string' && value.threadId !== this.threadId
+        ? this.children.get(value.threadId)
+        : undefined
+    const ownThread = record(value) && value.threadId === this.threadId
     if (
       this.closed ||
       context.signal.aborted ||
       !record(value) ||
-      value.threadId !== this.threadId ||
+      (!ownThread && !child) ||
       typeof value.turnId !== 'string' ||
-      value.turnId !== this.turnId ||
       typeof value.itemId !== 'string' ||
-      this.endedTurns.has(value.turnId)
+      (child
+        ? child.turnId !== null && child.turnId !== value.turnId
+        : value.turnId !== this.turnId || this.endedTurns.has(value.turnId))
     )
       return Promise.reject(new Error('Codex request has no live owning root turn'))
+    const threadId = value.threadId as string
     const requestId = this.approvalRequestId(
-      codexItemId(this.threadId!, value.turnId, value.itemId),
+      codexItemId(threadId, value.turnId, value.itemId),
       context.id
     )
     if (this.pending.has(requestId)) return Promise.reject(new Error('Duplicate Codex approval'))
@@ -1620,7 +1998,13 @@ export class CodexSession extends BaseSession {
     let gated: Gated[] | undefined
     const card: PendingApproval = {
       requestId,
-      toolUseId: codexItemId(this.threadId!, value.turnId, value.itemId),
+      // The CHILD item's own id when a child raised it. Nothing in the
+      // session's own transcript carries that id (the child's blocks live in
+      // `subagentMessages`), so `useUnmatchedApprovals` finds no match and the
+      // card floats — actionable, just not inline: `SubagentMessages` has no
+      // approval binding of its own, and giving it one is a renderer change
+      // this slice does not own.
+      toolUseId: codexItemId(threadId, value.turnId, value.itemId),
       toolName: '',
       input: {}
     }

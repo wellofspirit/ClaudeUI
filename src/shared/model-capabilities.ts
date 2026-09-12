@@ -507,7 +507,15 @@ export const CODEX_ENGINE_CAPABILITIES: EngineCapabilities = {
   // and the MCP UI is `engineId === 'claude'` only.
   hostedMcp: true,
   backgroundTasks: false,
-  subagents: false,
+  // Native children (ADR-066 slice F). Codex's stock `multi_agent_v1` tools
+  // spawn child THREADS in the root's own process; the app-server attaches
+  // every initialized connection to every thread it creates, so this client
+  // sees each child's items, deltas and approval requests on the same
+  // connection and renders them as the spawning call's subagent transcript.
+  // True on BOTH paths, which is what ADR-030 asks before the flag goes up:
+  // live (CodexSession's child routing) and cold (`loadCodexHistory` reads each
+  // child thread back under the same parent tool_use id).
+  subagents: true,
   // Plan mode is ClaudeUI's own read-only autonomy, enforced by the shared
   // permission engine over `untrusted` + a readOnly native sandbox (ADR-066).
   plan: true,

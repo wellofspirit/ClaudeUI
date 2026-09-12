@@ -1160,6 +1160,13 @@ interface SessionAPI {
     statusLine: StatusLineData | null
     taskPrompts: Record<string, string>
     warnings: string[]
+    /**
+     * Subagent transcripts the reader already resolved, by PARENT tool_use id.
+     * Codex's native children are threads on the same connection, so its reader
+     * returns them inline; Claude's live in per-agent JSONL files and are
+     * fetched separately through {@link loadSubagentHistory}.
+     */
+    subagentMessages?: Record<string, ChatMessage[]>
   }>
   loadSubagentHistory(
     sessionId: string,

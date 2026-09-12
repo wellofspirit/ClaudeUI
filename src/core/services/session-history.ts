@@ -713,6 +713,17 @@ export interface SessionHistoryResult {
   /** Maps agentId → toolUseId for subagent JSONL lookup */
   agentIdToToolUseId: Record<string, string>
   /**
+   * Subagent transcripts the reader already has in hand, by the PARENT
+   * `tool_use` id — the same key `session:subagent-message` uses live.
+   *
+   * Claude leaves this undefined: its subagent transcripts are separate JSONL
+   * files the Sidebar fetches per `agentIdToToolUseId` entry. Codex has no
+   * sidecar — a child is a native THREAD read over the same connection as the
+   * parent — so its reader returns them inline instead of inventing a second
+   * round trip that would cost another engine process (ADR-066 slice F).
+   */
+  subagentMessages?: Record<string, ChatMessage[]>
+  /**
    * Warnings worth resurfacing when the session is reopened — currently the
    * model_refusal_fallback / model_fallback system entries (the model swap is
    * sticky for the session, so the user should know which model answered).

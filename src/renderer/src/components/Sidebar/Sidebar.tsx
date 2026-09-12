@@ -384,7 +384,10 @@ export function Sidebar({
         history.messages,
         info.cwd,
         history.taskNotifications,
-        undefined,
+        // Codex's reader returns the child threads' transcripts inline (they
+        // are native THREADS on the same connection, not JSONL sidecars), so
+        // there is no second fetch to make here as there is for Claude.
+        history.subagentMessages,
         history.statusLine,
         history.warnings
       )

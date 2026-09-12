@@ -2,10 +2,35 @@ import type { ChatMessage, ContentBlock, FileDiff, StreamDelta } from '../../sha
 import { isImageMediaType } from '../../shared/types'
 import type { PatchChangeKind } from './protocol/v2/PatchChangeKind'
 import type { ThreadItem } from './protocol/v2/ThreadItem'
+import type { SubAgentActivityKind } from './protocol/v2/SubAgentActivityKind'
 
 /** Length-safe composite identity shared by live items and future history readers. */
 export function codexItemId(threadId: string, turnId: string, itemId: string): string {
   return `codex:${JSON.stringify([threadId, turnId, itemId])}`
+}
+
+/**
+ * The one-line result a TERMINAL sub-agent activity writes onto the spawn card
+ * that minted the child, or undefined for the kinds that are not terminal.
+ *
+ * `SubAgentActivityKind` is `started | interacted | interrupted | completed`
+ * (SubAgentActivityKind.ts) — there is no errored kind, so a v2 card is never
+ * red on this path. `completed` is emitted from `core/src/session/mod.rs:2216`
+ * only for `AgentStatus::Completed(_)`, so an agent that died leaves no
+ * terminal activity at all and its card is closed by teardown instead.
+ *
+ * This is NOT part of `mapCodexItem`: every activity carries its OWN item id
+ * (`started` takes the `spawn_agent` call id — `multi_agents_v2/spawn.rs:247`;
+ * `interrupted` the `interrupt_agent` call id — `interrupt_agent.rs:92`;
+ * `interacted` the message call id — `message_tool.rs:134`; `completed` the
+ * minted `subagent-completed-<child turn id>` — `session/mod.rs:2249`), so
+ * nothing in one item names the card it belongs to. The CALLER, which tracks
+ * `agentThreadId` -> card, is the only place that binding exists.
+ */
+export function subAgentActivityResult(kind: SubAgentActivityKind): string | undefined {
+  if (kind === 'completed') return 'Agent completed.'
+  if (kind === 'interrupted') return 'Agent was interrupted.'
+  return undefined
 }
 
 export type CodexMappedEvent =
@@ -120,6 +145,78 @@ export function mapCodexItem(
           fileDiffs: files
         })
       return outputs
+    }
+    case 'collabAgentToolCall': {
+      // Codex's native collaboration surface (`multi_agent_v1`: spawn_agent,
+      // send_input, wait_agent, close_agent, resume_agent). The wire name is
+      // PREFIXED rather than bare: `wait` and `sendInput` are generic enough to
+      // collide with a future hosted or native tool, and the prefix keeps
+      // CodexEngineToolMap's cases unambiguous at a glance.
+      const outputs: CodexMappedEvent[] = [
+        message([
+          {
+            type: 'tool_use',
+            toolUseId: id,
+            toolName: `collab:${item.tool}`,
+            toolInput: {
+              prompt: item.prompt,
+              model: item.model,
+              reasoningEffort: item.reasoningEffort,
+              receiverThreadIds: item.receiverThreadIds,
+              agentsStates: item.agentsStates
+            }
+          }
+        ])
+      ]
+      if (completed) {
+        const states = Object.entries(item.agentsStates ?? {})
+        outputs.push({
+          kind: 'toolResult',
+          toolUseId: id,
+          result: states.length
+            ? states
+                .map(([thread, state]) =>
+                  state?.message
+                    ? `${thread}: ${state.status} \u2014 ${state.message}`
+                    : `${thread}: ${state?.status ?? 'unknown'}`
+                )
+                .join('\n')
+            : item.receiverThreadIds.length
+              ? item.receiverThreadIds.map((thread) => `${thread}: no status reported`).join('\n')
+              : 'No agent reported a state for this call.',
+          // `interrupted` is deliberately NOT an error: the user (or a parent
+          // interrupt) asked for it, and colouring it red would read as a
+          // failure of the call rather than of the agent.
+          isError:
+            item.status === 'failed' ||
+            states.some(([, state]) => state?.status === 'errored' || state?.status === 'notFound')
+        })
+      }
+      return outputs
+    }
+    case 'subAgentActivity': {
+      // The v2 collaboration surface's stand-in for `collabAgentToolCall`: a
+      // spawn there emits its collab item to ANALYTICS only
+      // (`multi_agents_v2/spawn.rs:49-85`), and the transcript gets this
+      // instead. Only `started` mints a card, and it is minted in the v1 shape
+      // so one `task` normalizer, one TaskCard and one child-binding rule cover
+      // both surfaces.
+      return item.kind === 'started'
+        ? [
+            message([
+              {
+                type: 'tool_use',
+                toolUseId: id,
+                toolName: 'collab:spawnAgent',
+                toolInput: {
+                  agentPath: item.agentPath,
+                  receiverThreadIds: [item.agentThreadId],
+                  agentsStates: {}
+                }
+              }
+            ])
+          ]
+        : []
     }
     case 'dynamicToolCall': {
       // ClaudeUI's own hosted tools (render_mermaid / create_mockup /

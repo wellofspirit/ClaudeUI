@@ -242,3 +242,159 @@ it('restores forks from session metadata, which native listing never returns', a
     model: { engineId: 'codex', vendorId: 'openai', modelId: 'native' }
   })
 })
+
+it('reconstructs a spawned child transcript under its parent card on a cold read', async () => {
+  const spawn = {
+    type: 'collabAgentToolCall',
+    id: 'collab-1',
+    tool: 'spawnAgent',
+    status: 'completed',
+    senderThreadId: 'root',
+    receiverThreadIds: ['child'],
+    prompt: 'survey the tests',
+    model: 'native',
+    reasoningEffort: 'ultra',
+    agentsStates: { child: { status: 'completed', message: null } }
+  }
+  const threads: Record<string, unknown> = {
+    root: {
+      id: 'root',
+      modelProvider: 'openai',
+      name: null,
+      createdAt: 1,
+      turns: [{ id: 'one', status: 'completed', startedAt: 1, items: [spawn] }]
+    },
+    child: {
+      id: 'child',
+      modelProvider: 'openai',
+      name: null,
+      createdAt: 2,
+      turns: [
+        {
+          id: 'c1',
+          status: 'completed',
+          startedAt: 2,
+          items: [
+            { type: 'agentMessage', id: 'm1', text: 'three gaps' },
+            {
+              type: 'commandExecution',
+              id: 'k1',
+              command: 'ls',
+              cwd: '/isolated',
+              status: 'completed',
+              exitCode: 0,
+              aggregatedOutput: 'files'
+            }
+          ]
+        }
+      ]
+    }
+  }
+  mocks.history.mockImplementation(async (id: string) => threads[id])
+  const history = await loadCodexHistory('root')
+  expect(history.messages).toHaveLength(1)
+  const card = 'codex:["root","one","collab-1"]'
+  expect(history.subagentMessages?.[card]?.map((message) => message.id)).toEqual([
+    'codex:["child","c1","m1"]',
+    'codex:["child","c1","k1"]'
+  ])
+  // The child's own tool results ride inside its messages, exactly as the live
+  // `session:subagent-tool-result` path folds them in.
+  expect(
+    history.subagentMessages![card][1].content.some((block) => block.type === 'tool_result')
+  ).toBe(true)
+})
+
+it('never fails a cold read because one child thread is gone', async () => {
+  const spawn = {
+    type: 'collabAgentToolCall',
+    id: 'collab-1',
+    tool: 'spawnAgent',
+    status: 'completed',
+    senderThreadId: 'root',
+    receiverThreadIds: ['child'],
+    prompt: 'go',
+    model: 'native',
+    reasoningEffort: 'ultra',
+    agentsStates: {}
+  }
+  mocks.history.mockImplementation(async (id: string) => {
+    if (id === 'root')
+      return {
+        id: 'root',
+        modelProvider: 'openai',
+        name: null,
+        createdAt: 1,
+        turns: [{ id: 'one', status: 'completed', startedAt: 1, items: [spawn] }]
+      }
+    throw new Error('thread not found: child')
+  })
+  const history = await loadCodexHistory('root')
+  expect(history.messages).toHaveLength(1)
+  expect(history.subagentMessages).toEqual({})
+})
+
+it('reconstructs a v2 child from its subAgentActivity pair on a cold read', async () => {
+  const threads: Record<string, unknown> = {
+    root: {
+      id: 'root',
+      modelProvider: 'openai',
+      name: null,
+      createdAt: 1,
+      turns: [
+        {
+          id: 'one',
+          status: 'completed',
+          startedAt: 1,
+          items: [
+            {
+              type: 'subAgentActivity',
+              id: 'spawn-call',
+              kind: 'started',
+              agentThreadId: 'child',
+              agentPath: '/root/fixture_child'
+            },
+            {
+              type: 'subAgentActivity',
+              id: 'subagent-completed-c1',
+              kind: 'completed',
+              agentThreadId: 'child',
+              agentPath: '/root/fixture_child'
+            }
+          ]
+        }
+      ]
+    },
+    child: {
+      id: 'child',
+      modelProvider: 'openai',
+      name: null,
+      createdAt: 2,
+      turns: [
+        {
+          id: 'c1',
+          status: 'completed',
+          startedAt: 2,
+          items: [{ type: 'agentMessage', id: 'm1', text: 'v2 child done' }]
+        }
+      ]
+    }
+  }
+  mocks.history.mockImplementation(async (id: string) => threads[id])
+  const history = await loadCodexHistory('root')
+  const card = 'codex:["root","one","spawn-call"]'
+  // The started activity is the card; the completed one, whose id is its own,
+  // closes it.
+  expect(history.messages).toHaveLength(1)
+  expect(history.messages[0].content).toEqual([
+    expect.objectContaining({ type: 'tool_use', toolUseId: card, toolName: 'collab:spawnAgent' }),
+    expect.objectContaining({
+      type: 'tool_result',
+      toolUseId: card,
+      toolResult: 'Agent completed.'
+    })
+  ])
+  expect(history.subagentMessages?.[card]?.map((message) => message.id)).toEqual([
+    'codex:["child","c1","m1"]'
+  ])
+})

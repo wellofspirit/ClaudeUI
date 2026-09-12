@@ -2072,3 +2072,539 @@ describe('Codex cross-engine dispatch', () => {
     expect(dispatcher.disposeFor).toHaveBeenCalledWith('temporary')
   })
 })
+
+/**
+ * Native children (slice F). Codex spawns child THREADS through its collab
+ * tools; the app-server attaches every initialized connection to every thread
+ * it creates, so the child's own notifications arrive on this session's single
+ * stdio connection carrying the CHILD's `threadId`. They are routed into the
+ * engine-neutral subagent channels under the spawning call's tool_use id.
+ */
+describe('Codex native children', () => {
+  const PARENT_CARD = 'codex:["root","turn","collab-1"]'
+  /** The `collabAgentToolCall` pair a real `spawn_agent` emits, start then end. */
+  const spawn = (
+    f: ReturnType<typeof fixture>,
+    child = 'child',
+    itemId = 'collab-1',
+    turnId = 'turn'
+  ): void => {
+    const base = {
+      id: itemId,
+      type: 'collabAgentToolCall',
+      tool: 'spawnAgent',
+      senderThreadId: 'root',
+      prompt: 'survey the tests',
+      model: 'native',
+      reasoningEffort: 'ultra'
+    }
+    f.notify('item/started', {
+      threadId: 'root',
+      turnId,
+      item: { ...base, status: 'inProgress', receiverThreadIds: [], agentsStates: {} }
+    })
+    f.notify('item/completed', {
+      threadId: 'root',
+      turnId,
+      item: {
+        ...base,
+        status: 'completed',
+        receiverThreadIds: [child],
+        agentsStates: { [child]: { status: 'running', message: null } }
+      }
+    })
+  }
+  const sent = (channel: string): unknown[] =>
+    events.mock.calls.filter((call) => call[0] === channel).map((call) => (call[1] as unknown[])[1])
+
+  it('routes a child message into the subagent transcript under the spawning card', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    spawn(f)
+    f.notify('item/completed', {
+      threadId: 'child',
+      turnId: 'child-turn',
+      item: { id: 'm1', type: 'agentMessage', text: 'child speaking' }
+    })
+    expect(sent('session:subagent-message')).toEqual([
+      {
+        toolUseId: PARENT_CARD,
+        message: expect.objectContaining({
+          id: 'codex:["child","child-turn","m1"]',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'child speaking' }]
+        })
+      }
+    ])
+  })
+
+  it('streams a child delta and reports a child tool result under the same card', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    spawn(f)
+    f.notify('item/agentMessage/delta', {
+      threadId: 'child',
+      turnId: 'child-turn',
+      itemId: 'm1',
+      delta: 'tok'
+    })
+    expect(sent('session:subagent-stream')).toEqual([
+      { toolUseId: PARENT_CARD, type: 'text', text: 'tok' }
+    ])
+    f.notify('item/completed', {
+      threadId: 'child',
+      turnId: 'child-turn',
+      item: {
+        id: 'c1',
+        type: 'commandExecution',
+        command: 'pwd',
+        cwd: '/isolated',
+        status: 'completed',
+        exitCode: 0,
+        aggregatedOutput: '/isolated'
+      }
+    })
+    expect(sent('session:subagent-tool-result')).toEqual([
+      {
+        toolUseId: PARENT_CARD,
+        toolResultToolUseId: 'codex:["child","child-turn","c1"]',
+        result: '/isolated',
+        isError: false
+      }
+    ])
+  })
+
+  it('holds a child notification that beats its spawn item, then replays it', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    f.notify('item/completed', {
+      threadId: 'child',
+      turnId: 'child-turn',
+      item: { id: 'm1', type: 'agentMessage', text: 'early' }
+    })
+    expect(sent('session:subagent-message')).toEqual([])
+    spawn(f)
+    expect(sent('session:subagent-message')).toEqual([
+      {
+        toolUseId: PARENT_CARD,
+        message: expect.objectContaining({ id: 'codex:["child","child-turn","m1"]' })
+      }
+    ])
+  })
+
+  it('still drops a thread that never was a child of this root', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    spawn(f)
+    f.notify('item/completed', {
+      threadId: 'stranger',
+      turnId: 'x',
+      item: { id: 'm1', type: 'agentMessage', text: 'not ours' }
+    })
+    f.notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn', status: 'completed', items: [] }
+    })
+    f.notify('item/completed', {
+      threadId: 'stranger',
+      turnId: 'x',
+      item: { id: 'm2', type: 'agentMessage', text: 'still not ours' }
+    })
+    expect(sent('session:subagent-message')).toEqual([])
+  })
+
+  it('raises a child approval bound to the child item and answers it on the wire', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    spawn(f)
+    f.notify('turn/started', { threadId: 'child', turn: { id: 'child-turn' } })
+    const { result, card } = f.approval({
+      threadId: 'child',
+      turnId: 'child-turn',
+      itemId: 'child-cmd',
+      command: 'ls'
+    })
+    expect(card).toBeDefined()
+    expect(card!.requestId).toContain('"child","child-turn","child-cmd"')
+    expect(card!.toolUseId).toBe('codex:["child","child-turn","child-cmd"]')
+    f.session.resolveApproval(card!.requestId, 'allow')
+    await expect(result).resolves.toEqual({ decision: 'accept' })
+  })
+
+  it('interrupts every running child, not just the root turn', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    spawn(f)
+    f.notify('turn/started', { threadId: 'child', turn: { id: 'child-turn' } })
+    await f.session.interrupt()
+    await vi.waitFor(() =>
+      expect(f.request).toHaveBeenCalledWith('turn/interrupt', {
+        threadId: 'child',
+        turnId: 'child-turn'
+      })
+    )
+    expect(f.request).toHaveBeenCalledWith('turn/interrupt', {
+      threadId: 'root',
+      turnId: 'turn'
+    })
+  })
+
+  it('closes every open child card on dispose', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    spawn(f)
+    f.session.dispose()
+    expect(sent('session:task-notification')).toEqual([
+      expect.objectContaining({ taskId: 'child', toolUseId: PARENT_CARD, status: 'stopped' })
+    ])
+  })
+
+  it('marks a child completed once when a later collab call reports its terminal state', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    spawn(f)
+    f.notify('item/completed', {
+      threadId: 'child',
+      turnId: 'child-turn',
+      item: { id: 'm1', type: 'agentMessage', text: 'the survey found three gaps' }
+    })
+    const terminal = {
+      id: 'collab-2',
+      type: 'collabAgentToolCall',
+      tool: 'wait',
+      status: 'completed',
+      senderThreadId: 'root',
+      receiverThreadIds: ['child'],
+      prompt: null,
+      model: null,
+      reasoningEffort: null,
+      agentsStates: { child: { status: 'completed', message: null } }
+    }
+    f.notify('item/completed', { threadId: 'root', turnId: 'turn', item: terminal })
+    f.notify('item/completed', { threadId: 'root', turnId: 'turn', item: terminal })
+    expect(sent('session:task-notification')).toEqual([
+      expect.objectContaining({
+        taskId: 'child',
+        toolUseId: PARENT_CARD,
+        status: 'completed',
+        summary: 'the survey found three gaps'
+      })
+    ])
+    f.session.dispose()
+    expect(sent('session:task-notification')).toHaveLength(1)
+  })
+
+  it('refuses to nest: a grandchild is reported once and never registered', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    spawn(f)
+    const nested = (id: string): void =>
+      f.notify('item/completed', {
+        threadId: 'child',
+        turnId: 'child-turn',
+        item: {
+          id,
+          type: 'collabAgentToolCall',
+          tool: 'spawnAgent',
+          status: 'completed',
+          senderThreadId: 'child',
+          receiverThreadIds: ['grandchild'],
+          prompt: 'deeper',
+          model: 'native',
+          reasoningEffort: 'ultra',
+          agentsStates: { grandchild: { status: 'running', message: null } }
+        }
+      })
+    nested('collab-n1')
+    nested('collab-n2')
+    expect(events.mock.calls.filter((call) => call[0] === 'session:error')).toHaveLength(1)
+    f.notify('item/completed', {
+      threadId: 'grandchild',
+      turnId: 'g-turn',
+      item: { id: 'm1', type: 'agentMessage', text: 'too deep' }
+    })
+    expect(
+      sent('session:subagent-message').filter((data) =>
+        (data as { message: { id: string } }).message.id.includes('grandchild')
+      )
+    ).toEqual([])
+  })
+
+  it('folds child token usage into the root meter without double counting', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    spawn(f)
+    const usage = (threadId: string, input: number, output: number) =>
+      f.notify('thread/tokenUsage/updated', {
+        threadId,
+        turnId: 'turn',
+        tokenUsage: {
+          total: {
+            inputTokens: input,
+            cachedInputTokens: 0,
+            outputTokens: output,
+            cacheWriteInputTokens: 0,
+            reasoningOutputTokens: 0,
+            totalTokens: input + output
+          },
+          last: {
+            inputTokens: input,
+            cachedInputTokens: 0,
+            outputTokens: output,
+            cacheWriteInputTokens: 0,
+            reasoningOutputTokens: 0,
+            totalTokens: input + output
+          },
+          modelContextWindow: 1000
+        }
+      })
+    usage('root', 100, 10)
+    usage('child', 40, 4)
+    usage('child', 60, 6)
+    const meters = sent('session:metering') as Array<{
+      tokens: { input: number; output: number; total: number }
+      contextWindow: { used: number }
+    }>
+    expect(meters.at(-1)!.tokens).toMatchObject({ input: 160, output: 16, total: 176 })
+    // The context window is the ROOT's: a child has its own window and folding
+    // it in would misreport how close this thread is to compaction.
+    expect(meters.at(-1)!.contextWindow.used).toBe(110)
+  })
+})
+
+describe('Codex hosted tools and children', () => {
+  it('refuses an `item/tool/call` raised by a child thread', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    f.notify('item/started', {
+      threadId: 'root',
+      turnId: 'turn',
+      item: {
+        id: 'collab-1',
+        type: 'collabAgentToolCall',
+        tool: 'spawnAgent',
+        status: 'inProgress',
+        senderThreadId: 'root',
+        receiverThreadIds: [],
+        prompt: 'go',
+        model: 'native',
+        reasoningEffort: 'ultra',
+        agentsStates: {}
+      }
+    })
+    f.notify('item/completed', {
+      threadId: 'root',
+      turnId: 'turn',
+      item: {
+        id: 'collab-1',
+        type: 'collabAgentToolCall',
+        tool: 'spawnAgent',
+        status: 'completed',
+        senderThreadId: 'root',
+        receiverThreadIds: ['child'],
+        prompt: 'go',
+        model: 'native',
+        reasoningEffort: 'ultra',
+        agentsStates: { child: { status: 'running', message: null } }
+      }
+    })
+    // Children never inherit `dynamicTools` — both spawn paths build the child's
+    // options with `..StartThreadOptions::new(config)`, whose `dynamic_tools` is
+    // empty — so this can only be a replay or a forgery. Refuse either way.
+    const { result } = f.dynamicCall({ threadId: 'child', callId: 'child-call' })
+    await expect(result).rejects.toThrow('no live owning root turn')
+    expect(hosted.mermaid).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * The v2 collaboration surface (`multi_agent_v2`, which every v2-declaring
+ * model gets — `gpt-6-astra` and the rest of the current default line). A spawn
+ * there produces NO `collabAgentToolCall`; the transcript gets a
+ * `subAgentActivity` whose `started` kind is the only place the child's thread
+ * id appears, and whose later kinds each carry their OWN item id.
+ */
+describe('Codex native children over multi_agent_v2', () => {
+  const CARD = 'codex:["root","turn","spawn-call"]'
+  const sent = (channel: string): unknown[] =>
+    events.mock.calls.filter((call) => call[0] === channel).map((call) => (call[1] as unknown[])[1])
+  const activity = (
+    f: ReturnType<typeof fixture>,
+    kind: string,
+    id: string,
+    method = 'item/completed'
+  ): void =>
+    f.notify(method, {
+      threadId: 'root',
+      turnId: 'turn',
+      item: {
+        id,
+        type: 'subAgentActivity',
+        kind,
+        agentThreadId: 'child',
+        agentPath: '/root/fixture_child'
+      }
+    })
+
+  it('binds the child off the started activity and streams it under that card', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    activity(f, 'started', 'spawn-call')
+    f.notify('item/completed', {
+      threadId: 'child',
+      turnId: 'child-turn',
+      item: { id: 'm1', type: 'agentMessage', text: 'v2 child speaking' }
+    })
+    expect(sent('session:subagent-message')).toEqual([
+      {
+        toolUseId: CARD,
+        message: expect.objectContaining({ id: 'codex:["child","child-turn","m1"]' })
+      }
+    ])
+  })
+
+  it('closes the spawn card from a completed activity that carries a different id', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    activity(f, 'started', 'spawn-call')
+    f.notify('item/completed', {
+      threadId: 'child',
+      turnId: 'child-turn',
+      item: { id: 'm1', type: 'agentMessage', text: 'v2 child done' }
+    })
+    // The real id: `subagent-completed-<the CHILD's turn id>`, minted in
+    // core/src/session/mod.rs — nothing about it names the spawn call.
+    activity(f, 'completed', 'subagent-completed-child-turn')
+    expect(sent('session:tool-result')).toEqual([
+      { toolUseId: CARD, result: 'Agent completed.', isError: false }
+    ])
+    expect(sent('session:task-notification')).toEqual([
+      expect.objectContaining({
+        taskId: 'child',
+        toolUseId: CARD,
+        status: 'completed',
+        summary: 'v2 child done'
+      })
+    ])
+  })
+
+  it('treats an interrupted activity as terminal and an interacted one as noise', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    activity(f, 'started', 'spawn-call')
+    activity(f, 'interacted', 'message-call')
+    expect(sent('session:tool-result')).toEqual([])
+    expect(sent('session:task-notification')).toEqual([])
+    activity(f, 'interrupted', 'interrupt-call')
+    expect(sent('session:tool-result')).toEqual([
+      { toolUseId: CARD, result: 'Agent was interrupted.', isError: false }
+    ])
+    expect(sent('session:task-notification')).toEqual([
+      expect.objectContaining({ taskId: 'child', toolUseId: CARD, status: 'stopped' })
+    ])
+  })
+
+  it('refuses to nest a v2 grandchild too', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    activity(f, 'started', 'spawn-call')
+    for (const id of ['nested-1', 'nested-2'])
+      f.notify('item/completed', {
+        threadId: 'child',
+        turnId: 'child-turn',
+        item: {
+          id,
+          type: 'subAgentActivity',
+          kind: 'started',
+          agentThreadId: 'grandchild',
+          agentPath: '/root/fixture_child/deeper'
+        }
+      })
+    expect(events.mock.calls.filter((call) => call[0] === 'session:error')).toHaveLength(1)
+    f.notify('item/completed', {
+      threadId: 'grandchild',
+      turnId: 'g-turn',
+      item: { id: 'm1', type: 'agentMessage', text: 'too deep' }
+    })
+    expect(
+      sent('session:subagent-message').filter((data) =>
+        (data as { message: { id: string } }).message.id.includes('grandchild')
+      )
+    ).toEqual([])
+  })
+})
+
+describe('Codex sub-agent activity after the spawning turn ends', () => {
+  const sent = (channel: string): unknown[] =>
+    events.mock.calls.filter((call) => call[0] === channel).map((call) => (call[1] as unknown[])[1])
+
+  it('still closes the card when the child finishes after its turn ended', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    f.notify('item/completed', {
+      threadId: 'root',
+      turnId: 'turn',
+      item: {
+        id: 'spawn-call',
+        type: 'subAgentActivity',
+        kind: 'started',
+        agentThreadId: 'child',
+        agentPath: '/root/fixture_child'
+      }
+    })
+    // v2's `wait_agent` waits for inter-agent ACTIVITY, not for the child to
+    // finish, so the root's turn routinely ends first. The child's completion
+    // is then emitted raw into that same (ended) turn —
+    // `core/src/agent/control.rs:244-280` sends `ItemStarted`/`ItemCompleted`
+    // with the parent turn id whatever its state — and dropping it would leave
+    // the card spinning forever.
+    f.notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn', status: 'completed', items: [] }
+    })
+    const before = sent('session:tool-result').length
+    f.notify('item/completed', {
+      threadId: 'root',
+      turnId: 'turn',
+      item: {
+        id: 'subagent-completed-child-turn',
+        type: 'subAgentActivity',
+        kind: 'completed',
+        agentThreadId: 'child',
+        agentPath: '/root/fixture_child'
+      }
+    })
+    expect(sent('session:tool-result').slice(before)).toEqual([
+      {
+        toolUseId: 'codex:["root","turn","spawn-call"]',
+        result: 'Agent completed.',
+        isError: false
+      }
+    ])
+    expect(sent('session:task-notification')).toEqual([
+      expect.objectContaining({ taskId: 'child', status: 'completed' })
+    ])
+  })
+
+  it('keeps dropping every OTHER item that arrives for an ended turn', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    f.notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn', status: 'completed', items: [] }
+    })
+    const before = sent('session:message').length
+    f.notify('item/completed', {
+      threadId: 'root',
+      turnId: 'turn',
+      item: { id: 'late', type: 'agentMessage', text: 'too late' }
+    })
+    f.notify('item/agentMessage/delta', {
+      threadId: 'root',
+      turnId: 'turn',
+      itemId: 'late',
+      delta: 'x'
+    })
+    expect(sent('session:message').slice(before)).toEqual([])
+  })
+})
