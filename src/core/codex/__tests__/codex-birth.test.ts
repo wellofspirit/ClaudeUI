@@ -129,7 +129,10 @@ it('birth, identity acknowledgement, native commands and reconnect agree without
     sandbox: 'workspace-write',
     approvalsReviewer: 'auto_review',
     allowProviderModelFallback: false,
-    historyMode: 'paginated'
+    historyMode: 'paginated',
+    // The hosted UI tools are declared at creation (codex-hosted-tools.ts);
+    // their contents are asserted in codex-session.test.ts.
+    dynamicTools: expect.any(Array)
   })
   const snapshot = syncCore.getSnapshot()
   expect(snapshot.sessions.root.messages).toHaveLength(1)

@@ -32,6 +32,29 @@ vi.mock('../../services/claude-settings', () => ({
 vi.mock('../../services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
+/**
+ * ClaudeUI's hosted tools reach Codex over the dynamic-tool channel. The real
+ * handlers validate mermaid syntax and WRITE MOCKUPS TO DISK, neither of which
+ * belongs in a unit test, so both in-process MCP factories are stubbed with one
+ * observable spy apiece.
+ */
+const hosted = vi.hoisted(() => ({
+  mermaid: vi.fn(async () => ({ content: [{ type: 'text', text: 'Diagram rendered.' }] })),
+  mockup: vi.fn(async () => ({ content: [{ type: 'text', text: 'Directory: abc123' }] }))
+}))
+vi.mock('../../services/mermaid-tool', () => ({
+  createMermaidServer: () => ({
+    tools: [{ name: 'render_mermaid', handler: hosted.mermaid }]
+  })
+}))
+vi.mock('../../services/mockup-tool', () => ({
+  createMockupServer: () => ({
+    tools: [
+      { name: 'create_mockup', handler: hosted.mockup },
+      { name: 'show_mockup', handler: hosted.mockup }
+    ]
+  })
+}))
 vi.mock('../../services/db', () => ({
   dispatchedCostsByRouting: () => [],
   setSessionMeta: vi.fn(),
@@ -51,6 +74,8 @@ afterEach(() => {
   events.mockClear()
   overrides.clear()
   savedRules.mockClear()
+  hosted.mermaid.mockClear()
+  hosted.mockup.mockClear()
   rules.allow = []
   rules.deny = []
   rules.ask = []
@@ -156,6 +181,30 @@ function fixture(opts: EngineSpawnOptions = {}) {
     })
     return approval({ itemId }, 'item/fileChange/requestApproval')
   }
+  /**
+   * Drive one `item/tool/call` server request — the hosted-tool channel. Its
+   * controller joins the same list `abortServerRequests` sweeps, so a
+   * `turn/completed` aborts an in-flight call exactly as the real client does.
+   */
+  const dynamicCall = (params: Record<string, unknown> = {}) => {
+    const controller = new AbortController()
+    controllers.push(controller)
+    const result = callbacks.onServerRequest!(
+      'item/tool/call',
+      {
+        threadId: 'root',
+        turnId: 'turn',
+        callId: 'call-1',
+        namespace: null,
+        tool: 'render_mermaid',
+        arguments: { source: 'graph TD; A-->B' },
+        ...params
+      },
+      { id: controllers.length, signal: controller.signal }
+    )
+    void result.catch(() => {})
+    return { result, controller }
+  }
   /** Every `session:queue-changed` payload, oldest first (ADR-053 full lists). */
   const queues = (): QueuedItem[][] =>
     events.mock.calls
@@ -168,6 +217,7 @@ function fixture(opts: EngineSpawnOptions = {}) {
     notify,
     approval,
     fileChange,
+    dynamicCall,
     cards,
     queues,
     listed,
@@ -400,7 +450,10 @@ describe('Codex first session', () => {
       sandbox: 'workspace-write',
       approvalsReviewer: 'auto_review',
       allowProviderModelFallback: false,
-      historyMode: 'paginated'
+      historyMode: 'paginated',
+      // The hosted tools ride along on creation — their contents are asserted
+      // in the 'Codex hosted tools' describe below.
+      dynamicTools: expect.any(Array)
     })
     expect(session.getSessionId()).toBe('root')
     expect(events).toHaveBeenCalledWith('session:status', [
@@ -419,9 +472,13 @@ describe('Codex first session', () => {
     expect(session.capabilities.reasoning.nativeEffort?.options[0].value).toBe('ultra')
   })
 
-  it('resumes with the mode baseline and registers no hosted tools', async () => {
+  it('resumes with the mode baseline and re-declares no hosted tools', async () => {
     const { session, request, callbacks } = fixture({ resumeSessionId: 'root' })
     await session.run(null)
+    // `thread/resume` has no `dynamicTools` field at all: the specs given at
+    // creation live in the rollout's SessionMeta and come back from there
+    // (`core/src/session/mod.rs:721`), so a resumed thread keeps the tools
+    // without this client naming them again.
     expect(request).toHaveBeenCalledWith('thread/resume', {
       cwd: '/isolated',
       threadId: 'root',
@@ -429,7 +486,7 @@ describe('Codex first session', () => {
       sandbox: 'workspace-write',
       approvalsReviewer: 'user'
     })
-    expect(callbacks.serverMethods).not.toContain('item/tool/call')
+    expect(callbacks.serverMethods).toContain('item/tool/call')
     expect(callbacks.serverMethods).toContain('item/permissions/requestApproval')
   })
 
@@ -1480,5 +1537,154 @@ describe('Codex held queue', () => {
       expect.objectContaining({ text: 'one', state: 'recalled' }),
       expect.objectContaining({ text: 'two', state: 'recalled' })
     ])
+  })
+})
+
+/**
+ * Hosted tools over the native dynamic-tool channel (`thread/start`'s
+ * `dynamicTools` + the `item/tool/call` server request). Every refusal below is
+ * fail-closed: the handler must not run at all, because running it is the
+ * side effect (a mockup is written to disk, a diagram row appears in someone's
+ * transcript) that a forged or replayed call would be trying to buy.
+ */
+describe('Codex hosted tools', () => {
+  const startParams = (request: ReturnType<typeof fixture>['request']) =>
+    request.mock.calls.find(([method]) => method === 'thread/start')![1] as Record<string, unknown>
+
+  it('offers exactly the three hosted tools when the thread is created', async () => {
+    const { session, request } = fixture()
+    await session.run(null)
+    expect(startParams(request).dynamicTools).toEqual([
+      expect.objectContaining({ type: 'function', name: 'render_mermaid' }),
+      expect.objectContaining({ type: 'function', name: 'create_mockup' }),
+      expect.objectContaining({ type: 'function', name: 'show_mockup' })
+    ])
+    const specs = startParams(request).dynamicTools as Array<{ inputSchema: unknown }>
+    expect(specs[0].inputSchema).toMatchObject({
+      type: 'object',
+      properties: { source: { type: 'string' } },
+      required: ['source']
+    })
+  })
+
+  it('runs a valid call and answers with the handler output', async () => {
+    const { session, dynamicCall } = fixture()
+    await session.run('hello')
+    const { result } = dynamicCall()
+    await expect(result).resolves.toEqual({
+      contentItems: [{ type: 'inputText', text: 'Diagram rendered.' }],
+      success: true
+    })
+    expect(hosted.mermaid).toHaveBeenCalledWith(
+      { source: 'graph TD; A-->B' },
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+  })
+
+  it('reports a handler error as an unsuccessful call, not a rejected request', async () => {
+    const { session, dynamicCall } = fixture()
+    await session.run('hello')
+    hosted.mermaid.mockResolvedValueOnce({
+      content: [{ type: 'text', text: 'Mermaid syntax error' }],
+      isError: true
+    } as never)
+    await expect(dynamicCall().result).resolves.toEqual({
+      contentItems: [{ type: 'inputText', text: 'Mermaid syntax error' }],
+      success: false
+    })
+  })
+
+  it('turns an image result into an inline data URL content item', async () => {
+    const { session, dynamicCall } = fixture()
+    await session.run('hello')
+    hosted.mermaid.mockResolvedValueOnce({
+      content: [{ type: 'image', data: 'AAAA', mimeType: 'image/png' }]
+    } as never)
+    await expect(dynamicCall().result).resolves.toEqual({
+      contentItems: [{ type: 'inputImage', imageUrl: 'data:image/png;base64,AAAA' }],
+      success: true
+    })
+  })
+
+  it.each([
+    ['an unknown tool', { tool: 'rm_rf' }],
+    ['a foreign thread', { threadId: 'other' }],
+    ['a stale turn', { turnId: 'earlier' }],
+    ['a namespaced tool', { namespace: 'claudeui' }],
+    ['a non-string callId', { callId: 7 }]
+  ])('refuses %s without executing anything', async (_label, params) => {
+    const { session, dynamicCall } = fixture()
+    await session.run('hello')
+    await expect(dynamicCall(params).result).rejects.toThrow()
+    expect(hosted.mermaid).not.toHaveBeenCalled()
+    expect(hosted.mockup).not.toHaveBeenCalled()
+  })
+
+  it('runs one callId exactly once, however many times it is sent', async () => {
+    const { session, dynamicCall } = fixture()
+    await session.run('hello')
+    await expect(dynamicCall().result).resolves.toMatchObject({ success: true })
+    await expect(dynamicCall().result).rejects.toThrow()
+    expect(hosted.mermaid).toHaveBeenCalledOnce()
+  })
+
+  it('aborts an in-flight call when the turn ends and drops its late result', async () => {
+    const { session, notify, dynamicCall } = fixture()
+    await session.run('hello')
+    let observed!: AbortSignal
+    hosted.mermaid.mockImplementationOnce((async (
+      _input: unknown,
+      extra: { signal: AbortSignal }
+    ) => {
+      observed = extra.signal
+      await new Promise((resolve) =>
+        extra.signal.addEventListener('abort', resolve, { once: true })
+      )
+      return { content: [{ type: 'text', text: 'too late' }] }
+    }) as never)
+    const { result } = dynamicCall()
+    await vi.waitFor(() => expect(observed).toBeDefined())
+    notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn', status: 'completed', items: [] }
+    })
+    expect(observed.aborted).toBe(true)
+    await expect(result).rejects.toThrow()
+  })
+
+  it('allows all three hosted tools in plan mode, exactly as pi does', async () => {
+    for (const [tool, handler] of [
+      ['render_mermaid', hosted.mermaid],
+      ['create_mockup', hosted.mockup],
+      ['show_mockup', hosted.mockup]
+    ] as const) {
+      const { session, dynamicCall } = fixture({ permissionMode: 'plan' })
+      await session.run('hello')
+      await expect(
+        dynamicCall({ tool, callId: `call-${tool}`, arguments: {} }).result
+      ).resolves.toMatchObject({ success: true })
+      expect(handler).toHaveBeenCalled()
+      handler.mockClear()
+      session.dispose()
+    }
+  })
+
+  it('tells the model why rather than running a call with non-object arguments', async () => {
+    const { session, dynamicCall } = fixture()
+    await session.run('hello')
+    // A non-allow verdict answers the CALL (the model sees the reason as the
+    // tool's output) instead of rejecting the request, which the app-server
+    // would flatten into its own opaque "dynamic tool request failed".
+    await expect(dynamicCall({ arguments: null }).result).resolves.toEqual({
+      contentItems: [{ type: 'inputText', text: 'Hosted tool arguments must be an object' }],
+      success: false
+    })
+    expect(hosted.mermaid).not.toHaveBeenCalled()
+    expect(
+      events.mock.calls.some(
+        ([channel, args]) =>
+          channel === 'session:error' && String(args[1]).includes('must be an object')
+      )
+    ).toBe(true)
   })
 })

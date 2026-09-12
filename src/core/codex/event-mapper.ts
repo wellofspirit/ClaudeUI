@@ -121,6 +121,44 @@ export function mapCodexItem(
         })
       return outputs
     }
+    case 'dynamicToolCall': {
+      // ClaudeUI's own hosted tools (render_mermaid / create_mockup /
+      // show_mockup) ride this channel — see codex-hosted-tools.ts. The tool
+      // NAME is the wire name, so the renderer's CodexEngineToolMap keys off
+      // the same three strings pi's bare-name registrations use.
+      const outputs: CodexMappedEvent[] = [
+        message([
+          {
+            type: 'tool_use',
+            toolUseId: id,
+            toolName: item.tool,
+            toolInput: (item.arguments ?? {}) as Record<string, unknown>
+          }
+        ])
+      ]
+      if (completed) {
+        // TEXT ONLY. `inputImage`/`inputAudio` are out of scope for this slice:
+        // nothing ClaudeUI hosts returns them, and a `tool_result` has no
+        // channel for an image today, so rendering the raw data URL as text
+        // would be worse than dropping it.
+        const text = (item.contentItems ?? [])
+          .map((content) => (content.type === 'inputText' ? content.text : ''))
+          .filter((line) => line !== '')
+          .join('\n')
+        const isError = item.status !== 'completed' || item.success === false
+        outputs.push({
+          kind: 'toolResult',
+          toolUseId: id,
+          // The v2 item carries NO `error` field (the core's is dropped in
+          // `CoreTurnItem::DynamicToolCall` -> `ThreadItem::DynamicToolCall`),
+          // so a cancelled call is an empty `failed` item and the only honest
+          // thing left to say is that nothing came back.
+          result: text || (isError ? 'Hosted tool call did not return a result.' : ''),
+          isError
+        })
+      }
+      return outputs
+    }
     default:
       return []
   }

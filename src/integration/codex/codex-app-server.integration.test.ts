@@ -141,7 +141,8 @@ async function setupFixture(
   plainResponse = false,
   nativeSession = false,
   nativeCommand = false,
-  autoReview = false
+  autoReview = false,
+  hostedTool = false
 ) {
   const installed = resolve('vendor/codex-cli/codex')
   expect(createHash('sha256').update(readFileSync(installed)).digest('hex')).toBe(
@@ -273,12 +274,22 @@ async function setupFixture(
                         justification: 'Isolated fixture write inside the test directory'
                       })
                     }
-                  : {
-                      type: 'message',
-                      id: 'msg-fixture',
-                      role: 'assistant',
-                      content: [{ type: 'output_text', text: 'fixture complete' }]
-                    }
+                  : hostedTool && request.generate !== false && agentTurns === 1
+                    ? {
+                        type: 'function_call',
+                        call_id: 'fixture-mermaid',
+                        name: 'render_mermaid',
+                        arguments: JSON.stringify({
+                          source: 'graph TD; A-->B',
+                          title: 'Fixture diagram'
+                        })
+                      }
+                    : {
+                        type: 'message',
+                        id: 'msg-fixture',
+                        role: 'assistant',
+                        content: [{ type: 'output_text', text: 'fixture complete' }]
+                      }
             },
             completed
           ])
@@ -957,6 +968,91 @@ it.skipIf(!enabled)(
     } finally {
       sent.mockRestore()
     }
+  },
+  120000
+)
+
+/**
+ * Is this request OFFERING the hosted tool, as opposed to merely replaying a
+ * past call of it? Both carry the name, so neither a bare string search nor a
+ * name match alone would answer it.
+ *
+ * The pinned binary offers dynamic tools two different ways depending on the
+ * model: as an ordinary `{type:'function'|'custom', name, description,
+ * parameters}` entry, OR — under the code-mode models this fixture's catalog
+ * hands back — as a TypeScript declaration inside the `exec` tool's own
+ * description (`### \`render_mermaid\`` followed by `declare const tools: {
+ * render_mermaid(args: …) }`). Both count as advertised; a `function_call`
+ * item replayed from history does not.
+ */
+function advertisesHostedTool(value: unknown, name = 'render_mermaid'): boolean {
+  if (typeof value === 'string') return value.includes(`### \`${name}\``)
+  if (Array.isArray(value)) return value.some((entry) => advertisesHostedTool(entry, name))
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  if ((record.type === 'function' || record.type === 'custom') && record.name === name) return true
+  return Object.values(record).some((entry) => advertisesHostedTool(entry, name))
+}
+
+it.skipIf(!enabled)(
+  'runs a hosted tool over the dynamic-tool channel and keeps it across a resume',
+  async () => {
+    const { cwd, env, errors, requests } = await setupFixture(true, true, false, false, true)
+    session = new CodexSession('isolated-hosted', null, cwd, {}, { env, requestTimeoutMs: 20000 })
+    await session.run(null)
+    await session.run('Render the fixture diagram.')
+    await vi.waitFor(() => expect(session!.willQueue).toBe(false), { timeout: 30000 })
+    expect(errors).toEqual([])
+    // The tools were declared on `thread/start`, so the model saw them.
+    expect(requests.filter((request) => advertisesHostedTool(request)).length).toBeGreaterThan(0)
+    // One transcript row for the call, one result, and the result is the real
+    // mermaid handler's output — not a stub and not an error.
+    const blocks = session
+      .getMessages()
+      .flatMap((message) => message.content)
+      .filter((block) => block.type === 'tool_use' || block.type === 'tool_result')
+    const call = blocks.find(
+      (block) => block.type === 'tool_use' && block.toolName === 'render_mermaid'
+    )
+    expect(call).toBeDefined()
+    const result = blocks.find(
+      (block) =>
+        block.type === 'tool_result' &&
+        block.toolUseId === (call as { toolUseId: string }).toolUseId
+    )
+    expect(result).toMatchObject({
+      isError: false,
+      toolResult: expect.stringContaining('rendered successfully')
+    })
+    // …and the model was handed that same text on its next request.
+    expect(JSON.stringify(requests)).toContain('rendered successfully')
+    // No approval card: these three are auto-allowed by the shared engine, the
+    // same rung pi's hosted tools take.
+    expect(coreEvents.mock.calls.some(([channel]) => channel === 'session:approval-request')).toBe(
+      false
+    )
+
+    // RESUME. `thread/resume` cannot carry `dynamicTools`; the rollout's
+    // SessionMeta is what restores them, so this is the only honest way to
+    // answer whether a resumed thread still has the hosted tools.
+    const threadId = session.getSessionId()!
+    session.dispose()
+    const before = requests.length
+    session = new CodexSession(
+      'isolated-hosted-resume',
+      null,
+      cwd,
+      { resumeSessionId: threadId },
+      { env, requestTimeoutMs: 20000 }
+    )
+    await session.run(null)
+    expect(session.getSessionId()).toBe(threadId)
+    await session.run('Say something about the diagram.')
+    await vi.waitFor(() => expect(session!.willQueue).toBe(false), { timeout: 30000 })
+    const resumed = requests.slice(before).filter((request) => !isGuardianRequest(request))
+    expect(resumed.length).toBeGreaterThan(0)
+    expect(resumed.some((request) => advertisesHostedTool(request))).toBe(true)
+    expect(errors).toEqual([])
   },
   120000
 )

@@ -52,6 +52,14 @@ import type { FileChangeRequestApprovalParams } from './protocol/v2/FileChangeRe
 import type { ToolRequestUserInputParams } from './protocol/v2/ToolRequestUserInputParams'
 import { assertCodexProvider, selectCodexModel } from './model-selection'
 import { codexItemId, mapCodexDelta, mapCodexItem, type CodexMappedEvent } from './event-mapper'
+import {
+  CODEX_HOSTED_TOOL_NAMES,
+  codexDynamicToolSpecs,
+  runCodexHostedTool
+} from './codex-hosted-tools'
+import type { DynamicToolCallResponse } from './protocol/v2/DynamicToolCallResponse'
+import type { DynamicToolCallOutputContentItem } from './protocol/v2/DynamicToolCallOutputContentItem'
+import type { ToolResultContent } from '../sdk/types'
 import { unwrapShellCommand } from './command-text'
 import { BashStreamGate } from '../opencode/bash-stream-gate'
 import {
@@ -65,7 +73,10 @@ const serverMethods = [
   'item/commandExecution/requestApproval',
   'item/fileChange/requestApproval',
   'item/tool/requestUserInput',
-  'item/permissions/requestApproval'
+  'item/permissions/requestApproval',
+  // ClaudeUI's own hosted tools, offered on `thread/start` and called back here
+  // (codex-hosted-tools.ts). Not an approval — it is the tool RUN itself.
+  'item/tool/call'
 ] as const
 const record = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value)
@@ -301,7 +312,28 @@ const TURN_POLICY: Record<
   }
 }
 
-/** One root owns one one-shot client. No native queue, child adoption, or hosted tools. */
+/**
+ * MCP-shaped handler output -> the native `contentItems` the app-server accepts.
+ * Images travel as INLINE data URLs: `decode_response` rejects a remote image
+ * URL outright (`REMOTE_IMAGE_URL_ERROR`). Anything else a handler could
+ * theoretically return has no native counterpart and is dropped rather than
+ * stringified into the model's context.
+ */
+function hostedContentItems(result: ToolResultContent): DynamicToolCallOutputContentItem[] {
+  return result.content.flatMap((block): DynamicToolCallOutputContentItem[] => {
+    if (block.type === 'text' && typeof block.text === 'string')
+      return [{ type: 'inputText', text: block.text }]
+    if (
+      block.type === 'image' &&
+      typeof block.data === 'string' &&
+      typeof block.mimeType === 'string'
+    )
+      return [{ type: 'inputImage', imageUrl: `data:${block.mimeType};base64,${block.data}` }]
+    return []
+  })
+}
+
+/** One root owns one one-shot client. No native queue or child adoption. */
 export class CodexSession extends BaseSession {
   readonly engineId = 'codex' as const
   readonly capabilities = resolveCodexCapabilities()
@@ -333,6 +365,8 @@ export class CodexSession extends BaseSession {
   private guardianOverrides = new Map<string, GuardianOverride>()
   /** Denials whose declined item has not been mapped yet, by that item's id. */
   private heldDenials = new Map<string, ItemGuardianApprovalReviewCompletedNotification>()
+  /** Hosted-tool `callId`s already executed this process generation — one shot each. */
+  private hostedCalls = new Set<string>()
   /** Queue items whose steer timed out ambiguously, by queue item id. */
   private ambiguousSteers = new Map<string, AmbiguousSteer>()
   /** Serializes queue boundaries — see {@link queueBoundary}. */
@@ -360,7 +394,10 @@ export class CodexSession extends BaseSession {
       cwd,
       serverMethods,
       onNotification: (method, params) => this.notification(method, params),
-      onServerRequest: (method, params, context) => this.requestApproval(method, params, context),
+      onServerRequest: (method, params, context) =>
+        method === 'item/tool/call'
+          ? this.hostedToolCall(params, context)
+          : this.requestApproval(method, params, context),
       onDisconnect: (error) => this.disconnected(error)
     })
   }
@@ -663,7 +700,13 @@ export class CodexSession extends BaseSession {
         : await this.client.request('thread/start', {
             ...params,
             allowProviderModelFallback: false,
-            historyMode: 'paginated'
+            historyMode: 'paginated',
+            // START ONLY. `thread/resume` has no `dynamicTools` field, and it
+            // needs none: the specs are written into the rollout's SessionMeta
+            // at creation (`core/src/session/session.rs`, `CreateThreadParams
+            // .dynamic_tools`) and a resume with an empty list restores them
+            // from there (`core/src/session/mod.rs:721`).
+            dynamicTools: codexDynamicToolSpecs()
           })
       if (this.closed) return
       assertCodexProvider(response.modelProvider)
@@ -1235,6 +1278,71 @@ export class CodexSession extends BaseSession {
         this.rearmGuardianOverrides(event.toolUseId)
         break
     }
+  }
+
+  /**
+   * Run one ClaudeUI-hosted tool for the model (`item/tool/call`). This is NOT
+   * an approval: answering it EXECUTES something, which is why every check
+   * below fails closed by REJECTING the request rather than replying politely —
+   * the app-server turns a rejected request into its own `success: false`
+   * anyway (`app-server/src/dynamic_tools.rs` `fallback_response`), so a forged
+   * or replayed call costs the model one failed tool call and nothing else.
+   *
+   * The `callId` is one-shot for the life of this session object: a repeated
+   * one is refused, never re-executed, so a call the binary re-sends (or a
+   * response the transport lost) cannot write a second mockup to disk.
+   *
+   * `namespace` must be null — these three are registered as bare functions, so
+   * a namespaced call is not ours.
+   *
+   * The verdict comes from the SAME shared engine every other tool goes
+   * through. Today it can only answer `allow` for these three (the hosted
+   * auto-allow rung of `decideWithSource` sits above every rung but deny, and
+   * no Claude rule string maps to the `diagram`/`mockup` kinds), but the call
+   * is made anyway so a future ladder change reaches Codex too — and anything
+   * but `allow` refuses with the reason as the tool's own output, which is the
+   * only channel that tells the model why.
+   */
+  private async hostedToolCall(
+    value: unknown,
+    context: Parameters<NonNullable<CodexClientOptions['onServerRequest']>>[2]
+  ): Promise<DynamicToolCallResponse> {
+    if (
+      this.closed ||
+      context.signal.aborted ||
+      !record(value) ||
+      value.threadId !== this.threadId ||
+      typeof value.turnId !== 'string' ||
+      value.turnId !== this.turnId ||
+      this.endedTurns.has(value.turnId) ||
+      typeof value.callId !== 'string' ||
+      value.namespace != null ||
+      typeof value.tool !== 'string' ||
+      !CODEX_HOSTED_TOOL_NAMES.has(value.tool)
+    )
+      throw new Error('Codex hosted tool call has no live owning root turn')
+    const id = codexItemId(this.threadId!, value.turnId, value.callId)
+    if (this.hostedCalls.has(id)) throw new Error('Duplicate Codex hosted tool call')
+    this.hostedCalls.add(id)
+    const args = record(value.arguments) ? value.arguments : undefined
+    const verdict = args
+      ? this.gate([{ tool: value.tool, input: args }])
+      : {
+          decision: 'deny' as PermissionDecision,
+          reason: 'Hosted tool arguments must be an object'
+        }
+    if (verdict.decision !== 'allow') {
+      const reason = verdict.reason ?? `${value.tool} was not approved`
+      this.send('session:error', reason)
+      return { contentItems: [{ type: 'inputText', text: reason }], success: false }
+    }
+    const result = await runCodexHostedTool(value.tool, args!, this.cwd, context.signal)
+    // The turn ended (or the session went) while the handler ran: the core has
+    // already completed the item as `failed`, so a reply now would be answering
+    // a call nobody is waiting for.
+    if (this.closed || context.signal.aborted)
+      throw new Error('Codex hosted tool call was cancelled before it finished')
+    return { contentItems: hostedContentItems(result), success: !result.isError }
   }
 
   private requestApproval(

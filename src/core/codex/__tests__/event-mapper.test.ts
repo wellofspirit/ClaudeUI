@@ -105,6 +105,125 @@ describe('Codex item mapping', () => {
 })
 
 /**
+ * ClaudeUI's own hosted tools ride Codex's dynamic-tool channel, so the
+ * `dynamicToolCall` item is the transcript row for render_mermaid /
+ * create_mockup / show_mockup. The v2 projection of the item carries NO `error`
+ * field (`app-server-protocol/src/protocol/v2/item.rs`, `CoreTurnItem::
+ * DynamicToolCall` -> `ThreadItem::DynamicToolCall` drops the core's `error`),
+ * so a cancelled call arrives as `failed` with an EMPTY `contentItems` and the
+ * mapper has to say something itself.
+ */
+describe('Codex dynamic tool calls', () => {
+  const item = (over: Record<string, unknown> = {}): ThreadItem =>
+    ({
+      type: 'dynamicToolCall',
+      id: 'call-1',
+      namespace: null,
+      tool: 'render_mermaid',
+      arguments: { source: 'graph TD; A-->B' },
+      status: 'inProgress',
+      contentItems: null,
+      success: null,
+      durationMs: null,
+      ...over
+    }) as ThreadItem
+
+  it('maps an in-flight call to a tool_use block and nothing else', () => {
+    const output = mapCodexItem('root', 'turn', item(), false, 7)
+    expect(output).toHaveLength(1)
+    expect(output[0]).toMatchObject({
+      kind: 'message',
+      message: {
+        id: codexItemId('root', 'turn', 'call-1'),
+        content: [
+          {
+            type: 'tool_use',
+            toolUseId: codexItemId('root', 'turn', 'call-1'),
+            toolName: 'render_mermaid',
+            toolInput: { source: 'graph TD; A-->B' }
+          }
+        ]
+      }
+    })
+  })
+
+  it('joins the completed call text into a successful tool result', () => {
+    const output = mapCodexItem(
+      'root',
+      'turn',
+      item({
+        status: 'completed',
+        success: true,
+        contentItems: [
+          { type: 'inputText', text: 'Diagram rendered successfully.' },
+          { type: 'inputText', text: 'second line' }
+        ]
+      }),
+      true,
+      7
+    )
+    expect(output[1]).toEqual({
+      kind: 'toolResult',
+      toolUseId: codexItemId('root', 'turn', 'call-1'),
+      result: 'Diagram rendered successfully.\nsecond line',
+      isError: false
+    })
+  })
+
+  it('reports a failed call as an error even when the handler returned text', () => {
+    const output = mapCodexItem(
+      'root',
+      'turn',
+      item({
+        status: 'failed',
+        success: false,
+        contentItems: [{ type: 'inputText', text: 'Mermaid syntax error: no diagram type' }]
+      }),
+      true,
+      7
+    )
+    expect(output[1]).toMatchObject({
+      kind: 'toolResult',
+      result: 'Mermaid syntax error: no diagram type',
+      isError: true
+    })
+  })
+
+  it('says why a cancelled call has no output at all', () => {
+    const output = mapCodexItem(
+      'root',
+      'turn',
+      item({ status: 'failed', success: false, contentItems: [] }),
+      true,
+      7
+    )
+    expect(output[1]).toMatchObject({
+      kind: 'toolResult',
+      result: 'Hosted tool call did not return a result.',
+      isError: true
+    })
+  })
+
+  it('drops non-text content items rather than rendering a data URL', () => {
+    const output = mapCodexItem(
+      'root',
+      'turn',
+      item({
+        status: 'completed',
+        success: true,
+        contentItems: [
+          { type: 'inputImage', imageUrl: 'data:image/png;base64,AAAA' },
+          { type: 'inputText', text: 'kept' }
+        ]
+      }),
+      true,
+      7
+    )
+    expect(output[1]).toMatchObject({ kind: 'toolResult', result: 'kept', isError: false })
+  })
+})
+
+/**
  * The wire's `diff` field is only a unified diff for `update` — see
  * `format_file_change_diff` in codex-rs's app-server-protocol
  * (`item_builders.rs`). An `add`/`delete` carries the raw file CONTENT, and a

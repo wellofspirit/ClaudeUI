@@ -494,7 +494,18 @@ export const CLAUDE_ENGINE_CAPABILITIES: EngineCapabilities = {
 
 export const CODEX_ENGINE_CAPABILITIES: EngineCapabilities = {
   voice: false,
-  hostedMcp: false,
+  // ClaudeUI's three hosted UI tools (render_mermaid / create_mockup /
+  // show_mockup) run over Codex's native dynamic-tool channel — declared on
+  // `thread/start`, called back as `item/tool/call`
+  // (src/core/codex/codex-hosted-tools.ts). True on BOTH paths, which is what
+  // ADR-030 asks before the flag goes up: a resumed thread keeps them, because
+  // the specs live in the rollout's SessionMeta and come back from there even
+  // though `thread/resume` has no field to re-send them (pinned end to end by
+  // src/integration/codex/codex-app-server.integration.test.ts). It does NOT
+  // mean Codex hosts MCP servers — the runtime MCP verbs stay gated on method
+  // presence (`mcpServerStatus` and friends), which this engine has none of,
+  // and the MCP UI is `engineId === 'claude'` only.
+  hostedMcp: true,
   backgroundTasks: false,
   subagents: false,
   // Plan mode is ClaudeUI's own read-only autonomy, enforced by the shared
