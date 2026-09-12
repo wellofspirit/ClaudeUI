@@ -66,6 +66,12 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     codexLoginStatus: () => unwrap('codex:login-status'),
     codexLoginCancel: () => unwrap('codex:login-cancel'),
     platform: 'web',
+    // Never on the web client. The verifier hooks are a LOCAL harness affordance
+    // (`scripts/app-shot.mjs` driving the real Electron app); a browser reaching
+    // the app over the remote transport is not that, and publishing the store on
+    // `window` there would hand a shared page's scripts every transcript. Hard
+    // literal, not a plumbed flag — there is no version of this that is true.
+    verifierHooks: false,
 
     // Desktop-only: return null or no-op on web
     pickFolder: async () => {

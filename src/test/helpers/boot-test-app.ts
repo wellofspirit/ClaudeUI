@@ -61,6 +61,9 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
 
   return {
     platform: process.platform,
+    // The jsdom harness is not the real-app harness: nothing here reads
+    // `window.__claudeuiVerifier`, and tests reach the store directly.
+    verifierHooks: false,
     codexApproval: (id, requestId, decision) =>
       unwrap('session:codex-approval', id, requestId, decision),
     codexAuthStatus: () => unwrap('codex:auth-status'),

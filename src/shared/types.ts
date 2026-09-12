@@ -1068,6 +1068,13 @@ export interface ForkAnchorResult {
 
 interface SessionAPI {
   platform: string
+  /**
+   * True only when this launch opted into the verifier hooks
+   * (`CLAUDEUI_VERIFIER_HOOKS=1` / `--claudeui-verifier-hooks`), which is what
+   * makes the renderer publish `window.__claudeuiVerifier`. False on the web
+   * client, always. See `src/shared/verifier-hooks.ts`.
+   */
+  verifierHooks: boolean
   pickFolder(): Promise<string | null>
   createSession(
     routingId: string,

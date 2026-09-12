@@ -71,6 +71,7 @@ import {
 import { readImagePreview } from '../core/sent-file-security'
 import { setHostPaths } from '../core/host'
 import { setSqliteDriver } from '../core/services/sqlite-driver'
+import { verifierHooksEnabled, VERIFIER_HOOKS_SWITCH } from '../shared/verifier-hooks'
 import { betterSqlite3Driver } from '../core/services/sqlite/better-sqlite3-driver'
 import icon from '../../resources/icon.png?asset'
 
@@ -138,6 +139,18 @@ const remoteAccessDisabled =
 // would put the whole app into browser headless mode and break it.
 const headlessWindow =
   process.env.CLAUDEUI_HEADLESS === '1' || process.argv.includes('--claudeui-headless')
+
+// Verifier hooks (real-app harness): publish `window.__claudeuiVerifier` in the
+// renderer so `scripts/app-shot.mjs --eval/--state` can read the store and the
+// replica's canonical copy. Off unless asked for — rationale and the two switch
+// forms live in `src/shared/verifier-hooks.ts`.
+//
+// Main resolves it here and FORWARDS the switch to the preload through
+// `additionalArguments`: the preload runs in the renderer process, whose argv is
+// Chromium's, so the CLI form would otherwise reach main and stop there. (The env
+// var is inherited by the renderer process on its own; the forward is what makes
+// the two forms equivalent.)
+const verifierHooks = verifierHooksEnabled()
 
 // WINDOWLESS mode (SyncCore phase 4d): boot core and serve, with no BrowserWindow
 // at all. This is the phase-4 exit criterion — canonical state, the remote HTTP+WS
@@ -303,7 +316,10 @@ function createWindow(): void {
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
-      webviewTag: true
+      webviewTag: true,
+      // Carries the verifier opt-in into the renderer process, where the preload
+      // reads it off its own argv. Empty (not omitted) in every normal launch.
+      additionalArguments: verifierHooks ? [VERIFIER_HOOKS_SWITCH] : []
     }
   })
   currentWindow = mainWindow

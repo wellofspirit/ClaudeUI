@@ -6,6 +6,7 @@ import type {
   ProxySettings
 } from '../shared/types'
 import { buildMockupUrl } from '../shared/mockup-url'
+import { verifierHooksEnabled } from '../shared/verifier-hooks'
 
 /**
  * Factory for IPC event handler registration.
@@ -80,6 +81,11 @@ const api: ClaudeAPI = {
   codexLoginStatus: () => unwrap('codex:login-status'),
   codexLoginCancel: () => unwrap('codex:login-cancel'),
   platform: process.platform,
+  // Resolved here, in the one process that sees BOTH forms of the opt-in: the
+  // env var (inherited from main) and the `--claudeui-verifier-hooks` switch main
+  // forwards via `additionalArguments`. The renderer has neither, so it reads the
+  // answer off `window.api` instead. See `src/shared/verifier-hooks.ts`.
+  verifierHooks: verifierHooksEnabled(),
   pickFolder: () => ipcRenderer.invoke('session:pick-folder'),
   createSession: (
     routingId: string,
