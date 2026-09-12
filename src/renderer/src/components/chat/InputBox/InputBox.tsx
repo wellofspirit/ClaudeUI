@@ -7,6 +7,7 @@ import {
   engineDefaultModels,
   resolveEngineDefaultModel
 } from '../../../stores/session-store'
+import { resolveRekeyed } from '../../../stores/replica'
 import type { FileAttachment, VoiceState as VoiceStateType } from '../../../../../shared/types'
 import { v4 as uuid } from 'uuid'
 import { resolveSendAction, filterModelsForEngine } from './utils'
@@ -668,16 +669,25 @@ export function InputBox(): React.JSX.Element {
             await doSend(action.prompt, action.attachments)
           }
         } catch (err) {
-          useSessionStore.getState().addError(sessionId, `Failed to send message: ${err}`)
+          useSessionStore
+            .getState()
+            .addError(resolveRekeyed(sessionId), `Failed to send message: ${err}`)
           return
         }
+        // The engine can report its stable session id WHILE the send is in
+        // flight — Codex rekeys on `thread/start`, which lands well before
+        // `turn/start` resolves this await — and the rekey retires `sessionId`
+        // out from under us. Follow the move first, or the guard below compares
+        // the new active id against a dead one, the textarea never clears, and
+        // the attachment reset lands on an id nothing holds any more.
+        const settledId = resolveRekeyed(sessionId)
         // Only clear the textarea if the user is still on this session; always
         // clear the attachments of the session the send targeted.
-        if (useSessionStore.getState().activeSessionId === sessionId) {
+        if (useSessionStore.getState().activeSessionId === settledId) {
           setText('')
           if (textareaRef.current) textareaRef.current.style.height = 'auto'
         }
-        setDraftAttachments(sessionId, [])
+        setDraftAttachments(settledId, [])
         return
       }
     }

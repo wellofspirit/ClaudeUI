@@ -31,7 +31,8 @@ import {
   seedWatchedSession,
   evictLocalSessions,
   dropLocalSessions,
-  onReplicaApplied
+  onReplicaApplied,
+  resolveRekeyed
 } from '../replica'
 import { seed, emitSync, resetReplicaSeam } from '@test/helpers/replica-seed'
 import { toSnapshot } from '../../../../core/shared/sync/state'
@@ -200,6 +201,27 @@ describe('rekey', () => {
     expect(store().sessions['sdk-1'].draftText).toBe('keep me')
     expect(store().sessions['sdk-1'].messages).toHaveLength(1)
     expect(store().activeSessionId).toBe('sdk-1')
+  })
+
+  it('remembers where a retired id went', () => {
+    // The move is the only record that the old id ever named this session, and it
+    // is erased in the same tick. A caller holding the pre-rekey id across an
+    // await (InputBox's send) has nothing else to ask.
+    seed.created('old', { cwd: '/p' })
+    seed.rekey('old', 'sdk-1')
+    expect(resolveRekeyed('old')).toBe('sdk-1')
+  })
+
+  it('resolves an id it has no rekey for to itself', () => {
+    expect(resolveRekeyed('never-moved')).toBe('never-moved')
+  })
+
+  it('follows a chain of rekeys to the current id', () => {
+    seed.created('a', { cwd: '/p' })
+    seed.rekey('a', 'b')
+    seed.rekey('b', 'c')
+    expect(resolveRekeyed('a')).toBe('c')
+    expect(resolveRekeyed('b')).toBe('c')
   })
 })
 

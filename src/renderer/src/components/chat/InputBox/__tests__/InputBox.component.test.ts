@@ -646,6 +646,46 @@ describe('InputBox FC — rendered', () => {
     expect(useSessionStore.getState().sessions[FC_ROUTE].sdkActive).toBe(true)
   })
 
+  it('onSend clears the draft when the engine rekeys the session mid-send', async () => {
+    // Codex reports its stable session id on `thread/start`, which lands while
+    // `sendPrompt` is still awaiting `turn/start` — so the rekey retires
+    // FC_ROUTE before handleSend's continuation runs. Guarding on the captured
+    // (now dead) id left the sent prompt sitting in the textarea.
+    const REKEYED = 'codex-stable-1'
+    app.bridge.ipcMain.handle('session:send', (_e: unknown, ...args: unknown[]) => {
+      if (!ipcCalls['session:send']) ipcCalls['session:send'] = []
+      ipcCalls['session:send'].push(args)
+      seed.rekey(FC_ROUTE, REKEYED)
+      return null
+    })
+
+    useSessionStore.getState().setDraftText('hello world')
+    useSessionStore.getState().addDraftAttachments(FC_ROUTE, [
+      {
+        id: 'att-1',
+        fileName: 'shot.png',
+        fileType: 'image',
+        mediaType: 'image/png',
+        base64Data: 'AAAA',
+        previewUrl: 'blob:shot'
+      }
+    ])
+
+    renderFC()
+    await act(async () => {
+      await viewProps.onSend()
+    })
+
+    // The rekey landed, and the send targeted the id that was live when it was issued.
+    expect(useSessionStore.getState().activeSessionId).toBe(REKEYED)
+    expect(ipcCalls['session:send'][0][0]).toBe(FC_ROUTE)
+    expect(useSessionStore.getState().sessions[FC_ROUTE]).toBeUndefined()
+
+    const settled = useSessionStore.getState().sessions[REKEYED]
+    expect(settled.draftText).toBe('')
+    expect(settled.draftAttachments).toEqual([])
+  })
+
   it('onSend with /btw prefix: calls askSideQuestion IPC and setBtwQuestion in store', async () => {
     useSessionStore.getState().setDraftText('/btw What does this function do?')
 

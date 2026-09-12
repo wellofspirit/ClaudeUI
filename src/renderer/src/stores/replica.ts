@@ -157,6 +157,10 @@ export function startReplica(): () => void {
       const rekey = pendingRekeyFor(event)
       const removed = removedIdOf(event)
       commit(applyEvent(canonical, event, aux), { rekey, removed })
+      // Recorded before the persistence below, which reaches out to disk and can
+      // throw: the forwarding record is what an in-flight send needs, and losing
+      // it because `sessions.json` could not be written is the worse failure.
+      if (rekey) rekeyed.set(rekey.oldId, rekey.newId)
       if (rekey) persistRekeyedRegistry(rekey.newId)
       // The host now owns this id (or has dropped it) — either way it stops being
       // this client's private invention. A rekey carries the marker across, since
@@ -288,6 +292,46 @@ const locallyCreated = new Set<string>()
  */
 export function isLocallyCreated(routingId: string): boolean {
   return locallyCreated.has(routingId)
+}
+
+/**
+ * Where a retired routing id went — old id ⇒ the id that replaced it.
+ *
+ * Kept for the same reason {@link locallyCreated} is: after a rekey the old id is
+ * gone from canonical AND from the store in the same tick, so nothing left in the
+ * renderer can answer "what happened to it?". A caller that captured the id
+ * BEFORE an await needs exactly that answer — `InputBox.handleSend` holds one
+ * across `sendPrompt`, and Codex reports its stable session id (`thread/start`)
+ * while that await is still pending, so the guard "is the user still on this
+ * session?" would otherwise compare the new active id against an id that no
+ * longer exists and leave the sent prompt sitting in the textarea.
+ *
+ * Never pruned. An entry is two short strings, one per session that ever rekeyed
+ * — and answering for ids that no longer exist is the entire point, so there is
+ * no moment at which forgetting one is safe.
+ */
+const rekeyed = new Map<string, string>()
+
+/** Hop bound for {@link resolveRekeyed} — a cycle must not hang the send path. */
+const MAX_REKEY_HOPS = 16
+
+/**
+ * Follow a routing id through the rekeys this client has folded.
+ *
+ * Returns the input unchanged when no rekey is known for it — the common case,
+ * and the honest answer for an id that was never moved. A chain (`a → b → c`) is
+ * unlikely, since an engine reports its stable id once, but it is walked anyway
+ * and the walk is bounded: a cycle would be a reducer bug, and spinning on the
+ * send path is a worse way to report one than returning the last id seen.
+ */
+export function resolveRekeyed(routingId: string): string {
+  let id = routingId
+  for (let hop = 0; hop < MAX_REKEY_HOPS; hop++) {
+    const next = rekeyed.get(id)
+    if (next === undefined || next === id) break
+    id = next
+  }
+  return id
 }
 
 /**
@@ -583,6 +627,7 @@ export function resetReplicaForTests(): void {
   canonical = emptyCanonicalState()
   aux = emptyAux()
   locallyCreated.clear()
+  rekeyed.clear()
   observers.clear()
   rewatch = null
   if (rewatchTimer !== null) {
