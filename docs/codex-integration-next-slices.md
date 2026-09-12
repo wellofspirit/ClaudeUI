@@ -92,6 +92,8 @@ Known unrelated: `vscode-web-service` probeCli fails on darwin; `remote-*.test.t
 
 ## Slice B: approve a guardian-denied action from the declined tool card
 
+**Landed in `68bcf6e3` (2026-09-12).** Kept as the record of the design; two source facts below were corrected during implementation: the review completes before the target item's `item/completed`, and the shared reducer drops a pending approval when a `tool_result` for its id arrives, so the offer is held until the declined item completes and re-armed after a corrected authoritative replay; and `GuardianCommandSource` values differ in casing (`unifiedExec` vs `unified_exec`), not only the type tag.
+
 Decided by Daniel on 2026-09-12: no pop-up approval card. A guardian denial
 already leaves a declined tool card in the transcript; the override action
 lives on that card, so it can be clicked when wanted and ignored otherwise.

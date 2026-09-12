@@ -280,7 +280,7 @@ the per-mode `turn/start` parameters, plan declines, rule-sourced verdicts,
 acceptEdits workspace narrowing, the standard card shape, `allowForSession` and
 legacy override rows; two real-binary integration cases cover plan declining a
 write with no file left behind, and default asking, the human allowing, and the
-file existing. Still open: `auto` guardian behaviour against a real account, and
+file existing. A real-account Auto turn with an outside-workspace write rendered the guardian's decision row in the app on 2026-09-12 (approved, low risk); the human override of a denial landed in `68bcf6e3` and is proven against the real binary with a scripted deny verdict. Still open:
 sandbox containment, which the integration fixture cannot measure because macOS
 refuses to nest a second seatbelt profile.
 
