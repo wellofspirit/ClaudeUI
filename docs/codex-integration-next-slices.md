@@ -215,6 +215,8 @@ Owned: `src/core/codex/CodexSession.ts`, `src/shared/codex-types.ts`,
 
 ## Slice C: hosted tools over Codex dynamic tools (render_mermaid, create_mockup, show_mockup)
 
+**Landed in `30421310` (2026-09-12).** Kept as the design record. Deviations made during implementation, both verified in the source: the v2 `dynamicToolCall` item drops the core's `error` field, so a cancelled call arrives as `failed` with empty `contentItems` and the mapper supplies its own no-result text; and no interactive `ask` card was built, because the shared ladder's hosted auto-allow rung sits directly below deny and no Claude rule string maps to the `diagram`/`mockup` kinds, so a non-allow verdict is unreachable today and is answered fail-closed (`success: false` plus the reason) rather than with untestable card machinery. Resume persistence of the specs is confirmed from `core/src/session/mod.rs:721` and live.
+
 Scope: the three ClaudeUI-hosted UI tools only. `dispatch_agent` (cross-engine
 dispatch as a source) is M4 and out of scope.
 
