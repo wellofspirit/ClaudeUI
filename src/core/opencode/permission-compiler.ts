@@ -1,6 +1,12 @@
 import { join } from 'node:path'
 import type { ClaudePermissions, PermissionSuggestion } from '../../shared/types'
 import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
+// Import cycle by construction: `rules-sync` needs THIS module's
+// `parseClaudeRule` to read a Claude rule, and this module needs its writer to
+// keep the generated Codex rule file in step with a persisted "always allow".
+// Both directions are call-time only (no top-level use of the other module), so
+// ESM's live bindings resolve it whichever module is evaluated first.
+import { syncCodexRulesFile } from '../codex/rules-sync'
 import { logger } from '../services/logger'
 
 /**
@@ -317,6 +323,8 @@ export function persistAllowSuggestions(
       const allow = new Set(perms.allow)
       for (const rule of ruleStrings) allow.add(rule)
       saveClaudePermissions(scope, { ...perms, allow: [...allow] }, cwd)
+      // Only the user scope feeds the generated Codex execpolicy file.
+      if (scope === 'user') syncCodexRulesFile()
     }
     return byScope.size > 0
   } catch (err) {

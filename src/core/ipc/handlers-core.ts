@@ -5,6 +5,7 @@ import * as path from 'path'
 import type { SessionManager } from '../services/session-manager'
 import { scanSkills } from '../services/skill-scanner'
 import { saveCleanupPeriodDays, saveClaudePermissions } from '../services/claude-settings'
+import { syncCodexRulesFile } from '../codex/rules-sync'
 import type {
   ClaudePermissions,
   EngineId,
@@ -607,6 +608,10 @@ export function savePermissionsAndNotify(
   cwd?: string
 ): void {
   saveClaudePermissions(scope, permissions, cwd)
+  // Codex reads user permission rules only through the generated execpolicy file
+  // (see `codex/rules-sync.ts`), which compiles USER scope alone — a project or
+  // local write cannot change its content, so only a user write regenerates it.
+  if (scope === 'user') syncCodexRulesFile()
   manager.forEach((session) => {
     if (!cwd || session.cwd === cwd || scope === 'user') {
       session.notifySettingsChanged?.().catch(() => {})

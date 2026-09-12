@@ -23,8 +23,12 @@ const DQ_ESCAPABLE = new Set(['$', '`', '"', '\\', '\n'])
  * concatenate into a single word. Returns `null` for input this cannot be sure
  * of (unterminated quote, trailing lone backslash) — the caller then leaves the
  * command alone rather than guessing.
+ *
+ * Exported because `rules-sync.ts` needs the SAME splitter to turn a Claude
+ * `Bash(<prefix>:*)` rule into the argv prefix an execpolicy `prefix_rule`
+ * matches. A second splitter there would be a second set of quoting bugs.
  */
-function shlexSplit(input: string): string[] | null {
+export function splitShellWords(input: string): string[] | null {
   const tokens: string[] = []
   let token = ''
   let started = false
@@ -88,7 +92,7 @@ function shellName(token: string): string {
  * model's own nesting and stays visible to the rules as written.
  */
 export function unwrapShellCommand(command: string): string {
-  const tokens = shlexSplit(command)
+  const tokens = splitShellWords(command)
   if (!tokens || tokens.length !== 3) return command
   const [shell, flag, script] = tokens
   if (!FLAGS.has(flag) || !SHELLS.has(shellName(shell))) return command

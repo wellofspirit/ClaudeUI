@@ -8,6 +8,7 @@ import { OpencodeSession } from '../opencode/OpencodeSession'
 import { PiSession } from '../pi/PiSession'
 import { CodexSession } from '../codex/CodexSession'
 import { codexBinaryAvailable } from '../codex/codex-locate'
+import { syncCodexRulesFile } from '../codex/rules-sync'
 import { engineRegistry } from './EngineRegistry'
 import { claudeSpawnPrep } from './claude-spawn-prep'
 import { opencodeSpawnPrep } from '../opencode/opencode-spawn-prep'
@@ -39,5 +40,11 @@ engineRegistry.register('codex', (routingId, win, cwd, opts) => {
 })
 spawnPrepRegistry.register('codex', async (model) => {
   if (!codexBinaryAvailable()) throw new Error('Codex is not installed for this platform')
+  // Staleness check before every Codex session. Codex reads
+  // `$CODEX_HOME/rules/*.rules` ONCE per thread (`thread/start`/`thread/resume`),
+  // so this is the last moment a user permission edit made OUTSIDE ClaudeUI can
+  // still reach the session about to start. A no-op (one read + a hash compare)
+  // when nothing changed, and it never throws.
+  syncCodexRulesFile()
   return { resolvedModel: model || undefined }
 })
