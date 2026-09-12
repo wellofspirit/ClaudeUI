@@ -210,3 +210,64 @@ Owned: `src/core/codex/CodexSession.ts`, `src/shared/codex-types.ts`,
 `src/core/codex/__tests__/`, the renderer chat test directories, and
 `src/integration/codex/`. Do not touch `InputBox.tsx`, `stores/replica.ts`,
 `event-mapper.ts`, `history.ts`, the queue, or any other engine.
+
+## Slice C: hosted tools over Codex dynamic tools (render_mermaid, create_mockup, show_mockup)
+
+Scope: the three ClaudeUI-hosted UI tools only. `dispatch_agent` (cross-engine
+dispatch as a source) is M4 and out of scope.
+
+### Source facts (`.cache/codex-src`, tag `rust-v0.154.0`; re-verify each before relying on it)
+
+- `thread/start` takes `dynamicTools?: DynamicToolSpec[]` (`{type:'function', name, description, inputSchema, deferLoading?}` or a namespace). Neither `thread/resume` nor `thread/fork` accepts the field (generated params, 0 matches). Find out from `core/src/thread_manager.rs` / `app-server/src/request_processors/thread_processor.rs` whether definitions given at start persist into the rollout and are restored on resume; the spec's M3 text expects "cold definitions persist; resume cannot override them with an empty list". Report what the source says and, if a resumed thread has NO hosted tools, say so plainly and set the capability accordingly (ADR-030) rather than pretending.
+- When the model calls a dynamic tool, `core/src/tools/handlers/dynamic.rs` `request_dynamic_tool` emits `item/started` for a `dynamicToolCall` item (`{id: callId, namespace, tool, arguments, status: inProgress}`), the app-server sends the client a server request `item/tool/call` (`DynamicToolCallParams {threadId, turnId, callId, namespace, tool, arguments}`), and the item completes `completed` or `failed` from the response `{contentItems: [{type:'inputText', text} | {type:'inputImage', imageUrl} | {type:'inputAudio', audioUrl}], success}`. If the turn is aborted before a response, the pending sender is dropped and the item completes `failed` with error "dynamic tool call was cancelled before receiving a response"; a late response is then meaningless. `app-server/src/dynamic_tools.rs` `decode_response` shows what a malformed response turns into.
+- `ThreadItem` already has the `dynamicToolCall` variant (`src/core/codex/protocol/v2/ThreadItem.ts` line 79) and `thread/read` returns it in cold history, so one mapper change covers live and cold.
+- ClaudeUI reference implementations: `src/core/pi/PiSession.ts` `handleHostedTool` (dispatch by name onto `createMermaidServer()` / `createMockupServer(cwd)` handlers, `unknownHostedTool` fail-closed default) and `src/core/pi/pi-bridge-source.ts` (plain JSON-schema literals for the three tools; copy the shapes, keep field names identical so the shared kind bodies render them: `render_mermaid {source, title?}`, `create_mockup {html, title?}`, `show_mockup {directory}`). Policy: `src/core/pi/permission-engine.ts` lines ~120-180 map the three names onto shared tool kinds and `PI_HOSTED_TOOL_NAMES`; Codex applies the SAME verdicts through `decideWithSource` (the session already has `gate()` and the `Pending` machinery for an `ask`).
+- Renderer: `PiEngineToolMap.ts` `kindOf` (`render_mermaid` → `diagram`, `create_mockup`/`show_mockup` → `mockup`) and its `normalize` for those kinds are the model for `CodexEngineToolMap.ts`.
+
+### Design
+
+1. New `src/core/codex/codex-hosted-tools.ts`: `codexDynamicToolSpecs(): DynamicToolSpec[]` (three function specs, JSON-schema literals) and `runCodexHostedTool(name, args, cwd, signal): Promise<ToolResultContent>` reusing the mermaid/mockup handlers exactly as pi does. Pure, no session import.
+2. `CodexSession`: pass `dynamicTools` on `thread/start`. Add `item/tool/call` to `serverMethods` and handle it in `requestApproval`'s dispatcher (or a sibling): refuse unless `threadId === this.threadId`, `turnId === this.turnId`, the turn has not ended, `namespace === null`, `tool` is one of the three, and `callId` has not been seen this process generation (one-shot: a repeated `callId` is refused, never re-executed). Gate through the shared engine like pi (`ask` raises the standard card bound to `codexItemId(thread, turn, callId)`; `deny` answers `{success:false}` with the reason as `inputText` and a `session:error`). Execute with `context.signal`; `finishTurn` already aborts server requests for the ended turn and `disconnected()` for all, so an aborted signal must stop the handler (pass it through to the mermaid/mockup handlers' `extra.signal`) and a result that arrives after abort is dropped. Map `ToolResultContent` → `contentItems`: text → `inputText`; image → `inputImage` with `data:<mime>;base64,<data>`; `success = !isError`.
+3. `event-mapper.ts` `case 'dynamicToolCall'`: `tool_use {toolUseId: codexItemId(thread, turn, item.id), toolName: item.tool, toolInput: item.arguments}`; when completed, `toolResult` with the `inputText` items joined by newlines, `isError: item.status !== 'completed' || item.success === false`, plus `item.error` when present. Images from `inputImage` are out of scope for this slice; say so in a comment.
+4. `CodexEngineToolMap.ts`: `kindOf` and `normalize` for the three names, mirroring pi's (the mockup `directory` is extracted from the result text there; do the same).
+5. `CODEX_ENGINE_CAPABILITIES.hostedMcp = true` only if start AND resume both work end to end (ADR-030); otherwise leave `false` and report.
+
+### Tests (each must fail before the corresponding change)
+
+- `codex-session.test.ts`: `thread/start` params carry the three specs; a valid `item/tool/call` runs the handler (mock the mermaid/mockup modules) and answers `{contentItems, success:true}`; unknown tool, foreign thread, stale turn, non-null namespace, and repeated `callId` are refused without executing; `turn/completed` aborts an in-flight call's signal and a late handler result is not sent; plan-mode verdicts match pi's for each tool.
+- `event-mapper.test.ts`: `dynamicToolCall` in progress → `tool_use` only; completed success → result text; failed with `error` → `isError` and the error text.
+- Renderer: `CodexEngineToolMap` tests (find pi's equivalents and mirror them).
+- Integration (`CODEX_INTEGRATION=1`, real binary, fixture provider): script the provider to return a function call to `render_mermaid` with a small diagram; observe `item/tool/call` on the wire, answer it, see the `dynamicToolCall` item complete `completed`, and find the tool output text in the provider's next request. Second case: resume the same thread in a fresh `CodexSession` and check whether the provider's request still advertises the tool (this is the resume-persistence answer).
+
+### Files and boundaries
+
+Owned: `src/core/codex/codex-hosted-tools.ts` (new), `src/core/codex/CodexSession.ts`, `src/core/codex/event-mapper.ts`, `src/renderer/src/components/chat/tool-registry/CodexEngineToolMap.ts`, `src/shared/model-capabilities.ts` (the codex block only), their tests, `src/integration/codex/`. Do not touch pi/opencode/claude code, the queue, history listing, or docs.
+
+## Slice D: completed-turn fork
+
+### Source facts and as-built facts
+
+- `thread/fork {threadId, lastTurnId?, beforeTurnId?, cwd?, model?, approvalPolicy?, sandbox?, approvalsReviewer?, excludeTurns?, ...}` (generated `ThreadForkParams.ts`): copies the source thread through `lastTurnId` inclusive into a NEW thread; the referenced turn cannot be in progress; the source is not modified. The returned `Thread` carries `forkedFromId` (the source) and `parentThreadId` (null for a fork; set for native CHILD threads). The lifecycle probe (`src/integration/codex/codex-lifecycle.integration.test.ts`) pinned: `thread/list` never lists forks; a thread with a surviving fork cannot be deleted. Re-verify `forkedFromId` vs `parentThreadId` on a real fork before relying on the distinction.
+- ClaudeUI fork flow as built: renderer `session-store.ts` (~1780-1840) calls `session:resolve-fork-anchor` with `(sourceSessionId, cwd, messageId, engineId, messageIndex)`, expects `ForkAnchorResult {anchorUuid, reason?}`, seeds the branch optimistically with the source's messages up to the anchor, then `createSession({resumeSessionId: source, resumeSessionAt: anchorUuid, forkSession: true, engineId})`. `engine-history.ts` routes `forkAnchor` per engine (codex: `unsupported`); `create-session.ts` (~line 123) refuses codex fork; `CodexSession.start()` (~line 427) throws on `forkSession`/`resumeSessionAt`; `CODEX_ENGINE_CAPABILITIES.fork` and `forkFromMessage` are false, and the renderer shows "This engine does not support branching" when `forkFromMessage` is false.
+- Codex message ids are `codexItemId(threadId, turnId, itemId)` = `codex:` + JSON array, so the turn id is recoverable from any transcript message id, including guardian rows (`codex:[thread, turn, reviewId]`).
+- Fork granularity is the TURN. A fork "from message N" keeps the whole turn containing N. The renderer's optimistic seed slices at N; live, the new session's ids all carry the fork's thread id, so the seed and new turns never collide, and a cold reload replaces the seed with the fork's own history. Accept the seed/turn-boundary mismatch as cosmetic and note it in the report; do not change the shared renderer flow.
+- Listing: since `thread/list` never returns forks, a fork would vanish from the sidebar after restart. `setSessionMeta(threadId, {engineId:'codex', ...})` already runs for every started Codex thread (`CodexSession.start()`), so the set of codex ids in `session_meta` minus the natively listed ids is exactly the forks plus deleted threads. `listCodexSessions` reads each such id with the service (`thread/read`, or `history()` if no lighter read exists), skips ids the binary refuses, and includes the rest with the same `SessionInfo` shape. Bound concurrency (four at a time) and never let one failure fail the list.
+
+### Design
+
+1. `engine-history.ts` codex `forkAnchor(id, cwd, messageId)`: parse the turn id out of `messageId`; `thread/read` the source through `CodexService`; return `{anchorUuid: turnId}` when that turn exists and its status is not `inProgress`, else `{anchorUuid: null, reason: 'turn-in-progress' | 'turn-not-found' | 'not-a-codex-message'}`. No JSONL, no Claude anchor.
+2. `create-session.ts`: remove the codex refusal (keep the engine-identity check).
+3. `CodexSession.start()`: when `forkSession && resumeSessionAt`, call `thread/fork {threadId: resumeSessionId, lastTurnId: resumeSessionAt, cwd, model?, approvalPolicy, sandbox, approvalsReviewer, excludeTurns: true}` instead of `thread/resume`; the response thread's `forkedFromId` must equal the source, its id becomes `this.threadId`, saved overrides are copied from the source id to the new id, `setSessionMeta` and `ensureCodexSessionOverrides` run for the new id. Keep the `parentThreadId` guard (a fork must have `parentThreadId === null`; if the real binary sets it on forks, stop and report). `resumeSessionAt` without `forkSession` (resume-at) stays unsupported and throws with a clear message.
+4. `history.ts` `listCodexSessions`: add the fork discovery described above.
+5. Capabilities: `fork: true`, `forkFromMessage: true` for codex once the real-binary test passes end to end.
+
+### Tests (each must fail before the corresponding change)
+
+- `engine-history.test.ts` / a codex history test: anchor from a live-turn message → null with reason; from a completed turn → the turn id; from a non-codex id → null with reason.
+- `codex-session.test.ts`: fork spawn sends `thread/fork` with the exact params, rekeys to the new id, copies overrides, and refuses a response whose `forkedFromId` differs; resume-at without fork throws.
+- `codex-discovery-history.test.ts`: listing includes a session_meta-only codex id that `thread/read` resolves, skips one the binary refuses, and does not read natively listed ids twice.
+- Integration (`CODEX_INTEGRATION=1`, real binary, fixture provider): two turns on a root, fork at turn 1 → the fork's cold history has exactly turn 1's items, the source still has both turns, `thread/list` omits the fork, and `listCodexSessions` includes it. Also assert the fork's `parentThreadId` and `forkedFromId` values and quote them in the report.
+
+### Files and boundaries
+
+Owned: `src/core/services/engine-history.ts` (codex entry only), `src/core/ipc/create-session.ts` (the one refusal), `src/core/codex/CodexSession.ts` (`start()` only), `src/core/codex/history.ts`, `src/core/codex/CodexService.ts` (a read method if needed), `src/shared/model-capabilities.ts` (codex block), their tests, `src/integration/codex/`. Do not touch delete/archive, the renderer fork flow, or other engines.
