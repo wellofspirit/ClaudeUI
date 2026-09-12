@@ -114,6 +114,17 @@ second decision layer. Sandbox enforcement itself cannot be measured in the
 integration fixture, so containment claims rest on the Codex source at tag
 `rust-v0.154.0` and on real-app runs.
 
+Two additions landed on 2026-09-12. Under `auto`, each completed guardian
+review (`item/autoApprovalReview/completed`) becomes a system transcript row
+naming the action, verdict, risk level and rationale, and the guardian's
+circuit-breaker warning becomes a row plus `session:error`; reviews are not
+thread items, so cold history cannot reconstruct them. And the user-scope
+Claude `Bash` rules are compiled into `$CODEX_HOME/rules/claudeui.rules`
+(`rules-sync.ts`, see ADR-067's amendment for the mapping and trade-offs), so
+deny rules bind even under `auto` and prefix allows skip the ask; the file is
+regenerated on core boot, after a user-scope permission write and in the Codex
+spawn prep, only when its source hash changes.
+
 `codex_session_overrides` (migration 15) now holds model and effort only. Rows
 written before the shared gate still carry the retired
 `approvalPolicy`/`sandbox`/`approvalsReviewer` keys; `savedCodexOverrides` drops
