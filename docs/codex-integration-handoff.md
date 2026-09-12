@@ -2,7 +2,7 @@
 
 ## Resume here
 
-Work continues on **`codex-integration`**, created from `pre-release`. Ten Codex commits have landed on it, oldest first:
+Work continues on **`codex-integration`** (from `pre-release`). Twenty-one Codex commits are on it (the last is this handoff itself), nothing is pushed, and the worktree is clean apart from two unrelated pre-existing untracked files (`docs/headless-server.md`, `docs/manual.md`). Oldest first:
 
 ```text
 b670492e feat(codex): pin Codex 0.154.0 acquisition and generate app-server protocol types
@@ -15,99 +15,112 @@ b0a61d61 fix(codex): show the model name in the picker and report disposal durin
 93091e75 test(codex): probe the native approval surface across policy and sandbox modes
 970d9d4f feat(codex): gate Codex through ClaudeUI's shared permission model
 0df6ed51 docs(adr): ADR-067 Codex under the shared permission model
+59f19cfa docs(codex): reconcile architecture, spec and handoff with the built engine
+ed5e357a test(codex): probe the native reviewer, execpolicy rules and judge-thread tooling
+6e6d064e refactor(codex): drop the native settings channel, share allow-rule persistence, fix pre-turn effort
+176dd767 fix(codex): acquire codex-code-mode-host alongside the binary and require it
+389d22b0 fix(codex): gate and suggest on the command inside Codex's login-shell wrapper
+cae94a2e feat(verifier): opt-in renderer state hooks for the real-app harness
+33676b58 docs(codex): record the intermittent render loss and how to capture it
+7022abf3 feat(codex): show the native reviewer's decisions in Auto-mode transcripts
+a22ece12 feat(codex): compile user-scope Bash rules into a ClaudeUI-owned execpolicy file
+5eaf7bf5 docs(codex): handoff for the next session, preserved slice specs, ADR-067 amendments
 ```
 
-`git log --oneline main..HEAD` also lists the unrelated pre-existing branch commits below `43a93ac7`. The native policy and policy pill named in the earlier subject lines were removed again by `970d9d4f`; see ADR-067.
+The native policy pill and policy overrides named in the early subject lines were removed again by `970d9d4f`; ADR-067 is the permission model as built.
 
-Orchestration model in use, per ADR-026:
+### How this branch is worked (ADR-026, as practised)
 
-- The main model orchestrates, reviews every line, reruns gates independently, and commits.
-- Opus subagents implement, one slice each, against a written kickoff spec. They never commit, `git add`, branch, or run `bun install`.
-- Standing authorization to commit a reviewed slice. **Pushes still need an explicit ask.**
+- The main model orchestrates: writes a kickoff spec per slice, reviews every line of the resulting diff, reruns every gate itself, verifies against the real Electron app, and commits. It never trusts an implementer's summary.
+- Opus subagents implement one slice each against the written spec. They never commit, `git add`, branch, or run `bun install`. Every fix ships with a guard test proven to fail before the fix, with the failing assertion quoted in the report.
+- Daniel gave standing authorization to commit a reviewed, gate-passing slice, one commit per slice with a substantive message. **Pushes still need an explicit ask.**
+- Run at most two implementing agents at once, on disjoint files named in both specs. Three concurrent agents plus full-suite runs caused collisions and load flakes on 2026-09-11.
+- Answer "what does Codex do" from the source first: the pinned checkout is `.cache/codex-src` (tag `rust-v0.154.0`, gitignored; re-clone with `git clone --depth 1 --branch rust-v0.154.0 https://github.com/openai/codex.git .cache/codex-src`). Probes confirm the running binary; they do not replace reading. Files that answered the big questions: `codex-rs/core/src/exec_policy.rs`, `core/src/safety.rs`, `core/src/tools/approvals.rs`, `core/src/guardian/review.rs`, `core/src/shell.rs`, `execpolicy/README.md`, `install-context/src/lib.rs`, `features/src/lib.rs`.
+- Kickoff specs for the next two slices are in [codex-integration-next-slices.md](codex-integration-next-slices.md).
 
-Answer behaviour questions from the Codex source before probing: the `rust-v0.154.0` checkout under `.cache/codex-src/` (gitignored, not vendored) is the fastest and most reliable source for what the binary does. Probe only what the source cannot settle.
+### Real-provider testing
 
-The queue slice has a written kickoff spec that was parked before dispatch (identity-aware held queue via `turn/steer`, `consumeById` on `SessionQueue`, a `forwardQueuedItem` hook on `BaseSession`). It lives in the orchestrating session's scratchpad, which expires; rewrite it from the spec's "Mandatory remaining work" list if it is gone.
+Daniel authorized real Codex turns on his signed-in ChatGPT account for integration testing, with light usage: a few short turns per check, GPT-5.6 Luna by default, GPT 6 only for features Luna lacks. Rules of the road: run them in `/private/tmp/claudeui-codex-scratch` (contains `README.txt` and `hello.py`; recreate if gone), never in this repo; default mode unless the slice is about Auto; one benign command per check; never read `~/.codex` files or echo tokens; no login or logout while an account is signed in. Roughly a dozen turns were spent on 2026-09-12. The scratch directory now holds several completed Codex threads, so it appears in the welcome-screen directory list and can be selected by the harness.
+
+Harness drive that works end to end (real turn, Auto mode, about 45 s):
+
+```sh
+bun run build
+node scripts/app-shot.mjs --timeout 200000 --out .cache/screenshots/codex-turn.png \
+  --click '[data-testid="EnginePicker.trigger"]' --click '[data-testid="EnginePicker.option"][data-engine="codex"]' \
+  --click '[data-testid="WelcomeState.selectDirectory"]' --click '[data-testid="WelcomeState.directory"]:has-text("claudeui-codex-scratch")' \
+  --click '[data-testid="InputBox.textarea"]' --type 'Run ls and tell me in one sentence what files are here. Do not modify anything.' \
+  --click '[data-testid="InputBox.send"]' --wait 40000 --state --settle 500
+```
+
+`--state` prints the renderer store and replica canonical (verifier hooks, `cae94a2e`). Shift+Tab and other key presses do not reach the headless window; mode changes cannot be driven this way (the jsdom test covers them).
+
+## Decisions recorded on 2026-09-11 and 2026-09-12
+
+1. **Codex executes, ClaudeUI decides** ([ADR-067](adr/adr-067_codex-shared-permission-model.md)). The shared `PermissionMode` is the only policy surface. plan/default/acceptEdits run `untrusted` (the only policy that asks before executing anything) with our evaluator answering every command and file-change request; `auto` runs `on-request` with Codex's native `auto_review` guardian, which the user explicitly chose over a ClaudeUI judge ("if we can't map it, leave it as their native auto mode"). No bypass mode exists in the shared union. The pill, `CodexPolicyOptions` and the policy override keys are gone.
+2. **Guardian visibility, B then C.** B (read-only rows for every completed review, circuit breaker as row plus error) landed in `7022abf3`. C ("approve anyway" via `thread/approveGuardianDeniedAction`) is the next slice; its spec is in the next-slices doc.
+3. **Execpolicy rules file, option C** (deny and allow), landed in `a22ece12`: user-scope Bash rules only, deny as `forbidden` (prefix and exact), allow as `allow` (prefix only), everything else skipped and listed in the header, regenerated on core boot, on user-scope rule writes through ClaudeUI, and in the Codex spawn prep, only when the source hash changes. Daniel accepted that an execpolicy allow runs unsandboxed and unreviewed in every mode and that ClaudeUI writes one file into `~/.codex/rules/`. Project-scope rules are not compiled; he did not object to that recommendation but also did not explicitly confirm it. Raise it once if he asks why a project deny rule did not bind on Codex.
+4. Earlier decisions stand: native-owned auth with upstream refresh concurrency accepted; pinned 0.154.0 over stdio; application-held queue via `turn/steer`, never Codex's native next-turn queue; capabilities true only when the whole path works (ADR-030).
 
 ## Current checkpoint
 
-Built and committed: pinned 0.154.0 acquisition and generated protocol types, the stdio transport, typed client and read-only service, `CodexSession` and the event mapper, engine registration and spawn prep, native catalog/model/effort selection, native device-code auth, a history read/list baseline through `engine-history.ts`, the renderer account pane, tool map and approval surfaces, and the shared permission model (ADR-067).
+Built, committed and verified on the real binary: acquisition of both `codex` and `codex-code-mode-host` with pinned digests; stdio transport, typed client, read-only service; session adapter with the shared permission model; shell-wrapper unwrapping so `Bash(...)` rules match Codex commands; guardian rows in Auto transcripts; the execpolicy rules file; native device-code auth; catalog and native effort in the standard pickers; history list/read through `engine-history.ts`; renderer account pane; verifier hooks. Real turns complete end to end in default and Auto mode, with approval card, command output, answer, metering and cold history.
 
-Not built: application queue and steer, hosted tools, native children, completed-turn fork, delete and archive, the interrupted-tool presentation supplement, full metering, cross-engine dispatch, non-macOS packaging. `capabilities.queue`, `steer`, `fork`, `forkFromMessage`, `hostedMcp`, `subagents`, `crossEngineDispatch`, `slashCommands`, `skills`, `sideQuestion`, `voice`, `backgroundTasks` and `sandbox` are all false; `plan`, `interactiveApprovals` and `auth.canDriveLogin` are true.
+Not built: application queue and steer (`CodexSession.enqueuePrompt` throws; `capabilities.queue`/`steer` false), "approve anyway" for guardian denials, hosted tools, native children, fork, delete and archive (native rule from the lifecycle probe: forks are never listed, delete is refused while a process holds the thread or a descendant fork exists, leaf-first), interrupted-tool presentation supplement, full metering, cross-engine dispatch, non-macOS packaging.
 
-The [integration spec](codex-integration-spec.md) is the authority on scope: read its "Slice 3 (2026-09-11): shared permission model" and "Mandatory remaining work" sections rather than duplicating them here. Full default/CI/build and real-Electron release certification is not claimed.
+### Open items, in the order I would take them
 
-## Accepted decisions
-
-- Codex is a first-class fourth harness, not just another OpenAI model route.
-- Pin official **Codex 0.154.0** and drive `codex app-server` over stdio. No browser-facing Codex listener; desktop and web use existing core/SyncCore contracts.
-- **Native auth:** Codex owns login, credential storage, and refresh. No vault-to-Codex injection or experimental external-token authentication. The shared vault may later adopt tokens acquired through native Codex login, with a separate refresh-ownership design.
-- **Shared permissions (ADR-067, supersedes the phase-1 native-policy decision):** the session's shared `PermissionMode` is the only policy surface. Per-turn native parameters are derived from it, and every server approval request is answered by the engine-neutral permission engine pi uses. `auto` alone delegates review to Codex's native `auto_review` guardian. Do not reintroduce a native policy pill or `CodexPolicyOptions`.
-- **Native refresh concurrency:** the user explicitly chose **Accept upstream behavior**. Keep per-root processes plus service clients; document native refresh races, surface errors, and never automatically log out, delete credentials, or rewrite them. Do not reopen this with a speculative request mutex or pooling redesign.
-- **Queue semantics:** application-held, recallable items inject at an observed sub-turn boundary via `turn/steer`, not Codex's native next-turn queue.
-- Capabilities become true only when the complete product path works (ADR-030). Unfinished mandatory features are not silently dropped from phase 1.
+1. **Intermittent render loss.** Two of eight real-turn drives through the app rendered only the user bubble and a running spinner while Codex completed the turn and core's canonical state held every message. Both coincided with concurrent test suites; eight later drives rendered fully, two of them under deliberate load. Core-level reproductions of the app choreography (birth event, then the shared send handler, real client) were correct twice. If it recurs, capture with `--state` and compare the store against canonical; the suspect area is the routing-id rekey to the native thread id, but nothing in `reducer.ts`, `replica.ts` or `sync-core.ts` was found wrong on reading. Note also that after a rekey the send path's "clear the draft" check compares against the pre-rekey id, so the prompt text stays in the textarea after the first turn of a new Codex session; cosmetic, unfixed, applies to any engine that rekeys.
+2. **"Approve anyway"** for guardian denials (next-slices doc, slice B).
+3. **Queue and steer** (next-slices doc, slice A).
+4. **Real Auto verification with a guardian review.** The guardian rows were proven against the fixture provider with a scripted verdict; a real-account Auto turn that forces an escalation (an outside-workspace write) has not been observed in the app yet.
+5. Then the spec's mandatory remaining work in [codex-integration-spec.md](codex-integration-spec.md) §"Mandatory remaining work".
 
 ## Credential boundary
 
-The user authorized use of existing credentials for necessary integration validation, then specifically authorized:
+Daniel authorized use of the existing native Codex login for integration validation and, on 2026-09-12, real-provider turns under the light-usage rules above. The sanitized status probe is:
 
 ```sh
 node scripts/codex-native-status.mjs
 ```
 
-The main model independently ran it successfully after approval:
-
-```json
-{ "authenticated": true, "authKind": "chatgpt", "requiresLogin": false }
-```
-
-The previous status-access approval blocker is **resolved**. This proves stored native login state, not successful inference or current token freshness. No real-provider turn, live device login, logout, or explicit forced refresh was performed by main. Latest implementation tests use isolated synthetic auth.
-
-The status wrapper captures native output privately and returns allowlisted metadata. Never run bare `codex login status` visibly: its API-key path can print key fragments. Never read native auth files or vault material into tool output. Load the `vault` skill for any new credential handling. Implementing agents have no real credential access; main owns reviewed live validation. Native app-server startup can refresh in background even when an explicit `account/read` uses `refreshToken: false`.
+It returned `{"authenticated":true,"authKind":"chatgpt","requiresLogin":false}` when main ran it. Never run bare `codex login status` visibly (its API-key path can print key fragments). Never read native auth files or vault material into tool output. Load the `vault` skill for any new credential handling. Implementing agents get no real credential access and no real turns; every integration test uses an isolated `CODEX_HOME` with a fake key and a scripted localhost provider. `rules-sync.ts` writes to the real `~/.codex/rules/claudeui.rules` only after core boot arms it; unit tests cannot reach the developer's home, and `ls ~/.codex/rules` after a full suite run showed no directory.
 
 ## Read in this order
 
-1. [ADR-067](adr/adr-067_codex-shared-permission-model.md): the permission model as built.
-2. [ADR-066](adr/adr-066_codex-fourth-engine.md): the rest of the accepted design. Its "Phase-1 permissions are native, not shared Auto" section is superseded.
-3. [Integration spec](codex-integration-spec.md): milestone state, the slice-3 record, and mandatory remaining work.
-4. [Codex architecture](architecture/codex.md): ownership, transport, permissions and data flow as built.
-5. [Protocol reference](protocol-codex/README.md): acquisition, generated contracts and real-binary tests.
-6. [Executable spike](codex-spike.md): the two probes. Bounded observations, not proof of UI integration.
-7. [ADR-026](adr/adr-026_development-workflow.md), [ADR-030](adr/adr-030_capability-honesty.md), [ADR-038](adr/adr-038_event-driven-approval-lifecycle.md), [ADR-053](adr/adr-053_queue-item-identity-cc-parity.md), [ADR-059](adr/adr-059_no-silent-model-fallback.md), and [SyncCore](architecture/sync-core.md).
+1. [ADR-067](adr/adr-067_codex-shared-permission-model.md), including its 2026-09-12 amendments.
+2. [ADR-066](adr/adr-066_codex-fourth-engine.md) for everything else; its native-permissions section is superseded.
+3. [codex-integration-next-slices.md](codex-integration-next-slices.md): the two ready kickoff specs.
+4. [Integration spec](codex-integration-spec.md): milestone record and mandatory remaining work.
+5. [Codex architecture](architecture/codex.md): ownership, transport, permissions, data flow as built.
+6. [Executable spike](codex-spike.md): the three probes (transport spike, approval surface, reviewer and judge thread).
+7. [ADR-026](adr/adr-026_development-workflow.md), [ADR-030](adr/adr-030_capability-honesty.md), [ADR-038](adr/adr-038_event-driven-approval-lifecycle.md), [ADR-053](adr/adr-053_queue-item-identity-cc-parity.md), [SyncCore](architecture/sync-core.md).
 
-## Important findings and invariants
+## Findings and invariants worth remembering
 
-- Codex's native queue starts a new turn when idle, so it cannot back ADR-053's active-turn queue. `CodexSession.enqueuePrompt` throws and shared `SessionQueue` still correlates by text.
-- Interrupting a pending dynamic tool can emit neither `serverRequest/resolved` nor `item/completed`, and the interrupted item is absent from immediate and cold native history. Abort host work from the owning turn's terminal event; never infer child cancellation from parent completion.
-- `thread/settings/update` acknowledges out of band (the applied settings arrive only on a later `thread/settings/updated` notification), and an unconsumed update did not survive a new app-server process. Slice 3 removed the need for it on the policy path: policy rides `turn/start` instead.
-- `codex_session_overrides` (migration 15) holds model and effort only. Pre-slice-3 rows still carry policy keys; the loader drops unknown keys, the command parser rejects them.
-- Initialized zero-turn roots still fail some separate-process cold reads. Do not fabricate an empty successful history or silently create a replacement thread. This remains a mandatory lifecycle gate.
-- Native `thread.id` is conversation identity; `sessionId` can denote a tree root. Transcript IDs are thread/turn/item, and pending approval identity also includes process generation.
-- An approved command runs unsandboxed on this wire. Sandbox containment cannot be measured in the integration fixture because macOS refuses to nest a second seatbelt profile.
-- Native delete of a forked thread is a leaf-first whole-subtree operation, and forks are never listed by `thread/list`. See the lifecycle probe and the spec's remaining-work list before enabling any delete control.
-- `thread/resume` has no dynamic-tools replacement field. Sending an empty list is not a demonstrated scrub mechanism.
-- Intermittent, not reproduced since: on 2026-09-12 two of eight real-turn drives through the desktop app rendered only the user bubble and a running spinner although Codex completed the turn and core's canonical state held every message (verified by cold read and by two core-level reproductions of the app choreography). Both failures coincided with concurrent test suites; six later runs, two under deliberate load, rendered fully. `scripts/app-shot.mjs --state` (verifier hooks, commit cae94a2e) now captures the renderer store and replica canonical at failure time; use it on the next occurrence.
-- Delta handling uses item-scoped message upserts to avoid mixing concurrent items. This can flood the domain-event ring; per-item volatile streaming and throttling remain outstanding.
-- Native OpenAI transport sends a `generate:false` WebSocket warmup that is not a model turn. Custom-provider SSE tests alone do not cover that path.
-- USD is unavailable and unknown, not zero. Full account/rate-limit/child/dispatch attribution remains M4.
-- POSIX process-group teardown does not prove cleanup of escaped groups or PTY descendants. Windows and Linux provisioning and runtime behaviour remain unverified.
+- Codex wraps every model command as `<shell> -lc <script>`; the approval request and the transcript item both carry the wrapped string. `unwrapShellCommand` strips exactly one wrapper of the shape Codex's own `extract_bash_command` accepts before gating and suggesting.
+- Approving a command runs it unsandboxed; so does an execpolicy `allow`. Approval and sandbox are alternatives, not layers.
+- Under `auto`, no approval request reaches the client; only `item/autoApprovalReview/*` and `guardianWarning` notifications do. Reviews are not thread items and do not survive into cold history. Three consecutive guardian denials interrupt the turn.
+- Real catalog models are `tool_mode: code_mode_only` and need `codex-code-mode-host` beside `codex`; the fixture's `mock-model` is not code-mode and never exercises that path.
+- Codex loads `rules/*.rules` once per thread at start/resume; project-layer rules load only for trusted projects.
+- `thread/settings/update` returns `{}` and acknowledges out of band; policy no longer uses it, effort still does.
+- Native `thread.id` is conversation identity; transcript ids are thread/turn/item; pending approvals also carry the process generation.
+- Native delete of a forked thread is leaf-first and whole-subtree; forks are never listed by `thread/list`.
+- Delta handling uses item-scoped message upserts, which can flood the domain-event ring on long answers; per-item volatile streaming is outstanding.
+- Sandbox enforcement cannot be measured in the integration fixture (macOS refuses to nest a second seatbelt profile); containment claims rest on source and real runs.
+- Known test flakes unrelated to this branch: `remote-*.test.ts` port collisions under parallel load, and `SettingsDialogView.component.test.tsx` fails `format:check` since before the branch. Rerun in isolation before blaming a diff.
 
 ## Verification commands
 
 ```sh
-bun run typecheck
-bun run lint
-bun run test
-bun run test:ci
-bun run build
-bun run test:unit src/core/codex
+bun run typecheck && bun run lint && bun run test
 CODEX_INTEGRATION=1 bun run test:integration src/integration/codex
 bun run check-codex-protocol
+bun run build
 git diff --check
+bun run format:check
 ```
-
-Run the default and CI suites sequentially when diagnosing port collisions. Never install dependencies casually; native SQLite must be rebuilt after any dependency install. Do not perform another real login to test the UI while an account is already signed in.
 
 ## Artifacts
 
-The installed binary is `vendor/codex-cli/codex`, gitignored; `scripts/codex-digests.json` holds the authoritative digests. The Codex source checkout is `.cache/codex-src` at tag `rust-v0.154.0`, also gitignored. The Python transport spike is `scripts/probe-codex.py`; the repo-resident probes are under `src/integration/codex/`. `docs/headless-server.md` and `docs/manual.md` are unrelated pre-existing untracked files, not Codex work.
+Vendored binaries: `vendor/codex-cli/codex` and `vendor/codex-cli/codex-code-mode-host`, gitignored, digests in `scripts/codex-digests.json`. Source checkout: `.cache/codex-src`. Harness copies with longer watchdogs live in `.cache/` and can be deleted; `scripts/app-shot.mjs` now has `--wait`, `--eval`, `--state`, `--timeout`. Temporary real-turn probe tests were kept out of the repo. Memory notes for the orchestrating model live under the ClaudeUI project memory: source checkout, real-turn authorization, commit cadence, branch state.
