@@ -766,6 +766,89 @@ it.skipIf(!enabled)(
   90000
 )
 
+it.skipIf(!enabled)(
+  'steers a held prompt into the RUNNING turn and carries its id into native history',
+  async () => {
+    const { cwd, env, errors } = await setupFixture(true, true, true)
+    const sent = vi.spyOn(CodexClient.prototype, 'request')
+    try {
+      session = new CodexSession('isolated-steer', null, cwd, {}, { env, requestTimeoutMs: 15000 })
+      await session.run(null)
+      await session.run('Execute the isolated fixture command.')
+      // The approval card is a REAL mid-turn pause, which is what makes this a
+      // same-turn steer rather than a next-turn prompt: the item is held while
+      // the turn is unambiguously alive, and the command's `item/completed` is
+      // the boundary that forwards it.
+      await vi.waitFor(
+        () =>
+          expect(
+            coreEvents.mock.calls.some(([channel]) => channel === 'session:approval-request')
+          ).toBe(true),
+        { timeout: 30000 }
+      )
+      session.enqueuePrompt('Answer with the word steered.')
+      const itemId = session.queuedItems[0].itemId
+      const steerId = `steer-${itemId}`
+      expect(sent.mock.calls.some(([method]) => method === 'turn/steer')).toBe(false)
+      const card = coreEvents.mock.calls.find(
+        ([channel]) => channel === 'session:approval-request'
+      )![1][1]
+      session.resolveApproval(card.requestId, 'allow')
+      await vi.waitFor(() => expect(session!.willQueue).toBe(false), { timeout: 30000 })
+
+      const steer = sent.mock.calls.find(([method]) => method === 'turn/steer')
+      expect(steer, 'no turn/steer reached the binary').toBeDefined()
+      console.log(JSON.stringify({ probe: 'turn-steer', params: steer![1] }))
+      expect(steer![1]).toEqual({
+        threadId: session.getSessionId(),
+        expectedTurnId: expect.any(String),
+        clientUserMessageId: steerId,
+        input: [{ type: 'text', text: 'Answer with the word steered.', text_elements: [] }]
+      })
+      // Accepted on the RUNNING turn: never re-sent as a fresh one.
+      expect(
+        sent.mock.calls.filter(
+          ([method, params]) =>
+            method === 'turn/start' &&
+            (params as { clientUserMessageId?: string }).clientUserMessageId === steerId
+        )
+      ).toEqual([])
+      expect(session.queuedItems).toEqual([])
+      expect(
+        coreEvents.mock.calls
+          .filter(([channel]) => channel === 'session:queue-changed')
+          .flatMap(([, args]) => args[1].items)
+          .filter((item: { itemId: string }) => item.itemId === itemId)
+          .map((item: { state: string }) => item.state)
+      ).toEqual(['queued', 'consumed'])
+
+      // The native user item carries the steer's own id, so the synthesized
+      // `steer-<itemId>` row is replaced by IDENTITY rather than by text.
+      const native = session
+        .getMessages()
+        .find((message) => message.role === 'user' && message.replacesMessageId === steerId)
+      expect(native, 'no native userMessage carried the steer clientId').toBeDefined()
+      console.log(
+        JSON.stringify({
+          probe: 'steer-clientid',
+          id: native!.id,
+          clientId: native!.replacesMessageId
+        })
+      )
+      expect(native!.content).toEqual([{ type: 'text', text: 'Answer with the word steered.' }])
+      const history = await loadCodexHistory(session.getSessionId()!, { cwd, env })
+      expect(
+        history.messages.some((message) => message.id === native!.id && message.role === 'user'),
+        `cold history lacks the steered user item: ${JSON.stringify(history.messages.map((m) => m.id))}`
+      ).toBe(true)
+      expect(errors).toEqual([])
+    } finally {
+      sent.mockRestore()
+    }
+  },
+  90000
+)
+
 /** Every string anywhere inside one provider request's `input`, flattened. */
 function inputTexts(request: Record<string, unknown>): string[] {
   const walk = (value: unknown): string[] =>

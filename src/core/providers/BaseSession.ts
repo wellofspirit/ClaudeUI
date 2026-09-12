@@ -183,6 +183,20 @@ export abstract class BaseSession implements ISession {
   }
 
   /**
+   * Hand ONE held item to the engine. The default is an ordinary prompt — for
+   * opencode and pi a send during a running turn IS the steer, so `run()` picks
+   * the right transport on its own. CodexSession overrides this: its two
+   * transports are different RPCs (`turn/steer` mid-turn, `turn/start` at idle)
+   * and it correlates by a client-chosen id rather than by text.
+   *
+   * Delivery is reported through the queue, not the return value: leaving the
+   * item `queued` tells {@link flushQueuedItems} nothing landed.
+   */
+  protected forwardQueuedItem(item: QueuedItem): Promise<void> {
+    return this.run(item.text, item.attachments)
+  }
+
+  /**
    * Forward every held item, oldest first, at an engine sub-turn boundary.
    * Serialized: a boundary firing while a forward is in flight is a no-op —
    * the running loop picks newly queued items up on its next pass.
@@ -193,7 +207,7 @@ export abstract class BaseSession implements ISession {
     try {
       for (let item = this.queue.nextUnforwarded(); item; item = this.queue.nextUnforwarded()) {
         this.queue.markForwarded(item)
-        await this.run(item.text, item.attachments)
+        await this.forwardQueuedItem(item)
         // Delivery is acknowledged by the engine's own post-success path
         // (onPromptDelivered). Still pending here means the send failed —
         // which already surfaced `session:error` — so put the item back in the

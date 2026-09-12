@@ -74,6 +74,19 @@ export class SessionQueue {
     return item
   }
 
+  /**
+   * Consume ONE named item — the correlation for an engine that carries a
+   * client-chosen id end to end (Codex's `clientUserMessageId`, ADR-066). Text
+   * never enters into it, so duplicate texts stay individually addressable.
+   * Returns undefined for an id that is unknown or already terminal, so it is
+   * as safe to fire unconditionally as {@link consumeByText}.
+   */
+  consumeById(itemId: string): QueuedItem | undefined {
+    const item = this.items.find((i) => i.state === 'queued' && i.itemId === itemId)
+    if (item) item.state = 'consumed'
+    return item
+  }
+
   setState(item: QueuedItem, state: QueuedItem['state']): void {
     item.state = state
   }

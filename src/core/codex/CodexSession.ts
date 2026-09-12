@@ -8,6 +8,7 @@ import type {
   FileDiff,
   PendingApproval,
   PermissionSuggestion,
+  QueuedItem,
   SessionStatus,
   ChatMessage,
   MeteringSnapshot
@@ -38,10 +39,11 @@ import type { ThreadSettings } from './protocol/v2/ThreadSettings'
 import type { ThreadTokenUsage } from './protocol/v2/ThreadTokenUsage'
 import { resolveCodexCapabilities } from '../../shared/model-capabilities'
 import { CodexClient } from './CodexClient'
-import type { CodexClientOptions, CodexTransportError } from './CodexAppServerClient'
+import { CodexTransportError, type CodexClientOptions } from './CodexAppServerClient'
 import type { Model } from './protocol/v2/Model'
 import type { JsonValue } from './protocol/serde_json/JsonValue'
 import type { ThreadItem } from './protocol/v2/ThreadItem'
+import type { UserInput } from './protocol/v2/UserInput'
 import type { Turn } from './protocol/v2/Turn'
 import type { CommandExecutionRequestApprovalParams } from './protocol/v2/CommandExecutionRequestApprovalParams'
 import type { GuardianApprovalReviewAction } from './protocol/v2/GuardianApprovalReviewAction'
@@ -238,6 +240,17 @@ type Pending = {
   settle: (value?: unknown) => void
 }
 
+/** Inline images are the only attachment Codex takes on either turn transport. */
+type CodexAttachments = Array<{ mediaType: string; base64Data: string }>
+
+/**
+ * A `turn/steer` whose delivery the transport could not decide: the request was
+ * written to the binary and then timed out, so the message may or may not be in
+ * the model's context. Held, never resent, until the owning turn's own history
+ * answers the question.
+ */
+type AmbiguousSteer = { turnId: string; clientUserMessageId: string }
+
 /** One gated action inside a native request — one command, or one changed file. */
 type Gated = { tool: string; input: Record<string, unknown>; path?: string }
 
@@ -320,6 +333,10 @@ export class CodexSession extends BaseSession {
   private guardianOverrides = new Map<string, GuardianOverride>()
   /** Denials whose declined item has not been mapped yet, by that item's id. */
   private heldDenials = new Map<string, ItemGuardianApprovalReviewCompletedNotification>()
+  /** Queue items whose steer timed out ambiguously, by queue item id. */
+  private ambiguousSteers = new Map<string, AmbiguousSteer>()
+  /** Serializes queue boundaries — see {@link queueBoundary}. */
+  private flushChain: Promise<void> = Promise.resolve()
   private output = new Map<string, string>()
   private bashGate = new BashStreamGate((toolUseId, output) =>
     this.send('session:bash-output', { toolUseId, output })
@@ -355,16 +372,8 @@ export class CodexSession extends BaseSession {
     return this.threadId
   }
 
-  override enqueuePrompt(): void {
-    throw new Error('Codex application queue is not implemented')
-  }
-
-  async run(
-    prompt: string | null,
-    attachments?: Array<{ mediaType: string; base64Data: string }>,
-    clientUserMessageId = `msg-${randomUUID()}`
-  ): Promise<void> {
-    if (this.closed) throw new Error('Codex session is disconnected')
+  /** Codex takes inline images only, and only well-formed base64 of one. */
+  private assertAttachments(attachments?: CodexAttachments): void {
     if (
       attachments?.some(
         (attachment) =>
@@ -373,8 +382,178 @@ export class CodexSession extends BaseSession {
       )
     )
       throw new Error('Codex accepts inline PNG/JPEG/GIF/WebP image attachments only')
+  }
+
+  /**
+   * The one input mapping both transports use — `turn/start` and `turn/steer`
+   * take the same `UserInput[]`, so a divergence here would be a queued message
+   * that reaches the model differently from a typed one.
+   */
+  private turnInput(prompt: string, attachments?: CodexAttachments): UserInput[] {
+    this.assertAttachments(attachments)
+    return [
+      { type: 'text', text: prompt, text_elements: [] },
+      ...(attachments ?? []).map((attachment) => ({
+        type: 'image' as const,
+        url: `data:${attachment.mediaType};base64,${attachment.base64Data}`
+      }))
+    ]
+  }
+
+  /**
+   * Hand ONE held item to Codex (ADR-053 on this engine's two transports).
+   *
+   * Mid-turn it is `turn/steer` with `expectedTurnId`, which injects the text
+   * into the RUNNING turn — the native queue would start a different one, which
+   * is why core keeps the queue of record. At idle it is the ordinary
+   * `turn/start`, taken directly rather than through `handlers-core.sendPrompt`
+   * because that path emits its own `session:user-message` and the queue path
+   * must not (the `consumed` broadcast is what synthesizes the row).
+   *
+   * Either way the id travels as `steer-<itemId>`, so the native `userMessage`
+   * comes back with that `clientId` and `mapCodexItem` turns it into a
+   * `replacesMessageId` — identity, never text, so duplicates cannot collide.
+   *
+   * Never throws: {@link BaseSession.flushQueuedItems} reads delivery off the
+   * item's own state, and an item left `queued` is one the next boundary retries.
+   */
+  protected override async forwardQueuedItem(item: QueuedItem): Promise<void> {
+    if (this.closed || !this.threadId) return
+    // Uncertain delivery is NOT a reason to send again — that is the one way to
+    // double a message. It waits for `turn/completed` to settle it.
+    if (this.ambiguousSteers.has(item.itemId)) return
+    const clientUserMessageId = `steer-${item.itemId}`
+    const turnId = this.turnId
+    if (this.busy && turnId) {
+      try {
+        await this.client.request('turn/steer', {
+          threadId: this.threadId,
+          expectedTurnId: turnId,
+          clientUserMessageId,
+          input: this.turnInput(item.text, item.attachments)
+        })
+      } catch (error) {
+        // An ambiguous timeout MAY have been delivered, so it is reconciled and
+        // never resent. Anything else is a refusal the binary spelled out — an
+        // `expectedTurnId` mismatch, a non-steerable (review/compact) turn, a
+        // rejected input — so nothing was delivered, the item stays queued and
+        // recallable, and the base loop stops here to retry at the next boundary.
+        if (
+          error instanceof CodexTransportError &&
+          error.code === 'request-timeout' &&
+          error.ambiguousDelivery
+        )
+          await this.reconcileSteer(item, { turnId, clientUserMessageId })
+        return
+      }
+      // Acceptance is the response itself; the native user item may follow much
+      // later, or (on an interrupted turn) not at all.
+      if (this.queue.consumeById(item.itemId)) this.queue.emit()
+      return
+    }
+    try {
+      await this.run(item.text, item.attachments, clientUserMessageId)
+    } catch {
+      // `run()` already surfaced the failure (and disposed if it was fatal).
+      return
+    }
+    if (this.queue.consumeById(item.itemId)) this.queue.emit()
+  }
+
+  /**
+   * Ask the turn's own history whether an ambiguous steer landed. Consumes it
+   * if so; otherwise parks it as unrecallable and unsent until the turn ends —
+   * the honest middle state ADR-066 asks for, since the message may already be
+   * in the model's context.
+   */
+  private async reconcileSteer(item: QueuedItem, steer: AmbiguousSteer): Promise<void> {
+    if (await this.steerLanded(steer).catch(() => false)) {
+      if (this.queue.consumeById(item.itemId)) this.queue.emit()
+      return
+    }
+    // The owning turn has already ended, so the read above WAS the turn-end
+    // reconciliation: nothing more can land, and the item is ordinary again.
+    if (this.endedTurns.has(steer.turnId)) return
+    this.ambiguousSteers.set(item.itemId, steer)
+    this.send(
+      'session:error',
+      'Codex could not confirm a queued message reached the running turn. It is held, unsent, until the turn ends.'
+    )
+  }
+
+  /**
+   * Boundary signals are serialized on their OWN chain rather than fired blind.
+   * Two reasons, both real here: a turn can end while its own steer is still on
+   * the wire, and {@link BaseSession.flushQueuedItems}'s re-entrancy guard drops
+   * an overlapping signal — which would strand the item, since a finished turn
+   * emits no further boundary. Chaining also orders the turn-end reconciliation
+   * AFTER the steer that may have gone ambiguous, so it reads for the right id.
+   */
+  private queueBoundary(endedTurnId?: string): void {
+    this.flushChain = this.flushChain
+      .then(() =>
+        endedTurnId === undefined ? this.flushQueuedItems() : this.settleQueue(endedTurnId)
+      )
+      .catch(() => {})
+  }
+
+  /** Turn-end pass: settle what the timeout left open, then forward what is left. */
+  private async settleQueue(turnId: string): Promise<void> {
+    for (const [itemId, steer] of [...this.ambiguousSteers]) {
+      if (steer.turnId !== turnId) continue
+      // Dropped either way: the turn is over, so this is the last word on it.
+      // A failed read counts as "not found" HERE only, where a resend is safe.
+      this.ambiguousSteers.delete(itemId)
+      if ((await this.steerLanded(steer).catch(() => false)) && this.queue.consumeById(itemId))
+        this.queue.emit()
+    }
+    await this.flushQueuedItems()
+  }
+
+  /** Is there a `userMessage` in this turn carrying the steer's own client id? */
+  private async steerLanded({ turnId, clientUserMessageId }: AmbiguousSteer): Promise<boolean> {
+    let cursor: string | null = null
+    for (let page = 0; page < 20; page++) {
+      if (this.closed || !this.threadId) return false
+      const result = await this.client.request('thread/items/list', {
+        threadId: this.threadId,
+        turnId,
+        cursor,
+        limit: 100,
+        sortDirection: 'asc'
+      })
+      if (
+        result.data.some(
+          (entry) =>
+            entry.item.type === 'userMessage' && entry.item.clientId === clientUserMessageId
+        )
+      )
+        return true
+      if (!result.nextCursor) return false
+      cursor = result.nextCursor
+    }
+    return false
+  }
+
+  /**
+   * Recall (ADR-053) is take-back of something core still holds. An ambiguous
+   * steer is not that: the engine may already have it, so it cannot be offered
+   * back as if it never left.
+   */
+  protected override async tryRecallQueuedItem(item: QueuedItem): Promise<boolean> {
+    if (this.ambiguousSteers.has(item.itemId)) return false
+    return super.tryRecallQueuedItem(item)
+  }
+
+  async run(
+    prompt: string | null,
+    attachments?: CodexAttachments,
+    clientUserMessageId = `msg-${randomUUID()}`
+  ): Promise<void> {
+    if (this.closed) throw new Error('Codex session is disconnected')
+    this.assertAttachments(attachments)
     if (this.willQueue && prompt !== null)
-      throw new Error('Codex turn is already running; queue and steer are not implemented')
+      throw new Error('Codex turn is already running; send this prompt through the queue')
     if (prompt !== null) {
       this.sending = true
       this.clearInactivityTimer()
@@ -391,13 +570,7 @@ export class CodexSession extends BaseSession {
       const result = await this.client.request('turn/start', {
         threadId: this.threadId!,
         clientUserMessageId,
-        input: [
-          { type: 'text', text: prompt, text_elements: [] },
-          ...(attachments ?? []).map((attachment) => ({
-            type: 'image' as const,
-            url: `data:${attachment.mediaType};base64,${attachment.base64Data}`
-          }))
-        ],
+        input: this.turnInput(prompt, attachments),
         ...(this.model !== undefined ? { model: this.model } : {}),
         ...(this.effort !== undefined ? { effort: this.effort } : {}),
         ...this.turnPolicy()
@@ -687,8 +860,12 @@ export class CodexSession extends BaseSession {
     this.bashGate.cancelAll()
     this.output.clear()
     this.heldDenials.clear()
+    this.ambiguousSteers.clear()
     for (const pending of [...this.pending.values()]) pending.settle()
     this.clearGuardianOverrides()
+    // Nothing held can ever run now: the engine that would have taken it is
+    // gone. Say so (ADR-053) rather than leaving items pending forever.
+    this.recallQueuedOnEngineLoss()
     if (error && error.code !== 'disposed') this.send('session:error', error.message)
     this.status('disconnected')
   }
@@ -811,6 +988,10 @@ export class CodexSession extends BaseSession {
       if (method === 'item/started' || method === 'item/completed') {
         if (!record(value.item) || typeof value.item.id !== 'string') return
         this.item(value.turnId, value.item as ThreadItem, method === 'item/completed')
+        // ADR-053: a completed item is this engine's observable sub-turn
+        // boundary — the moment a held message can join the running turn.
+        // Deltas are not (a steer between two tokens is not a boundary).
+        if (method === 'item/completed') this.queueBoundary()
       } else if (typeof value.itemId === 'string' && typeof value.delta === 'string') {
         for (const event of mapCodexDelta(method, {
           threadId: this.threadId,
@@ -972,6 +1153,9 @@ export class CodexSession extends BaseSession {
       this.status('idle')
       this.resetInactivityTimer()
     }
+    // Turn end is the other boundary, and the only place an ambiguous steer can
+    // be settled: the turn's history is now final.
+    this.queueBoundary(turn.id)
   }
 
   private item(turnId: string, item: ThreadItem, completed: boolean, authoritative = false): void {

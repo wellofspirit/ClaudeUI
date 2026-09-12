@@ -502,8 +502,15 @@ export const CODEX_ENGINE_CAPABILITIES: EngineCapabilities = {
   plan: true,
   fork: false,
   forkFromMessage: false,
-  steer: false,
-  queue: false,
+  // Both true together, as on pi: they gate the SAME send-while-busy
+  // affordance, and ADR-053's full path works here — core holds the item
+  // (recallable), forwards it with `turn/steer` + `expectedTurnId` at the next
+  // completed sub-turn item, and broadcasts the `consumed` transition.
+  // `capabilities.steer` is read nowhere in the renderer (InputBox derives
+  // `queueEnabled` from `queue` alone); it is the ADR-030 honesty flag for
+  // "this lands in the RUNNING turn", which `turn/steer` is.
+  steer: true,
+  queue: true,
   slashCommands: false,
   skills: false,
   sideQuestion: false,

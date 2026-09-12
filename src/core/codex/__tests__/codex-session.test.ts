@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CodexSession } from '../CodexSession'
 import type { CodexClient } from '../CodexClient'
-import type { CodexClientOptions } from '../CodexAppServerClient'
+import { CodexTransportError, type CodexClientOptions } from '../CodexAppServerClient'
 import type { EngineSpawnOptions } from '../../providers/ISession'
+import type { QueuedItem } from '../../../shared/types'
 import { applyEvent } from '../../shared/sync/reducer'
 import { emptyCanonicalState } from '../../shared/sync/state'
 
@@ -70,8 +71,13 @@ function fixture(opts: EngineSpawnOptions = {}) {
     reasoningEffort: 'ultra',
     ...policy
   }
-  const request = vi.fn(async (method: string) => {
+  /** What `thread/items/list` answers a steer reconciliation with. */
+  const listed = { current: [] as unknown[] }
+  const request = vi.fn(async (method: string, _params?: unknown) => {
     if (method === 'config/read') return { config: { model: 'native', model_provider: 'openai' } }
+    if (method === 'turn/steer') return { turnId: 'turn' }
+    if (method === 'thread/items/list')
+      return { data: listed.current, nextCursor: null, backwardsCursor: null }
     if (method === 'model/list')
       return {
         data: [
@@ -150,6 +156,11 @@ function fixture(opts: EngineSpawnOptions = {}) {
     })
     return approval({ itemId }, 'item/fileChange/requestApproval')
   }
+  /** Every `session:queue-changed` payload, oldest first (ADR-053 full lists). */
+  const queues = (): QueuedItem[][] =>
+    events.mock.calls
+      .filter(([channel]) => channel === 'session:queue-changed')
+      .map((call) => (call[1] as [string, { items: QueuedItem[] }])[1].items)
   return {
     session,
     client,
@@ -158,6 +169,8 @@ function fixture(opts: EngineSpawnOptions = {}) {
     approval,
     fileChange,
     cards,
+    queues,
+    listed,
     callbacks,
     response,
     policy
@@ -448,12 +461,14 @@ describe('Codex first session', () => {
     expect(events.mock.calls.some(([channel]) => channel === 'session:stream')).toBe(false)
   })
 
-  it('rejects a concurrent send after coalesced startup and rejects application queue', async () => {
+  it('rejects a concurrent direct send after coalesced startup and holds a queued one', async () => {
     const { session, request } = fixture()
     const results = await Promise.allSettled([session.run('one'), session.run('two')])
     expect(results.map((result) => result.status)).toEqual(['fulfilled', 'rejected'])
     expect(request.mock.calls.filter(([method]) => method === 'turn/start')).toHaveLength(1)
-    expect(() => session.enqueuePrompt()).toThrow('queue')
+    // The queue is the ONLY way in while a turn runs; a direct send still refuses.
+    session.enqueuePrompt('held')
+    expect(session.queuedItems.map((item) => item.text)).toEqual(['held'])
   })
 
   it('aborts owning approvals at terminal and rejects child approvals', async () => {
@@ -1242,5 +1257,228 @@ describe('Codex guardian denial override', () => {
     const { requestId } = offers()[0]
     session.dispose()
     expect(dismissed()).toEqual([requestId])
+  })
+})
+
+/**
+ * ADR-053 parity on Codex: core holds the item, forwards it with `turn/steer`
+ * at an observed sub-turn boundary, and correlates by IDENTITY
+ * (`clientUserMessageId: 'steer-<itemId>'`), never by text — Codex's own queue
+ * would start a different turn, so it cannot back this.
+ */
+describe('Codex held queue', () => {
+  /** The completed sub-turn item every boundary test uses as its trigger. */
+  const BOUNDARY = {
+    threadId: 'root',
+    turnId: 'turn',
+    item: { id: 'a1', type: 'agentMessage', text: 'thinking out loud' }
+  }
+  const steers = (request: ReturnType<typeof vi.fn>) =>
+    request.mock.calls.filter(([method]) => method === 'turn/steer').map((call) => call[1])
+  const starts = (request: ReturnType<typeof vi.fn>) =>
+    request.mock.calls.filter(([method]) => method === 'turn/start').map((call) => call[1])
+
+  it('holds a prompt sent during a turn and gives it back on recall', async () => {
+    const { session, request, queues } = fixture()
+    await session.run('hello')
+    expect(session.willQueue).toBe(true)
+    session.enqueuePrompt('held text')
+    expect(queues().at(-1)).toEqual([
+      expect.objectContaining({ text: 'held text', state: 'queued' })
+    ])
+    // Nothing reached the engine: that is the whole take-back window.
+    expect(steers(request)).toEqual([])
+    expect(await session.recallQueued()).toEqual({ recalled: ['held text'], notRecalled: 0 })
+    expect(queues().at(-1)).toEqual([
+      expect.objectContaining({ text: 'held text', state: 'recalled' })
+    ])
+    // A direct send while busy is still refused — the queue is the only way in.
+    await expect(session.run('direct')).rejects.toThrow('already running')
+  })
+
+  it('steers a held item at the next boundary and lets the native ack replace its row', async () => {
+    const { session, request, notify, queues } = fixture()
+    await session.run('hello')
+    session.enqueuePrompt('steer me')
+    const itemId = queues().at(-1)![0].itemId
+    notify('item/completed', BOUNDARY)
+    await vi.waitFor(() => expect(steers(request)).toHaveLength(1))
+    expect(steers(request)[0]).toEqual({
+      threadId: 'root',
+      expectedTurnId: 'turn',
+      clientUserMessageId: `steer-${itemId}`,
+      input: [{ type: 'text', text: 'steer me', text_elements: [] }]
+    })
+    await vi.waitFor(() =>
+      expect(queues().at(-1)).toEqual([
+        expect.objectContaining({ itemId, text: 'steer me', state: 'consumed' })
+      ])
+    )
+    // The native user item then replaces the synthesized `steer-<itemId>` row BY ID.
+    notify('item/completed', {
+      threadId: 'root',
+      turnId: 'turn',
+      item: {
+        id: 'u1',
+        type: 'userMessage',
+        clientId: `steer-${itemId}`,
+        content: [{ type: 'text', text: 'steer me' }]
+      }
+    })
+    expect(session.getMessages().find((message) => message.role === 'user')).toEqual(
+      expect.objectContaining({ replacesMessageId: `steer-${itemId}` })
+    )
+  })
+
+  it('steers duplicate texts under distinct ids and consumes them in order', async () => {
+    const { session, request, notify, queues } = fixture()
+    await session.run('hello')
+    session.enqueuePrompt('same text')
+    session.enqueuePrompt('same text')
+    const [first, second] = queues()
+      .at(-1)!
+      .map((item) => item.itemId)
+    expect(first).not.toBe(second)
+    notify('item/completed', BOUNDARY)
+    await vi.waitFor(() => expect(steers(request)).toHaveLength(2))
+    expect(steers(request).map((params) => params.clientUserMessageId)).toEqual([
+      `steer-${first}`,
+      `steer-${second}`
+    ])
+    await vi.waitFor(() =>
+      expect(queues().at(-1)).toEqual([
+        expect.objectContaining({ itemId: second, state: 'consumed' })
+      ])
+    )
+    // Each consume rode exactly one broadcast, oldest first.
+    expect(
+      queues()
+        .flat()
+        .filter((item) => item.state === 'consumed')
+        .map((item) => item.itemId)
+    ).toEqual([first, second])
+  })
+
+  it('leaves a refused steer queued and starts the next turn with it instead', async () => {
+    const { session, request, notify, queues } = fixture()
+    await session.run('hello')
+    session.enqueuePrompt('retry me')
+    const itemId = queues().at(-1)![0].itemId
+    request.mockImplementationOnce(async (method: string) => {
+      expect(method).toBe('turn/steer')
+      // The binary's own refusal shape: an RPC error, nothing delivered.
+      throw new CodexTransportError('rpc-error--32600')
+    })
+    notify('item/completed', BOUNDARY)
+    await vi.waitFor(() => expect(steers(request)).toHaveLength(1))
+    expect(queues().at(-1)).toEqual([expect.objectContaining({ itemId, state: 'queued' })])
+    notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn', status: 'completed', items: [] }
+    })
+    await vi.waitFor(() => expect(starts(request)).toHaveLength(2))
+    expect(starts(request)[1]).toEqual(
+      expect.objectContaining({ clientUserMessageId: `steer-${itemId}`, threadId: 'root' })
+    )
+    expect(queues().at(-1)).toEqual([expect.objectContaining({ itemId, state: 'consumed' })])
+  })
+
+  it('consumes an ambiguous steer the reconciliation finds, without resending it', async () => {
+    const { session, request, notify, queues, listed } = fixture()
+    await session.run('hello')
+    session.enqueuePrompt('maybe landed')
+    const itemId = queues().at(-1)![0].itemId
+    listed.current = [
+      { turnId: 'turn', item: { id: 'u1', type: 'userMessage', clientId: `steer-${itemId}` } }
+    ]
+    request.mockImplementationOnce(async () => {
+      throw new CodexTransportError('request-timeout', true)
+    })
+    notify('item/completed', BOUNDARY)
+    await vi.waitFor(() =>
+      expect(queues().at(-1)).toEqual([expect.objectContaining({ itemId, state: 'consumed' })])
+    )
+    expect(request.mock.calls.find(([method]) => method === 'thread/items/list')![1]).toEqual({
+      threadId: 'root',
+      turnId: 'turn',
+      cursor: null,
+      limit: 100,
+      sortDirection: 'asc'
+    })
+    expect(steers(request)).toHaveLength(1)
+    expect(starts(request)).toHaveLength(1)
+  })
+
+  it('holds an unconfirmed steer unrecallable until the turn ends, then recovers it', async () => {
+    const { session, request, notify, queues } = fixture()
+    await session.run('hello')
+    session.enqueuePrompt('unconfirmed')
+    const itemId = queues().at(-1)![0].itemId
+    request.mockImplementationOnce(async () => {
+      throw new CodexTransportError('request-timeout', true)
+    })
+    notify('item/completed', BOUNDARY)
+    await vi.waitFor(() =>
+      expect(
+        events.mock.calls.some(
+          ([channel, args]) =>
+            channel === 'session:error' && String(args[1]).includes('could not confirm')
+        )
+      ).toBe(true)
+    )
+    // Unrecallable AND unconsumed: it may already be in the model's context.
+    expect(queues().at(-1)).toEqual([expect.objectContaining({ itemId, state: 'queued' })])
+    expect(await session.recallQueued()).toEqual({ recalled: [], notRecalled: 1 })
+    // Never resent while the owning turn is still alive.
+    notify('item/completed', { ...BOUNDARY, item: { ...BOUNDARY.item, id: 'a2' } })
+    await vi.waitFor(() => expect(steers(request)).toHaveLength(1))
+    expect(starts(request)).toHaveLength(1)
+    notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn', status: 'completed', items: [] }
+    })
+    // Turn-end reconciliation still cannot find it, so it becomes ordinary again.
+    await vi.waitFor(() => expect(starts(request)).toHaveLength(2))
+    expect(starts(request)[1]).toEqual(
+      expect.objectContaining({ clientUserMessageId: `steer-${itemId}` })
+    )
+  })
+
+  it('consumes an unconfirmed steer the turn-end reconciliation finds', async () => {
+    const { session, request, notify, queues, listed } = fixture()
+    await session.run('hello')
+    session.enqueuePrompt('landed late')
+    const itemId = queues().at(-1)![0].itemId
+    request.mockImplementationOnce(async () => {
+      throw new CodexTransportError('request-timeout', true)
+    })
+    notify('item/completed', BOUNDARY)
+    await vi.waitFor(() =>
+      expect(request.mock.calls.some(([method]) => method === 'thread/items/list')).toBe(true)
+    )
+    expect(queues().at(-1)).toEqual([expect.objectContaining({ itemId, state: 'queued' })])
+    listed.current = [
+      { turnId: 'turn', item: { id: 'u1', type: 'userMessage', clientId: `steer-${itemId}` } }
+    ]
+    notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn', status: 'completed', items: [] }
+    })
+    await vi.waitFor(() =>
+      expect(queues().at(-1)).toEqual([expect.objectContaining({ itemId, state: 'consumed' })])
+    )
+    expect(starts(request)).toHaveLength(1)
+  })
+
+  it('recalls everything still held when the engine is lost', async () => {
+    const { session, queues } = fixture()
+    await session.run('hello')
+    session.enqueuePrompt('one')
+    session.enqueuePrompt('two')
+    session.dispose()
+    expect(queues().at(-1)).toEqual([
+      expect.objectContaining({ text: 'one', state: 'recalled' }),
+      expect.objectContaining({ text: 'two', state: 'recalled' })
+    ])
   })
 })

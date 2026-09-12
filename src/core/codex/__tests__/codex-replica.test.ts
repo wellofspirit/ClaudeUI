@@ -94,3 +94,73 @@ it('reconciles a host user row by identity, preserving order and native history 
     'assistant'
   ])
 })
+
+/**
+ * The queue's end of the same identity contract (ADR-053 + ADR-066): the
+ * `consumed` transition synthesizes `steer-<itemId>`, and the native ack for
+ * the steer — `clientId: 'steer-<itemId>'`, mapped to `replacesMessageId` —
+ * lands on THAT row, in place. Duplicate texts cannot collide, because nothing
+ * here matches on text.
+ */
+it('replaces a consumed steer row by identity, duplicate texts included', () => {
+  let state = applyEvent(emptyCanonicalState(), {
+    channel: 'session:created',
+    args: ['root', { cwd: '/isolated', engineId: 'codex' }],
+    seq: 1
+  })
+  state = applyEvent(state, {
+    channel: 'session:queue-changed',
+    args: [
+      'root',
+      {
+        items: [
+          { itemId: 'q1', text: 'same text', state: 'consumed' },
+          { itemId: 'q2', text: 'same text', state: 'queued' }
+        ]
+      }
+    ],
+    seq: 2
+  })
+  expect(state.sessions.root.messages.map((message) => message.id)).toEqual(['steer-q1'])
+  expect(state.sessions.root.queue.map((item) => item.itemId)).toEqual(['q2'])
+  state = applyEvent(state, {
+    channel: 'session:message',
+    args: [
+      'root',
+      {
+        id: 'assistant',
+        role: 'assistant',
+        timestamp: 2,
+        content: [{ type: 'text', text: 'answer' }]
+      }
+    ],
+    seq: 3
+  })
+  state = applyEvent(state, {
+    channel: 'session:queue-changed',
+    args: ['root', { items: [{ itemId: 'q2', text: 'same text', state: 'consumed' }] }],
+    seq: 4
+  })
+  state = applyEvent(state, {
+    channel: 'session:message',
+    args: [
+      'root',
+      {
+        id: 'codex:["root","turn","u1"]',
+        replacesMessageId: 'steer-q1',
+        role: 'user',
+        timestamp: 3,
+        content: [{ type: 'text', text: 'same text' }]
+      }
+    ],
+    seq: 5
+  })
+  const replica = fromSnapshot(toSnapshot(state, 5))
+  // The second steer keeps its synthesized id; only the acked one is rewritten.
+  expect(replica.sessions.root.messages.map((message) => message.id)).toEqual([
+    'codex:["root","turn","u1"]',
+    'assistant',
+    'steer-q2'
+  ])
+  expect(replica.sessions.root.queue).toEqual([])
+})
