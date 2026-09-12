@@ -277,3 +277,17 @@ three dispatched qwen3.8:27b turns failed at 5m02–03s each. Worse, the error p
   cli.js also threads an abort signal into every MCP call — a turn interrupt cancels the
   in-flight call (fires our `extra.signal`), so dispatches do not outlive an interrupted
   dispatching turn (no orphan-reaper needed).
+
+## Amendment (2026-09-12): Codex as a dispatch source
+
+Codex joined as a SOURCE in `843b4ecf` (ADR-066/067 branch). `dispatch_agent` is declared to Codex as a
+native dynamic tool beside the three hosted UI tools (`src/core/codex/codex-hosted-tools.ts`) and called
+back as the `item/tool/call` server request; `CodexSession.dispatchAgent` builds the same
+`DispatchContext` the pi and Claude sources build, with `toolUseId` set to the mapper's
+`dynamicToolCall` id so streams and task events land on the model's own card, `autonomyMode` set to
+the user's mode, and `extra.signal` set to the app-server request's abort signal, which `finishTurn`
+fires, so an ended turn stops the target as a cli.js interrupt does. The shared permission engine
+gates it as kind `task` (ask in default/acceptEdits/auto, deny in plan); an ask is a card bound to the
+call's id. `crossEngineDispatchAvailable('codex')` is always true because claude is a bundled target,
+the same reasoning as the opencode branch. Codex as a TARGET is not built: the dispatcher has no Codex
+target factory and refuses `codex` as `req.engine`.

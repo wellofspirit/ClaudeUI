@@ -53,16 +53,16 @@ These are host-only APIs behind registered core commands and the native auth
 provider. Service reads never start or resume a root. Device login UI is
 mock-tested; the authorized native status check passed independently. See the
 [service contracts and evidence](../protocol-codex/README.md#m1b-service-and-ownership).
-The table marks the owners whose responsibilities are still planned.
+The table marks the owners whose responsibilities are still partly planned (native children, full usage).
 
-| Owner                              | Responsibility                                                                                                                                          |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CodexSession extends BaseSession` | One root session's lifecycle, model and effort selection, per-turn policy derivation and approval gating. Queue handoff, children and usage are planned |
-| Root's app-server process          | Native root thread and its child threads, model context and native persistence                                                                          |
-| RPC client                         | JSONL framing, handshake, request correlation, server requests, timeouts, generation invalidation, disconnect                                           |
-| Pure mapper                        | Native items/deltas/results into neutral messages, tool results, task notifications, and usage facts                                                    |
-| Minimal service client             | Bounded catalog/history/auth reads and explicitly authorized auth actions; no second owner of an active thread                                          |
-| SyncCore                           | Canonical state, command authorization, replication, stream fanout, query routing                                                                       |
+| Owner                              | Responsibility                                                                                                                                                                                                                            |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CodexSession extends BaseSession` | One root session's lifecycle, model and effort selection, per-turn policy derivation and approval gating. Held queue and steer, hosted tools, dispatch as a source and completed-turn fork are built; children and full usage are planned |
+| Root's app-server process          | Native root thread and its child threads, model context and native persistence                                                                                                                                                            |
+| RPC client                         | JSONL framing, handshake, request correlation, server requests, timeouts, generation invalidation, disconnect                                                                                                                             |
+| Pure mapper                        | Native items/deltas/results into neutral messages, tool results, task notifications, and usage facts                                                                                                                                      |
+| Minimal service client             | Bounded catalog/history/auth reads and explicitly authorized auth actions; no second owner of an active thread                                                                                                                            |
+| SyncCore                           | Canonical state, command authorization, replication, stream fanout, query routing                                                                                                                                                         |
 
 New code belongs under `src/core/codex/`; host locators/spawn inputs follow `src/core/host.ts`. `register-engines.ts` and `SpawnPrepRegistry` are the existing construction seams. No Electron import enters core, and a null window is normal. Desktop preload and web clients use the same typed core contracts. Neither gets a Codex socket or a browser-facing app-server port.
 
@@ -157,7 +157,7 @@ with no clients connected.
 
 | SyncCore lane    | Codex use                                                                                                                                                          |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Commands         | Create/resume, send/interrupt, permission-mode and model/effort changes, approvals and authorized login actions. Steer and recall are planned                      |
+| Commands         | Create/resume, send/interrupt, permission-mode and model/effort changes, approvals and authorized login actions. Steer and recall are built (`4050eb0a`)           |
 | Domain events    | Session identity/status/effective config, final transcript items, pending request lifecycle, queue state, task lifecycle and usage metadata                        |
 | Volatile streams | Command-output tails. Text/reasoning currently use stable item-scoped message upserts so independent native items cannot concatenate in the single session stream. |
 | Queries          | Native catalog/status, history/list/fork anchors, non-secret account metadata                                                                                      |
@@ -172,15 +172,14 @@ Use the same pure Codex mapping for live completion and history items. Preserve 
 
 The spike's interrupted dynamic invocation disappeared from immediate and cold native history. If needed for transcript fidelity, persist a narrow SQLite presentation supplement keyed by native thread/turn/call. Mark it interrupted or outcome-unknown, merge idempotently, and never replay it into model context or fabricate a native completion. Decide retention and delete/fork behavior with the history schema gate.
 
-Codex read and list are built; `engine-history.ts` refuses Codex delete and
-fork-anchor outright, and `capabilities.fork` and `forkFromMessage` are false.
+Codex read, list and fork are built (`5e92e52f`): the fork anchor is the turn parsed from the codex message id, `thread/fork` copies the source through that turn into a new thread whose `forkedFromId` is verified, forks are kept in the sidebar through a `session_meta` sweep because `thread/list` never returns them, and the canonical seed truncates the source history through the anchor. `engine-history.ts` still refuses Codex delete.
 Fork anchors identify completed native turns. A message inside a turn must either resolve to an explicitly displayed supported boundary or be refused. Fork success creates a distinct thread and leaves the source untouched. Delete must define native deletion versus archive semantics and test descendants, pins, active ownership, and supplement cleanup before its UI is enabled. Legacy metadata import must recognize Codex going forward; already-clamped Claude rows cannot be automatically recovered from model names or guessed thread IDs.
 
-## Queue and cancellation (planned)
+## Queue and cancellation
 
-`CodexSession.enqueuePrompt` throws, `capabilities.queue` and `capabilities.steer`
-are false, and shared `SessionQueue` still correlates by text. The design below
-is not built.
+Built in `4050eb0a` (2026-09-12) as designed below: `SessionQueue.consumeById`
+correlates by `clientUserMessageId: steer-<itemId>`, boundaries are chained on
+the session's own promise, and `capabilities.queue`/`steer` are true.
 
 Keep `BaseSession`'s queue of record. Hold recallable input until an observed boundary supports a steer, then send `expectedTurnId` plus `clientUserMessageId`. At idle, start a new turn through the ordinary send path. Do not forward through Codex's native next-turn queue.
 
@@ -194,9 +193,11 @@ ADR-038 while compensating for Codex's missing dynamic-call resolution event.
 
 ## Tools and dispatch
 
-Built: `CodexEngineToolMap` feeds the existing renderer `ToolView` kinds.
-Everything else in this section is planned, and `capabilities.hostedMcp`,
-`subagents` and `crossEngineDispatch` are false.
+Built: `CodexEngineToolMap` feeds the existing renderer `ToolView` kinds; the
+three hosted UI tools run over the native dynamic-tool channel (`30421310`,
+`hostedMcp: true`); `dispatch_agent` makes Codex a dispatch SOURCE (`843b4ecf`,
+`crossEngineDispatch: true`, ADR-033 amendment). Planned: native children as
+subagent transcripts (`subagents` false) and Codex as a dispatch TARGET.
 
 Register hosted dynamic tools only with explicit experimental initialization and a tested definition set. Reuse handlers rather than cloning mermaid/mockup/file/dispatch behavior. Add a Codex engine tool map alongside the existing renderer maps and feed neutral `ToolView` kinds. Native MCP remains native; dynamic-tool support alone does not prove the full hosted-MCP control contract.
 
