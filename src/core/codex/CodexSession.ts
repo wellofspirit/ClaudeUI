@@ -634,8 +634,17 @@ export class CodexSession extends BaseSession {
 
   private async start(): Promise<void> {
     try {
-      if (this.options.forkSession || this.options.resumeSessionAt)
-        throw new Error('Codex fork is not implemented')
+      // Codex has ONE branching verb and its granularity is the turn, so the
+      // two shapes it has no answer for are refused up front rather than
+      // silently becoming a fork or a plain resume.
+      const source = this.options.resumeSessionId
+      const lastTurnId = this.options.resumeSessionAt
+      const branch =
+        this.options.forkSession && source && lastTurnId ? { threadId: source, lastTurnId } : null
+      if (this.options.forkSession && !branch)
+        throw new Error('Codex branching needs a turn anchor on an existing thread')
+      if (lastTurnId && !this.options.forkSession)
+        throw new Error('Codex resume-at is not supported; branch the turn instead')
       const saved = this.options.resumeSessionId
         ? savedCodexOverrides(getCodexSessionOverrides(this.options.resumeSessionId))
         : {}
@@ -692,25 +701,44 @@ export class CodexSession extends BaseSession {
         sandbox,
         approvalsReviewer
       }
-      const response = this.options.resumeSessionId
-        ? await this.client.request('thread/resume', {
-            ...params,
-            threadId: this.options.resumeSessionId
-          })
-        : await this.client.request('thread/start', {
-            ...params,
-            allowProviderModelFallback: false,
-            historyMode: 'paginated',
-            // START ONLY. `thread/resume` has no `dynamicTools` field, and it
-            // needs none: the specs are written into the rollout's SessionMeta
-            // at creation (`core/src/session/session.rs`, `CreateThreadParams
-            // .dynamic_tools`) and a resume with an empty list restores them
-            // from there (`core/src/session/mod.rs:721`).
-            dynamicTools: codexDynamicToolSpecs()
-          })
+      const response = branch
+        ? // Copies the source THROUGH `lastTurnId` into a NEW thread and leaves
+          // the source untouched. No `dynamicTools` field and none needed: the
+          // hosted-tool specs come back from the source rollout's SessionMeta on
+          // a fork exactly as on a resume (`history/src/lib.rs`
+          // `get_dynamic_tools`, arm `Forked`). `excludeTurns` keeps the reply
+          // metadata-only; the branch's transcript is read back through the
+          // ordinary history path.
+          await this.client.request('thread/fork', { ...params, ...branch, excludeTurns: true })
+        : this.options.resumeSessionId
+          ? await this.client.request('thread/resume', {
+              ...params,
+              threadId: this.options.resumeSessionId
+            })
+          : await this.client.request('thread/start', {
+              ...params,
+              allowProviderModelFallback: false,
+              historyMode: 'paginated',
+              // START ONLY. `thread/resume` has no `dynamicTools` field, and it
+              // needs none: the specs are written into the rollout's SessionMeta
+              // at creation (`core/src/session/session.rs`, `CreateThreadParams
+              // .dynamic_tools`) and a resume with an empty list restores them
+              // from there (`core/src/session/mod.rs:721`).
+              dynamicTools: codexDynamicToolSpecs()
+            })
       if (this.closed) return
       assertCodexProvider(response.modelProvider)
-      if (this.options.resumeSessionId && response.thread.id !== this.options.resumeSessionId)
+      // A branch must be a NEW thread rooted at the source; a resume must be the
+      // same thread. `forkedFromId` is the fork's own lineage and `parentThreadId`
+      // stays null on it — that field marks a native SUBAGENT child, which no
+      // fork is (`core/src/thread_manager.rs` never sets it on the fork path).
+      if (branch) {
+        if (response.thread.forkedFromId !== branch.threadId)
+          throw new Error('Codex forked a different native thread')
+      } else if (
+        this.options.resumeSessionId &&
+        response.thread.id !== this.options.resumeSessionId
+      )
         throw new Error('Codex resumed a different native thread')
       if (response.thread.parentThreadId)
         throw new Error('Native child threads must be controlled by their owning root')

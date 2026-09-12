@@ -120,8 +120,6 @@ export async function prepareAndCreateSession(
   const storedEngine = resumeSessionId ? getSessionMeta(resumeSessionId)?.engineId : undefined
   if (storedEngine && storedEngine !== resolvedEngineId)
     throw new Error('Resume engine does not match persisted session identity')
-  if (resolvedEngineId === 'codex' && (forkSession || resumeSessionAt))
-    throw new Error('Codex fork is not enabled')
   const engineCfg = loadEngineConfig(resolvedEngineId)
   const prep = spawnPrepRegistry.require(resolvedEngineId)
   const { resolvedModel } = await prep(model, engineCfg)

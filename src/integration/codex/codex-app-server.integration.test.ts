@@ -18,7 +18,11 @@ import { CodexAppServerClient } from '../../core/codex/CodexAppServerClient'
 import { CodexClient } from '../../core/codex/CodexClient'
 import { CodexService } from '../../core/codex/CodexService'
 import { CodexSession } from '../../core/codex/CodexSession'
-import { loadCodexHistory } from '../../core/codex/history'
+import {
+  listCodexSessions,
+  loadCodexHistory,
+  resolveCodexForkAnchor
+} from '../../core/codex/history'
 import { setHostPaths } from '../../core/host'
 import provenance from '../../core/codex/protocol/provenance.json'
 
@@ -39,6 +43,8 @@ vi.mock('../../core/services/claude-settings', () => ({
   saveClaudePermissions: vi.fn()
 }))
 const persistence = vi.hoisted(() => ({ close: () => {} }))
+/** The isolated `session_meta` table these probes read their fork ids out of. */
+const sessionMeta = vi.hoisted(() => new Map<string, unknown>())
 vi.mock('../../core/services/db', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../core/services/db')>()
   const { default: Database } = await import('better-sqlite3')
@@ -47,7 +53,13 @@ vi.mock('../../core/services/db', async (importOriginal) => {
   persistence.close = () => db.close()
   return {
     dispatchedCostsByRouting: () => [],
-    setSessionMeta: vi.fn(),
+    // Real rows, not spies: the fork sweep in `listCodexSessions` IS a
+    // session_meta read, so a stubbed table would make it trivially pass.
+    // `setSessionMeta` and friends take no db handle, so the isolated table is
+    // this map rather than the in-memory database used for the overrides.
+    setSessionMeta: (id: string, meta: unknown) => void sessionMeta.set(id, meta),
+    getSessionMeta: (id: string) => sessionMeta.get(id),
+    allSessionMeta: () => Object.fromEntries(sessionMeta),
     getCodexSessionOverrides: (id: string) => actual.getCodexSessionOverrides(id, db),
     hasCodexSessionOverrides: (id: string) => actual.hasCodexSessionOverrides(id, db),
     ensureCodexSessionOverrides: (id: string) => actual.ensureCodexSessionOverrides(id, db),
@@ -85,6 +97,7 @@ let server: ReturnType<typeof createServer> | undefined
 let websocket: WebSocketServer | undefined
 afterEach(async () => {
   coreEvents.mockClear()
+  sessionMeta.clear()
   const survivors: number[] = []
   try {
     client?.dispose()
@@ -1055,4 +1068,128 @@ it.skipIf(!enabled)(
     expect(errors).toEqual([])
   },
   120000
+)
+
+/** Distinct turn ids, oldest first, off a session's own `codex:` message ids. */
+function turnIds(messages: Array<{ id: string }>): string[] {
+  const seen: string[] = []
+  for (const message of messages) {
+    if (!message.id.startsWith('codex:')) continue
+    const turn = (JSON.parse(message.id.slice('codex:'.length)) as string[])[1]
+    if (turn && !seen.includes(turn)) seen.push(turn)
+  }
+  return seen
+}
+
+it.skipIf(!enabled)(
+  'branches a completed turn into its own thread the sidebar can still find',
+  async () => {
+    const { cwd, env, errors, requests } = await setupFixture(true, true)
+    session = new CodexSession(
+      'isolated-fork-source',
+      null,
+      cwd,
+      {},
+      { env, requestTimeoutMs: 20000 }
+    )
+    await session.run(null)
+    const sourceId = session.getSessionId()!
+    for (const prompt of ['first turn', 'second turn']) {
+      await session.run(prompt)
+      await vi.waitFor(() => expect(session!.willQueue).toBe(false), { timeout: 30000 })
+    }
+    const turns = turnIds(session.getMessages())
+    expect(turns).toHaveLength(2)
+    const firstTurnMessage = session.getMessages().find((message) => message.id.includes(turns[0]))!
+
+    // The anchor the renderer's branch button resolves: the turn that owns the
+    // clicked row, not a JSONL line uuid.
+    expect(await resolveCodexForkAnchor(sourceId, firstTurnMessage.id, { cwd, env })).toEqual({
+      anchorUuid: turns[0]
+    })
+    expect(await resolveCodexForkAnchor(sourceId, 'a-claude-uuid', { cwd, env })).toEqual({
+      anchorUuid: null,
+      reason: 'not-a-codex-message'
+    })
+
+    session.dispose()
+    const beforeFork = requests.length
+    session = new CodexSession(
+      'isolated-fork',
+      null,
+      cwd,
+      { resumeSessionId: sourceId, resumeSessionAt: turns[0], forkSession: true },
+      { env, requestTimeoutMs: 20000 }
+    )
+    await session.run(null)
+    const forkId = session.getSessionId()!
+    expect(forkId).not.toBe(sourceId)
+
+    service = new CodexService({ cwd, env, requestTimeoutMs: 15000 })
+    const forkThread = (await service.readThread({ threadId: forkId, includeTurns: false })).thread
+    const forkHistory = await service.history(forkId)
+    const sourceHistory = await service.history(sourceId)
+    const listed = (await service.listAllThreads()).map((thread) => thread.id)
+    // `listCodexSessions` gates on `codexBinaryAvailable()`, which demands the
+    // code-mode host BESIDE the binary. The fixture copies only `codex` (the
+    // host is 62MB and nine other probes never touch this path), so place it
+    // here, for this probe alone.
+    copyFileSync(
+      resolve('vendor/codex-cli/codex-code-mode-host'),
+      join(directory!, 'vendor/codex-cli/codex-code-mode-host')
+    )
+    const sidebar = (await listCodexSessions({ cwd, env })).map((entry) => entry.sessionId)
+    console.log(
+      JSON.stringify({
+        probe: 'session-fork',
+        sourceId,
+        anchor: turns[0],
+        fork: {
+          id: forkThread.id,
+          forkedFromId: forkThread.forkedFromId,
+          parentThreadId: forkThread.parentThreadId,
+          historyTurns: forkHistory.turns.map((turn) => turn.id)
+        },
+        sourceTurns: sourceHistory.turns.map((turn) => turn.id),
+        listed,
+        sidebar
+      })
+    )
+    // The fork's own lineage, and the field that would make it a native SUBAGENT
+    // child instead — which `CodexSession.start` refuses to adopt.
+    expect(forkThread.forkedFromId).toBe(sourceId)
+    expect(forkThread.parentThreadId).toBeNull()
+    // Copied THROUGH the anchor turn, and the source is untouched.
+    expect(forkHistory.turns).toHaveLength(1)
+    expect(sourceHistory.turns).toHaveLength(2)
+    expect(forkHistory.turns[0].items.length).toBeGreaterThan(0)
+    // `thread/list` never returns forks, so session_meta is the only way back to
+    // this branch after a restart.
+    expect(listed).toContain(sourceId)
+    expect(listed).not.toContain(forkId)
+    expect(sidebar).toContain(sourceId)
+    expect(sidebar).toContain(forkId)
+
+    // The canonical seed `create-session.ts` runs for every branch: the SOURCE
+    // read back through the anchor turn. Without the cut it would show clients
+    // the source's second turn above a thread that forked before it — and the
+    // codex reader used to refuse an anchor outright, which fired the
+    // "native context was not replaced" banner on every fork. Taken one hop
+    // below `readSessionHistory` because that router hardcodes the real home;
+    // `engine-history.test.ts` pins the hop itself.
+    const seeded = await loadCodexHistory(sourceId, { cwd, env }, turns[0])
+    expect(turnIds(seeded.messages)).toEqual([turns[0]])
+    expect(turnIds((await loadCodexHistory(sourceId, { cwd, env })).messages)).toEqual(turns)
+
+    // `thread/fork` has no `dynamicTools` field. The hosted tools survive anyway,
+    // restored from the source rollout's SessionMeta — so the branch's FIRST
+    // request to the model still advertises them.
+    await session.run('branch turn')
+    await vi.waitFor(() => expect(session!.willQueue).toBe(false), { timeout: 30000 })
+    const branched = requests.slice(beforeFork).filter((request) => !isGuardianRequest(request))
+    expect(branched.length).toBeGreaterThan(0)
+    expect(advertisesHostedTool(branched[0])).toBe(true)
+    expect(errors).toEqual([])
+  },
+  180000
 )

@@ -511,8 +511,16 @@ export const CODEX_ENGINE_CAPABILITIES: EngineCapabilities = {
   // Plan mode is ClaudeUI's own read-only autonomy, enforced by the shared
   // permission engine over `untrusted` + a readOnly native sandbox (ADR-066).
   plan: true,
-  fork: false,
-  forkFromMessage: false,
+  // Native `thread/fork`, whose granularity is the TURN: a branch copies the
+  // source through the turn that owns the clicked message into a NEW thread and
+  // leaves the source untouched. Both flags go up together because that verb is
+  // the only branch this engine has — there is no whole-session clone separate
+  // from it, so `fork` without `forkFromMessage` would describe nothing. The
+  // renderer's optimistic seed still slices at the MESSAGE, so a branch cut
+  // mid-turn shows fewer rows than it actually kept until the next cold load
+  // replaces the seed with the fork's own history (ADR-066).
+  fork: true,
+  forkFromMessage: true,
   // Both true together, as on pi: they gate the SAME send-while-busy
   // affordance, and ADR-053's full path works here — core holds the item
   // (recallable), forwards it with `turn/steer` + `expectedTurnId` at the next

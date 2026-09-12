@@ -96,6 +96,11 @@ function fixture(opts: EngineSpawnOptions = {}) {
     reasoningEffort: 'ultra',
     ...policy
   }
+  /** What `thread/fork` answers with: a NEW id rooted at the source. */
+  const forked = {
+    ...response,
+    thread: { id: 'fork', forkedFromId: 'root', parentThreadId: null, turns: [] }
+  }
   /** What `thread/items/list` answers a steer reconciliation with. */
   const listed = { current: [] as unknown[] }
   const request = vi.fn(async (method: string, _params?: unknown) => {
@@ -113,6 +118,7 @@ function fixture(opts: EngineSpawnOptions = {}) {
         ],
         nextCursor: null
       }
+    if (method === 'thread/fork') return forked
     if (method === 'thread/start' || method === 'thread/resume') return response
     if (method === 'turn/start') return { turn: { id: 'turn', status: 'inProgress', items: [] } }
     return {}
@@ -223,6 +229,7 @@ function fixture(opts: EngineSpawnOptions = {}) {
     listed,
     callbacks,
     response,
+    forked,
     policy
   }
 }
@@ -277,6 +284,65 @@ describe('Codex first session', () => {
       effort: 'ultra'
     })
     expect(overrides.get('root')).toEqual({ effort: 'ultra' })
+  })
+
+  it('branches a completed turn into a new native thread and carries its overrides', async () => {
+    overrides.set('root', { effort: 'ultra' })
+    const { session, request } = fixture({
+      resumeSessionId: 'root',
+      resumeSessionAt: 'turn-1',
+      forkSession: true
+    })
+    await session.run(null)
+    // `thread/fork` copies the source THROUGH `lastTurnId` into a new thread and
+    // leaves the source untouched. `excludeTurns` keeps the response metadata-only:
+    // the branch's transcript is read back through the ordinary history path.
+    expect(request).toHaveBeenCalledWith('thread/fork', {
+      cwd: '/isolated',
+      threadId: 'root',
+      lastTurnId: 'turn-1',
+      excludeTurns: true,
+      approvalPolicy: 'untrusted',
+      sandbox: 'workspace-write',
+      approvalsReviewer: 'user'
+    })
+    expect(request).not.toHaveBeenCalledWith('thread/resume', expect.anything())
+    expect(session.getSessionId()).toBe('fork')
+    // The branch is its OWN session row: the source's accepted overrides are
+    // copied onto the new id, and replayed against it.
+    expect(overrides.get('fork')).toEqual({ effort: 'ultra' })
+    expect(overrides.get('root')).toEqual({ effort: 'ultra' })
+    expect(request).toHaveBeenCalledWith('thread/settings/update', {
+      threadId: 'fork',
+      effort: 'ultra'
+    })
+  })
+
+  it('refuses a branch the binary rooted somewhere else', async () => {
+    const { session, forked, client } = fixture({
+      resumeSessionId: 'root',
+      resumeSessionAt: 'turn-1',
+      forkSession: true
+    })
+    forked.thread.forkedFromId = 'someone-else'
+    await expect(session.run(null)).rejects.toThrow('Codex forked a different native thread')
+    expect(client.dispose).toHaveBeenCalledOnce()
+  })
+
+  it('refuses the branch shapes Codex has no verb for', async () => {
+    // Resume-at is Claude's mid-transcript resume. Codex's granularity is the
+    // TURN and its only verb is a fork, so this must not quietly become one.
+    const at = fixture({ resumeSessionId: 'root', resumeSessionAt: 'turn-1' })
+    await expect(at.session.run(null)).rejects.toThrow('Codex resume-at is not supported')
+    expect(at.request).not.toHaveBeenCalledWith('thread/fork', expect.anything())
+    const anchorless = fixture({ resumeSessionId: 'root', forkSession: true })
+    await expect(anchorless.session.run(null)).rejects.toThrow(
+      'Codex branching needs a turn anchor'
+    )
+    const sourceless = fixture({ resumeSessionAt: 'turn-1', forkSession: true })
+    await expect(sourceless.session.run(null)).rejects.toThrow(
+      'Codex branching needs a turn anchor'
+    )
   })
 
   it('does not adopt a native child as an independent root', async () => {

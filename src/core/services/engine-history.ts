@@ -13,7 +13,7 @@ import {
   deleteOpencodeSession
 } from './opencode-session-list'
 import { deleteSessionFiles } from './delete-session-files'
-import { listCodexSessions, loadCodexHistory } from '../codex/history'
+import { listCodexSessions, loadCodexHistory, resolveCodexForkAnchor } from '../codex/history'
 import type { ForkAnchorResult } from '../../shared/types'
 
 interface EngineHistory {
@@ -36,9 +36,7 @@ const bare = (messages: SessionHistoryResult['messages']): SessionHistoryResult 
   warnings: []
 })
 const unsupported = async (): Promise<never> => {
-  throw new Error(
-    'Codex deletion and fork are unsupported until native lifecycle verification is complete'
-  )
+  throw new Error('Codex deletion is unsupported until native lifecycle verification is complete')
 }
 
 const readers: Record<EngineId, EngineHistory> = {
@@ -63,13 +61,16 @@ const readers: Record<EngineId, EngineHistory> = {
     }
   },
   codex: {
-    read: (id, _projectKey, anchor) => {
-      if (anchor) throw new Error('Codex history cannot use a Claude message anchor')
-      return loadCodexHistory(id)
-    },
+    // The anchor is a native TURN id, never a Claude JSONL line uuid — the codex
+    // `forkAnchor` below is the only thing that mints one — so it is forwarded
+    // as the cut, which is what seeds a branch's canonical transcript.
+    read: (id, _projectKey, anchor) =>
+      anchor ? loadCodexHistory(id, undefined, anchor) : loadCodexHistory(id),
     list: listCodexSessions,
     delete: unsupported,
-    forkAnchor: unsupported
+    // Turn-granular and native: no JSONL line uuid and no `messageIndex`, since
+    // the Codex message id already carries the turn that owns the row.
+    forkAnchor: (id, cwd, message) => resolveCodexForkAnchor(id, message, { cwd })
   }
 }
 
