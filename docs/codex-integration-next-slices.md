@@ -249,6 +249,8 @@ Owned: `src/core/codex/codex-hosted-tools.ts` (new), `src/core/codex/CodexSessio
 
 ## Slice D: completed-turn fork
 
+**Landed in `5e92e52f` (2026-09-12).** Kept as the design record. Confirmed on the real binary: a fork carries `forkedFromId` and a null `parentThreadId`, preserves the source turn ids, and `thread/list` omits it. One thing the spec missed, found on the real app: the fork's canonical seed goes through the shared history reader WITH the turn anchor, and the codex reader refused every anchor as a Claude line uuid; it now truncates the source history through that turn.
+
 ### Source facts and as-built facts
 
 - `thread/fork {threadId, lastTurnId?, beforeTurnId?, cwd?, model?, approvalPolicy?, sandbox?, approvalsReviewer?, excludeTurns?, ...}` (generated `ThreadForkParams.ts`): copies the source thread through `lastTurnId` inclusive into a NEW thread; the referenced turn cannot be in progress; the source is not modified. The returned `Thread` carries `forkedFromId` (the source) and `parentThreadId` (null for a fork; set for native CHILD threads). The lifecycle probe (`src/integration/codex/codex-lifecycle.integration.test.ts`) pinned: `thread/list` never lists forks; a thread with a surviving fork cannot be deleted. Re-verify `forkedFromId` vs `parentThreadId` on a real fork before relying on the distinction.
