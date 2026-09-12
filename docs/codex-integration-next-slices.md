@@ -315,6 +315,8 @@ Owned: `src/core/codex/codex-hosted-tools.ts`, `src/core/codex/CodexSession.ts` 
 
 ## Slice F: native children as subagent transcripts
 
+**Landed in `5452d3c5` (2026-09-13).** Kept as the design record. Findings that changed it, all verified in the source and on the binary: the model, not the feature flag, picks the collab surface (`multi_agent_version_for_model`), and v2 (Astra, Sol, Terra, Daybreak) puts `subAgentActivity` items in the transcript instead of the spawn's `collabAgentToolCall`, so both are mapped; no `thread/started` is ever emitted for a spawned child (three emit sites: start, fork, detached review), so a child's early notifications are held until its spawn item binds it; a v2 `completed` activity arrives after the parent turn ended and is the one item honoured for an ended turn; parent interrupt does not cascade natively; children do not inherit `dynamicTools`. Additive shared change: `SessionHistoryResult.subagentMessages`.
+
 Scope: render the child threads a Codex root spawns through its collab tools
 (`spawnAgent`, `sendInput`, `wait`, `closeAgent`, ...) as ClaudeUI subagent
 transcripts under the parent's tool card, with approvals from children routed

@@ -53,16 +53,16 @@ These are host-only APIs behind registered core commands and the native auth
 provider. Service reads never start or resume a root. Device login UI is
 mock-tested; the authorized native status check passed independently. See the
 [service contracts and evidence](../protocol-codex/README.md#m1b-service-and-ownership).
-The table marks the owners whose responsibilities are still partly planned (native children, full usage).
+The table marks the owners whose responsibilities are still partly planned (full usage).
 
-| Owner                              | Responsibility                                                                                                                                                                                                                            |
-| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CodexSession extends BaseSession` | One root session's lifecycle, model and effort selection, per-turn policy derivation and approval gating. Held queue and steer, hosted tools, dispatch as a source and completed-turn fork are built; children and full usage are planned |
-| Root's app-server process          | Native root thread and its child threads, model context and native persistence                                                                                                                                                            |
-| RPC client                         | JSONL framing, handshake, request correlation, server requests, timeouts, generation invalidation, disconnect                                                                                                                             |
-| Pure mapper                        | Native items/deltas/results into neutral messages, tool results, task notifications, and usage facts                                                                                                                                      |
-| Minimal service client             | Bounded catalog/history/auth reads and explicitly authorized auth actions; no second owner of an active thread                                                                                                                            |
-| SyncCore                           | Canonical state, command authorization, replication, stream fanout, query routing                                                                                                                                                         |
+| Owner                              | Responsibility                                                                                                                                                                                                                               |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CodexSession extends BaseSession` | One root session's lifecycle, model and effort selection, per-turn policy derivation and approval gating. Held queue and steer, hosted tools, dispatch as a source, completed-turn fork and native children are built; full usage is planned |
+| Root's app-server process          | Native root thread and its child threads, model context and native persistence                                                                                                                                                               |
+| RPC client                         | JSONL framing, handshake, request correlation, server requests, timeouts, generation invalidation, disconnect                                                                                                                                |
+| Pure mapper                        | Native items/deltas/results into neutral messages, tool results, task notifications, and usage facts                                                                                                                                         |
+| Minimal service client             | Bounded catalog/history/auth reads and explicitly authorized auth actions; no second owner of an active thread                                                                                                                               |
+| SyncCore                           | Canonical state, command authorization, replication, stream fanout, query routing                                                                                                                                                            |
 
 New code belongs under `src/core/codex/`; host locators/spawn inputs follow `src/core/host.ts`. `register-engines.ts` and `SpawnPrepRegistry` are the existing construction seams. No Electron import enters core, and a null window is normal. Desktop preload and web clients use the same typed core contracts. Neither gets a Codex socket or a browser-facing app-server port.
 
@@ -196,8 +196,7 @@ ADR-038 while compensating for Codex's missing dynamic-call resolution event.
 Built: `CodexEngineToolMap` feeds the existing renderer `ToolView` kinds; the
 three hosted UI tools run over the native dynamic-tool channel (`30421310`,
 `hostedMcp: true`); `dispatch_agent` makes Codex a dispatch SOURCE (`843b4ecf`,
-`crossEngineDispatch: true`, ADR-033 amendment). Planned: native children as
-subagent transcripts (`subagents` false) and Codex as a dispatch TARGET.
+`crossEngineDispatch: true`, ADR-033 amendment). Native children render as subagent transcripts under the spawning card on both collab surfaces (`5452d3c5`, `subagents: true`). Planned: Codex as a dispatch TARGET.
 
 Register hosted dynamic tools only with explicit experimental initialization and a tested definition set. Reuse handlers rather than cloning mermaid/mockup/file/dispatch behavior. Add a Codex engine tool map alongside the existing renderer maps and feed neutral `ToolView` kinds. Native MCP remains native; dynamic-tool support alone does not prove the full hosted-MCP control contract.
 
