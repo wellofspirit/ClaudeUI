@@ -1,5 +1,6 @@
 import type { ChatMessage, ContentBlock, FileDiff, StreamDelta } from '../../shared/types'
 import { isImageMediaType } from '../../shared/types'
+import type { PatchChangeKind } from './protocol/v2/PatchChangeKind'
 import type { ThreadItem } from './protocol/v2/ThreadItem'
 
 /** Length-safe composite identity shared by live items and future history readers. */
@@ -96,7 +97,7 @@ export function mapCodexItem(
     case 'fileChange': {
       const files = item.changes.map((change): FileDiff => ({
         path: change.path,
-        patch: change.diff,
+        patch: codexChangePatch(change),
         changeType:
           change.kind.type === 'update' && change.kind.move_path ? 'move' : change.kind.type
       }))
@@ -123,6 +124,71 @@ export function mapCodexItem(
     default:
       return []
   }
+}
+
+/**
+ * The unified diff for one native file change.
+ *
+ * The wire's `diff` field is NOT a unified diff for every kind — see
+ * `format_file_change_diff` in codex-rs (`app-server-protocol/src/protocol/
+ * item_builders.rs`):
+ *
+ *  - `add` / `delete` carry the RAW FILE CONTENT;
+ *  - a renamed `update` carries the unified diff with `\n\nMoved to: <path>`
+ *    appended (the rename is already expressed as `changeType: 'move'`, and
+ *    `FileDiff` has no destination field to put the path in);
+ *  - a plain `update` carries the unified diff verbatim.
+ *
+ * Handing the raw content straight through is what made an add render as
+ * "No changes": the viewer's parser finds zero hunks in it.
+ *
+ * The branch is taken on `kind.type` ALONE, never on what the content looks
+ * like: a file whose first line is `---` or `@@` (a .patch fixture, a changelog)
+ * is ordinary content, and sniffing would leave exactly those unwrapped.
+ */
+function codexChangePatch(change: { kind: PatchChangeKind; path: string; diff: string }): string {
+  if (change.kind.type === 'add') return contentPatch(change.path, change.diff, 'add')
+  if (change.kind.type === 'delete') return contentPatch(change.path, change.diff, 'delete')
+  const movedTo = change.kind.move_path
+  const trailer = movedTo ? `\n\nMoved to: ${movedTo}` : ''
+  return trailer && change.diff.endsWith(trailer)
+    ? change.diff.slice(0, -trailer.length)
+    : change.diff
+}
+
+/**
+ * Wrap whole-file content as a unified add/delete diff, the shape
+ * `renderer/src/lib/diff/parse-patch.ts` reads (and `GitService.getFilePatch`
+ * already emits for untracked files).
+ *
+ * A file that does not end in a newline keeps that fact: the parser skips the
+ * `\ No newline at end of file` marker, so it costs nothing and survives a
+ * round-trip through anything else that reads the patch. An EMPTY file has no
+ * lines at all and gets an empty `@@ -0,0 +0,0 @@` hunk — one hunk is what keeps
+ * the viewer from calling it "No changes", and `--- /dev/null` is what keeps it
+ * styled as a pure add.
+ */
+function contentPatch(path: string, content: string, kind: 'add' | 'delete'): string {
+  const lines = content === '' ? [] : content.split('\n')
+  const endsWithNewline = lines.length > 0 && lines[lines.length - 1] === ''
+  if (endsWithNewline) lines.pop()
+  const count = lines.length
+  const sign = kind === 'add' ? '+' : '-'
+  const header =
+    kind === 'add'
+      ? [
+          `--- /dev/null`,
+          `+++ b/${path}`,
+          count === 0 ? `@@ -0,0 +0,0 @@` : `@@ -0,0 +1,${count} @@`
+        ]
+      : [
+          `--- a/${path}`,
+          `+++ /dev/null`,
+          count === 0 ? `@@ -0,0 +0,0 @@` : `@@ -1,${count} +0,0 @@`
+        ]
+  const body = lines.map((line) => `${sign}${line}`)
+  if (count > 0 && !endsWithNewline) body.push('\\ No newline at end of file')
+  return [...header, ...body].join('\n')
 }
 
 function codexImage(url: string): ContentBlock[] {

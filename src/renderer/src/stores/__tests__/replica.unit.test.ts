@@ -32,9 +32,10 @@ import {
   evictLocalSessions,
   dropLocalSessions,
   onReplicaApplied,
-  resolveRekeyed
+  resolveRekeyed,
+  isLocallyCreated
 } from '../replica'
-import { seed, emitSync, resetReplicaSeam } from '@test/helpers/replica-seed'
+import { seed, seedSession, emitSync, resetReplicaSeam } from '@test/helpers/replica-seed'
 import { toSnapshot } from '../../../../core/shared/sync/state'
 import { makeAssistantMessage, makeSessionStatus } from '@test/factories/messages'
 
@@ -214,6 +215,32 @@ describe('rekey', () => {
 
   it('resolves an id it has no rekey for to itself', () => {
     expect(resolveRekeyed('never-moved')).toBe('never-moved')
+  })
+
+  it('carries the local-creation marker even when persisting the registry throws', () => {
+    // The persistence reaches disk through `window.api.saveSessionConfig` and can
+    // fail; the in-memory bookkeeping must not be a casualty. A still-private
+    // session that loses its marker stops being droppable by the empty-session
+    // cleanup, so an abandoned scratch session is stranded in the sidebar.
+    ;(globalThis as unknown as { window: { api: unknown } }).window = {
+      api: {
+        saveSessionConfig: () => {
+          throw new Error('disk full')
+        }
+      }
+    } as never
+    seedSession('local-only', { cwd: '/p' })
+    expect(isLocallyCreated('local-only')).toBe(true)
+
+    try {
+      seed.rekey('local-only', 'sdk-1')
+    } catch {
+      // The throw is the point — the fold and the bookkeeping still have to stand.
+    }
+
+    expect(isLocallyCreated('sdk-1')).toBe(true)
+    expect(isLocallyCreated('local-only')).toBe(false)
+    expect(resolveRekeyed('local-only')).toBe('sdk-1')
   })
 
   it('follows a chain of rekeys to the current id', () => {

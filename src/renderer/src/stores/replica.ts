@@ -157,17 +157,19 @@ export function startReplica(): () => void {
       const rekey = pendingRekeyFor(event)
       const removed = removedIdOf(event)
       commit(applyEvent(canonical, event, aux), { rekey, removed })
-      // Recorded before the persistence below, which reaches out to disk and can
-      // throw: the forwarding record is what an in-flight send needs, and losing
-      // it because `sessions.json` could not be written is the worse failure.
       if (rekey) rekeyed.set(rekey.oldId, rekey.newId)
-      if (rekey) persistRekeyedRegistry(rekey.newId)
       // The host now owns this id (or has dropped it) — either way it stops being
       // this client's private invention. A rekey carries the marker across, since
       // the pre-rekey id named the same still-private session.
       if (event.channel === 'session:created') locallyCreated.delete(routingIdOf(event))
       if (removed) locallyCreated.delete(removed)
       if (rekey && locallyCreated.delete(rekey.oldId)) locallyCreated.add(rekey.newId)
+      // LAST, after every in-memory line above: this one reaches out to disk
+      // (`window.api.saveSessionConfig`) and can throw. The forwarding record is
+      // what an in-flight send needs, and the marker is what lets the cleanup drop
+      // a still-private session — losing either because `sessions.json` could not
+      // be written is the worse failure.
+      if (rekey) persistRekeyedRegistry(rekey.newId)
     }
     for (const observer of observers) {
       try {
