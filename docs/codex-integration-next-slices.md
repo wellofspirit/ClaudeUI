@@ -280,6 +280,8 @@ Owned: `src/core/services/engine-history.ts` (codex entry only), `src/core/ipc/c
 
 ## Slice E: Codex as a cross-engine dispatch source (`dispatch_agent`)
 
+**Landed in `843b4ecf` (2026-09-12).** Kept as the design record. Three departures from the text, all deliberate: the dispatcher's blanket `fromEngine === 'codex'` refusal had to go (one line outside the "availability branch only" boundary) or nothing could run; `CodexEngineToolMap` gained the `task` mapping so the call renders as a TaskCard rather than an unknown tool; and turn end relies on the abort signal alone rather than also calling `stopDispatch`, which would have logged a user stop the user did not make. `crossEngineDispatchAvailable('codex')` is always true because claude is a bundled target, the same reasoning as the opencode branch.
+
 Scope: Codex SENDS work to a headless claude, opencode or pi target through the
 existing `crossEngineDispatcher` (ADR-033). Codex as a dispatch TARGET is a
 separate slice (the dispatcher needs a Codex target factory; M4).
