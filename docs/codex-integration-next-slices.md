@@ -275,3 +275,36 @@ Owned: `src/core/codex/codex-hosted-tools.ts` (new), `src/core/codex/CodexSessio
 ### Files and boundaries
 
 Owned: `src/core/services/engine-history.ts` (codex entry only), `src/core/ipc/create-session.ts` (the one refusal), `src/core/codex/CodexSession.ts` (`start()` only), `src/core/codex/history.ts`, `src/core/codex/CodexService.ts` (a read method if needed), `src/shared/model-capabilities.ts` (codex block), their tests, `src/integration/codex/`. Do not touch delete/archive, the renderer fork flow, or other engines.
+
+## Slice E: Codex as a cross-engine dispatch source (`dispatch_agent`)
+
+Scope: Codex SENDS work to a headless claude, opencode or pi target through the
+existing `crossEngineDispatcher` (ADR-033). Codex as a dispatch TARGET is a
+separate slice (the dispatcher needs a Codex target factory; M4).
+
+### As-built facts (re-verify before relying on them)
+
+- `src/core/services/cross-engine-dispatcher.ts`: `DispatchRequest {engine, prompt, model?, sessionId?}`, `DispatchContext {fromEngine, fromRoutingId, cwd, autonomyMode, emit, addDispatchedCost?, toolUseId?, extra?}`, `DispatchResult {text, sessionId, isError?}`; `crossEngineDispatcher.dispatch(req, ctx)`, `stopDispatch(toolCallId, routingId)`, `disposeFor(routingId)`. `crossEngineDispatchAvailable(engineId)` (~line 107) returns `false` for `codex` unconditionally; read its doc comment for what the function means before changing the branch.
+- The model implementation for a NON-MCP source is `PiSession.handleDispatchAgent` (`src/core/pi/PiSession.ts`, ~line 2422 onward, plus `inFlightDispatchIds`, `interrupt()` calling `stopDispatch` for each, and `disposeFor(this.routingId)` on teardown). Copy its validation, `DispatchContext` construction, result text (the `[dispatch session_id: …]` suffix) and lifecycle verbatim in spirit; do not import from pi.
+- Hosted-tool transport on Codex is slice C (`src/core/codex/codex-hosted-tools.ts`, `CodexSession.hostedToolCall`): a fourth function spec and a fourth handler branch ride the same channel. The `item/tool/call` params carry `callId`, so `toolUseId` for the `DispatchContext` is `codexItemId(threadId, turnId, callId)`, which is exactly the `tool_use` id the mapper emits for the `dynamicToolCall` item, so the dispatcher's subagent-stream and task events land on the right card.
+- The pi permission engine treats `dispatch_agent` as a hosted tool that is NOT auto-allowed (`PI_HOSTED_TOOL_NAMES` minus `PI_AUTO_ALLOW_HOSTED_TOOLS`), so the shared ladder answers `ask` in default/acceptEdits and `deny` in plan; `CodexSession.gate()` already maps `auto` to `default` for anything that reaches this client, and Codex's own guardian never sees a dynamic tool call, so under `auto` a Codex dispatch asks the human. Read `decideWithSource` and confirm the verdicts per mode before writing the tests.
+- Slice C answered every non-allow hosted verdict fail-closed because none was reachable. Dispatch makes `ask` reachable, so this slice adds the card: a `PendingApproval` bound to the call's `toolUseId` (`toolName: 'dispatch_agent'`, `input: {engine, prompt, model?, session_id?}`), resolved through the existing `pending` map (`resolveApproval` `allow`/`deny`; `allowForSession` adds the session-allow key exactly as commands do). `finishTurn` settles it with the turn; disconnect settles all. The card renders on the `dynamicToolCall` tool card, like every other id-bound approval.
+- The dispatched turn's spend is folded into the source session with `addDispatchedCost` (`BaseSession`), and `dispatched_usage` rows are the dispatcher's own.
+
+### Design
+
+1. `codex-hosted-tools.ts`: add the `dispatch_agent` spec (engine enum `claude | opencode | pi`, `prompt`, optional `model`, optional `session_id`; descriptions carry the model hints from `dispatch-model-hint.ts` like opencode's schema does). Keep `CODEX_HOSTED_TOOL_NAMES` as the allowlist and extend it. Do not add dispatch to `runCodexHostedTool`; dispatch is a session concern (it needs routing id, cwd, mode, emit, cost sink and the abort signal), so `CodexSession.hostedToolCall` branches on the name before calling the pure module.
+2. `CodexSession`: gate `dispatch_agent` through `gate()`; on `ask` raise the card described above and await it; on allow call `crossEngineDispatcher.dispatch(req, ctx)` with `ctx.extra = { signal: context.signal, sendNotification }` so an aborted turn stops the target (read how the dispatcher consumes `extra.signal` and `stopDispatch` before choosing between the two; pi uses `stopDispatch` because its bridge has no signal, Codex HAS one). Track in-flight ids; `interrupt()` and `disconnected()` call `stopDispatch` for each; `dispose()` calls `disposeFor(routingId)`. Map the `DispatchResult` to `{contentItems: [{type:'inputText', text}], success: !isError}`.
+3. `crossEngineDispatchAvailable('codex')`: return whether at least one target engine is available, consistent with the function's documented meaning for the other sources.
+4. Capabilities: `CODEX_ENGINE_CAPABILITIES.crossEngineDispatch = true` once the real-binary test passes (ADR-030).
+5. Same-engine dispatch (codex → codex) is rejected by the dispatcher's engine guard today because there is no Codex target; keep it rejected with a clear tool result.
+
+### Tests (each must fail before the corresponding change)
+
+- `codex-session.test.ts`: the fourth spec is declared; a `dispatch_agent` call in default mode raises the card bound to the call id and runs nothing until `allow`; `deny` answers `{success:false}` with the reason; plan mode denies without a card; `auto` asks; a valid allowed call invokes a mocked `crossEngineDispatcher.dispatch` with the exact `DispatchRequest` and a `DispatchContext` whose `toolUseId` is the call's id and whose `autonomyMode` is the session's mode; the result text and `isError` map onto `contentItems`/`success`; `turn/completed` mid-dispatch aborts the signal and calls `stopDispatch`; `dispose` calls `disposeFor(routingId)`; `addDispatchedCost` is wired.
+- `cross-engine-dispatcher` test file: `crossEngineDispatchAvailable('codex')` follows target availability.
+- Integration (`CODEX_INTEGRATION=1`, real Codex binary, fixture provider scripting a `dispatch_agent` function call): with the dispatcher's target stubbed at the `DispatchTargetClient` seam (no real second engine), observe the card, resolve `allow`, and see the dispatched text returned to the provider on the next request as the tool output; a second run under `plan` sees the denial text instead.
+
+### Files and boundaries
+
+Owned: `src/core/codex/codex-hosted-tools.ts`, `src/core/codex/CodexSession.ts` (`hostedToolCall`, lifecycle hooks), `src/core/services/cross-engine-dispatcher.ts` (the availability branch only), `src/shared/model-capabilities.ts` (codex block), their tests, `src/integration/codex/`. Do not touch pi/opencode/claude dispatch code beyond reading it, the dispatcher's target machinery, or docs.
