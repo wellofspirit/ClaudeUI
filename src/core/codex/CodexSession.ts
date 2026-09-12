@@ -47,6 +47,7 @@ import type { FileChangeRequestApprovalParams } from './protocol/v2/FileChangeRe
 import type { ToolRequestUserInputParams } from './protocol/v2/ToolRequestUserInputParams'
 import { assertCodexProvider, selectCodexModel } from './model-selection'
 import { codexItemId, mapCodexDelta, mapCodexItem, type CodexMappedEvent } from './event-mapper'
+import { unwrapShellCommand } from './command-text'
 import { BashStreamGate } from '../opencode/bash-stream-gate'
 import {
   setSessionMeta,
@@ -752,12 +753,24 @@ export class CodexSession extends BaseSession {
     }
     if (method === 'item/commandExecution/requestApproval') {
       const params = value as CommandExecutionRequestApprovalParams
-      const command = params.command ?? ''
+      const rawCommand = params.command ?? ''
+      // Codex wraps every model command in the user's login shell, so the wire
+      // string is `/bin/zsh -lc <script>`. Gating that verbatim would make a
+      // `Bash(rm -rf:*)` deny rule dead on this engine and would suggest
+      // `Bash(/bin/zsh -lc ...:*)`, a rule matching nothing on any other one.
+      const command = unwrapShellCommand(rawCommand)
       card.toolName = 'commandExecution'
       // `commandActions` is display-only (docs/codex-spike.md answer A: it
       // cannot even separate `pwd` from `echo hi`), so the command STRING is
       // what gets gated and what a suggested rule is built from.
-      card.input = { command, cwd: params.cwd ?? '' }
+      card.input = {
+        command,
+        // Only when it differs — the transcript stays truthful about what Codex
+        // will actually exec without the card growing a redundant field on the
+        // (Execve-bridge) requests that arrive unwrapped already.
+        ...(command === rawCommand ? {} : { rawCommand }),
+        cwd: params.cwd ?? ''
+      }
       card.decisionReason = params.reason ?? undefined
       // NEVER suggest a rule for an empty command: `Bash(:*)` is a prefix rule
       // that matches every command ever run. An approval with no command string

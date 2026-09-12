@@ -711,6 +711,48 @@ describe('Codex first session', () => {
     )
   })
 
+  it('gates and suggests on the command inside Codex login-shell wrapper', async () => {
+    rules.deny = ['Bash(rm -rf:*)']
+    const { session, approval } = fixture()
+    await session.run('hello')
+    // Codex wraps every model command in the user's login shell
+    // (codex-rs/core/src/shell.rs `derive_exec_args`), so the wire string is
+    // `shlex_join(["/bin/zsh", "-lc", "rm -rf x"])`. A deny rule must still bite.
+    const denied = approval({ command: "/bin/zsh -lc 'rm -rf x'" })
+    expect(denied.card).toBeUndefined()
+    expect(await denied.result).toEqual({ decision: 'decline' })
+    expect(events).toHaveBeenCalledWith('session:error', [
+      'temporary',
+      'Denied by permission rule: Bash(rm -rf:*)'
+    ])
+
+    const pending = approval({ command: '/bin/zsh -lc ls', itemId: 'two' })
+    // The card shows the command the model actually asked for, and keeps the
+    // raw wire string so the transcript stays truthful.
+    expect(pending.card).toMatchObject({
+      toolName: 'commandExecution',
+      input: { command: 'ls', rawCommand: '/bin/zsh -lc ls', cwd: '/isolated' }
+    })
+    expect(pending.card.suggestions.map((s) => s.rules)).toEqual([
+      [{ toolName: 'Bash', ruleContent: 'ls:*' }],
+      [{ toolName: 'Bash', ruleContent: 'ls:*' }],
+      [{ toolName: 'Bash', ruleContent: 'ls:*' }]
+    ])
+    session.resolveApproval(pending.card.requestId, 'allowForSession')
+    expect(await pending.result).toEqual({ decision: 'accept' })
+    const repeat = approval({ command: '/bin/zsh -lc ls', itemId: 'three' })
+    expect(repeat.card).toBeUndefined()
+    expect(await repeat.result).toEqual({ decision: 'accept' })
+  })
+
+  it('leaves an unwrapped command exactly as it arrived', async () => {
+    const { session, approval } = fixture()
+    await session.run('hello')
+    const pending = approval({ command: 'ls' })
+    expect(pending.card.input).toEqual({ command: 'ls', cwd: '/isolated' })
+    expect(pending.card.suggestions[0].rules).toEqual([{ toolName: 'Bash', ruleContent: 'ls:*' }])
+  })
+
   it('validates model/effort selections and sends native effort on the next turn', async () => {
     const { session, request } = fixture()
     await session.run(null)
