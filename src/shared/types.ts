@@ -255,7 +255,7 @@ export interface PermissionSuggestion {
 }
 
 export interface PendingApproval {
-  codex?: import('./codex-types').CodexApprovalChoices
+  codex?: import('./codex-types').CodexApprovalPayload
   requestId: string
   /**
    * cli.js-assigned tool_use id for the invocation being prompted. The

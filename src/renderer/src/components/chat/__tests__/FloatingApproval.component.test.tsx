@@ -419,6 +419,41 @@ describe('FloatingApproval rendered component', () => {
     expect(screen.getByText('Deny')).toBeInTheDocument()
   })
 
+  // A Codex guardian override is bound to a tool_use already in the transcript,
+  // so the declined card owns it and the floating layer must stay empty — the
+  // same rule that keeps any id-matched approval off the floater.
+  it('never floats an approval whose tool_use is already on screen', () => {
+    const toolUseId = 'codex:["root","turn","esc"]'
+    useSessionStore.getState().createNewSession(ROUTE, '/test')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+    seed.message(ROUTE, {
+      id: toolUseId,
+      role: 'assistant',
+      timestamp: 1,
+      content: [
+        {
+          type: 'tool_use',
+          toolUseId,
+          toolName: 'commandExecution',
+          toolInput: { command: 'rm -rf x' }
+        }
+      ]
+    })
+    seed.approvalRequest(
+      ROUTE,
+      makePendingApproval({
+        toolUseId,
+        toolName: 'commandExecution',
+        input: { command: 'rm -rf x' },
+        codex: { guardianOverride: true }
+      })
+    )
+
+    const { container } = render(<FloatingApproval />)
+
+    expect(container.firstChild).toBeNull()
+  })
+
   it('renders nothing when there are no pending approvals', () => {
     useSessionStore.getState().createNewSession(ROUTE, '/test')
     useSessionStore.setState({ activeSessionId: ROUTE })

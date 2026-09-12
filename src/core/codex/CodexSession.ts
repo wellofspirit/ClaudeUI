@@ -40,6 +40,7 @@ import { resolveCodexCapabilities } from '../../shared/model-capabilities'
 import { CodexClient } from './CodexClient'
 import type { CodexClientOptions, CodexTransportError } from './CodexAppServerClient'
 import type { Model } from './protocol/v2/Model'
+import type { JsonValue } from './protocol/serde_json/JsonValue'
 import type { ThreadItem } from './protocol/v2/ThreadItem'
 import type { Turn } from './protocol/v2/Turn'
 import type { CommandExecutionRequestApprovalParams } from './protocol/v2/CommandExecutionRequestApprovalParams'
@@ -120,6 +121,81 @@ function guardianActionLabel(action: GuardianApprovalReviewAction): string {
   }
 }
 
+/**
+ * The three reviewed actions a denial override can express. `writeStdin`,
+ * `networkAccess`, `mcpToolCall` and `requestPermissions` are deliberately out:
+ * the first two have no declined thread item to hang a card on (a network review
+ * carries `targetItemId: null` by design), and the last two are behind
+ * under-development features this adapter does not enable.
+ */
+const OVERRIDABLE_ACTIONS = new Set(['command', 'execve', 'applyPatch'])
+
+/**
+ * The v2 notification carries a CAMEL-cased projection of the core's own
+ * `GuardianAssessmentAction` (`app-server-protocol/src/protocol/v2/item.rs`,
+ * `From<CoreGuardianAssessmentAction>`), but
+ * `thread_approve_guardian_denied_action_inner` deserializes the CORE type,
+ * which is `#[serde(tag = "type", rename_all = "snake_case")]`
+ * (`protocol/src/approvals.rs`). So the tag is re-spelled, and so is the
+ * `GuardianCommandSource` VALUE — camelCase `unifiedExec` there, snake_case
+ * `unified_exec` here.
+ */
+function guardianDenialAction(action: GuardianApprovalReviewAction): JsonValue {
+  const source = (value: string): string => (value === 'unifiedExec' ? 'unified_exec' : value)
+  switch (action.type) {
+    case 'command':
+      // Echoed EXACTLY as received, login-shell wrapper included: the core
+      // serializes this action straight back into the model's context, and a
+      // command it cannot recognise is an approval for something else.
+      return {
+        type: 'command',
+        source: source(action.source),
+        command: action.command,
+        cwd: action.cwd
+      }
+    case 'execve':
+      return {
+        type: 'execve',
+        source: source(action.source),
+        program: action.program,
+        argv: action.argv,
+        cwd: action.cwd
+      }
+    case 'applyPatch':
+      return { type: 'apply_patch', cwd: action.cwd, files: action.files }
+    default:
+      throw new Error('Codex auto-review denial cannot be overridden')
+  }
+}
+
+/**
+ * The core `GuardianAssessmentEvent` rebuilt from the v2 notification. Every
+ * field but `id`, `status` and `action` is `#[serde(default)]` upstream, and
+ * `approve_guardian_denied_action` reads only `status` and `action`, but the
+ * rest is echoed verbatim so the event stays a faithful record of the review
+ * that produced it rather than a minimal stub.
+ */
+function guardianDenialEvent(
+  notification: ItemGuardianApprovalReviewCompletedNotification
+): JsonValue {
+  const { review } = notification
+  return {
+    id: notification.reviewId,
+    target_item_id: notification.targetItemId,
+    turn_id: notification.turnId,
+    started_at_ms: notification.startedAtMs,
+    completed_at_ms: notification.completedAtMs,
+    // `GuardianAssessmentStatus` is snake_case and the handler ignores every
+    // value but this one (`core/src/session/handlers.rs`).
+    status: 'denied',
+    ...(review.riskLevel ? { risk_level: review.riskLevel } : {}),
+    ...(review.userAuthorization ? { user_authorization: review.userAuthorization } : {}),
+    ...(review.rationale ? { rationale: review.rationale } : {}),
+    ...(notification.decisionSource ? { decision_source: notification.decisionSource } : {}),
+    action: guardianDenialAction(notification.action)
+  }
+}
+
 /** One flat sentence per decision — see GUARDIAN_VERB for the untrusted-text rules. */
 export function guardianReviewText(
   notification: ItemGuardianApprovalReviewCompletedNotification
@@ -164,6 +240,23 @@ type Pending = {
 
 /** One gated action inside a native request — one command, or one changed file. */
 type Gated = { tool: string; input: Record<string, unknown>; path?: string }
+
+/**
+ * A denied guardian review the human can still reverse. It is NOT a `Pending`:
+ * there is no server request parked behind it, nothing settles it, and
+ * `finishTurn` must leave it alone — the injected approval only has to reach
+ * Codex before the model's next turn, which is exactly when it expires.
+ */
+type GuardianOverride = {
+  /** The card itself — kept so a repeated `tool_result` can re-arm it verbatim. */
+  card: PendingApproval
+  /** Core-shaped `GuardianAssessmentEvent`, ready to send back verbatim. */
+  event: JsonValue
+  /** Human label for the reviewed action, already backticked where it helps. */
+  label: string
+  /** Transcript row this override writes once Codex accepts it. */
+  rowId: string
+}
 
 /**
  * Per-turn native policy. Codex EXECUTES, ClaudeUI DECIDES (ADR-066 slice 3):
@@ -223,6 +316,10 @@ export class CodexSession extends BaseSession {
   /** "Allow for this session" clicks, in the shared engine's key vocabulary. */
   private sessionAllows = new Set<string>()
   private pending = new Map<string, Pending>()
+  /** Guardian-denial overrides by requestId — never `this.pending` (see the type). */
+  private guardianOverrides = new Map<string, GuardianOverride>()
+  /** Denials whose declined item has not been mapped yet, by that item's id. */
+  private heldDenials = new Map<string, ItemGuardianApprovalReviewCompletedNotification>()
   private output = new Map<string, string>()
   private bashGate = new BashStreamGate((toolUseId, output) =>
     this.send('session:bash-output', { toolUseId, output })
@@ -306,6 +403,9 @@ export class CodexSession extends BaseSession {
         ...this.turnPolicy()
       })
       if (this.closed) return
+      // A guardian override is context injected for the model's NEXT turn. Once
+      // that turn has started, an unanswered offer can no longer reach it.
+      this.clearGuardianOverrides()
       if (!this.endedTurns.has(result.turn.id)) this.turnId = result.turn.id
       if (this.interruptRequested && this.turnId) await this.interrupt()
       if (result.turn.status !== 'inProgress') this.finishTurn(result.turn)
@@ -586,7 +686,9 @@ export class CodexSession extends BaseSession {
     this.clearInactivityTimer()
     this.bashGate.cancelAll()
     this.output.clear()
+    this.heldDenials.clear()
     for (const pending of [...this.pending.values()]) pending.settle()
+    this.clearGuardianOverrides()
     if (error && error.code !== 'disposed') this.send('session:error', error.message)
     this.status('disconnected')
   }
@@ -681,10 +783,12 @@ export class CodexSession extends BaseSession {
     ) {
       // `started` is deliberately dropped: it carries no verdict, and a row per
       // in-flight review would double every decision in the transcript.
+      const notification = value as unknown as ItemGuardianApprovalReviewCompletedNotification
       this.guardianRow(
         codexItemId(this.threadId, value.turnId, value.reviewId),
-        guardianReviewText(value as unknown as ItemGuardianApprovalReviewCompletedNotification)
+        guardianReviewText(notification)
       )
+      this.offerGuardianOverride(notification)
     } else if (method === 'guardianWarning' && typeof value.message === 'string') {
       const message = value.message
       if (GUARDIAN_DECISION_WARNING.test(message)) return
@@ -750,6 +854,96 @@ export class CodexSession extends BaseSession {
     })
   }
 
+  /**
+   * A denial is the one review outcome a human may want to reverse, so it also
+   * raises an approval bound to the DECLINED item's own id. No pop-up: the card
+   * is already in the transcript (`MessageBubble` binds by `toolUseId`, and
+   * `FloatingApproval` only floats what no block matched), so the offer can be
+   * taken or ignored without blocking anything.
+   *
+   * The review and its target item race — a real denial run emits the review
+   * BEFORE the target's `item/completed` — so a denial is HELD until that item
+   * has completed and `item()` raises it. Waiting for completion is not
+   * cosmetic: every client drops a pending approval when a `tool_result` for
+   * its `toolUseId` arrives (ADR-038's belt-and-suspenders rule, applied in
+   * `sync/reducer.ts`), and a declined item's result is exactly that, so a card
+   * raised any earlier is wiped the moment the denial reaches the transcript.
+   */
+  private offerGuardianOverride(
+    notification: ItemGuardianApprovalReviewCompletedNotification
+  ): void {
+    const { review, action, targetItemId, turnId, reviewId } = notification
+    if (
+      !this.threadId ||
+      review.status !== 'denied' ||
+      typeof targetItemId !== 'string' ||
+      !OVERRIDABLE_ACTIONS.has(action.type)
+    )
+      return
+    const toolUseId = codexItemId(this.threadId, turnId, targetItemId)
+    const requestId = `codex-guardian:${this.generation}:${toolUseId}:${reviewId}`
+    // Codex repeats a completed review on the authoritative replay path; one
+    // denial is one offer.
+    if (this.guardianOverrides.has(requestId)) return
+    const tool = this.messageHistory
+      .flatMap((message) => message.content)
+      .find((block) => block.type === 'tool_use' && block.toolUseId === toolUseId)
+    if (tool?.type !== 'tool_use' || !this.completedItems.has(toolUseId)) {
+      this.heldDenials.set(toolUseId, notification)
+      return
+    }
+    this.heldDenials.delete(toolUseId)
+    // The reviewer's rationale is untrusted model text from a thread the user
+    // never saw: collapsed and capped exactly as the transcript row treats it.
+    const rationale = review.rationale
+      ? ` ${clip(normalizeWhitespace(review.rationale), GUARDIAN_RATIONALE_LIMIT)}`
+      : ''
+    const card: PendingApproval = {
+      requestId,
+      toolUseId,
+      toolName: tool.toolName,
+      input: tool.toolInput ?? {},
+      decisionReason: `Codex auto-review denied this action.${rationale}`,
+      // No `suggestions`: a standing rule cannot express "let this one through",
+      // and under `auto` a ClaudeUI allow rule is never consulted anyway.
+      codex: { guardianOverride: true }
+    }
+    this.guardianOverrides.set(requestId, {
+      card,
+      event: guardianDenialEvent(notification),
+      label: guardianActionLabel(action),
+      rowId: `${codexItemId(this.threadId, turnId, reviewId)}:override`
+    })
+    this.send('session:approval-request', card)
+  }
+
+  /**
+   * Put back a card the incoming `tool_result` is about to remove. Only the
+   * authoritative turn replay can reach this (a corrected result for an item
+   * that already completed); the first result for a declined item is emitted
+   * before its override is raised at all.
+   */
+  private rearmGuardianOverrides(toolUseId: string): void {
+    for (const [requestId, override] of this.guardianOverrides) {
+      if (override.card.toolUseId !== toolUseId) continue
+      // Dismiss first: `session:approval-request` APPENDS, so a bare re-send
+      // would show the same denial twice.
+      this.send('session:approval-dismiss', { requestId })
+      this.send('session:approval-request', override.card)
+    }
+  }
+
+  /** Forget one override and mirror that to every view (ADR-038 emission duty). */
+  private dismissGuardianOverride(requestId: string): void {
+    if (!this.guardianOverrides.delete(requestId)) return
+    this.send('session:approval-dismiss', { requestId })
+  }
+
+  private clearGuardianOverrides(): void {
+    for (const requestId of [...this.guardianOverrides.keys()])
+      this.dismissGuardianOverride(requestId)
+  }
+
   private finishTurn(turn: Turn): void {
     if (!this.threadId || typeof turn.id !== 'string' || this.endedTurns.has(turn.id)) return
     for (const item of turn.items ?? []) this.item(turn.id, item, true, true)
@@ -758,6 +952,11 @@ export class CodexSession extends BaseSession {
     for (const pending of [...this.pending.values()]) {
       if (pending.turnId === turn.id) pending.settle()
     }
+    // A denial whose declined item never arrived (it cannot arrive after the
+    // authoritative replay above) has nothing to bind to. Raised overrides are
+    // deliberately NOT touched: they outlive the turn that produced them.
+    for (const [id, held] of [...this.heldDenials])
+      if (held.turnId === turn.id) this.heldDenials.delete(id)
     if (this.turnId === turn.id || this.turnId === null) {
       this.turnId = null
       this.busy = false
@@ -790,6 +989,9 @@ export class CodexSession extends BaseSession {
       this.messageHistory.find((message) => message.id === id)?.timestamp ?? Date.now()
     for (const event of mapCodexItem(this.threadId!, turnId, item, completed, timestamp))
       this.dispatch(event)
+    // The tool_use block a held denial was waiting for may have just landed.
+    const held = this.heldDenials.get(id)
+    if (held) this.offerGuardianOverride(held)
   }
 
   private dispatch(event: CodexMappedEvent): void {
@@ -846,6 +1048,7 @@ export class CodexSession extends BaseSession {
           isError: event.isError,
           ...(event.fileDiffs ? { fileDiffs: event.fileDiffs } : {})
         })
+        this.rearmGuardianOverrides(event.toolUseId)
         break
     }
   }
@@ -1092,12 +1295,50 @@ export class CodexSession extends BaseSession {
     pending.settle({ answers: {} })
   }
 
+  /**
+   * "Approve anyway" on a guardian denial. Nothing is re-run: the core
+   * serializes `{action, outcome: "allowed"}` into a user-context fragment and
+   * injects it WITHOUT starting a turn (`core/src/session/handlers.rs`
+   * `approve_guardian_denied_action`), so the model sees the approval on its
+   * next turn and may retry the action itself. The card is dismissed either way
+   * — it is answered once, and a refusal is reported rather than retried.
+   */
+  private resolveGuardianOverride(
+    requestId: string,
+    override: GuardianOverride,
+    decision: ApprovalDecision
+  ): void {
+    if (decision === 'allowForSession')
+      throw new Error('Stale or unoffered Codex approval decision')
+    this.dismissGuardianOverride(requestId)
+    if (decision !== 'allow' || !this.threadId) return
+    void this.client
+      .request('thread/approveGuardianDeniedAction', {
+        threadId: this.threadId,
+        event: override.event
+      })
+      .then(() =>
+        this.guardianRow(
+          override.rowId,
+          `You approved ${override.label} over Codex's auto-review. Codex will see this on its next turn and may retry.`
+        )
+      )
+      .catch((error) =>
+        this.send(
+          'session:error',
+          `Codex did not accept the auto-review override: ${error instanceof Error ? error.message : 'native request failed'}`
+        )
+      )
+  }
+
   resolveApproval(
     requestId: string,
     decision: ApprovalDecision,
     answers?: Record<string, string>,
     updatedPermissions?: PermissionSuggestion[]
   ): void {
+    const override = this.guardianOverrides.get(requestId)
+    if (override) return this.resolveGuardianOverride(requestId, override, decision)
     const pending = this.pending.get(requestId)
     if (!pending) throw new Error('Stale or unknown Codex approval')
     if (pending.questions) {

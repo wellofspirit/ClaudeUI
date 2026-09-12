@@ -3,6 +3,8 @@ import { CodexSession } from '../CodexSession'
 import type { CodexClient } from '../CodexClient'
 import type { CodexClientOptions } from '../CodexAppServerClient'
 import type { EngineSpawnOptions } from '../../providers/ISession'
+import { applyEvent } from '../../shared/sync/reducer'
+import { emptyCanonicalState } from '../../shared/sync/state'
 
 const events = vi.hoisted(() => vi.fn())
 const overrides = vi.hoisted(() => new Map<string, unknown>())
@@ -889,5 +891,356 @@ describe('Codex auto-review visibility', () => {
     expect(session.getMessages().filter((message) => message.role === 'system')).toEqual([
       expect.objectContaining({ id, content: [{ type: 'text', text: rows()[0].content[0].text }] })
     ])
+  })
+})
+
+/**
+ * A guardian DENIAL is the one auto-review outcome a human may still want to
+ * reverse. There is no native server request to answer — the reviewer already
+ * replied for us — so the override is raised as a `PendingApproval` bound to the
+ * declined item's own id, lives in its own map, and survives the turn that
+ * produced it (`thread/approveGuardianDeniedAction` only has to reach Codex
+ * before the model's NEXT turn).
+ */
+describe('Codex guardian denial override', () => {
+  const REVIEW = {
+    threadId: 'root',
+    turnId: 'turn',
+    startedAtMs: 1,
+    completedAtMs: 2,
+    reviewId: 'review-1',
+    targetItemId: 'esc',
+    decisionSource: 'agent',
+    review: {
+      status: 'denied',
+      riskLevel: 'critical',
+      userAuthorization: 'unknown',
+      rationale: 'Isolated   fixture deny'
+    },
+    action: {
+      type: 'command',
+      source: 'shell',
+      command: "/bin/zsh -lc 'rm -rf x'",
+      cwd: '/isolated'
+    }
+  }
+  const TARGET = {
+    threadId: 'root',
+    turnId: 'turn',
+    item: {
+      id: 'esc',
+      type: 'commandExecution',
+      command: "/bin/zsh -lc 'rm -rf x'",
+      cwd: '/isolated',
+      status: 'declined',
+      exitCode: null,
+      aggregatedOutput: 'This action was rejected due to unacceptable risk.'
+    }
+  }
+  const TARGET_ID = 'codex:["root","turn","esc"]'
+  /** Only the override cards — the shared gate's own cards carry no `codex`. */
+  const offers = () =>
+    events.mock.calls
+      .filter(([channel]) => channel === 'session:approval-request')
+      .map((call) => call[1][1])
+      .filter((card: { codex?: { guardianOverride?: boolean } }) => card.codex?.guardianOverride)
+  const dismissed = () =>
+    events.mock.calls
+      .filter(([channel]) => channel === 'session:approval-dismiss')
+      .map((call) => call[1][1].requestId)
+  const rows = () =>
+    events.mock.calls
+      .filter(([channel]) => channel === 'session:message')
+      .map((call) => call[1][1])
+      .filter((message: { role: string }) => message.role === 'system')
+
+  it('offers the override on the declined card when the review lands last', async () => {
+    const { session, notify } = fixture({ permissionMode: 'auto' })
+    await session.run('hello')
+    notify('item/started', TARGET)
+    notify('item/completed', TARGET)
+    notify('item/autoApprovalReview/completed', REVIEW)
+    expect(offers()).toHaveLength(1)
+    expect(offers()[0]).toEqual({
+      requestId: expect.stringContaining('codex-guardian:'),
+      toolUseId: TARGET_ID,
+      toolName: 'commandExecution',
+      input: { command: "/bin/zsh -lc 'rm -rf x'", cwd: '/isolated' },
+      // Untrusted reviewer prose: collapsed, never a second row of its own.
+      decisionReason: 'Codex auto-review denied this action. Isolated fixture deny',
+      codex: { guardianOverride: true }
+    })
+    expect(offers()[0].suggestions).toBeUndefined()
+    // The review row is unchanged: the override is an ADDITION, not a swap.
+    expect(rows()[0].content[0].text).toContain('Codex auto-review denied')
+  })
+
+  /**
+   * The reducer every client shares drops a pending approval when a
+   * `tool_result` for its `toolUseId` arrives (ADR-038's belt-and-suspenders
+   * rule). A declined item's result IS that event, and a real denial run emits
+   * the review BEFORE `item/completed` (pinned by the integration override
+   * test), so raising on `item/started` would produce a card the UI deletes
+   * milliseconds later.
+   */
+  it('raises the override after the declined result, never before it', async () => {
+    const { session, notify } = fixture({ permissionMode: 'auto' })
+    await session.run('hello')
+    notify('item/started', TARGET)
+    notify('item/autoApprovalReview/completed', REVIEW)
+    expect(offers()).toHaveLength(0)
+    notify('item/completed', TARGET)
+    expect(
+      events.mock.calls
+        .filter(
+          ([channel, args]) =>
+            ['session:approval-request', 'session:tool-result'].includes(channel) &&
+            args[1].toolUseId === TARGET_ID
+        )
+        .map(([channel]) => channel)
+    ).toEqual(['session:tool-result', 'session:approval-request'])
+  })
+
+  /**
+   * The end-state guard the two above only approximate: fold everything this
+   * session broadcast through the CANONICAL reducer and check the card is still
+   * there. Every client projects from this, so a card that loses the race with
+   * its own `tool_result` is invisible in the app no matter what was emitted.
+   */
+  it('leaves the override standing in the canonical replica, corrected replay included', async () => {
+    const { session, notify } = fixture({ permissionMode: 'auto' })
+    await session.run('hello')
+    notify('item/started', TARGET)
+    notify('item/completed', TARGET)
+    notify('item/autoApprovalReview/completed', REVIEW)
+    notify('turn/completed', {
+      threadId: 'root',
+      turn: {
+        id: 'turn',
+        status: 'completed',
+        items: [{ ...TARGET.item, aggregatedOutput: 'corrected' }]
+      }
+    })
+    const projected = events.mock.calls
+      // `session:status` re-keys canonical state onto the native thread id, a
+      // move SessionManager.rekey() mirrors onto the session's own routingId.
+      // This fixture has no manager, so folding status here would strand every
+      // later event under the pre-rekey id. Nothing in this guard depends on it.
+      .filter(([channel]) => channel !== 'session:status')
+      .reduce(
+        (state, [channel, args], index) => applyEvent(state, { channel, args, seq: index + 2 }),
+        applyEvent(emptyCanonicalState(), {
+          channel: 'session:created',
+          args: ['temporary', { cwd: '/isolated', engineId: 'codex' }],
+          seq: 1
+        })
+      ).sessions.temporary
+    expect(projected.pendingApprovals).toEqual([offers()[0]])
+  })
+
+  it('re-arms the override when an authoritative replay repeats the declined result', async () => {
+    const { session, notify } = fixture({ permissionMode: 'auto' })
+    await session.run('hello')
+    notify('item/started', TARGET)
+    notify('item/completed', TARGET)
+    notify('item/autoApprovalReview/completed', REVIEW)
+    const { requestId } = offers()[0]
+    notify('turn/completed', {
+      threadId: 'root',
+      turn: {
+        id: 'turn',
+        status: 'completed',
+        items: [{ ...TARGET.item, aggregatedOutput: 'corrected' }]
+      }
+    })
+    // Dismissed by the corrected result, then put straight back — same card,
+    // same requestId, so the click still resolves.
+    expect(dismissed()).toEqual([requestId])
+    expect(offers()).toHaveLength(2)
+    expect(offers()[1]).toEqual(offers()[0])
+    expect(() => session.resolveApproval(requestId, 'deny')).not.toThrow()
+  })
+
+  it('holds a denial that arrives before its target item and raises it once', async () => {
+    const { session, notify } = fixture({ permissionMode: 'auto' })
+    await session.run('hello')
+    notify('item/autoApprovalReview/completed', REVIEW)
+    expect(offers()).toHaveLength(0)
+    notify('item/started', TARGET)
+    notify('item/completed', TARGET)
+    expect(offers()).toHaveLength(1)
+    expect(offers()[0].toolUseId).toBe(TARGET_ID)
+  })
+
+  it.each([
+    ['an approved review', { review: { ...REVIEW.review, status: 'approved' } }],
+    ['a network-policy review with no target item', { targetItemId: null }],
+    [
+      'an action type the override RPC cannot express',
+      {
+        action: {
+          type: 'writeStdin',
+          approvalId: 'a',
+          processId: 'p',
+          stdin: 'y',
+          cwd: '/isolated'
+        }
+      }
+    ]
+  ])('raises no override for %s', async (_label, patch) => {
+    const { session, notify } = fixture({ permissionMode: 'auto' })
+    await session.run('hello')
+    notify('item/started', TARGET)
+    notify('item/completed', TARGET)
+    notify('item/autoApprovalReview/completed', { ...REVIEW, ...patch })
+    expect(offers()).toHaveLength(0)
+  })
+
+  it('sends the snake_case denial event on approve-anyway, then rows the override', async () => {
+    const { session, notify, request } = fixture({ permissionMode: 'auto' })
+    await session.run('hello')
+    notify('item/started', TARGET)
+    notify('item/completed', TARGET)
+    notify('item/autoApprovalReview/completed', REVIEW)
+    const { requestId } = offers()[0]
+    session.resolveApproval(requestId, 'allow')
+    // `thread_approve_guardian_denied_action_inner` deserializes the CORE
+    // `GuardianAssessmentEvent`, which is snake_case on the wire, from the
+    // camelCase v2 notification — every renamed field is load-bearing.
+    expect(request).toHaveBeenCalledWith('thread/approveGuardianDeniedAction', {
+      threadId: 'root',
+      event: {
+        id: 'review-1',
+        target_item_id: 'esc',
+        turn_id: 'turn',
+        started_at_ms: 1,
+        completed_at_ms: 2,
+        status: 'denied',
+        risk_level: 'critical',
+        user_authorization: 'unknown',
+        rationale: 'Isolated   fixture deny',
+        decision_source: 'agent',
+        action: {
+          type: 'command',
+          source: 'shell',
+          command: "/bin/zsh -lc 'rm -rf x'",
+          cwd: '/isolated'
+        }
+      }
+    })
+    expect(dismissed()).toEqual([requestId])
+    await vi.waitFor(() =>
+      expect(rows().at(-1).content[0].text).toBe(
+        "You approved `rm -rf x` over Codex's auto-review. Codex will see this on its next turn and may retry."
+      )
+    )
+    expect(rows().at(-1).id).toBe('codex:["root","turn","review-1"]:override')
+    // Answering twice is a stale click, not a second injection.
+    expect(() => session.resolveApproval(requestId, 'allow')).toThrow('Stale')
+  })
+
+  it.each([
+    [
+      'execve',
+      {
+        action: {
+          type: 'execve',
+          source: 'unifiedExec',
+          program: '/bin/rm',
+          argv: ['rm', '-rf', 'x'],
+          cwd: '/isolated'
+        }
+      },
+      {
+        type: 'execve',
+        // The v2 enum is camelCase and the core one is snake_case.
+        source: 'unified_exec',
+        program: '/bin/rm',
+        argv: ['rm', '-rf', 'x'],
+        cwd: '/isolated'
+      }
+    ],
+    [
+      'applyPatch',
+      { action: { type: 'applyPatch', cwd: '/isolated', files: ['/isolated/a.txt'] } },
+      { type: 'apply_patch', cwd: '/isolated', files: ['/isolated/a.txt'] }
+    ]
+  ])('re-spells a %s action for the core event', async (_label, patch, expected) => {
+    const { session, notify, request } = fixture({ permissionMode: 'auto' })
+    await session.run('hello')
+    notify('item/started', TARGET)
+    notify('item/completed', TARGET)
+    notify('item/autoApprovalReview/completed', { ...REVIEW, ...patch })
+    session.resolveApproval(offers()[0].requestId, 'allow')
+    expect(request).toHaveBeenCalledWith(
+      'thread/approveGuardianDeniedAction',
+      expect.objectContaining({ event: expect.objectContaining({ action: expected }) })
+    )
+  })
+
+  it('dismisses without an RPC when the human dismisses the offer', async () => {
+    const { session, notify, request } = fixture({ permissionMode: 'auto' })
+    await session.run('hello')
+    notify('item/started', TARGET)
+    notify('item/completed', TARGET)
+    notify('item/autoApprovalReview/completed', REVIEW)
+    const { requestId } = offers()[0]
+    session.resolveApproval(requestId, 'deny')
+    expect(
+      request.mock.calls.some(([method]) => method === 'thread/approveGuardianDeniedAction')
+    ).toBe(false)
+    expect(dismissed()).toEqual([requestId])
+    expect(rows().some((row) => row.content[0].text.startsWith('You approved'))).toBe(false)
+    // There is no session-scoped form of a one-off override.
+    expect(() => session.resolveApproval(requestId, 'allowForSession')).toThrow('Stale')
+  })
+
+  it('reports a refused override instead of pretending it landed', async () => {
+    const { session, notify, request } = fixture({ permissionMode: 'auto' })
+    await session.run('hello')
+    notify('item/started', TARGET)
+    notify('item/completed', TARGET)
+    notify('item/autoApprovalReview/completed', REVIEW)
+    const { requestId } = offers()[0]
+    request.mockRejectedValueOnce(new Error('invalid Guardian denial event'))
+    session.resolveApproval(requestId, 'allow')
+    expect(dismissed()).toEqual([requestId])
+    await vi.waitFor(() =>
+      expect(events).toHaveBeenCalledWith('session:error', [
+        'temporary',
+        expect.stringContaining('invalid Guardian denial event')
+      ])
+    )
+    expect(rows().some((row) => row.content[0].text.startsWith('You approved'))).toBe(false)
+  })
+
+  it('survives the end of its own turn and dies with the next one', async () => {
+    const { session, notify } = fixture({ permissionMode: 'auto' })
+    await session.run('hello')
+    notify('item/started', TARGET)
+    notify('item/completed', TARGET)
+    notify('item/autoApprovalReview/completed', REVIEW)
+    const { requestId } = offers()[0]
+    notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn', status: 'completed', items: [] }
+    })
+    // ADR-038: an approval's lifetime is never inferred from turn state.
+    expect(dismissed()).toEqual([])
+    await session.run('again')
+    // The injected context only matters BEFORE the model's next turn.
+    expect(dismissed()).toEqual([requestId])
+    expect(() => session.resolveApproval(requestId, 'allow')).toThrow('Stale')
+  })
+
+  it('drops every override when the engine is lost', async () => {
+    const { session, notify } = fixture({ permissionMode: 'auto' })
+    await session.run('hello')
+    notify('item/started', TARGET)
+    notify('item/completed', TARGET)
+    notify('item/autoApprovalReview/completed', REVIEW)
+    const { requestId } = offers()[0]
+    session.dispose()
+    expect(dismissed()).toEqual([requestId])
   })
 })

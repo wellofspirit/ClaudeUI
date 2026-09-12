@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { PendingApproval } from '../../../../shared/types'
+import type { CodexApprovalChoices } from '../../../../shared/codex-types'
 import { SelectMenu } from '../shared/SelectMenu'
 
 /**
@@ -14,7 +15,11 @@ export function CodexApprovalCard({ approval }: { approval: PendingApproval }): 
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [answers, setAnswers] = useState<Record<string, string>>({})
-  const native = approval.codex!
+  // `PendingApproval.codex` is a union since the guardian-denial override
+  // joined it, and only a QUESTION payload reaches this component — both call
+  // sites route on `codex.questions`, and an override renders its two buttons
+  // inline on the declined tool card instead.
+  const native = approval.codex as CodexApprovalChoices
   const questions = native.questions
   const execute = async (action: () => Promise<void>): Promise<void> => {
     setBusy(true)

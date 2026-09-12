@@ -765,3 +765,115 @@ it.skipIf(!enabled)(
   },
   90000
 )
+
+/** Every string anywhere inside one provider request's `input`, flattened. */
+function inputTexts(request: Record<string, unknown>): string[] {
+  const walk = (value: unknown): string[] =>
+    typeof value === 'string'
+      ? [value]
+      : Array.isArray(value)
+        ? value.flatMap(walk)
+        : value && typeof value === 'object'
+          ? Object.values(value).flatMap(walk)
+          : []
+  return walk(request.input)
+}
+
+it.skipIf(!enabled)(
+  'overrides a guardian denial and lands the approval in the model context before the next turn',
+  async () => {
+    const { cwd, env, errors, requests, verdict } = await setupFixture(true, true, true, true)
+    verdict.current = JSON.stringify({
+      risk_level: 'critical',
+      user_authorization: 'unknown',
+      outcome: 'deny',
+      rationale: 'Isolated fixture deny'
+    })
+    const sent = vi.spyOn(CodexClient.prototype, 'request')
+    try {
+      session = new CodexSession(
+        'isolated-guardian-override',
+        null,
+        cwd,
+        { permissionMode: 'auto' },
+        { env, requestTimeoutMs: 15000 }
+      )
+      await session.run(null)
+      await session.run('Execute the isolated fixture command.')
+      await vi.waitFor(() => expect(session!.willQueue).toBe(false), { timeout: 30000 })
+      // The reviewer declined it, so nothing ran and nothing landed — the
+      // override offers a retry, not a replay of a half-done action.
+      expect(existsSync(join(cwd, 'approval.txt'))).toBe(false)
+      const card = coreEvents.mock.calls
+        .filter(([channel]) => channel === 'session:approval-request')
+        .map(([, args]) => args[1])
+        .find((approval) => approval.codex?.guardianOverride)
+      expect(card, 'no guardian override was offered for the denied command').toBeDefined()
+      // The card hangs off the DECLINED item's own transcript row.
+      expect(
+        session
+          .getMessages()
+          .flatMap((message) => message.content)
+          .some((block) => block.type === 'tool_use' && block.toolUseId === card.toolUseId)
+      ).toBe(true)
+      // The ORDER is the whole reason the offer waits for the declined item to
+      // complete: the binary emits the review first, and every client drops a
+      // pending approval when a `tool_result` for its `toolUseId` arrives, so a
+      // card raised on the review would be deleted by its own denial.
+      expect(
+        coreEvents.mock.calls
+          .filter(
+            ([channel, args]) =>
+              ['session:approval-request', 'session:tool-result'].includes(channel) &&
+              args[1].toolUseId === card.toolUseId
+          )
+          .map(([channel]) => channel)
+      ).toEqual(['session:tool-result', 'session:approval-request'])
+
+      session.resolveApproval(card.requestId, 'allow')
+      await vi.waitFor(() =>
+        expect(
+          session!
+            .getMessages()
+            .some((message) =>
+              message.content.some(
+                (block) => block.type === 'text' && block.text.startsWith('You approved ')
+              )
+            )
+        ).toBe(true)
+      )
+      // This is the shape guard: the binary answers `invalid Guardian denial
+      // event` to anything it cannot deserialize into its own snake_case
+      // `GuardianAssessmentEvent`, and that would surface here.
+      expect(
+        coreEvents.mock.calls.filter(
+          ([channel, args]) =>
+            channel === 'session:error' && String(args[1]).includes('auto-review override')
+        )
+      ).toEqual([])
+      const event = sent.mock.calls.find(
+        ([method]) => method === 'thread/approveGuardianDeniedAction'
+      )![1]
+      console.log(JSON.stringify({ probe: 'guardian-override', params: event }))
+
+      const before = requests.length
+      await session.run('Retry the approved action.')
+      await vi.waitFor(() => expect(session!.willQueue).toBe(false), { timeout: 30000 })
+      // `approve_guardian_denied_action` injects `{action, outcome: "allowed"}`
+      // WITHOUT starting a turn, so the proof it arrived is the next turn's
+      // request body carrying the fragment.
+      const injected = requests
+        .slice(before)
+        .filter((request) => !isGuardianRequest(request))
+        .flatMap(inputTexts)
+      expect(
+        injected.some((text) => text.includes('"outcome": "allowed"')),
+        `no approved-action fragment in the next turn: ${JSON.stringify(injected).slice(0, 4000)}`
+      ).toBe(true)
+      expect(errors).toEqual([])
+    } finally {
+      sent.mockRestore()
+    }
+  },
+  120000
+)

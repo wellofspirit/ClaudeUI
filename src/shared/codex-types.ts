@@ -1,11 +1,10 @@
 export type CodexApprovalDecision = 'accept' | 'acceptForSession' | 'decline' | 'cancel'
 
 /**
- * The ONLY approval shape that still carries a `codex` field: the native
- * `item/tool/requestUserInput` question card, which has no shared analogue.
- * Commands and file changes are gated by ClaudeUI's own permission engine
- * (ADR-066 / slice 3) and render through the standard approval card, so their
- * `PendingApproval` carries no engine-specific payload at all.
+ * The native `item/tool/requestUserInput` question card, which has no shared
+ * analogue. Commands and file changes are gated by ClaudeUI's own permission
+ * engine (ADR-066 / slice 3) and render through the standard approval card, so
+ * their `PendingApproval` carries no engine-specific payload at all.
  */
 export interface CodexApprovalChoices {
   questions: Array<{
@@ -18,7 +17,25 @@ export interface CodexApprovalChoices {
   routingId?: string
   /** Native replies the card may send for a question — `cancel` only. */
   decisions: CodexApprovalDecision[]
+  guardianOverride?: undefined
 }
+
+/**
+ * A guardian denial the human may still reverse (ADR-067, 2026-09-12). There is
+ * no native server request behind it: the auto-review subagent already answered
+ * for us, so this card is bound to the DECLINED item's `toolUseId` and its
+ * `allow` sends `thread/approveGuardianDeniedAction`. It carries no questions
+ * and no decision vocabulary, which is what tells the two payloads apart.
+ */
+export interface CodexGuardianOverride {
+  guardianOverride: true
+  questions?: undefined
+  decisions?: undefined
+  routingId?: undefined
+}
+
+/** Every engine-specific approval payload Codex still produces. */
+export type CodexApprovalPayload = CodexApprovalChoices | CodexGuardianOverride
 
 /**
  * Explicit session overrides only. Absence preserves native user

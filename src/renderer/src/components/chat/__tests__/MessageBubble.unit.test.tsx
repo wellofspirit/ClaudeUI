@@ -344,6 +344,48 @@ describe('MessageBubble', () => {
       )
       expect(screen.getAllByRole('button', { name: /^Allow$/ })).toHaveLength(1)
     })
+
+    // A Codex guardian-denial override binds to an ALREADY DECLINED card: the
+    // tool_use has its error result, and the offer is to let Codex retry it.
+    // Nothing is pending on this click, so it must not float either.
+    it('binds a guardian override to the declined card it names', () => {
+      act(() => {
+        useSessionStore.setState((state) => ({
+          sessions: {
+            ...state.sessions,
+            'test-session': {
+              ...state.sessions['test-session'],
+              status: { ...state.sessions['test-session'].status, engineId: 'codex' as const }
+            }
+          }
+        }))
+      })
+      const toolUseId = 'codex:["root","turn","esc"]'
+      const block = makeToolUseBlock('commandExecution', { command: 'rm -rf x' }, toolUseId)
+      const msg = makeChatMessage({
+        role: 'assistant',
+        content: [block, makeToolResultBlock(toolUseId, 'rejected: unacceptable risk')]
+      })
+      const approval = makePendingApproval({
+        requestId: 'codex-guardian:gen:item:review-1',
+        toolUseId,
+        toolName: 'commandExecution',
+        input: { command: 'rm -rf x' },
+        decisionReason: 'Codex auto-review denied this action.',
+        codex: { guardianOverride: true }
+      })
+      render(
+        <MessageBubble
+          message={msg}
+          pendingApprovals={[approval]}
+          isLastAssistant={true}
+          thinkingStartedAt={null}
+        />
+      )
+      expect(screen.getByTestId('ApprovalButtons.approveAnyway')).toBeInTheDocument()
+      expect(screen.getByTestId('ApprovalButtons.dismiss')).toBeInTheDocument()
+      expect(screen.queryByTestId('ApprovalButtons.allow')).not.toBeInTheDocument()
+    })
   })
 
   describe('system messages', () => {
