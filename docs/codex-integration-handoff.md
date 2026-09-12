@@ -2,7 +2,7 @@
 
 ## Resume here
 
-Work continues on **`codex-integration`** (from `pre-release`). Twenty-one Codex commits are on it (the last is this handoff itself), nothing is pushed, and the worktree is clean apart from two unrelated pre-existing untracked files (`docs/headless-server.md`, `docs/manual.md`). Oldest first:
+Work continues on **`codex-integration`** (from `pre-release`). Twenty-one Codex commits are on it (the last is this handoff itself), pushed to `origin/codex-integration` on 2026-09-12 with Daniel's approval, and the worktree is clean apart from two unrelated pre-existing untracked files (`docs/headless-server.md`, `docs/manual.md`). Oldest first:
 
 ```text
 b670492e feat(codex): pin Codex 0.154.0 acquisition and generate app-server protocol types
@@ -58,9 +58,11 @@ node scripts/app-shot.mjs --timeout 200000 --out .cache/screenshots/codex-turn.p
 ## Decisions recorded on 2026-09-11 and 2026-09-12
 
 1. **Codex executes, ClaudeUI decides** ([ADR-067](adr/adr-067_codex-shared-permission-model.md)). The shared `PermissionMode` is the only policy surface. plan/default/acceptEdits run `untrusted` (the only policy that asks before executing anything) with our evaluator answering every command and file-change request; `auto` runs `on-request` with Codex's native `auto_review` guardian, which the user explicitly chose over a ClaudeUI judge ("if we can't map it, leave it as their native auto mode"). No bypass mode exists in the shared union. The pill, `CodexPolicyOptions` and the policy override keys are gone.
-2. **Guardian visibility, B then C.** B (read-only rows for every completed review, circuit breaker as row plus error) landed in `7022abf3`. C ("approve anyway" via `thread/approveGuardianDeniedAction`) is the next slice; its spec is in the next-slices doc.
-3. **Execpolicy rules file, option C** (deny and allow), landed in `a22ece12`: user-scope Bash rules only, deny as `forbidden` (prefix and exact), allow as `allow` (prefix only), everything else skipped and listed in the header, regenerated on core boot, on user-scope rule writes through ClaudeUI, and in the Codex spawn prep, only when the source hash changes. Daniel accepted that an execpolicy allow runs unsandboxed and unreviewed in every mode and that ClaudeUI writes one file into `~/.codex/rules/`. Project-scope rules are not compiled; he did not object to that recommendation but also did not explicitly confirm it. Raise it once if he asks why a project deny rule did not bind on Codex.
-4. Earlier decisions stand: native-owned auth with upstream refresh concurrency accepted; pinned 0.154.0 over stdio; application-held queue via `turn/steer`, never Codex's native next-turn queue; capabilities true only when the whole path works (ADR-030).
+2. **Guardian visibility, B then C.** B (read-only rows for every completed review, circuit breaker as row plus error) landed in `7022abf3`. C ("approve anyway" via `thread/approveGuardianDeniedAction`) is the next slice; its spec is in the next-slices doc. Daniel ruled on 2026-09-12 that a pop-up approval card per denial is too heavy: the override lives on the declined tool card itself, bound by the review's `targetItemId`, survives turn end, and is cleared at the next `turn/start`, on disconnect, or by the user.
+3. **Execpolicy rules file, option C** (deny and allow), landed in `a22ece12`: user-scope Bash rules only, deny as `forbidden` (prefix and exact), allow as `allow` (prefix only), everything else skipped and listed in the header, regenerated on core boot, on user-scope rule writes through ClaudeUI, and in the Codex spawn prep, only when the source hash changes. Daniel accepted that an execpolicy allow runs unsandboxed and unreviewed in every mode and that ClaudeUI writes one file into `~/.codex/rules/`. Project-scope rules are not compiled. Daniel's position on 2026-09-12: do not map rules per session, but do not give up on deny rules either; the design discussion is deferred until everything else on this branch is done. Until then a project-scope deny rule does not bind on Codex.
+4. **Real-account Auto verification** with a forced guardian escalation is authorized (2026-09-12), under the light-usage rules.
+5. **Draft left in the textarea after a rekey** is to be fixed, not left cosmetic.
+6. Earlier decisions stand: native-owned auth with upstream refresh concurrency accepted; pinned 0.154.0 over stdio; application-held queue via `turn/steer`, never Codex's native next-turn queue; capabilities true only when the whole path works (ADR-030).
 
 ## Current checkpoint
 

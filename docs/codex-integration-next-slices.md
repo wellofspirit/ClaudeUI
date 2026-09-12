@@ -90,41 +90,121 @@ Known unrelated: `vscode-web-service` probeCli fails on darwin; `remote-*.test.t
 3. Gate commands and outcomes.
 4. Judgment calls and anything left undone. Terse.
 
-## Slice B: approve a guardian-denied action ("approve anyway")
+## Slice B: approve a guardian-denied action from the declined tool card
+
+Decided by Daniel on 2026-09-12: no pop-up approval card. A guardian denial
+already leaves a declined tool card in the transcript; the override action
+lives on that card, so it can be clicked when wanted and ignored otherwise.
 
 Depends on: the guardian rows from commit 7022abf3 and the generated
 `thread/approveGuardianDeniedAction` method map entry.
 
-Source facts (`.cache/codex-src`, tag `rust-v0.154.0`):
-`core/src/session/handlers.rs` `approve_guardian_denied_action` does NOT
-re-run the action; it injects a "user approved this action" context fragment
-(`GuardianApprovedAction`) into the thread without starting a turn, so the
-model's next turn knows the human overrode the guardian and may retry. The
-request payload is `{ threadId, event }` where `event` is the serialized
-`GuardianAssessmentEvent` for the denied review; it is ignored unless
-`status == Denied`.
+### Source facts (`.cache/codex-src`, tag `rust-v0.154.0`)
 
-Design:
+- `item/autoApprovalReview/completed` carries `threadId`, `turnId`, `reviewId`,
+  `targetItemId` (nullable: null for network-policy reviews), `startedAtMs`,
+  `completedAtMs`, `decisionSource`, `review {status, riskLevel,
+userAuthorization, rationale}` and `action` (v2 `GuardianApprovalReviewAction`,
+  camelCase fields, `type` tag). `targetItemId` names the `commandExecution` or
+  `fileChange` item the denial belongs to; that item completes with
+  `status: 'declined'`, and `event-mapper.ts` already emits its `tool_result`
+  with `isError: true`. Its ClaudeUI id is `codexItemId(threadId, turnId,
+targetItemId)`, which is the `toolUseId` of the card.
+- `app-server/src/request_processors/thread_processor.rs`
+  `thread_approve_guardian_denied_action_inner`: `serde_json::from_value(event)`
+  into the core `GuardianAssessmentEvent`, `invalid_request("invalid Guardian
+denial event")` on a bad shape, `load_thread` (the thread must be live in this
+  process), `ensure_direct_input_allowed`, then `Op::ApproveGuardianDeniedAction`.
+- `core/src/session/handlers.rs` `approve_guardian_denied_action`: ignores any
+  status other than `Denied`; does NOT re-run the action; serializes
+  `{action, outcome: "allowed"}` into a `GuardianApprovedAction` user-context
+  fragment and `inject_no_new_turn`. The model sees it on its next turn and may
+  retry.
+- `protocol/src/approvals.rs` `GuardianAssessmentEvent` is snake_case on the
+  wire: `id`, `target_item_id`, `turn_id`, `started_at_ms`, `completed_at_ms`,
+  `status` (snake_case enum: `denied`), `risk_level`, `user_authorization`,
+  `rationale`, `decision_source`, `review_reason`, `plugin_id`, `script_path`,
+  `action`. `GuardianAssessmentAction` is `#[serde(tag = "type", rename_all =
+"snake_case")]` with snake_case fields: `command {source, command, cwd}`,
+  `execve {source, program, argv, cwd}`, `apply_patch {cwd, files}`, and others.
+  The v2 notification's `action` is `assessment.action.into()`
+  (`app-server-protocol/src/protocol/item_builders.rs`), so the client must map
+  camelCase back to snake_case. Read both files before writing the mapper.
+- Renderer: `MessageBubble.tsx` binds a `PendingApproval` to a `tool_use` block
+  by `toolUseId`; `ToolCard.tsx` renders `ApprovalButtons` when `!isHistorical
+&& approval` (a card with a result still qualifies; verify); `FloatingApproval`
+  shows only approvals with no matching block. A `PendingApproval` keyed to the
+  declined item therefore renders on the card and never floats.
 
-- When `item/autoApprovalReview/completed` arrives with `status: denied`, in
-  addition to the system row, raise a `PendingApproval` card with one action,
-  "Approve anyway", and a `codex` payload carrying the review event verbatim
-  (the wire shape the method needs back). Identity: `codex-approval:<generation>:<reviewId>`.
-- Resolving it calls `thread/approveGuardianDeniedAction` with the stored
-  event, dismisses the card (`session:approval-dismiss`), and appends a system
-  row "You approved `<action>` over Codex's review; it may retry on its next
-  turn." Deny/dismiss just clears the card.
-- Cards are invalidated at turn end and on disconnect exactly like other
-  pending approvals (ADR-038). Since the turn the denial belonged to has
-  usually already ended, decide explicitly whether the card survives turn end
-  (recommended: yes, until the next turn starts or the user dismisses it) and
-  test both paths.
-- Capability: no new flag; `interactiveApprovals` already covers it. Remote:
-  the reply goes over `session:approval-response` with `chat` capability.
+### Design
 
-Tests: unit (card raised only for denied reviews; resolve sends the exact
-event; dismissal on disconnect; survives turn end per the decision above),
-renderer (card renders the review text and one button), integration
-(fixture with a scripted deny verdict, then the override call observed on the
-wire and the injected fragment visible in the next turn's request to the
-fixture provider).
+1. `CodexSession`: on a completed review with `review.status === 'denied'`,
+   `targetItemId !== null`, and `action.type` in `command | execve | applyPatch`,
+   keep the existing system row and also raise
+   `PendingApproval { requestId: 'codex-guardian:<generation>:<codexItemId>:<reviewId>',
+toolUseId: codexItemId(threadId, turnId, targetItemId), toolName, input,
+decisionReason, codex: { guardianOverride: true } }`. `toolName` and `input`
+   come from the already-mapped `tool_use` block in `messageHistory` (the same
+   lookup the fileChange approval uses); `decisionReason` is "Codex auto-review
+   denied this action." plus the clipped, whitespace-collapsed rationale. No
+   `suggestions`. Verify the event order in
+   `src/integration/codex/codex-auto-review-probe.integration.test.ts` (review
+   before or after `item/started` for the target) and handle both: hold a denial
+   until the target's `tool_use` exists in the same turn, then raise. Denials
+   with a null `targetItemId` or another action type: row only, no override.
+2. Type: `PendingApproval.codex` today is the questions-only
+   `CodexApprovalChoices`. Add the override shape without breaking the
+   `approval.codex?.questions` checks (make `questions` optional or use a
+   discriminated union). Update the doc comment in `src/shared/codex-types.ts`.
+3. `ApprovalButtons.tsx`: when `approval.codex?.guardianOverride`, render
+   "Dismiss" (`data-testid="ApprovalButtons.dismiss"`, decision `deny`) and
+   "Approve anyway" (`data-testid="ApprovalButtons.approveAnyway"`, decision
+   `allow`), show `decisionReason`, no `AlwaysAllowSection`. Nothing else in the
+   component changes.
+4. Resolution in `CodexSession.resolveApproval`: `allow` sends
+   `thread/approveGuardianDeniedAction { threadId, event }` with `event` rebuilt
+   from the stored notification (snake_case, `status: 'denied'`, `action`
+   mapped as above, the wrapped command string exactly as received). Success:
+   dismiss (`session:approval-dismiss`) and append a system row keyed
+   `codexItemId(threadId, turnId, reviewId) + ':override'`: "You approved
+   `<label>` over Codex's auto-review. Codex will see this on its next turn and
+   may retry." RPC error: dismiss and `session:error`. `deny`: dismiss only.
+   `allowForSession`: throw (unoffered). Keep overrides in their own map, not
+   `this.pending`, because there is no native server request to settle and
+   `finishTurn` must not clear them.
+5. Lifetime: an override survives the end of the turn it belongs to. It is
+   cleared on approve, on dismiss, on `disconnected()`, and when the next
+   `turn/start` succeeds (the injected context only matters before the model's
+   next turn). Test all four.
+6. Remote: the reply travels on `session:approval-response` with the `chat`
+   capability as today; confirm the shared handler passes an approval whose
+   `codex` field lacks `questions`.
+7. Capabilities: no new flag.
+
+### Tests (each must fail before the corresponding change)
+
+- `src/core/codex/__tests__/codex-session.test.ts`: denied review plus declined
+  item raises the approval bound to the item's id with `guardianOverride`;
+  approved review raises nothing; null `targetItemId` raises nothing; both
+  orderings of review and item; `allow` sends the exact snake_case params (snap
+  them) then dismisses and rows; `deny` dismisses without an RPC; RPC error
+  dismisses and errors; `turn/completed` does not dismiss; the next `turn/start`
+  does; `disconnected` does.
+- Renderer: `ApprovalButtons` with `guardianOverride` renders the two labelled
+  buttons and no Allow/Deny, and clicks call `onApproval('allow' | 'deny')`.
+  One `MessageBubble`/`FloatingApproval` assertion that the override binds to
+  the declined card and does not float.
+- Integration (`CODEX_INTEGRATION=1`, real binary, fixture provider, scripted
+  deny verdict as in the probe): observe the approval request, resolve `allow`
+  through `CodexSession`, assert no RPC error, start the next turn, and assert
+  the fixture provider's next request body contains the injected fragment
+  (`"outcome": "allowed"`). This is the guard for the event shape.
+
+### Files and boundaries
+
+Owned: `src/core/codex/CodexSession.ts`, `src/shared/codex-types.ts`,
+`src/shared/types.ts` only if the union needs it,
+`src/renderer/src/components/chat/ApprovalButtons.tsx`, tests under
+`src/core/codex/__tests__/`, the renderer chat test directories, and
+`src/integration/codex/`. Do not touch `InputBox.tsx`, `stores/replica.ts`,
+`event-mapper.ts`, `history.ts`, the queue, or any other engine.
