@@ -10,32 +10,51 @@
  * (`app-server/src/dynamic_tools.rs` `decode_response`). That is the whole
  * transport: no extension, no loopback HTTP, no bridge process.
  *
- * The three tools are the SAME three pi registers by bare name
+ * The four tools are the SAME four pi registers by bare name
  * (pi-bridge-source.ts) and Claude/opencode expose over MCP, delegating to the
  * SAME in-process handlers (mermaid-tool.ts / mockup-tool.ts) — the field names
  * are identical on purpose so the shared renderer kind bodies render a Codex
- * call exactly like a pi or Claude one. `dispatch_agent` is deliberately absent:
- * cross-engine dispatch from Codex is its own slice, and `crossEngineDispatch`
- * is still false for this engine.
+ * call exactly like a pi or Claude one.
  *
- * Pure by design — no session import, no module state beyond the memoized
- * mermaid server (which has none of its own).
+ * `dispatch_agent` (ADR-033, slice E) is declared here but NOT executed here:
+ * it needs the session's routing id, cwd, permission mode, emit, cost sink and
+ * abort signal, so `CodexSession.hostedToolCall` branches on the name before
+ * it ever reaches `runCodexHostedTool` — exactly the split pi uses
+ * (PiSession.handleDispatchAgent vs the three handler cases beside it).
+ *
+ * Otherwise pure — no session import, no module state beyond the memoized
+ * mermaid server (which has none of its own). The one I/O the specs do is the
+ * `loadEngineConfig` read behind the dispatch model hints, which is the same
+ * registration-time snapshot opencode-hosted-tools.ts takes (see
+ * dispatch-model-hint.ts): config edits land on the NEXT thread creation.
  */
 import type { DynamicToolSpec } from './protocol/v2/DynamicToolSpec'
 import type { ToolResultContent } from '../sdk/types'
+import type { EngineId } from '../../shared/types'
 import { createMermaidServer } from '../services/mermaid-tool'
 import { createMockupServer } from '../services/mockup-tool'
+import { describeDispatchModels } from '../services/dispatch-model-hint'
+import { loadEngineConfig } from '../services/ui-config'
 
 /**
- * Every tool name this module will execute. `CodexSession` refuses an
+ * Every tool name this module's callers will execute. `CodexSession` refuses an
  * `item/tool/call` for anything outside this set BEFORE dispatching, so the set
- * is the security boundary, not just a lookup table.
+ * is the security boundary, not just a lookup table. `dispatch_agent` is IN it
+ * (the session executes it itself) even though `runCodexHostedTool` refuses it.
  */
 export const CODEX_HOSTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   'render_mermaid',
   'create_mockup',
-  'show_mockup'
+  'show_mockup',
+  'dispatch_agent'
 ])
+
+/**
+ * Engines a Codex session may dispatch INTO. Codex itself is absent — the
+ * dispatcher has no Codex target factory, and a same-engine dispatch is
+ * rejected by its own engine guard regardless.
+ */
+const DISPATCH_TARGETS: readonly EngineId[] = ['claude', 'opencode', 'pi']
 
 /**
  * The `dynamicTools` param for `thread/start`, in the CANONICAL tagged form
@@ -45,11 +64,16 @@ export const CODEX_HOSTED_TOOL_NAMES: ReadonlySet<string> = new Set([
  *
  * Names must match `^[a-zA-Z0-9_-]+$` and must not start with `mcp`
  * (`validate_dynamic_tools`, app-server/src/request_processors/
- * thread_processor.rs) — these three do. `deferLoading` is NOT set: it requires
+ * thread_processor.rs) — these four do. `deferLoading` is NOT set: it requires
  * a namespace, and a namespace would change the wire tool name the model sees
  * and the `namespace` field on every call.
+ *
+ * `includeDispatch` is the session's RESOLVED `crossEngineDispatch` capability
+ * (ADR-030 honesty, mirroring the `CLAUDEUI_PI_DISPATCH_ENABLED` env gate pi
+ * puts on the same tool): a session that has nowhere to dispatch to must not
+ * advertise the tool at all.
  */
-export function codexDynamicToolSpecs(): DynamicToolSpec[] {
+export function codexDynamicToolSpecs(includeDispatch: boolean): DynamicToolSpec[] {
   return [
     {
       type: 'function',
@@ -101,8 +125,70 @@ export function codexDynamicToolSpecs(): DynamicToolSpec[] {
         required: ['directory'],
         additionalProperties: false
       }
-    }
+    },
+    ...(includeDispatch ? [dispatchAgentSpec()] : [])
   ]
+}
+
+/**
+ * `dispatch_agent` (ADR-033, slice E) — Codex as a dispatch SOURCE. Wording and
+ * parameter names mirror opencode's Zod registration
+ * (opencode-hosted-tools.ts) verbatim, so the same tool reads the same to a
+ * model whichever engine is hosting it, and the renderer's shared `task` kind
+ * body finds the fields it expects (`engine`/`prompt`/`model`).
+ *
+ * The model hints are a snapshot of `engines/<target>.json` taken at thread
+ * creation — see dispatch-model-hint.ts for why that is resolved here rather
+ * than looked up per call.
+ */
+function dispatchAgentSpec(): DynamicToolSpec {
+  const hints = DISPATCH_TARGETS.map((targetEngine) => {
+    const dispatch = loadEngineConfig(targetEngine).dispatch
+    return {
+      targetEngine,
+      ...describeDispatchModels({
+        targetEngine,
+        allowedModels: dispatch?.allowedModels,
+        defaultModel: dispatch?.defaultModel
+      })
+    }
+  })
+  return {
+    type: 'function',
+    name: 'dispatch_agent',
+    description:
+      'Delegate a task to an agent running on a DIFFERENT engine — claude, opencode or pi. The ' +
+      'agent runs headless in the same working directory and its final answer is returned as this ' +
+      'tool result. The result includes a session_id — pass it back as `session_id` to continue ' +
+      'the same agent with its context intact (multi-turn collaboration). The available model ' +
+      "list is user-configured per target engine; omit `model` to use that engine's configured " +
+      `default. ${hints.map((hint) => `For ${hint.targetEngine}: ${hint.long}`).join(' ')}`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        engine: {
+          type: 'string',
+          enum: [...DISPATCH_TARGETS],
+          description: 'Target engine to dispatch to'
+        },
+        prompt: { type: 'string', description: 'Task for the dispatched agent' },
+        model: {
+          type: 'string',
+          description:
+            'Target model id (format depends on the target engine — must be user-allowed). Omit ' +
+            `for that engine's configured default. ${hints
+              .map((hint) => `For ${hint.targetEngine}: ${hint.short}`)
+              .join(' ')}`
+        },
+        session_id: {
+          type: 'string',
+          description: 'session_id from a previous dispatch_agent result — continues that agent'
+        }
+      },
+      required: ['engine', 'prompt'],
+      additionalProperties: false
+    }
+  }
 }
 
 /** Constructing it is cheap but stateless, so one per process is enough (mirrors PiSession's memo). */
@@ -128,6 +214,10 @@ function unknownHostedTool(name: string): ToolResultContent {
  * model as a failed tool call it can react to, rather than a rejected server
  * request the app-server turns into its own opaque "dynamic tool request
  * failed".
+ *
+ * `dispatch_agent` is NOT runnable here — it needs session state this module
+ * deliberately cannot see, so `CodexSession.hostedToolCall` handles it before
+ * calling in and the name falls through to the fail-closed unknown branch.
  */
 export async function runCodexHostedTool(
   name: string,

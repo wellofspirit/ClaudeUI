@@ -55,6 +55,37 @@ vi.mock('../../services/mockup-tool', () => ({
     ]
   })
 }))
+/**
+ * Cross-engine dispatch (slice E). The real dispatcher spawns a headless
+ * SECOND engine, so the seam is mocked here: these tests are about what Codex
+ * hands it and how the verdict/card/lifecycle behave, not about the target.
+ */
+const dispatcher = vi.hoisted(() => ({
+  dispatch: vi.fn(async (_req: unknown, _ctx: unknown) => ({
+    text: 'target answer',
+    sessionId: 'target-session'
+  })),
+  stopDispatch: vi.fn(() => true),
+  disposeFor: vi.fn(),
+  available: vi.fn(() => true)
+}))
+vi.mock('../../services/cross-engine-dispatcher', () => ({
+  crossEngineDispatcher: {
+    dispatch: dispatcher.dispatch,
+    stopDispatch: dispatcher.stopDispatch,
+    disposeFor: dispatcher.disposeFor
+  },
+  crossEngineDispatchAvailable: dispatcher.available
+}))
+/**
+ * The dispatch spec's model hints are read from `~/.claude/ui/engines/*.json`
+ * at thread creation — pinned empty so this suite never depends on the dev
+ * machine's own engine config.
+ */
+vi.mock('../../services/ui-config', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/ui-config')>()),
+  loadEngineConfig: () => ({})
+}))
 vi.mock('../../services/db', () => ({
   dispatchedCostsByRouting: () => [],
   setSessionMeta: vi.fn(),
@@ -76,6 +107,15 @@ afterEach(() => {
   savedRules.mockClear()
   hosted.mermaid.mockClear()
   hosted.mockup.mockClear()
+  dispatcher.dispatch.mockClear()
+  dispatcher.dispatch.mockImplementation(async (_req: unknown, _ctx: unknown) => ({
+    text: 'target answer',
+    sessionId: 'target-session'
+  }))
+  dispatcher.stopDispatch.mockClear()
+  dispatcher.disposeFor.mockClear()
+  dispatcher.available.mockClear()
+  dispatcher.available.mockReturnValue(true)
   rules.allow = []
   rules.deny = []
   rules.ask = []
@@ -1617,13 +1657,14 @@ describe('Codex hosted tools', () => {
   const startParams = (request: ReturnType<typeof fixture>['request']) =>
     request.mock.calls.find(([method]) => method === 'thread/start')![1] as Record<string, unknown>
 
-  it('offers exactly the three hosted tools when the thread is created', async () => {
+  it('offers exactly the four hosted tools when the thread is created', async () => {
     const { session, request } = fixture()
     await session.run(null)
     expect(startParams(request).dynamicTools).toEqual([
       expect.objectContaining({ type: 'function', name: 'render_mermaid' }),
       expect.objectContaining({ type: 'function', name: 'create_mockup' }),
-      expect.objectContaining({ type: 'function', name: 'show_mockup' })
+      expect.objectContaining({ type: 'function', name: 'show_mockup' }),
+      expect.objectContaining({ type: 'function', name: 'dispatch_agent' })
     ])
     const specs = startParams(request).dynamicTools as Array<{ inputSchema: unknown }>
     expect(specs[0].inputSchema).toMatchObject({
@@ -1752,5 +1793,282 @@ describe('Codex hosted tools', () => {
           channel === 'session:error' && String(args[1]).includes('must be an object')
       )
     ).toBe(true)
+  })
+})
+
+/**
+ * Codex as a cross-engine dispatch SOURCE (ADR-033, slice E). `dispatch_agent`
+ * rides the SAME dynamic-tool channel as the hosted three above, but it is the
+ * one hosted tool the shared permission ladder does NOT auto-allow: it reaches
+ * the mode base as kind `task`, so it asks in default/acceptEdits/auto and
+ * denies in plan. The dispatcher itself is mocked — what is asserted here is
+ * the request/context Codex hands it, the card, and the lifecycle.
+ */
+describe('Codex cross-engine dispatch', () => {
+  const startParams = (request: ReturnType<typeof fixture>['request']) =>
+    request.mock.calls.find(([method]) => method === 'thread/start')![1] as Record<string, unknown>
+
+  /** Drive one `dispatch_agent` call over the dynamic-tool channel. */
+  const dispatchCall = (
+    f: ReturnType<typeof fixture>,
+    args: Record<string, unknown> = { engine: 'claude', prompt: 'summarise the repo' }
+  ) => f.dynamicCall({ tool: 'dispatch_agent', callId: 'dispatch-1', arguments: args })
+
+  it('declares dispatch_agent with the three target engines and the dispatch arguments', async () => {
+    const { session, request } = fixture()
+    await session.run(null)
+    const specs = startParams(request).dynamicTools as Array<{
+      name: string
+      description: string
+      inputSchema: Record<string, unknown>
+    }>
+    const spec = specs.find((entry) => entry.name === 'dispatch_agent')!
+    expect(spec).toBeDefined()
+    expect(spec.inputSchema).toMatchObject({
+      type: 'object',
+      properties: {
+        engine: { type: 'string', enum: ['claude', 'opencode', 'pi'] },
+        prompt: { type: 'string' },
+        model: { type: 'string' },
+        session_id: { type: 'string' }
+      },
+      required: ['engine', 'prompt'],
+      additionalProperties: false
+    })
+  })
+
+  it('does not offer the tool at all when no dispatch target is available', async () => {
+    dispatcher.available.mockReturnValue(false)
+    const { session, request } = fixture()
+    await session.run(null)
+    const specs = startParams(request).dynamicTools as Array<{ name: string }>
+    expect(specs.map((entry) => entry.name)).toEqual([
+      'render_mermaid',
+      'create_mockup',
+      'show_mockup'
+    ])
+    expect(session.capabilities.crossEngineDispatch).toBe(false)
+  })
+
+  it('asks the human before dispatching in default mode and runs nothing until allow', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    const { result } = dispatchCall(f, {
+      engine: 'claude',
+      prompt: 'summarise the repo',
+      model: 'haiku',
+      session_id: 'prior'
+    })
+    const card = f.cards().at(-1)!
+    expect(card).toMatchObject({
+      toolUseId: 'codex:["root","turn","dispatch-1"]',
+      toolName: 'dispatch_agent',
+      input: {
+        engine: 'claude',
+        prompt: 'summarise the repo',
+        model: 'haiku',
+        session_id: 'prior'
+      }
+    })
+    expect(dispatcher.dispatch).not.toHaveBeenCalled()
+    f.session.resolveApproval(card.requestId, 'allow')
+    await expect(result).resolves.toMatchObject({ success: true })
+    expect(dispatcher.dispatch).toHaveBeenCalledOnce()
+  })
+
+  it('hands the dispatcher the exact request and a context bound to the call id', async () => {
+    const f = fixture({ permissionMode: 'acceptEdits' })
+    await f.session.run('hello')
+    const { result } = dispatchCall(f, {
+      engine: 'pi',
+      prompt: 'run the tests',
+      model: 'anthropic/claude-haiku',
+      session_id: 'earlier'
+    })
+    f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
+    await result
+    expect(dispatcher.dispatch).toHaveBeenCalledWith(
+      {
+        engine: 'pi',
+        prompt: 'run the tests',
+        model: 'anthropic/claude-haiku',
+        sessionId: 'earlier'
+      },
+      expect.objectContaining({
+        fromEngine: 'codex',
+        fromRoutingId: 'temporary',
+        cwd: '/isolated',
+        autonomyMode: 'acceptEdits',
+        toolUseId: 'codex:["root","turn","dispatch-1"]',
+        extra: expect.objectContaining({ signal: expect.any(AbortSignal) })
+      })
+    )
+  })
+
+  it('maps the dispatch result onto the tool response, session_id suffix included', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    const { result } = dispatchCall(f)
+    f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
+    await expect(result).resolves.toEqual({
+      contentItems: [
+        {
+          type: 'inputText',
+          text:
+            'target answer\n\n[dispatch session_id: target-session — pass it as session_id to ' +
+            'continue this agent]'
+        }
+      ],
+      success: true
+    })
+  })
+
+  it('reports a failed dispatch as an unsuccessful call carrying the dispatcher text', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    dispatcher.dispatch.mockResolvedValueOnce({
+      text: 'Dispatch failed: no such model',
+      sessionId: '',
+      isError: true
+    } as never)
+    const { result } = dispatchCall(f)
+    f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
+    await expect(result).resolves.toEqual({
+      contentItems: [{ type: 'inputText', text: 'Dispatch failed: no such model' }],
+      success: false
+    })
+  })
+
+  it('answers a denied card without dispatching anything', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    const { result } = dispatchCall(f)
+    f.session.resolveApproval(f.cards().at(-1)!.requestId, 'deny')
+    await expect(result).resolves.toEqual({
+      contentItems: [{ type: 'inputText', text: 'dispatch_agent was declined by the user.' }],
+      success: false
+    })
+    expect(dispatcher.dispatch).not.toHaveBeenCalled()
+  })
+
+  it('remembers an "allow for this session" answer for the next dispatch', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    const first = dispatchCall(f)
+    f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allowForSession')
+    await first.result
+    const before = f.cards().length
+    const second = f.dynamicCall({
+      tool: 'dispatch_agent',
+      callId: 'dispatch-2',
+      arguments: { engine: 'claude', prompt: 'again' }
+    })
+    await expect(second.result).resolves.toMatchObject({ success: true })
+    expect(f.cards()).toHaveLength(before)
+    expect(dispatcher.dispatch).toHaveBeenCalledTimes(2)
+  })
+
+  it('denies in plan mode without ever raising a card', async () => {
+    const f = fixture({ permissionMode: 'plan' })
+    await f.session.run('hello')
+    const before = f.cards().length
+    await expect(dispatchCall(f).result).resolves.toEqual({
+      contentItems: [
+        {
+          type: 'inputText',
+          text: 'Plan mode is read-only — present a plan and call exit_plan to proceed'
+        }
+      ],
+      success: false
+    })
+    expect(f.cards()).toHaveLength(before)
+    expect(dispatcher.dispatch).not.toHaveBeenCalled()
+  })
+
+  it('asks under auto too — the native reviewer never sees a dynamic tool call', async () => {
+    const f = fixture({ permissionMode: 'auto' })
+    await f.session.run('hello')
+    const { result } = dispatchCall(f)
+    expect(f.cards().at(-1)).toMatchObject({ toolName: 'dispatch_agent' })
+    expect(dispatcher.dispatch).not.toHaveBeenCalled()
+    f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
+    await expect(result).resolves.toMatchObject({ success: true })
+    // The MODE still travels to the target verbatim — the card is ClaudeUI's
+    // gate, not a downgrade of the user's autonomy choice.
+    expect(dispatcher.dispatch).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ autonomyMode: 'auto' })
+    )
+  })
+
+  it('refuses a malformed call without a card and without dispatching', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    const before = f.cards().length
+    await expect(dispatchCall(f, { engine: 'codex', prompt: 'loop' }).result).resolves.toEqual({
+      contentItems: [
+        {
+          type: 'inputText',
+          text: 'dispatch_agent requires "engine" (one of "claude"|"opencode"|"pi") and a string "prompt".'
+        }
+      ],
+      success: false
+    })
+    expect(f.cards()).toHaveLength(before)
+    expect(dispatcher.dispatch).not.toHaveBeenCalled()
+  })
+
+  it('folds the dispatched turn cost into the session through addDispatchedCost', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    const cost = vi.spyOn(f.session, 'addDispatchedCost')
+    dispatcher.dispatch.mockImplementationOnce(async (_req: unknown, ctx: unknown) => {
+      ;(
+        ctx as { addDispatchedCost?: (e: string, m: string, c: number) => void }
+      ).addDispatchedCost?.('claude', 'haiku', 0.25)
+      return { text: 'target answer', sessionId: 'target-session' }
+    })
+    const { result } = dispatchCall(f)
+    f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
+    await result
+    expect(cost).toHaveBeenCalledWith('claude', 'haiku', 0.25)
+  })
+
+  it('drops the card and the dispatch when the owning turn ends', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    let signal!: AbortSignal
+    dispatcher.dispatch.mockImplementationOnce(async (_req: unknown, ctx: unknown) => {
+      signal = (ctx as { extra: { signal: AbortSignal } }).extra.signal
+      await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }))
+      return { text: 'too late', sessionId: 'target-session' }
+    })
+    const { result } = dispatchCall(f)
+    f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
+    await vi.waitFor(() => expect(signal).toBeDefined())
+    f.notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn', status: 'completed', items: [] }
+    })
+    expect(signal.aborted).toBe(true)
+    await expect(result).rejects.toThrow()
+  })
+
+  it('stops an in-flight dispatch on interrupt and tears the targets down on dispose', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    dispatcher.dispatch.mockImplementationOnce(
+      () => new Promise(() => {}) as Promise<{ text: string; sessionId: string }>
+    )
+    dispatchCall(f)
+    f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
+    await vi.waitFor(() => expect(dispatcher.dispatch).toHaveBeenCalled())
+    await f.session.interrupt()
+    expect(dispatcher.stopDispatch).toHaveBeenCalledWith(
+      'codex:["root","turn","dispatch-1"]',
+      'temporary'
+    )
+    f.session.dispose()
+    expect(dispatcher.disposeFor).toHaveBeenCalledWith('temporary')
   })
 })

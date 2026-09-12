@@ -24,6 +24,8 @@ import {
   resolveCodexForkAnchor
 } from '../../core/codex/history'
 import { setHostPaths } from '../../core/host'
+import { crossEngineDispatcher } from '../../core/services/cross-engine-dispatcher'
+import type { PendingApproval } from '../../shared/types'
 import provenance from '../../core/codex/protocol/provenance.json'
 
 // Wrap only test spawns. Production exposes neither a command override nor a PATH fallback.
@@ -53,6 +55,11 @@ vi.mock('../../core/services/db', async (importOriginal) => {
   persistence.close = () => db.close()
   return {
     dispatchedCostsByRouting: () => [],
+    // Reached only through cross-engine-dispatcher.ts's module singleton, which
+    // CodexSession now imports (ADR-033 slice E). No dispatch in this file ever
+    // gets far enough to record a row — the target is stubbed — so this exists
+    // to keep the mock's export surface honest, not to be called.
+    insertDispatchedUsage: vi.fn(),
     // Real rows, not spies: the fork sweep in `listCodexSessions` IS a
     // session_meta read, so a stubbed table would make it trivially pass.
     // `setSessionMeta` and friends take no db handle, so the isolated table is
@@ -150,13 +157,27 @@ afterEach(async () => {
 const isGuardianRequest = (request: Record<string, unknown>): boolean =>
   JSON.stringify(request).includes('>>> APPROVAL REQUEST START')
 
+/**
+ * The hosted-tool call the fixture scripts on the agent's FIRST turn: `true` is
+ * the `render_mermaid` default, or name the tool and its arguments outright
+ * (slice E scripts `dispatch_agent` this way). `false` scripts no tool call.
+ */
+type ScriptedHostedTool = boolean | { name: string; arguments: Record<string, unknown> }
+
 async function setupFixture(
   plainResponse = false,
   nativeSession = false,
   nativeCommand = false,
   autoReview = false,
-  hostedTool = false
+  hostedTool: ScriptedHostedTool = false
 ) {
+  const scripted =
+    hostedTool === true
+      ? {
+          name: 'render_mermaid',
+          arguments: { source: 'graph TD; A-->B', title: 'Fixture diagram' }
+        }
+      : hostedTool || undefined
   const installed = resolve('vendor/codex-cli/codex')
   expect(createHash('sha256').update(readFileSync(installed)).digest('hex')).toBe(
     provenance.binarySha256
@@ -287,15 +308,12 @@ async function setupFixture(
                         justification: 'Isolated fixture write inside the test directory'
                       })
                     }
-                  : hostedTool && request.generate !== false && agentTurns === 1
+                  : scripted && request.generate !== false && agentTurns === 1
                     ? {
                         type: 'function_call',
-                        call_id: 'fixture-mermaid',
-                        name: 'render_mermaid',
-                        arguments: JSON.stringify({
-                          source: 'graph TD; A-->B',
-                          title: 'Fixture diagram'
-                        })
+                        call_id: `fixture-${scripted.name}`,
+                        name: scripted.name,
+                        arguments: JSON.stringify(scripted.arguments)
                       }
                     : {
                         type: 'message',
@@ -1066,6 +1084,141 @@ it.skipIf(!enabled)(
     expect(resumed.length).toBeGreaterThan(0)
     expect(resumed.some((request) => advertisesHostedTool(request))).toBe(true)
     expect(errors).toEqual([])
+  },
+  120000
+)
+
+/**
+ * Codex as a cross-engine dispatch SOURCE (ADR-033, slice E), end to end
+ * against the real binary: the fourth dynamic tool is declared, the binary
+ * calls it, the shared permission engine asks, the human answers, and the
+ * dispatched agent's answer comes back to the model as that call's output.
+ *
+ * The dispatcher's TARGET is stubbed at `crossEngineDispatcher.dispatch` — a
+ * real target would spawn a SECOND engine (headless Claude / an opencode
+ * server / a pi child), none of which this probe is about, and all of which
+ * the sandbox profile would refuse anyway.
+ */
+const DISPATCH_ARGS = {
+  engine: 'claude',
+  prompt: 'Summarise the fixture repository.',
+  model: 'haiku'
+}
+
+/** The one dispatch approval card raised on this session, once it exists. */
+async function dispatchCard(): Promise<PendingApproval> {
+  return await vi.waitFor(
+    () => {
+      const call = coreEvents.mock.calls.find(
+        ([channel, args]) =>
+          channel === 'session:approval-request' &&
+          (args as [string, PendingApproval])[1].toolName === 'dispatch_agent'
+      )
+      expect(call).toBeDefined()
+      return (call![1] as [string, PendingApproval])[1]
+    },
+    { timeout: 30000, interval: 100 }
+  )
+}
+
+it.skipIf(!enabled)(
+  'asks before dispatching, then hands the dispatched answer back to the model',
+  async () => {
+    const { cwd, env, errors, requests } = await setupFixture(true, true, false, false, {
+      name: 'dispatch_agent',
+      arguments: DISPATCH_ARGS
+    })
+    const dispatch = vi
+      .spyOn(crossEngineDispatcher, 'dispatch')
+      .mockResolvedValue({ text: 'dispatched-agent-answer', sessionId: 'stub-target-session' })
+    try {
+      session = new CodexSession(
+        'isolated-dispatch',
+        null,
+        cwd,
+        {},
+        { env, requestTimeoutMs: 20000 }
+      )
+      await session.run(null)
+      // The tool was declared on `thread/start`, so the model can call it.
+      expect(session.capabilities.crossEngineDispatch).toBe(true)
+
+      const turn = session.run('Delegate the summary.')
+      const card = await dispatchCard()
+      expect(card).toMatchObject({
+        toolName: 'dispatch_agent',
+        input: DISPATCH_ARGS
+      })
+      // The card's id IS the transcript row's tool_use id, which is what binds
+      // the dispatcher's stream/progress events to the right card.
+      expect(card.toolUseId).toBe(
+        `codex:${JSON.stringify([session.getSessionId(), turnIds(session.getMessages()).at(-1), 'fixture-dispatch_agent'])}`
+      )
+      // NOTHING ran while the human was deciding.
+      expect(dispatch).not.toHaveBeenCalled()
+
+      session.resolveApproval(card.requestId, 'allow')
+      await turn
+      await vi.waitFor(() => expect(session!.willQueue).toBe(false), { timeout: 30000 })
+
+      expect(dispatch).toHaveBeenCalledWith(
+        { engine: 'claude', prompt: DISPATCH_ARGS.prompt, model: 'haiku', sessionId: undefined },
+        expect.objectContaining({
+          fromEngine: 'codex',
+          fromRoutingId: 'isolated-dispatch',
+          cwd,
+          autonomyMode: 'default',
+          toolUseId: card.toolUseId
+        })
+      )
+      // …and the binary handed that answer to the model on its next request.
+      expect(JSON.stringify(requests)).toContain('dispatched-agent-answer')
+      expect(
+        session
+          .getMessages()
+          .flatMap((message) => message.content)
+          .find((block) => block.type === 'tool_result' && block.toolUseId === card.toolUseId)
+      ).toMatchObject({
+        isError: false,
+        toolResult: expect.stringContaining('dispatched-agent-answer')
+      })
+      expect(errors).toEqual([])
+    } finally {
+      dispatch.mockRestore()
+    }
+  },
+  120000
+)
+
+it.skipIf(!enabled)(
+  'refuses a dispatch in plan mode without ever raising a card',
+  async () => {
+    const { cwd, env, errors, requests } = await setupFixture(true, true, false, false, {
+      name: 'dispatch_agent',
+      arguments: DISPATCH_ARGS
+    })
+    const dispatch = vi.spyOn(crossEngineDispatcher, 'dispatch')
+    try {
+      session = new CodexSession(
+        'isolated-dispatch-plan',
+        null,
+        cwd,
+        { permissionMode: 'plan' },
+        { env, requestTimeoutMs: 20000 }
+      )
+      await session.run(null)
+      await session.run('Delegate the summary.')
+      await vi.waitFor(() => expect(session!.willQueue).toBe(false), { timeout: 30000 })
+      expect(dispatch).not.toHaveBeenCalled()
+      expect(
+        coreEvents.mock.calls.some(([channel]) => channel === 'session:approval-request')
+      ).toBe(false)
+      // The model is told WHY, on the tool's own output channel.
+      expect(JSON.stringify(requests)).toContain('Plan mode is read-only')
+      expect(errors).toEqual([])
+    } finally {
+      dispatch.mockRestore()
+    }
   },
   120000
 )

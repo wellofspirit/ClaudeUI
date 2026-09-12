@@ -31,6 +31,14 @@ vi.mock('../../pi/pi-spawn-prep', () => ({ piSpawnPrep: vi.fn() }))
 vi.mock('../../services/ui-config', () => ({
   loadEngineConfig: () => ({ sandbox: { enabled: true } })
 }))
+// CodexSession dispatches cross-engine (ADR-033 slice E), and the real module
+// CONSTRUCTS its singleton at import — a headless opencode/Claude/pi target
+// factory this birth test has no use for. Stubbed for the same reason the three
+// sibling engine sessions above are.
+vi.mock('../../services/cross-engine-dispatcher', () => ({
+  crossEngineDispatcher: { dispatch: vi.fn(), stopDispatch: vi.fn(), disposeFor: vi.fn() },
+  crossEngineDispatchAvailable: () => true
+}))
 vi.mock('../../services/db', () => ({
   setSessionMeta: vi.fn(),
   getSessionMeta: () => undefined,

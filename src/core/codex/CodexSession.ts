@@ -57,6 +57,11 @@ import {
   codexDynamicToolSpecs,
   runCodexHostedTool
 } from './codex-hosted-tools'
+import {
+  crossEngineDispatcher,
+  crossEngineDispatchAvailable
+} from '../services/cross-engine-dispatcher'
+import type { DispatchContext, DispatchRequest } from '../services/cross-engine-dispatcher'
 import type { DynamicToolCallResponse } from './protocol/v2/DynamicToolCallResponse'
 import type { DynamicToolCallOutputContentItem } from './protocol/v2/DynamicToolCallOutputContentItem'
 import type { ToolResultContent } from '../sdk/types'
@@ -367,6 +372,17 @@ export class CodexSession extends BaseSession {
   private heldDenials = new Map<string, ItemGuardianApprovalReviewCompletedNotification>()
   /** Hosted-tool `callId`s already executed this process generation — one shot each. */
   private hostedCalls = new Set<string>()
+  /**
+   * Cross-engine dispatches currently awaiting `crossEngineDispatcher.dispatch`,
+   * by the dispatching `tool_use` id (ADR-033 M3 — mirrors
+   * `PiSession.inFlightDispatchIds`). Held from BEFORE the await starts until
+   * it settles either way, so an interrupt or a transport loss racing that
+   * exact instant still finds the id to stop. The abort signal on the owning
+   * `item/tool/call` covers a turn that simply ENDS (`abortServerRequests`);
+   * this set is what an Esc-interrupt and a disconnect reach for, neither of
+   * which touches the request's signal.
+   */
+  private inFlightDispatchIds = new Set<string>()
   /** Queue items whose steer timed out ambiguously, by queue item id. */
   private ambiguousSteers = new Map<string, AmbiguousSteer>()
   /** Serializes queue boundaries — see {@link queueBoundary}. */
@@ -386,6 +402,12 @@ export class CodexSession extends BaseSession {
       new CodexClient(options)
   ) {
     super(routingId, win, cwd)
+    // ADR-030/ADR-033: the STATIC flag says this engine can HOST dispatch_agent;
+    // the honest per-session value additionally requires a target engine to
+    // exist. ANDed once here (rather than behind a getter, as pi does) because
+    // `capabilities` is a mutable field this class writes into as the native
+    // model resolves — a getter would silently drop those writes.
+    this.capabilities.crossEngineDispatch &&= crossEngineDispatchAvailable('codex')
     this.model = options.model
     this.effort = options.effort
     this.permissionMode = options.permissionMode ?? 'default'
@@ -724,7 +746,7 @@ export class CodexSession extends BaseSession {
               // at creation (`core/src/session/session.rs`, `CreateThreadParams
               // .dynamic_tools`) and a resume with an empty list restores them
               // from there (`core/src/session/mod.rs:721`).
-              dynamicTools: codexDynamicToolSpecs()
+              dynamicTools: codexDynamicToolSpecs(this.capabilities.crossEngineDispatch)
             })
       if (this.closed) return
       assertCodexProvider(response.modelProvider)
@@ -894,6 +916,13 @@ export class CodexSession extends BaseSession {
   }
 
   async interrupt(): Promise<void> {
+    // `turn/interrupt` ends the NATIVE turn; it cannot reach a cross-engine
+    // dispatch this turn started, which is a plain promise awaiting the
+    // dispatcher. Turn-scoped stop (the same call TaskCard's Stop button
+    // makes), NOT disposeFor: an interrupt ends this turn, it does not tear
+    // down a target a later turn may continue. Idempotent — a dispatch that
+    // already settled is simply absent from the dispatcher's registry.
+    this.stopInFlightDispatches()
     if (this.sending && !this.threadId) {
       this.dispose()
       return
@@ -934,11 +963,24 @@ export class CodexSession extends BaseSession {
     this.ambiguousSteers.clear()
     for (const pending of [...this.pending.values()]) pending.settle()
     this.clearGuardianOverrides()
+    // Nothing can consume a dispatch result any more: stop the turns, then
+    // release the targets this session owns. `dispose()` funnels through here,
+    // so this covers both an explicit teardown and a transport loss — and both
+    // dispatcher calls are no-ops when this session never dispatched.
+    this.stopInFlightDispatches()
+    crossEngineDispatcher.disposeFor(this.routingId)
     // Nothing held can ever run now: the engine that would have taken it is
     // gone. Say so (ADR-053) rather than leaving items pending forever.
     this.recallQueuedOnEngineLoss()
     if (error && error.code !== 'disposed') this.send('session:error', error.message)
     this.status('disconnected')
+  }
+
+  /** Stop every dispatch this session still has in flight, scoped to it. */
+  private stopInFlightDispatches(): void {
+    for (const id of this.inFlightDispatchIds)
+      crossEngineDispatcher.stopDispatch(id, this.routingId)
+    this.inFlightDispatchIds.clear()
   }
 
   private status(state: SessionStatus['state']): void {
@@ -1324,12 +1366,14 @@ export class CodexSession extends BaseSession {
    * a namespaced call is not ours.
    *
    * The verdict comes from the SAME shared engine every other tool goes
-   * through. Today it can only answer `allow` for these three (the hosted
+   * through. For the hosted THREE it can only answer `allow` (the hosted
    * auto-allow rung of `decideWithSource` sits above every rung but deny, and
    * no Claude rule string maps to the `diagram`/`mockup` kinds), but the call
    * is made anyway so a future ladder change reaches Codex too — and anything
    * but `allow` refuses with the reason as the tool's own output, which is the
-   * only channel that tells the model why.
+   * only channel that tells the model why. `dispatch_agent` is the one hosted
+   * tool that is NOT auto-allowed, so its verdict genuinely varies and it owns
+   * the `ask` path — see {@link dispatchAgent}.
    */
   private async hostedToolCall(
     value: unknown,
@@ -1359,6 +1403,10 @@ export class CodexSession extends BaseSession {
           decision: 'deny' as PermissionDecision,
           reason: 'Hosted tool arguments must be an object'
         }
+    // Dispatch answers every verdict itself (deny/ask/allow) — the three below
+    // stay fail-closed on anything but `allow`.
+    if (value.tool === 'dispatch_agent')
+      return this.dispatchAgent(id, value.turnId, args, verdict, context)
     if (verdict.decision !== 'allow') {
       const reason = verdict.reason ?? `${value.tool} was not approved`
       this.send('session:error', reason)
@@ -1371,6 +1419,172 @@ export class CodexSession extends BaseSession {
     if (this.closed || context.signal.aborted)
       throw new Error('Codex hosted tool call was cancelled before it finished')
     return { contentItems: hostedContentItems(result), success: !result.isError }
+  }
+
+  /**
+   * `dispatch_agent` (ADR-033, slice E) — Codex as a dispatch SOURCE. Codex as
+   * a dispatch TARGET is a separate slice: the dispatcher has no Codex target
+   * factory, so a `codex` target is refused by its own engine guard (as is
+   * codex → codex, which is same-engine besides).
+   *
+   * Mirrors `PiSession.handleDispatchAgent` in spirit — identical validation,
+   * identical `DispatchContext` construction, identical `[dispatch session_id:
+   * …]` success suffix, so a Codex-sourced dispatch reads exactly like a
+   * pi-sourced or Claude-sourced one — but imports nothing from pi and differs
+   * in two ways the transport forces:
+   *
+   *  - `extra.signal` IS threaded through. pi's bridge is a POST body with no
+   *    channel for an abort, but Codex's `item/tool/call` carries the
+   *    app-server request's own signal, which `finishTurn` fires through
+   *    `abortServerRequests`. The dispatcher races that signal against its own
+   *    arms (`ctx.extra?.signal` → `{kind:'abort'}`), so an ended turn stops
+   *    the dispatched target rather than leaving it editing files unwatched.
+   *  - `toolUseId` is the call's `codexItemId`, which is EXACTLY the `tool_use`
+   *    id the mapper emits for the `dynamicToolCall` item, so the dispatcher's
+   *    subagent-stream / task-progress / task-notification events land on the
+   *    card the model's own call rendered.
+   *
+   * Verdict handling: `deny` refuses with the engine's reason (plan mode, or a
+   * user deny rule) as the tool's own output; `ask` parks the request behind a
+   * human card bound to the same id and runs NOTHING until it is answered;
+   * `allow` (a standing allow rule, or an earlier "allow for this session")
+   * dispatches straight away.
+   */
+  private async dispatchAgent(
+    toolUseId: string,
+    turnId: string,
+    args: Record<string, unknown> | undefined,
+    verdict: { decision: PermissionDecision; reason?: string },
+    context: Parameters<NonNullable<CodexClientOptions['onServerRequest']>>[2]
+  ): Promise<DynamicToolCallResponse> {
+    const refuse = (text: string): DynamicToolCallResponse => ({
+      contentItems: [{ type: 'inputText', text }],
+      success: false
+    })
+    if (verdict.decision === 'deny') {
+      const reason = verdict.reason ?? 'dispatch_agent was not approved'
+      this.send('session:error', reason)
+      return refuse(reason)
+    }
+    // Shape first, card second: a call that cannot run either way is not worth
+    // interrupting a human for. (`args` is only ever undefined on the deny
+    // branch above, where the arguments were not an object at all.)
+    const engine = args?.engine
+    const prompt = args?.prompt
+    if (
+      (engine !== 'claude' && engine !== 'opencode' && engine !== 'pi') ||
+      typeof prompt !== 'string'
+    )
+      return refuse(
+        'dispatch_agent requires "engine" (one of "claude"|"opencode"|"pi") and a string "prompt".'
+      )
+    const req: DispatchRequest = {
+      engine,
+      prompt,
+      model: typeof args?.model === 'string' ? args.model : undefined,
+      sessionId: typeof args?.session_id === 'string' ? args.session_id : undefined
+    }
+    if (verdict.decision === 'ask') {
+      const card: PendingApproval = {
+        requestId: this.approvalRequestId(toolUseId, context.id),
+        toolUseId,
+        toolName: 'dispatch_agent',
+        input: {
+          engine: req.engine,
+          prompt: req.prompt,
+          ...(req.model !== undefined ? { model: req.model } : {}),
+          ...(req.sessionId !== undefined ? { session_id: req.sessionId } : {})
+        }
+      }
+      // `allowForSession` keys on the bare tool name, exactly as the shared
+      // engine does for anything that is not bash — one "always" click covers
+      // this session's later dispatches, whatever they target.
+      const reply = await this.park(card, turnId, [sessionAllowKey('dispatch_agent', {})], context)
+      if ((reply as { decision?: string }).decision !== 'accept')
+        return refuse('dispatch_agent was declined by the user.')
+    }
+    const ctx: DispatchContext = {
+      fromEngine: 'codex',
+      fromRoutingId: this.routingId,
+      cwd: this.cwd,
+      // The user's OWN autonomy choice, un-narrowed: `gate()`'s auto→default
+      // mapping governs what this client asks about, not what the dispatched
+      // agent is allowed to do (the human just approved this dispatch anyway).
+      autonomyMode: this.permissionMode,
+      emit: (channel, data) => this.send(channel, data),
+      addDispatchedCost: (engineId, modelId, costUsd) =>
+        this.addDispatchedCost(engineId, modelId, costUsd),
+      toolUseId,
+      extra: { signal: context.signal, sendNotification: async (): Promise<void> => {} }
+    }
+    this.inFlightDispatchIds.add(toolUseId)
+    let result: Awaited<ReturnType<typeof crossEngineDispatcher.dispatch>>
+    try {
+      result = await crossEngineDispatcher.dispatch(req, ctx)
+    } finally {
+      this.inFlightDispatchIds.delete(toolUseId)
+    }
+    // Same end-of-turn check the hosted three make: the core has already
+    // completed the item as `failed`, so a reply now answers nobody.
+    if (this.closed || context.signal.aborted)
+      throw new Error('Codex hosted tool call was cancelled before it finished')
+    return {
+      contentItems: [
+        {
+          type: 'inputText',
+          text: result.isError
+            ? result.text
+            : `${result.text}\n\n[dispatch session_id: ${result.sessionId} — pass it as session_id to continue this agent]`
+        }
+      ],
+      success: !result.isError
+    }
+  }
+
+  /**
+   * The requestId one server request's card is answered by. Scoped to this
+   * process generation AND the native request id, so a replayed request can
+   * never be answered by a card raised for an earlier one.
+   */
+  private approvalRequestId(toolUseId: string, requestId: unknown): string {
+    return `codex-approval:${this.generation}:${toolUseId}:${JSON.stringify(requestId)}`
+  }
+
+  /**
+   * Park one server request behind a human approval card: the card goes to the
+   * renderer, this promise waits in `pending` until `resolveApproval` settles
+   * it. Cancellation — turn end (`finishTurn`), disconnect, or the request's
+   * own abort — settles with no reply, which REJECTS: the app-server turns a
+   * rejected request into its own failure response, which is the honest answer
+   * for a question nobody is waiting on any more.
+   */
+  private park(
+    card: PendingApproval,
+    turnId: string,
+    allowKeys: string[],
+    context: Parameters<NonNullable<CodexClientOptions['onServerRequest']>>[2],
+    choices: CodexApprovalDecision[] = [],
+    questions?: ToolRequestUserInputParams['questions']
+  ): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const abort = (): void => settle()
+      const settle = (reply?: unknown): void => {
+        if (!this.pending.delete(card.requestId)) return
+        context.signal.removeEventListener('abort', abort)
+        this.send('session:approval-dismiss', { requestId: card.requestId })
+        if (reply === undefined) reject(new Error('Codex approval cancelled'))
+        else resolve(reply)
+      }
+      this.pending.set(card.requestId, {
+        turnId,
+        choices: [...choices],
+        questions,
+        allowKeys,
+        settle
+      })
+      context.signal.addEventListener('abort', abort, { once: true })
+      this.send('session:approval-request', card)
+    })
   }
 
   private requestApproval(
@@ -1389,7 +1603,10 @@ export class CodexSession extends BaseSession {
       this.endedTurns.has(value.turnId)
     )
       return Promise.reject(new Error('Codex request has no live owning root turn'))
-    const requestId = `codex-approval:${this.generation}:${codexItemId(this.threadId!, value.turnId, value.itemId)}:${JSON.stringify(context.id)}`
+    const requestId = this.approvalRequestId(
+      codexItemId(this.threadId!, value.turnId, value.itemId),
+      context.id
+    )
     if (this.pending.has(requestId)) return Promise.reject(new Error('Duplicate Codex approval'))
     if (method === 'item/permissions/requestApproval') {
       this.send(
@@ -1510,25 +1727,7 @@ export class CodexSession extends BaseSession {
       }
     }
     const allowKeys = (gated ?? []).map((entry) => sessionAllowKey(entry.tool, entry.input))
-    return new Promise((resolve, reject) => {
-      const abort = (): void => settle()
-      const settle = (reply?: unknown): void => {
-        if (!this.pending.delete(requestId)) return
-        context.signal.removeEventListener('abort', abort)
-        this.send('session:approval-dismiss', { requestId })
-        if (reply === undefined) reject(new Error('Codex approval cancelled'))
-        else resolve(reply)
-      }
-      this.pending.set(requestId, {
-        turnId: value.turnId as string,
-        choices: [...choices],
-        questions,
-        allowKeys,
-        settle
-      })
-      context.signal.addEventListener('abort', abort, { once: true })
-      this.send('session:approval-request', card)
-    })
+    return this.park(card, value.turnId as string, allowKeys, context, choices, questions)
   }
 
   /**

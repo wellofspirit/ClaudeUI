@@ -103,9 +103,14 @@ import type {
  *  - 'pi' (ADR-033 M4c) hosts the tool for Claude/opencode-originated
  *    dispatches into pi — gates on the vendored pi binary actually being
  *    present, mirroring the 'claude' branch's opencode-binary check.
+ *  - 'codex' (slice E) hosts the tool for Codex-originated dispatches into
+ *    claude/opencode/pi. Claude is one of those three and is ClaudeUI's
+ *    bundled default engine, so — same reasoning as the 'opencode' branch —
+ *    a Codex session always has somewhere to dispatch to; the other two
+ *    binaries being absent only narrows the useful target list, which the
+ *    dispatcher's own per-request guards report.
  */
 export function crossEngineDispatchAvailable(engineId: EngineId): boolean {
-  if (engineId === 'codex') return false
   if (engineId === 'claude') return opencodeServerManager.isBinaryAvailable()
   if (engineId === 'pi') return piBinaryAvailable()
   return true
@@ -1247,7 +1252,6 @@ export class CrossEngineDispatcher {
   }
 
   private async dispatchInner(req: DispatchRequest, ctx: DispatchContext): Promise<DispatchResult> {
-    if (ctx.fromEngine === 'codex') return errorResult('Codex dispatch is not implemented.')
     // ── Guards ────────────────────────────────────────────────────────────
     if (req.engine === ctx.fromEngine) {
       return errorResult(

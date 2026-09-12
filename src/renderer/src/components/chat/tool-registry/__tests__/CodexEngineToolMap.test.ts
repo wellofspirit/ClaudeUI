@@ -20,6 +20,9 @@ describe('CodexEngineToolMap.kindOf', () => {
     ['render_mermaid', 'diagram'],
     ['create_mockup', 'mockup'],
     ['show_mockup', 'mockup'],
+    // Cross-engine dispatch (slice E) rides the same bare-name channel and
+    // renders on the engine-neutral TaskCard, exactly as pi's does.
+    ['dispatch_agent', 'task'],
     ['somethingElse', 'unknown']
   ]
   it.each(cases)('kindOf(%s) === %s', (name, kind) => {
@@ -71,6 +74,41 @@ describe('CodexEngineToolMap — hosted tools', () => {
       kind: 'mockup',
       directory: undefined,
       title: undefined
+    })
+  })
+})
+
+/**
+ * Cross-engine dispatch (slice E). `dispatch_agent` reaches Codex over the same
+ * dynamic-tool channel as the hosted three, under the same bare name pi uses,
+ * so it normalizes to the engine-neutral `task` shape TaskCard renders.
+ */
+describe('CodexEngineToolMap — dispatch_agent', () => {
+  it('names it the way every other engine does', () => {
+    expect(CodexEngineToolMap.displayName('dispatch_agent')).toBe('Dispatch')
+  })
+
+  it('task: the target engine is the discriminator, the model rides the subtitle', () => {
+    expect(
+      CodexEngineToolMap.normalize('task', {
+        engine: 'claude',
+        prompt: 'summarise the repo',
+        model: 'haiku'
+      })
+    ).toEqual({
+      kind: 'task',
+      description: 'Dispatch: claude',
+      prompt: 'summarise the repo',
+      subagent: 'claude · haiku'
+    })
+  })
+
+  it('task: no model means the engine alone', () => {
+    expect(CodexEngineToolMap.normalize('task', { engine: 'pi', prompt: 'run tests' })).toEqual({
+      kind: 'task',
+      description: 'Dispatch: pi',
+      prompt: 'run tests',
+      subagent: 'pi'
     })
   })
 })

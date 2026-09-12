@@ -3000,6 +3000,53 @@ describe('crossEngineDispatchAvailable (ADR-030/M4-A)', () => {
     vi.mocked(piBinaryAvailable).mockReturnValueOnce(false)
     expect(crossEngineDispatchAvailable('pi')).toBe(false)
   })
+
+  it("'codex' is always true — Claude, one of its three targets, is always installed (slice E)", () => {
+    // Neither of the two OPTIONAL target binaries being present may change the
+    // answer: the claude target needs nothing installed, so a Codex session
+    // always has somewhere to dispatch to.
+    const spy = vi.spyOn(opencodeServerManager, 'isBinaryAvailable').mockReturnValue(false)
+    vi.mocked(piBinaryAvailable).mockReturnValueOnce(false)
+    expect(crossEngineDispatchAvailable('codex')).toBe(true)
+    spy.mockRestore()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Codex as a dispatch SOURCE (slice E) — the engine guard, not the transport.
+// ---------------------------------------------------------------------------
+
+describe('CrossEngineDispatcher — Codex-sourced dispatches', () => {
+  it('runs a codex→opencode dispatch instead of refusing it as unimplemented', async () => {
+    const { dispatcher } = makeHarness()
+    const result = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'x' },
+      makeCtx({ fromEngine: 'codex', fromRoutingId: 'routing-codex' })
+    )
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('target answer')
+  })
+
+  it('rejects codex→codex with the same-engine reason, not a target-engine one', async () => {
+    const { dispatcher } = makeHarness()
+    const result = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x' },
+      makeCtx({ fromEngine: 'codex' })
+    )
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('targets a different engine')
+    expect(result.text).toContain('"codex"')
+  })
+
+  it('rejects a dispatch INTO codex — there is no Codex target factory yet', async () => {
+    const { dispatcher } = makeHarness()
+    const result = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude' })
+    )
+    expect(result.isError).toBe(true)
+    expect(result.text).toBe('Dispatching into engine "codex" is not supported yet.')
+  })
 })
 
 // ---------------------------------------------------------------------------

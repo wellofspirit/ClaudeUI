@@ -14,7 +14,8 @@ type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 const HOSTED_DISPLAY_NAMES: Record<string, string> = {
   render_mermaid: 'Mermaid',
   create_mockup: 'Mockup',
-  show_mockup: 'Mockup'
+  show_mockup: 'Mockup',
+  dispatch_agent: 'Dispatch'
 }
 
 /**
@@ -37,6 +38,9 @@ export const CodexEngineToolMap: EngineToolMap = {
     if (name === 'requestUserInput') return 'question'
     if (name === 'render_mermaid') return 'diagram'
     if (name === 'create_mockup' || name === 'show_mockup') return 'mockup'
+    // Cross-engine dispatch (ADR-033, slice E) — the engine-neutral TaskCard
+    // kind, exactly as pi's identically-named bare tool takes.
+    if (name === 'dispatch_agent') return 'task'
     return 'unknown'
   },
   displayName(name) {
@@ -71,6 +75,19 @@ export const CodexEngineToolMap: EngineToolMap = {
         kind,
         source: input?.source != null ? String(input.source) : '',
         title: input?.title != null ? String(input.title) : undefined
+      }
+    // dispatch_agent args: { engine, prompt, model?, session_id? } — the same
+    // field names on every engine, so this branch is Pi/Claude/Opencode's
+    // dispatch normalizer verbatim.
+    if (kind === 'task')
+      return {
+        kind,
+        description: `Dispatch: ${String(input?.engine ?? '')}`,
+        prompt: input?.prompt != null ? String(input.prompt) : '',
+        subagent:
+          input?.model != null
+            ? `${String(input?.engine ?? '')} · ${String(input.model)}`
+            : String(input?.engine ?? '')
       }
     // create_mockup args: { html, title? }; show_mockup args: { directory }.
     if (kind === 'mockup')

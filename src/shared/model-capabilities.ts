@@ -538,7 +538,15 @@ export const CODEX_ENGINE_CAPABILITIES: EngineCapabilities = {
   proxy: false,
   autonomyModes: ['ask', 'autoEdit', 'full', 'plan'],
   auth: { canDriveLogin: true, multiAccount: false },
-  crossEngineDispatch: false
+  // ADR-033 slice E — Codex as a dispatch SOURCE: `dispatch_agent` rides the
+  // same native dynamic-tool channel the hosted three do, gated by the shared
+  // permission engine (kind `task`: asks in default/acceptEdits/auto, denies
+  // in plan) and executed by `CodexSession.dispatchAgent` against the shared
+  // `crossEngineDispatcher`. Codex as a dispatch TARGET is NOT shipped — the
+  // dispatcher has no Codex target factory, so a `codex` target is refused.
+  // The honest per-session value ANDs this with the runtime
+  // `crossEngineDispatchAvailable('codex')` check (CodexSession's constructor).
+  crossEngineDispatch: true
 }
 
 export function resolveCodexCapabilities(model?: {
