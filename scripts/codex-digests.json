@@ -5,7 +5,16 @@
   "licenseSha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
   "platform": "darwin",
   "arch": "arm64",
-  "member": "codex-aarch64-apple-darwin",
-  "archiveSha256": "344310a0a591c1b192e04feff304321a69907c9498baaac331ca7e16ebcef9d7",
-  "binarySha256": "4f85982624b3898c8991cb80c0981b2aa71070e3537046c9a95950318a95afcc"
+  "binaries": {
+    "codex": {
+      "member": "codex-aarch64-apple-darwin",
+      "archiveSha256": "344310a0a591c1b192e04feff304321a69907c9498baaac331ca7e16ebcef9d7",
+      "binarySha256": "4f85982624b3898c8991cb80c0981b2aa71070e3537046c9a95950318a95afcc"
+    },
+    "codex-code-mode-host": {
+      "member": "codex-code-mode-host-aarch64-apple-darwin",
+      "archiveSha256": "500ee2a02ea598ae519052e7d7d8e201d1db01986f30c214ef4143645dc86fad",
+      "binarySha256": "426d73aaeb2aeef45e98b5add99e8ef9594a31673d281489bb2cb06b38c27423"
+    }
+  }
 }

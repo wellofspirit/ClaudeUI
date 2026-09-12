@@ -14,22 +14,41 @@ bun run update-codex
 ```
 
 The second command forces reinstall of the same reviewed pin, not an upgrade to
-latest. `scripts/codex-digests.json` pins the release archive, extracted binary,
+latest. `scripts/codex-digests.json` pins the release archives, extracted binaries,
 source commit and Apache-2.0 license. Only macOS arm64 is supported. Linux musl
 and Windows release names/digests alone do not establish provisioning readiness.
 Windows archives and ancillary executables have not been inspected in M1a;
 single-executable Windows packaging is deliberately not claimed.
 
-An existing archive can avoid the binary download. Supplying the pinned license
-also avoids its network fetch. Both files still undergo digest verification.
+The release ships two assets that must be installed together:
+`codex-aarch64-apple-darwin.tar.gz` and
+`codex-code-mode-host-aarch64-apple-darwin.tar.gz`. Real catalog models are
+`tool_mode: code_mode_only` and run every tool through the separate
+`codex-code-mode-host` executable, which Codex resolves from the directory of its
+own binary (`install-context::code_mode_host_program_from_exe`; the `code_mode_host`
+feature is Stable and default-enabled). Without it each `exec_command` fails with
+"the command tool failed to start" and no approval ever reaches ClaudeUI, so the
+host is mandatory, not optional: the whole manifest is acquired and published by a
+single directory rename, a missing or wrong-digest host is a cache miss, and
+`codexBinaryAvailable()` reports Codex unavailable unless the host sits beside
+`codex`. Only `codex` answers `--version`; the host is gated by its pinned digest.
+The mock-model fixture is not code-mode, so it does not exercise this path.
+
+Existing archives can avoid the downloads, matched to their manifest member by
+digest rather than flag order; `--archive` may be repeated. Supplying the pinned
+license also avoids its network fetch. Every file still undergoes digest
+verification.
 
 ```sh
-bun run ensure-codex --archive /path/to/codex-aarch64-apple-darwin.tar.gz --license /path/to/LICENSE
+bun run ensure-codex \
+  --archive /path/to/codex-aarch64-apple-darwin.tar.gz \
+  --archive /path/to/codex-code-mode-host-aarch64-apple-darwin.tar.gz \
+  --license /path/to/LICENSE
 ```
 
 Acquisition bounds downloads and decompression, accepts exactly the expected
-regular tar member, and rejects links, traversal, extra members, truncation and
-digest mismatch. Cache hits rehash actual payload/license bytes. Installation
+regular tar member from each archive, and rejects links, traversal, extra members,
+truncation and digest mismatch. Cache hits rehash actual payload/license bytes. Installation
 stages complete files before directory rename and restores the prior directory
 if replacement fails. If restoring the prior directory also fails, its backup
 is retained under the staging directory and the command reports the exact

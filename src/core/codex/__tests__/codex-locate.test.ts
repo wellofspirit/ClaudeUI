@@ -3,7 +3,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { lstatSync } from 'node:fs'
 import { join } from 'node:path'
 import { setHostPaths } from '../../host'
-import { locateCodexBinary } from '../codex-locate'
+import { codexBinaryAvailable, locateCodexBinary, locateCodexCodeModeHost } from '../codex-locate'
 vi.mock('node:fs', () => ({ lstatSync: vi.fn() }))
 afterEach(() => {
   setHostPaths(null)
@@ -29,4 +29,27 @@ it('returns unavailable rather than falling back to PATH', () => {
   })
   expect(locateCodexBinary()).toBeNull()
   expect(lstatSync).toHaveBeenCalledTimes(1)
+})
+const onSupportedHost = process.platform === 'darwin' && process.arch === 'arm64'
+it.skipIf(!onSupportedHost)(
+  'reports unavailable when the code-mode host is missing beside the binary (macOS arm64)',
+  () => {
+    setHostPaths({ getAppPath: () => '/project' })
+    vi.mocked(lstatSync).mockImplementation((path) => {
+      if (String(path).endsWith('codex-code-mode-host')) throw new Error('missing')
+      return { isFile: () => true } as ReturnType<typeof lstatSync>
+    })
+    expect(locateCodexBinary()).not.toBeNull()
+    expect(codexBinaryAvailable()).toBe(false)
+    vi.mocked(lstatSync).mockReturnValue({ isFile: () => true } as ReturnType<typeof lstatSync>)
+    expect(codexBinaryAvailable()).toBe(true)
+  }
+)
+it.skipIf(!onSupportedHost)('locates the host only beside the located binary (macOS arm64)', () => {
+  setHostPaths({ getAppPath: () => '/project' })
+  vi.mocked(lstatSync).mockReturnValue({ isFile: () => true } as ReturnType<typeof lstatSync>)
+  expect(locateCodexCodeModeHost()).toBe(join('/project/vendor/codex-cli', 'codex-code-mode-host'))
+  vi.mocked(lstatSync).mockReturnValue({ isFile: () => false } as ReturnType<typeof lstatSync>)
+  expect(locateCodexCodeModeHost()).toBeNull()
+  expect(codexBinaryAvailable()).toBe(false)
 })
