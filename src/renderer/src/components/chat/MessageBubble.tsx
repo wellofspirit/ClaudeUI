@@ -129,6 +129,21 @@ export const MessageBubble = memo(function MessageBubble({
               <ApiErrorBlock key={i} block={block} />
             )
           }
+          // A bare notice the engine wants in the transcript — Codex's `auto`
+          // guardian decisions are the current producer. Rendered VERBATIM and
+          // never through the markdown pipeline: the text can quote a
+          // model-authored rationale from a reviewer thread the user never saw.
+          if (block.type === 'text') {
+            return (
+              <div
+                key={i}
+                data-testid="MessageBubble.systemNotice"
+                className="text-[12px] text-text-muted leading-[1.6] whitespace-pre-wrap break-words border-l-2 border-border pl-3 py-0.5"
+              >
+                {block.text}
+              </div>
+            )
+          }
           return null
         })}
       </div>

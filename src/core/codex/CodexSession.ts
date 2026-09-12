@@ -43,6 +43,8 @@ import type { Model } from './protocol/v2/Model'
 import type { ThreadItem } from './protocol/v2/ThreadItem'
 import type { Turn } from './protocol/v2/Turn'
 import type { CommandExecutionRequestApprovalParams } from './protocol/v2/CommandExecutionRequestApprovalParams'
+import type { GuardianApprovalReviewAction } from './protocol/v2/GuardianApprovalReviewAction'
+import type { ItemGuardianApprovalReviewCompletedNotification } from './protocol/v2/ItemGuardianApprovalReviewCompletedNotification'
 import type { FileChangeRequestApprovalParams } from './protocol/v2/FileChangeRequestApprovalParams'
 import type { ToolRequestUserInputParams } from './protocol/v2/ToolRequestUserInputParams'
 import { assertCodexProvider, selectCodexModel } from './model-selection'
@@ -64,6 +66,92 @@ const serverMethods = [
 ] as const
 const record = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value)
+
+/**
+ * AUTO-MODE VISIBILITY. Under `auto` the native `auto_review` guardian answers
+ * every gated action itself: no approval request reaches this client, no thread
+ * item is produced, and nothing in `thread/read` reconstructs the decision
+ * afterwards (docs/codex-spike.md, "Native reviewer and judge-thread
+ * probe (2026-09-11)", pinned by
+ * src/integration/codex/codex-auto-review-probe.integration.test.ts). The
+ * `item/autoApprovalReview/completed` notification is therefore the ONLY trace
+ * a command or patch leaves, which is why it becomes a transcript row.
+ *
+ * Everything downstream of `review.rationale` treats it as UNTRUSTED: it is
+ * model-authored text from a thread the user never sees, so it is
+ * whitespace-collapsed (no forged second row), length-capped, and rendered as
+ * plain text in the system bubble.
+ */
+const GUARDIAN_VERB: Record<string, string> = {
+  approved: 'approved',
+  denied: 'denied',
+  timedOut: 'timed out reviewing',
+  aborted: 'stopped reviewing',
+  inProgress: 'did not finish reviewing'
+}
+const GUARDIAN_RATIONALE_LIMIT = 500
+const GUARDIAN_ACTION_LIMIT = 200
+
+const clip = (text: string, limit: number): string =>
+  text.length > limit ? `${text.slice(0, limit - 1)}\u2026` : text
+
+/** Human label for the reviewed action; commands are backticked, the rest read as prose. */
+function guardianActionLabel(action: GuardianApprovalReviewAction): string {
+  const short = (text: string): string => clip(normalizeWhitespace(text), GUARDIAN_ACTION_LIMIT)
+  switch (action.type) {
+    case 'command':
+      // The wire carries Codex's own `<shell> -lc <script>` wrapper; the user
+      // asked about the script, and a rule they wrote would name the script.
+      return `\`${short(unwrapShellCommand(action.command))}\``
+    case 'execve':
+      return `\`${short((action.argv.length ? action.argv : [action.program]).join(' '))}\``
+    case 'writeStdin':
+      return 'input to a running command'
+    case 'applyPatch':
+      return `changes to ${short(action.files.join(', ')) || short(action.cwd)}`
+    case 'networkAccess':
+      return `network access to ${short(action.host)}:${action.port}`
+    case 'mcpToolCall':
+      return `MCP tool ${short(`${action.server}/${action.toolName}`)}`
+    case 'requestPermissions':
+      return 'a permissions request'
+    default:
+      return 'an action'
+  }
+}
+
+/** One flat sentence per decision — see GUARDIAN_VERB for the untrusted-text rules. */
+export function guardianReviewText(
+  notification: ItemGuardianApprovalReviewCompletedNotification
+): string {
+  const { review, action } = notification
+  const verb = GUARDIAN_VERB[review.status] ?? 'reviewed'
+  const risk = review.riskLevel ? ` (risk: ${review.riskLevel})` : ''
+  const rationale = review.rationale
+    ? ` ${clip(normalizeWhitespace(review.rationale), GUARDIAN_RATIONALE_LIMIT)}`
+    : ''
+  return `Codex auto-review ${verb} ${guardianActionLabel(action)}${risk}.${rationale}`
+}
+
+/**
+ * `core/src/guardian/review.rs` is the ONLY emitter of `GuardianWarning`, in
+ * exactly three places:
+ *  - :709-717 `"Automatic approval review {approved|denied} (risk: {r},
+ *    authorization: {a}): {rationale}"`, once per decision — a restatement of
+ *    the review this adapter already rowed.
+ *  - :590-597 the timeout rationale verbatim (set at :575), `"Automatic
+ *    approval review timed out while evaluating the requested approval."`,
+ *    which ALSO arrives as the completed review's `rationale`.
+ *  - :298-307 the circuit breaker, `"Automatic approval review rejected too
+ *    many approval requests for this turn (N consecutive, M in the last 50
+ *    reviews); interrupting the turn."` — the only one that is not a duplicate,
+ *    and the only signal that the turn was KILLED rather than finished.
+ * So the first two are dropped and the third is both a row and an error.
+ */
+const GUARDIAN_DECISION_WARNING =
+  /^Automatic approval review (?:approved|denied) \(risk: |^Automatic approval review timed out /
+const GUARDIAN_BREAKER_WARNING =
+  /^Automatic approval review rejected too many approval requests for this turn\b/
 
 type Pending = {
   turnId: string
@@ -584,6 +672,37 @@ export class CodexSession extends BaseSession {
         })
     } else if (method === 'turn/completed' && record(value.turn)) {
       this.finishTurn(value.turn as Turn)
+    } else if (
+      method === 'item/autoApprovalReview/completed' &&
+      typeof value.turnId === 'string' &&
+      typeof value.reviewId === 'string' &&
+      record(value.review) &&
+      record(value.action)
+    ) {
+      // `started` is deliberately dropped: it carries no verdict, and a row per
+      // in-flight review would double every decision in the transcript.
+      this.guardianRow(
+        codexItemId(this.threadId, value.turnId, value.reviewId),
+        guardianReviewText(value as unknown as ItemGuardianApprovalReviewCompletedNotification)
+      )
+    } else if (method === 'guardianWarning' && typeof value.message === 'string') {
+      const message = value.message
+      if (GUARDIAN_DECISION_WARNING.test(message)) return
+      const text = `Codex auto-review: ${clip(normalizeWhitespace(message), GUARDIAN_RATIONALE_LIMIT)}`
+      // No turnId on the wire (GuardianWarningNotification carries threadId and
+      // message only), so the live turn stands in and the message hash keeps
+      // repeats of the same warning on one row.
+      this.guardianRow(
+        `codex:${JSON.stringify([
+          this.threadId,
+          this.turnId ?? 'thread',
+          'guardianWarning',
+          createHash('sha256').update(message).digest('hex').slice(0, 16)
+        ])}`,
+        text
+      )
+      // The breaker ABORTS the turn. Without an error the transcript just stops.
+      if (GUARDIAN_BREAKER_WARNING.test(message)) this.send('session:error', text)
     } else if (typeof value.turnId === 'string' && !this.endedTurns.has(value.turnId)) {
       if (method === 'item/started' || method === 'item/completed') {
         if (!record(value.item) || typeof value.item.id !== 'string') return
@@ -615,6 +734,20 @@ export class CodexSession extends BaseSession {
         }
       }
     }
+  }
+
+  /**
+   * A guardian decision is NOT a thread item: it never enters `completedItems`
+   * and `turn.items` never carries it, which is exactly what keeps
+   * `finishTurn`'s authoritative replay from dropping the row it produced.
+   */
+  private guardianRow(id: string, text: string): void {
+    const timestamp =
+      this.messageHistory.find((message) => message.id === id)?.timestamp ?? Date.now()
+    this.dispatch({
+      kind: 'message',
+      message: { id, role: 'system', content: [{ type: 'text', text }], timestamp }
+    })
   }
 
   private finishTurn(turn: Turn): void {

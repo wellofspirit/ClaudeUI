@@ -381,6 +381,30 @@ describe('MessageBubble', () => {
       expect(screen.getByText('compacted')).toBeInTheDocument()
     })
 
+    it('renders a plain text notice — Codex auto-review rows arrive as one', () => {
+      // Codex's `auto` guardian decisions have no tool call, no diff and no
+      // error to hang off: a text block on a system row is the whole row, and
+      // before this it fell through the block switch and rendered nothing.
+      const msg = makeChatMessage({
+        role: 'system',
+        content: [
+          { type: 'text', text: 'Codex auto-review approved `ls` (risk: low). Looks safe.' }
+        ]
+      })
+      render(
+        <MessageBubble
+          message={msg}
+          pendingApprovals={[]}
+          isLastAssistant={false}
+          thinkingStartedAt={null}
+        />
+      )
+      const notice = screen.getByTestId('MessageBubble.systemNotice')
+      expect(notice).toHaveTextContent('Codex auto-review approved `ls` (risk: low). Looks safe.')
+      // Untrusted model text: rendered verbatim, never as markdown/HTML.
+      expect(notice.querySelector('code')).toBeNull()
+    })
+
     it('renders API error block', () => {
       const msg = makeChatMessage({
         role: 'system',

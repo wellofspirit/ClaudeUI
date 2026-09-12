@@ -54,10 +54,12 @@ import type { SandboxPolicy } from '../../core/codex/protocol/v2/SandboxPolicy'
  *     own prompt arrives as a developer message rather than in `instructions`.
  *     The Q3 tool-surface probes therefore stay on `mock-model`, which uses the
  *     classic shape.
- *  5. The auto-review wire surface has NO generated protocol binding.
+ *  5. These probes read the auto-review wire surface as RAW JSON-RPC on purpose.
  *     `item/autoApprovalReview/started`, `item/autoApprovalReview/completed` and
- *     `guardianWarning` exist on the wire with no `protocol/v2/*.ts` type, so the
- *     probes read them as raw JSON-RPC.
+ *     `guardianWarning` now have generated `protocol/v2/*.ts` types (the adapter
+ *     rows the completed ones; see the auto-mode test in
+ *     `codex-app-server.integration.test.ts`), but reading the raw params is
+ *     what lets a probe observe a field the generator did not carry over.
  */
 const containment = vi.hoisted(() => ({ profile: '', pids: [] as number[] }))
 vi.mock('node:child_process', async (importOriginal) => {

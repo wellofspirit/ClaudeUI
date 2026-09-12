@@ -29,6 +29,44 @@ import {
   type ThinkingMode
 } from '../../../../../shared/model-capabilities'
 
+const codexCatalogOf = (models: ReadonlyArray<{ value: string; engineId?: string }>) =>
+  models.filter((model) => model.engineId === 'codex')
+
+/**
+ * THE predicate for "this Codex spawn carries an explicit model". The request
+ * (`resolveSessionSdkOptions`) sends `selectedModel` exactly when this is true,
+ * and the pill reads "Native default" exactly when it is false. Keeping two
+ * copies of the rule is what let the pill advertise a catalog model the request
+ * then omitted, so Codex silently ran its own configured default instead.
+ *
+ * The empty-`selectedModel` case is the one the second copy got wrong: the flag
+ * can say "explicit" while the value is gone (a sticky pick the catalog no
+ * longer offers), and an absent value is an omitted model whatever the flag
+ * says.
+ */
+export function codexModelIsExplicit(
+  session:
+    | {
+        codexModelExplicit?: boolean
+        isHistorical?: boolean
+        selectedModel: string
+        status: { sessionId: string | null }
+      }
+    | undefined,
+  sticky: string | undefined,
+  codexModels: ReadonlyArray<{ value: string }>
+): boolean {
+  // Welcome screen: no session holds the pick yet, so answer for the one
+  // `createNewSession` is about to seed — it marks a sticky model explicit, and
+  // drops it only when a codex catalog exists that no longer lists it.
+  if (!session)
+    return (
+      !!sticky && (codexModels.length === 0 || codexModels.some((model) => model.value === sticky))
+    )
+  if (!session.selectedModel) return false
+  return !!(session.codexModelExplicit || session.isHistorical || session.status.sessionId)
+}
+
 const ACCEPTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
 const ACCEPTED_FILE_TYPES = [...ACCEPTED_IMAGE_TYPES, 'application/pdf']
 const MAX_IMAGE_DIMENSION = 2048
@@ -297,6 +335,21 @@ export function InputBox(): React.JSX.Element {
     isHistorical,
     startedSessionId
   ])
+  const stickyCodexModel = lastSelectedModelByEngine.codex
+  // The exact four fields `resolveSessionSdkOptions` reads off the store, so
+  // the pill and the spawn ask `codexModelIsExplicit` the same question.
+  const activeCodexSession = useMemo(
+    () =>
+      activeSessionId
+        ? {
+            codexModelExplicit,
+            isHistorical,
+            selectedModel: selectedModelValue,
+            status: { sessionId: startedSessionId }
+          }
+        : undefined,
+    [activeSessionId, codexModelExplicit, isHistorical, selectedModelValue, startedSessionId]
+  )
 
   const statusLine = useActiveSession((s) => s.statusLine)
   const billingType = useActiveSession((s) => s.status?.account?.billingType)
@@ -376,11 +429,13 @@ export function InputBox(): React.JSX.Element {
     const engineId = session?.selectedEngineId ?? 'claude'
     if (engineId === 'codex')
       return {
-        model:
-          session &&
-          (session.codexModelExplicit || session.isHistorical || session.status.sessionId)
-            ? session.selectedModel || undefined
-            : undefined
+        model: codexModelIsExplicit(
+          session,
+          state.lastSelectedModelByEngine.codex,
+          codexCatalogOf(state.availableModels)
+        )
+          ? session?.selectedModel
+          : undefined
       }
     const modelInfo = state.availableModels.find(
       (m) => m.value === session?.selectedModel && (m.engineId ?? 'claude') === engineId
@@ -410,13 +465,19 @@ export function InputBox(): React.JSX.Element {
    * alias is a real value and never trips this.
    */
   function assertModelResolved(routingId: string): void {
-    const session = useSessionStore.getState().sessions[routingId]
+    const state = useSessionStore.getState()
+    const session = state.sessions[routingId]
     const engineId = session?.selectedEngineId ?? 'claude'
+    // Codex without an explicit model is a SUPPORTED spawn (the pill says
+    // "Native default" and Codex uses its own configured model), so the
+    // engine-default guard below must not fire on it.
     if (
       engineId === 'codex' &&
-      !session?.codexModelExplicit &&
-      !session?.isHistorical &&
-      !session?.status.sessionId
+      !codexModelIsExplicit(
+        session,
+        state.lastSelectedModelByEngine.codex,
+        codexCatalogOf(state.availableModels)
+      )
     )
       return
     if (engineId === 'claude' || session?.selectedModel) return
@@ -966,9 +1027,7 @@ export function InputBox(): React.JSX.Element {
       models={pickerModels}
       selectedModel={
         effectiveEngineId === 'codex' &&
-        !startedSessionId &&
-        !isHistorical &&
-        !(activeSessionId ? codexModelExplicit : lastSelectedModelByEngine.codex)
+        !codexModelIsExplicit(activeCodexSession, stickyCodexModel, pickerModels)
           ? {
               ...selectedModel,
               displayName: 'Native configured model',

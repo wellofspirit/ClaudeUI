@@ -24,6 +24,13 @@ export const methods = {
   'config/read': ['ConfigReadParams', 'ConfigReadResponse'],
   'configRequirements/read': [null, 'ConfigRequirementsReadResponse'],
   'thread/settings/update': ['ThreadSettingsUpdateParams', 'ThreadSettingsUpdateResponse'],
+  // Retries an action the native approval reviewer denied, after a human
+  // approves it. Unused by the read-only guardian transcript rows; generated
+  // now so the follow-on "approve anyway" slice has the exact payload type.
+  'thread/approveGuardianDeniedAction': [
+    'ThreadApproveGuardianDeniedActionParams',
+    'ThreadApproveGuardianDeniedActionResponse'
+  ],
   ...Object.fromEntries(
     ['Start', 'Read', 'Resume', 'Fork', 'List', 'Delete', 'Archive', 'TurnsList', 'ItemsList'].map(
       (name) => [
@@ -72,6 +79,13 @@ export const notifications = {
   'turn/completed': 'TurnCompletedNotification',
   'item/started': 'ItemStartedNotification',
   'item/completed': 'ItemCompletedNotification',
+  // Under `approvalsReviewer: "auto_review"` these REPLACE the client approval
+  // requests: no `*/requestApproval` reaches us, so this pair plus
+  // `guardianWarning` is the only trace a gated action leaves. Reviews are not
+  // thread items, so nothing reconstructs them from history.
+  'item/autoApprovalReview/started': 'ItemGuardianApprovalReviewStartedNotification',
+  'item/autoApprovalReview/completed': 'ItemGuardianApprovalReviewCompletedNotification',
+  guardianWarning: 'GuardianWarningNotification',
   'item/agentMessage/delta': 'AgentMessageDeltaNotification',
   'serverRequest/resolved': 'ServerRequestResolvedNotification'
 }

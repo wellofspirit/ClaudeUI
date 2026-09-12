@@ -499,6 +499,65 @@ describe('InputBox FC — rendered', () => {
     }
   )
 
+  it('says Native default whenever the codex spawn omits the model', async () => {
+    // The sticky codex pick is gone from the catalog, so `createNewSession`
+    // seeded an EMPTY selectedModel and left `codexModelExplicit` true. The
+    // pill read the first catalog entry ("GPT-6-Astra") while the request
+    // carried no model at all — two copies of the rule, two answers, and Codex
+    // silently ran its own configured default.
+    useSessionStore.setState((state) => ({
+      lastSelectedModelByEngine: { codex: 'gpt-5.9-vanished' },
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedEngineId: 'codex',
+          selectedModel: '',
+          codexModelExplicit: true,
+          sdkActive: false,
+          isHistorical: false,
+          status: {
+            ...state.sessions[FC_ROUTE].status,
+            sessionId: null,
+            engineId: 'codex',
+            capabilities: resolveCodexCapabilities()
+          }
+        }
+      },
+      availableModels: [
+        { value: 'gpt-6-astra', displayName: 'GPT-6-Astra', description: '', engineId: 'codex' }
+      ]
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    expect(viewProps.selectedModel.shortName).toBe('Native default')
+    await act(async () => {
+      useSessionStore.getState().setDraftText('go')
+    })
+    await act(async () => {
+      await viewProps.onSend()
+    })
+    expect(ipcCalls['session:create'][0][5]).toBeUndefined()
+    expect(ipcCalls['session:create'][0][9]).toBe('codex')
+  })
+
+  it('previews the sticky codex pick only while the catalog still offers it', () => {
+    // Welcome screen: no session holds the pick, so the pill must answer for
+    // the session `createNewSession` is about to seed — which marks a sticky
+    // model explicit, and drops it when the catalog no longer lists it.
+    useSessionStore.setState({
+      activeSessionId: null,
+      lastSelectedEngineId: 'codex',
+      lastSelectedModelByEngine: { codex: 'gpt-5.9-vanished' },
+      availableModels: [
+        { value: 'gpt-6-astra', displayName: 'GPT-6-Astra', description: '', engineId: 'codex' }
+      ]
+    })
+    mirrorStoreIntoReplica()
+    renderFC()
+    expect(viewProps.selectedModel.shortName).toBe('Native default')
+  })
+
   it('codex shortName is the display name, not the native description sentence', () => {
     // Codex's catalog ships a marketing sentence in `description`; only
     // claude/opencode/pi discovery follow the "Name · detail" convention the

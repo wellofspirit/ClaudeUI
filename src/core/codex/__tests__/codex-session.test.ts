@@ -766,3 +766,128 @@ describe('Codex first session', () => {
     )
   })
 })
+
+/**
+ * Under `auto` the native reviewer answers every gated action itself and NO
+ * approval request reaches the client (docs/codex-spike.md, "Native reviewer
+ * and judge-thread probe (2026-09-11)"; pinned by
+ * src/integration/codex/codex-auto-review-probe.integration.test.ts). These
+ * notifications are the only trace such a turn leaves, and the circuit-breaker
+ * warning is the only sign a turn was killed rather than finished.
+ */
+describe('Codex auto-review visibility', () => {
+  const REVIEW = {
+    threadId: 'root',
+    turnId: 'turn',
+    startedAtMs: 1,
+    completedAtMs: 2,
+    reviewId: 'review-1',
+    targetItemId: 'esc',
+    decisionSource: 'agent',
+    review: {
+      status: 'approved',
+      riskLevel: 'low',
+      userAuthorization: 'unknown',
+      rationale: 'Auto-review returned a low-risk allow decision.'
+    },
+    action: { type: 'command', source: 'shell', command: '/bin/zsh -lc ls', cwd: '/isolated' }
+  }
+  /** Every emitted system row, oldest first. */
+  const rows = () =>
+    events.mock.calls
+      .filter(([channel]) => channel === 'session:message')
+      .map((call) => call[1][1])
+      .filter((message: { role: string }) => message.role === 'system')
+
+  it('rows an approved review with the unwrapped command and its risk', async () => {
+    const { session, notify } = fixture()
+    await session.run('hello')
+    notify('item/autoApprovalReview/completed', REVIEW)
+    expect(rows()).toEqual([
+      expect.objectContaining({
+        id: 'codex:["root","turn","review-1"]',
+        role: 'system',
+        content: [
+          {
+            type: 'text',
+            text: 'Codex auto-review approved `ls` (risk: low). Auto-review returned a low-risk allow decision.'
+          }
+        ]
+      })
+    ])
+  })
+
+  it('words a denial as a denial and names the patched files', async () => {
+    const { session, notify } = fixture()
+    await session.run('hello')
+    notify('item/autoApprovalReview/completed', {
+      ...REVIEW,
+      review: {
+        status: 'denied',
+        riskLevel: 'critical',
+        userAuthorization: 'unknown',
+        rationale: 'Isolated fixture deny'
+      },
+      action: { type: 'applyPatch', cwd: '/isolated', files: ['/isolated/a.txt'] }
+    })
+    expect(rows()[0].content[0].text).toBe(
+      'Codex auto-review denied changes to /isolated/a.txt (risk: critical). Isolated fixture deny'
+    )
+  })
+
+  it('ignores a review for another thread and the started half of its own', async () => {
+    const { session, notify } = fixture()
+    await session.run('hello')
+    notify('item/autoApprovalReview/completed', { ...REVIEW, threadId: 'other' })
+    notify('item/autoApprovalReview/started', { ...REVIEW, review: { status: 'inProgress' } })
+    expect(rows()).toEqual([])
+  })
+
+  it('does not double-post the per-decision warning that follows every review', async () => {
+    const { session, notify } = fixture()
+    await session.run('hello')
+    notify('item/autoApprovalReview/completed', REVIEW)
+    // core/src/guardian/review.rs:709-717 sends this for EVERY decision.
+    notify('guardianWarning', {
+      threadId: 'root',
+      message:
+        'Automatic approval review approved (risk: low, authorization: unknown): Auto-review returned a low-risk allow decision.'
+    })
+    expect(rows()).toHaveLength(1)
+    expect(events.mock.calls.some(([channel]) => channel === 'session:error')).toBe(false)
+  })
+
+  it('rows the circuit breaker and raises it as an error too', async () => {
+    const { session, notify } = fixture()
+    await session.run('hello')
+    // core/src/guardian/review.rs:296-306 — the turn is interrupted, so without
+    // this row an auto turn just stops mid-flight and reads as a crash.
+    notify('guardianWarning', {
+      threadId: 'root',
+      message:
+        'Automatic approval review rejected too many approval requests for this turn (3 consecutive, 3 in the last 50 reviews); interrupting the turn.'
+    })
+    const text =
+      'Codex auto-review: Automatic approval review rejected too many approval requests for this turn (3 consecutive, 3 in the last 50 reviews); interrupting the turn.'
+    expect(rows()).toEqual([
+      expect.objectContaining({ role: 'system', content: [{ type: 'text', text }] })
+    ])
+    expect(events).toHaveBeenCalledWith('session:error', ['temporary', text])
+  })
+
+  it('keeps review rows through the authoritative item replay and across duplicates', async () => {
+    const { session, notify } = fixture()
+    await session.run('hello')
+    notify('item/autoApprovalReview/completed', REVIEW)
+    notify('item/autoApprovalReview/completed', REVIEW)
+    const id = rows()[0].id
+    expect(rows().every((row: { id: string }) => row.id === id)).toBe(true)
+    notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn', status: 'completed', items: [] }
+    })
+    expect(session.getMessages().filter((message) => message.role === 'system')).toEqual([
+      expect.objectContaining({ id, content: [{ type: 'text', text: rows()[0].content[0].text }] })
+    ])
+  })
+})

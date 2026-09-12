@@ -127,7 +127,22 @@ afterEach(async () => {
   expect(survivors, 'app-server groups survived bounded disposal').toEqual([])
 })
 
-async function setupFixture(plainResponse = false, nativeSession = false, nativeCommand = false) {
+/**
+ * A guardian auto-review call, told apart from the agent's own. Codex frames the
+ * planned action between `>>> APPROVAL REQUEST START` / `END`
+ * (`core/src/guardian/prompt.rs`), in the reviewer prompt and nowhere else, so
+ * this holds whether the reviewer got the catalog policy template or the
+ * bundled one.
+ */
+const isGuardianRequest = (request: Record<string, unknown>): boolean =>
+  JSON.stringify(request).includes('>>> APPROVAL REQUEST START')
+
+async function setupFixture(
+  plainResponse = false,
+  nativeSession = false,
+  nativeCommand = false,
+  autoReview = false
+) {
   const installed = resolve('vendor/codex-cli/codex')
   expect(createHash('sha256').update(readFileSync(installed)).digest('hex')).toBe(
     provenance.binarySha256
@@ -143,6 +158,15 @@ async function setupFixture(plainResponse = false, nativeSession = false, native
   setHostPaths({ getAppPath: () => directory! })
   const requests: Record<string, unknown>[] = []
   const errors: string[] = []
+  /** Final-message text the fixture answers a guardian review with. */
+  const verdict = {
+    current: JSON.stringify({
+      risk_level: 'low',
+      user_authorization: 'high',
+      outcome: 'allow',
+      rationale: 'Isolated fixture allow'
+    })
+  }
   const completed = {
     type: 'response.completed',
     response: {
@@ -218,15 +242,27 @@ async function setupFixture(plainResponse = false, nativeSession = false, native
       }
       websocket!.handleUpgrade(req, socket, head, (connection) => {
         connection.on('message', (data) => {
-          requests.push(JSON.parse(data.toString()))
+          const request = JSON.parse(data.toString()) as Record<string, unknown>
+          requests.push(request)
+          // The reviewer is a SECOND model session on the SAME provider, so its
+          // calls interleave with the agent's; the step index must count only
+          // the agent's or the scripted command never fires.
+          const guardian = isGuardianRequest(request)
+          const agentTurns = requests.filter(
+            (entry) => !isGuardianRequest(entry) && entry.generate !== false
+          ).length
           for (const event of [
             { type: 'response.created', response: { id: 'resp-fixture' } },
             {
               type: 'response.output_item.done',
-              item:
-                nativeCommand &&
-                requests.at(-1)?.generate !== false &&
-                requests.filter((request) => request.generate !== false).length === 1
+              item: guardian
+                ? {
+                    type: 'message',
+                    id: 'msg-guardian',
+                    role: 'assistant',
+                    content: [{ type: 'output_text', text: verdict.current }]
+                  }
+                : nativeCommand && request.generate !== false && agentTurns === 1
                   ? {
                       type: 'function_call',
                       call_id: 'fixture-command',
@@ -272,7 +308,7 @@ async function setupFixture(plainResponse = false, nativeSession = false, native
 model_provider = "${nativeSession ? 'openai' : 'fixture'}"
 ${nativeSession ? `openai_base_url = "http://127.0.0.1:${port}/v1"` : ''}
 approval_policy = "on-request"
-approvals_reviewer = "user"
+approvals_reviewer = "${autoReview ? 'auto_review' : 'user'}"
 sandbox_mode = "read-only"
 cli_auth_credentials_store = "file"
 check_for_update_on_startup = false
@@ -312,6 +348,7 @@ shell_snapshot = false
     codexHome,
     requests,
     errors,
+    verdict,
     env: {
       HOME: home,
       CODEX_HOME: codexHome,
@@ -687,4 +724,44 @@ it.skipIf(!enabled)(
     await expect(pending).rejects.toThrow(/^Codex transport: disposed$/)
   },
   60000
+)
+
+it.skipIf(!enabled)(
+  'auto mode rows the native guardian decision no approval request ever reaches',
+  async () => {
+    const { cwd, env, errors, requests } = await setupFixture(true, true, true, true)
+    session = new CodexSession(
+      'isolated-auto-review',
+      null,
+      cwd,
+      { permissionMode: 'auto' },
+      { env, requestTimeoutMs: 15000 }
+    )
+    await session.run(null)
+    await session.run('Execute the isolated fixture command.')
+    await vi.waitFor(() => expect(session!.willQueue).toBe(false), { timeout: 30000 })
+    // The reviewer replaced the client outright: nothing to approve, no card,
+    // and — before this slice — no trace at all of why the command ran.
+    expect(coreEvents.mock.calls.some(([channel]) => channel === 'session:approval-request')).toBe(
+      false
+    )
+    expect(requests.some((request) => isGuardianRequest(request))).toBe(true)
+    const rows = coreEvents.mock.calls
+      .filter(([channel]) => channel === 'session:message')
+      .map(
+        ([, args]) => args[1] as { role: string; content: Array<{ type: string; text?: string }> }
+      )
+      .filter((message) => message.role === 'system')
+      .flatMap((message) => message.content.map((block) => block.text ?? ''))
+    expect(
+      rows.some(
+        (text) =>
+          text.startsWith('Codex auto-review approved `printf fixture-approved > ') &&
+          text.includes('(risk: low). Isolated fixture allow')
+      ),
+      `system rows: ${JSON.stringify(rows)}`
+    ).toBe(true)
+    expect(errors).toEqual([])
+  },
+  90000
 )

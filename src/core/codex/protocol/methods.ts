@@ -8,6 +8,7 @@ export interface CodexMethods {
   "config/read": { params: import("./v2/ConfigReadParams").ConfigReadParams; result: import("./v2/ConfigReadResponse").ConfigReadResponse };
   "configRequirements/read": { params: undefined; result: import("./v2/ConfigRequirementsReadResponse").ConfigRequirementsReadResponse };
   "thread/settings/update": { params: import("./v2/ThreadSettingsUpdateParams").ThreadSettingsUpdateParams; result: import("./v2/ThreadSettingsUpdateResponse").ThreadSettingsUpdateResponse };
+  "thread/approveGuardianDeniedAction": { params: import("./v2/ThreadApproveGuardianDeniedActionParams").ThreadApproveGuardianDeniedActionParams; result: import("./v2/ThreadApproveGuardianDeniedActionResponse").ThreadApproveGuardianDeniedActionResponse };
   "thread/start": { params: import("./v2/ThreadStartParams").ThreadStartParams; result: import("./v2/ThreadStartResponse").ThreadStartResponse };
   "thread/read": { params: import("./v2/ThreadReadParams").ThreadReadParams; result: import("./v2/ThreadReadResponse").ThreadReadResponse };
   "thread/resume": { params: import("./v2/ThreadResumeParams").ThreadResumeParams; result: import("./v2/ThreadResumeResponse").ThreadResumeResponse };
@@ -42,6 +43,9 @@ export interface CodexNotifications {
   "turn/completed": import("./v2/TurnCompletedNotification").TurnCompletedNotification;
   "item/started": import("./v2/ItemStartedNotification").ItemStartedNotification;
   "item/completed": import("./v2/ItemCompletedNotification").ItemCompletedNotification;
+  "item/autoApprovalReview/started": import("./v2/ItemGuardianApprovalReviewStartedNotification").ItemGuardianApprovalReviewStartedNotification;
+  "item/autoApprovalReview/completed": import("./v2/ItemGuardianApprovalReviewCompletedNotification").ItemGuardianApprovalReviewCompletedNotification;
+  "guardianWarning": import("./v2/GuardianWarningNotification").GuardianWarningNotification;
   "item/agentMessage/delta": import("./v2/AgentMessageDeltaNotification").AgentMessageDeltaNotification;
   "serverRequest/resolved": import("./v2/ServerRequestResolvedNotification").ServerRequestResolvedNotification;
 }
