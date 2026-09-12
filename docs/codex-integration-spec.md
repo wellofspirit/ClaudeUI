@@ -288,7 +288,7 @@ refuses to nest a second seatbelt profile.
 
 None of this is deferred by implication.
 
-- **Application queue and steer.** Still pending in full, not partially built: `CodexSession.enqueuePrompt` throws, `capabilities.queue` and `steer` are false, and shared `SessionQueue` still correlates by text. Identity-aware acknowledgment, honest recall and ambiguous-delivery reconciliation are unbuilt.
+- **Application queue and steer.** Landed in `4050eb0a` (2026-09-12): core-held queue, `turn/steer` with `expectedTurnId` at completed sub-turn items, `turn/start` at idle, identity acknowledgment via `clientUserMessageId: steer-<itemId>` and `SessionQueue.consumeById`, honest recall, ambiguous-timeout reconciliation against `thread/items/list` with no blind resend. Proven against the real binary (same-turn steer while paused on an approval) and on the real app.
 - **Hosted tools**, with authorization separate from approvals, at-most-once execution and real cancellation.
 - **Completed-turn fork.** `engine-history.ts` refuses Codex fork anchors today.
 - **Delete and archive.** Refused today. The lifecycle probe (`src/integration/codex/codex-lifecycle.integration.test.ts`) pins the native rule: `thread/list` never lists forks, in either archived state; delete and archive are both refused while the owning root process holds the thread, and that refusal is inert (the live thread keeps accepting turns); stopping the holder is not sufficient, because a thread with a surviving descendant fork stays undeletable, listed and readable; archiving the descendant does not lift that, only deleting it does. A native delete of a forked thread is therefore a whole-subtree operation, leaf-first, and the UI must either walk the tree that way or fail non-destructively.

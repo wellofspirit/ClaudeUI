@@ -46,7 +46,7 @@ Add a minimal neutral registry for history read/list/delete/fork-anchor operatio
 
 Fork only at verified completed-turn anchors, preserving the source. Do not offer a message-mid-turn fork as though Codex supports it. Test delete behavior for descendants, metadata, and pins before exposing it. The legacy DB importer clamps Codex to Claude; update recognition without guessing which already-clamped rows once belonged to Codex.
 
-Retain ADR-053's application-held queue and forward at an observed supported boundary using `turn/steer` with `expectedTurnId` and `clientUserMessageId`. Native queue acceptance is not inference consumption, and native queueing starts a different turn. Keep recallable, irrevocably sent, acknowledged, and ambiguous-delivery states honest. Correlate by identity, not duplicate text. Reconcile thread/turn state after a timeout; never blindly retry a possibly accepted send.
+Retain ADR-053's application-held queue and forward at an observed supported boundary using `turn/steer` with `expectedTurnId` and `clientUserMessageId`. **Built as designed in `4050eb0a` (2026-09-12)**; one addition the build needed: boundary signals are chained on the session's own promise rather than fired blind, because a turn can end while its steer is still on the wire and `BaseSession.flushQueuedItems`'s re-entrancy guard would drop that signal and strand the item. Native queue acceptance is not inference consumption, and native queueing starts a different turn. Keep recallable, irrevocably sent, acknowledged, and ambiguous-delivery states honest. Correlate by identity, not duplicate text. Reconcile thread/turn state after a timeout; never blindly retry a possibly accepted send.
 
 ### Hosted tools, children, and dispatch
 

@@ -4,6 +4,8 @@ Kickoff specs for the next two implementation slices, preserved here because the
 
 ## Slice A: identity-aware held queue via turn/steer (ADR-053 parity)
 
+**Landed in `4050eb0a` (2026-09-12).** Kept as the design record. Two corrections made during implementation: the spec's "keep the item forwarded (unrecallable)" for an ambiguous timeout and "do not override `tryRecallQueuedItem`" were incompatible (the base loop unmarks a still-queued item), so the behaviour won and a three-line `tryRecallQueuedItem` override refuses recall only for ambiguous steers; and boundary signals had to be chained (`queueBoundary`) because the base loop's re-entrancy guard dropped a turn end arriving mid-steer.
+
 Repo: /Users/daniel.liu/work/ClaudeUI, branch `codex-integration`, uncommitted worktree.
 You implement; the reviewer reads every line. Same hard rules as before: no commit/add/stash/branch/reset, no `bun install`, no real credentials, no touching `~/.codex`, never revert unrelated uncommitted work. Every behaviour change ships with a guard test you prove fails before the fix.
 
