@@ -68,6 +68,15 @@ function genericHint(targetEngine: EngineId): { long: string; short: string } {
       short: 'Use "provider/modelId" format (e.g. "openai-codex/gpt-5.6-luna").'
     }
   }
+  // ADR-033 slice H: Codex takes a BARE native model id — no provider prefix
+  // (its only provider is openai) and no alias vocabulary — so it is a third
+  // distinct case, not pi's "provider/modelId" nor Claude's aliases.
+  if (targetEngine === 'codex') {
+    return {
+      long: 'Models are bare native ids, e.g. "gpt-5.6-luna".',
+      short: 'A bare native id, e.g. "gpt-5.6-luna".'
+    }
+  }
   return {
     long: 'Claude model aliases, e.g. "sonnet", "haiku", "opus".',
     short: 'A Claude alias, e.g. "sonnet", "haiku", "opus".'
@@ -107,10 +116,22 @@ export function describeDispatchModels(input: DispatchModelHintInput): DispatchM
     short = hint.short
   }
 
+  // The codex wording differs because the BEHAVIOUR does: a model is optional
+  // for a Codex target (cross-engine-dispatcher.ts resolves the user's own
+  // `config/read` model against the native catalog when none is requested),
+  // whereas the claude/opencode/pi target paths refuse a model-less dispatch
+  // outright. Telling a Codex caller to "pass model explicitly" would send it
+  // guessing at ids it has no way to know.
   const defaultClauseLong = defaultModel
     ? `Default: ${defaultModel}.`
-    : 'No default is configured — pass model explicitly.'
-  const defaultClauseShort = defaultModel ? `Default: ${defaultModel}.` : 'No default configured.'
+    : targetEngine === 'codex'
+      ? "No ClaudeUI default is configured — omit `model` to use the user's own Codex default."
+      : 'No default is configured — pass model explicitly.'
+  const defaultClauseShort = defaultModel
+    ? `Default: ${defaultModel}.`
+    : targetEngine === 'codex'
+      ? "No default configured — omit to use the user's own."
+      : 'No default configured.'
 
   return {
     long: `${long} ${defaultClauseLong}`,

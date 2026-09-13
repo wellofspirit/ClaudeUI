@@ -26,6 +26,16 @@ vi.mock('../../../core/pi/pi-locate', () => ({
   locatePiBinary: vi.fn(() => null),
   piBinaryAvailable: vi.fn(() => true)
 }))
+// Same reasoning as pi-locate above: a plain function export, mocked so
+// crossEngineDispatchAvailable's codex disjunct is controllable per-test.
+// Every codex-target TEST injects a fake spawnCodexTarget (bypassing
+// defaultSpawnCodexTarget, which is the only thing that would ever locate a
+// real binary), so this mock cannot affect them either way.
+vi.mock('../../../core/codex/codex-locate', () => ({
+  codexBinaryAvailable: vi.fn(() => false),
+  locateCodexBinary: vi.fn(() => null),
+  locateCodexCodeModeHost: vi.fn(() => null)
+}))
 
 import {
   CrossEngineDispatcher,
@@ -35,6 +45,7 @@ import {
 } from '../../../core/services/cross-engine-dispatcher'
 import { opencodeServerManager } from '../../../core/opencode/OpencodeServerManager'
 import { piBinaryAvailable } from '../../../core/pi/pi-locate'
+import { codexBinaryAvailable } from '../../../core/codex/codex-locate'
 import type {
   ClaudeQuerySpawnOpts,
   DispatchContext,
@@ -43,12 +54,14 @@ import type {
   DispatchTargetClient,
   PiTargetSpawnOpts,
   PiTargetPrimitives,
+  CodexTargetSpawnOpts,
   SpawnClaudeQueryFn,
-  SpawnPiTargetFn
+  SpawnPiTargetFn,
+  SpawnCodexTargetFn
 } from '../../../core/services/cross-engine-dispatcher'
 import type { QueryHandle, ResultMessage, SDKMessage, SdkToolExtra } from '../../../core/sdk'
 import type { StoredMessage } from '../../../core/opencode/protocol/types'
-import type { EngineId } from '../../../shared/types'
+import type { EngineConfig, EngineId } from '../../../shared/types'
 import type { PiRpcClient } from '../../../core/pi/PiRpcClient'
 import type { PiBridgeHost, PiBridgeHandler } from '../../../core/pi/PiBridgeHost'
 
@@ -313,8 +326,11 @@ describe('CrossEngineDispatcher — guards', () => {
 
   it('rejects dispatch into a genuinely unsupported engine (defensive guard — EngineId is closed, but this crosses an IPC boundary at runtime)', async () => {
     const { dispatcher } = makeHarness()
+    // A string no EngineId has ever been. 'codex' USED to stand in here; slice
+    // H made it a real target, so the defensive guard needs a genuinely
+    // unknown engine to be defensive about.
     const result = await dispatcher.dispatch(
-      { engine: 'codex' as unknown as EngineId, prompt: 'x' },
+      { engine: 'gemini' as unknown as EngineId, prompt: 'x' },
       makeCtx({ fromEngine: 'opencode' })
     )
     expect(result.isError).toBe(true)
@@ -2985,13 +3001,29 @@ describe('crossEngineDispatchAvailable (ADR-030/M4-A)', () => {
     expect(crossEngineDispatchAvailable('opencode')).toBe(true)
   })
 
-  it("'claude' mirrors opencodeServerManager.isBinaryAvailable()", () => {
+  it("'claude' is true when ANY of its three targets is installed, false when none is (slice H)", () => {
     const spy = vi.spyOn(opencodeServerManager, 'isBinaryAvailable')
+    vi.mocked(codexBinaryAvailable).mockReturnValue(false)
+    vi.mocked(piBinaryAvailable).mockReturnValue(false)
+
     spy.mockReturnValue(true)
     expect(crossEngineDispatchAvailable('claude')).toBe(true)
     spy.mockReturnValue(false)
     expect(crossEngineDispatchAvailable('claude')).toBe(false)
+
+    // pi alone is enough — M4c made pi a Claude target but left this branch
+    // asking only about opencode, so a pi-only machine hid the tool.
+    vi.mocked(piBinaryAvailable).mockReturnValue(true)
+    expect(crossEngineDispatchAvailable('claude')).toBe(true)
+    vi.mocked(piBinaryAvailable).mockReturnValue(false)
+
+    // codex alone is enough (slice H).
+    vi.mocked(codexBinaryAvailable).mockReturnValue(true)
+    expect(crossEngineDispatchAvailable('claude')).toBe(true)
+
     spy.mockRestore()
+    vi.mocked(codexBinaryAvailable).mockReturnValue(false)
+    vi.mocked(piBinaryAvailable).mockReturnValue(true)
   })
 
   it("'pi' mirrors piBinaryAvailable() (ADR-033 M4c)", () => {
@@ -2999,6 +3031,7 @@ describe('crossEngineDispatchAvailable (ADR-030/M4-A)', () => {
     expect(crossEngineDispatchAvailable('pi')).toBe(true)
     vi.mocked(piBinaryAvailable).mockReturnValueOnce(false)
     expect(crossEngineDispatchAvailable('pi')).toBe(false)
+    vi.mocked(piBinaryAvailable).mockReturnValue(true)
   })
 
   it("'codex' is always true — Claude, one of its three targets, is always installed (slice E)", () => {
@@ -3038,14 +3071,18 @@ describe('CrossEngineDispatcher — Codex-sourced dispatches', () => {
     expect(result.text).toContain('"codex"')
   })
 
-  it('rejects a dispatch INTO codex — there is no Codex target factory yet', async () => {
-    const { dispatcher } = makeHarness()
-    const result = await dispatcher.dispatch(
+  it('no longer refuses a dispatch INTO codex as unimplemented — slice H gave it a target factory', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const pending = dispatcher.dispatch(
       { engine: 'codex', prompt: 'x' },
       makeCtx({ fromEngine: 'claude' })
     )
-    expect(result.isError).toBe(true)
-    expect(result.text).toBe('Dispatching into engine "codex" is not supported yet.')
+    await tick()
+    target.completeTurn({ text: 'target answer' })
+    const result = await pending
+    expect(result.text).not.toBe('Dispatching into engine "codex" is not supported yet.')
+    expect(result.isError).toBeUndefined()
   })
 })
 
@@ -5338,5 +5375,1165 @@ describe('buildPiTargetChildEnv (ADR-033 M4c — recursion guard)', () => {
     }
     expect(merged.CLAUDEUI_PI_HOSTED_TOOLS).toBe('')
     expect(merged.CLAUDEUI_PI_DISPATCH_ENABLED).toBe('')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// codex direction (ADR-033 slice H — claude/opencode/pi → codex)
+// ---------------------------------------------------------------------------
+
+/** Loose shape covering exactly what the dispatcher calls on a Codex target's client. */
+interface FakeCodexClient {
+  start: ReturnType<typeof vi.fn>
+  request: ReturnType<typeof vi.fn>
+  abortServerRequests: ReturnType<typeof vi.fn>
+  dispose: ReturnType<typeof vi.fn>
+}
+
+type CodexRequestHandler = (
+  method: string,
+  params: Record<string, unknown>
+) => unknown | Promise<unknown>
+
+const CODEX_THREAD_ID = 'codex-thread-1'
+const CODEX_TURN_ID = 'codex-turn-1'
+
+/** One `agentMessage` ThreadItem — a turn's result text. */
+function codexAgentMessage(text: string, id = 'item-msg-1'): Record<string, unknown> {
+  return {
+    type: 'agentMessage',
+    id,
+    text,
+    phase: null,
+    memoryCitation: null,
+    delivery: null,
+    questions: null
+  }
+}
+
+/** One `commandExecution` ThreadItem. */
+function codexCommandItem(
+  command: string,
+  opts: { id?: string; status?: string; output?: string; exitCode?: number | null } = {}
+): Record<string, unknown> {
+  return {
+    type: 'commandExecution',
+    id: opts.id ?? 'item-cmd-1',
+    pluginId: null,
+    scriptPath: null,
+    command,
+    cwd: '/tmp/xeng-project',
+    processId: null,
+    source: 'shell',
+    status: opts.status ?? 'inProgress',
+    commandActions: [],
+    aggregatedOutput: opts.output ?? null,
+    exitCode: opts.exitCode ?? null,
+    durationMs: null
+  }
+}
+
+/** One `fileChange` ThreadItem. */
+function codexFileChangeItem(
+  path: string,
+  opts: { id?: string; kind?: Record<string, unknown>; status?: string } = {}
+): Record<string, unknown> {
+  return {
+    type: 'fileChange',
+    id: opts.id ?? 'item-patch-1',
+    changes: [{ path, kind: opts.kind ?? { type: 'add' }, diff: 'hello\n' }],
+    status: opts.status ?? 'inProgress'
+  }
+}
+
+function codexUsage(over: Partial<Record<string, number>> = {}): Record<string, number> {
+  return {
+    totalTokens: 0,
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    outputTokens: 0,
+    reasoningOutputTokens: 0,
+    ...over
+  }
+}
+
+/**
+ * Fake headless Codex target: a fake `CodexClient` (start/request/
+ * abortServerRequests/dispose) whose canned responses cover the fixed
+ * `start` → `config/read` → `model/list` → `thread/start` → `turn/start`
+ * sequence `createCodexTarget`/`driveCodexTurn` issue.
+ *
+ * `notify()` feeds the SAME onNotification callback the dispatcher installs, so
+ * `mapCodexItem`/`mapCodexDelta` and the whole item/dedupe/settle pipeline run
+ * FOR REAL — only the process and its wire are faked (mirrors the pi fake's
+ * "real event-mapper logic, fake transport" precedent). `serverRequest()`
+ * drives the approval gate the same way the real app-server would.
+ */
+function makeFakeCodexTarget(
+  overrides: {
+    threadId?: string
+    turnId?: string
+    configModel?: string
+    catalog?: Array<Record<string, unknown>>
+    requestHandler?: CodexRequestHandler
+  } = {}
+): {
+  spawnCodexTarget: SpawnCodexTargetFn
+  spawnCalls: CodexTargetSpawnOpts[]
+  client: FakeCodexClient
+  requests: Array<{ method: string; params: Record<string, unknown> }>
+  notify: (method: string, params: Record<string, unknown>) => void
+  serverRequest: (
+    method: string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal
+  ) => Promise<unknown>
+  disconnect: (code?: string) => void
+  currentTurnId: () => string
+  completeTurn: (opts?: {
+    text?: string
+    status?: string
+    error?: { message: string }
+    turnId?: string
+    items?: Array<Record<string, unknown>>
+    durationMs?: number
+  }) => void
+  threadStartParams: () => Record<string, unknown>
+} {
+  const threadId = overrides.threadId ?? CODEX_THREAD_ID
+  const turnId = overrides.turnId ?? CODEX_TURN_ID
+  // Real, PRICED catalog ids (shared/pricing.ts's openai table) so the cost
+  // arithmetic under test is the arithmetic that runs in production.
+  const catalog = overrides.catalog ?? [
+    {
+      model: 'gpt-5.6-luna',
+      isDefault: true,
+      supportedReasoningEfforts: [],
+      inputModalities: ['text']
+    },
+    { model: 'gpt-5.6-terra', isDefault: false, supportedReasoningEfforts: [], inputModalities: [] }
+  ]
+  const requests: Array<{ method: string; params: Record<string, unknown> }> = []
+  let onNotification: ((method: string, params: unknown) => void) | undefined
+  let onServerRequest: NonNullable<CodexTargetSpawnOpts['onServerRequest']> | undefined
+  let onDisconnect: ((error: { code: string }) => void) | undefined
+  let serverRequestSeq = 0
+  let turnSeq = 0
+  let currentTurnId = turnId
+
+  const defaultHandler: CodexRequestHandler = (method, params) => {
+    switch (method) {
+      case 'config/read':
+        return {
+          config: { model: overrides.configModel ?? 'gpt-5.6-luna', model_provider: 'openai' }
+        }
+      case 'model/list':
+        return { data: catalog, nextCursor: null }
+      case 'thread/start':
+        return {
+          thread: { id: threadId, parentThreadId: null, forkedFromId: null },
+          model: params.model,
+          modelProvider: 'openai',
+          reasoningEffort: null
+        }
+      case 'turn/start':
+        // A FRESH id per turn, as the real app-server mints (UUIDv7) — the
+        // dispatcher retires a turn by id, so a fake that reused one would be
+        // testing a state the binary cannot produce.
+        turnSeq += 1
+        currentTurnId = turnSeq === 1 ? turnId : `${turnId}-${turnSeq}`
+        return {
+          turn: {
+            id: currentTurnId,
+            items: [],
+            itemsView: 'complete',
+            status: 'inProgress',
+            error: null,
+            startedAt: null,
+            completedAt: null,
+            durationMs: null
+          }
+        }
+      case 'turn/interrupt':
+        return {}
+      default:
+        return {}
+    }
+  }
+  const handler = overrides.requestHandler ?? defaultHandler
+
+  const client: FakeCodexClient = {
+    start: vi.fn(async () => ({})),
+    request: vi.fn(async (method: string, params: Record<string, unknown>) => {
+      requests.push({ method, params })
+      return await handler(method, params ?? {})
+    }),
+    abortServerRequests: vi.fn(),
+    dispose: vi.fn(() => onDisconnect?.({ code: 'disposed' }))
+  }
+
+  const spawnCalls: CodexTargetSpawnOpts[] = []
+  const spawnCodexTarget = vi.fn<SpawnCodexTargetFn>(async (opts) => {
+    spawnCalls.push(opts)
+    onNotification = opts.onNotification
+    onServerRequest = opts.onServerRequest
+    onDisconnect = opts.onDisconnect as unknown as (error: { code: string }) => void
+    return client as unknown as Awaited<ReturnType<SpawnCodexTargetFn>>
+  })
+
+  const notify = (method: string, params: Record<string, unknown>): void => {
+    onNotification?.(method, params)
+  }
+
+  return {
+    spawnCodexTarget,
+    spawnCalls,
+    client,
+    requests,
+    notify,
+    serverRequest: (method, params, signal) =>
+      onServerRequest!(method, params, {
+        id: `srv-${++serverRequestSeq}`,
+        signal: signal ?? new AbortController().signal
+      }) as Promise<unknown>,
+    disconnect: (code = 'process-exited') => onDisconnect?.({ code }),
+    currentTurnId: () => currentTurnId,
+    completeTurn: (opts = {}) => {
+      const items = opts.items ?? [codexAgentMessage(opts.text ?? 'target answer')]
+      notify('turn/completed', {
+        threadId,
+        turn: {
+          id: opts.turnId ?? currentTurnId,
+          items,
+          itemsView: 'complete',
+          status: opts.status ?? 'completed',
+          error: opts.error ?? null,
+          startedAt: null,
+          completedAt: null,
+          durationMs: opts.durationMs ?? 1234
+        }
+      })
+    },
+    threadStartParams: () => requests.find((entry) => entry.method === 'thread/start')?.params ?? {}
+  }
+}
+
+/**
+ * A codex-flavoured harness. The shared `makeHarness` default config carries an
+ * OPENCODE model id (`openai/gpt-5`), which a Codex target would take as its
+ * requested model and correctly refuse as absent from the native catalog — so
+ * every codex test names its own dispatch config rather than inheriting that.
+ * Empty by default: `selectCodexModel` then falls back to the target's own
+ * `config/read` model, which is the ordinary no-config-needed path.
+ */
+function makeCodexHarness(
+  overrides: Partial<DispatcherDeps> & { dispatch?: Record<string, unknown> } = {}
+): { dispatcher: CrossEngineDispatcher } {
+  const { dispatch, ...rest } = overrides
+  return makeHarness({
+    loadEngineConfig: vi.fn(() => ({ dispatch: dispatch ?? {} }) as EngineConfig),
+    ...rest
+  })
+}
+
+describe('CrossEngineDispatcher — codex direction (slice H): the policy envelope', () => {
+  it.each([
+    ['plan', 'untrusted', 'read-only', 'user'],
+    ['default', 'untrusted', 'workspace-write', 'user'],
+    ['acceptEdits', 'untrusted', 'workspace-write', 'user'],
+    ['auto', 'on-request', 'workspace-write', 'auto_review']
+  ])(
+    "autonomy '%s' opens the thread with approvalPolicy '%s', sandbox '%s', reviewer '%s' — all three on thread/start, none per turn",
+    async (mode, approvalPolicy, sandbox, approvalsReviewer) => {
+      const target = makeFakeCodexTarget()
+      const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+      const pending = dispatcher.dispatch(
+        { engine: 'codex', prompt: 'x' },
+        makeCtx({ fromEngine: 'claude', autonomyMode: mode })
+      )
+      await tick()
+      target.completeTurn()
+      await pending
+
+      expect(target.threadStartParams()).toMatchObject({
+        cwd: '/tmp/xeng-project',
+        approvalPolicy,
+        sandbox,
+        approvalsReviewer,
+        allowProviderModelFallback: false,
+        historyMode: 'paginated'
+      })
+      // The per-turn request carries NO policy at all — the thread baseline is
+      // the single place the envelope lives.
+      const turnStart = target.requests.find((entry) => entry.method === 'turn/start')!
+      expect(turnStart.params.approvalPolicy).toBeUndefined()
+      expect(turnStart.params.sandboxPolicy).toBeUndefined()
+      expect(turnStart.params.approvalsReviewer).toBeUndefined()
+    }
+  )
+
+  it('offers NO dynamicTools and no item/tool/call server method — a target can neither dispatch nor run a hosted tool', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, makeCtx())
+    await tick()
+    target.completeTurn()
+    await pending
+
+    expect(target.threadStartParams()).not.toHaveProperty('dynamicTools')
+    expect(target.spawnCalls[0]!.serverMethods).toEqual([
+      'item/commandExecution/requestApproval',
+      'item/fileChange/requestApproval',
+      'item/tool/requestUserInput',
+      'item/permissions/requestApproval'
+    ])
+    expect(target.spawnCalls[0]!.serverMethods).not.toContain('item/tool/call')
+  })
+
+  it('identifies itself as claudeui_dispatch, never as a session', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, makeCtx())
+    await tick()
+    target.completeTurn()
+    await pending
+    expect(target.client.start.mock.calls[0]![0]).toMatchObject({
+      clientInfo: { name: 'claudeui_dispatch' }
+    })
+  })
+
+  it('the envelope is fixed at creation — a continuation with a DIFFERENT autonomyMode neither re-policies the thread nor moves the gate', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const first = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'one' },
+      makeCtx({ fromEngine: 'claude', autonomyMode: 'auto' })
+    )
+    await tick()
+    target.completeTurn()
+    const firstResult = await first
+
+    const second = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'two', sessionId: firstResult.sessionId },
+      makeCtx({ fromEngine: 'claude', autonomyMode: 'plan' })
+    )
+    await tick()
+    // Still the 'auto' envelope on the wire, and still the 'auto' gate.
+    expect(target.requests.filter((entry) => entry.method === 'thread/start')).toHaveLength(1)
+    const decision = await target.serverRequest('item/commandExecution/requestApproval', {
+      threadId: CODEX_THREAD_ID,
+      turnId: target.currentTurnId(),
+      itemId: 'item-cmd-1',
+      command: '/bin/zsh -lc "rm -rf x"',
+      cwd: '/tmp/xeng-project'
+    })
+    expect(decision).toEqual({ decision: 'accept' })
+    target.completeTurn()
+    await second
+  })
+})
+
+describe('CrossEngineDispatcher — codex direction (slice H): the gate', () => {
+  async function startTarget(
+    mode: string,
+    overrides: Partial<DispatcherDeps> = {}
+  ): Promise<{
+    dispatcher: CrossEngineDispatcher
+    target: ReturnType<typeof makeFakeCodexTarget>
+    ctx: ReturnType<typeof makeCtx>
+    pending: Promise<DispatchResult>
+  }> {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({
+      spawnCodexTarget: target.spawnCodexTarget,
+      ...overrides
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: mode, toolUseId: 'toolu_dispatch_1' })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+    return { dispatcher, target, ctx, pending }
+  }
+
+  const commandRequest = (command: string): Record<string, unknown> => ({
+    threadId: CODEX_THREAD_ID,
+    turnId: CODEX_TURN_ID,
+    itemId: 'item-cmd-1',
+    startedAtMs: 0,
+    kind: 'command',
+    environmentId: null,
+    command,
+    cwd: '/tmp/xeng-project'
+  })
+
+  it('plan mode DENIES a write outright — no approval is forwarded, nothing waits for a human the target does not have', async () => {
+    const { target, ctx, pending } = await startTarget('plan')
+    target.notify('item/started', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      item: codexFileChangeItem('notes.md')
+    })
+    const decision = await target.serverRequest('item/fileChange/requestApproval', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      itemId: 'item-patch-1',
+      startedAtMs: 0
+    })
+    expect(decision).toEqual({ decision: 'decline' })
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+    // The denial is visible to the watching human — neither native response
+    // type carries a reason.
+    const denial = ctx.emit.mock.calls.find(
+      (c) =>
+        c[0] === 'session:subagent-stream' &&
+        String((c[1] as { text: string }).text).includes('denied')
+    )
+    expect((denial![1] as { text: string }).text).toContain(
+      'Plan mode is read-only — present a plan and call exit_plan to proceed'
+    )
+    target.completeTurn()
+    await pending
+  })
+
+  it('plan mode DENIES a non-plan-safe command outright too', async () => {
+    const { target, ctx, pending } = await startTarget('plan')
+    const decision = await target.serverRequest(
+      'item/commandExecution/requestApproval',
+      commandRequest('/bin/zsh -lc "rm -rf /tmp/x"')
+    )
+    expect(decision).toEqual({ decision: 'decline' })
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+    target.completeTurn()
+    await pending
+  })
+
+  it("default mode forwards an ASK to the CALLER's client bound to the target item's own id, and resolveApproval answers the native request", async () => {
+    const { dispatcher, target, ctx, pending } = await startTarget('default')
+    const decisionPromise = target.serverRequest(
+      'item/commandExecution/requestApproval',
+      commandRequest('/bin/zsh -lc "rm -rf x"')
+    )
+    await tick()
+
+    const call = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')
+    expect(call).toBeTruthy()
+    const approval = call![1] as {
+      requestId: string
+      toolName: string
+      toolUseId?: string
+      input: Record<string, unknown>
+    }
+    expect(approval.requestId.startsWith(XENG_REQUEST_PREFIX)).toBe(true)
+    expect(approval.toolName).toBe('commandExecution')
+    // The TARGET ITEM's composite id — NOT ctx.toolUseId ('toolu_dispatch_1').
+    expect(approval.toolUseId).toBe(
+      `codex:${JSON.stringify([CODEX_THREAD_ID, CODEX_TURN_ID, 'item-cmd-1'])}`
+    )
+    // The login-shell wrapper is unwrapped for gating, with the raw string kept.
+    expect(approval.input).toEqual({
+      command: 'rm -rf x',
+      rawCommand: '/bin/zsh -lc "rm -rf x"',
+      cwd: '/tmp/xeng-project'
+    })
+
+    const sentinel = Symbol('pending')
+    expect(await Promise.race([decisionPromise, Promise.resolve(sentinel)])).toBe(sentinel)
+
+    expect(dispatcher.resolveApproval(approval.requestId, 'allow')).toBe(true)
+    expect(await decisionPromise).toEqual({ decision: 'accept' })
+    target.completeTurn()
+    await pending
+  })
+
+  it("resolveApproval('deny') declines the native request", async () => {
+    const { dispatcher, target, ctx, pending } = await startTarget('default')
+    const decisionPromise = target.serverRequest(
+      'item/commandExecution/requestApproval',
+      commandRequest('ls')
+    )
+    await tick()
+    const approval = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')![1] as {
+      requestId: string
+    }
+    dispatcher.resolveApproval(approval.requestId, 'deny', { feedback: 'no' })
+    expect(await decisionPromise).toEqual({ decision: 'decline' })
+    target.completeTurn()
+    await pending
+  })
+
+  it("'allowForSession' is a one-off allow — a second identical command still asks", async () => {
+    const { dispatcher, target, ctx, pending } = await startTarget('default')
+    const first = target.serverRequest(
+      'item/commandExecution/requestApproval',
+      commandRequest('ls')
+    )
+    await tick()
+    const a1 = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')![1] as {
+      requestId: string
+    }
+    dispatcher.resolveApproval(a1.requestId, 'allowForSession')
+    expect(await first).toEqual({ decision: 'accept' })
+
+    const second = target.serverRequest('item/commandExecution/requestApproval', {
+      ...commandRequest('ls'),
+      itemId: 'item-cmd-2'
+    })
+    await tick()
+    const a2 = ctx.emit.mock.calls
+      .filter((c) => c[0] === 'session:approval-request')
+      .at(-1)![1] as { requestId: string }
+    expect(a2.requestId).not.toBe(a1.requestId)
+    dispatcher.resolveApproval(a2.requestId, 'allow')
+    await second
+    target.completeTurn()
+    await pending
+  })
+
+  it("auto mode ACCEPTS what the native reviewer escalated without asking — 'auto_review' already decided", async () => {
+    const { target, ctx, pending } = await startTarget('auto')
+    const decision = await target.serverRequest(
+      'item/commandExecution/requestApproval',
+      commandRequest('/bin/zsh -lc "rm -rf x"')
+    )
+    expect(decision).toEqual({ decision: 'accept' })
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+    target.completeTurn()
+    await pending
+  })
+
+  it("acceptEdits allows a patch INSIDE the workspace but asks for one outside it (Codex's workspaceWrite line, not the mode base's)", async () => {
+    const { dispatcher, target, ctx, pending } = await startTarget('acceptEdits')
+    target.notify('item/started', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      item: codexFileChangeItem('notes.md')
+    })
+    expect(
+      await target.serverRequest('item/fileChange/requestApproval', {
+        threadId: CODEX_THREAD_ID,
+        turnId: CODEX_TURN_ID,
+        itemId: 'item-patch-1',
+        startedAtMs: 0
+      })
+    ).toEqual({ decision: 'accept' })
+
+    target.notify('item/started', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      item: codexFileChangeItem('/etc/hosts', { id: 'item-patch-2' })
+    })
+    const outside = target.serverRequest('item/fileChange/requestApproval', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      itemId: 'item-patch-2',
+      startedAtMs: 0
+    })
+    await tick()
+    const approval = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')![1] as {
+      requestId: string
+      input: { files: Array<{ path: string }> }
+    }
+    expect(approval.input.files[0]!.path).toBe('/etc/hosts')
+    dispatcher.resolveApproval(approval.requestId, 'allow')
+    await outside
+    target.completeTurn()
+    await pending
+  })
+
+  it('a fileChange request with NO known changes ASKS — never allows on no evidence', async () => {
+    const { dispatcher, target, ctx, pending } = await startTarget('auto')
+    const decisionPromise = target.serverRequest('item/fileChange/requestApproval', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      itemId: 'item-patch-unknown',
+      startedAtMs: 0
+    })
+    await tick()
+    const call = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')
+    expect(call, 'a request with nothing to gate must ask even under auto').toBeTruthy()
+    dispatcher.resolveApproval((call![1] as { requestId: string }).requestId, 'allow')
+    await decisionPromise
+    target.completeTurn()
+    await pending
+  })
+
+  it('never grants a native permission profile, and never answers a user question', async () => {
+    const { target, ctx, pending } = await startTarget('default')
+    expect(
+      await target.serverRequest('item/permissions/requestApproval', {
+        threadId: CODEX_THREAD_ID,
+        turnId: CODEX_TURN_ID,
+        itemId: 'item-perm-1'
+      })
+    ).toEqual({ permissions: {}, scope: 'turn' })
+    expect(
+      await target.serverRequest('item/tool/requestUserInput', {
+        threadId: CODEX_THREAD_ID,
+        turnId: CODEX_TURN_ID,
+        itemId: 'item-q-1',
+        questions: [{ id: 'q', question: 'which?', header: null, isSecret: false, isOther: false }]
+      })
+    ).toEqual({ answers: {} })
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+    target.completeTurn()
+    await pending
+  })
+
+  it('refuses a request raised by a native CHILD thread the target spawned', async () => {
+    const { target, pending } = await startTarget('default')
+    await expect(
+      target.serverRequest('item/commandExecution/requestApproval', {
+        ...commandRequest('ls'),
+        threadId: 'some-child-thread'
+      })
+    ).rejects.toThrow('no live owning dispatch turn')
+    target.completeTurn()
+    await pending
+  })
+})
+
+describe('CrossEngineDispatcher — codex direction (slice H): streaming, result, usage', () => {
+  it("streams items, deltas and tool results to the caller's subagent channels under ctx.toolUseId", async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_dispatch_1' })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+
+    target.notify('item/agentMessage/delta', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      itemId: 'item-msg-1',
+      delta: 'Hel'
+    })
+    target.notify('item/started', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      item: codexCommandItem('ls')
+    })
+    target.notify('item/completed', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      item: codexCommandItem('ls', { status: 'completed', output: 'a.txt', exitCode: 0 })
+    })
+    // The raw command output is NOT streamed — same as every other direction.
+    target.notify('item/commandExecution/outputDelta', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      itemId: 'item-cmd-1',
+      delta: 'a.txt'
+    })
+    target.completeTurn({ text: 'all done' })
+    const result = await pending
+
+    const itemId = `codex:${JSON.stringify([CODEX_THREAD_ID, CODEX_TURN_ID, 'item-cmd-1'])}`
+    expect(ctx.emit).toHaveBeenCalledWith('session:subagent-stream', {
+      toolUseId: 'toolu_dispatch_1',
+      type: 'text',
+      text: 'Hel'
+    })
+    expect(ctx.emit).toHaveBeenCalledWith('session:subagent-tool-result', {
+      toolUseId: 'toolu_dispatch_1',
+      toolResultToolUseId: itemId,
+      result: 'a.txt',
+      isError: false
+    })
+    const toolUse = ctx.emit.mock.calls.find(
+      (c) =>
+        c[0] === 'session:subagent-message' &&
+        (c[1] as { message: { content: Array<{ type: string }> } }).message.content.some(
+          (b) => b.type === 'tool_use'
+        )
+    )
+    expect(toolUse).toBeTruthy()
+    // One command stream, and only ONE — the outputDelta above is skipped.
+    const streams = ctx.emit.mock.calls.filter((c) => c[0] === 'session:subagent-stream')
+    expect(streams).toHaveLength(1)
+    expect(result.text).toBe('all done')
+    expect(result.sessionId).toBe(CODEX_THREAD_ID)
+  })
+
+  it('drops notifications for a native CHILD thread — one dispatch is one card, and a grandchild has no home in it', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_dispatch_1' })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+    target.notify('item/completed', {
+      threadId: 'some-child-thread',
+      turnId: 'child-turn',
+      item: codexAgentMessage('child chatter')
+    })
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:subagent-message')).toBe(false)
+    target.completeTurn()
+    await pending
+  })
+
+  it("records ONE usage row per turn: the thread's cumulative total minus the previous turn's baseline", async () => {
+    const recordDispatchedUsage = vi.fn()
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({
+      spawnCodexTarget: target.spawnCodexTarget,
+      recordDispatchedUsage
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_dispatch_1' })
+    const first = dispatcher.dispatch({ engine: 'codex', prompt: 'one' }, ctx)
+    await tick()
+    target.notify('thread/tokenUsage/updated', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      tokenUsage: {
+        total: codexUsage({ totalTokens: 120, inputTokens: 100, outputTokens: 20 }),
+        last: codexUsage({ totalTokens: 120 }),
+        modelContextWindow: 400000
+      }
+    })
+    target.completeTurn({ durationMs: 4242 })
+    const firstResult = await first
+
+    expect(recordDispatchedUsage).toHaveBeenCalledTimes(1)
+    expect(recordDispatchedUsage.mock.calls[0]![0]).toMatchObject({
+      fromRoutingId: 'routing-1',
+      fromEngine: 'claude',
+      targetEngine: 'codex',
+      targetModel: 'gpt-5.6-luna',
+      targetSessionId: CODEX_THREAD_ID,
+      toolUseId: 'toolu_dispatch_1',
+      totalTokens: 120,
+      durationMs: 4242
+    })
+
+    // A SECOND turn on the same thread reports the CUMULATIVE total; the row
+    // must carry the delta, not the running total.
+    const second = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'two', sessionId: firstResult.sessionId },
+      ctx
+    )
+    await tick()
+    target.notify('thread/tokenUsage/updated', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      tokenUsage: {
+        total: codexUsage({ totalTokens: 200, inputTokens: 160, outputTokens: 40 }),
+        last: codexUsage({ totalTokens: 200 }),
+        modelContextWindow: 400000
+      }
+    })
+    target.completeTurn()
+    await second
+    expect(recordDispatchedUsage.mock.calls[1]![0]).toMatchObject({ totalTokens: 80 })
+  })
+
+  it('an unpriced model leaves costUsd NULL — the row means "unknown", never "free"', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const target = makeFakeCodexTarget({
+      configModel: 'gpt-nonexistent-preview',
+      catalog: [
+        {
+          model: 'gpt-nonexistent-preview',
+          isDefault: true,
+          supportedReasoningEfforts: [],
+          inputModalities: []
+        }
+      ]
+    })
+    const { dispatcher } = makeCodexHarness({
+      spawnCodexTarget: target.spawnCodexTarget,
+      recordDispatchedUsage
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_dispatch_1' })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+    target.notify('thread/tokenUsage/updated', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      tokenUsage: {
+        total: codexUsage({ totalTokens: 10, inputTokens: 8, outputTokens: 2 }),
+        last: codexUsage({ totalTokens: 10 }),
+        modelContextWindow: null
+      }
+    })
+    target.completeTurn()
+    await pending
+    expect(recordDispatchedUsage.mock.calls[0]![0].costUsd).toBeNull()
+    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+  })
+
+  it('a turn/completed carrying an error is an isError result plus a "failed" notification', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_dispatch_1' })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+    target.completeTurn({ status: 'failed', error: { message: 'model overloaded' }, items: [] })
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('model overloaded')
+    const notification = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')!
+    expect((notification[1] as { status: string }).status).toBe('failed')
+  })
+
+  it('a turn that produced no agent message returns the placeholder rather than empty text', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, makeCtx())
+    await tick()
+    target.completeTurn({ items: [] })
+    const result = await pending
+    expect(result.text).toBe('(the dispatched agent returned no text)')
+  })
+
+  it('an app-server disconnect mid-turn settles the turn as an error instead of hanging it', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, makeCtx())
+    await tick()
+    target.disconnect('process-exited')
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('process-exited')
+  })
+})
+
+describe('CrossEngineDispatcher — codex direction (slice H): continuation, model, stop, dispose', () => {
+  it('continuation: session_id reuses the live entry — no second thread/start, no second spawn', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    const first = dispatcher.dispatch({ engine: 'codex', prompt: 'one' }, ctx)
+    await tick()
+    target.completeTurn({ text: 'first' })
+    const firstResult = await first
+
+    const second = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'two', sessionId: firstResult.sessionId },
+      ctx
+    )
+    await tick()
+    target.completeTurn({ text: 'second' })
+    const secondResult = await second
+
+    expect(secondResult.text).toBe('second')
+    expect(target.spawnCodexTarget).toHaveBeenCalledTimes(1)
+    expect(target.requests.filter((entry) => entry.method === 'thread/start')).toHaveLength(1)
+    expect(target.requests.filter((entry) => entry.method === 'turn/start')).toHaveLength(2)
+  })
+
+  it('continuation with an unknown sessionId is an isError — NEVER a thread/resume of a caller-named thread', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const result = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x', sessionId: 'someone-elses-thread' },
+      makeCtx({ fromEngine: 'claude' })
+    )
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('Unknown dispatch session')
+    expect(target.spawnCodexTarget).not.toHaveBeenCalled()
+  })
+
+  it("continuation with another session's target → isError (scoped to fromRoutingId)", async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const first = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'one' },
+      makeCtx({ fromEngine: 'claude', fromRoutingId: 'routing-a' })
+    )
+    await tick()
+    target.completeTurn()
+    const firstResult = await first
+
+    const result = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'two', sessionId: firstResult.sessionId },
+      makeCtx({ fromEngine: 'claude', fromRoutingId: 'routing-b' })
+    )
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('Unknown dispatch session')
+  })
+
+  it('a busy target rejects a concurrent same-session_id dispatch without disturbing the running turn', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    const first = dispatcher.dispatch({ engine: 'codex', prompt: 'one' }, ctx)
+    await tick()
+    target.completeTurn()
+    const firstResult = await first
+
+    const running = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'two', sessionId: firstResult.sessionId },
+      ctx
+    )
+    await tick()
+    const rejected = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'three', sessionId: firstResult.sessionId },
+      ctx
+    )
+    expect(rejected.isError).toBe(true)
+    expect(rejected.text).toContain('already running a turn')
+
+    target.completeTurn({ text: 'second' })
+    expect((await running).text).toBe('second')
+  })
+
+  it('refuses an explicitly requested model outside the allowlist BEFORE spawning anything', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({
+      spawnCodexTarget: target.spawnCodexTarget,
+      dispatch: { allowedModels: ['gpt-5.6-luna'] }
+    })
+    const result = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x', model: 'gpt-5.6-terra' },
+      makeCtx({ fromEngine: 'claude' })
+    )
+    expect(result.isError).toBe(true)
+    expect(result.text).toBe(
+      'Model "gpt-5.6-terra" is not in the user-configured allowlist for codex dispatch. ' +
+        'Allowed models: gpt-5.6-luna'
+    )
+    expect(target.spawnCodexTarget).not.toHaveBeenCalled()
+  })
+
+  it('refuses the CONFIG-resolved default too when it falls outside the allowlist, and never opens a thread', async () => {
+    const target = makeFakeCodexTarget({ configModel: 'gpt-5.6-terra' })
+    const { dispatcher } = makeCodexHarness({
+      spawnCodexTarget: target.spawnCodexTarget,
+      dispatch: { allowedModels: ['gpt-5.6-luna'] }
+    })
+    const result = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude' })
+    )
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('not in the user-configured allowlist for codex dispatch')
+    expect(target.requests.some((entry) => entry.method === 'thread/start')).toBe(false)
+    expect(target.client.dispose).toHaveBeenCalled()
+  })
+
+  it('a model the native catalog does not carry is refused by selectCodexModel', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const result = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x', model: 'gpt-9-imaginary' },
+      makeCtx({ fromEngine: 'claude' })
+    )
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('unavailable in the native catalog')
+  })
+
+  it('a non-openai provider is refused before a thread exists', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({
+      spawnCodexTarget: makeFakeCodexTarget({
+        requestHandler: (method) =>
+          method === 'config/read'
+            ? { config: { model: 'x', model_provider: 'azure' } }
+            : { data: [], nextCursor: null }
+      }).spawnCodexTarget
+    })
+    void target
+    const result = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude' })
+    )
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('only the native OpenAI provider')
+  })
+
+  it('stopDispatch interrupts the native turn, settles as stopped, and KEEPS the thread alive for continuation', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({
+      spawnCodexTarget: target.spawnCodexTarget,
+      codexAbortSettleGraceMs: 20
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stop_1' })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+
+    expect(dispatcher.stopDispatch('toolu_stop_1', 'routing-1')).toBe(true)
+    const result = await pending
+    expect(result.isError).toBe(true)
+    expect(result.text).toBe('Dispatch stopped by user.')
+    expect(target.requests.some((e) => e.method === 'turn/interrupt')).toBe(true)
+    expect(target.requests.find((e) => e.method === 'turn/interrupt')!.params).toEqual({
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID
+    })
+    expect(target.client.abortServerRequests).toHaveBeenCalledWith(CODEX_THREAD_ID, CODEX_TURN_ID)
+    expect(target.client.dispose).not.toHaveBeenCalled()
+    const notification = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')!
+    expect((notification[1] as { status: string }).status).toBe('stopped')
+
+    // The entry survives: a continuation runs a fresh turn on the same thread.
+    const second = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'again', sessionId: result.sessionId },
+      ctx
+    )
+    await tick()
+    target.completeTurn({ text: 'second' })
+    expect((await second).text).toBe('second')
+  })
+
+  it("a stopped turn's own late turn/completed cannot settle the NEXT turn (retired by id)", async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({
+      spawnCodexTarget: target.spawnCodexTarget,
+      codexAbortSettleGraceMs: 20
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stop_2' })
+    const first = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+    dispatcher.stopDispatch('toolu_stop_2', 'routing-1')
+    const stopped = await first
+
+    const second = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'again', sessionId: stopped.sessionId },
+      ctx
+    )
+    await tick()
+    // The ABANDONED turn's terminal event, arriving late.
+    target.completeTurn({ text: 'stale', turnId: CODEX_TURN_ID })
+    const sentinel = Symbol('still running')
+    expect(await Promise.race([second, Promise.resolve(sentinel)])).toBe(sentinel)
+    target.completeTurn({ text: 'fresh' })
+    expect((await second).text).toBe('fresh')
+  })
+
+  it('a late approval request from an already stopped turn is refused, never forwarded', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({
+      spawnCodexTarget: target.spawnCodexTarget,
+      codexAbortSettleGraceMs: 20
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stop_3' })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+    dispatcher.stopDispatch('toolu_stop_3', 'routing-1')
+    await pending
+
+    const decision = await target.serverRequest('item/commandExecution/requestApproval', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      itemId: 'item-cmd-late',
+      startedAtMs: 0,
+      command: 'ls',
+      cwd: '/tmp/xeng-project'
+    })
+    expect(decision).toEqual({ decision: 'decline' })
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+  })
+
+  it('a stop dismisses a forwarded approval still pending for that target', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({
+      spawnCodexTarget: target.spawnCodexTarget,
+      codexAbortSettleGraceMs: 20
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stop_4' })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+    const decisionPromise = target.serverRequest('item/commandExecution/requestApproval', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      itemId: 'item-cmd-1',
+      startedAtMs: 0,
+      command: 'ls',
+      cwd: '/tmp/xeng-project'
+    })
+    await tick()
+    const approval = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')![1] as {
+      requestId: string
+    }
+    dispatcher.stopDispatch('toolu_stop_4', 'routing-1')
+    await pending
+    expect(ctx.emit).toHaveBeenCalledWith('session:approval-dismiss', {
+      requestId: approval.requestId
+    })
+    expect(await decisionPromise).toEqual({ decision: 'decline' })
+  })
+
+  it('disposeFor disposes the client, unregisters the target and settles a turn in flight', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const ctx = makeCtx({ fromEngine: 'claude', fromRoutingId: 'routing-dispose' })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    await tick()
+
+    dispatcher.disposeFor('routing-dispose')
+    const result = await pending
+    expect(target.client.dispose).toHaveBeenCalledTimes(1)
+    expect(result.isError).toBe(true)
+
+    const dead = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'again', sessionId: CODEX_THREAD_ID },
+      ctx
+    )
+    expect(dead.isError).toBe(true)
+    expect(dead.text).toContain('Unknown dispatch session')
+  })
+
+  it('disposeFor leaves ANOTHER session’s codex target alone', async () => {
+    const a = makeFakeCodexTarget({ threadId: 'codex-thread-a' })
+    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: a.spawnCodexTarget })
+    const pending = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude', fromRoutingId: 'routing-a' })
+    )
+    await tick()
+    a.completeTurn()
+    await pending
+    dispatcher.disposeFor('routing-other')
+    expect(a.client.dispose).not.toHaveBeenCalled()
+  })
+
+  it('the cumulative cost cap rejects a continuation once it is reached', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({
+      spawnCodexTarget: target.spawnCodexTarget,
+      dispatch: { maxCostUsd: 0.0000001 }
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    const first = dispatcher.dispatch({ engine: 'codex', prompt: 'one' }, ctx)
+    await tick()
+    target.notify('thread/tokenUsage/updated', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      tokenUsage: {
+        total: codexUsage({ totalTokens: 1000, inputTokens: 900, outputTokens: 100 }),
+        last: codexUsage({ totalTokens: 1000 }),
+        modelContextWindow: null
+      }
+    })
+    target.completeTurn()
+    const firstResult = await first
+    expect(firstResult.text).toContain('dispatch cost cap reached')
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('codex', 'gpt-5.6-luna', expect.any(Number))
+
+    const second = await dispatcher.dispatch(
+      { engine: 'codex', prompt: 'two', sessionId: firstResult.sessionId },
+      ctx
+    )
+    expect(second.isError).toBe(true)
+    expect(second.text).toContain('Dispatch cost cap')
+  })
+
+  it('the absolute per-turn timeout interrupts the turn and records a failed row', async () => {
+    const recordDispatchedUsage = vi.fn()
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({
+      spawnCodexTarget: target.spawnCodexTarget,
+      dispatchTimeoutMs: 30,
+      codexAbortSettleGraceMs: 10,
+      recordDispatchedUsage
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_1' })
+    const result = await dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('Dispatch timed out')
+    expect(target.requests.some((e) => e.method === 'turn/interrupt')).toBe(true)
+    expect(recordDispatchedUsage).toHaveBeenCalledTimes(1)
+    expect(recordDispatchedUsage.mock.calls[0]![0]).toMatchObject({
+      targetEngine: 'codex',
+      targetSessionId: CODEX_THREAD_ID
+    })
   })
 })

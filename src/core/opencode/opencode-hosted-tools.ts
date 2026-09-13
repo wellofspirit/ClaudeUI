@@ -89,10 +89,11 @@ export type DispatchAgentFn = (
  */
 function buildDispatchAgentInputSchema(
   modelHintShort: string,
-  piModelHintShort: string
+  piModelHintShort: string,
+  codexModelHintShort: string
 ): Record<string, z.ZodTypeAny> {
   return {
-    engine: z.enum(['claude', 'pi']).describe('Target engine to dispatch to'),
+    engine: z.enum(['claude', 'pi', 'codex']).describe('Target engine to dispatch to'),
     prompt: z.string().describe('Task for the dispatched agent'),
     model: z
       .string()
@@ -100,7 +101,7 @@ function buildDispatchAgentInputSchema(
       .describe(
         'Target model id (format depends on the target engine — must be user-allowed). Omit for ' +
           `that engine's configured default. For claude: a Claude alias (e.g. "haiku", "sonnet") — ` +
-          `${modelHintShort} For pi: ${piModelHintShort}`
+          `${modelHintShort} For pi: ${piModelHintShort} For codex: ${codexModelHintShort}`
       ),
     session_id: z
       .string()
@@ -188,25 +189,38 @@ export function createOpencodeHostedToolsServer(
     allowedModels: piDispatchCfg?.allowedModels,
     defaultModel: piDispatchCfg?.defaultModel
   })
+  // codex (ADR-033 slice H) — a THIRD independent snapshot alongside the two
+  // above, same snapshot-at-spawn caveat.
+  const codexDispatchCfg = loadEngineConfig('codex').dispatch
+  const codexModelHint = describeDispatchModels({
+    targetEngine: 'codex',
+    allowedModels: codexDispatchCfg?.allowedModels,
+    defaultModel: codexDispatchCfg?.defaultModel
+  })
 
   server.registerTool(
     'dispatch_agent',
     {
       description:
-        "Delegate a task to an agent running on a DIFFERENT engine — Claude (Anthropic's models) or " +
-        'pi (an alternative coding-agent harness). The agent runs headless in the same working ' +
-        'directory and its final answer is returned as this tool result. The result includes a ' +
-        'session_id — pass it back as `session_id` to continue the same agent with its context intact ' +
-        '(multi-turn collaboration). The available model list is user-configured per target engine; ' +
-        `omit \`model\` to use that engine's configured default. For claude: ${modelHint.long} For pi: ${piModelHint.long}`,
-      inputSchema: buildDispatchAgentInputSchema(modelHint.short, piModelHint.short)
+        "Delegate a task to an agent running on a DIFFERENT engine — Claude (Anthropic's models), " +
+        "pi (an alternative coding-agent harness) or codex (OpenAI's own coding agent). The agent " +
+        'runs headless in the same working directory and its final answer is returned as this tool ' +
+        'result. The result includes a session_id — pass it back as `session_id` to continue the same ' +
+        'agent with its context intact (multi-turn collaboration). The available model list is ' +
+        "user-configured per target engine; omit `model` to use that engine's configured default. " +
+        `For claude: ${modelHint.long} For pi: ${piModelHint.long} For codex: ${codexModelHint.long}`,
+      inputSchema: buildDispatchAgentInputSchema(
+        modelHint.short,
+        piModelHint.short,
+        codexModelHint.short
+      )
     },
     async (
       args: Record<string, unknown>,
       extra: RequestHandlerExtra<ServerRequest, ServerNotification>
     ) => {
       const { engine, prompt, model, session_id, __xeng_caller_session, __xeng_call_id } = args as {
-        engine: 'claude' | 'pi'
+        engine: 'claude' | 'pi' | 'codex'
         prompt: string
         model?: string
         session_id?: string

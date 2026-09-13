@@ -79,6 +79,25 @@ describe('describeDispatchModels', () => {
     expect(hint.short).toContain('provider/modelId')
   })
 
+  it('nothing known: falls back to a THIRD, bare-native-id hint for targetEngine "codex" (slice H — codex has no provider prefix and no aliases)', () => {
+    const hint = describeDispatchModels({ targetEngine: 'codex' })
+    expect(hint.long).toContain('bare native ids')
+    expect(hint.long).toContain('gpt-5.6-luna')
+    expect(hint.long).not.toContain('providerID/modelID')
+    expect(hint.long).not.toContain('sonnet')
+    expect(hint.short).toContain('bare native id')
+    // A model is OPTIONAL for a codex target, so the no-default clause must
+    // not tell the caller to pass one.
+    expect(hint.long).not.toContain('pass model explicitly')
+    expect(hint.long).toContain("omit `model` to use the user's own Codex default")
+  })
+
+  it('every OTHER engine still gets the "pass model explicitly" no-default clause', () => {
+    for (const targetEngine of ['claude', 'opencode', 'pi'] as const) {
+      expect(describeDispatchModels({ targetEngine }).long).toContain('pass model explicitly')
+    }
+  })
+
   it('empty allowedModels array is treated as "not configured" (falls through)', () => {
     const hint = describeDispatchModels({ targetEngine: 'claude', allowedModels: [] })
     expect(hint.long).not.toContain('Allowed models')

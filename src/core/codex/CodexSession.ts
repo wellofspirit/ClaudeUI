@@ -20,12 +20,15 @@ import type {
   CodexSettings
 } from '../../shared/codex-types'
 import { mergeContentBlocks } from '../../shared/content-blocks'
-import { isImageMediaType } from '../../shared/types'
-import { parseCodexSettings, savedCodexOverrides, codexSandboxPolicy } from './settings'
-import type { AskForApproval } from './protocol/v2/AskForApproval'
-import type { ApprovalsReviewer } from './protocol/v2/ApprovalsReviewer'
-import type { SandboxMode } from './protocol/v2/SandboxMode'
-import type { SandboxPolicy } from './protocol/v2/SandboxPolicy'
+import { parseCodexSettings, savedCodexOverrides } from './settings'
+import {
+  assertCodexAttachments,
+  codexModePolicy,
+  codexTurnInput,
+  codexTurnPolicy,
+  type CodexAttachments,
+  type CodexModePolicy
+} from './codex-turn-policy'
 import {
   decideWithSource,
   mergedClaudeRulesFor,
@@ -45,7 +48,6 @@ import { CodexTransportError, type CodexClientOptions } from './CodexAppServerCl
 import type { Model } from './protocol/v2/Model'
 import type { JsonValue } from './protocol/serde_json/JsonValue'
 import type { ThreadItem } from './protocol/v2/ThreadItem'
-import type { UserInput } from './protocol/v2/UserInput'
 import type { Turn } from './protocol/v2/Turn'
 import type { CommandExecutionRequestApprovalParams } from './protocol/v2/CommandExecutionRequestApprovalParams'
 import type { GuardianApprovalReviewAction } from './protocol/v2/GuardianApprovalReviewAction'
@@ -332,9 +334,6 @@ const CHILD_CLOSED_STATE: Record<TaskNotification['status'], CollabAgentStatus> 
   stopped: 'shutdown'
 }
 
-/** Inline images are the only attachment Codex takes on either transport. */
-type CodexAttachments = Array<{ mediaType: string; base64Data: string }>
-
 /**
  * A `turn/steer` whose delivery the transport could not decide: the request was
  * written to the binary and then timed out, so the message may or may not be in
@@ -361,36 +360,6 @@ type GuardianOverride = {
   label: string
   /** Transcript row this override writes once Codex accepts it. */
   rowId: string
-}
-
-/**
- * Per-turn native policy. Codex EXECUTES, ClaudeUI DECIDES (ADR-066 slice 3):
- * every turn but `auto` runs `untrusted`, the one policy the pinned binary asks
- * before running anything (docs/codex-spike.md, "Native approval surface probe"
- * answer B), so every command and file change arrives as a server request for
- * ClaudeUI's own permission engine to answer. `auto` is the exception — it hands
- * review to Codex's native `auto_review` subagent under `on-request`, and only
- * what that subagent escalates reaches us, gated exactly like `default`.
- *
- * The sandbox is the containment floor, not the decision: an ACCEPTED command
- * runs unsandboxed on this wire regardless (same probe, "Other observations").
- */
-const TURN_POLICY: Record<
-  string,
-  { approvalPolicy: AskForApproval; sandbox: SandboxMode; approvalsReviewer: ApprovalsReviewer }
-> = {
-  plan: { approvalPolicy: 'untrusted', sandbox: 'read-only', approvalsReviewer: 'user' },
-  default: { approvalPolicy: 'untrusted', sandbox: 'workspace-write', approvalsReviewer: 'user' },
-  acceptEdits: {
-    approvalPolicy: 'untrusted',
-    sandbox: 'workspace-write',
-    approvalsReviewer: 'user'
-  },
-  auto: {
-    approvalPolicy: 'on-request',
-    sandbox: 'workspace-write',
-    approvalsReviewer: 'auto_review'
-  }
 }
 
 /**
@@ -518,34 +487,6 @@ export class CodexSession extends BaseSession {
     return this.threadId
   }
 
-  /** Codex takes inline images only, and only well-formed base64 of one. */
-  private assertAttachments(attachments?: CodexAttachments): void {
-    if (
-      attachments?.some(
-        (attachment) =>
-          !isImageMediaType(attachment.mediaType) ||
-          !/^[A-Za-z0-9+/]*={0,2}$/.test(attachment.base64Data)
-      )
-    )
-      throw new Error('Codex accepts inline PNG/JPEG/GIF/WebP image attachments only')
-  }
-
-  /**
-   * The one input mapping both transports use — `turn/start` and `turn/steer`
-   * take the same `UserInput[]`, so a divergence here would be a queued message
-   * that reaches the model differently from a typed one.
-   */
-  private turnInput(prompt: string, attachments?: CodexAttachments): UserInput[] {
-    this.assertAttachments(attachments)
-    return [
-      { type: 'text', text: prompt, text_elements: [] },
-      ...(attachments ?? []).map((attachment) => ({
-        type: 'image' as const,
-        url: `data:${attachment.mediaType};base64,${attachment.base64Data}`
-      }))
-    ]
-  }
-
   /**
    * Hand ONE held item to Codex (ADR-053 on this engine's two transports).
    *
@@ -576,7 +517,7 @@ export class CodexSession extends BaseSession {
           threadId: this.threadId,
           expectedTurnId: turnId,
           clientUserMessageId,
-          input: this.turnInput(item.text, item.attachments)
+          input: codexTurnInput(item.text, item.attachments)
         })
       } catch (error) {
         // An ambiguous timeout MAY have been delivered, so it is reconciled and
@@ -697,7 +638,7 @@ export class CodexSession extends BaseSession {
     clientUserMessageId = `msg-${randomUUID()}`
   ): Promise<void> {
     if (this.closed) throw new Error('Codex session is disconnected')
-    this.assertAttachments(attachments)
+    assertCodexAttachments(attachments)
     if (this.willQueue && prompt !== null)
       throw new Error('Codex turn is already running; send this prompt through the queue')
     if (prompt !== null) {
@@ -716,7 +657,7 @@ export class CodexSession extends BaseSession {
       const result = await this.client.request('turn/start', {
         threadId: this.threadId!,
         clientUserMessageId,
-        input: this.turnInput(prompt, attachments),
+        input: codexTurnInput(prompt, attachments),
         ...(this.model !== undefined ? { model: this.model } : {}),
         ...(this.effort !== undefined ? { effort: this.effort } : {}),
         ...this.turnPolicy()
@@ -994,17 +935,12 @@ export class CodexSession extends BaseSession {
   }
 
   /** The native policy this session's shared mode maps onto. Unknown modes fail toward asking. */
-  private modePolicy(): (typeof TURN_POLICY)[string] {
-    return TURN_POLICY[this.permissionMode] ?? TURN_POLICY.default
+  private modePolicy(): CodexModePolicy {
+    return codexModePolicy(this.permissionMode)
   }
 
-  private turnPolicy(): {
-    approvalPolicy: AskForApproval
-    sandboxPolicy: SandboxPolicy
-    approvalsReviewer: ApprovalsReviewer
-  } {
-    const { approvalPolicy, sandbox, approvalsReviewer } = this.modePolicy()
-    return { approvalPolicy, sandboxPolicy: codexSandboxPolicy(sandbox), approvalsReviewer }
+  private turnPolicy(): ReturnType<typeof codexTurnPolicy> {
+    return codexTurnPolicy(this.permissionMode)
   }
 
   async interrupt(): Promise<void> {

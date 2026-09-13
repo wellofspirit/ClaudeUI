@@ -16,8 +16,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it("is version 6 (both bridge exchanges became long polls, so Bun's ~300 s fetch idle timeout can no longer kill a held approval)", () => {
-    expect(PI_BRIDGE_VERSION).toBe('6')
+  it("is version 7 (ADR-033 slice H added 'codex' to dispatch_agent's engine enum)", () => {
+    expect(PI_BRIDGE_VERSION).toBe('7')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -423,9 +423,11 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
           },
           required: ['source']
         })
+        // All three OTHER engines — 'codex' joined in bridge v7 (ADR-033 slice
+        // H). pi itself is absent: pi->pi is same-engine and guard-rejected.
         expect(tools.get('dispatch_agent')!.parameters).toMatchObject({
           type: 'object',
-          properties: { engine: { type: 'string', enum: ['claude', 'opencode'] } },
+          properties: { engine: { type: 'string', enum: ['claude', 'opencode', 'codex'] } },
           required: ['engine', 'prompt']
         })
       }
