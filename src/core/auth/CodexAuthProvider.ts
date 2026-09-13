@@ -63,14 +63,23 @@ export class CodexAuthProvider implements EngineAuthProvider {
     const vault = await this.vault.getStatus().catch(() => null)
     const active = vault?.accounts.find((account) => account.id === vault.activeId)
     if (active) {
+      // Two ways one stored account is already dead, and BOTH have to read as
+      // "sign in again" rather than as a healthy subscription (ADR-030):
+      //
+      //  · the vault's own refresh was revoked — `needsReauth`;
+      //  · the backend REFUSES the token the vault still holds. Nothing expired,
+      //    so no refresh was ever attempted and the vault looks fine; what the
+      //    user sees is the catalog coming back empty, which slice 2a's live run
+      //    surfaced as the generic "No Codex models were discovered" banner.
+      //    `models()` is the narrowest probe of that — a bare `model/list`, with
+      //    none of `modelOptions`'s provider assertions — so a misconfigured
+      //    `model_provider` cannot be mistaken for a refused credential.
+      const rejected = active.needsReauth || !(await this.catalogReadable())
       return {
         openai: {
-          // A revoked refresh token is reported as such rather than as a healthy
-          // subscription (ADR-030): the turn WILL fail, and the sign-in prompt
-          // is the only thing that fixes it.
-          authState: active.needsReauth ? 'unauthenticated' : 'authenticated',
+          authState: rejected ? 'unauthenticated' : 'authenticated',
           billingType: 'subscription',
-          requiresLogin: active.needsReauth,
+          requiresLogin: rejected,
           label: active.email ?? 'ChatGPT'
         }
       }
@@ -94,6 +103,19 @@ export class CodexAuthProvider implements EngineAuthProvider {
         error: status.error ?? status.catalogError,
         label: status.authKind === 'chatgpt' ? 'Native ChatGPT' : 'Native Codex'
       }
+    }
+  }
+
+  /**
+   * Can the injected identity read the model catalog? Any failure — transport,
+   * refusal, an empty catalog — answers no; this runs only on the error path of
+   * a session that already has nothing to show.
+   */
+  private async catalogReadable(): Promise<boolean> {
+    try {
+      return (await this.service.models()).length > 0
+    } catch {
+      return false
     }
   }
 

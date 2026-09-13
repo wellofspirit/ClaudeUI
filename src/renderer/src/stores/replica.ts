@@ -814,6 +814,7 @@ function projectSession(
     sdkActive: c.sdkActive,
     selectedEngineId: c.selectedEngineId,
     selectedModel: c.selectedModel,
+    authRequired: c.authRequired,
     ...(c.codexModelExplicit !== undefined ? { codexModelExplicit: c.codexModelExplicit } : {}),
     // The per-session mirror of the app-level map, so `session:status`'s
     // worktree-exit rule (the reducer drops the entry when cwd returns to

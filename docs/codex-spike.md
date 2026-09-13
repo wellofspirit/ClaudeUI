@@ -524,3 +524,11 @@ The fixture setup and RPC shapes were checked against the following sources at
 - [Thread protocol definitions](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/app-server-protocol/src/protocol/v2/thread.rs).
 - [Turn protocol definitions](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/app-server-protocol/src/protocol/v2/turn.rs).
 - [Plugin startup gating](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core-plugins/src/manager.rs).
+
+## Per-thread MCP override probe (ADR-068 §5 gate, 2026-09-14)
+
+**Question.** Does `thread/start.config.mcp_servers` reach Codex's MCP launcher, so the shared Claude MCP list can be delivered at runtime without writing `config.toml`? `model_catalog_json` is documented as a per-thread no-op, so this could not be assumed.
+
+**Method.** Pinned 0.154.0 on Windows x64, isolated `CODEX_HOME` and replacement environment, localhost provider stub (never called), `historyMode: paginated`, `model: mock-model`. The "MCP server" was a node script that appends a marker file the moment it is spawned and echoes its stdin. Two threads on two fresh app-servers: a control with no override, then `thread/start { ..., config: { mcp_servers: { probe: { command: <node>, args: [<stub>, 'from-thread-override'] } } } }`.
+
+**Result.** Control: no marker, no MCP notifications, `mcpServerStatus/list` empty. Override: the stub was spawned with the override's argv, received the MCP `initialize` handshake on stdin (`protocolVersion 2025-06-18`), and the client saw `mcpServer/startupStatus/updated` twice. **The per-thread `config.mcp_servers` override is honoured**; the JSON shape is the `config.toml` shape (`command`/`args`/`env`, or `url` with `bearer_token_env_var`/`http_headers`/`env_http_headers`). `mcpServerStatus/list` timed out against the stub because it never answered `initialize`; that is the stub, not the override. Probe script kept out of the repo (reviewer scratchpad).

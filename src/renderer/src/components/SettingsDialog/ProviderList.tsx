@@ -240,10 +240,6 @@ export function ProviderList({
           opencodeInstalled={opencodeInstalled}
           onWrote={handleWrote}
           onClose={() => setOpenId(null)}
-          onAddProvider={(focusId) => {
-            setOpenId(null)
-            setAdding({ focusId: focusId ?? null })
-          }}
         />
       )}
 

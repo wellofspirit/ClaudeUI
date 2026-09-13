@@ -106,7 +106,7 @@ beforeEach(() => {
         btwQuestion: null,
         btwResponse: null,
         btwLoading: false,
-        vendorAuthRequired: null
+        authRequired: null
       }
     },
     settings: {
@@ -467,8 +467,13 @@ describe('MessageBubble', () => {
       expect(screen.getByText('Overloaded')).toBeInTheDocument()
     })
 
-    it('renders auth variant with Login action for authentication errors', () => {
-      useSessionStore.setState({ authState: null })
+    /**
+     * ADR-068 §3: the card is a ROW now, not a flow. The three states it used to
+     * walk (waiting, manual paste, signed-in + Retry) live in `SignInDialog`,
+     * and `AuthEntryPoints.component.test.tsx` pins what this row hands it.
+     */
+    it('renders the compact auth row, not the generic API-error card', () => {
+      useSessionStore.setState({ authState: null, signInDialog: null })
       const msg = makeChatMessage({
         role: 'system',
         content: [
@@ -487,16 +492,17 @@ describe('MessageBubble', () => {
           thinkingStartedAt={null}
         />
       )
-      // Auth variant — not the generic collapsible "API Error" card
-      expect(screen.getByText('Authentication failed')).toBeInTheDocument()
-      expect(screen.getByText('Log in with Claude')).toBeInTheDocument()
+      expect(screen.getByTestId('AuthErrorBlock')).toHaveTextContent(
+        'Turn stopped: Claude rejected the credential'
+      )
+      expect(screen.getByTestId('AuthErrorBlock.signIn')).toBeInTheDocument()
       expect(screen.queryByText('API Error')).not.toBeInTheDocument()
     })
 
-    it('clicking Log in triggers signIn', () => {
+    it('Sign in opens the dialog and starts no flow of its own', () => {
       const signIn = vi.fn().mockResolvedValue(undefined)
       ;(globalThis as any).window.api.signIn = signIn
-      useSessionStore.setState({ authState: null })
+      useSessionStore.setState({ authState: null, signInDialog: null })
       const msg = makeChatMessage({
         role: 'system',
         content: [{ type: 'api_error', errorType: 'authentication', errorMessage: '401' } as any]
@@ -509,51 +515,20 @@ describe('MessageBubble', () => {
           thinkingStartedAt={null}
         />
       )
-      screen.getByText('Log in with Claude').click()
-      expect(signIn).toHaveBeenCalledOnce()
+      act(() => {
+        screen.getByTestId('AuthErrorBlock.signIn').click()
+      })
+      expect(signIn).not.toHaveBeenCalled()
+      expect(useSessionStore.getState().signInDialog).toMatchObject({
+        providerId: 'anthropic',
+        mode: 'reauth'
+      })
     })
 
-    it('auth variant shows signed-in success state after this card initiates login', () => {
-      ;(globalThis as any).window.api.signIn = vi.fn().mockResolvedValue(undefined)
-      useSessionStore.setState({ authState: null })
-      const msg = makeChatMessage({
-        role: 'system',
-        content: [{ type: 'api_error', errorType: 'authentication', errorMessage: '401' } as any]
-      })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={false}
-          thinkingStartedAt={null}
-        />
-      )
-      // This card must initiate login to follow the global flow state.
-      act(() => {
-        screen.getByText('Log in with Claude').click()
-      })
-      act(() => {
-        useSessionStore.setState({
-          authState: {
-            status: 'success',
-            account: {
-              email: 'user@example.com',
-              organization: null,
-              subscriptionType: 'Claude Team'
-            },
-            error: null
-          }
-        })
-      })
-      expect(screen.getByText('Signed in as user@example.com')).toBeInTheDocument()
-      expect(screen.getByText('Claude Team subscription')).toBeInTheDocument()
-      expect(screen.getByText('Retry message')).toBeInTheDocument()
-    })
-
-    it('a non-initiating error card stays in the error state even when a login succeeded elsewhere (no retry loop)', () => {
-      // Global flow is "success" (another card logged in), but THIS freshly
-      // arrived error card did not initiate it — it must show Log in, not a
-      // stale "Retry message" success that would loop. See ADR-014.
+    it('a global flow state cannot turn this row into a success card (no retry loop)', () => {
+      // The card used to mirror `authState`, which is how a freshly arrived
+      // error could inherit someone else's "success" and offer a Retry that
+      // re-failed. It renders the FACT of the rejection now, and nothing else.
       useSessionStore.setState({
         authState: {
           status: 'success',
@@ -573,8 +548,29 @@ describe('MessageBubble', () => {
           thinkingStartedAt={null}
         />
       )
-      expect(screen.getByText('Authentication failed')).toBeInTheDocument()
+      expect(screen.getByTestId('AuthErrorBlock')).toBeInTheDocument()
+      expect(screen.queryByText('Signed in as user@example.com')).not.toBeInTheDocument()
       expect(screen.queryByText('Retry message')).not.toBeInTheDocument()
+    })
+
+    it('Dismiss removes the row', () => {
+      useSessionStore.setState({ authState: null, signInDialog: null })
+      const msg = makeChatMessage({
+        role: 'system',
+        content: [{ type: 'api_error', errorType: 'authentication', errorMessage: '401' } as any]
+      })
+      render(
+        <MessageBubble
+          message={msg}
+          pendingApprovals={[]}
+          isLastAssistant={false}
+          thinkingStartedAt={null}
+        />
+      )
+      act(() => {
+        screen.getByTestId('AuthErrorBlock.dismiss').click()
+      })
+      expect(screen.queryByTestId('AuthErrorBlock')).not.toBeInTheDocument()
     })
   })
 

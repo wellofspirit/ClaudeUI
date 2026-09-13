@@ -2,11 +2,6 @@ import { useState, useEffect, useCallback, useSyncExternalStore } from 'react'
 import { DEFAULT_SETTINGS, useActiveSession, useSessionStore } from '../../stores/session-store'
 import type { AppSettings } from '../../stores/session-store'
 import { PermissionsDialog } from '../PermissionsDialog'
-import {
-  OAuthOutcomeNotice,
-  OAuthPasteBackFlow,
-  classifyOAuthError
-} from '../auth/OAuthPasteBackFlow'
 import type {
   ClaudePermissions,
   ProxySettings,
@@ -361,22 +356,17 @@ function ModelEffortRow({
 // ── Accounts (multi-account support, ADR-015) ────────────────────────
 
 /**
- * Adding an account starts a Claude login. On DESKTOP the host opens its own
- * browser and nothing more is needed here. On WEB (ADR-057 / S4-UI) the host
- * opens nothing: `account:add` returns the flow's `pendingSignIn` snapshot, we
- * fold it into the store's `authState` — the SAME field AuthBanner drives, so
- * there is still exactly one Claude-flow state — and the shared paste-back flow
- * finishes it through `submitOAuthCode`.
+ * The account list. Switching and removing are writes this pane owns; ADDING is
+ * a sign-in, and since ADR-068 §3 every sign-in runs in `SignInDialog` — the
+ * paste panel and the outcome notice that used to live here are gone, along
+ * with the second copy of the flow they implemented. `addAccount()` itself is
+ * unchanged; the dialog is simply the thing that calls it now.
  */
 function AccountsSetting(): React.JSX.Element {
   const accounts = useSessionStore((s) => s.accountsState)
   const setAccounts = useSessionStore((s) => s.setAccountsState)
-  const authState = useSessionStore((s) => s.authState)
-  const setAuthState = useSessionStore((s) => s.setAuthState)
-  const submitOAuthCode = useSessionStore((s) => s.submitOAuthCode)
-  const cancelSignIn = useSessionStore((s) => s.cancelSignIn)
+  const openSignIn = useSessionStore((s) => s.openSignIn)
   const [busy, setBusy] = useState(false)
-  const [submittingCode, setSubmittingCode] = useState(false)
 
   useEffect(() => {
     void window.api.getAccounts().then(setAccounts)
@@ -384,16 +374,11 @@ function AccountsSetting(): React.JSX.Element {
 
   const enabled = accounts?.enabled ?? false
   const isMac = window.api.platform === 'darwin'
-  const isWeb = window.api.platform === 'web'
-  const pasteBack = isWeb && authState?.status === 'authorizing'
 
   const run = async (fn: () => Promise<AccountsState>): Promise<void> => {
     setBusy(true)
     try {
-      const next = await fn()
-      setAccounts(next)
-      // Only `account:add` on a remote connection ever carries this.
-      if (next.pendingSignIn) setAuthState(next.pendingSignIn)
+      setAccounts(await fn())
     } finally {
       setBusy(false)
     }
@@ -470,36 +455,11 @@ function AccountsSetting(): React.JSX.Element {
             testid="AccountsSetting.addAccount"
             variant="tinted"
             disabled={busy}
-            onClick={() => void run(() => window.api.addAccount())}
+            onClick={() => openSignIn({ providerId: 'anthropic', mode: 'add' })}
           >
             + Add account
           </Button>
         </SettingRow>
-      )}
-
-      {enabled && pasteBack && (
-        <div data-testid="AccountsSetting.signInFlow" className="px-3.5 py-2.5">
-          <OAuthPasteBackFlow
-            variant="code"
-            url={authState?.manualUrl}
-            busy={submittingCode}
-            onSubmit={(pasted) => {
-              setSubmittingCode(true)
-              void submitOAuthCode(pasted)
-                .then(() => void window.api.getAccounts().then(setAccounts))
-                .finally(() => setSubmittingCode(false))
-            }}
-            onCancel={() => void cancelSignIn()}
-          />
-        </div>
-      )}
-      {enabled && isWeb && authState?.status === 'error' && authState.error && (
-        <div className="px-3.5 py-2.5">
-          <OAuthOutcomeNotice
-            kind={classifyOAuthError(authState.error)}
-            message={authState.error}
-          />
-        </div>
       )}
     </div>
   )

@@ -140,7 +140,6 @@ describe('the transient set is the `canonical: false` complement', () => {
       'git:status-update',
       'usage:data',
       'usage:block-data',
-      'session:vendor-auth-required',
       'session:bash-output',
       'session:background-output'
     ]) {

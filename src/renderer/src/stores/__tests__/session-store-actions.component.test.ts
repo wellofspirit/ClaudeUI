@@ -6,7 +6,12 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { useSessionStore, OPENCODE_DEFAULT_MODEL, PI_DEFAULT_MODEL } from '../session-store'
+import {
+  useSessionStore,
+  OPENCODE_DEFAULT_MODEL,
+  PI_DEFAULT_MODEL,
+  CODEX_SIGN_IN_REQUIRED_ERROR
+} from '../session-store'
 import { claudeModel } from '../../../../shared/types'
 import {
   resolveClaudeCapabilities,
@@ -2284,6 +2289,50 @@ describe('stale CONFIGURED default model errors instead of substituting (Item 3b
 
     expect(store().sessions['r-pi-stale'].selectedModel).toBe('')
     expect(store().sessions['r-pi-stale'].errors.join(' ')).toContain('openai-codex/gone')
+  })
+
+  /**
+   * ADR-068 §4, the SERVICE path. An empty Codex catalog has two causes needing
+   * opposite advice, and only the probe can tell them apart — so the banner asks
+   * before it advises, and keeps the installation hint whenever it has no answer.
+   */
+  it('an empty Codex catalog blames the ChatGPT sign-in only when the probe does', async () => {
+    // The banner's real producer is switching a not-yet-spawned session to Codex
+    // and finding nothing to run — `setSelectedEngine`'s no-resolved-model branch.
+    const stage = async (probe: () => Promise<unknown>, routingId: string): Promise<string[]> => {
+      ;(window.api as any).vendorAuthProbe = vi.fn(probe)
+      useSessionStore.setState({
+        activeSessionId: null,
+        lastSelectedEngineId: 'claude',
+        availableModels: []
+      })
+      store().createNewSession(routingId, '/proj')
+      useSessionStore.setState({ activeSessionId: routingId, availableModels: [] })
+      store().setSelectedEngine('codex')
+      await vi.waitFor(() => expect(store().sessions[routingId].errors).toHaveLength(1))
+      return store().sessions[routingId].errors
+    }
+
+    expect(
+      await stage(
+        async () => ({ openai: { authState: 'unauthenticated', requiresLogin: true } }),
+        'r-codex-refused'
+      )
+    ).toEqual([CODEX_SIGN_IN_REQUIRED_ERROR])
+
+    expect(
+      (
+        await stage(async () => ({ openai: { authState: 'authenticated' } }), 'r-codex-healthy')
+      ).join(' ')
+    ).toContain('Check installation')
+
+    expect(
+      (
+        await stage(async () => {
+          throw new Error('probe failed')
+        }, 'r-codex-unknown')
+      ).join(' ')
+    ).toContain('Check installation')
   })
 
   it('an EMPTY engine model list cannot validate, so the configured value passes through', () => {

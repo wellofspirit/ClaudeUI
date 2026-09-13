@@ -79,6 +79,7 @@ import {
 import { loadEngineConfig, loadSharedAutoModeConfig } from '../services/ui-config'
 import type { ClaudePermissions, PermissionScope } from '../../shared/types'
 import { blockUsageService } from '../services/block-usage'
+import { opencodeAuthRequiredProviderId } from '../shared-providers/chatgpt-route'
 import {
   crossEngineDispatcher,
   crossEngineDispatchAvailable
@@ -1227,10 +1228,14 @@ export class OpencodeSession extends BaseSession {
 
       case 'auth-required':
         this.isProcessing = false
-        this.send('session:vendor-auth-required', {
-          vendorId: output.vendorId,
-          message: output.message
+        // ADR-068 §4: one event for every engine, naming the PROVIDER the
+        // sign-in dialog can act on rather than opencode's own vendor id. The
+        // event carries no text, so opencode's verbatim message rides along as
+        // an ordinary error row — dropping it would lose the vendor's own words.
+        this.send('session:auth-required', {
+          providerId: opencodeAuthRequiredProviderId(output.vendorId)
         })
+        this.send('session:error', output.message)
         this.sendStatus()
         this.resetInactivityTimer()
         break

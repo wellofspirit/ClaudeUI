@@ -17,7 +17,9 @@ import {
   rekeyTargetFor,
   type ReducerAux
 } from '../reducer'
-import { isVolatileStream } from '../channels'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { channelSpec, isVolatileStream } from '../channels'
 import { applyStreamFrame, streamFrameFrom } from '../stream'
 import { emptyCanonicalState, fromSnapshot, toSnapshot, type CanonicalState } from '../state'
 import type { ChatMessage, SessionStatus, StatusLineData } from '../../../../shared/types'
@@ -1408,5 +1410,37 @@ describe('reducer — subagents', () => {
     expect(s.sessions['rid'].activeTasks).toEqual({
       t1: { taskId: 'a', taskType: 'local_agent' }
     })
+  })
+})
+
+describe('session:auth-required — one event, on the wire (ADR-068 §4, slice 3)', () => {
+  it('sets authRequired, a running turn clears it, and a snapshot round-trip keeps it', () => {
+    const owed = fold([
+      created(),
+      ['session:status', 'rid', status({ state: 'idle' })],
+      ['session:auth-required', 'rid', { providerId: 'chatgpt', accountId: 'acct-a' }]
+    ])
+    expect(owed.sessions['rid'].authRequired).toEqual({
+      providerId: 'chatgpt',
+      accountId: 'acct-a'
+    })
+
+    // The wire carries it now — slice 2a deliberately blanked it on restore
+    // because nothing rendered it; slice 3 is the client that does.
+    const restored = fromSnapshot(toSnapshot(owed, 7))
+    expect(restored.sessions['rid'].authRequired).toEqual({
+      providerId: 'chatgpt',
+      accountId: 'acct-a'
+    })
+
+    const cleared = fold([['session:status', 'rid', status({ state: 'running' })]], owed)
+    expect(cleared.sessions['rid'].authRequired).toBeNull()
+  })
+
+  it('session:vendor-auth-required is gone from the channel specs and the event map', () => {
+    expect(channelSpec('session:vendor-auth-required')).toBeUndefined()
+    const events = readFileSync(join(process.cwd(), 'src/core/shared/sync/events.ts'), 'utf8')
+    expect(events).not.toContain('session:vendor-auth-required')
+    expect(events).toContain("'session:auth-required'")
   })
 })

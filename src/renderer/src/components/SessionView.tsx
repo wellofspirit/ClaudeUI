@@ -20,6 +20,7 @@ import { useIsMobile, useVisualViewportHeight } from '../hooks/useIsMobile'
 import { QuitWorktreeModal } from './QuitWorktreeModal'
 import { RemoteServeBanner } from './RemoteServeBanner'
 import { SettingsDialog } from './SettingsDialog'
+import { SignInDialog } from './auth/SignInDialog'
 import { settingsTargetFromEvent, type SettingsTarget } from './SettingsDialog/settings-target'
 import { nextPermissionMode, autoModeAvailableForEngine } from '../../../shared/permission-modes'
 
@@ -401,6 +402,11 @@ export function SessionView(): React.JSX.Element {
           initialTarget={mobileSettings.target}
         />
       )}
+      {/* The ONE sign-in dialog (ADR-068 §3), mounted once beside the settings
+          dialog and driven entirely by the store's `signInDialog` slice — every
+          entry point (banner, transcript row, settings rows, provider sheets)
+          opens it by setting that slice rather than by rendering a flow. */}
+      <SignInDialog />
       {/* App-level (not per-session) notice: `tailscale serve` failed while TLS
           mode is on, so the remote bookmark is dead. Fixed overlay, desktop-only
           — renders null on web and while serve is healthy. */}

@@ -57,7 +57,12 @@ describe('native auth provider', () => {
     // The identity every Codex process is injected with IS the vault's active
     // account (ADR-068 §1), so the native read must not be what the UI shows —
     // and must not even be reached.
-    const service = { accountStatus: vi.fn(), modelOptions: vi.fn(), startLogin: vi.fn() }
+    const service = {
+      accountStatus: vi.fn(),
+      modelOptions: vi.fn(),
+      models: vi.fn(async () => [{ model: 'gpt-5-codex' }]),
+      startLogin: vi.fn()
+    }
     const provider = new CodexAuthProvider(
       service as unknown as CodexService,
       vaultWith([
@@ -76,14 +81,49 @@ describe('native auth provider', () => {
     expect(service.accountStatus).not.toHaveBeenCalled()
   })
 
+  it('a stored account whose catalog read is refused asks for a sign-in (service path)', async () => {
+    // ADR-068 §4: a fake or revoked-at-the-backend token leaves the vault looking
+    // healthy — nothing expired, so no refresh was attempted — while every Codex
+    // read comes back empty. Reporting `authenticated` there is what made the
+    // failure look like a broken installation.
+    const refused = new CodexAuthProvider(
+      {
+        accountStatus: vi.fn(),
+        models: vi.fn(async () => {
+          throw new Error('Codex transport: rpc-error-401')
+        })
+      } as unknown as CodexService,
+      vaultWith([{ id: 'acct-one', email: 'first@example.com' }])
+    )
+    expect(await refused.probe()).toEqual({
+      openai: {
+        authState: 'unauthenticated',
+        billingType: 'subscription',
+        requiresLogin: true,
+        label: 'first@example.com'
+      }
+    })
+
+    const empty = new CodexAuthProvider(
+      { accountStatus: vi.fn(), models: vi.fn(async () => []) } as unknown as CodexService,
+      vaultWith([{ id: 'acct-one', email: 'first@example.com' }])
+    )
+    expect(await empty.probe()).toMatchObject({
+      openai: { authState: 'unauthenticated', requiresLogin: true }
+    })
+  })
+
   it('a revoked active account asks for a sign-in rather than claiming health', async () => {
+    const models = vi.fn(async () => [{ model: 'gpt-5-codex' }])
     const provider = new CodexAuthProvider(
-      { accountStatus: vi.fn() } as unknown as CodexService,
+      { accountStatus: vi.fn(), models } as unknown as CodexService,
       vaultWith([{ id: 'acct-one', email: 'first@example.com', needsReauth: true }])
     )
     expect(await provider.probe()).toMatchObject({
       openai: { authState: 'unauthenticated', requiresLogin: true }
     })
+    // Short-circuited: a revoked account is already the answer.
+    expect(models).not.toHaveBeenCalled()
   })
 
   it('has no product login surface left', () => {

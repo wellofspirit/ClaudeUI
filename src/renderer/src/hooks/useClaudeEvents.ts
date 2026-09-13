@@ -271,9 +271,6 @@ export function useClaudeEvents(): void {
       onSyncEvent('session:sandbox-violation', (routingId, message) => {
         useSessionStore.getState().addSandboxViolation(routingId, message)
       }),
-      onSyncEvent('session:vendor-auth-required', (routingId, data) => {
-        useSessionStore.getState().setVendorAuthRequired(routingId, data)
-      }),
       onSyncEvent('session:bash-output', (routingId, data) => {
         useSessionStore
           .getState()
@@ -546,8 +543,9 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
 
     case 'session:result': {
       const session = store.sessions[routingId]
-      // Clear any pending vendor auth required card when a turn succeeds
-      store.clearVendorAuthRequired(routingId)
+      // The owed sign-in is the REDUCER's now (cleared on the next running
+      // status, ADR-068 §4) — a second clear here would be a second
+      // interpretation of the same fact, and a sealed field has one writer.
       // Mark attention + notify when the agent's turn ends (user's turn)
       if (!session?.sdkActive) return
       // …unless it isn't: a `result` under a running delegated task is followed by

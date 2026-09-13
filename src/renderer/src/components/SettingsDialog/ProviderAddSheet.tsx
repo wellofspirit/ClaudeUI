@@ -27,9 +27,9 @@
  * WHERE EACH SAVE GOES — every one is an EXISTING writer, as in the Manage
  * sheet; this file introduces no channel of its own:
  *
- *  · subscription (ChatGPT)   → `vendor-auth:oauth-authorize` + `:oauth-callback`
- *                               for pi's `openai-codex` (the vault's own sign-in,
- *                               ADR-036), through the shared `VendorOAuthFlow`
+ *  · subscription (ChatGPT)   → the same vault sign-in (pi's `openai-codex`,
+ *                               ADR-036), but run in `SignInDialog` since
+ *                               ADR-068 §3 — this row only opens it
  *  · subscription (Claude/pi) → nothing: pi's login is a terminal command, so the
  *                               row COPIES it (`pi:binary-path`)
  *  · catalog, API key         → `vendor-auth:set-key` once per selected engine
@@ -55,6 +55,7 @@ import { SheetFrame, SheetGroup } from './SheetFrame'
 import { CredentialChip, EngineChip } from './ProviderSheet'
 import { ProviderForm, blankProviderDraft, normalizeProviderDraft } from './ProviderForm'
 import { VendorOAuthFlow } from './VendorOAuthFlow'
+import { useSessionStore } from '../../stores/session-store'
 
 /** Testid namespace (ADR-027 tier 1/2). */
 const SHEET = 'ProviderAddSheet'
@@ -121,6 +122,8 @@ export function ProviderAddSheet({
   const [copied, setCopied] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  /** ADR-068 §3 — the subscription row opens the one dialog, not a flow. */
+  const openSignIn = useSessionStore((s) => s.openSignIn)
 
   const { entries, opencodeInstalled } = snapshot
 
@@ -294,13 +297,23 @@ export function ProviderAddSheet({
                 </SettingRow>
                 {(!chatgptConnected || chatgptAccounts > 0) && (
                   <div className="px-3.5 pb-3 -mt-1">
-                    <VendorOAuthFlow
-                      engineId="pi"
-                      vendorId={CODEX_VENDOR_ID}
-                      label={chatgptAccounts > 0 ? 'Add another account' : 'Sign in'}
+                    {/* ADR-068 §3: the flow itself lives in `SignInDialog`, so
+                        this is a button that opens it — `add` once there is an
+                        account to add to, `reauth` for the first sign-in. */}
+                    <Button
+                      variant="tinted"
+                      testid={`${SHEET}.chatgptSignIn`}
+                      dataId={CHATGPT_ID}
                       disabled={busy}
-                      onDone={() => void onAdded(CHATGPT_ID)}
-                    />
+                      onClick={() =>
+                        openSignIn({
+                          providerId: 'chatgpt',
+                          mode: chatgptAccounts > 0 ? 'add' : 'reauth'
+                        })
+                      }
+                    >
+                      {chatgptAccounts > 0 ? 'Add another account' : 'Sign in'}
+                    </Button>
                   </div>
                 )}
               </div>

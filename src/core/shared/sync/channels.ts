@@ -306,17 +306,11 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: false,
     why: 'Same as session:error — no snapshot field.'
   },
-  'session:vendor-auth-required': {
-    cls: 'replicated',
-    ring: true,
-    canonical: false,
-    why: 'Rings and fans out; no snapshot field (the card is re-derived from the next turn).'
-  },
   'session:auth-required': {
     cls: 'replicated',
     ring: true,
     canonical: true,
-    why: 'ADR-068 §4: the session remembers which provider/account was rejected until the next turn starts, so a client that reconnects mid-outage still knows a sign-in is owed. Core-internal for now — the wire field and the banner land with the sign-in dialog in slice 3.'
+    why: 'ADR-068 §4: the session remembers which provider/account was rejected until the next turn starts, so a client that reconnects mid-outage still knows a sign-in is owed. Carried on PerSessionSnapshot as `authRequired`; it replaced `session:vendor-auth-required` in slice 3.'
   },
   'session:auth-source': {
     cls: 'replicated',

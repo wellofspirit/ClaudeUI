@@ -231,6 +231,45 @@ export function resolveEngineDefaultModel(
   return engineMeta(engineId).defaultModelValue()
 }
 
+/**
+ * The Codex-discovery banner when the identity Codex runs under is what was
+ * refused (ADR-068 §4).
+ *
+ * A distinct STRING rather than a flag, because a session's errors are a list of
+ * strings in the store and on the wire; `FloatingError` matches this one to
+ * attach the Sign in action. The generic hint below stays for every other cause
+ * — a missing binary, a native model/provider misconfiguration — because those
+ * are not fixed by signing in and must not be told to.
+ */
+export const CODEX_SIGN_IN_REQUIRED_ERROR =
+  'ChatGPT rejected the credential Codex runs under, so no Codex models could be read. Sign in again to continue.'
+
+/**
+ * Banner the missing default model, asking WHY first when the answer changes the
+ * advice.
+ *
+ * Every engine but Codex is answered synchronously from the configured value.
+ * An empty CODEX catalog is the one case with two causes that need opposite
+ * advice — a broken installation, or the vault's ChatGPT credential being
+ * refused — and only `vendorAuthProbe('codex')` can tell them apart
+ * (`CodexAuthProvider` reports `unauthenticated` when the stored account cannot
+ * read the catalog). A probe that fails or says nothing keeps the generic hint:
+ * an unanswered question is not evidence.
+ */
+function reportStaleDefaultModel(routingId: string, engineId: EngineId, model: string): void {
+  const generic = staleDefaultModelMessage(engineId, model)
+  const addError = (text: string): void => useSessionStore.getState().addError(routingId, text)
+  if (engineId !== 'codex' || model) return addError(generic)
+  void window.api
+    .vendorAuthProbe('codex')
+    .then((probe) =>
+      addError(
+        probe.openai?.authState === 'unauthenticated' ? CODEX_SIGN_IN_REQUIRED_ERROR : generic
+      )
+    )
+    .catch(() => addError(generic))
+}
+
 /** The configured-but-missing default model for `engineId`, for error copy. */
 function configuredDefaultModelOf(engineId: EngineId, defaults: EngineDefaultModels): string {
   if (engineId === 'codex') return ''
@@ -735,8 +774,11 @@ export interface PerSessionState {
   btwQuestion: string | null
   btwResponse: string | null
   btwLoading: boolean
-  // Vendor auth required (opencode ProviderAuthError)
-  vendorAuthRequired: { vendorId: string; message: string } | null
+  /**
+   * The sign-in this session owes (ADR-068 §4) — SEALED: `session:auth-required`
+   * folds into it and a running turn clears it, both in the reducer.
+   */
+  authRequired: { providerId: string; accountId?: string } | null
 }
 
 /** Exported so the replica can build a store entry for a session it learns of first. */
@@ -812,7 +854,7 @@ export const EMPTY_SESSION_STATE: PerSessionState = {
   btwQuestion: null,
   btwResponse: null,
   btwLoading: false,
-  vendorAuthRequired: null
+  authRequired: null
 }
 
 /**
@@ -1014,6 +1056,25 @@ export interface VendorOAuthState {
   error?: string
 }
 
+/**
+ * What the sign-in dialog is open ON (ADR-068 §3).
+ *
+ * `mode` is the ENTRY's intent, not a stage: `reauth` opens the chooser on the
+ * account that failed, `switch` opens it to pick a different stored one, `add`
+ * skips the chooser and starts a new sign-in. `retry` carries the prompt whose
+ * turn the rejection killed, so the done state can offer to re-send it.
+ */
+export interface SignInRequest {
+  providerId: SignInProviderId
+  mode: 'reauth' | 'add' | 'switch'
+  /** The stored account the entry point blames, when it knows one. */
+  accountId?: string
+  retry?: { routingId: string; prompt: string }
+}
+
+/** The two providers ClaudeUI can actually drive a sign-in for. */
+export type SignInProviderId = 'anthropic' | 'chatgpt'
+
 export interface SessionState {
   // Multi-session
   activeSessionId: string | null
@@ -1098,6 +1159,17 @@ export interface SessionState {
   accountsState: AccountsState | null
   /** Global vendor OAuth flow state (auto/loopback OAuth in progress). */
   vendorOAuth: VendorOAuthState | null
+  /**
+   * What the ONE sign-in dialog is open on (ADR-068 §3), or null when it is
+   * closed. Deliberately NOT a third flow state: the flows themselves stay on
+   * `authState` (Anthropic) and `vendorOAuth` (ChatGPT), and the dialog is a
+   * view over them — dismissing it leaves a running flow running.
+   *
+   * Named `signInDialog` rather than the spec's `signIn` because the store
+   * already has a `signIn()` ACTION (the Anthropic driver the dialog calls) and
+   * one flat object cannot hold both.
+   */
+  signInDialog: SignInRequest | null
   activeView: ActiveView
   /** Bumped when a surface with no native folder dialog (the web client's
    *  sidebar double-click) asks the welcome screen to open its host-backed
@@ -1299,8 +1371,17 @@ export interface SessionState {
   cancelSignIn: () => Promise<void>
   setVendorOAuth(state: VendorOAuthState | null): void
   cancelVendorOAuth(): void
-  setVendorAuthRequired(routingId: string, data: { vendorId: string; message: string } | null): void
-  clearVendorAuthRequired(routingId: string): void
+  /** Open the one sign-in dialog. Replaces whatever it was open on. */
+  openSignIn(request: SignInRequest): void
+  /** Close it. The flow underneath keeps running — see {@link SessionState.signInDialog}. */
+  closeSignIn(): void
+  /**
+   * Dismiss the owed sign-in for one session. The FIELD is sealed, so this goes
+   * through the replica's sanctioned local write rather than a second writer:
+   * dismissing is a per-client act (the other client may still want the row),
+   * and the reducer's own clear — a turn that runs again — is unaffected.
+   */
+  clearAuthRequired(routingId: string): void
   authorizeVendorOAuth(
     engineId: EngineId,
     vendorId: string
@@ -1402,6 +1483,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   vendorAuth: null,
   accountsState: null,
   vendorOAuth: null,
+  signInDialog: null,
   blockUsage: null,
   activeView: { type: 'chat' } as ActiveView,
   welcomeBrowseToken: 0,
@@ -1561,11 +1643,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         { create: true }
       )
       // After the session exists — `addError` writes through `updateSession`.
-      if (staleDefault) {
-        useSessionStore
-          .getState()
-          .addError(routingId, staleDefaultModelMessage(engineId, staleDefault))
-      }
+      if (staleDefault) reportStaleDefaultModel(routingId, engineId, staleDefault)
       patchLocalApp({ recentSessionIds, sessionEngines })
       saveSessionConfig(state, { recentSessionIds, sessionEngines })
       if (switchTo) {
@@ -1665,12 +1743,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     })
     if (resolved === null) {
-      useSessionStore
-        .getState()
-        .addError(
-          id,
-          staleDefaultModelMessage(engineId, configuredDefaultModelOf(engineId, defaults))
-        )
+      reportStaleDefaultModel(id, engineId, configuredDefaultModelOf(engineId, defaults))
     }
     patchLocalApp({ sessionEngines })
     saveSessionConfig(state, { sessionEngines })
@@ -2530,6 +2603,8 @@ export const useSessionStore = create<SessionState>((set) => ({
     }))
   },
   setVendorOAuth: (state) => set({ vendorOAuth: state }),
+  openSignIn: (request) => set({ signInDialog: request }),
+  closeSignIn: () => set({ signInDialog: null }),
   cancelVendorOAuth: () => {
     // Invalidate any in-flight `auto` flow so its late-resolving callback can't
     // re-set vendorOAuth after the user cancelled (SHOULD-FIX 4).
@@ -2541,14 +2616,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     if (engineId) void window.api.vendorAuthOauthCancel(engineId).catch(() => {})
     set({ vendorOAuth: null })
   },
-  setVendorAuthRequired: (routingId, data) =>
-    set((s) => ({
-      sessions: updateSession(s.sessions, routingId, () => ({ vendorAuthRequired: data }))
-    })),
-  clearVendorAuthRequired: (routingId) =>
-    set((s) => ({
-      sessions: updateSession(s.sessions, routingId, () => ({ vendorAuthRequired: null }))
-    })),
+  clearAuthRequired: (routingId) => patchLocalSession(routingId, { authRequired: null }),
   authorizeVendorOAuth: async (engineId, vendorId) => {
     try {
       const allOptions = await window.api.vendorAuthListOptions(engineId)
@@ -2755,8 +2823,10 @@ export const useSessionStore = create<SessionState>((set) => ({
         draftAttachments: [],
         planReview: null,
         mockupDir: null,
-        mockupTitle: null,
-        vendorAuthRequired: null
+        mockupTitle: null
+        // `authRequired` is NOT reset here: it is sealed now, and the reducer's
+        // own `session:conversation-cleared` branch blanks it with the rest of
+        // the fresh session, for every client rather than only this one.
       }))
     }))
   },

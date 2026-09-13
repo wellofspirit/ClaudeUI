@@ -20,6 +20,7 @@ import { render, screen, fireEvent, cleanup, act, within } from '@testing-librar
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { chooseSelectMenuOption } from '@test/helpers/select-menu'
 import { ProviderList } from '../ProviderList'
+import { useSessionStore } from '../../../stores/session-store'
 import type {
   ProviderEntry,
   ProviderRegistrySnapshot
@@ -443,16 +444,20 @@ describe('ACCOUNTS', () => {
     expect(screen.queryByTestId('ProviderSheet.perSession')).not.toBeInTheDocument()
   })
 
-  it('Add account hands over to the existing sign-in flow, not a second one', async () => {
+  it('Add account opens the ONE sign-in dialog, and no flow renders here', async () => {
+    // ADR-068 §3: the sheet used to hand over to the Add sheet, which rendered
+    // `VendorOAuthFlow` inline. Both of those were sign-in surfaces; now there
+    // is one, and this row only asks for it.
     withAccounts(twoAccounts)
     await openSheet('chatgpt')
     await click(screen.getByTestId('ProviderSheet.addAccount'))
-    expect(screen.queryByTestId('ProviderSheet')).not.toBeInTheDocument()
-    expect(screen.getByTestId('ProviderAddSheet.search')).toHaveValue('chatgpt')
-    // Landing on the row is not enough: the row must still OFFER the sign-in
-    // once an account exists, or "+ Add account" opens a sheet with no control.
-    expect(screen.getByTestId('VendorOAuthFlow')).toHaveAttribute('data-id', 'openai-codex')
-    expect(screen.getByTestId('VendorOAuthFlow.start')).toHaveTextContent('Add another account')
+    expect(useSessionStore.getState().signInDialog).toEqual({
+      providerId: 'chatgpt',
+      mode: 'add'
+    })
+    expect(screen.queryByTestId('VendorOAuthFlow')).not.toBeInTheDocument()
+    // The sheet stays put — the dialog is mounted above it, not instead of it.
+    expect(screen.getByTestId('ProviderSheet')).toBeInTheDocument()
   })
 
   it('disconnects EVERY account from the footer, on the second press', async () => {
@@ -810,8 +815,8 @@ describe('the re-homed vault flows', () => {
     expect(screen.queryByTestId('ProviderSheet.editEndpoint')).not.toBeInTheDocument()
   })
 
-  it('hands a disconnected subscription to the ADD sheet rather than signing in here', async () => {
-    // One sign-in surface, and it is the one that ACQUIRES providers.
+  it('a disconnected subscription opens the sign-in dialog, not the Add sheet', async () => {
+    // One sign-in surface, and since ADR-068 §3 it is the dialog.
     snapshot = {
       ...snapshot,
       entries: snapshot.entries.map((e) =>
@@ -821,11 +826,12 @@ describe('the re-homed vault flows', () => {
     await openSheet('chatgpt')
     await click(screen.getByTestId('ProviderSheet.signIn'))
 
-    expect(screen.queryByTestId('ProviderSheet')).not.toBeInTheDocument()
-    const add = screen.getByTestId('ProviderAddSheet')
-    expect(add).toBeInTheDocument()
-    // Opened ON that row: the search is seeded with the provider handed over.
-    expect(screen.getByTestId('ProviderAddSheet.search')).toHaveValue('chatgpt')
+    expect(useSessionStore.getState().signInDialog).toEqual({
+      providerId: 'chatgpt',
+      mode: 'reauth'
+    })
+    expect(screen.queryByTestId('ProviderAddSheet')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('VendorOAuthFlow')).not.toBeInTheDocument()
   })
 })
 

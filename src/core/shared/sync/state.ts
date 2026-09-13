@@ -70,11 +70,9 @@ export interface CanonicalSessionState {
    * The credential this session needs was rejected and could not be renewed
    * (ADR-068 §4), cleared the moment a turn starts running again.
    *
-   * Core-internal and NOT on the wire yet, the same deliberate asymmetry
-   * `seeded` has: nothing renders it until the sign-in dialog lands (slice 3),
-   * and putting a field on `PerSessionSnapshot` that no client reads would
-   * advertise a contract that does not exist. A restored snapshot therefore
-   * comes back null; the event itself rings, so a reconnecting client replays it.
+   * ON the wire since slice 3 (`PerSessionSnapshot.authRequired`): the row that
+   * renders it is engine-neutral, so a client that reconnects mid-outage has to
+   * learn the owed sign-in from the snapshot as well as from the ringed event.
    */
   authRequired: { providerId: string; accountId?: string } | null
   /**
@@ -232,9 +230,7 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
       selectedEngineId: s.selectedEngineId ?? 'claude',
       selectedModel: s.selectedModel ?? 'default',
       ...(s.codexModelExplicit !== undefined ? { codexModelExplicit: s.codexModelExplicit } : {}),
-      // Not on the wire (see `CanonicalSessionState.authRequired`): a restored
-      // session starts owing no sign-in, and the ringed event re-applies one.
-      authRequired: null,
+      authRequired: s.authRequired ?? null,
       seeded: true
     }
   }
@@ -294,6 +290,7 @@ export function toSnapshot(state: CanonicalState, seq: number): FullStateSnapsho
       sdkActive: s.sdkActive,
       selectedEngineId: s.selectedEngineId,
       selectedModel: s.selectedModel,
+      authRequired: s.authRequired,
       ...(s.codexModelExplicit !== undefined ? { codexModelExplicit: s.codexModelExplicit } : {})
     }
   }

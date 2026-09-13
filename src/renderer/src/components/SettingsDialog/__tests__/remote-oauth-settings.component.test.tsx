@@ -74,70 +74,47 @@ function installAccountsApi(platform: string, over: Record<string, unknown> = {}
   ;(globalThis as unknown as { window: Record<string, unknown> }).window.open = vi.fn()
 }
 
-describe('Settings › Accounts — add-account sign-in', () => {
+describe('Settings › Accounts — add-account opens the ONE dialog', () => {
   beforeEach(() => {
-    useSessionStore.setState({ accountsState: null, authState: null })
+    useSessionStore.setState({ accountsState: null, authState: null, signInDialog: null })
   })
 
-  it('on web: folds the response’s pendingSignIn into authState and shows the flow', async () => {
+  it('+ Add account opens SignInDialog in add mode and starts no flow here', async () => {
+    // ADR-068 §3: this pane used to host the paste-back flow AND fold
+    // `pendingSignIn` into `authState` itself, which made it the fourth copy of
+    // the Claude sign-in. `addAccount()` is unchanged; the DIALOG calls it now.
     installAccountsApi('web')
     await act(async () => renderSection('accounts'))
-    expect(screen.queryByTestId('AccountsSetting.signInFlow')).toBeNull()
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('AccountsSetting.addAccount'))
     })
 
-    // ONE Claude-flow state, shared with AuthBanner.
-    expect(useSessionStore.getState().authState?.manualUrl).toBe(MANUAL_URL)
-    expect(screen.getByTestId('AccountsSetting.signInFlow')).toBeTruthy()
-    const flow = screen.getByTestId('OAuthPasteBackFlow')
-    expect(flow).toHaveAttribute('data-variant', 'code')
-    fireEvent.click(screen.getByTestId('OAuthPasteBackFlow.open'))
-    expect(window.open).toHaveBeenCalledWith(MANUAL_URL, '_blank', 'noopener,noreferrer')
-  })
-
-  it('on web: the pasted code goes to auth:submit-code', async () => {
-    installAccountsApi('web')
-    await act(async () => renderSection('accounts'))
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('AccountsSetting.addAccount'))
+    expect(useSessionStore.getState().signInDialog).toEqual({
+      providerId: 'anthropic',
+      mode: 'add'
     })
-    fireEvent.change(screen.getByTestId('OAuthPasteBackFlow.input'), { target: { value: 'zz1' } })
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('OAuthPasteBackFlow.submit'))
-    })
-    expect(window.api.submitOAuthCode).toHaveBeenCalledWith('zz1')
-  })
-
-  it('on desktop: no pendingSignIn, no flow (platform pin)', async () => {
-    installAccountsApi('darwin')
-    await act(async () => renderSection('accounts'))
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('AccountsSetting.addAccount'))
-    })
-    expect(screen.queryByTestId('AccountsSetting.signInFlow')).toBeNull()
-    expect(screen.queryByTestId('OAuthPasteBackFlow')).toBeNull()
+    expect(window.api.addAccount).not.toHaveBeenCalled()
     expect(useSessionStore.getState().authState).toBeNull()
   })
 
-  it('on desktop: even an in-flight authState never mounts the flow (platform pin)', async () => {
-    // The backend pin (account-manager.test.ts) already says a desktop
-    // `account:add` sends no `pendingSignIn`. This is the UI half of the same
-    // guarantee: the pane's own branch, with the store forced into the state a
-    // remote flow would produce.
-    installAccountsApi('darwin')
-    await act(async () => renderSection('accounts'))
-    act(() =>
-      useSessionStore.getState().setAuthState({
-        status: 'authorizing',
-        account: null,
-        error: null,
-        manualUrl: MANUAL_URL
-      })
-    )
-    expect(screen.queryByTestId('AccountsSetting.signInFlow')).toBeNull()
-    expect(screen.queryByTestId('OAuthPasteBackFlow')).toBeNull()
+  it('the pane carries no flow UI on either platform', async () => {
+    for (const platform of ['web', 'darwin']) {
+      installAccountsApi(platform)
+      await act(async () => renderSection('accounts'))
+      act(() =>
+        useSessionStore.getState().setAuthState({
+          status: 'authorizing',
+          account: null,
+          error: null,
+          manualUrl: MANUAL_URL
+        })
+      )
+      expect(screen.queryByTestId('AccountsSetting.signInFlow')).toBeNull()
+      expect(screen.queryByTestId('OAuthPasteBackFlow')).toBeNull()
+      expect(screen.queryByTestId('OAuthOutcomeNotice')).toBeNull()
+      cleanup()
+    }
   })
 })
 

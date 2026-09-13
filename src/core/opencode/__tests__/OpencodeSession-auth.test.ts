@@ -2,8 +2,11 @@
  * @vitest-environment node
  *
  * Unit tests for OpencodeSession.dispatchMapperOutput auth-required routing.
- * Verifies that a session.error event with ProviderAuthError + providerID emits
- * session:vendor-auth-required instead of session:error.
+ * A session.error event carrying a ProviderAuthError + providerID raises the one
+ * engine-neutral `session:auth-required` (ADR-068 §4) under the PROVIDER the
+ * vendor belongs to, plus the vendor's verbatim message as a session error —
+ * the event itself carries no text, so dropping the message would lose opencode's
+ * own words.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
@@ -120,6 +123,30 @@ vi.mock('../OpencodeClient', () => ({
   OpencodeClient: MockOpencodeClient
 }))
 
+/**
+ * The vendor→provider mapping is REAL here; only its disk read is replaced, so
+ * no test reads `~/.claude/ui/providers`. The fixture is the shipped ChatGPT
+ * definition with both routes on.
+ */
+vi.mock('../../shared-providers/chatgpt-route', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../shared-providers/chatgpt-route')>()
+  return {
+    ...actual,
+    opencodeAuthRequiredProviderId: (vendorId: string): string =>
+      actual.authRequiredProviderId(vendorId, {
+        id: 'chatgpt',
+        name: 'ChatGPT',
+        kind: 'subscription',
+        models: [],
+        managed: true,
+        routes: {
+          pi: { enabled: true, providerId: 'openai-codex' },
+          opencode: { enabled: true, providerId: 'openai' }
+        }
+      })
+  }
+})
+
 vi.mock('../../services/claude-settings', () => ({
   loadClaudePermissions: mockLoadClaudePermissions,
   saveClaudePermissions: mockSaveClaudePermissions
@@ -227,7 +254,7 @@ describe('OpencodeSession — auth-required dispatch', () => {
     closeDb()
   })
 
-  it('ProviderAuthError with providerID emits session:vendor-auth-required (not session:error)', async () => {
+  it('ProviderAuthError with providerID emits session:auth-required under the mapped provider', async () => {
     const SES = 'ses_auth_1'
     mockCreateSession.mockResolvedValue({ id: SES })
     mockSubscribeEvents.mockImplementation(
@@ -253,19 +280,59 @@ describe('OpencodeSession — auth-required dispatch', () => {
     // Wait for the SSE consumer to process the event
     await vi.waitFor(() => {
       const calls = (win as unknown as MockWindow).webContents.send.mock.calls
-      return calls.some((c) => c[0] === 'session:vendor-auth-required')
+      return calls.some((c) => c[0] === 'session:auth-required')
     })
 
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
 
-    // Should emit session:vendor-auth-required
-    const authRequiredCall = calls.find((c) => c[0] === 'session:vendor-auth-required')
+    const authRequiredCall = calls.find((c) => c[0] === 'session:auth-required')
     expect(authRequiredCall).toBeDefined()
-    expect(authRequiredCall![2]).toEqual({ vendorId: 'openai', message: 'Token expired' })
+    // The vendor id is opencode's; the PROVIDER is what the sign-in dialog acts on.
+    expect(authRequiredCall![2]).toEqual({ providerId: 'chatgpt' })
 
-    // Should NOT emit session:error for a ProviderAuthError with providerID
+    // The vendor's own words survive as an error row — the event carries none.
     const errorCall = calls.find((c) => c[0] === 'session:error')
-    expect(errorCall).toBeUndefined()
+    expect(errorCall).toBeDefined()
+    expect(errorCall![2]).toBe('Token expired')
+
+    // The renamed channel is gone.
+    expect(calls.find((c) => c[0] === 'session:vendor-auth-required')).toBeUndefined()
+
+    session.dispose()
+  })
+
+  it('a vendor the shared route does not own is namespaced under opencode', async () => {
+    const SES = 'ses_auth_3'
+    mockCreateSession.mockResolvedValue({ id: SES })
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        {
+          id: 'e3',
+          type: 'session.error',
+          properties: {
+            sessionID: SES,
+            error: {
+              name: 'ProviderAuthError',
+              data: { providerID: 'anthropic', message: 'Token expired' }
+            }
+          }
+        }
+      ])
+    )
+
+    const win = new MockWindow() as unknown as HostWindowHandle
+    const session = new OpencodeSession('r_auth3', win, '/tmp/auth-cwd3')
+    await session.run('test prompt')
+
+    await vi.waitFor(() => {
+      const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+      return calls.some((c) => c[0] === 'session:auth-required')
+    })
+
+    const calls = (win as unknown as MockWindow).webContents.send.mock.calls
+    expect(calls.find((c) => c[0] === 'session:auth-required')![2]).toEqual({
+      providerId: 'opencode:anthropic'
+    })
 
     session.dispose()
   })
@@ -305,8 +372,8 @@ describe('OpencodeSession — auth-required dispatch', () => {
     expect(errorCall).toBeDefined()
     expect(errorCall![2]).toContain('Authentication required')
 
-    // Should NOT emit session:vendor-auth-required
-    const authRequiredCall = calls.find((c) => c[0] === 'session:vendor-auth-required')
+    // No provider to act on, so no auth-required event.
+    const authRequiredCall = calls.find((c) => c[0] === 'session:auth-required')
     expect(authRequiredCall).toBeUndefined()
 
     session.dispose()

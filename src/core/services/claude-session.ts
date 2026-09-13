@@ -22,6 +22,7 @@ import { cwdToProjectKey } from '../../shared/project-key'
 import { transformAssistantMessage } from './assistant-message'
 import { extractToolResultContent } from './tool-result-content'
 import { classifyApiError } from './api-error'
+import { ANTHROPIC_AUTH_PROVIDER_ID } from '../auth/auth-providers'
 import { VoiceClient } from './voice-client'
 import { startRecording, stopRecording } from './voice-capture'
 // Host-local emissions (`voice:state`) go through the funnel like everything else
@@ -1143,6 +1144,17 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       if (errMsg) {
         this.upsertMessage(errMsg)
         this.send('session:message', errMsg)
+        // ADR-068 §4: the block stays in the transcript as DATA; the OWED
+        // SIGN-IN is a separate fact every engine now reports the same way, so
+        // the one row and the one dialog serve Claude too. Only the
+        // `authentication` class — a rate limit is not a sign-in problem.
+        if (
+          errMsg.content.some(
+            (block) => block.type === 'api_error' && block.errorType === 'authentication'
+          )
+        ) {
+          this.send('session:auth-required', { providerId: ANTHROPIC_AUTH_PROVIDER_ID })
+        }
         return
       }
     }

@@ -214,15 +214,18 @@ export interface SyncEventMap {
   'session:error': (routingId: string, error: string) => void
   'session:warning': (routingId: string, warning: string) => void
   'session:sandbox-violation': (routingId: string, message: string) => void
-  'session:vendor-auth-required': (
-    routingId: string,
-    data: { vendorId: string; message: string }
-  ) => void
   /**
    * A credential the session needs was rejected and cannot be renewed
-   * (ADR-068 §4). Codex raises it when it cannot answer the app-server's
-   * `account/chatgptAuthTokens/refresh`; slice 3 generalizes it to every engine
-   * and replaces `session:vendor-auth-required` with it.
+   * (ADR-068 §4) — the ONE auth event, from every engine that can tell a
+   * rejected credential apart. Codex raises it when it cannot answer the
+   * app-server's `account/chatgptAuthTokens/refresh`, opencode for a
+   * `ProviderAuthError` carrying a vendor, Claude for an `authentication`
+   * api_error. pi has no distinguishable auth signal on its wire today.
+   *
+   * `providerId` is what the sign-in dialog acts on: `anthropic`, `chatgpt`, or
+   * `opencode:<vendorId>` for a vendor no shared provider owns (that one has no
+   * flow, so the row opens Settings › Models & providers instead). It carries no
+   * message — the emitting engine sends its own words as `session:error`.
    */
   'session:auth-required': (
     routingId: string,

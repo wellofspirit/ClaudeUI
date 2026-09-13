@@ -1073,6 +1073,14 @@ export interface PerSessionSnapshot {
   /** Model picker value within the selected engine. */
   selectedModel?: string
   codexModelExplicit?: boolean
+  /**
+   * The sign-in this session owes (ADR-068 §4) — which provider rejected a
+   * credential, and which stored account when the provider has several. Null
+   * once a turn runs again. Optional for the same older-server-compat reason as
+   * {@link PerSessionSnapshot.queue}: a host that predates slice 3 sends none,
+   * which reads as "nothing owed".
+   */
+  authRequired?: { providerId: string; accountId?: string } | null
 }
 
 export interface FullStateSnapshot {

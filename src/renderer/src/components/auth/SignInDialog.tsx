@@ -1,0 +1,501 @@
+/**
+ * SignInDialog — the ONE place a sign-in flow renders (ADR-068 §3, mockup
+ * screen 5, owner-approved 2026-09-13).
+ *
+ * Before this, four surfaces each grew their own flow: the Claude banner
+ * expanded into a paste field, the transcript's `AuthErrorBlock` walked the
+ * OAuth states inline, opencode's `VendorAuthRequiredCard` did it a third time,
+ * and the settings account rows a fourth. Four copies of one state machine is
+ * how a credential surface ends up telling the user two different things about
+ * whether they are signed in.
+ *
+ * WHAT THIS OWNS AND WHAT IT DOES NOT. It owns the STAGES — choose an account,
+ * watch the flow, report what changed — and nothing else. The flows themselves
+ * stay exactly where they were:
+ *
+ *  · Anthropic (ADR-014 / ADR-015) — `signIn()` to re-authorise, `addAccount()`
+ *    to add one (its `pendingSignIn` seeds the remote paste panel),
+ *    `submitOAuthCode` / `cancelSignIn`;
+ *  · ChatGPT (ADR-036 / ADR-068 §1) — `authorizeVendorOAuth('pi',
+ *    'openai-codex')`, `submitVendorOAuthCode` / `cancelVendorOAuth`.
+ *
+ * So there is no third flow state: `authState` and `vendorOAuth` are still the
+ * single source for each provider, and this is a view over them. Dismissing the
+ * dialog mid-flight therefore leaves the flow RUNNING — the banner keeps
+ * reporting it — which is what makes "close it and keep working" safe.
+ *
+ * THE HOST VARIANT IS DERIVED, NEVER CHOSEN (ADR-057). A web client has no host
+ * browser to wait on, so it gets the two-step paste panel; the desktop opens its
+ * own browser and gets "Waiting for the browser…" with a manual link. A user
+ * cannot pick the wrong one because there is nothing to pick.
+ *
+ * VISUAL VOCABULARY. `SettingRow` / `SheetGroup` / `Button` from the settings
+ * dialog, so an account row here reads as the same object as an account row in
+ * Settings. `SheetFrame` itself does NOT fit: its geometry mirrors the settings
+ * dialog's box in order to pin itself to that box's right edge, and this dialog
+ * opens over the chat.
+ */
+
+import { useCallback, useEffect, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
+import {
+  useSessionStore,
+  type SignInProviderId,
+  type SignInRequest
+} from '../../stores/session-store'
+import { useIsMobile } from '../../hooks/useIsMobile'
+import { useEscapeLayer } from '../shared/use-escape-layer'
+import { SettingRow, Button } from '../SettingsDialog/settings-controls'
+import { SheetGroup } from '../SettingsDialog/SheetFrame'
+import { OAuthOutcomeNotice, OAuthPasteBackFlow, classifyOAuthError } from './OAuthPasteBackFlow'
+
+const DIALOG = 'SignInDialog'
+
+/** pi's auth.json key for the ChatGPT credential — `CredentialSync.PI_CODEX_VENDOR_ID`. */
+const CODEX_VENDOR_ID = 'openai-codex'
+/** The shared vault's id for the ChatGPT subscription. */
+const CHATGPT_ID = 'chatgpt'
+
+const PROVIDER_NAME: Record<SignInProviderId, string> = {
+  anthropic: 'Claude',
+  chatgpt: 'ChatGPT'
+}
+
+const PROVIDER_BLURB: Record<SignInProviderId, string> = {
+  anthropic: 'Your Claude subscription, used by Claude Code sessions.',
+  chatgpt: 'One ChatGPT sign-in, shared with pi, opencode and Codex.'
+}
+
+const message = (e: unknown): string => (e instanceof Error ? e.message : String(e))
+
+/** One stored account, flattened out of the two providers' different shapes. */
+interface AccountRow {
+  id: string
+  label: string
+  description?: string
+  active: boolean
+}
+
+type Stage = 'choose' | 'flow' | 'done'
+
+export function SignInDialog(): React.JSX.Element | null {
+  const request = useSessionStore((s) => s.signInDialog)
+  if (!request) return null
+  // Remounted on every open, so no stage, error or account list survives from
+  // the previous one — a dialog that reopened on a stale "done" is the failure
+  // this key removes without a reset effect that has to enumerate the state.
+  return <SignInDialogBody key={`${request.providerId}:${request.mode}`} request={request} />
+}
+
+function SignInDialogBody({ request }: { request: SignInRequest }): React.JSX.Element {
+  const isMobile = useIsMobile()
+  const {
+    closeSignIn,
+    authState,
+    vendorOAuth,
+    signIn,
+    submitOAuthCode,
+    cancelSignIn,
+    authorizeVendorOAuth,
+    submitVendorOAuthCode,
+    cancelVendorOAuth,
+    setAuthState,
+    setAccountsState,
+    loadProviderAccounts,
+    retrySend
+  } = useSessionStore(
+    useShallow((s) => ({
+      closeSignIn: s.closeSignIn,
+      authState: s.authState,
+      vendorOAuth: s.vendorOAuth,
+      signIn: s.signIn,
+      submitOAuthCode: s.submitOAuthCode,
+      cancelSignIn: s.cancelSignIn,
+      authorizeVendorOAuth: s.authorizeVendorOAuth,
+      submitVendorOAuthCode: s.submitVendorOAuthCode,
+      cancelVendorOAuth: s.cancelVendorOAuth,
+      setAuthState: s.setAuthState,
+      setAccountsState: s.setAccountsState,
+      loadProviderAccounts: s.loadProviderAccounts,
+      retrySend: s.retrySend
+    }))
+  )
+
+  const { providerId } = request
+  const isWeb = window.api.platform === 'web'
+
+  const [stage, setStage] = useState<Stage>('choose')
+  /** null while the account read is in flight — the chooser must not flash empty. */
+  const [accounts, setAccounts] = useState<AccountRow[] | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+  const [signedInAs, setSignedInAs] = useState<string | null>(null)
+  const [plan, setPlan] = useState<string | null>(null)
+  const [fanOut, setFanOut] = useState<Array<{ id: string; text: string }>>([])
+
+  useEscapeLayer(closeSignIn)
+
+  const readAccounts = useCallback(async (): Promise<AccountRow[]> => {
+    if (providerId === 'anthropic') {
+      const state = await window.api.getAccounts()
+      setAccountsState(state)
+      // Multi-account off means ONE credential and nothing to choose between;
+      // the chooser would be a list of one with no alternative.
+      if (!state.enabled) return []
+      return state.accounts.map((account) => ({
+        id: account.id,
+        label: account.email || 'Account',
+        description: account.subscriptionType ?? undefined,
+        active: account.id === state.activeId
+      }))
+    }
+    const list = await window.api.listProviderAccounts(CHATGPT_ID)
+    return list.accounts.map((account) => ({
+      id: account.id,
+      label: account.email || 'Account',
+      description:
+        [account.planType, account.needsReauth ? 'sign-in expired' : null]
+          .filter(Boolean)
+          .join(' · ') || undefined,
+      active: account.id === list.activeId
+    }))
+  }, [providerId, setAccountsState])
+
+  /** Everything the done state reports, read AFTER the credential was written. */
+  const collectOutcome = useCallback(async (): Promise<void> => {
+    if (providerId === 'anthropic') {
+      const account = useSessionStore.getState().authState?.account
+      setSignedInAs(account?.email ?? null)
+      setPlan(account?.subscriptionType ?? null)
+      setFanOut([])
+      return
+    }
+    const [list, definitions] = await Promise.all([
+      window.api.listProviderAccounts(CHATGPT_ID).catch(() => null),
+      window.api.listSharedProviders().catch(() => [])
+    ])
+    const active = list?.accounts.find((account) => account.id === list.activeId)
+    setSignedInAs(active?.email ?? null)
+    setPlan(active?.planType ?? null)
+    const definition = definitions.find((entry) => entry.id === CHATGPT_ID)
+    const lines: Array<{ id: string; text: string }> = []
+    if (definition?.routes.pi.enabled)
+      lines.push({ id: 'pi', text: 'pi is using the new token now.' })
+    if (definition?.routes.opencode.enabled)
+      lines.push({ id: 'opencode', text: 'opencode picks it up on its next server start.' })
+    // Codex is not a ROUTE on the definition — ADR-068 §1 feeds it by injection
+    // from the same vault account, and 2a's refresh path makes a live re-inject
+    // lazy — so it is reported unconditionally rather than read off a flag that
+    // does not exist, and it says "next request" rather than claiming more.
+    lines.push({ id: 'codex', text: 'Codex sessions use the new token on their next request.' })
+    setFanOut(lines)
+    void loadProviderAccounts()
+  }, [providerId, loadProviderAccounts])
+
+  const finish = useCallback(async (): Promise<void> => {
+    await collectOutcome()
+    setStage('done')
+  }, [collectOutcome])
+
+  const start = useCallback(
+    async (mode: 'reauth' | 'add'): Promise<void> => {
+      setError(null)
+      setBusy(true)
+      setStage('flow')
+      try {
+        if (providerId === 'anthropic') {
+          if (mode === 'add') {
+            const next = await window.api.addAccount()
+            setAccountsState(next)
+            // Only a REMOTE `account:add` carries it; it is the flow's manualUrl.
+            if (next.pendingSignIn) setAuthState(next.pendingSignIn)
+          } else {
+            await signIn()
+          }
+          return
+        }
+        const result = await authorizeVendorOAuth('pi', CODEX_VENDOR_ID)
+        // Desktop resolves ok once the loopback completed; web parks the store's
+        // flow at `paste` (or `error`) and the panel below takes over.
+        if (result.ok) await finish()
+        else if (result.error) setError(result.error)
+      } catch (e) {
+        setError(message(e))
+        setStage('choose')
+      } finally {
+        setBusy(false)
+      }
+    },
+    [providerId, signIn, authorizeVendorOAuth, setAccountsState, setAuthState, finish]
+  )
+
+  // Open: read the accounts, then decide whether there is anything to choose
+  // between. `add` never has anything to choose; neither does a provider with no
+  // stored account, so both go straight to the flow.
+  useEffect(() => {
+    let cancelled = false
+    void readAccounts()
+      .then((rows) => {
+        if (cancelled) return
+        setAccounts(rows)
+        if (request.mode === 'add' || rows.length === 0) {
+          void start(request.mode === 'add' ? 'add' : 'reauth')
+        }
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return
+        setAccounts([])
+        setError(message(e))
+      })
+    return () => {
+      cancelled = true
+    }
+    // Once per open — the dialog is remounted (keyed) for every new request.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Anthropic's flow finishes OUT OF BAND: the host drives the browser and the
+  // terminal transition arrives on `auth:state`, so success is a state edge here,
+  // not a resolved promise.
+  useEffect(() => {
+    if (stage !== 'flow' || providerId !== 'anthropic') return
+    if (authState?.status === 'success') void finish()
+  }, [stage, providerId, authState?.status, finish])
+
+  const switchTo = async (id: string): Promise<void> => {
+    setBusy(true)
+    setError(null)
+    try {
+      if (providerId === 'anthropic') setAccountsState(await window.api.switchAccount(id))
+      else {
+        await window.api.switchProviderAccount(CHATGPT_ID, id)
+        await loadProviderAccounts()
+      }
+      closeSignIn()
+    } catch (e) {
+      setError(message(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const cancelFlow = (): void => {
+    if (providerId === 'anthropic') void cancelSignIn()
+    else cancelVendorOAuth()
+    // Back to the chooser when there is one; otherwise the flow panel is all
+    // this dialog has, and the user closes it.
+    if (accounts && accounts.length > 0) setStage('choose')
+  }
+
+  const retryPrompt = (): void => {
+    const retry = request.retry
+    closeSignIn()
+    if (retry) void retrySend(retry.routingId, retry.prompt)
+  }
+
+  // ── The flow panel ───────────────────────────────────────────────────────
+  /** The authorize URL this provider's flow parked, whichever host we are on. */
+  const flowUrl = providerId === 'anthropic' ? authState?.manualUrl : vendorOAuth?.url
+  const flowError =
+    providerId === 'anthropic'
+      ? authState?.status === 'error'
+        ? authState.error
+        : null
+      : vendorOAuth?.stage === 'error'
+        ? (vendorOAuth.error ?? null)
+        : null
+
+  const submitPaste = (pasted: string): void => {
+    setSubmitting(true)
+    // Anthropic: `submitOAuthCode` folds the outcome into `authState` and the
+    // success effect above advances the stage, exactly as on desktop. ChatGPT
+    // has no such event, so its result is read here.
+    const done =
+      providerId === 'anthropic'
+        ? submitOAuthCode(pasted)
+        : submitVendorOAuthCode(pasted).then((result) => (result.ok ? finish() : undefined))
+    void done.finally(() => setSubmitting(false))
+  }
+
+  const flowPanel = isWeb ? (
+    <OAuthPasteBackFlow
+      variant={providerId === 'anthropic' ? 'code' : 'url'}
+      id={providerId}
+      url={flowUrl}
+      busy={submitting || busy}
+      onSubmit={submitPaste}
+      onCancel={cancelFlow}
+    />
+  ) : (
+    <div data-testid={`${DIALOG}.waiting`} className="space-y-2">
+      <div className="text-[13px] text-text-primary">Waiting for the browser…</div>
+      <div className="text-[12px] text-text-secondary leading-relaxed">
+        Finish the sign-in in the browser window we opened. It completes on its own.
+      </div>
+      <div className="flex items-center gap-2">
+        {flowUrl && (
+          <Button
+            variant="link"
+            testid={`${DIALOG}.manualLink`}
+            onClick={() => window.open(flowUrl, '_blank', 'noopener,noreferrer')}
+          >
+            Open the link manually ↗
+          </Button>
+        )}
+        <Button variant="link" testid={`${DIALOG}.cancel`} onClick={cancelFlow}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  )
+
+  // ── Body ─────────────────────────────────────────────────────────────────
+  const body =
+    stage === 'done' ? (
+      <div data-testid={`${DIALOG}.done`} className="space-y-3">
+        <SettingRow
+          testid={`${DIALOG}.signedIn`}
+          label={signedInAs ? `Signed in as ${signedInAs}` : 'Signed in'}
+          description={plan ?? undefined}
+        />
+        {fanOut.length > 0 && (
+          <SheetGroup testid={`${DIALOG}.group`} id="fanout" label="What changed">
+            {fanOut.map((line) => (
+              <SettingRow
+                key={line.id}
+                testid={`${DIALOG}.fanOut`}
+                dataId={line.id}
+                description={line.text}
+              />
+            ))}
+          </SheetGroup>
+        )}
+      </div>
+    ) : stage === 'flow' ? (
+      <div className="space-y-3">
+        {flowPanel}
+        {flowError && (
+          <OAuthOutcomeNotice
+            kind={classifyOAuthError(flowError)}
+            message={flowError}
+            id={providerId}
+          />
+        )}
+      </div>
+    ) : (
+      <SheetGroup testid={`${DIALOG}.group`} id="accounts" label="Accounts">
+        {(accounts ?? []).map((account) => (
+          <SettingRow
+            key={account.id}
+            testid={`${DIALOG}.account`}
+            dataId={account.id}
+            label={account.label}
+            description={account.description}
+            className={account.active ? 'bg-accent/5' : undefined}
+          >
+            {account.active || account.id === request.accountId ? (
+              <Button
+                variant="primary"
+                testid={`${DIALOG}.reauth`}
+                dataId={account.id}
+                disabled={busy}
+                onClick={() => void start('reauth')}
+              >
+                Re-authorize
+              </Button>
+            ) : (
+              <Button
+                variant="tinted"
+                testid={`${DIALOG}.switch`}
+                dataId={account.id}
+                disabled={busy}
+                onClick={() => void switchTo(account.id)}
+              >
+                Switch
+              </Button>
+            )}
+          </SettingRow>
+        ))}
+        <SettingRow
+          testid={`${DIALOG}.addRow`}
+          description={`Signs in to another ${PROVIDER_NAME[providerId]} account and adds it to the list.`}
+        >
+          <Button
+            variant="tinted"
+            testid={`${DIALOG}.addAccount`}
+            disabled={busy}
+            onClick={() => void start('add')}
+          >
+            Add another account
+          </Button>
+        </SettingRow>
+      </SheetGroup>
+    )
+
+  return (
+    <div data-testid={DIALOG} data-id={providerId} className="fixed inset-0 z-[100] flex">
+      <span
+        data-testid={`${DIALOG}.scrim`}
+        onClick={closeSignIn}
+        className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+      />
+      <div
+        className={
+          isMobile
+            ? 'relative z-10 w-full h-full flex flex-col bg-bg-primary animate-fade-in'
+            : 'relative z-10 m-auto w-[460px] max-w-[92vw] max-h-[88vh] flex flex-col bg-bg-primary border border-border rounded-xl shadow-2xl animate-fade-in'
+        }
+      >
+        <div className="h-[52px] shrink-0 flex items-center gap-2 px-4 border-b border-border">
+          <span className="min-w-0">
+            <span className="block text-[15px] font-semibold text-text-primary truncate">
+              Sign in to {PROVIDER_NAME[providerId]}
+            </span>
+            <span className="block text-[11px] text-text-secondary truncate">
+              {PROVIDER_BLURB[providerId]}
+            </span>
+          </span>
+          <button
+            type="button"
+            data-testid={`${DIALOG}.close`}
+            title="Close"
+            onClick={closeSignIn}
+            className="ml-auto shrink-0 w-6 h-6 flex items-center justify-center rounded-md text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+            >
+              <path d="M18 6L6 18M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">{body}</div>
+
+        <div className="shrink-0 flex items-center gap-2 px-4 py-3 border-t border-border">
+          <span
+            data-testid={`${DIALOG}.error`}
+            className="flex-1 min-w-0 truncate text-[12px] text-danger"
+          >
+            {error}
+          </span>
+          {stage === 'done' && request.retry && (
+            <Button variant="tinted" testid={`${DIALOG}.retry`} onClick={retryPrompt}>
+              Retry last prompt
+            </Button>
+          )}
+          <Button variant="primary" testid={`${DIALOG}.close2`} onClick={closeSignIn}>
+            {stage === 'done' ? 'Done' : 'Close'}
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}

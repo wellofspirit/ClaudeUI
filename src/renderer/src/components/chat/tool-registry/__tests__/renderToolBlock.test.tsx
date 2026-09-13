@@ -119,7 +119,7 @@ beforeEach(() => {
         btwQuestion: null,
         btwResponse: null,
         btwLoading: false,
-        vendorAuthRequired: null
+        authRequired: null
       }
     },
     settings: {

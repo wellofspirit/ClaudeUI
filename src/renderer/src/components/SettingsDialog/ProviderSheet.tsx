@@ -259,20 +259,13 @@ export interface ProviderSheetProps {
    * snapshot, and closes the sheet itself when this entry is gone from it.
    */
   onWrote: () => Promise<void>
-  /**
-   * Open the Add sheet, optionally on one row. Signing in to a subscription
-   * lives THERE (it is how a provider is acquired), so the not-connected
-   * credential row hands over rather than growing a second sign-in surface.
-   */
-  onAddProvider?: (focusId?: string) => void
 }
 
 export function ProviderSheet({
   entry,
   opencodeInstalled,
   onClose,
-  onWrote,
-  onAddProvider
+  onWrote
 }: ProviderSheetProps): React.JSX.Element {
   /**
    * The shared DEFINITION behind a shared row. The read model deliberately does
@@ -290,6 +283,14 @@ export function ProviderSheet({
     definition: SharedProviderDefinition | null
   }>({ resolved: false, definition: null })
   const definition = shared.definition
+  /**
+   * The ONE sign-in surface (ADR-068 §3). A subscription's sign-in used to be
+   * handed to the Add sheet, which rendered `VendorOAuthFlow` inline; now both
+   * the "Sign in" row and "+ Add account" open the dialog, so the Manage sheet
+   * carries no flow. `VendorOAuthFlow` stays for opencode-NATIVE vendor OAuth,
+   * which has no dialog driver.
+   */
+  const openSignIn = useSessionStore((s) => s.openSignIn)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   /** null = not editing; a string = the key being typed. Never pre-filled. */
@@ -641,8 +642,8 @@ export function ProviderSheet({
           <Button
             variant="tinted"
             testid={`${SHEET}.signIn`}
-            disabled={busy || !onAddProvider}
-            onClick={() => onAddProvider?.(entry.id)}
+            disabled={busy}
+            onClick={() => openSignIn({ providerId: 'chatgpt', mode: 'reauth' })}
           >
             Sign in
           </Button>
@@ -1125,8 +1126,8 @@ export function ProviderSheet({
               <Button
                 variant="link"
                 testid={`${SHEET}.addAccount`}
-                disabled={busy || !onAddProvider}
-                onClick={() => onAddProvider?.(entry.id)}
+                disabled={busy}
+                onClick={() => openSignIn({ providerId: 'chatgpt', mode: 'add' })}
               >
                 + Add account
               </Button>
