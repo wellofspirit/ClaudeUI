@@ -431,3 +431,50 @@ describe('VoiceButton — hold-to-talk on touch (phase 5 S3)', () => {
     expect(onVoiceStop).toHaveBeenCalledTimes(1)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Status-line {cost} placeholder. `StatusLineData.totalCostUsd` is nullable:
+// null = the engine could not price the session, and printing "$0.00" for it
+// would read as "this turn was free".
+// ---------------------------------------------------------------------------
+
+describe('StatusLine — {cost} placeholder', () => {
+  function renderWithCost(totalCostUsd: number | null) {
+    useSessionStore.setState((s) => ({
+      settings: { ...s.settings, statusLineTemplate: 'Cost: {cost}' }
+    }))
+    render(
+      <InputBoxView
+        {...makeProps({
+          statusLine: {
+            totalCostUsd,
+            totalDurationMs: 0,
+            totalApiDurationMs: 0,
+            totalInputTokens: 0,
+            totalOutputTokens: 0,
+            cachedTokens: 0,
+            totalTokens: 0,
+            contextWindowSize: 0,
+            usedPercentage: null,
+            remainingPercentage: null
+          }
+        })}
+      />
+    )
+    return screen.getByTestId('InputBox.statusLine')
+  }
+
+  it('renders the unknown placeholder for a null cost, not a dollar figure', () => {
+    const line = renderWithCost(null)
+    expect(line).toHaveTextContent('Cost: unknown')
+    expect(line.textContent).not.toContain('$')
+  })
+
+  it('renders a real $0.0000 for a known-zero cost', () => {
+    expect(renderWithCost(0)).toHaveTextContent('Cost: $0.0000')
+  })
+
+  it('renders a priced figure unchanged', () => {
+    expect(renderWithCost(1.5)).toHaveTextContent('Cost: $1.50')
+  })
+})

@@ -1623,7 +1623,10 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.accTotalDurationMs = Math.max(this.accTotalDurationMs, metrics.totalDurationMs)
       this.lastContextLength = metrics.contextWindowSize
       if (seedCost) {
-        this.costBaseUsd = metrics.totalCostUsd
+        // The transcript recompute always yields a figure (StatusLineData's
+        // cost is nullable for engines that cannot price a turn; this one
+        // prices from the table, so null never reaches here).
+        this.costBaseUsd = metrics.totalCostUsd ?? 0
         this.modelCostBase = new Map((metrics.modelCosts ?? []).map((m) => [m.modelId, m.costUsd]))
       }
       this.send('session:status-line', this.buildStatusLineFromAccumulators())

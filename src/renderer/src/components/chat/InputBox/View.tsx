@@ -22,6 +22,7 @@ import {
   type ModelDisplay
 } from '../../shared/InlinePickers'
 import { MobileConfigSheet } from './MobileConfigSheet'
+import { formatCostOrUnknown } from '../../../utils/cost'
 
 export type { ModelDisplay }
 
@@ -172,6 +173,7 @@ function StatusLine({
   // the main-computed value stays reactive without duplicating window logic here.
   return (
     <div
+      data-testid="InputBox.statusLine"
       className={`text-[10px] text-text-muted ${ALIGN_CLASS[align]} pt-1.5 select-none truncate`}
     >
       {interpolateTemplate(template, data)}
@@ -411,24 +413,23 @@ function formatDuration(ms: number): string {
   return `${min}m ${sec}s`
 }
 
-function formatCost(usd: number): string {
-  if (usd < 0.01) return '$' + usd.toFixed(4)
-  return '$' + usd.toFixed(2)
-}
-
 function interpolateTemplate(template: string, data: StatusLineData): string {
-  return template
-    .replace(/\{in\}/g, formatTokens(data.totalInputTokens))
-    .replace(/\{out\}/g, formatTokens(data.totalOutputTokens))
-    .replace(/\{cached\}/g, formatTokens(data.cachedTokens))
-    .replace(/\{total\}/g, formatTokens(data.totalTokens))
-    .replace(/\{cost\}/g, formatCost(data.totalCostUsd))
-    .replace(/\{used\}/g, data.usedPercentage !== null ? String(data.usedPercentage) : '–')
-    .replace(
-      /\{remaining\}/g,
-      data.usedPercentage !== null ? String(100 - data.usedPercentage) : '–'
-    )
-    .replace(/\{duration\}/g, formatDuration(data.totalDurationMs))
+  return (
+    template
+      .replace(/\{in\}/g, formatTokens(data.totalInputTokens))
+      .replace(/\{out\}/g, formatTokens(data.totalOutputTokens))
+      .replace(/\{cached\}/g, formatTokens(data.cachedTokens))
+      .replace(/\{total\}/g, formatTokens(data.totalTokens))
+      // null = unpriced/unknown, which renders as the word rather than a
+      // fabricated "$0.00" (see SessionStatus.totalCostUsd).
+      .replace(/\{cost\}/g, formatCostOrUnknown(data.totalCostUsd))
+      .replace(/\{used\}/g, data.usedPercentage !== null ? String(data.usedPercentage) : '–')
+      .replace(
+        /\{remaining\}/g,
+        data.usedPercentage !== null ? String(100 - data.usedPercentage) : '–'
+      )
+      .replace(/\{duration\}/g, formatDuration(data.totalDurationMs))
+  )
 }
 
 // ---------------------------------------------------------------------------

@@ -344,6 +344,104 @@ describe('TopBar — dispatched (cross-engine) rows and total (Slice C)', () => 
 })
 
 // ---------------------------------------------------------------------------
+// Unknown cost: `totalCostUsd: null` means the engine could NOT price the
+// session (Codex on an unpriced model), which is a different statement from a
+// real $0.00. The tooltip must never launder the former into the latter.
+// ---------------------------------------------------------------------------
+
+describe('TopBar — unknown (unpriced) cost', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  it('renders the unknown placeholder (not $0.00) for a null status-line cost', () => {
+    seed.statusLine(ROUTE, makeStatusLine({ totalCostUsd: null, totalDurationMs: 1000 }))
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    const cell = screen.getByTestId('TopBar.cost')
+    expect(cell).toHaveTextContent('unknown')
+    expect(cell.textContent).not.toContain('$')
+    unmount()
+  })
+
+  it('renders $0.0000 for a KNOWN zero cost (free model), never the placeholder', () => {
+    // A zero with a dispatched row present, so the Cost tile is rendered at all
+    // — the "cost is 0 and nothing was dispatched" case still hides, as before.
+    seed.statusLine(
+      ROUTE,
+      makeStatusLine({
+        totalCostUsd: 0,
+        modelCosts: [
+          { engineId: 'opencode', modelId: 'openai/gpt-5', costUsd: 0.5, dispatched: true }
+        ]
+      })
+    )
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    const cell = screen.getByTestId('TopBar.cost')
+    expect(cell).toHaveTextContent('$0.0000')
+    expect(cell.textContent).not.toContain('unknown')
+    unmount()
+  })
+
+  it('falls back to a null SessionStatus cost before any status line arrives', () => {
+    seed.status(ROUTE, {
+      state: 'idle',
+      sessionId: null,
+      model: null,
+      cwd: '/d/repo',
+      totalCostUsd: null,
+      engineId: 'codex',
+      capabilities: resolveClaudeCapabilities('default'),
+      account: null
+    } as SessionStatus)
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    expect(screen.getByTestId('TopBar.cost')).toHaveTextContent('unknown')
+    unmount()
+  })
+
+  it('shows the dispatched figure plus "unknown" when the headline is unpriced', () => {
+    seed.statusLine(
+      ROUTE,
+      makeStatusLine({
+        totalCostUsd: null,
+        modelCosts: [
+          { engineId: 'opencode', modelId: 'openai/gpt-5', costUsd: 0.31, dispatched: true }
+        ]
+      })
+    )
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    const total = screen.getByTestId('TopBar.costTotalInclDispatched')
+    expect(total).toHaveAttribute('data-cost-unknown', 'true')
+    // The dispatched spend is real and stated; the own-engine part is not
+    // folded in as zero, it is named as unknown.
+    expect(total).toHaveTextContent('$0.31 + unknown')
+
+    unmount()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // The mobile-web fullscreen control is GONE from TopBar — it moved to a
 // double-tap gesture on the chat scroll area (see
 // hooks/__tests__/useFullscreenDoubleTap.unit.test.tsx). This block is the

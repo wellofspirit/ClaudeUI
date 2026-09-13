@@ -795,8 +795,31 @@ describe('reducer — per-session config (item 6)', () => {
 })
 
 describe('reducer — cost + metering REPLACE, never accumulate (invariant 6)', () => {
-  const line = (cost: number): StatusLineData =>
+  const line = (cost: number | null): StatusLineData =>
     ({ totalCostUsd: cost, model: 'sonnet' }) as unknown as StatusLineData
+
+  it('carries a NULL (unpriced) cost through unchanged — null is not 0', () => {
+    // An engine that cannot price a turn reports null, and every replica has to
+    // keep telling "unknown" apart from "known to be free". A reducer that
+    // coerced (`?? 0`) would launder the former into the latter on every hop.
+    const s = fold([
+      created(),
+      ['session:status', 'rid', status({ engineId: 'codex', totalCostUsd: null })],
+      ['session:status-line', 'rid', line(null)]
+    ])
+    expect(s.sessions['rid'].status.totalCostUsd).toBeNull()
+    expect(s.sessions['rid'].statusLine?.totalCostUsd).toBeNull()
+
+    // …and survives the snapshot a remote/web client hydrates from.
+    const restored = fromSnapshot(toSnapshot(s, 3))
+    expect(restored.sessions['rid'].status.totalCostUsd).toBeNull()
+    expect(restored.sessions['rid'].statusLine?.totalCostUsd).toBeNull()
+  })
+
+  it('a KNOWN zero cost stays 0, never collapsing into null', () => {
+    const s = fold([created(), ['session:status-line', 'rid', line(0)]])
+    expect(s.sessions['rid'].statusLine?.totalCostUsd).toBe(0)
+  })
 
   it('a status-line sequence ends at the LAST value, not the sum', () => {
     // Engine cost fields are cumulative-per-process snapshots (see

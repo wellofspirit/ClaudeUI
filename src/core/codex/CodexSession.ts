@@ -1053,9 +1053,15 @@ export class CodexSession extends BaseSession {
           : null,
       cwd: this.cwd,
       // The same API-rate equivalent the status line carries (and the TopBar's
-      // fallback until one arrives) — see `equivalentCost`. Zero here means
-      // "nothing metered yet or no published price", never "this was free".
-      totalCostUsd: this.equivalentCostUsd ?? 0,
+      // fallback until one arrives) — see `equivalentCost`. Before the first
+      // `tokenUsage/updated` there is no equivalent yet, and the two reasons
+      // for that are NOT the same statement: a PRICED model has spent a real,
+      // known $0 so far (the zero-token equivalent), while an unpriced one —
+      // or a thread whose model is not known yet — cannot be priced at all and
+      // reports null, which the renderers show as "unknown" rather than free.
+      totalCostUsd:
+        this.equivalentCostUsd ??
+        this.equivalentCost({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
       account: this.account,
       ...(this.native ? { codex: { ...this.native, overrides: { ...this.overrides } } } : {})
     } satisfies SessionStatus)
@@ -1260,11 +1266,11 @@ export class CodexSession extends BaseSession {
     } satisfies MeteringSnapshot)
     this.send('session:status-line', {
       // The EQUIVALENT, not a real charge: a ChatGPT-subscription turn's true
-      // USD cost is unknowable from here, and `StatusLineData.totalCostUsd` is a
-      // plain number with no "unknown" (see the ADR-066 open item). The API-rate
-      // equivalent is what the other engines show and the only honest figure
-      // available; an unpriced model leaves it at zero rather than guessing.
-      totalCostUsd: this.equivalentCostUsd ?? 0,
+      // USD cost is unknowable from here. The API-rate equivalent is what the
+      // other engines show and the only honest figure available; an UNPRICED
+      // model reports null (unknown), never zero — zero is reserved for "known
+      // to be free" and the renderers render null as a placeholder.
+      totalCostUsd: this.equivalentCostUsd,
       modelCosts: this.dispatchedCostEntries(),
       totalDurationMs: 0,
       totalApiDurationMs: 0,

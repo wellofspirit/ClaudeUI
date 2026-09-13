@@ -1188,6 +1188,45 @@ describe('CrossEngineDispatcher — approval forwarding', () => {
     })
   })
 
+  it("carries the target tool call's id so the card can bind to the nested tool block", async () => {
+    const { stream, ctx, sessionId } = await makeTarget()
+
+    stream.push('permission.asked', {
+      id: 'perm-tool',
+      sessionID: sessionId,
+      permission: 'bash',
+      // The wire shape the own-session mapper already reads (event-mapper.ts):
+      // the calling tool part's id. Without it the forwarded card can only
+      // float — it never binds to the tool block inside the dispatch card.
+      tool: { messageID: 'msg-1', callID: 'call-42' },
+      metadata: { command: 'ls' }
+    })
+    await tick()
+
+    const call = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')
+    const approval = call![1] as { requestId: string; toolUseId?: string }
+    expect(approval.toolUseId).toBe('call-42')
+    // Both surfaces still key off the SAME requestId — the inline binding is
+    // additive, the floating card stays.
+    expect(approval.requestId).toBe(`${XENG_REQUEST_PREFIX}perm-tool`)
+  })
+
+  it('omits toolUseId when the wire event carries no callID (never invents one)', async () => {
+    const { stream, ctx, sessionId } = await makeTarget()
+
+    stream.push('permission.asked', {
+      id: 'perm-bare',
+      sessionID: sessionId,
+      permission: 'bash'
+    })
+    await tick()
+
+    const call = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')
+    const approval = call![1] as { toolUseId?: string }
+    expect(approval.toolUseId).toBeUndefined()
+    expect('toolUseId' in approval).toBe(false)
+  })
+
   it('permission.asked for a foreign session is ignored (unfiltered stream)', async () => {
     const { stream, ctx } = await makeTarget()
     stream.push('permission.asked', {

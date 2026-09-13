@@ -2600,8 +2600,17 @@ export class CrossEngineDispatcher {
       const permission = (props.permission as string | undefined) ?? 'tool'
       const metadata = (props.metadata as Record<string, unknown> | undefined) ?? {}
       const patterns = props.patterns as string[] | undefined
+      // The TARGET-side tool call this ask belongs to. The target's stream is
+      // replayed on the dispatching client under the dispatch tool card, so
+      // this id is the one the nested tool block there carries — binding it
+      // lets the approval render INLINE on that block instead of only floating
+      // (both surfaces share `requestId`). Absent on the wire for a
+      // non-tool-scoped ask; never invent one — a wrong id binds the card to
+      // the wrong block, which is worse than no inline card at all.
+      const tool = props.tool as { messageID?: string; callID?: string } | undefined
       const approval: PendingApproval = {
         requestId,
+        ...(tool?.callID ? { toolUseId: tool.callID } : {}),
         toolName: `dispatch:${permission}`,
         input: { ...metadata, ...(patterns ? { patterns } : {}) }
       }

@@ -238,7 +238,13 @@ export interface SessionStatus {
   /** Vendor-qualified model identity. Null until the engine reports a model. */
   model: ModelRef | null
   cwd: string | null
-  totalCostUsd: number
+  /**
+   * Session cost in USD, or null when the engine cannot price the turn (no
+   * published price for the model). Null means UNKNOWN — 0 means known to be
+   * zero (a free model, or nothing metered yet on an engine that does price
+   * its models). Renderers show a placeholder for null, never "$0.00".
+   */
+  totalCostUsd: number | null
   engineId: EngineId
   capabilities: ResolvedCapabilities
   /** Resolved account descriptor from the engine auth provider. Null until probed. */
@@ -2668,7 +2674,9 @@ export interface AuthFlowState {
  *   totalDurationMs + (turnStartedAtMs ? Date.now() - turnStartedAtMs : 0)
  */
 export interface StatusLineData {
-  totalCostUsd: number
+  /** Cumulative session cost in USD; null when unpriced/unknown (see
+   *  {@link SessionStatus.totalCostUsd} — 0 still means known-zero). */
+  totalCostUsd: number | null
   totalDurationMs: number
   totalApiDurationMs: number
   totalInputTokens: number
@@ -2895,7 +2903,8 @@ export interface AutomationRun {
   startedAt: number
   finishedAt: number | null
   status: 'running' | 'success' | 'error'
-  totalCostUsd: number
+  /** Run cost in USD; null when the engine could not price the run. */
+  totalCostUsd: number | null
   error?: string
   resultSummary?: string
   /** SDK session ID — used to locate the project JSONL for message history */

@@ -282,7 +282,9 @@ describe('OpencodeSession — live breakdown equals headline (Slice B)', () => {
     const sendMock = (win as unknown as MockWindow).webContents.send
     const statusLine = lastStatusLine(sendMock as never)
     const breakdownSum = (statusLine.modelCosts ?? []).reduce((acc, m) => acc + m.costUsd, 0)
-    expect(breakdownSum).toBeCloseTo(statusLine.totalCostUsd, 10)
+    // opencode always reports a priced figure — never the nullable "unknown".
+    expect(statusLine.totalCostUsd).not.toBeNull()
+    expect(breakdownSum).toBeCloseTo(statusLine.totalCostUsd as number, 10)
     expect(statusLine.totalCostUsd).toBeCloseTo(0.07, 10)
     expect(statusLine.modelCosts).toEqual([
       { engineId: 'opencode', modelId: 'claude-sonnet-4-6', costUsd: 0.07 }

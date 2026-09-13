@@ -2425,7 +2425,7 @@ describe('Codex native children', () => {
     // → 0.2 × 0.2 + 0.6 × 0.02 + 0.2 × 0.25 + 1 × 1.2 = 1.302
     const meters = sent('session:metering') as Array<{ equivalentCostUsd: number | null }>
     expect(meters.at(-1)!.equivalentCostUsd).toBeCloseTo(1.302, 6)
-    const lines = sent('session:status-line') as Array<{ totalCostUsd: number }>
+    const lines = sent('session:status-line') as Array<{ totalCostUsd: number | null }>
     expect(lines.at(-1)!.totalCostUsd).toBeCloseTo(1.302, 6)
     // `session:status` is only re-emitted when something about the session
     // changes, so it carries the cost from the next emission onward — the
@@ -2434,8 +2434,22 @@ describe('Codex native children', () => {
       threadId: 'root',
       threadSettings: { model: 'gpt-5.6-luna', modelProvider: 'openai', effort: 'ultra' }
     })
-    const statuses = sent('session:status') as Array<{ totalCostUsd: number }>
+    const statuses = sent('session:status') as Array<{ totalCostUsd: number | null }>
     expect(statuses.at(-1)!.totalCostUsd).toBeCloseTo(1.302, 6)
+  })
+
+  it('reports a KNOWN zero, not "unknown", for a priced model that has metered nothing yet', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    // A priced model, no `tokenUsage/updated` yet: this thread really has spent
+    // $0 so far, which is a different statement from "cannot be priced" — only
+    // the latter is null (and shows as "unknown" in the UI).
+    f.notify('thread/settings/updated', {
+      threadId: 'root',
+      threadSettings: { model: 'gpt-5.6-luna', modelProvider: 'openai', effort: 'ultra' }
+    })
+    const statuses = sent('session:status') as Array<{ totalCostUsd: number | null }>
+    expect(statuses.at(-1)!.totalCostUsd).toBe(0)
   })
 
   it('reports no cost at all for a model with no published price', async () => {
@@ -2468,8 +2482,18 @@ describe('Codex native children', () => {
     // would be worse than silence (ADR-030).
     const meters = sent('session:metering') as Array<{ equivalentCostUsd: number | null }>
     expect(meters.at(-1)!.equivalentCostUsd).toBeNull()
-    const lines = sent('session:status-line') as Array<{ totalCostUsd: number }>
-    expect(lines.at(-1)!.totalCostUsd).toBe(0)
+    // NULL, not 0: `StatusLineData.totalCostUsd` is nullable precisely so an
+    // unpriced model reads as "unknown" in the UI. Zero would claim the turn
+    // was free, which for a paid ChatGPT subscription is a lie.
+    const lines = sent('session:status-line') as Array<{ totalCostUsd: number | null }>
+    expect(lines.at(-1)!.totalCostUsd).toBeNull()
+    // Same on the status fallback the TopBar reads before a status line lands.
+    f.notify('thread/settings/updated', {
+      threadId: 'root',
+      threadSettings: { model: 'native', modelProvider: 'openai', effort: 'medium' }
+    })
+    const statuses = sent('session:status') as Array<{ totalCostUsd: number | null }>
+    expect(statuses.at(-1)!.totalCostUsd).toBeNull()
   })
 })
 
