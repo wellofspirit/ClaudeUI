@@ -2,7 +2,7 @@
 
 ## Resume here
 
-Work continues on **`codex-integration`** (from `pre-release`). Twenty-one Codex commits are on it (the last is this handoff itself), pushed to `origin/codex-integration` on 2026-09-12 with Daniel's approval, and the worktree is clean apart from two unrelated pre-existing untracked files (`docs/headless-server.md`, `docs/manual.md`). Oldest first:
+Work continues on **`codex-integration`** (from `pre-release`). Forty-three Codex commits are on it. The first twenty-one were pushed to `origin/codex-integration` on 2026-09-12 with Daniel's approval; everything after `5eaf7bf5` is local until he asks for another push. The worktree is clean apart from two unrelated pre-existing untracked files (`docs/headless-server.md`, `docs/manual.md`). Oldest first:
 
 ```text
 b670492e feat(codex): pin Codex 0.154.0 acquisition and generate app-server protocol types
@@ -25,6 +25,29 @@ cae94a2e feat(verifier): opt-in renderer state hooks for the real-app harness
 7022abf3 feat(codex): show the native reviewer's decisions in Auto-mode transcripts
 a22ece12 feat(codex): compile user-scope Bash rules into a ClaudeUI-owned execpolicy file
 5eaf7bf5 docs(codex): handoff for the next session, preserved slice specs, ADR-067 amendments
+9edff274 docs(codex): rewrite the handoff as the resume point for the next session
+44fcf2eb docs(codex): move the guardian override onto the declined card, record 2026-09-12 decisions
+e56e466d fix(renderer): clear the draft after a send that rekeyed the session mid-flight
+cd5d3598 docs(codex): record the draft fix and the render-loss tally after its verification drive
+11a9637c docs(codex): defer the shared app-server decision to M4, record the inputs
+68bcf6e3 feat(codex): let the human approve a guardian-denied action from the declined card
+a3411d17 docs(codex): record the landed guardian override and the real Auto verification
+3e7052e8 docs(codex): kickoff specs for hosted tools (slice C) and completed-turn fork (slice D)
+156cd23c fix(codex): render native file adds and deletes as diffs; persist the rekeyed registry last
+4050eb0a feat(codex): hold prompts sent mid-turn and steer them into the running turn by identity
+3d15a284 docs(codex): record the landed queue and steer, and the shared base-loop hazard it exposed
+30421310 feat(codex): host render_mermaid, create_mockup and show_mockup over Codex dynamic tools
+7c365d8e docs(codex): record the landed hosted tools and their two verified deviations
+0569269b docs(codex): kickoff spec for Codex as a cross-engine dispatch source (slice E)
+21bff23e docs(codex): metering honesty gap as an open item; render-loss tally at twenty drives
+5e92e52f feat(codex): branch a completed turn into a new native thread, and keep forks in the sidebar
+368044ff docs(codex): record the landed fork and the sweep's missing negative cache
+21f5f3ec docs(codex): kickoff spec for native children as subagent transcripts (slice F)
+843b4ecf feat(codex): let Codex dispatch work to claude, opencode or pi through dispatch_agent
+0cde917c docs(codex): record the landed dispatch source and its three departures from the spec
+eed0b1c9 docs(codex): architecture pages and ADR-033 reflect the built queue, hosted tools, dispatch source and fork
+5452d3c5 feat(codex): render native child agents as subagent transcripts under the spawning card
+99cbf950 docs(codex): record the landed native children and the two presentation gaps they leave
 ```
 
 The native policy pill and policy overrides named in the early subject lines were removed again by `970d9d4f`; ADR-067 is the permission model as built.
@@ -68,7 +91,7 @@ node scripts/app-shot.mjs --timeout 200000 --out .cache/screenshots/codex-turn.p
 
 Built, committed and verified on the real binary: acquisition of both `codex` and `codex-code-mode-host` with pinned digests; stdio transport, typed client, read-only service; session adapter with the shared permission model; shell-wrapper unwrapping so `Bash(...)` rules match Codex commands; guardian rows in Auto transcripts; the execpolicy rules file; native device-code auth; catalog and native effort in the standard pickers; history list/read through `engine-history.ts`; renderer account pane; verifier hooks. Real turns complete end to end in default and Auto mode, with approval card, command output, answer, metering and cold history; a prompt sent mid-turn is held, steered into the running turn at the next completed item, and its native user row replaces the synthesized one by identity (`4050eb0a`, seen live on 2026-09-12: the second user bubble landed between two command cards and one answer covered both prompts); the three hosted UI tools run over Codex's dynamic-tool channel and survive a resume (`30421310`, seen live: Luna called render_mermaid and the diagram card rendered an SVG); a completed turn can be branched into a new native thread that the sidebar keeps listing (`5e92e52f`, seen live twice: the branch answered from the copied context, no banner); Codex can dispatch to claude, opencode or pi through `dispatch_agent`, with the ask card on the task card (`843b4ecf`, seen live: Luna called it, deny returned the reason to the model); native child agents render as subagent transcripts under the spawning card on both collab surfaces, live and cold (`5452d3c5`, seen live on Astra: one spawned child, its reply under the Agent card, the root reporting it); a real Auto turn with an outside-workspace write showed the guardian's own decision row (approved, low risk), and the denial override (`68bcf6e3`) is proven against the real binary with a scripted deny verdict. A real denial has not been observed in the app: forcing one needs an action the reviewer rates risky, and every candidate that is also harmless if approved either trips ClaudeUI's own harness classifier or a user deny rule (`Bash(rm -rf /*)`). Minor presentation gap seen on that drive: a native `fileChange` add rendered "No changes" in the diff body.
 
-Not built: Codex as a dispatch TARGET, delete and archive (native rule from the lifecycle probe: forks are never listed, delete is refused while a process holds the thread or a descendant fork exists, leaf-first), interrupted-tool presentation supplement, full metering, cross-engine dispatch, non-macOS packaging.
+Not built: Codex as a dispatch TARGET, delete and archive (native rule from the lifecycle probe: forks are never listed, delete is refused while a process holds the thread or a descendant fork exists, leaf-first), interrupted-tool presentation supplement (the M2 finding predates slice C, under which an interrupted dynamic call now completes `failed` with a cancellation text; whether cold history still omits it is unverified), full metering, non-macOS packaging.
 
 ### Open items, in the order I would take them
 
@@ -113,6 +136,12 @@ It returned `{"authenticated":true,"authKind":"chatgpt","requiresLogin":false}` 
 - Native delete of a forked thread is leaf-first and whole-subtree; forks are never listed by `thread/list`.
 - Delta handling uses item-scoped message upserts, which can flood the domain-event ring on long answers; per-item volatile streaming is outstanding.
 - Sandbox enforcement cannot be measured in the integration fixture (macOS refuses to nest a second seatbelt profile); containment claims rest on source and real runs.
+- The model, not the feature flag, picks Codex's collab surface (`multi_agent_version_for_model`): Luna and the older models take v1 (`collabAgentToolCall` items, `spawn_agent` in namespace `multi_agent_v1`), Astra/Sol/Terra/Daybreak take v2 (`subAgentActivity` items, namespace `collaboration`, spawn requires `task_name`). Only the `started` activity names the child thread; later activities carry their own item ids.
+- No `thread/started` is ever emitted for a spawned child (three emit sites: `thread/start`, `thread/fork`, detached review). A child's early notifications must be held until its spawn item binds it.
+- `dynamicTools` is accepted on `thread/start` only; resume and fork restore the specs from the source rollout's SessionMeta; children never inherit them.
+- The v2 wire uses camelCase where the core deserializes snake_case: `GuardianAssessmentEvent` fields, action tags (`apply_patch`) and the `GuardianCommandSource` VALUE (`unifiedExec` vs `unified_exec`). Anything sent back to the core needs the mapping.
+- A parent `turn/interrupt` does not cascade to spawned children; each running child needs its own.
+- `BaseSession.flushQueuedItems` drops a boundary signal that arrives while a forward is in flight (re-entrancy guard). Codex chains boundaries on its own promise; opencode and pi still call it blind.
 - Known test flakes unrelated to this branch: `remote-*.test.ts` port collisions under parallel load, and `SettingsDialogView.component.test.tsx` fails `format:check` since before the branch. Rerun in isolation before blaming a diff.
 
 ## Verification commands
