@@ -6,6 +6,13 @@ import type { SessionManager } from '../services/session-manager'
 import { scanSkills } from '../services/skill-scanner'
 import { saveCleanupPeriodDays, saveClaudePermissions } from '../services/claude-settings'
 import { syncCodexRulesFile } from '../codex/rules-sync'
+import {
+  codexDeletePlan,
+  deleteCodexSubtree,
+  type CodexDeleteHooks,
+  type CodexNodeFacts
+} from '../codex/delete'
+import type { CodexDeletePlan } from '../../shared/codex-types'
 import type {
   ClaudePermissions,
   EngineId,
@@ -187,6 +194,68 @@ function unwatchForDelete(sessionId: string): void {
 }
 
 /**
+ * What a Codex delete plan needs to know about each thread it lists: the title
+ * the user would recognise it by, and whether a process still holds it.
+ *
+ * The title comes from the canonical directory listing rather than from the
+ * engine, because a fork the user has never opened has no live session and no
+ * `session_meta` title — the sidebar row is the only place its name exists.
+ */
+function codexNodeFacts(manager: SessionManager): (threadId: string) => CodexNodeFacts {
+  const listed = syncCore.getCanonicalState().directories.flatMap((group) => group.sessions)
+  return (threadId) => ({
+    title: listed.find((session) => session.sessionId === threadId)?.title ?? null,
+    live: manager.has(threadId)
+  })
+}
+
+/** The three side effects above, handed to the Codex walk per node. */
+function codexDeleteHooks(manager: SessionManager): CodexDeleteHooks {
+  return {
+    unwatch: unwatchForDelete,
+    stop: (threadId) => manager.cancel(threadId),
+    removeSession: (threadId) => syncCore.removeSession(threadId)
+  }
+}
+
+/**
+ * What deleting `threadId` would remove: the thread and every branch cut from
+ * it, leaf-first.
+ *
+ * A read-only query, so the confirmation can say what it is about to do. The
+ * walk below recomputes its own plan and never trusts the answer a client was
+ * shown — by the time the user clicks, a branch may have appeared or gone.
+ */
+export async function codexDeletePlanFor(
+  manager: SessionManager,
+  threadId: string
+): Promise<CodexDeletePlan> {
+  if (typeof threadId !== 'string' || !threadId || threadId.length > 512)
+    throw new Error('Invalid Codex thread ID')
+  return codexDeletePlan(threadId, codexNodeFacts(manager))
+}
+
+/**
+ * Delete one persisted Codex session AND every branch cut from it.
+ *
+ * Not a choice: the binary refuses to delete a thread whose history a fork
+ * still references, so the subtree goes leaf-first or nothing goes at all (see
+ * `core/codex/delete.ts`). The walk stops at the first refusal and throws
+ * naming it; the listing refresh runs either way, which is what puts the
+ * surviving rows back on every client after a partial delete.
+ */
+async function deleteCodexSession(manager: SessionManager, sessionId: string): Promise<void> {
+  try {
+    await deleteCodexSubtree(
+      await codexDeletePlan(sessionId, codexNodeFacts(manager)),
+      codexDeleteHooks(manager)
+    )
+  } finally {
+    void refreshCanonicalDirectories()
+  }
+}
+
+/**
  * Delete one persisted session, everywhere.
  *
  * `sessionId` is also the routingId of a live session for it, when there is one
@@ -202,7 +271,7 @@ export async function deleteSession(
   if (engineId && actualEngine && engineId !== actualEngine)
     throw new Error('Session deletion engine does not match persisted identity')
   if (engineId === 'codex' || actualEngine === 'codex')
-    throw new Error('Codex deletion is unsupported until native delete verification is complete')
+    return deleteCodexSession(manager, sessionId)
   if (engineId && !['claude', 'opencode', 'pi'].includes(engineId))
     throw new Error('Unsupported deletion engine')
   unwatchForDelete(sessionId)
@@ -237,19 +306,54 @@ export async function deleteSession(
 export async function deleteProject(manager: SessionManager, projectKey: string): Promise<void> {
   const state = syncCore.getCanonicalState()
   const group = state.directories.find((g) => g.projectKey === projectKey)
-  if (
-    group?.sessions.some((session) => session.engineId === 'codex') ||
-    Object.values(state.sessions).some(
-      (session) =>
-        session.status.engineId === 'codex' && cwdToProjectKey(session.cwd) === projectKey
-    )
-  )
-    throw new Error('Project contains Codex sessions; native project deletion is not enabled')
   const ids = new Set<string>(group?.sessions.map((s) => s.sessionId) ?? [])
   for (const [routingId, session] of Object.entries(state.sessions)) {
     if (cwdToProjectKey(session.cwd) === projectKey) ids.add(routingId)
   }
+
+  // Codex FIRST, and by subtree.
+  //
+  // Each root is walked leaf-first through the same path a single delete takes,
+  // before anything irreversible happens to the other engines: a native refusal
+  // (a thread some other process still holds) aborts the whole project delete
+  // rather than leaving Claude's directory unlinked behind a session that
+  // survived. A branch whose root is elsewhere is just a node — which also
+  // means a root here can take a fork that lives in ANOTHER project with it,
+  // because the binary will not delete the source while the fork references it.
+  const codexIds = new Set(
+    [...ids].filter(
+      (id) =>
+        state.sessions[id]?.status.engineId === 'codex' ||
+        group?.sessions.find((s) => s.sessionId === id)?.engineId === 'codex' ||
+        getSessionMeta(id)?.engineId === 'codex'
+    )
+  )
+  const swept = new Set<string>()
+  let walkedCodex = false
+  try {
+    for (const id of codexIds) {
+      if (swept.has(id)) continue
+      const plan = await codexDeletePlan(id, codexNodeFacts(manager))
+      walkedCodex = true
+      // A fork of this root that an earlier walk already removed is not deleted
+      // twice: the second delete would be refused as "no such thread", which is
+      // indistinguishable from a real refusal.
+      const nodes = plan.nodes.filter((node) => !swept.has(node.threadId))
+      await deleteCodexSubtree(
+        { nodes, order: plan.order.filter((threadId) => !swept.has(threadId)) },
+        codexDeleteHooks(manager)
+      )
+      for (const node of nodes) swept.add(node.threadId)
+    }
+  } finally {
+    // Also on the way out of a REFUSAL: the walk replicates each removal before
+    // it asks the binary, so an aborted sweep leaves clients missing rows for
+    // sessions that still exist until the listing is re-read.
+    if (walkedCodex) void refreshCanonicalDirectories()
+  }
+
   for (const id of ids) {
+    if (swept.has(id)) continue
     unwatchForDelete(id)
     manager.cancel(id)
     syncCore.removeSession(id)
@@ -258,7 +362,11 @@ export async function deleteProject(manager: SessionManager, projectKey: string)
   // Engine-owned storage first (see above). `allSettled`: one engine being down
   // must not abandon the rest of the delete — the Claude unlink below is the
   // irreversible step and it still has to run.
-  const foreign = (group?.sessions ?? []).filter((s) => s.engineId && s.engineId !== 'claude')
+  // Codex is excluded: its threads went through the subtree walk above, and
+  // asking the binary to delete one again would be refused as "no such thread".
+  const foreign = (group?.sessions ?? []).filter(
+    (s) => s.engineId && s.engineId !== 'claude' && !swept.has(s.sessionId)
+  )
   const results = await Promise.allSettled(
     foreign.map((s) => deleteSessionByEngine(s.sessionId, projectKey, s.engineId))
   )

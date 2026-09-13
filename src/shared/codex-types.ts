@@ -69,3 +69,32 @@ export interface CodexSessionState {
   reasoningEffort: string | null
   effortOptions: Array<{ value: string; description: string }>
 }
+
+/**
+ * One thread a Codex delete will remove, and what the user is told about it.
+ *
+ * `depth` is the distance from the thread the user clicked (0 for that thread),
+ * so a fork of a fork is 2. `live` means a process still holds the thread and
+ * the walk has to stop it first — the native delete is refused while anything
+ * owns the thread.
+ */
+export interface CodexDeleteNode {
+  threadId: string
+  /** The sidebar's title when the listing knows the thread; otherwise null. */
+  title: string | null
+  live: boolean
+  depth: number
+}
+
+/**
+ * What deleting one Codex session actually removes.
+ *
+ * A native delete is refused while any fork still references the thread's
+ * history, so deleting a branched session means deleting its whole subtree,
+ * leaf-first. `order` is that sequence — deepest first, the clicked thread
+ * last — and `nodes` is the same set with what the confirmation has to show.
+ */
+export interface CodexDeletePlan {
+  nodes: CodexDeleteNode[]
+  order: string[]
+}

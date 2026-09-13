@@ -80,6 +80,7 @@ const api: ClaudeAPI = {
   codexLoginStart: () => unwrap('codex:login-start'),
   codexLoginStatus: () => unwrap('codex:login-status'),
   codexLoginCancel: () => unwrap('codex:login-cancel'),
+  codexDeletePlan: (threadId) => unwrap('session:codex-delete-plan', threadId),
   platform: process.platform,
   // Resolved here, in the one process that sees BOTH forms of the opt-in: the
   // env var (inherited from main) and the `--claudeui-verifier-hooks` switch main

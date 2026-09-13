@@ -1,4 +1,5 @@
 import { ConfirmModal } from '../shared/ConfirmModal'
+import type { CodexDeleteNode } from '../../../../shared/codex-types'
 
 /**
  * Session/project delete confirmation. A thin wrapper over the shared
@@ -11,6 +12,7 @@ export function DeleteConfirmModal({
   name,
   path,
   sessionCount,
+  branches,
   onConfirm,
   onCancel
 }: {
@@ -21,6 +23,13 @@ export function DeleteConfirmModal({
   path: string
   /** For project deletes, number of sessions that will also be removed */
   sessionCount?: number
+  /**
+   * Codex only: the branches cut from this session, which the delete has to
+   * take with it. Codex refuses to delete a thread while a fork still
+   * references its history, so this is a statement of fact, not an option.
+   * `undefined` for every other engine; empty for an unbranched Codex session.
+   */
+  branches?: CodexDeleteNode[]
   /** Async — may reject; the modal surfaces the error inline */
   onConfirm: () => Promise<void>
   onCancel: () => void
@@ -28,7 +37,9 @@ export function DeleteConfirmModal({
   const confirmLabel =
     kind === 'project' && sessionCount && sessionCount > 0
       ? `Delete all ${sessionCount} session${sessionCount === 1 ? '' : 's'}`
-      : 'Delete'
+      : branches?.length
+        ? `Delete all ${branches.length + 1}`
+        : 'Delete'
 
   return (
     <ConfirmModal
@@ -46,6 +57,27 @@ export function DeleteConfirmModal({
             This will permanently delete{' '}
             <span className="font-medium text-text-primary">&quot;{name}&quot;</span> and its
             subagent data from disk. This cannot be undone.
+            {branches?.length ? (
+              <span data-testid="DeleteConfirmModal.branches" className="mt-2 block">
+                Also deletes {branches.length} branch
+                {branches.length === 1 ? '' : 'es'} cut from it — Codex will not delete a session
+                while a branch still references it:
+                <span className="mt-1 block">
+                  {branches.map((branch) => (
+                    <span
+                      key={branch.threadId}
+                      data-testid="DeleteConfirmModal.branch"
+                      className="block truncate text-text-primary"
+                    >
+                      {branch.title ?? branch.threadId}
+                      {branch.live ? (
+                        <span className="text-text-muted"> — running, will be stopped</span>
+                      ) : null}
+                    </span>
+                  ))}
+                </span>
+              </span>
+            ) : null}
           </>
         ) : (
           <>

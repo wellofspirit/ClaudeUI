@@ -1738,7 +1738,9 @@ describe('remote surface parity (phase 1 port)', () => {
         'codex:login-start',
         'codex:login-status',
         'codex:login-cancel',
-        'session:codex-approval'
+        'session:codex-approval',
+        // Read-only: what deleting a Codex session would remove (slice G).
+        'session:codex-delete-plan'
       ].sort()
     )
   })

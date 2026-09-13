@@ -65,6 +65,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     codexLoginStart: () => unwrap('codex:login-start'),
     codexLoginStatus: () => unwrap('codex:login-status'),
     codexLoginCancel: () => unwrap('codex:login-cancel'),
+    codexDeletePlan: (threadId) => unwrap('session:codex-delete-plan', threadId),
     platform: 'web',
     // Never on the web client. The verifier hooks are a LOCAL harness affordance
     // (`scripts/app-shot.mjs` driving the real Electron app); a browser reaching

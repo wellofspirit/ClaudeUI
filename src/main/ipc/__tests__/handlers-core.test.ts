@@ -51,6 +51,19 @@ vi.mock('../../../core/services/sync-seed', () => ({ refreshCanonicalDirectories
 const { unwatchSession } = vi.hoisted(() => ({ unwatchSession: vi.fn() }))
 vi.mock('../../../core/services/session-watcher', () => ({ unwatchSession }))
 
+// Slice G's Codex walk. The plan and the native delete are the subject of
+// `core/codex/__tests__/codex-delete.test.ts`; what these tests pin is that the
+// codex branch reaches the walk at all, with hooks wired to this module's own
+// unwatch/cancel/replicate, and that a refusal still refreshes the listing.
+const { codexDeletePlan, deleteCodexSubtree } = vi.hoisted(() => ({
+  codexDeletePlan: vi.fn((...args: any[]) => ({
+    nodes: [{ threadId: args[0], title: null, live: false, depth: 0 }],
+    order: [args[0]]
+  })),
+  deleteCodexSubtree: vi.fn(async (..._args: any[]) => {})
+}))
+vi.mock('../../../core/codex/delete', () => ({ codexDeletePlan, deleteCodexSubtree }))
+
 // Import AFTER mocks.
 import {
   mcpStatus,
@@ -413,6 +426,122 @@ describe('handlers-core', () => {
       expect(deleteSessionByEngine).toHaveBeenCalledWith('pi-1', '-repo', 'pi')
       // Engine-owned storage first; the irreversible Claude unlink last.
       expect(order[order.length - 1]).toBe('unlink-claude')
+    })
+
+    // -----------------------------------------------------------------------
+    // Codex (ADR-066 slice G) — a delete is a leaf-first SUBTREE walk
+    // -----------------------------------------------------------------------
+    //
+    // This branch used to `throw new Error('Codex deletion is unsupported …')`,
+    // so the sidebar's delete was a dead end for the one engine whose sessions
+    // cannot be removed by unlinking a file.
+
+    it('walks the Codex subtree instead of refusing, with this module’s own hooks', async () => {
+      const order: string[] = []
+      unwatchSession.mockImplementation((id: string) => order.push(`unwatch:${id}`))
+      const manager = {
+        cancel: vi.fn((id: string) => order.push(`cancel:${id}`)),
+        get: vi.fn(),
+        has: vi.fn((id: string) => id === 'cx-live'),
+        forEach: vi.fn()
+      } as any
+      syncCore.emit('session:created', ['cx-root', { cwd: '/repo' }])
+
+      await deleteSession(manager, 'cx-root', '-repo', 'codex')
+
+      expect(deleteCodexSubtree).toHaveBeenCalledTimes(1)
+      const [plan, hooks] = deleteCodexSubtree.mock.calls[0] as any
+      expect(plan.order).toEqual(['cx-root'])
+      // The hooks are the same three steps every other engine's delete takes.
+      hooks.unwatch('cx-root')
+      hooks.stop('cx-root')
+      hooks.removeSession('cx-root')
+      expect(order).toEqual(['unwatch:cx-root', 'cancel:cx-root'])
+      expect(syncCore.getCanonicalState().sessions['cx-root']).toBeUndefined()
+      // `liveness` is answered by the session manager, not by the engine.
+      const facts = codexDeletePlan.mock.calls[0][1] as (id: string) => { live: boolean }
+      expect(typeof facts).toBe('function')
+      expect(facts('cx-live').live).toBe(true)
+      expect(facts('cx-root').live).toBe(false)
+      // The file-unlinking dispatcher is NOT part of this path.
+      expect(deleteSessionByEngine).not.toHaveBeenCalled()
+      expect(refreshCanonicalDirectories).toHaveBeenCalled()
+    })
+
+    it('refreshes the listing even when the Codex walk is refused', async () => {
+      const manager = {
+        cancel: vi.fn(),
+        get: vi.fn(),
+        has: vi.fn(() => false),
+        forEach: vi.fn()
+      } as any
+      deleteCodexSubtree.mockRejectedValueOnce(new Error('Codex refused to delete "b" (…)'))
+      await expect(deleteSession(manager, 'cx-root', '-repo', 'codex')).rejects.toThrow(
+        /Codex refused to delete/
+      )
+      // Without this the deleted-but-refused rows stay missing on every client:
+      // the walk already replicated their removal before asking the binary.
+      expect(refreshCanonicalDirectories).toHaveBeenCalled()
+    })
+
+    it('sweeps a project’s Codex sessions through the same walk, before the Claude unlink', async () => {
+      const manager = {
+        cancel: vi.fn(),
+        get: vi.fn(),
+        has: vi.fn(() => false),
+        forEach: vi.fn()
+      } as any
+      const order: string[] = []
+      deleteCodexSubtree.mockImplementation(async (plan: any) => {
+        order.push(`codex:${plan.order.join(',')}`)
+      })
+      deleteProjectFiles.mockImplementation(async () => {
+        order.push('unlink-claude')
+      })
+      syncCore.setDirectories([
+        {
+          cwd: '/repo',
+          projectKey: '-repo',
+          folderName: 'repo',
+          sessions: [
+            { sessionId: 'cl-1', cwd: '/repo', projectKey: '-repo', engineId: 'claude' },
+            { sessionId: 'cx-1', cwd: '/repo', projectKey: '-repo', engineId: 'codex' }
+          ]
+        }
+      ] as never)
+
+      await deleteProject(manager, '-repo')
+
+      expect(order).toEqual(['codex:cx-1', 'unlink-claude'])
+      // Codex never goes through the engine-neutral single-thread delete here —
+      // the walk already removed it, and a second ask is refused as "no such
+      // thread", which is indistinguishable from a real refusal.
+      expect(deleteSessionByEngine).not.toHaveBeenCalled()
+    })
+
+    it('a refused Codex walk aborts the project delete before anything irreversible', async () => {
+      const manager = {
+        cancel: vi.fn(),
+        get: vi.fn(),
+        has: vi.fn(() => false),
+        forEach: vi.fn()
+      } as any
+      deleteCodexSubtree.mockRejectedValueOnce(new Error('Codex refused to delete "cx-1" (…)'))
+      syncCore.setDirectories([
+        {
+          cwd: '/repo',
+          projectKey: '-repo',
+          folderName: 'repo',
+          sessions: [
+            { sessionId: 'cl-1', cwd: '/repo', projectKey: '-repo', engineId: 'claude' },
+            { sessionId: 'cx-1', cwd: '/repo', projectKey: '-repo', engineId: 'codex' }
+          ]
+        }
+      ] as never)
+
+      await expect(deleteProject(manager, '-repo')).rejects.toThrow(/Codex refused to delete/)
+      // A session that still exists must not be left behind a deleted project.
+      expect(deleteProjectFiles).not.toHaveBeenCalled()
     })
 
     it('one engine failing does not abandon the rest of the delete', async () => {

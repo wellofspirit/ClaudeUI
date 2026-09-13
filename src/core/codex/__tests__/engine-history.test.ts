@@ -1,7 +1,12 @@
 import { expect, it, vi } from 'vitest'
 import { historyFor, readSessionHistory } from '../../services/engine-history'
 
-const mocks = vi.hoisted(() => ({ claude: vi.fn(), codex: vi.fn(), anchor: vi.fn() }))
+const mocks = vi.hoisted(() => ({
+  claude: vi.fn(),
+  codex: vi.fn(),
+  anchor: vi.fn(),
+  deleteThread: vi.fn(async () => {})
+}))
 vi.mock('../../services/db', () => ({
   getSessionMeta: (id: string) => (id === 'native' ? { engineId: 'codex' } : undefined)
 }))
@@ -11,6 +16,7 @@ vi.mock('../history', () => ({
   listCodexSessions: vi.fn(),
   resolveCodexForkAnchor: mocks.anchor
 }))
+vi.mock('../delete', () => ({ deleteCodexThread: mocks.deleteThread }))
 
 it('routes metadata-owned native reads without touching Claude files', async () => {
   const result = {
@@ -55,4 +61,16 @@ it('seeds a codex branch from the source truncated at its anchor turn', async ()
   mocks.codex.mockResolvedValue(result)
   expect(await historyFor('codex').read('root', 'project', 'turn-1')).toBe(result)
   expect(mocks.codex).toHaveBeenLastCalledWith('root', undefined, 'turn-1')
+})
+
+/**
+ * The codex `delete` entry was `unsupported` — it threw for every caller — so
+ * nothing engine-neutral could remove a Codex session. It is the LEAF case now:
+ * one thread, no subtree, because this seam takes one id and has nowhere to put
+ * a plan. A branched session goes through `handlers-core.deleteSession`'s walk,
+ * which calls the same native delete per node.
+ */
+it('deletes one codex thread natively instead of refusing', async () => {
+  await historyFor('codex').delete('thread-1', 'unused-project-key')
+  expect(mocks.deleteThread).toHaveBeenCalledExactlyOnceWith('thread-1')
 })

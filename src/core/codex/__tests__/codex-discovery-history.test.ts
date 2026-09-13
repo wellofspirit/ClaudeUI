@@ -1,6 +1,11 @@
 import { beforeEach, expect, it, vi } from 'vitest'
 import { discoverCodexModels } from '../model-discovery'
-import { listCodexSessions, loadCodexHistory, resolveCodexForkAnchor } from '../history'
+import {
+  discoverCodexForks,
+  listCodexSessions,
+  loadCodexHistory,
+  resolveCodexForkAnchor
+} from '../history'
 import { setSessionMeta } from '../../services/db'
 import { CodexTransportError } from '../CodexAppServerClient'
 
@@ -42,6 +47,9 @@ vi.mock('../../services/db', () => ({
   codexForkSweepDone: () => mocks.swept.done,
   markCodexForkSweepDone: () => void (mocks.swept.done = true)
 }))
+/** The confirm pass's delay, so no test here waits the real 750 ms. */
+const instant = { sleep: async (): Promise<void> => {} }
+
 beforeEach(() => {
   vi.clearAllMocks()
   mocks.available = true
@@ -242,23 +250,29 @@ it('adopts pre-registry forks once, then reads only what the registry holds', as
     claude: { engineId: 'claude' }
   })
   mocks.read.mockImplementation(async ({ threadId }: { threadId: string }) => {
+    if (threadId === 'root') return { thread: root }
     if (threadId !== 'fork') throw new Error('no such thread')
     return { thread: { ...root, id: 'fork', name: 'Fork', forkedFromId: 'root' } }
   })
   expect((await listCodexSessions()).map((session) => session.sessionId)).toEqual(['root', 'fork'])
-  // The natively listed root is never read again, and a non-codex id never at all.
+  // EVERY unregistered codex id is read, the natively listed root included: a
+  // fork that has run a turn is listed exactly like a root and its list entry
+  // carries no lineage, so being listed proves nothing. A non-codex id is never
+  // read at all.
   expect(mocks.read.mock.calls.map(([params]) => params.threadId).sort()).toEqual([
     'deleted',
-    'fork'
+    'fork',
+    'root'
   ])
   expect(setSessionMeta).toHaveBeenCalledWith('fork', {
     engineId: 'codex',
     model: { engineId: 'codex', vendorId: 'openai', modelId: 'native' }
   })
   // What the sweep found is now REGISTERED, so the next refresh reads it
-  // directly. `deleted` failed with a non-definitive error, so the sweep is not
-  // marked done and it is retried — once it is refused definitively it is gone
-  // from the round for good (the prune test below).
+  // directly — and the ROOT is not, because it has no lineage and needs no help
+  // being found. `deleted` failed with a non-definitive error, so the sweep is
+  // not marked done and it is retried — once it is refused definitively it is
+  // gone from the round for good (the prune test below).
   expect([...mocks.forks]).toEqual([['fork', 'root']])
 })
 
@@ -313,7 +327,9 @@ it('prunes a definitively refused fork and keeps one whose read merely broke', a
     if (threadId === 'gone') throw new CodexTransportError('rpc-error--32600')
     throw new CodexTransportError('request-timeout')
   })
-  expect((await listCodexSessions()).map((session) => session.sessionId)).toEqual(['root'])
+  expect((await listCodexSessions(undefined, instant)).map((session) => session.sessionId)).toEqual(
+    ['root']
+  )
   expect([...mocks.forks.keys()]).toEqual(['unreachable'])
 })
 
@@ -471,4 +487,183 @@ it('reconstructs a v2 child from its subAgentActivity pair on a cold read', asyn
   expect(history.subagentMessages?.[card]?.map((message) => message.id)).toEqual([
     'codex:["child","c1","m1"]'
   ])
+})
+
+// ---------------------------------------------------------------------------
+// `-32600` is not proof. Found on a real machine 2026-09-13: a fresh
+// app-server refused two live forks, the adoption believed it, marked itself
+// done with nothing registered, and both branches vanished from the sidebar and
+// from every delete plan.
+// ---------------------------------------------------------------------------
+
+const listedRoot = {
+  id: 'root',
+  model: 'native',
+  modelProvider: 'openai',
+  name: 'Root',
+  cwd: '/isolated',
+  createdAt: 1,
+  updatedAt: 2
+}
+
+it('keeps a fork whose FIRST refusal a re-read does not confirm', async () => {
+  mocks.list.mockResolvedValue([listedRoot])
+  mocks.meta.mockReturnValue({ root: { engineId: 'codex' } })
+  mocks.swept.done = true
+  mocks.forks.set('flaky', 'root')
+  let reads = 0
+  mocks.read.mockImplementation(async ({ threadId }: { threadId: string }) => {
+    if (++reads === 1) throw new CodexTransportError('rpc-error--32600')
+    return { thread: { ...listedRoot, id: threadId, name: 'Flaky', forkedFromId: 'root' } }
+  })
+  expect((await listCodexSessions(undefined, instant)).map((s) => s.sessionId)).toEqual([
+    'root',
+    'flaky'
+  ])
+  // Two reads, not one: the refusal was checked before it was believed.
+  expect(reads).toBe(2)
+  // PRE-FIX this row was deleted and the branch was gone for good.
+  expect([...mocks.forks.keys()]).toEqual(['flaky'])
+})
+
+it('does not mark the adoption done when a refusal is not confirmed', async () => {
+  mocks.list.mockResolvedValue([listedRoot])
+  mocks.meta.mockReturnValue({ root: { engineId: 'codex' }, fork: { engineId: 'codex' } })
+  let reads = 0
+  mocks.read.mockImplementation(async ({ threadId }: { threadId: string }) => {
+    if (++reads === 1) throw new CodexTransportError('rpc-error--32600')
+    if (threadId === 'root') return { thread: listedRoot }
+    return { thread: { ...listedRoot, id: threadId, name: 'Fork', forkedFromId: 'root' } }
+  })
+  expect((await listCodexSessions(undefined, instant)).map((s) => s.sessionId)).toEqual([
+    'root',
+    'fork'
+  ])
+  expect([...mocks.forks]).toEqual([['fork', 'root']])
+  expect(mocks.swept.done).toBe(true)
+})
+
+it('leaves the adoption unmarked when a refusal stays unconfirmed AND unresolved', async () => {
+  mocks.list.mockResolvedValue([listedRoot])
+  mocks.meta.mockReturnValue({ root: { engineId: 'codex' }, fork: { engineId: 'codex' } })
+  let reads = 0
+  mocks.read.mockImplementation(async () => {
+    // Refused, then BROKEN — neither answer is "gone for good", so the sweep
+    // has not finished and must run again next refresh.
+    if (++reads === 1) throw new CodexTransportError('rpc-error--32600')
+    throw new CodexTransportError('request-timeout')
+  })
+  await listCodexSessions(undefined, instant)
+  expect(mocks.swept.done).toBe(false)
+  expect([...mocks.forks]).toEqual([])
+})
+
+it('prunes only a refusal the re-read confirms', async () => {
+  mocks.list.mockResolvedValue([listedRoot])
+  mocks.meta.mockReturnValue({ root: { engineId: 'codex' } })
+  mocks.swept.done = true
+  mocks.forks.set('gone', 'root')
+  mocks.read.mockRejectedValue(new CodexTransportError('rpc-error--32600'))
+  expect((await listCodexSessions(undefined, instant)).map((s) => s.sessionId)).toEqual(['root'])
+  expect([...mocks.forks.keys()]).toEqual([])
+  expect(mocks.read).toHaveBeenCalledTimes(2)
+})
+
+// ---------------------------------------------------------------------------
+// The sweep a DELETE runs, so a plan is right even when the registry is not
+// ---------------------------------------------------------------------------
+
+it('discovers a branch that only session_meta knows about, and registers it', async () => {
+  mocks.list.mockResolvedValue([listedRoot])
+  mocks.meta.mockReturnValue({
+    root: { engineId: 'codex' },
+    lost: { engineId: 'codex' },
+    claude: { engineId: 'claude' }
+  })
+  mocks.swept.done = true
+  mocks.read.mockImplementation(async ({ threadId }: { threadId: string }) =>
+    threadId === 'root'
+      ? { thread: listedRoot }
+      : { thread: { ...listedRoot, id: threadId, name: 'Lost branch', forkedFromId: 'root' } }
+  )
+  expect(await discoverCodexForks({ cwd: '/isolated' }, instant)).toEqual([
+    { threadId: 'lost', forkedFromId: 'root' }
+  ])
+  // The root is READ — a listed thread may still be a branch — but it earns no
+  // registry row, because it has no lineage. A Claude id is never read at all.
+  expect(mocks.read.mock.calls.map(([params]) => params.threadId).sort()).toEqual(['lost', 'root'])
+})
+
+it('never prunes from a delete sweep, however the read answers', async () => {
+  // A delete plan may not delete registry rows: the sidebar's list is the one
+  // place that decides a branch is gone, and it has the whole picture.
+  mocks.list.mockResolvedValue([listedRoot])
+  mocks.meta.mockReturnValue({ root: { engineId: 'codex' }, lost: { engineId: 'codex' } })
+  mocks.swept.done = true
+  mocks.forks.set('registered', 'root')
+  mocks.read.mockRejectedValue(new CodexTransportError('rpc-error--32600'))
+  expect(await discoverCodexForks({ cwd: '/isolated' }, instant)).toEqual([
+    { threadId: 'registered', forkedFromId: 'root' }
+  ])
+  // `registered` is not re-probed — the registry already carries its lineage,
+  // and a delete does not need to prove the thread is there. `root` and `lost`
+  // are, twice each: a refusal is only believed when a re-read repeats it.
+  expect(mocks.read.mock.calls.map(([params]) => params.threadId).sort()).toEqual([
+    'lost',
+    'lost',
+    'root',
+    'root'
+  ])
+})
+
+// ---------------------------------------------------------------------------
+// A fork that has RUN A TURN is listed like a root — and its list entry carries
+// no lineage. Verified on a real machine 2026-09-13: `thread/list` returned 25
+// threads including both branches, each with `forkedFromId: null`, while
+// `thread/read` gave the real source for each. The sweep skipped them for being
+// listed, so nothing ever learned they were branches and the delete plan for
+// their root was the root alone.
+// ---------------------------------------------------------------------------
+
+it('adopts a fork the native listing already carries, and lists it once', async () => {
+  const listedFork = { ...listedRoot, id: 'grown-fork', name: 'Grown fork' }
+  // Exactly what the machine returned: listed, and with NO lineage on the entry.
+  mocks.list.mockResolvedValue([listedRoot, { ...listedFork, forkedFromId: null }])
+  mocks.meta.mockReturnValue({ root: { engineId: 'codex' }, 'grown-fork': { engineId: 'codex' } })
+  mocks.read.mockImplementation(async ({ threadId }: { threadId: string }) =>
+    threadId === 'root'
+      ? { thread: listedRoot }
+      : { thread: { ...listedFork, forkedFromId: 'root' } }
+  )
+  const listed = await listCodexSessions(undefined, instant)
+  // PRE-FIX the registry stayed empty, so every delete plan for `root` was
+  // `[root]` and the binary refused it for the branch still referencing it.
+  expect([...mocks.forks]).toEqual([['grown-fork', 'root']])
+  // ...and being in both sources must not make it two sidebar rows.
+  expect(listed.map((session) => session.sessionId)).toEqual(['root', 'grown-fork'])
+  expect(mocks.swept.done).toBe(true)
+})
+
+it('finds a listed fork from the delete sweep too', async () => {
+  mocks.list.mockResolvedValue([listedRoot, { ...listedRoot, id: 'grown-fork' }])
+  mocks.meta.mockReturnValue({ root: { engineId: 'codex' }, 'grown-fork': { engineId: 'codex' } })
+  mocks.swept.done = true
+  mocks.read.mockImplementation(async ({ threadId }: { threadId: string }) =>
+    threadId === 'root'
+      ? { thread: listedRoot }
+      : { thread: { ...listedRoot, id: 'grown-fork', forkedFromId: 'root' } }
+  )
+  expect(await discoverCodexForks({ cwd: '/isolated' }, instant)).toEqual([
+    { threadId: 'grown-fork', forkedFromId: 'root' }
+  ])
+})
+
+it('never registers a thread as its own source', async () => {
+  // Defensive: a lineage pointing at itself is a chain nothing can walk, and a
+  // row for it would make the id a candidate on every later sweep.
+  mocks.list.mockResolvedValue([listedRoot])
+  mocks.meta.mockReturnValue({ root: { engineId: 'codex' } })
+  mocks.read.mockImplementation(async () => ({ thread: { ...listedRoot, forkedFromId: 'root' } }))
+  await listCodexSessions(undefined, instant)
+  expect([...mocks.forks]).toEqual([])
 })

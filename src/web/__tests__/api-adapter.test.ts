@@ -326,6 +326,7 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
   { method: 'codexLoginStart', channel: 'codex:login-start', args: [] },
   { method: 'codexLoginStatus', channel: 'codex:login-status', args: [] },
   { method: 'codexLoginCancel', channel: 'codex:login-cancel', args: [] },
+  { method: 'codexDeletePlan', channel: 'session:codex-delete-plan', args: ['thread-1'] },
   // Engine / vendor config (plain handlers — preload uses a bare invoke here).
   { method: 'loadEngineConfig', channel: 'config:load-engine-config', args: ['opencode'] },
   {

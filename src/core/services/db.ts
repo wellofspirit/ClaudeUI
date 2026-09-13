@@ -880,6 +880,26 @@ export interface CodexFork {
  */
 const FORK_SWEEP_MARKER = ''
 
+/**
+ * Which adoption the marker row records, in its otherwise unused
+ * `forked_from_id`.
+ *
+ * A GENERATION rather than a boolean, because the adoption has finished wrongly
+ * twice and each fix has to reach the users the previous one already marked:
+ *
+ *  - v1 (`NULL`) believed a single `-32600` from `thread/read`;
+ *  - v2 swept only the ids `thread/list` omitted, which misses a fork that has
+ *    run a turn — it is listed like a root, and the list entry carries no
+ *    lineage.
+ *
+ * On one real machine (2026-09-13) the two together marked the sweep done with
+ * NOTHING registered while two live branches sat in `session_meta`. Bumping
+ * this value re-runs the adoption exactly once more, with no migration: the
+ * older marker no longer matches, and the next completed sweep overwrites the
+ * row. See `codex/history.ts` `adoptLegacyForks`.
+ */
+const FORK_SWEEP_GENERATION = 'adopted-v3'
+
 /** Record a `thread/fork` result. First registration wins — a later resume of the
  *  same branch must not rewrite its lineage or duplicate the row. */
 export function registerCodexFork(
@@ -909,18 +929,19 @@ export function deleteCodexFork(threadId: string, db: Db = getDb()): void {
   db.prepare('DELETE FROM codex_forks WHERE thread_id = ?').run(threadId)
 }
 
-/** Whether the one-time adoption of pre-registry forks has already run. */
+/** Whether the CURRENT adoption of pre-registry forks has already run. */
 export function codexForkSweepDone(db: Db = getDb()): boolean {
-  return (
-    db.prepare('SELECT 1 FROM codex_forks WHERE thread_id = ?').get(FORK_SWEEP_MARKER) !== undefined
-  )
+  const marker = db
+    .prepare('SELECT forked_from_id FROM codex_forks WHERE thread_id = ?')
+    .get(FORK_SWEEP_MARKER) as { forked_from_id: string | null } | undefined
+  return marker?.forked_from_id === FORK_SWEEP_GENERATION
 }
 
-/** Record that the one-time adoption has run. Idempotent. */
+/** Record that the current adoption has run. Idempotent; replaces an older generation. */
 export function markCodexForkSweepDone(db: Db = getDb()): void {
   db.prepare(
-    'INSERT OR IGNORE INTO codex_forks (thread_id, forked_from_id, created_at) VALUES (?, NULL, ?)'
-  ).run(FORK_SWEEP_MARKER, Date.now())
+    'INSERT OR REPLACE INTO codex_forks (thread_id, forked_from_id, created_at) VALUES (?, ?, ?)'
+  ).run(FORK_SWEEP_MARKER, FORK_SWEEP_GENERATION, Date.now())
 }
 
 /**

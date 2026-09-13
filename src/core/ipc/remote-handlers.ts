@@ -127,6 +127,7 @@ import {
   listPlaces,
   deleteSession,
   deleteProject,
+  codexDeletePlanFor,
   clearConversation
 } from './handlers-core'
 
@@ -844,6 +845,15 @@ export function registerRemoteHandlers(
     handler: async (projectKey: string) => {
       await deleteProject(manager, projectKey)
     }
+  })
+
+  // The desktop twin in session.ipc.ts carries the reasoning; the two must
+  // agree on capability and kind or the registry throws.
+  handleRemote({
+    channel: 'session:codex-delete-plan',
+    capability: 'chat',
+    kind: 'query',
+    handler: async (threadId: string) => codexDeletePlanFor(manager, threadId)
   })
 
   // -------------------------------------------------------------------------

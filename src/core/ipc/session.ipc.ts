@@ -119,6 +119,7 @@ import {
   listPlaces,
   deleteSession,
   deleteProject,
+  codexDeletePlanFor,
   clearConversation
 } from './handlers-core'
 
@@ -333,6 +334,7 @@ const SESSION_IPC_CHANNELS = [
   'session:get-session-log-path',
   'session:delete-session',
   'session:delete-project',
+  'session:codex-delete-plan',
   'session:clear-conversation',
   'session:list-directories',
   'session:list-opencode',
@@ -941,6 +943,16 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: safeHandler(async (projectKey: string) => {
       await deleteProject(manager, projectKey)
     })
+  })
+
+  // READ-ONLY, and `chat` for the same reason the delete itself is (ADR-056):
+  // it describes which CONVERSATIONS a delete would remove. Codex only — no
+  // other engine's delete takes more than the session the user clicked.
+  handleIpc({
+    channel: 'session:codex-delete-plan',
+    capability: 'chat',
+    kind: 'query',
+    handler: safeHandler(async (threadId: string) => codexDeletePlanFor(manager, threadId))
   })
 
   handleIpc({

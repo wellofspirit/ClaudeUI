@@ -581,10 +581,14 @@ it.skipIf(!enabled)(
     )
     // ── What the pinned binary actually does ────────────────────────────
     //
-    // 1. FORKS ARE NEVER LISTED. `thread/list` returns only the source root, in
-    //    both `archived: false` and `archived: true` — so "the row disappeared"
-    //    is no proof of deletion for a fork, and a sidebar built on
-    //    `listAllThreads()` cannot show forks at all.
+    // 1. A FORK IS NOT LISTED UNTIL IT HAS A TURN OF ITS OWN. Both forks here
+    //    are turn-less, and `thread/list` returns only the source root, in both
+    //    `archived: false` and `archived: true` — so "the row disappeared" is no
+    //    proof of deletion for a fresh fork, and a sidebar built on
+    //    `listAllThreads()` alone would never show one. Run a turn on it and it
+    //    IS listed, exactly like a root and with `forkedFromId: null` on the
+    //    entry — see the probe below, which is why lineage can only come from
+    //    `thread/read`.
     expect(listBeforeDelete).toEqual([sourceId])
     // 2. Delete AND archive are refused while the owning root process holds the
     //    thread — the contract `CodexService.deleteThread` documents — and the
@@ -609,7 +613,7 @@ it.skipIf(!enabled)(
     expect(readDeletedSource).toBe('ok')
     expect(descendantAfterSourceDelete).toBe('ok')
     // 6. Archive retains the native data: the thread still reads. It adds no row
-    //    to the archived listing either, because forks are never listed (1).
+    //    to the archived listing either, because a turn-less fork is not listed (1).
     expect(archiveUnloadedFork).toBe('ok')
     expect(listAfterArchive).toEqual([sourceId])
     expect(archivedListed).toEqual([])
@@ -695,6 +699,69 @@ it.skipIf(!enabled)(
       })
     )
     expect(plainResumeTools).toContain('fixture_echo')
+    expect(errors).toEqual([])
+  },
+  90000
+)
+
+/**
+ * WHEN a fork starts being listed, and what the listing says about it.
+ *
+ * The M3 sidebar and the delete plan both depended on "a fork is never listed",
+ * and that is only half the rule. A fork with no turns of its own is invisible
+ * to `thread/list`; the moment it runs one it is listed like any root — and the
+ * LIST ENTRY carries no `forkedFromId`, while `thread/read` of the same id
+ * does. Anything that wants lineage has to read; nothing can infer "this is a
+ * root" from the listing. Cost: a real machine's two live branches stayed out
+ * of the fork registry, so deleting their root was refused (2026-09-13).
+ */
+it.skipIf(!enabled)(
+  'probes when a fork joins thread/list, and whether the entry carries its lineage',
+  async () => {
+    const { cwd, env, errors, script } = await setupFixture()
+    let counter = 0
+    script.current = () => message(`answer ${++counter}`)
+    const source = await root(cwd, env)
+    const started = await source.client.request<{ thread: { id: string } }>('thread/start', {
+      cwd,
+      model: 'mock-model',
+      modelProvider: 'fixture',
+      historyMode: 'paginated'
+    })
+    const sourceId = started.thread.id
+    const anchor = await runTurn(source.client, source.notifications, sourceId, 'one')
+    const forked = await source.client.request<{
+      thread: { id: string; forkedFromId: string | null }
+    }>('thread/fork', { threadId: sourceId, lastTurnId: anchor, cwd })
+    const forkId = forked.thread.id
+    const service = new CodexService({ cwd, env, requestTimeoutMs: 15000 })
+    services.push(service)
+
+    const listedBeforeTurn = (await service.listAllThreads()).map((thread) => thread.id)
+    await runTurn(source.client, source.notifications, forkId, 'the fork runs its own turn')
+    const afterTurn = await service.listAllThreads()
+    const entry = afterTurn.find((thread) => thread.id === forkId)
+    const read = (await service.readThread({ threadId: forkId, includeTurns: false })).thread
+    console.log(
+      JSON.stringify({
+        probe: 'fork-listing',
+        forkId,
+        forkResponseForkedFromId: forked.thread.forkedFromId,
+        listedBeforeTurn,
+        listedAfterTurn: afterTurn.map((thread) => thread.id),
+        entryForkedFromId: entry?.forkedFromId ?? null,
+        entryParentThreadId: entry?.parentThreadId ?? null,
+        readForkedFromId: read.forkedFromId
+      })
+    )
+    // Turn-less: invisible, as finding 1 above says.
+    expect(listedBeforeTurn).toEqual([sourceId])
+    // One turn later: listed, and indistinguishable from a root in the listing.
+    expect(afterTurn.map((thread) => thread.id).sort()).toEqual([forkId, sourceId].sort())
+    expect(entry?.forkedFromId ?? null).toBeNull()
+    expect(entry?.parentThreadId ?? null).toBeNull()
+    // The lineage exists — only `thread/read` will tell you.
+    expect(read.forkedFromId).toBe(sourceId)
     expect(errors).toEqual([])
   },
   90000

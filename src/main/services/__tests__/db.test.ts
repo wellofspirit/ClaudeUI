@@ -532,6 +532,35 @@ describe('Codex fork registry', () => {
       db.close()
     }
   })
+
+  /**
+   * The adoption has finished WRONGLY twice — v1 believed a single `-32600`
+   * from `thread/read`, v2 swept only the ids `thread/list` omits (which misses
+   * a fork that has run a turn) — and on a real machine (2026-09-13) the two
+   * together marked it done having registered nothing while two live branches
+   * sat in `session_meta`. Each of those users carries one of the marker rows
+   * below, and neither may count, or they never get the fixed sweep.
+   */
+  it.each([
+    ['v1', null],
+    ['v2', 'adopted-v2']
+  ])('ignores the marker a superseded adoption (%s) left behind', (_generation, value) => {
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      db.prepare(
+        'INSERT INTO codex_forks (thread_id, forked_from_id, created_at) VALUES (?, ?, ?)'
+      ).run('', value, Date.now())
+      expect(codexForkSweepDone(db)).toBe(false)
+      // ...and the re-run replaces it rather than colliding with it.
+      markCodexForkSweepDone(db)
+      expect(codexForkSweepDone(db)).toBe(true)
+      expect(db.prepare('SELECT COUNT(*) AS n FROM codex_forks').get()).toEqual({ n: 1 })
+      expect(listCodexForks(db)).toEqual([])
+    } finally {
+      db.close()
+    }
+  })
 })
 
 describe('migration framework — transactional application', () => {

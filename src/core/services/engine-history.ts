@@ -14,6 +14,7 @@ import {
 } from './opencode-session-list'
 import { deleteSessionFiles } from './delete-session-files'
 import { listCodexSessions, loadCodexHistory, resolveCodexForkAnchor } from '../codex/history'
+import { deleteCodexThread } from '../codex/delete'
 import type { ForkAnchorResult } from '../../shared/types'
 
 interface EngineHistory {
@@ -35,10 +36,6 @@ const bare = (messages: SessionHistoryResult['messages']): SessionHistoryResult 
   agentIdToToolUseId: {},
   warnings: []
 })
-const unsupported = async (): Promise<never> => {
-  throw new Error('Codex deletion is unsupported until native lifecycle verification is complete')
-}
-
 const readers: Record<EngineId, EngineHistory> = {
   claude: {
     read: (...args) => loadClaudeHistory(...args),
@@ -67,7 +64,12 @@ const readers: Record<EngineId, EngineHistory> = {
     read: (id, _projectKey, anchor) =>
       anchor ? loadCodexHistory(id, undefined, anchor) : loadCodexHistory(id),
     list: listCodexSessions,
-    delete: unsupported,
+    // ONE thread, which is all this engine-neutral seam can express. The
+    // binary refuses to delete a thread a fork still references, so a branched
+    // session is deleted through `handlers-core.deleteSession`'s leaf-first
+    // subtree walk instead — this entry is the leaf case and the walk's own
+    // per-node call shares its implementation (`core/codex/delete.ts`).
+    delete: (id) => deleteCodexThread(id),
     // Turn-granular and native: no JSONL line uuid and no `messageIndex`, since
     // the Codex message id already carries the turn that owns the row.
     forkAnchor: (id, cwd, message) => resolveCodexForkAnchor(id, message, { cwd })

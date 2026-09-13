@@ -70,6 +70,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     codexLoginStart: () => unwrap('codex:login-start'),
     codexLoginStatus: () => unwrap('codex:login-status'),
     codexLoginCancel: () => unwrap('codex:login-cancel'),
+    codexDeletePlan: (threadId) => unwrap('session:codex-delete-plan', threadId),
     pickFolder: () => ipcRenderer.invoke('session:pick-folder'),
     createSession: (
       routingId,

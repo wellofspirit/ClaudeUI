@@ -5,6 +5,7 @@ import type {
   WorktreeInfo,
   ActiveView
 } from '../../../../shared/types'
+import type { CodexDeletePlan } from '../../../../shared/codex-types'
 import { WorktreesModal } from '../WorktreesModal'
 import { WorktreeCleanupModal } from '../WorktreeCleanupModal'
 import { NavItem, SafeSvgIcon } from './NavItem'
@@ -45,6 +46,8 @@ export interface SidebarViewProps {
   renamingKey: string | null
   worktreesModalCwd: string | null
   deleteTarget: DeleteTarget | null
+  /** The Codex subtree the pending delete would remove; null for every other engine. */
+  deletePlan: CodexDeletePlan | null
   cleanupWorktree: { sessionId: string; worktreeInfo: WorktreeInfo } | null
   onToggleCollapse?: () => void
   onNewSession: () => void
@@ -100,6 +103,7 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
     renamingKey,
     worktreesModalCwd,
     deleteTarget,
+    deletePlan,
     cleanupWorktree,
     onToggleCollapse,
     onNewSession,
@@ -443,11 +447,21 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
           kind={deleteTarget.kind}
           name={deleteTarget.kind === 'session' ? deleteTarget.title : deleteTarget.folderName}
           path={
-            deleteTarget.kind === 'session'
-              ? `~/.claude/projects/${deleteTarget.projectKey}/${deleteTarget.sessionId}.jsonl`
-              : `~/.claude/projects/${deleteTarget.projectKey}/`
+            deleteTarget.kind !== 'session'
+              ? `~/.claude/projects/${deleteTarget.projectKey}/`
+              : // A Codex thread has no file under `~/.claude/projects` — it
+                // lives in the app-server's own store — so naming one here
+                // would be a fabricated path. Its id is the honest detail.
+                deleteTarget.engineId === 'codex'
+                ? deleteTarget.sessionId
+                : `~/.claude/projects/${deleteTarget.projectKey}/${deleteTarget.sessionId}.jsonl`
           }
           sessionCount={deleteTarget.kind === 'project' ? deleteTarget.sessionCount : undefined}
+          branches={
+            deleteTarget.kind === 'session' && deleteTarget.engineId === 'codex'
+              ? (deletePlan?.nodes.filter((node) => node.depth > 0) ?? [])
+              : undefined
+          }
           onConfirm={onConfirmDelete}
           onCancel={onCancelDelete}
         />

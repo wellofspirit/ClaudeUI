@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useRef } from 'react'
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { v4 as uuid } from 'uuid'
 import { useSessionStore } from '../../stores/session-store'
 import type {
@@ -9,6 +9,7 @@ import type {
 } from '../../../../shared/types'
 import { useAutomationStore } from '../../stores/automation-store'
 import { useIsMobile } from '../../hooks/useIsMobile'
+import type { CodexDeletePlan } from '../../../../shared/codex-types'
 import { SidebarView, type DeleteTarget } from './View'
 import { cwdToProjectKey } from '../../../../shared/project-key'
 
@@ -132,6 +133,7 @@ export function Sidebar({
   const [renamingKey, setRenamingKey] = useState<string | null>(null)
   const [showHidden, setShowHidden] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
+  const [deletePlan, setDeletePlan] = useState<CodexDeletePlan | null>(null)
   const [historyError, setHistoryError] = useState<string | null>(null)
 
   const hiddenSessionSet = useMemo(() => new Set(hiddenSessionIds), [hiddenSessionIds])
@@ -616,6 +618,31 @@ export function Sidebar({
     })
   }, [])
 
+  /**
+   * What deleting the pending CODEX target would actually remove.
+   *
+   * Only Codex has a plan: its native delete is refused while a fork still
+   * references the thread's history, so a branched session is a subtree delete
+   * and the confirmation has to say so before the user agrees to it. The answer
+   * is advisory — main recomputes the plan when the delete runs and never
+   * trusts this copy — and a failed query just leaves the plain confirmation
+   * standing rather than blocking the delete.
+   */
+  useEffect(() => {
+    setDeletePlan(null)
+    if (deleteTarget?.kind !== 'session' || deleteTarget.engineId !== 'codex') return
+    let current = true
+    void window.api
+      .codexDeletePlan(deleteTarget.sessionId)
+      .then((plan) => {
+        if (current) setDeletePlan(plan)
+      })
+      .catch(() => {})
+    return () => {
+      current = false
+    }
+  }, [deleteTarget])
+
   const confirmDelete = useCallback(async (): Promise<void> => {
     if (!deleteTarget) return
     if (deleteTarget.kind === 'session') {
@@ -742,6 +769,7 @@ export function Sidebar({
         renamingKey={renamingKey}
         worktreesModalCwd={worktreesModalCwd}
         deleteTarget={deleteTarget}
+        deletePlan={deletePlan}
         cleanupWorktree={cleanupWorktree}
         onToggleCollapse={onToggleCollapse}
         onNewSession={handleNewSession}

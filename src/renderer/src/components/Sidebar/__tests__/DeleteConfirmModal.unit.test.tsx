@@ -143,3 +143,37 @@ describe('DeleteConfirmModal (project)', () => {
     expect(screen.getByRole('button', { name: 'Delete' })).toBeInTheDocument()
   })
 })
+
+/**
+ * Codex branches (ADR-066 slice G). The native delete is refused while a fork
+ * still references the thread's history, so deleting a branched session takes
+ * the whole subtree — and the confirmation has to say so BEFORE the user
+ * agrees, which is the only reason this prop exists.
+ */
+describe('DeleteConfirmModal (codex branches)', () => {
+  it('lists the branches the delete will take with it, and marks the running one', () => {
+    renderModal({
+      name: 'Root thread',
+      path: 'thread-root',
+      branches: [
+        { threadId: 'fork-a', title: 'Try the other fix', live: true, depth: 1 },
+        { threadId: 'fork-b', title: null, live: false, depth: 2 }
+      ]
+    })
+    expect(screen.getByTestId('DeleteConfirmModal.branches')).toBeInTheDocument()
+    expect(screen.getAllByTestId('DeleteConfirmModal.branch')).toHaveLength(2)
+    expect(screen.getByText(/Also deletes 2 branches/)).toBeInTheDocument()
+    expect(screen.getByText(/Try the other fix/)).toBeInTheDocument()
+    // No sidebar title for a branch nobody has opened: the id is what is left.
+    expect(screen.getByText(/fork-b/)).toBeInTheDocument()
+    expect(screen.getByText(/running, will be stopped/)).toBeInTheDocument()
+    // One button, and it says how many threads it is about to remove.
+    expect(screen.getByRole('button', { name: 'Delete all 3' })).toBeInTheDocument()
+  })
+
+  it('says nothing extra for an unbranched Codex session', () => {
+    renderModal({ name: 'Leaf thread', path: 'thread-leaf', branches: [] })
+    expect(screen.queryByTestId('DeleteConfirmModal.branches')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Delete' })).toBeInTheDocument()
+  })
+})

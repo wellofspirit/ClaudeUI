@@ -2541,6 +2541,8 @@ export interface ClaudeAPI
   codexLoginStart(): Promise<import('./codex-types').CodexLoginState>
   codexLoginStatus(): Promise<import('./codex-types').CodexLoginState>
   codexLoginCancel(): Promise<void>
+  /** What deleting this Codex thread would remove: the thread and every branch cut from it. */
+  codexDeletePlan(threadId: string): Promise<import('./codex-types').CodexDeletePlan>
   /** Relay a log message from the renderer to the main process logger */
   logRelay(level: string, source: string, message: string): void
   /** App + SDK version info for display in Settings */
