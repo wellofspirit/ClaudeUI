@@ -3,7 +3,7 @@ import {
   CodexTransportError,
   type CodexClientOptions
 } from './CodexAppServerClient'
-import type { CodexAuthHook } from './codex-auth-hook'
+import type { CodexAuthHook, CodexInjectionToken } from './codex-auth-hook'
 import type { CodexMethods } from './protocol/methods'
 import type { InitializeParams } from './protocol/InitializeParams'
 
@@ -60,6 +60,35 @@ export class CodexClient {
     }
     if (!token) return result
     try {
+      await this.sendLogin(token)
+    } catch (error) {
+      this.transport.dispose()
+      throw error
+    }
+    return result
+  }
+
+  /**
+   * Re-point a LIVE process at another vault account (ADR-068 §2's per-session
+   * pin). Legal while external auth is active — `account/login/start
+   * {chatgptAuthTokens}` is the one login `account_processor.rs` still accepts
+   * then, precisely so a multi-account client can update the identity in place.
+   *
+   * Unlike {@link start} a refusal does NOT dispose: the process is already
+   * running under a perfectly valid identity, so the honest outcome is to reject
+   * the pin and leave the session on the account it has. The caller surfaces the
+   * native message.
+   */
+  async injectAccount(auth: CodexAuthHook): Promise<CodexInjectionToken | null> {
+    const token = await auth.inject()
+    if (!token) return null
+    await this.sendLogin(token)
+    return token
+  }
+
+  /** The one place the injected triple reaches the wire. Never logged. */
+  private async sendLogin(token: CodexInjectionToken): Promise<void> {
+    try {
       await this.transport.request('account/login/start', {
         type: 'chatgptAuthTokens',
         accessToken: token.accessToken,
@@ -67,13 +96,11 @@ export class CodexClient {
         chatgptPlanType: token.chatgptPlanType
       })
     } catch (error) {
-      this.transport.dispose()
       throw new CodexInjectionError(
         (error instanceof CodexTransportError ? error.nativeMessage : undefined) ??
           'Codex refused the ChatGPT credential from ClaudeUI'
       )
     }
-    return result
   }
 
   request<M extends keyof CodexMethods>(

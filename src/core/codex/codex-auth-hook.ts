@@ -63,6 +63,23 @@ export interface CodexAuthHook {
   inject(): Promise<CodexInjectionToken | null>
   /** Answers `account/chatgptAuthTokens/refresh`. Rejects when no account can. */
   onRefreshRequest(params: unknown): Promise<ChatgptAuthTokensRefreshResponse>
+  /**
+   * Re-point this hook at another vault account before the NEXT {@link inject}
+   * (ADR-068 §2's per-session pin). `null` means the ACTIVE account.
+   *
+   * A setter rather than an argument on `inject()` because the choice is sticky:
+   * the refresh answer's second fallback is "the account this process was
+   * injected with", and a re-injection that did not also move the requested
+   * account would leave a later 401 recovering onto the previous identity.
+   */
+  requestAccount(accountId: string | null): void
+  /**
+   * Is `accountId` a vault account that still exists? Token-free — it reads the
+   * same `getStatus()` the account commands do. `setAccount` validates through
+   * it so an unknown id is refused before anything is persisted (ADR-059's rule
+   * applied to accounts: never silently substitute another identity).
+   */
+  hasAccount(accountId: string): Promise<boolean>
   /** The vault account id this process currently runs as, or null. */
   readonly injectedAccountId: string | null
   /**
@@ -106,13 +123,20 @@ function previousWorkspaceId(params: unknown): string | null {
  */
 export function codexAuthHook(deps: CodexAuthHookDeps = {}): CodexAuthHook {
   const source = deps.source ?? credentialSync
-  const requested = deps.accountId ?? null
+  let requested = deps.accountId ?? null
   let injected: string | null = null
   const hook: CodexAuthHook = {
     get injectedAccountId(): string | null {
       return injected
     },
     onAuthRequired: deps.onAuthRequired,
+    requestAccount(accountId: string | null): void {
+      requested = accountId
+    },
+    async hasAccount(accountId: string): Promise<boolean> {
+      const status = await source.getStatus()
+      return status.accounts.some((account) => account.id === accountId)
+    },
     async inject(): Promise<CodexInjectionToken | null> {
       const token = await source.injectionTokenFor(requested)
       injected = token?.vaultAccountId ?? null

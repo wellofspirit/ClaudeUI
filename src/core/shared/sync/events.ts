@@ -260,6 +260,13 @@ export interface SyncEventMap {
   'mockup:file-changed': (directory: string) => void
   'usage:data': (data: AccountUsage) => void
   'usage:block-data': (data: BlockUsageData) => void
+  /**
+   * Per-account ChatGPT rate limits changed (ADR-068 §2) — a live session pushed
+   * an `account/rateLimits/updated`, or a panel-driven read finished. Deliberately
+   * PAYLOAD-FREE: clients re-query `usage:chatgpt-limits`, so the map has exactly
+   * one shape and one owner.
+   */
+  'usage:chatgpt-limits-changed': () => void
 
   // -------------------------------------------------------------------------
   // Automation

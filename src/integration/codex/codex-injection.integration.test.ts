@@ -72,17 +72,23 @@ const WORKSPACE = 'ws-fixture-0001'
 const EMAIL = 'fixture-owner@example.test'
 const VAULT_ACCOUNT = 'acct-fixture'
 
-/** An UNSIGNED, obviously synthetic ChatGPT-shaped JWT. Never a real token. */
-function fakeJwt(suffix: string): string {
+/**
+ * An UNSIGNED, obviously synthetic ChatGPT-shaped JWT. Never a real token.
+ *
+ * The binary only base64-decodes the payload (`parse_chatgpt_jwt_claims`), so
+ * the third segment is free-form — which is what lets a test tell two tokens
+ * apart in the provider's `Authorization` headers.
+ */
+function fakeJwtFor(workspace: string, email: string, suffix: string): string {
   const part = (value: unknown): string =>
     Buffer.from(JSON.stringify(value)).toString('base64url').replace(/=+$/, '')
   return [
     part({ alg: 'none', typ: 'JWT' }),
     part({
       exp: Math.floor(Date.now() / 1000) + 3600,
-      email: EMAIL,
+      email,
       'https://api.openai.com/auth': {
-        chatgpt_account_id: WORKSPACE,
+        chatgpt_account_id: workspace,
         chatgpt_plan_type: 'pro',
         chatgpt_user_id: 'user-fixture'
       }
@@ -90,6 +96,8 @@ function fakeJwt(suffix: string): string {
     `unsigned-${suffix}`
   ].join('.')
 }
+
+const fakeJwt = (suffix: string): string => fakeJwtFor(WORKSPACE, EMAIL, suffix)
 
 const clients: CodexClient[] = []
 let directory: string | undefined
@@ -525,6 +533,176 @@ forced_chatgpt_workspace_id = "ws-somebody-else"
       const account = await client.request('account/read', { refreshToken: false })
       expect(account.account).toMatchObject({ type: 'chatgpt', email: EMAIL })
     }
+  },
+  120000
+)
+
+/**
+ * Slice 2b guard 8 — re-pointing a LIVE process at a second account
+ * (ADR-068 §2), against the pinned binary.
+ *
+ * The claim the unit suite cannot make: `account/login/start
+ * {chatgptAuthTokens}` is accepted on a process that is ALREADY under external
+ * auth, takes effect for `account/read`, and leaves the thread able to run
+ * another turn. That is the whole mechanism `CodexSession.setAccount` rests on —
+ * if the binary refused a second login the pin would have to respawn the
+ * process, which would lose the conversation.
+ *
+ * Driven at the CLIENT level rather than through `CodexSession`, for the same
+ * reason the rest of this file is: a session would pull in the db, the sync host
+ * and the vault. `setAccount`'s own bookkeeping is unit-pinned; what is proven
+ * here is the wire underneath it.
+ *
+ * Still no real credential: both JWTs are minted in this file with unsigned
+ * third segments, and the provider is the same scripted localhost fixture.
+ */
+const SECOND_WORKSPACE = 'ws-fixture-0002'
+const SECOND_EMAIL = 'fixture-second@example.test'
+const SECOND_ACCOUNT = 'acct-fixture-2'
+
+/** Two accounts, switchable by `requestAccount` exactly as the session does. */
+function twoAccountSource(): CodexAuthSource {
+  const accounts = [
+    { id: VAULT_ACCOUNT, workspace: WORKSPACE, email: EMAIL },
+    { id: SECOND_ACCOUNT, workspace: SECOND_WORKSPACE, email: SECOND_EMAIL }
+  ]
+  return {
+    injectionTokenFor: async (accountId) => {
+      const account = accountId === null ? accounts[0] : accounts.find((a) => a.id === accountId)
+      if (!account) return null
+      return {
+        accessToken: fakeJwtFor(account.workspace, account.email, account.id),
+        chatgptAccountId: account.workspace,
+        chatgptPlanType: 'pro',
+        vaultAccountId: account.id
+      }
+    },
+    getStatus: async () => ({
+      accounts: accounts.map((a) => ({ id: a.id, accountId: a.workspace }))
+    })
+  }
+}
+
+it.skipIf(!enabled)(
+  'switches a live thread to a second account between turns, and the next turn completes',
+  async () => {
+    const fixture = await setupFixture()
+    const hook = codexAuthHook({ source: twoAccountSource() })
+    const notifications: Notification[] = []
+    const client = new CodexClient({
+      cwd: fixture.cwd,
+      env: fixture.env,
+      requestTimeoutMs: 15000,
+      serverMethods: ['account/chatgptAuthTokens/refresh'],
+      onServerRequest: async (_method, params) => hook.onRefreshRequest(params),
+      onNotification: (method, params) =>
+        notifications.push({ method, params: params as Record<string, unknown> })
+    })
+    clients.push(client)
+    await client.start(
+      {
+        clientInfo: { name: 'codex_pin_probe', title: null, version: '1' },
+        capabilities: { experimentalApi: true, requestAttestation: false }
+      },
+      hook
+    )
+    expect(hook.injectedAccountId).toBe(VAULT_ACCOUNT)
+    expect((await client.request('account/read', { refreshToken: false })).account).toMatchObject({
+      type: 'chatgpt',
+      email: EMAIL
+    })
+
+    const started = await client.request('thread/start', {
+      cwd: fixture.cwd,
+      model: 'mock-model',
+      historyMode: 'paginated'
+    })
+    const threadId = started.thread.id
+    const first = await client.request('turn/start', {
+      threadId,
+      input: [{ type: 'text', text: 'hello', text_elements: [] }]
+    })
+    await waitFor(
+      () =>
+        notifications.some(
+          ({ method, params }) =>
+            method === 'turn/completed' && (params.turn as { id: string })?.id === first.turn.id
+        ),
+      'first turn'
+    )
+
+    // THE PIN. A second `account/login/start {chatgptAuthTokens}` on the SAME
+    // connection, while external auth is already active.
+    hook.requestAccount(SECOND_ACCOUNT)
+    const token = await client.injectAccount(hook)
+    expect(token?.vaultAccountId).toBe(SECOND_ACCOUNT)
+    expect(hook.injectedAccountId).toBe(SECOND_ACCOUNT)
+    expect((await client.request('account/read', { refreshToken: false })).account).toMatchObject({
+      type: 'chatgpt',
+      email: SECOND_EMAIL
+    })
+
+    const second = await client.request('turn/start', {
+      threadId,
+      input: [{ type: 'text', text: 'again', text_elements: [] }]
+    })
+    await waitFor(
+      () =>
+        notifications.some(
+          ({ method, params }) =>
+            method === 'turn/completed' && (params.turn as { id: string })?.id === second.turn.id
+        ),
+      'turn after the pin'
+    )
+
+    // The turn after the switch carried the SECOND account's token.
+    expect(fixture.authorizations.at(-1)).toContain(SECOND_ACCOUNT)
+    expect(fixture.authorizations[0]).toContain(VAULT_ACCOUNT)
+    // Still memory-only: a pin writes nothing to the native auth store.
+    expect(() =>
+      readFileSync(join(fixture.env.CODEX_HOME as string, 'auth.json'), 'utf8')
+    ).toThrow()
+    expect(fixture.errors).toEqual([])
+  },
+  120000
+)
+
+it.skipIf(!enabled)(
+  'reads per-account rate limits over one process, re-injecting between reads',
+  async () => {
+    // `account/rateLimits/read` goes to `chatgpt_base_url`, which this fixture
+    // answers 404 — so the READ is expected to fail. What is proven here is the
+    // shape of the sweep: one process, one login per account, in order, with no
+    // second child spawned. The numbers themselves need a real backend.
+    const fixture = await setupFixture()
+    const hook = codexAuthHook({ source: twoAccountSource() })
+    const client = new CodexClient({
+      cwd: fixture.cwd,
+      env: fixture.env,
+      requestTimeoutMs: 15000
+    })
+    clients.push(client)
+    await client.start(
+      {
+        clientInfo: { name: 'codex_ratelimit_probe', title: null, version: '1' },
+        capabilities: { experimentalApi: true, requestAttestation: false }
+      },
+      hook
+    )
+
+    const seen: string[] = []
+    for (const accountId of [VAULT_ACCOUNT, SECOND_ACCOUNT]) {
+      hook.requestAccount(accountId)
+      const token = await client.injectAccount(hook)
+      expect(token?.vaultAccountId).toBe(accountId)
+      const result = await client.request('account/rateLimits/read', {}).catch(() => null)
+      seen.push(`${accountId}:${result ? 'answered' : 'refused'}`)
+    }
+
+    expect(seen).toEqual([`${VAULT_ACCOUNT}:refused`, `${SECOND_ACCOUNT}:refused`])
+    // The binary DID ask the (fixture) backend on each pass, which is what says
+    // the re-injected identity reached the read rather than being short-circuited.
+    expect(fixture.backend.length).toBeGreaterThan(0)
   },
   120000
 )

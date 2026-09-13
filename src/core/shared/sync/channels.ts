@@ -409,6 +409,12 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: false,
     why: 'Block analytics. Fans out today; no snapshot field.'
   },
+  'usage:chatgpt-limits-changed': {
+    cls: 'replicated',
+    ring: true,
+    canonical: false,
+    why: 'ADR-068 §2: per-account ChatGPT rate limits moved — a bare nudge with NO payload, because the map is read through `usage:chatgpt-limits` and a fan-out carrying it would be a second copy of state the query already owns. No snapshot field, like the two usage channels above it.'
+  },
 
   // -------------------------------------------------------------------------
   // Automation domain (phase-1 residual, classified here)

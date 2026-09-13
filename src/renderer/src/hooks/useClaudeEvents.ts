@@ -302,6 +302,13 @@ export function useClaudeEvents(): void {
       onSyncEvent('usage:block-data', (data) => {
         useSessionStore.getState().setBlockUsage(data)
       }),
+      // ADR-068 §2: a bare nudge — a live Codex session pushed new ChatGPT rate
+      // limits, or a panel-driven read finished. The map itself is read back
+      // through `usage:chatgpt-limits`, so there is one shape and one owner.
+      // `false`: re-read what the host already holds, never provoke a fetch.
+      onSyncEvent('usage:chatgpt-limits-changed', () => {
+        void useSessionStore.getState().loadChatgptLimits(false)
+      }),
       // Auth source from session init ('none' = logged out) — drives the banner
       // Also updates the vendorAuth probe so AuthBanner reads from the probe.
       onSyncEvent('session:auth-source', (_routingId, source) => {

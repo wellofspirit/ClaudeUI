@@ -46,6 +46,8 @@ import { resolveCodexCapabilities } from '../../shared/model-capabilities'
 import { CodexClient } from './CodexClient'
 import { CodexTransportError, type CodexClientOptions } from './CodexAppServerClient'
 import { CODEX_AUTH_PROVIDER_ID, type CodexAuthHook } from './codex-auth-hook'
+import { chatgptRateLimits } from './chatgpt-rate-limits'
+import type { RateLimitSnapshot } from './protocol/v2/RateLimitSnapshot'
 import type { Model } from './protocol/v2/Model'
 import type { JsonValue } from './protocol/serde_json/JsonValue'
 import type { ThreadItem } from './protocol/v2/ThreadItem'
@@ -438,7 +440,12 @@ export class CodexSession extends BaseSession {
   private model?: string
   private effectiveModel?: string
   private effort?: string
-  private native?: CodexSessionState
+  /**
+   * The NATIVE half of `SessionStatus.codex`. `overrides` and `pinnedAccountId`
+   * are ClaudeUI's own and are folded in by {@link status}, so they are omitted
+   * here rather than kept in two places that could disagree.
+   */
+  private native?: Omit<CodexSessionState, 'overrides' | 'pinnedAccountId'>
   private overrides: CodexSettings = {}
   private account: SessionStatus['account'] = null
   /**
@@ -449,6 +456,19 @@ export class CodexSession extends BaseSession {
   private readonly auth: CodexAuthHook | null
   /** The VAULT account id this process was injected with, or null. */
   private injectedAccountId: string | null = null
+  /**
+   * A pin accepted while a turn was running, waiting for the next turn boundary
+   * (ADR-068 §2 — the same "applies from the next turn" rule
+   * {@link setPermissionMode} follows, for the same reason: re-pointing the
+   * identity mid-turn would bill half a conversation to another subscription).
+   *
+   * Also carries a pin chosen BEFORE the process starts, which `start()` folds
+   * into the overrides in the same place it folds an explicit model or effort.
+   *
+   * `undefined` means nothing is pending; `null` is a pending "follow the active
+   * account", which is why this is not just `string | null`.
+   */
+  private pendingAccountId: string | null | undefined
   private permissionMode: string
   /** "Allow for this session" clicks, in the shared engine's key vocabulary. */
   private sessionAllows = new Set<string>()
@@ -713,6 +733,11 @@ export class CodexSession extends BaseSession {
       this.busy = true
       this.clearInactivityTimer()
       this.status('running')
+      // The turn BOUNDARY is where a pin taken mid-turn lands (ADR-068 §2), so
+      // the login is on the wire before `turn/start` and this turn actually runs
+      // under the account the user picked.
+      await this.applyPendingPin()
+      if (this.closed) throw new Error('Codex session is disconnected')
       const result = await this.client.request('turn/start', {
         threadId: this.threadId!,
         clientUserMessageId,
@@ -762,6 +787,15 @@ export class CodexSession extends BaseSession {
       else this.model = saved.model
       if (this.effort !== undefined) this.overrides.effort = this.effort
       else this.effort = saved.effort
+      // A pin chosen BEFORE the first turn (the picker on a session that has not
+      // spawned yet) wins over the inherited one, exactly as an explicit model or
+      // effort does above — `this.overrides` is rebuilt here, so a pin written
+      // straight into it would be discarded.
+      if (this.pendingAccountId !== undefined) {
+        this.overrides.accountId = this.pendingAccountId
+        this.pendingAccountId = undefined
+      }
+      await this.resolveSavedPin()
       await this.client.start(
         {
           clientInfo: { name: 'claudeui_session', title: 'Codex session', version: '1' },
@@ -938,12 +972,20 @@ export class CodexSession extends BaseSession {
   }
 
   /**
-   * The single funnel both native settings writes take — `setModel` and
+   * The single funnel both NATIVE settings writes take — `setModel` and
    * `setEffort` are the only callers, and the only channels that reach them are
    * the engine-neutral `session:set-model` / `session:set-effort`.
+   *
+   * `accountId` shares the overrides ROW but is not a native thread setting: it
+   * decides which token the process is injected with, and `thread/settings/update`
+   * has no field for it. {@link setAccount} owns it; sending it here would put a
+   * ClaudeUI-only key on the native wire, so it is refused rather than silently
+   * dropped.
    */
   async setCodexSettings(value: CodexSettings): Promise<void> {
     const settings = parseCodexSettings(value)
+    if ('accountId' in settings)
+      throw new Error('The ChatGPT account pin is set through session:set-account')
     if (!this.starting) {
       if (settings.model !== undefined) this.model = settings.model
       if (settings.effort !== undefined) this.effort = settings.effort
@@ -999,6 +1041,153 @@ export class CodexSession extends BaseSession {
   setEffort(effort: string): Promise<void> {
     this.validateEffort(effort)
     return this.setCodexSettings({ effort })
+  }
+
+  // -------------------------------------------------------------------------
+  // The per-session ChatGPT pin (ADR-068 §2)
+  // -------------------------------------------------------------------------
+
+  /** The vault account this session is pinned to, or null when it follows active. */
+  private pinnedAccountId(): string | null {
+    return this.overrides.accountId ?? null
+  }
+
+  /**
+   * Pin this session to one stored ChatGPT account, or `null` to follow the
+   * ACTIVE one (ADR-068 §2).
+   *
+   * Order matters and is deliberate: VALIDATE first (an id the vault does not
+   * hold is refused and nothing is written — ADR-059's rule applied to
+   * accounts), then persist, then apply.
+   *
+   * Applying splits on whether a turn is running, exactly as
+   * {@link setPermissionMode} does. Idle: re-inject NOW on the live client —
+   * `account/login/start {chatgptAuthTokens}` is the one login Codex still
+   * accepts while external auth is active — then re-read `account/read` so the
+   * label follows the identity. Busy: hold the pin and apply it at the next turn
+   * boundary, because a turn that changed subscription halfway through would
+   * bill two accounts for one conversation.
+   */
+  async setAccount(accountId: string | null): Promise<void> {
+    if (!this.capabilities.auth.perSessionAccount)
+      throw new Error('This engine does not support per-session accounts')
+    if (this.closed) throw new Error('Codex session is disconnected')
+    if (!this.auth)
+      throw new Error('This Codex session does not manage its ChatGPT account through ClaudeUI')
+    if (accountId !== null && !(await this.auth.hasAccount(accountId)))
+      throw new Error('That ChatGPT account is no longer stored in ClaudeUI')
+    // Nothing has started yet. Hold the choice for `start()` — which rebuilds
+    // `this.overrides` from the saved row and would drop a write made here — and
+    // then START, exactly as `setCodexSettings` does for a pre-spawn model or
+    // effort. Merely parking it would leave the picker reading "Active · …"
+    // until the first prompt happened to spawn the process, so the session would
+    // silently disagree with what the user just chose. `start()` does the rest:
+    // it folds the pin, injects that account, persists the overrides row and
+    // emits the status that carries `codex.pinnedAccountId`.
+    if (!this.starting) {
+      this.pendingAccountId = accountId
+      this.starting = this.start()
+      await this.starting
+      if (this.closed) throw new Error('Codex session is disconnected')
+      return
+    }
+    await this.starting
+    if (this.closed) throw new Error('Codex session is disconnected')
+    await this.persistPin(accountId)
+    if (this.busy || this.sending) {
+      this.pendingAccountId = accountId
+      this.status('running')
+      return
+    }
+    this.pendingAccountId = undefined
+    await this.applyPin(accountId)
+  }
+
+  /** Write the pin into the overrides row beside model and effort. */
+  private async persistPin(accountId: string | null): Promise<void> {
+    const accepted = parseCodexSettings({ ...this.overrides, accountId })
+    try {
+      setCodexSessionOverrides(this.threadId!, accepted)
+    } catch {
+      throw new Error('The account pin could not be saved for reconnect')
+    }
+    this.overrides = accepted
+  }
+
+  /**
+   * Re-point the live process and refresh the attribution. A native refusal
+   * (a managed workspace policy) propagates with its own message and leaves the
+   * process on the identity it already had — never a silent substitution.
+   */
+  private async applyPin(accountId: string | null): Promise<void> {
+    this.auth!.requestAccount(accountId)
+    const token = await this.client.injectAccount(this.auth!)
+    this.injectedAccountId = token?.vaultAccountId ?? null
+    if (this.closed) return
+    const account = (await this.client.request('account/read', { refreshToken: false })).account
+    if (this.closed) return
+    this.account = this.injectedAccountId
+      ? {
+          engineId: 'codex',
+          vendorId: 'openai',
+          authState: 'authenticated',
+          billingType: 'subscription',
+          ...(account?.type === 'chatgpt' && account.email ? { label: account.email } : {}),
+          accountId: this.injectedAccountId
+        }
+      : this.account
+    this.status(this.busy ? 'running' : 'idle')
+  }
+
+  /**
+   * Apply a pin taken mid-turn, at the NEXT turn boundary — called from
+   * {@link run} before `turn/start`, so the login is on the wire first and the
+   * turn genuinely runs under the account the user chose.
+   *
+   * A failure here is reported and dropped rather than thrown: the pin is
+   * already persisted (the next process start honours it) and refusing to send
+   * the turn at all would be a worse answer than sending it on the identity the
+   * process already holds.
+   */
+  private async applyPendingPin(): Promise<void> {
+    if (this.pendingAccountId === undefined || !this.auth) return
+    const accountId = this.pendingAccountId
+    this.pendingAccountId = undefined
+    try {
+      await this.applyPin(accountId)
+    } catch (error) {
+      this.send(
+        'session:error',
+        error instanceof Error
+          ? `The ChatGPT account for this session could not be changed: ${error.message}`
+          : 'The ChatGPT account for this session could not be changed'
+      )
+    }
+  }
+
+  /**
+   * Resolve the pin a resume or fork inherited, BEFORE the handshake injects.
+   *
+   * A pinned account that no longer exists does not silently become the active
+   * one: the pin is cleared in the overrides and the user is told once
+   * (ADR-059's no-silent-fallback rule, applied to accounts).
+   */
+  private async resolveSavedPin(): Promise<void> {
+    const pin = this.overrides.accountId
+    if (!this.auth || typeof pin !== 'string') {
+      this.auth?.requestAccount(this.pinnedAccountId())
+      return
+    }
+    if (await this.auth.hasAccount(pin).catch(() => true)) {
+      this.auth.requestAccount(pin)
+      return
+    }
+    delete this.overrides.accountId
+    this.auth.requestAccount(null)
+    this.send(
+      'session:error',
+      'The pinned ChatGPT account was removed; this session now follows the active account.'
+    )
   }
 
   /**
@@ -1148,12 +1337,35 @@ export class CodexSession extends BaseSession {
         this.equivalentCostUsd ??
         this.equivalentCost({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
       account: this.account,
-      ...(this.native ? { codex: { ...this.native, overrides: { ...this.overrides } } } : {})
+      ...(this.native
+        ? {
+            codex: {
+              ...this.native,
+              overrides: { ...this.overrides },
+              pinnedAccountId: this.pinnedAccountId()
+            }
+          }
+        : {})
     } satisfies SessionStatus)
   }
 
   private notification(method: string, value: unknown): void {
-    if (this.closed || !record(value) || !this.threadId) return
+    if (this.closed || !record(value)) return
+    // ACCOUNT-level, not thread-level: `account/rateLimits/updated` carries no
+    // `threadId` at all, so it has to be taken before the thread routing below
+    // (which would otherwise hand it to `childNotification` as a foreign
+    // thread). It is attributed to the account THIS process was injected with —
+    // the only account whose usage this connection can be reporting (ADR-068 §2).
+    if (method === 'account/rateLimits/updated') {
+      if (this.injectedAccountId && record(value.rateLimits))
+        chatgptRateLimits.record(
+          this.injectedAccountId,
+          value.rateLimits as RateLimitSnapshot,
+          this.account?.label ? { email: this.account.label } : {}
+        )
+      return
+    }
+    if (!this.threadId) return
     // Every thread this process creates is attached to this one connection, so
     // a foreign `threadId` is either one of this root's own children or nothing
     // to do with us. Children route into the subagent channels; the rest are
@@ -2111,6 +2323,10 @@ export class CodexSession extends BaseSession {
       emit: (channel, data) => this.send(channel, data),
       addDispatchedCost: (engineId, modelId, costUsd) =>
         this.addDispatchedCost(engineId, modelId, costUsd),
+      // A dispatch target bills the subscription THIS session runs on
+      // (ADR-068 §2). Null when the session follows the active account, which is
+      // also what every non-Codex caller sends.
+      chatgptAccountId: this.pinnedAccountId(),
       toolUseId,
       extra: { signal: context.signal, sendNotification: async (): Promise<void> => {} }
     }

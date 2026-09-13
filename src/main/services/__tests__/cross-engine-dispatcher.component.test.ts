@@ -59,6 +59,7 @@ import type {
   SpawnPiTargetFn,
   SpawnCodexTargetFn
 } from '../../../core/services/cross-engine-dispatcher'
+import type { CodexAuthHook } from '../../../core/codex/codex-auth-hook'
 import type { QueryHandle, ResultMessage, SDKMessage, SdkToolExtra } from '../../../core/sdk'
 import type { StoredMessage } from '../../../core/opencode/protocol/types'
 import type { EngineConfig, EngineId } from '../../../shared/types'
@@ -6574,5 +6575,79 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
       targetEngine: 'codex',
       targetSessionId: CODEX_THREAD_ID
     })
+  })
+})
+
+/**
+ * Slice 2b guard 5 (target half) — a dispatch target bills the CALLER's
+ * subscription (ADR-068 §2).
+ *
+ * `createCodexTarget` builds one hook per target from the injected factory; what
+ * this pins is the ACCOUNT that factory is asked for, straight off
+ * `DispatchContext.chatgptAccountId`.
+ *
+ * FINDING, recorded rather than worked around: today nothing can drive this end
+ * to end. Only `CodexSession` sets `chatgptAccountId` (its own pin), and
+ * `dispatchInner` refuses `req.engine === ctx.fromEngine`, so a Codex caller can
+ * never reach a Codex target. The two halves are therefore pinned separately —
+ * the caller half in `core/codex/__tests__/codex-session.test.ts` ("hands a
+ * dispatch target the caller pin"), the target half here against a context that
+ * carries the field. The wiring is what makes the pair correct the moment either
+ * of those two facts changes; without it, a pinned session's delegated work
+ * would silently bill the active account (ADR-059's rule, applied to accounts).
+ */
+describe('CrossEngineDispatcher — codex direction: the caller account (ADR-068 §2)', () => {
+  const hookFor = (accountId: string | null): CodexAuthHook => ({
+    inject: vi.fn(async () => null),
+    onRefreshRequest: vi.fn(),
+    requestAccount: vi.fn(),
+    hasAccount: vi.fn(async () => true),
+    injectedAccountId: accountId
+  })
+
+  it.each([
+    ['a caller pin', 'acct-b', 'acct-b'],
+    ['an explicit follow-active', null, null],
+    ['a caller that carries no account at all', undefined, null]
+  ])('asks the hook factory for %s', async (_label, chatgptAccountId, expected) => {
+    const target = makeFakeCodexTarget()
+    const asked: Array<string | null> = []
+    const { dispatcher } = makeCodexHarness({
+      spawnCodexTarget: target.spawnCodexTarget,
+      codexAuth: (accountId) => {
+        asked.push(accountId)
+        return hookFor(accountId)
+      }
+    })
+    const pending = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x' },
+      makeCtx({
+        fromEngine: 'claude',
+        ...(chatgptAccountId !== undefined ? { chatgptAccountId } : {})
+      })
+    )
+    await tick()
+    target.completeTurn()
+    await pending
+
+    expect(asked).toEqual([expected])
+    expect(target.client.start).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ injectedAccountId: expected })
+    )
+  })
+
+  it('injects nothing when no factory is wired — the hermetic default', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const pending = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude', chatgptAccountId: 'acct-b' })
+    )
+    await tick()
+    target.completeTurn()
+    await pending
+
+    expect(target.client.start).toHaveBeenCalledWith(expect.anything(), undefined)
   })
 })

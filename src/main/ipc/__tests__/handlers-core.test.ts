@@ -85,6 +85,7 @@ import {
   listPlaces,
   setPermissionMode,
   setModel,
+  setAccount,
   deleteSession,
   deleteProject,
   clearConversation
@@ -287,6 +288,59 @@ describe('handlers-core', () => {
       await setPermissionMode(manager, 'rid-1', 'bogus')
 
       expect(sessionStub.setPermissionMode).not.toHaveBeenCalled()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // ADR-068 §2 — the per-session account pin is CAPABILITY-gated at the handler
+  // -------------------------------------------------------------------------
+
+  describe('setAccount', () => {
+    it('delegates to the session when the engine declares perSessionAccount', async () => {
+      const sessionStub = makeSessionStub({
+        engineId: 'codex',
+        capabilities: {
+          ...resolveClaudeCapabilities('default'),
+          auth: { canDriveLogin: true, multiAccount: false, perSessionAccount: true }
+        },
+        setAccount: vi.fn(async () => {})
+      })
+      const manager = makeManager(sessionStub)
+
+      await setAccount(manager, 'rid-1', 'acct-b')
+      await setAccount(manager, 'rid-1', null)
+
+      expect(sessionStub.setAccount).toHaveBeenNthCalledWith(1, 'acct-b')
+      expect(sessionStub.setAccount).toHaveBeenNthCalledWith(2, null)
+    })
+
+    it('REFUSES on an engine without the capability rather than resolving into nothing', async () => {
+      // Claude's `auth.perSessionAccount` is false. A silent no-op here would
+      // leave the picker showing a pin the session never took.
+      const sessionStub = makeSessionStub({ setAccount: vi.fn(async () => {}) })
+      const manager = makeManager(sessionStub)
+
+      await expect(setAccount(manager, 'rid-1', 'acct-b')).rejects.toThrow(
+        'This engine does not support per-session accounts'
+      )
+      expect(sessionStub.setAccount).not.toHaveBeenCalled()
+    })
+
+    it('refuses a missing session and a malformed id', async () => {
+      await expect(setAccount(makeManager(undefined), 'ghost', 'acct-b')).rejects.toThrow(
+        'No active session'
+      )
+      const sessionStub = makeSessionStub({
+        capabilities: {
+          ...resolveClaudeCapabilities('default'),
+          auth: { canDriveLogin: true, multiAccount: false, perSessionAccount: true }
+        },
+        setAccount: vi.fn(async () => {})
+      })
+      const manager = makeManager(sessionStub)
+      for (const bad of ['', 'x'.repeat(257), 42 as unknown as string])
+        await expect(setAccount(manager, 'rid-1', bad)).rejects.toThrow('Invalid account id')
+      expect(sessionStub.setAccount).not.toHaveBeenCalled()
     })
   })
 

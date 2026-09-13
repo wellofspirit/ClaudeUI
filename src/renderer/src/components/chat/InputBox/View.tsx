@@ -19,6 +19,8 @@ import {
   EffortPicker,
   ThinkingPicker,
   ReasoningPicker,
+  AccountPicker,
+  type AccountChoice,
   type ModelDisplay
 } from '../../shared/InlinePickers'
 import { MobileConfigSheet } from './MobileConfigSheet'
@@ -99,6 +101,22 @@ export interface InputBoxViewProps {
   nativeEffortOptions?: ReadonlyArray<{ value: string; description: string }>
   effortSupported: boolean
   allowedEffortLevels: readonly EffortLevel[]
+  /**
+   * The per-session ChatGPT account picker (ADR-068 §2). Shown only when the
+   * engine declares `auth.perSessionAccount`, the provider's Per-session
+   * accounts toggle is on, AND at least two accounts are stored — a picker with
+   * one option is a control that cannot be used.
+   */
+  showAccountPicker?: boolean
+  accounts?: readonly AccountChoice[]
+  /** The globally ACTIVE account, described under "Follow active account". */
+  activeAccountId?: string | null
+  /** This session's pin, or null when it follows the active account. */
+  pinnedAccountId?: string | null
+  onSelectAccount?: (accountId: string | null) => void
+  onAddAccount?: () => void
+  /** Re-read the account list (the picker calls it as its menu opens). */
+  onAccountMenuOpen?: () => void
   thinkingMode: ThinkingMode
   adaptiveSupported: boolean
   /** Show/hide the thinking-mode picker. Gated on capabilities.reasoning.thinking. */
@@ -591,6 +609,13 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                   effortSupported={props.effortSupported}
                   allowedEffortLevels={props.allowedEffortLevels}
                   nativeEffortOptions={props.nativeEffortOptions}
+                  showAccountPicker={props.showAccountPicker ?? false}
+                  accounts={props.accounts ?? []}
+                  activeAccountId={props.activeAccountId ?? null}
+                  pinnedAccountId={props.pinnedAccountId ?? null}
+                  onSelectAccount={props.onSelectAccount ?? (() => {})}
+                  onAddAccount={props.onAddAccount ?? (() => {})}
+                  onAccountMenuOpen={props.onAccountMenuOpen}
                   onSelectMode={props.onSelectMode ?? (() => {})}
                   onSelectEngine={props.onSelectEngine}
                   onSelectModel={props.onSelectModel}
@@ -635,6 +660,16 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                     supported={props.effortSupported}
                     onSelectEffort={props.onSelectEffort}
                   />
+                  {props.showAccountPicker && (
+                    <AccountPicker
+                      accounts={props.accounts ?? []}
+                      activeAccountId={props.activeAccountId ?? null}
+                      pinned={props.pinnedAccountId ?? null}
+                      onSelectAccount={props.onSelectAccount ?? (() => {})}
+                      onAddAccount={props.onAddAccount ?? (() => {})}
+                      onOpen={props.onAccountMenuOpen}
+                    />
+                  )}
                 </>
               )}
               <SandboxPill

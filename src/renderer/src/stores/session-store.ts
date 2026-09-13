@@ -3,6 +3,7 @@ import { useShallow } from 'zustand/react/shallow'
 import { VOICE_LANGUAGES } from '../../../shared/types'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import type { EffortLevel } from '../../../shared/model-capabilities'
+import type { SharedProviderAccountList } from '../../../shared/shared-provider'
 import {
   DEFAULT_AUTONOMY_MODE,
   PERMISSION_TO_AUTONOMY,
@@ -51,7 +52,8 @@ import type {
   EngineId,
   ModelRef,
   EngineConfig,
-  FileAttachment
+  FileAttachment,
+  ChatgptRateLimits
 } from '../../../shared/types'
 /**
  * The replica owns every SEALED slice of this store (see `sealed-fields.ts`).
@@ -1074,6 +1076,15 @@ export interface SessionState {
   customCommands: SlashCommandInfo[]
   sdkSkillNames: string[]
   accountUsage: AccountUsage | null
+  /**
+   * The ChatGPT vault's stored accounts and the per-session policy over them
+   * (ADR-068 §2), as `provider-account:list` answers. Null until first read —
+   * the account picker is hidden while it is, which is the honest state: nothing
+   * yet knows whether there is more than one account to choose from.
+   */
+  providerAccounts: SharedProviderAccountList | null
+  /** Per-account ChatGPT rate limits, read on demand (`usage:chatgpt-limits`). */
+  chatgptLimits: ChatgptRateLimits | null
   blockUsage: BlockUsageData | null
   /** Native OAuth login-flow state (ADR-014). Null until first event/status. */
   authState: AuthFlowState | null
@@ -1272,6 +1283,10 @@ export interface SessionState {
   closeGitPanel: (routingId: string) => void
   // Account usage
   setAccountUsage: (data: AccountUsage) => void
+  /** Re-read the ChatGPT account list. Safe to call repeatedly; failures leave the slice alone. */
+  loadProviderAccounts: () => Promise<void>
+  /** Re-read the per-account rate limits; `refresh` asks the host to fetch first. */
+  loadChatgptLimits: (refresh?: boolean) => Promise<void>
   // Native OAuth (ADR-014)
   setAuthState: (data: AuthFlowState) => void
   setAuthSource: (source: string) => void
@@ -1380,6 +1395,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   customCommands: [],
   sdkSkillNames: [],
   accountUsage: null,
+  providerAccounts: null,
+  chatgptLimits: null,
   authState: null,
   authSource: null,
   vendorAuth: null,
@@ -2457,6 +2474,24 @@ export const useSessionStore = create<SessionState>((set) => ({
   setAvailableModels: (models) => set({ availableModels: models }),
 
   setAccountUsage: (data) => set({ accountUsage: data }),
+
+  // ADR-068 §2. Both are plain READS of host-owned state — the store never
+  // derives either, and a failure leaves the previous answer in place rather
+  // than blanking a picker or a usage block mid-use.
+  loadProviderAccounts: async () => {
+    try {
+      set({ providerAccounts: await window.api.listProviderAccounts('chatgpt') })
+    } catch {
+      /* the host has no vault yet, or the read failed — keep what we have */
+    }
+  },
+  loadChatgptLimits: async (refresh = false) => {
+    try {
+      set({ chatgptLimits: await window.api.fetchChatgptLimits(refresh) })
+    } catch {
+      /* same posture as above */
+    }
+  },
 
   // Native OAuth (ADR-014). signIn/submit return the "authorizing"/result
   // snapshot synchronously; the terminal transition arrives via onAuthState.

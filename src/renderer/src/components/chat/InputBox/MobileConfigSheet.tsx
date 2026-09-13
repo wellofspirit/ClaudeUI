@@ -26,15 +26,17 @@ import { EngineLogo } from '../../shared/EngineLogo'
 import { useEscapeLayer } from '../../shared/use-escape-layer'
 import {
   ADAPTIVE_UNSUPPORTED_TOOLTIP,
+  accountLabel,
   deriveModelGroups,
   unsupportedTooltip,
+  type AccountChoice,
   type ModelDisplay
 } from '../../shared/InlinePickers'
 
 const ENGINE_LOCKED_TOOLTIP =
   'Engine cannot change after session initialization or for historical sessions'
 
-type Page = 'root' | 'mode' | 'engine' | 'model' | 'thinking' | 'variant' | 'effort'
+type Page = 'root' | 'mode' | 'engine' | 'model' | 'thinking' | 'variant' | 'effort' | 'account'
 
 const PAGE_HEADING: Record<Page, string> = {
   root: 'Run configuration',
@@ -43,7 +45,8 @@ const PAGE_HEADING: Record<Page, string> = {
   model: 'Model',
   thinking: 'Thinking mode',
   variant: 'Reasoning variant',
-  effort: 'Effort level'
+  effort: 'Effort level',
+  account: 'ChatGPT account'
 }
 
 export interface MobileConfigSheetProps {
@@ -67,6 +70,14 @@ export interface MobileConfigSheetProps {
   /** Engine-native effort tiers, in place of the fixed Claude ladder (see EffortPicker). */
   nativeEffortOptions?: ReadonlyArray<{ value: string; description: string }>
   allowedEffortLevels: readonly EffortLevel[]
+  /** The per-session ChatGPT account row and page (ADR-068 §2). Same gate as desktop. */
+  showAccountPicker: boolean
+  accounts: readonly AccountChoice[]
+  activeAccountId: string | null
+  pinnedAccountId: string | null
+  onSelectAccount: (accountId: string | null) => void
+  onAddAccount: () => void
+  onAccountMenuOpen?: () => void
   onSelectMode: (mode: PermissionMode) => void
   onSelectEngine: (engineId: EngineId) => void
   onSelectModel: (value: string) => void
@@ -453,6 +464,68 @@ function EffortPage({
   )
 }
 
+/**
+ * The same list the desktop `AccountPicker` offers (ADR-068 §2): follow-active
+ * first (described by the account it currently resolves to), then every stored
+ * account, then the escape hatch into Settings.
+ */
+function AccountPage({
+  accounts,
+  activeAccountId,
+  pinnedAccountId,
+  onSelect,
+  onAdd
+}: {
+  accounts: readonly AccountChoice[]
+  activeAccountId: string | null
+  pinnedAccountId: string | null
+  onSelect: (accountId: string | null) => void
+  onAdd: () => void
+}): React.JSX.Element {
+  const active = accounts.find((account) => account.id === activeAccountId)
+  return (
+    <div>
+      <OptionButton
+        testId="MobileConfigSheet.accountOption"
+        dataValue="__active__"
+        active={pinnedAccountId === null}
+        onClick={() => onSelect(null)}
+      >
+        <div className="min-w-0 flex flex-col gap-0.5">
+          <span className="text-[13px] truncate">Follow active account</span>
+          {active && (
+            <span className="text-[11px] text-text-muted truncate">{accountLabel(active)}</span>
+          )}
+        </div>
+      </OptionButton>
+      {accounts.map((account) => (
+        <OptionButton
+          key={account.id}
+          testId="MobileConfigSheet.accountOption"
+          dataValue={account.id}
+          active={pinnedAccountId === account.id}
+          onClick={() => onSelect(account.id)}
+        >
+          <div className="min-w-0 flex flex-col gap-0.5">
+            <span className="text-[13px] truncate">{accountLabel(account)}</span>
+            {account.planType && (
+              <span className="text-[11px] text-text-muted truncate">{account.planType}</span>
+            )}
+          </div>
+        </OptionButton>
+      ))}
+      <OptionButton
+        testId="MobileConfigSheet.accountAdd"
+        dataValue="__add__"
+        active={false}
+        onClick={onAdd}
+      >
+        <span className="text-[13px] truncate">Add account…</span>
+      </OptionButton>
+    </div>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
@@ -478,6 +551,13 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
     effortSupported,
     allowedEffortLevels,
     nativeEffortOptions,
+    showAccountPicker,
+    accounts,
+    activeAccountId,
+    pinnedAccountId,
+    onSelectAccount,
+    onAddAccount,
+    onAccountMenuOpen,
     onSelectMode,
     onSelectEngine,
     onSelectModel,
@@ -496,7 +576,8 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
     showModelPicker ||
     showThinkingPicker ||
     showVariantRow ||
-    effortSupported
+    effortSupported ||
+    showAccountPicker
 
   // Reset to root whenever the sheet closes, and fail safe if an external
   // prop change (e.g. a model/engine switch) makes the current submenu
@@ -513,6 +594,7 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
     else if (page === 'thinking' && !showThinkingPicker) setPage('root')
     else if (page === 'variant' && !showVariantRow) setPage('root')
     else if (page === 'effort' && !effortSupported) setPage('root')
+    else if (page === 'account' && !showAccountPicker) setPage('root')
   }, [
     open,
     page,
@@ -521,7 +603,8 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
     showModelPicker,
     showThinkingPicker,
     showVariantRow,
-    effortSupported
+    effortSupported,
+    showAccountPicker
   ])
 
   // The OPEN sheet is an Escape layer (use-escape-layer): the key closes the
@@ -703,6 +786,23 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
                       onClick={() => setPage('effort')}
                     />
                   )}
+                  {showAccountPicker && (
+                    <RootRow
+                      testId="MobileConfigSheet.account"
+                      label="ChatGPT account"
+                      value={
+                        pinnedAccountId === null
+                          ? `Active · ${accountLabel(
+                              accounts.find((account) => account.id === activeAccountId)
+                            )}`
+                          : accountLabel(accounts.find((account) => account.id === pinnedAccountId))
+                      }
+                      onClick={() => {
+                        onAccountMenuOpen?.()
+                        setPage('account')
+                      }}
+                    />
+                  )}
                 </div>
               )}
 
@@ -768,6 +868,22 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
                   nativeOptions={nativeEffortOptions}
                   onSelect={(level) => {
                     onSelectEffort(level)
+                    goRoot()
+                  }}
+                />
+              )}
+
+              {page === 'account' && (
+                <AccountPage
+                  accounts={accounts}
+                  activeAccountId={activeAccountId}
+                  pinnedAccountId={pinnedAccountId}
+                  onSelect={(accountId) => {
+                    onSelectAccount(accountId)
+                    goRoot()
+                  }}
+                  onAdd={() => {
+                    onAddAccount()
                     goRoot()
                   }}
                 />

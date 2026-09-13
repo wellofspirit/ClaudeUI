@@ -917,6 +917,69 @@ export function InputBox(): React.JSX.Element {
     [setThinkingMode, restartSdkSession]
   )
 
+  // -------------------------------------------------------------------------
+  // The per-session ChatGPT account pin (ADR-068 §2)
+  // -------------------------------------------------------------------------
+  //
+  // Read once on mount and again whenever the menu opens, so an account added
+  // or removed in Settings since this bar mounted is offered (or gone) without
+  // the input bar knowing anything about the settings surface.
+  const providerAccounts = useSessionStore((s) => s.providerAccounts)
+  const loadProviderAccounts = useSessionStore((s) => s.loadProviderAccounts)
+  useEffect(() => {
+    void loadProviderAccounts()
+  }, [loadProviderAccounts])
+
+  // Three conditions, all of them honest refusals rather than cosmetic gates:
+  // the ENGINE must be able to run one session on another account, the provider
+  // must have per-session accounts turned on, and there must be a second account
+  // to switch to. `providerAccounts === null` means "not read yet", which is a
+  // fourth reason to stay hidden — guessing would flash a picker and then take
+  // it away.
+  const showAccountPicker =
+    capabilities.auth.perSessionAccount &&
+    providerAccounts?.perSession === true &&
+    providerAccounts.accounts.length > 1
+  const accountChoices = useMemo(
+    () =>
+      (providerAccounts?.accounts ?? []).map(({ id, email, planType }) => ({
+        id,
+        ...(email ? { email } : {}),
+        ...(planType ? { planType } : {})
+      })),
+    [providerAccounts]
+  )
+  const handleSelectAccount = useCallback(
+    async (accountId: string | null) => {
+      if (!activeSessionId) return
+      try {
+        await window.api.setSessionAccount(activeSessionId, accountId)
+      } catch (error) {
+        // Codex can REFUSE the re-injection (a managed workspace policy, or a
+        // token it will not parse), and the native message is the only thing the
+        // user can act on. It goes where `session:error` goes — an error row on
+        // this session — rather than dying as an unhandled rejection in the
+        // console, which is all it did before. Both surfaces reach this one
+        // handler: the desktop `AccountPicker` and the mobile sheet's account
+        // page are both wired to `onSelectAccount`.
+        useSessionStore
+          .getState()
+          .addError(
+            activeSessionId,
+            error instanceof Error
+              ? error.message
+              : 'The ChatGPT account for this session could not be changed'
+          )
+      }
+    },
+    [activeSessionId]
+  )
+  const handleAddAccount = useCallback(() => {
+    window.dispatchEvent(
+      new CustomEvent('open-settings', { detail: { page: 'models', group: 'providers' } })
+    )
+  }, [])
+
   const handleOpenSandboxSettings = useCallback(() => {
     window.dispatchEvent(
       new CustomEvent('open-settings', { detail: { page: 'claude', group: 'sandbox' } })
@@ -1052,6 +1115,13 @@ export function InputBox(): React.JSX.Element {
       effortSupported={nativeEffortOptions != null || effortCap != null}
       allowedEffortLevels={allowedEffortLevels}
       nativeEffortOptions={nativeEffortOptions}
+      showAccountPicker={showAccountPicker}
+      accounts={accountChoices}
+      activeAccountId={providerAccounts?.activeId ?? null}
+      pinnedAccountId={status.codex?.pinnedAccountId ?? null}
+      onSelectAccount={handleSelectAccount}
+      onAddAccount={handleAddAccount}
+      onAccountMenuOpen={loadProviderAccounts}
       thinkingMode={effectiveThinking}
       adaptiveSupported={adaptiveSupported}
       showThinkingPicker={effectiveEngineId !== 'codex' && thinkingCap != null}

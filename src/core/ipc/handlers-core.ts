@@ -683,6 +683,35 @@ export async function setEffort(
   emitConfigChanged(s, routingId, { effort })
 }
 
+/**
+ * Pin a session to one stored vendor account (ADR-068 §2).
+ *
+ * Engine-neutral by channel and capability-gated by
+ * `capabilities.auth.perSessionAccount`, so it REFUSES loudly on an engine that
+ * has no such thing rather than resolving into nothing — a silent no-op here
+ * would leave the picker showing a pin the session never took. Validation of the
+ * id itself belongs to the session (only it can ask the vault), and its error
+ * text reaches the caller unchanged.
+ *
+ * No `session:config-changed` echo: the pin is not one of that event's four
+ * fields, and the session re-emits `session:status` (carrying
+ * `codex.pinnedAccountId`) as part of applying it, which is what every replica
+ * folds.
+ */
+export async function setAccount(
+  manager: SessionManager,
+  routingId: string,
+  accountId: string | null
+): Promise<void> {
+  if (accountId !== null && (typeof accountId !== 'string' || !accountId || accountId.length > 256))
+    throw new Error('Invalid account id')
+  const session = manager.get(routingId)
+  if (!session) throw new Error('No active session')
+  if (!session.capabilities.auth.perSessionAccount || !session.setAccount)
+    throw new Error('This engine does not support per-session accounts')
+  await session.setAccount(accountId)
+}
+
 export function setThinkingMode(manager: SessionManager, routingId: string, mode: string): void {
   const s = manager.get(routingId)
   if (s && s.capabilities.reasoning.thinking == null) return

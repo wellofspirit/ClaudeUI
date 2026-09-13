@@ -416,7 +416,17 @@ export interface EngineCapabilities {
   sandbox: boolean
   proxy: boolean
   autonomyModes: AutonomyMode[]
-  auth: { canDriveLogin: boolean; multiAccount: boolean }
+  /**
+   * `canDriveLogin` — the app can start this engine's sign-in itself.
+   * `multiAccount`  — the engine's own store holds several accounts at once.
+   * `perSessionAccount` — a SINGLE session can be pinned to one stored account
+   *   independently of the global active one (ADR-068 §2). True for Codex only:
+   *   its identity is injected per process (`account/login/start
+   *   {type:'chatgptAuthTokens'}`), so re-pointing one live process costs one
+   *   request. pi and opencode read a single-slot file, and Claude would need a
+   *   per-spawn credential directory — a separate decision, not this flag.
+   */
+  auth: { canDriveLogin: boolean; multiAccount: boolean; perSessionAccount: boolean }
   /**
    * ADR-033 (cross-engine dispatch) + ADR-030 (capability honesty): "this
    * engine can host the `dispatch_agent` tool AND at least one OTHER engine is
@@ -488,7 +498,7 @@ export const CLAUDE_ENGINE_CAPABILITIES: EngineCapabilities = {
   sandbox: true,
   proxy: true,
   autonomyModes: ['plan', 'ask', 'autoEdit', 'full'],
-  auth: { canDriveLogin: true, multiAccount: true },
+  auth: { canDriveLogin: true, multiAccount: true, perSessionAccount: false },
   crossEngineDispatch: true
 }
 
@@ -545,7 +555,10 @@ export const CODEX_ENGINE_CAPABILITIES: EngineCapabilities = {
   sandbox: false,
   proxy: false,
   autonomyModes: ['ask', 'autoEdit', 'full', 'plan'],
-  auth: { canDriveLogin: true, multiAccount: false },
+  // ADR-068 §2: the ONE engine whose session can be pinned to a stored
+  // ChatGPT account of its own — the identity is injected per app-server
+  // process, so re-pointing a live one is a single `account/login/start`.
+  auth: { canDriveLogin: true, multiAccount: false, perSessionAccount: true },
   // ADR-033 slice E — Codex as a dispatch SOURCE: `dispatch_agent` rides the
   // same native dynamic-tool channel the hosted three do, gated by the shared
   // permission engine (kind `task`: asks in default/acceptEdits/auto, denies
@@ -699,7 +712,7 @@ export const OPENCODE_ENGINE_CAPABILITIES: EngineCapabilities = {
   sandbox: false,
   proxy: false,
   autonomyModes: ['plan', 'ask', 'full'],
-  auth: { canDriveLogin: true, multiAccount: false },
+  auth: { canDriveLogin: true, multiAccount: false, perSessionAccount: false },
   crossEngineDispatch: true
 }
 
@@ -909,7 +922,7 @@ export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
   sandbox: false,
   proxy: false,
   autonomyModes: ['ask', 'autoEdit', 'full', 'plan'],
-  auth: { canDriveLogin: true, multiAccount: false },
+  auth: { canDriveLogin: true, multiAccount: false, perSessionAccount: false },
   crossEngineDispatch: true
 }
 

@@ -416,6 +416,15 @@ describe('InputBox FC — rendered', () => {
       record('session:cancel', ...args)
       return null
     })
+    // ADR-068 §2 — the per-session ChatGPT pin and the account list behind it.
+    app.bridge.ipcMain.handle('session:set-account', (_e: unknown, ...args: unknown[]) => {
+      record('session:set-account', ...args)
+      return null
+    })
+    app.bridge.ipcMain.handle('provider-account:list', (_e: unknown, ...args: unknown[]) => {
+      record('provider-account:list', ...args)
+      return { ok: true, data: useSessionStore.getState().providerAccounts }
+    })
     app.bridge.ipcMain.handle('session:get-models', () => [])
     app.bridge.ipcMain.handle('session:get-engine-models', () => [
       { engineId: 'claude', vendorId: 'anthropic', vendorName: 'Anthropic', models: [] }
@@ -1208,7 +1217,8 @@ describe('InputBox FC — rendered', () => {
             codex: {
               modelProvider: 'openai',
               reasoningEffort: 'low',
-              effortOptions: nativeEffortOptions
+              effortOptions: nativeEffortOptions,
+              pinnedAccountId: null
             }
           }
         }
@@ -1388,6 +1398,163 @@ describe('InputBox FC — rendered', () => {
     const session = useSessionStore.getState().sessions[FC_ROUTE]
     expect(session.thinkingMode).toBe('adaptive') // both support adaptive
     expect(session.effort).toBe('high') // xhigh coerced to model's default
+  })
+
+  // -------------------------------------------------------------------------
+  // Slice 2b guard 6 — the per-session ChatGPT account picker (ADR-068 §2)
+  // -------------------------------------------------------------------------
+
+  /** What `provider-account:list('chatgpt')` answers in these tests. */
+  function accountList(
+    over: Partial<import('../../../../../../shared/shared-provider').SharedProviderAccountList> = {}
+  ): import('../../../../../../shared/shared-provider').SharedProviderAccountList {
+    return {
+      activeId: 'acct-a',
+      perSession: true,
+      accounts: [
+        {
+          id: 'acct-a',
+          email: 'a@example.test',
+          planType: 'pro',
+          expiresAt: 0,
+          needsReauth: false
+        },
+        {
+          id: 'acct-b',
+          email: 'b@example.test',
+          planType: 'plus',
+          expiresAt: 0,
+          needsReauth: false
+        }
+      ],
+      ...over
+    }
+  }
+
+  async function withAccounts(
+    list: ReturnType<typeof accountList> | null,
+    pinnedAccountId: string | null = null
+  ): Promise<void> {
+    codexSession()
+    useSessionStore.setState((state) => ({
+      providerAccounts: list,
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          status: {
+            ...state.sessions[FC_ROUTE].status,
+            codex: {
+              modelProvider: 'openai',
+              reasoningEffort: null,
+              effortOptions: [],
+              pinnedAccountId
+            }
+          }
+        }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    await act(async () => {
+      renderFC()
+    })
+  }
+
+  it('shows the picker only with the capability, the toggle on, and two accounts', async () => {
+    await withAccounts(accountList())
+    expect(viewProps.showAccountPicker).toBe(true)
+
+    // The per-provider toggle is off: one active account for everything.
+    await withAccounts(accountList({ perSession: false }))
+    expect(viewProps.showAccountPicker).toBe(false)
+
+    // Only one account stored — there is nothing to choose between.
+    await withAccounts(accountList({ accounts: [accountList().accounts[0]] }))
+    expect(viewProps.showAccountPicker).toBe(false)
+
+    // Nothing read yet: hidden rather than guessing.
+    await withAccounts(null)
+    expect(viewProps.showAccountPicker).toBe(false)
+  })
+
+  it('hides the picker on an engine without perSessionAccount', async () => {
+    useSessionStore.setState({ providerAccounts: accountList() })
+    mirrorStoreIntoReplica()
+    await act(async () => {
+      renderFC()
+    })
+    // A Claude session: `capabilities.auth.perSessionAccount` is false.
+    expect(viewProps.showAccountPicker).toBe(false)
+  })
+
+  it('reports the current choice, which follow-active cannot be derived from', async () => {
+    await withAccounts(accountList(), null)
+    expect(viewProps.pinnedAccountId).toBe(null)
+    expect(viewProps.activeAccountId).toBe('acct-a')
+    expect(viewProps.accounts?.map((a) => a.id)).toEqual(['acct-a', 'acct-b'])
+
+    await withAccounts(accountList(), 'acct-b')
+    expect(viewProps.pinnedAccountId).toBe('acct-b')
+  })
+
+  it('sends session:set-account with the id, and null for follow-active', async () => {
+    await withAccounts(accountList())
+
+    await act(async () => {
+      await viewProps.onSelectAccount?.('acct-b')
+    })
+    await act(async () => {
+      await viewProps.onSelectAccount?.(null)
+    })
+
+    expect(ipcCalls['session:set-account']).toEqual([
+      [FC_ROUTE, 'acct-b'],
+      [FC_ROUTE, null]
+    ])
+  })
+
+  it('surfaces a REFUSED pin on the session instead of an unhandled rejection', async () => {
+    // Codex can refuse the re-injection outright (a managed workspace policy, a
+    // token it will not parse — "failed to set external auth: invalid ID token
+    // format"). That message is the only thing the user can act on, and before
+    // this it reached nothing but the renderer console as an unhandled rejection.
+    await withAccounts(accountList())
+    const refusal = 'failed to set external auth: invalid ID token format'
+    app.bridge.ipcMain.handle('session:set-account', () => {
+      throw new Error(refusal)
+    })
+
+    await act(async () => {
+      await expect(viewProps.onSelectAccount?.('acct-b')).resolves.toBeUndefined()
+    })
+
+    expect(useSessionStore.getState().sessions[FC_ROUTE].errors.at(-1)).toContain(refusal)
+  })
+
+  it('a pin that is accepted adds no error row', async () => {
+    await withAccounts(accountList())
+    await act(async () => {
+      await viewProps.onSelectAccount?.('acct-b')
+    })
+    expect(useSessionStore.getState().sessions[FC_ROUTE].errors).toEqual([])
+  })
+
+  it('reads the account list on mount and opens Settings for "Add account…"', async () => {
+    const opened: unknown[] = []
+    const listener = (event: Event): void => {
+      opened.push((event as CustomEvent).detail)
+    }
+    window.addEventListener('open-settings', listener)
+    try {
+      await withAccounts(accountList())
+      expect(ipcCalls['provider-account:list']).toEqual([['chatgpt']])
+      act(() => {
+        viewProps.onAddAccount?.()
+      })
+      expect(opened).toEqual([{ page: 'models', group: 'providers' }])
+    } finally {
+      window.removeEventListener('open-settings', listener)
+    }
   })
 })
 

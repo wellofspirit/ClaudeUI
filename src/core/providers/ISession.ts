@@ -118,6 +118,15 @@ export interface ISession {
   voiceStartRecording?(language: string): Promise<void>
   voiceStopRecording?(): Promise<void>
 
+  /**
+   * Pin this session to one stored vendor account, or `null` to follow the
+   * globally active one (ADR-068 §2). Gated by
+   * `capabilities.auth.perSessionAccount` — Codex only today; the channel
+   * refuses on every other engine rather than relying on the optional call, so
+   * a client gets a reason instead of silence.
+   */
+  setAccount?(accountId: string | null): Promise<void>
+
   /** Reasoning-effort tier (gated by capabilities.reasoning.effort != null). */
   setEffort?(effort: string): void | Promise<void>
   /** Thinking mode (gated by capabilities.reasoning.thinking != null). */

@@ -45,6 +45,18 @@ export type CodexApprovalPayload = CodexApprovalChoices | CodexGuardianOverride
 export interface CodexSettings {
   model?: string
   effort?: string
+  /**
+   * The vault ChatGPT account this session is PINNED to (ADR-068 §2), stored in
+   * the same `codex_session_overrides.settings_json` blob as the two above — a
+   * new key, not a schema migration.
+   *
+   * Three states, all load-bearing: a string pins that account, an explicit
+   * `null` clears the pin so the session follows whichever account is active,
+   * and an absent key changes nothing. Unlike model and effort this is NOT a
+   * native thread setting — it never reaches `thread/settings/update`; it
+   * decides which token `account/login/start {type:'chatgptAuthTokens'}` carries.
+   */
+  accountId?: string | null
 }
 
 export interface CodexAuthStatus {
@@ -68,6 +80,15 @@ export interface CodexSessionState {
   modelProvider: string
   reasoningEffort: string | null
   effortOptions: Array<{ value: string; description: string }>
+  /**
+   * The vault account this session is PINNED to, or null when it follows the
+   * active account (ADR-068 §2).
+   *
+   * It cannot be derived from `SessionStatus.account.accountId`: a session that
+   * follows the active account carries that same id, so the two states are
+   * indistinguishable there and the picker would read "pinned" for everybody.
+   */
+  pinnedAccountId: string | null
 }
 
 /**

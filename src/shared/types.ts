@@ -1251,6 +1251,12 @@ interface SessionAPI {
   setPermissionMode(routingId: string, mode: string): Promise<void>
   setModel(routingId: string, model: string): Promise<void>
   setEffort(routingId: string, effort: string): Promise<void>
+  /**
+   * Pin a session to one stored vendor account, or `null` to follow the active
+   * one (ADR-068 §2). Only Codex answers it today
+   * (`capabilities.auth.perSessionAccount`); every other engine rejects.
+   */
+  setSessionAccount(routingId: string, accountId: string | null): Promise<void>
   setThinkingMode(routingId: string, mode: string): Promise<void>
   setReasoningVariant(routingId: string, variant: string | null): Promise<void>
   getModels(): Promise<ModelInfo[]>
@@ -1710,6 +1716,11 @@ interface VendorAuthAPI {
 
 interface AccountAPI {
   fetchAccountUsage(): Promise<AccountUsage>
+  /**
+   * Per-account ChatGPT rate limits (ADR-068 §2). `refresh` asks the host to
+   * read them from Codex first; without it the last known map comes back.
+   */
+  fetchChatgptLimits(refresh?: boolean): Promise<ChatgptRateLimits>
   fetchBlockUsage(): Promise<BlockUsageData>
   /** Filter usage analytics to one account email (null = all accounts) */
   setUsageAccountFilter(account: string | null): Promise<void>
@@ -2586,6 +2597,38 @@ export interface RateWindow {
   usedPercent: number // 0-100
   resetsAt: string | null // ISO8601 timestamp
 }
+
+/**
+ * ChatGPT subscription usage for ONE stored vault account (ADR-068 §2).
+ *
+ * Codex's `RateLimitSnapshot` maps onto {@link RateWindow} one to one —
+ * `usedPercent` is already 0-100 and `resetsAt` is a unix timestamp in SECONDS
+ * (`protocol/src/protocol.rs`: "Unix timestamp (seconds since epoch) when the
+ * window resets"), converted to ISO 8601 on the way in so the panel's existing
+ * `formatResetTime` works unchanged.
+ *
+ * `primary` is the rolling 5-hour window and `secondary` the weekly one; either
+ * is null when the backend did not report it, which the panel shows as
+ * unavailable rather than as zero usage.
+ */
+export interface ChatgptAccountLimits {
+  email?: string
+  planType?: string
+  primary: RateWindow | null
+  secondary: RateWindow | null
+  /**
+   * A CREDITS-based plan (a business workspace, seen live 2026-09-14) reports no
+   * windows at all — both are null in `rateLimits` and in
+   * `rateLimitsByLimitId.codex` — and answers with a credit balance instead.
+   * Percentage bars are not the shape that plan has, so the balance is what the
+   * panel shows for it. Absent when the backend says the account has no credits.
+   */
+  credits?: { unlimited: boolean; balance: string | null }
+  fetchedAt: number
+}
+
+/** Every account's limits, keyed by VAULT account id (never the workspace id). */
+export type ChatgptRateLimits = Record<string, ChatgptAccountLimits>
 
 export interface ExtraUsage {
   isEnabled: boolean

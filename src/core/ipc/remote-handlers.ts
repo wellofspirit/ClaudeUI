@@ -47,6 +47,7 @@ import {
 import { loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
 import { scanCustomCommands } from '../services/custom-command-scanner'
 import { usageFetcher } from '../services/usage-fetcher'
+import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
 import { blockUsageService } from '../services/block-usage'
 import type {
   ApprovalDecision,
@@ -111,6 +112,7 @@ import {
   askSideQuestion,
   setPermissionMode,
   setEffort,
+  setAccount,
   setThinkingMode,
   setModel,
   setReasoningVariant,
@@ -552,6 +554,18 @@ export function registerRemoteHandlers(
     kind: 'command',
     sessionIdArg: 0,
     handler: async (routingId: string, effort: string) => setEffort(manager, routingId, effort)
+  })
+
+  // ADR-068 §2 — the per-session vendor account pin. `session-config` like the
+  // two above: choosing which stored subscription a session bills is session
+  // configuration, and the phone manages the same accounts the desktop does.
+  handleRemote({
+    channel: 'session:set-account',
+    capability: 'session-config',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, accountId: string | null) =>
+      setAccount(manager, routingId, accountId)
   })
 
   handleRemote({
@@ -1021,6 +1035,21 @@ export function registerRemoteHandlers(
     kind: 'query',
     handler: async () => {
       return blockUsageService.getData() ?? (await blockUsageService.recalculate())
+    }
+  })
+
+  /**
+   * ADR-068 §2 — per-account ChatGPT subscription limits. Read-only and
+   * token-free (percentages and reset times), and it TRIGGERS the read: rate
+   * limits are fetched when somebody looks at them, never on a timer.
+   */
+  handleRemote({
+    channel: 'usage:chatgpt-limits',
+    capability: 'config',
+    kind: 'query',
+    handler: async (refresh?: boolean) => {
+      if (refresh) await chatgptRateLimits.refresh()
+      return chatgptRateLimits.snapshot()
     }
   })
 

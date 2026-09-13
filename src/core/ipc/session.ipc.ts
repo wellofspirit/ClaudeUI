@@ -42,6 +42,7 @@ import type { UISettings, UISessionConfig } from '../services/ui-config'
 import { gitServiceManager } from '../services/git-service'
 import { gitWatchRegistry } from '../services/git-watch-registry'
 import { usageFetcher } from '../services/usage-fetcher'
+import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
@@ -103,6 +104,7 @@ import {
   askSideQuestion,
   setPermissionMode,
   setEffort,
+  setAccount,
   setThinkingMode,
   setModel,
   setReasoningVariant,
@@ -319,6 +321,7 @@ const SESSION_IPC_CHANNELS = [
   'session:set-permission-mode',
   'session:set-model',
   'session:set-effort',
+  'session:set-account',
   'session:set-reasoning-variant',
   'session:get-models',
   'session:get-engine-models',
@@ -387,6 +390,7 @@ const SESSION_IPC_CHANNELS = [
   'file:list-places',
   'usage:fetch',
   'usage:fetch-block',
+  'usage:chatgpt-limits',
   'usage:set-account-filter',
   'usage:refresh-prices',
   'usage:fetch-dispatched',
@@ -756,6 +760,17 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     kind: 'command',
     sessionIdArg: 0,
     handler: (routingId: string, effort: string) => setEffort(manager, routingId, effort)
+  })
+
+  // ADR-068 §2 — the per-session vendor account pin. Engine-neutral channel,
+  // refused by `setAccount` on an engine without `auth.perSessionAccount`.
+  handleIpc({
+    channel: 'session:set-account',
+    capability: 'session-config',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: (routingId: string, accountId: string | null) =>
+      setAccount(manager, routingId, accountId)
   })
 
   handleIpc({
@@ -1658,6 +1673,21 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     kind: 'query',
     handler: async () => {
       return blockUsageService.getData() ?? (await blockUsageService.recalculate())
+    }
+  })
+
+  /**
+   * ADR-068 §2 — per-account ChatGPT subscription limits. Read-only and
+   * token-free (percentages and reset times), and it TRIGGERS the read: rate
+   * limits are fetched when somebody looks at them, never on a timer.
+   */
+  handleIpc({
+    channel: 'usage:chatgpt-limits',
+    capability: 'config',
+    kind: 'query',
+    handler: async (refresh?: boolean) => {
+      if (refresh) await chatgptRateLimits.refresh()
+      return chatgptRateLimits.snapshot()
     }
   })
 

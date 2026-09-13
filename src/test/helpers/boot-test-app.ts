@@ -169,6 +169,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('session:set-permission-mode', routingId, mode),
     setModel: (routingId, model) => ipcRenderer.invoke('session:set-model', routingId, model),
     setEffort: (routingId, effort) => ipcRenderer.invoke('session:set-effort', routingId, effort),
+    setSessionAccount: (routingId, accountId) =>
+      ipcRenderer.invoke('session:set-account', routingId, accountId),
     setThinkingMode: (routingId, mode) =>
       ipcRenderer.invoke('session:set-thinking-mode', routingId, mode),
     setReasoningVariant: (routingId, variant) =>
@@ -271,6 +273,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     loadSkillDetails: (cwd) => ipcRenderer.invoke('config:load-skill-details', cwd),
 
     fetchAccountUsage: () => ipcRenderer.invoke('usage:fetch'),
+    fetchChatgptLimits: (refresh) => ipcRenderer.invoke('usage:chatgpt-limits', refresh ?? false),
     fetchBlockUsage: () => ipcRenderer.invoke('usage:fetch-block'),
     setUsageAccountFilter: async () => {},
     refreshPrices: async () => ({ count: 0, refreshedAt: Date.now() }),

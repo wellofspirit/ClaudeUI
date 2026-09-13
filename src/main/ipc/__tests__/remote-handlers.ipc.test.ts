@@ -1679,6 +1679,25 @@ const PROVIDER_ACCOUNT_CHANNELS = [
 ] as const
 
 /**
+ * ADR-068 §2 — the per-session ChatGPT PIN and the per-account usage it makes
+ * readable. The EIGHTH deliberate widening, and the narrowest since the provider
+ * rows: both declare `config`, so a base connection reaches them, and both are
+ * engine CONFIGURATION rather than a security surface (ADR-056).
+ *
+ * `session:set-account` is `session-config`, the same capability as
+ * `session:set-model` and `session:set-effort` beside it: choosing which stored
+ * subscription a session bills is a run-configuration choice a phone must be
+ * able to make, and the handler refuses on an engine whose
+ * `capabilities.auth.perSessionAccount` is false rather than silently doing
+ * nothing.
+ *
+ * `usage:chatgpt-limits` is a `query` joining the four `usage:*` channels the
+ * phone already reaches. Token-free by construction: percentages, reset times,
+ * the email the account list already carries, and nothing else.
+ */
+const CODEX_ACCOUNT_PIN_CHANNELS = ['session:set-account', 'usage:chatgpt-limits'] as const
+
+/**
  * The redacted status READ (owner ruling, 2026-08-28) — the one `remote:*`
  * channel with a remote registration, and the SIXTH deliberate widening.
  *
@@ -1756,6 +1775,7 @@ describe('remote surface parity (phase 1 port)', () => {
         ...S4_VENDOR_CREDENTIAL_CHANNELS,
         ...PROVIDER_REGISTRY_CHANNELS,
         ...PROVIDER_ACCOUNT_CHANNELS,
+        ...CODEX_ACCOUNT_PIN_CHANNELS,
         ...REMOTE_VIEW_CHANNELS,
         ...IDE_CHANNELS,
         // ADR-068 §1: the three `codex:login-*` channels are gone with the

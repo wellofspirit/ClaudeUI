@@ -499,6 +499,160 @@ export function EffortPicker({
   )
 }
 
+/** One stored subscription account, as the pickers render it (ADR-068 §2). */
+export interface AccountChoice {
+  id: string
+  email?: string
+  planType?: string
+}
+
+/** The label a stored account shows. Email when the JWT carried one. */
+export function accountLabel(account: AccountChoice | undefined): string {
+  return account?.email ?? 'Account'
+}
+
+/**
+ * The per-session ChatGPT account picker (ADR-068 §2), in the same visual
+ * grammar as {@link EffortPicker}.
+ *
+ * "Follow active account" is FIRST and is a real choice, not the absence of one:
+ * a session that follows active carries the same account id as one pinned to it,
+ * so the trigger has to say which of the two it is. Hence `pinned === null` is
+ * rendered as `Active · <email>` rather than just the email.
+ *
+ * `onOpen` re-reads the list when the menu is opened, so an account added or
+ * removed in Settings since this input bar mounted is offered (or gone) without
+ * this component knowing anything about the settings surface.
+ */
+export function AccountPicker({
+  accounts,
+  activeAccountId,
+  pinned,
+  onSelectAccount,
+  onAddAccount,
+  onOpen
+}: {
+  accounts: readonly AccountChoice[]
+  activeAccountId: string | null
+  pinned: string | null
+  onSelectAccount: (accountId: string | null) => void
+  onAddAccount: () => void
+  onOpen?: () => void
+}): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement | null>(null)
+  useClickOutside(ref, open, () => setOpen(false))
+  const active = accounts.find((account) => account.id === activeAccountId)
+  const current = pinned === null ? undefined : accounts.find((account) => account.id === pinned)
+  const trigger = pinned === null ? `Active · ${accountLabel(active)}` : accountLabel(current)
+
+  return (
+    <div className="relative" ref={ref} data-testid="AccountPicker">
+      <button
+        onClick={(e) => {
+          e.stopPropagation()
+          if (!open) onOpen?.()
+          setOpen(!open)
+        }}
+        className="h-7 px-2 flex items-center gap-1 rounded-lg text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer max-w-[180px]"
+        title="ChatGPT account for this session"
+        data-testid="AccountPicker.trigger"
+      >
+        <span className="truncate">{trigger}</span>
+        <ChevronIcon open={open} />
+      </button>
+      {open && (
+        <div className="absolute bottom-full mb-1 left-0 w-60 bg-bg-tertiary border border-border rounded-lg overflow-hidden shadow-lg shadow-black/30 z-20">
+          <AccountOption
+            testId="AccountPicker.option"
+            dataValue="__active__"
+            selected={pinned === null}
+            label="Follow active account"
+            detail={active ? accountLabel(active) : undefined}
+            onClick={() => {
+              onSelectAccount(null)
+              setOpen(false)
+            }}
+          />
+          {accounts.map((account) => (
+            <AccountOption
+              key={account.id}
+              testId="AccountPicker.option"
+              dataValue={account.id}
+              selected={pinned === account.id}
+              label={accountLabel(account)}
+              detail={account.planType}
+              onClick={() => {
+                onSelectAccount(account.id)
+                setOpen(false)
+              }}
+            />
+          ))}
+          <button
+            data-testid="AccountPicker.add"
+            onClick={() => {
+              onAddAccount()
+              setOpen(false)
+            }}
+            className="w-full flex items-center px-3 py-1.5 text-[12px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors text-left cursor-pointer border-t border-border"
+          >
+            Add account…
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AccountOption({
+  testId,
+  dataValue,
+  selected,
+  label,
+  detail,
+  onClick
+}: {
+  testId: string
+  dataValue: string
+  selected: boolean
+  label: string
+  detail?: string
+  onClick: () => void
+}): React.JSX.Element {
+  return (
+    <button
+      data-testid={testId}
+      data-value={dataValue}
+      aria-checked={selected}
+      role="menuitemradio"
+      onClick={onClick}
+      className={`w-full flex items-center justify-between gap-2 px-3 py-1.5 text-[12px] transition-colors text-left cursor-pointer ${
+        selected
+          ? 'text-text-primary bg-bg-hover'
+          : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+      }`}
+    >
+      <span className="min-w-0 flex flex-col items-start">
+        <span className="truncate">{label}</span>
+        {detail && <span className="text-[10px] text-text-muted leading-tight">{detail}</span>}
+      </span>
+      {selected && (
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="3"
+          className="shrink-0"
+        >
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+      )}
+    </button>
+  )
+}
+
 /**
  * Reasoning variant picker for opencode models.
  * Renders when the selected model has `reasoningVariants.length > 0`.

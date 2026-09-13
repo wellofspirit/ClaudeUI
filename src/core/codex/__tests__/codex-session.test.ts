@@ -20,6 +20,13 @@ const rules = vi.hoisted(() => ({
 }))
 const savedRules = vi.hoisted(() => vi.fn())
 vi.mock('../../services/sync-host', () => ({ emitEvent: events }))
+/**
+ * The per-account ChatGPT rate-limit map (ADR-068 §2). Its real singleton builds
+ * a `CodexService` against the vault; here only the CALL matters — which account
+ * a live push is attributed to.
+ */
+const rateLimitStore = vi.hoisted(() => ({ record: vi.fn(), snapshot: vi.fn(() => ({})) }))
+vi.mock('../chatgpt-rate-limits', () => ({ chatgptRateLimits: rateLimitStore }))
 vi.mock('../../services/claude-settings', () => ({
   loadClaudePermissions: (scope: string) => ({
     // One scope only: the engine concatenates all three, so returning the same
@@ -108,6 +115,7 @@ afterEach(() => {
   sessions.forEach((session) => session.dispose())
   sessions.length = 0
   events.mockClear()
+  rateLimitStore.record.mockClear()
   overrides.clear()
   forks.clear()
   savedRules.mockClear()
@@ -176,6 +184,14 @@ function fixture(opts: EngineSpawnOptions = {}, auth: CodexAuthHook | null = nul
     start: vi.fn(async (_params: unknown, hook?: CodexAuthHook | null) => {
       await hook?.inject()
       return {}
+    }),
+    // Mirrors `CodexClient.injectAccount`: re-point a LIVE process, which is one
+    // `account/login/start` on the same connection (ADR-068 §2). Kept observable
+    // through `request` so a test can assert it lands BEFORE `turn/start`.
+    injectAccount: vi.fn(async (hook: CodexAuthHook) => {
+      const token = await hook.inject()
+      if (token) await request('account/login/start', { type: 'chatgptAuthTokens', ...token })
+      return token ?? null
     }),
     request,
     dispose: vi.fn(),
@@ -592,7 +608,11 @@ describe('Codex first session', () => {
           modelProvider: 'openai',
           reasoningEffort: 'ultra',
           effortOptions: expect.any(Array),
-          overrides: {}
+          overrides: {},
+          // ADR-068 §2: null is "follows the active account", and it must be
+          // reported rather than absent — the picker cannot derive it from
+          // `account.accountId`, which is the same id either way.
+          pinnedAccountId: null
         }
       })
     ])
@@ -3138,5 +3158,310 @@ describe('Codex sessions under an injected ChatGPT account', () => {
     // and the turn is simply lost — nothing else refreshes an injected token.
     const { callbacks } = fixture({}, codexAuthHook({ source: authSource('fake-access-jwt') }))
     expect(callbacks.serverMethods).toContain('account/chatgptAuthTokens/refresh')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Slice 2b guards 2-5 — the per-session ChatGPT pin (ADR-068 §2)
+// ---------------------------------------------------------------------------
+
+describe('the per-session ChatGPT account pin', () => {
+  /** Two stored accounts, no vault, no network, no token that could be real. */
+  function twoAccounts(): CodexAuthSource {
+    const accounts = [
+      { id: 'acct-a', workspace: 'ws-a', plan: 'pro' },
+      { id: 'acct-b', workspace: 'ws-b', plan: 'plus' }
+    ]
+    return {
+      injectionTokenFor: vi.fn(async (accountId: string | null) => {
+        const account = accountId === null ? accounts[0] : accounts.find((a) => a.id === accountId)
+        if (!account) return null
+        return {
+          accessToken: `fake-${account.id}`,
+          chatgptAccountId: account.workspace,
+          chatgptPlanType: account.plan,
+          vaultAccountId: account.id
+        }
+      }),
+      getStatus: vi.fn(async () => ({
+        accounts: accounts.map((a) => ({ id: a.id, accountId: a.workspace }))
+      }))
+    }
+  }
+  /** Answers `account/read` with the email that belongs to the injected token. */
+  function emailPerAccount(
+    request: ReturnType<typeof fixture>['request'],
+    hook: { injectedAccountId: string | null }
+  ): void {
+    const base = request.getMockImplementation()!
+    request.mockImplementation((async (method: string, params?: unknown) =>
+      method === 'account/read'
+        ? { account: { type: 'chatgpt', email: `${hook.injectedAccountId}@example.test` } }
+        : base(method, params)) as typeof base)
+  }
+  const statuses = (): Array<Record<string, unknown>> =>
+    events.mock.calls
+      .filter(([channel]) => channel === 'session:status')
+      .map((call) => (call[1] as [string, Record<string, unknown>])[1])
+  const pinOf = (status: Record<string, unknown>): string | null =>
+    (status.codex as { pinnedAccountId: string | null }).pinnedAccountId
+  const errors = (): string[] =>
+    events.mock.calls
+      .filter(([channel]) => channel === 'session:error')
+      .map((call) => (call[1] as [string, string])[1])
+
+  it('re-injects immediately on an idle session and moves both ids', async () => {
+    const hook = codexAuthHook({ source: twoAccounts() })
+    const { session, request, client } = fixture({}, hook)
+    emailPerAccount(request, hook)
+    await session.run(null)
+    expect(statuses().at(-1)!.account).toMatchObject({ accountId: 'acct-a' })
+    expect(pinOf(statuses().at(-1)!)).toBe(null)
+
+    await session.setAccount('acct-b')
+
+    expect(client.injectAccount).toHaveBeenCalledTimes(1)
+    expect(request).toHaveBeenCalledWith('account/login/start', {
+      type: 'chatgptAuthTokens',
+      accessToken: 'fake-acct-b',
+      chatgptAccountId: 'ws-b',
+      chatgptPlanType: 'plus',
+      vaultAccountId: 'acct-b'
+    })
+    const last = statuses().at(-1)!
+    expect(last.account).toMatchObject({ accountId: 'acct-b', label: 'acct-b@example.test' })
+    expect(pinOf(last)).toBe('acct-b')
+    // Persisted beside model and effort, in the SAME overrides blob.
+    expect(overrides.get('root')).toEqual({ accountId: 'acct-b' })
+  })
+
+  it('defers a pin taken mid-turn to the next turn, login BEFORE turn/start', async () => {
+    const hook = codexAuthHook({ source: twoAccounts() })
+    const { session, request, client, notify } = fixture({}, hook)
+    emailPerAccount(request, hook)
+    await session.run('first')
+    notify('turn/started', { threadId: 'root', turn: { id: 'turn' } })
+
+    await session.setAccount('acct-b')
+    // Nothing re-pointed yet: the running turn keeps the identity it started on.
+    expect(client.injectAccount).not.toHaveBeenCalled()
+    // …but the pin is already persisted and already visible to the picker.
+    expect(overrides.get('root')).toEqual({ accountId: 'acct-b' })
+    expect(pinOf(statuses().at(-1)!)).toBe('acct-b')
+
+    notify('turn/completed', { threadId: 'root', turn: { id: 'turn', status: 'completed' } })
+    request.mockClear()
+    await session.run('second')
+
+    const methods = request.mock.calls.map(([method]) => method)
+    expect(methods).toContain('account/login/start')
+    expect(methods.indexOf('account/login/start')).toBeLessThan(methods.indexOf('turn/start'))
+    expect(statuses().at(-1)!.account).toMatchObject({ accountId: 'acct-b' })
+  })
+
+  it('a pin chosen before the first turn survives into the spawn', async () => {
+    // The picker is usable on a session that has not spawned yet. `start()`
+    // rebuilds `this.overrides` from the saved row, so a pin written straight
+    // into that object would be silently dropped on the way to the first turn —
+    // the session would run on the ACTIVE account while the picker showed the pin.
+    const hook = codexAuthHook({ source: twoAccounts() })
+    const { session, request } = fixture({}, hook)
+    emailPerAccount(request, hook)
+
+    await session.setAccount('acct-b')
+    await session.run(null)
+
+    expect(hook.injectedAccountId).toBe('acct-b')
+    expect(overrides.get('root')).toEqual({ accountId: 'acct-b' })
+    expect(pinOf(statuses().at(-1)!)).toBe('acct-b')
+  })
+
+  it('a pre-spawn pin starts the process, so the picker sees it before any prompt', async () => {
+    // Parking the choice and waiting for the first prompt was the real-app gap:
+    // nothing emitted a status, so the picker kept reading "Active · …" after the
+    // user had already chosen. `setCodexSettings` solves the identical pre-spawn
+    // problem for model and effort by starting the process; the pin does the same.
+    const hook = codexAuthHook({ source: twoAccounts() })
+    const { session, request } = fixture({}, hook)
+    emailPerAccount(request, hook)
+
+    await session.setAccount('acct-b')
+
+    // No prompt has been sent, and the session already runs as the pinned account.
+    expect(request.mock.calls.some(([method]) => method === 'turn/start')).toBe(false)
+    const last = statuses().at(-1)!
+    expect(pinOf(last)).toBe('acct-b')
+    expect(last.account).toMatchObject({ accountId: 'acct-b', label: 'acct-b@example.test' })
+    expect(overrides.get('root')).toEqual({ accountId: 'acct-b' })
+  })
+
+  it('refuses an unknown account id and writes nothing', async () => {
+    const hook = codexAuthHook({ source: twoAccounts() })
+    const { session, client } = fixture({}, hook)
+    await session.run(null)
+    expect(overrides.get('root')).toEqual({})
+
+    await expect(session.setAccount('acct-gone')).rejects.toThrow(
+      'That ChatGPT account is no longer stored in ClaudeUI'
+    )
+    expect(overrides.get('root')).toEqual({})
+    expect(client.injectAccount).not.toHaveBeenCalled()
+  })
+
+  it('null clears the pin and re-injects the ACTIVE account', async () => {
+    const hook = codexAuthHook({ source: twoAccounts() })
+    const { session, request } = fixture({}, hook)
+    emailPerAccount(request, hook)
+    await session.run(null)
+    await session.setAccount('acct-b')
+
+    await session.setAccount(null)
+
+    expect(overrides.get('root')).toEqual({ accountId: null })
+    const last = statuses().at(-1)!
+    expect(last.account).toMatchObject({ accountId: 'acct-a' })
+    expect(pinOf(last)).toBe(null)
+  })
+
+  // Guard 3 — a resume whose pinned account was removed.
+  it('resumes onto the ACTIVE account when the pin is gone, once, and clears it', async () => {
+    overrides.set('root', { accountId: 'acct-gone', model: 'native' })
+    const hook = codexAuthHook({ source: twoAccounts() })
+    const { session, request } = fixture({ resumeSessionId: 'root' }, hook)
+    emailPerAccount(request, hook)
+
+    await session.run(null)
+
+    expect(errors()).toEqual([
+      'The pinned ChatGPT account was removed; this session now follows the active account.'
+    ])
+    expect(statuses().at(-1)!.account).toMatchObject({ accountId: 'acct-a' })
+    // The pin is gone from the row, so the next resume says nothing at all.
+    expect(overrides.get('root')).toEqual({ model: 'native' })
+  })
+
+  it('resumes onto the pinned account when it still exists, silently', async () => {
+    overrides.set('root', { accountId: 'acct-b' })
+    const hook = codexAuthHook({ source: twoAccounts() })
+    const { session, request } = fixture({ resumeSessionId: 'root' }, hook)
+    emailPerAccount(request, hook)
+
+    await session.run(null)
+
+    expect(errors()).toEqual([])
+    expect(statuses().at(-1)!.account).toMatchObject({ accountId: 'acct-b' })
+    expect(pinOf(statuses().at(-1)!)).toBe('acct-b')
+  })
+
+  // Guard 4 — a fork inherits the pin through the existing overrides copy.
+  it('a fork inherits the pin with no new code', async () => {
+    const hook = codexAuthHook({ source: twoAccounts() })
+    const first = fixture({}, hook)
+    emailPerAccount(first.request, hook)
+    await first.session.run(null)
+    await first.session.setAccount('acct-b')
+    first.session.dispose()
+
+    const forkHook = codexAuthHook({ source: twoAccounts() })
+    const forked = fixture(
+      { resumeSessionId: 'root', resumeSessionAt: 'turn', forkSession: true },
+      forkHook
+    )
+    emailPerAccount(forked.request, forkHook)
+    await forked.session.run(null)
+
+    expect(forked.session.getSessionId()).toBe('fork')
+    expect(overrides.get('fork')).toEqual({ accountId: 'acct-b' })
+    expect(forkHook.injectedAccountId).toBe('acct-b')
+  })
+
+  // Guard 5 (caller half) — a dispatch runs on the caller's subscription.
+  it('hands a dispatch target the caller pin, and null when it follows active', async () => {
+    const unpinned = fixture({ permissionMode: 'full' }, codexAuthHook({ source: twoAccounts() }))
+    await unpinned.session.run('hello')
+    await unpinned.dynamicCall({
+      tool: 'dispatch_agent',
+      callId: 'dispatch-unpinned',
+      arguments: { engine: 'claude', prompt: 'go' }
+    }).result
+    expect(dispatcher.dispatch.mock.calls.at(-1)![1]).toMatchObject({ chatgptAccountId: null })
+    unpinned.session.dispose()
+
+    const hook = codexAuthHook({ source: twoAccounts() })
+    const pinned = fixture({ permissionMode: 'full' }, hook)
+    emailPerAccount(pinned.request, hook)
+    await pinned.session.run(null)
+    await pinned.session.setAccount('acct-b')
+    await pinned.session.run('hello')
+    await pinned.dynamicCall({
+      tool: 'dispatch_agent',
+      callId: 'dispatch-pinned',
+      arguments: { engine: 'claude', prompt: 'go again' }
+    }).result
+    expect(dispatcher.dispatch.mock.calls.at(-1)![1]).toMatchObject({
+      chatgptAccountId: 'acct-b'
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Slice 2b guard 7 (live half) — `account/rateLimits/updated` (ADR-068 §2)
+// ---------------------------------------------------------------------------
+
+describe('a live session forwards its ChatGPT rate limits', () => {
+  const snapshot = {
+    limitId: null,
+    primary: { usedPercent: 42, windowDurationMins: 300, resetsAt: 1_735_693_200 },
+    secondary: null
+  }
+  function oneAccount(): CodexAuthSource {
+    return {
+      injectionTokenFor: vi.fn(async () => ({
+        accessToken: 'fake-access-jwt',
+        chatgptAccountId: 'ws-fixture',
+        chatgptPlanType: 'pro',
+        vaultAccountId: 'acct-fixture'
+      })),
+      getStatus: vi.fn(async () => ({
+        accounts: [{ id: 'acct-fixture', accountId: 'ws-fixture' }]
+      }))
+    }
+  }
+
+  it('records the push under the account this process was injected with', async () => {
+    const hook = codexAuthHook({ source: oneAccount() })
+    const { session, request, notify } = fixture({}, hook)
+    const base = request.getMockImplementation()!
+    request.mockImplementation((async (method: string, params?: unknown) =>
+      method === 'account/read'
+        ? { account: { type: 'chatgpt', email: 'owner@example.test' } }
+        : base(method, params)) as typeof base)
+    await session.run(null)
+
+    // NO `threadId` on this notification — it is account-level, which is exactly
+    // why it has to be taken before the thread routing.
+    notify('account/rateLimits/updated', { rateLimits: snapshot })
+
+    expect(rateLimitStore.record).toHaveBeenCalledWith('acct-fixture', snapshot, {
+      email: 'owner@example.test'
+    })
+  })
+
+  it('records nothing when the process runs on Codex’s own login', async () => {
+    const hook = codexAuthHook({
+      source: {
+        injectionTokenFor: vi.fn(async () => null),
+        getStatus: vi.fn(async () => ({ accounts: [] }))
+      }
+    })
+    const { session, notify } = fixture({}, hook)
+    await session.run(null)
+
+    notify('account/rateLimits/updated', { rateLimits: snapshot })
+
+    // Nothing was injected, so there is no vault account to attribute usage to —
+    // and guessing at the active one would put another subscription's numbers
+    // on this session's bars.
+    expect(rateLimitStore.record).not.toHaveBeenCalled()
   })
 })

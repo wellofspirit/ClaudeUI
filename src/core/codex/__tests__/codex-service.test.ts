@@ -3,6 +3,7 @@ import type { CodexClientOptions } from '../CodexAppServerClient'
 import { CodexTransportError } from '../CodexAppServerClient'
 import { CodexService } from '../CodexService'
 import { CodexClient } from '../CodexClient'
+import type { CodexAuthHook } from '../codex-auth-hook'
 
 const mocks = vi.hoisted(() => ({
   clients: [] as {
@@ -20,6 +21,14 @@ vi.mock('../CodexClient', () => ({
     }
     request = vi.fn((method, params) => mocks.request(method, params))
     start = vi.fn(() => mocks.start())
+    // Mirrors the real `CodexClient.injectAccount` (ADR-068 §2): re-point a LIVE
+    // process with one `account/login/start`, observable through `request`.
+    injectAccount = vi.fn(async (auth: { inject: () => Promise<unknown> }) => {
+      const token = (await auth.inject()) as { accessToken: string } | null
+      if (!token) return null
+      await mocks.request('account/login/start', { type: 'chatgptAuthTokens', ...token })
+      return token
+    })
     dispose = vi.fn()
   }
 }))
@@ -331,3 +340,94 @@ function typedContract(client: CodexClient): void {
   void client.request('fs/remove', {})
 }
 void typedContract
+
+/**
+ * Slice 2b guard 7 (pull half) — per-account rate limits through ONE app-server
+ * (ADR-068 §2).
+ *
+ * The whole point of the list-taking signature: `read()` releases its client the
+ * moment the last user drops, so one call per account would be one child process
+ * per account. Here the re-injection and the read share a single operation.
+ */
+describe('per-account ChatGPT rate limits', () => {
+  const snapshot = (usedPercent: number) => ({
+    rateLimits: {
+      primary: { usedPercent, windowDurationMins: 300, resetsAt: 1_735_693_200 },
+      secondary: null
+    }
+  })
+  /** A hook over two accounts. No vault, no network, no token that could be real. */
+  function hook(): CodexAuthHook & { asked: Array<string | null> } {
+    const asked: Array<string | null> = []
+    let requested: string | null = null
+    let injected: string | null = null
+    return {
+      asked,
+      get injectedAccountId() {
+        return injected
+      },
+      requestAccount: (accountId: string | null) => {
+        requested = accountId
+      },
+      hasAccount: async () => true,
+      onRefreshRequest: vi.fn(),
+      inject: async () => {
+        asked.push(requested)
+        if (requested === 'acct-gone') return null
+        injected = requested ?? 'acct-a'
+        return {
+          accessToken: `fake-${injected}`,
+          chatgptAccountId: `ws-${injected}`,
+          chatgptPlanType: 'pro',
+          vaultAccountId: injected
+        }
+      }
+    } as CodexAuthHook & { asked: Array<string | null> }
+  }
+
+  it('re-injects each account in turn and reads its limits, on one process', async () => {
+    let percent = 10
+    mocks.request.mockImplementation(async (method: string) =>
+      method === 'account/rateLimits/read' ? snapshot((percent += 10)) : {}
+    )
+    const auth = hook()
+    const service = new CodexService({ ...options, auth })
+
+    const limits = await service.rateLimits(['acct-a', 'acct-b'])
+
+    expect(auth.asked).toEqual(['acct-a', 'acct-b'])
+    expect([...limits.keys()]).toEqual(['acct-a', 'acct-b'])
+    // The WHOLE response comes back — a credits-based plan hides its figures in
+    // `rateLimitsByLimitId`, so the transport must not pre-pick a bucket.
+    expect(limits.get('acct-b')!.rateLimits.primary).toEqual({
+      usedPercent: 30,
+      windowDurationMins: 300,
+      resetsAt: 1_735_693_200
+    })
+    // One app-server for the whole sweep, and the login precedes each read.
+    expect(mocks.clients).toHaveLength(1)
+    expect(mocks.request.mock.calls.map(([method]) => method)).toEqual([
+      'account/login/start',
+      'account/rateLimits/read',
+      'account/login/start',
+      'account/rateLimits/read'
+    ])
+  })
+
+  it('skips an account the vault cannot produce a token for', async () => {
+    mocks.request.mockImplementation(async (method: string) =>
+      method === 'account/rateLimits/read' ? snapshot(55) : {}
+    )
+    const service = new CodexService({ ...options, auth: hook() })
+
+    const limits = await service.rateLimits(['acct-gone', 'acct-a'])
+
+    expect([...limits.keys()]).toEqual(['acct-a'])
+  })
+
+  it('reads nothing at all without a hook — a service with no identity injects none', async () => {
+    const service = new CodexService(options)
+    expect([...(await service.rateLimits(['acct-a'])).keys()]).toEqual([])
+    expect(mocks.clients).toHaveLength(0)
+  })
+})

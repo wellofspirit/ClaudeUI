@@ -6,6 +6,7 @@ import type { Config } from './protocol/v2/Config'
 import type { LoginAccountParams } from './protocol/v2/LoginAccountParams'
 import type { LoginAccountResponse } from './protocol/v2/LoginAccountResponse'
 import type { Model } from './protocol/v2/Model'
+import type { GetAccountRateLimitsResponse } from './protocol/v2/GetAccountRateLimitsResponse'
 import type { ThreadReadParams } from './protocol/v2/ThreadReadParams'
 import type { ThreadListParams } from './protocol/v2/ThreadListParams'
 import { assertCodexProvider, selectCodexModel } from './model-selection'
@@ -201,6 +202,45 @@ export class CodexService {
         sandbox_mode: config.sandbox_mode
       }
     })
+  }
+
+  /**
+   * Per-account ChatGPT rate limits (ADR-068 §2), read through ONE app-server.
+   *
+   * The signature takes the whole LIST rather than one account because the
+   * constraint is the process, not the call: `read()` disposes its client the
+   * moment the last user drops, so N single-account calls would be N app-server
+   * children. Here the re-injection and the read both happen inside one
+   * operation — `account/login/start {chatgptAuthTokens}` is legal while
+   * external auth is active, so the same process answers for every account in
+   * turn, sequentially.
+   *
+   * `null` in the list means the ACTIVE account. An account the vault cannot
+   * produce a token for, or one whose read the binary refuses, is simply absent
+   * from the result: a missing subscription is reported as "unavailable", never
+   * as another account's numbers.
+   *
+   * The WHOLE response is handed back, not a picked snapshot: a credits-based
+   * plan answers with empty windows at the top level and the real figures in
+   * `rateLimitsByLimitId`, and which bucket to believe is a product decision
+   * (`chatgpt-rate-limits.ts`), not a transport one.
+   */
+  async rateLimits(
+    accountIds: ReadonlyArray<string | null>
+  ): Promise<Map<string, GetAccountRateLimitsResponse>> {
+    const out = new Map<string, GetAccountRateLimitsResponse>()
+    if (!this.auth || accountIds.length === 0) return out
+    const auth = this.auth
+    await this.read(async (client) => {
+      for (const accountId of accountIds) {
+        auth.requestAccount(accountId)
+        const token = await client.injectAccount(auth).catch(() => null)
+        if (!token) continue
+        const result = await client.request('account/rateLimits/read', {}).catch(() => null)
+        if (result) out.set(token.vaultAccountId, result)
+      }
+    })
+    return out
   }
 
   readThread(params: ThreadReadParams) {

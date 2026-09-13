@@ -457,6 +457,8 @@ describe('ChatGPT token injection', () => {
     return {
       inject: vi.fn(async () => token),
       onRefreshRequest: vi.fn(),
+      requestAccount: vi.fn(),
+      hasAccount: vi.fn(async () => true),
       injectedAccountId: token?.vaultAccountId ?? null
     }
   }

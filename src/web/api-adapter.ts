@@ -268,6 +268,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('session:set-model', routingId, model) as Promise<void>,
     setEffort: (routingId, effort) =>
       connection.invoke('session:set-effort', routingId, effort) as Promise<void>,
+    setSessionAccount: (routingId, accountId) =>
+      connection.invoke('session:set-account', routingId, accountId) as Promise<void>,
     setThinkingMode: (routingId, mode) =>
       connection.invoke('session:set-thinking-mode', routingId, mode) as Promise<void>,
     setReasoningVariant: (routingId, variant) =>
@@ -599,6 +601,10 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // Usage
     fetchAccountUsage: () =>
       connection.invoke('usage:fetch') as ReturnType<ClaudeAPI['fetchAccountUsage']>,
+    fetchChatgptLimits: (refresh) =>
+      connection.invoke('usage:chatgpt-limits', refresh ?? false) as ReturnType<
+        ClaudeAPI['fetchChatgptLimits']
+      >,
     fetchBlockUsage: () =>
       connection.invoke('usage:fetch-block') as ReturnType<ClaudeAPI['fetchBlockUsage']>,
     setUsageAccountFilter: (account) =>

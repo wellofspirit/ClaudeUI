@@ -51,6 +51,13 @@ function makeProps(overrides: Partial<MobileConfigSheetProps> = {}): MobileConfi
     effort: 'high',
     effortSupported: true,
     allowedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    showAccountPicker: false,
+    accounts: [],
+    activeAccountId: null,
+    pinnedAccountId: null,
+    onSelectAccount: vi.fn(),
+    onAddAccount: vi.fn(),
+    onAccountMenuOpen: vi.fn(),
     onSelectMode: vi.fn(),
     onSelectEngine: vi.fn(),
     onSelectModel: vi.fn(),
@@ -580,5 +587,66 @@ describe('MobileConfigSheet — dialog chrome', () => {
     rerender(<MobileConfigSheet {...makeProps({ effortSupported: false })} />)
     expect(screen.getByText('Run configuration')).toBeInTheDocument()
     expect(screen.queryByTestId('MobileConfigSheet.effortOption')).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * Slice 2b guard 6 (mobile half) — the ChatGPT account page (ADR-068 §2).
+ *
+ * Same list, same vocabulary and the same follow-active-vs-pinned distinction
+ * the desktop `AccountPicker` draws; the sheet is a different surface, not a
+ * different model.
+ */
+describe('MobileConfigSheet — the ChatGPT account page', () => {
+  const accounts = [
+    { id: 'acct-a', email: 'a@example.test', planType: 'pro' },
+    { id: 'acct-b', email: 'b@example.test', planType: 'plus' }
+  ]
+  const accountProps = (over: Partial<MobileConfigSheetProps> = {}): MobileConfigSheetProps =>
+    makeProps({
+      showAccountPicker: true,
+      accounts,
+      activeAccountId: 'acct-a',
+      pinnedAccountId: null,
+      ...over
+    })
+
+  it('has no account row at all when the picker is gated off', () => {
+    render(<MobileConfigSheet {...makeProps()} />)
+    fireEvent.click(screen.getByTestId('MobileConfigSheet.trigger'))
+    expect(screen.queryByTestId('MobileConfigSheet.account')).toBeNull()
+  })
+
+  it('summarises follow-active on the row and drills into the same list', () => {
+    const props = accountProps()
+    render(<MobileConfigSheet {...props} />)
+    fireEvent.click(screen.getByTestId('MobileConfigSheet.trigger'))
+
+    const row = screen.getByTestId('MobileConfigSheet.account')
+    expect(row.textContent).toContain('Active · a@example.test')
+    fireEvent.click(row)
+
+    expect(props.onAccountMenuOpen).toHaveBeenCalledTimes(1)
+    const options = screen.getAllByTestId('MobileConfigSheet.accountOption')
+    expect(options.map((option) => option.getAttribute('data-value'))).toEqual([
+      '__active__',
+      'acct-a',
+      'acct-b'
+    ])
+    fireEvent.click(options[2])
+    expect(props.onSelectAccount).toHaveBeenCalledWith('acct-b')
+    // Selecting returns to root, like every other page in this sheet.
+    expect(screen.getByTestId('MobileConfigSheet.account')).toBeTruthy()
+  })
+
+  it('shows the pin on the row and offers the way to add an account', () => {
+    const props = accountProps({ pinnedAccountId: 'acct-b' })
+    render(<MobileConfigSheet {...props} />)
+    fireEvent.click(screen.getByTestId('MobileConfigSheet.trigger'))
+    expect(screen.getByTestId('MobileConfigSheet.account').textContent).toContain('b@example.test')
+
+    fireEvent.click(screen.getByTestId('MobileConfigSheet.account'))
+    fireEvent.click(screen.getByTestId('MobileConfigSheet.accountAdd'))
+    expect(props.onAddAccount).toHaveBeenCalledTimes(1)
   })
 })

@@ -183,6 +183,8 @@ export const TRANSIENT_SESSION_FIELDS = [
 /** App-level equivalents of {@link TRANSIENT_SESSION_FIELDS}. */
 export const TRANSIENT_APP_FIELDS = [
   'accountUsage', // usage:data
+  'providerAccounts', // provider-account:list   (host-local read)
+  'chatgptLimits', // usage:chatgpt-limits    (host-local read, nudged by usage:chatgpt-limits-changed)
   'blockUsage', // usage:block-data
   'authState', // auth:state       (host-local)
   'authSource', // session:auth-source

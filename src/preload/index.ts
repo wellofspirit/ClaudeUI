@@ -212,6 +212,8 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:set-model', routingId, model),
   setEffort: (routingId: string, effort: string) =>
     ipcRenderer.invoke('session:set-effort', routingId, effort),
+  setSessionAccount: (routingId: string, accountId: string | null) =>
+    ipcRenderer.invoke('session:set-account', routingId, accountId),
   setThinkingMode: (routingId: string, mode: string) =>
     ipcRenderer.invoke('session:set-thinking-mode', routingId, mode),
   setReasoningVariant: (routingId: string, variant: string | null) =>
@@ -353,6 +355,8 @@ const api: ClaudeAPI = {
 
   // Account usage (5hr / 7-day rate limits)
   fetchAccountUsage: () => ipcRenderer.invoke('usage:fetch'),
+  fetchChatgptLimits: (refresh?: boolean) =>
+    ipcRenderer.invoke('usage:chatgpt-limits', refresh ?? false),
 
   // Block usage analytics
   fetchBlockUsage: () => ipcRenderer.invoke('usage:fetch-block'),

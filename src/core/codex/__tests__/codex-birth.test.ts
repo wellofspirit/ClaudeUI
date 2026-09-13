@@ -157,7 +157,9 @@ it('birth, identity acknowledgement, native commands and reconnect agree without
     modelProvider: 'openai',
     reasoningEffort: null,
     effortOptions: [{ value: 'ultra', description: 'Native ultra' }],
-    overrides: {}
+    overrides: {},
+    // ADR-068 §2: no pin on a fresh session — it follows the active account.
+    pinnedAccountId: null
   })
 
   const controller = new AbortController()

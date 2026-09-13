@@ -212,6 +212,16 @@ export interface DispatchContext {
    * gated on this being set; never fail a dispatch over it).
    */
   toolUseId?: string
+  /**
+   * The VAULT ChatGPT account the DISPATCHING session runs as (ADR-068 §2), when
+   * it is a Codex session with a per-session pin. A headless target must bill the
+   * same subscription the human's session bills — otherwise a pinned session's
+   * delegated work quietly lands on the active account instead.
+   *
+   * Absent (or null) on every other caller and on an unpinned Codex session:
+   * the target then runs as the ACTIVE account, exactly as slice 2a left it.
+   */
+  chatgptAccountId?: string | null
   extra?: SdkToolExtra
 }
 
@@ -378,7 +388,7 @@ const defaultSpawnCodexTarget: SpawnCodexTargetFn = async (opts) => new CodexCli
  * nothing and never reads the vault, which is what keeps the real-binary target
  * integration hermetic; the singleton below supplies the real one.
  */
-export type CodexAuthHookFactory = () => CodexAuthHook
+export type CodexAuthHookFactory = (accountId: string | null) => CodexAuthHook
 
 export interface DispatcherDeps {
   serverManager: {
@@ -4353,13 +4363,13 @@ export class CrossEngineDispatcher {
     try {
       // A headless target is still one of "every app-server ClaudeUI starts"
       // (ADR-068 §1), and it must bill the same subscription the caller runs on:
-      // slice 2a always injects the ACTIVE account, 2b the caller's pin.
+      // the caller's PIN when it has one, the ACTIVE account otherwise (§2).
       await entry.client.start(
         {
           clientInfo: { name: 'claudeui_dispatch', title: 'Codex dispatch target', version: '1' },
           capabilities: { experimentalApi: true, requestAttestation: false }
         },
-        this.codexAuth?.()
+        this.codexAuth?.(ctx.chatgptAccountId ?? null)
       )
       const { config } = await entry.client.request('config/read', {
         cwd: ctx.cwd,
@@ -4833,5 +4843,5 @@ export const crossEngineDispatcher = new CrossEngineDispatcher({
   serverManager: opencodeServerManager,
   makeClient: (baseUrl, authHeader) => new OpencodeClient(baseUrl, authHeader),
   loadEngineConfig,
-  codexAuth: codexAuthHook
+  codexAuth: (accountId) => codexAuthHook({ accountId })
 })
