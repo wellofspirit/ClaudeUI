@@ -412,6 +412,13 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
 
     getVersionInfo: () => ipcRenderer.invoke('app:version-info'),
     listProviderRegistry: () => unwrap('provider-registry:list'),
+    listProviderAccounts: (providerId) => unwrap('provider-account:list', providerId),
+    switchProviderAccount: (providerId, accountId) =>
+      unwrap('provider-account:switch', providerId, accountId),
+    removeProviderAccount: (providerId, accountId) =>
+      unwrap('provider-account:remove', providerId, accountId),
+    setProviderAccountsPerSession: (providerId, enabled) =>
+      unwrap('provider-account:set-per-session', providerId, enabled),
     listSharedProviders: () => unwrap('shared-provider:list'),
     getSharedProviderStatuses: () => unwrap('shared-provider:statuses'),
     listSharedProviderModels: (id) => unwrap('shared-provider:models', id),

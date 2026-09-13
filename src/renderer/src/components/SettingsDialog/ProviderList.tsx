@@ -182,7 +182,17 @@ export function ProviderList({
           dataId={entry.id}
           label={entry.name}
           labelBadge={
-            <CredentialChip credential={entry.credential} testid={`${LIST}.credential`} />
+            <CredentialChip
+              credential={entry.credential}
+              // A subscription with several accounts: the COUNT is what the row
+              // has to say, and "Connected" would hide that there are others.
+              label={
+                (entry.accounts?.list.length ?? 0) > 1
+                  ? `${entry.accounts!.list.length} accounts`
+                  : undefined
+              }
+              testid={`${LIST}.credential`}
+            />
           }
           description={describe(entry)}
         >

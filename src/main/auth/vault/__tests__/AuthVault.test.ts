@@ -18,12 +18,15 @@ beforeEach(() => {
 })
 afterEach(() => rmSync(testHome, { recursive: true, force: true }))
 describe('AuthVault', () => {
-  it('writes a plaintext v2 0600 generic credential map', async () => {
+  it('writes a plaintext v3 0600 generic credential map', async () => {
     const vault = new AuthVault()
     await vault.saveCredential('custom', { type: 'api_key', key: 'test-key' })
+    // v3 (ADR-068 §2): `credentials` holds API keys only; OAuth subscriptions
+    // live under `accounts`, which an API-key-only vault leaves empty.
     expect(JSON.parse(readFileSync(vaultPath(), 'utf8'))).toEqual({
-      v: 2,
-      credentials: { custom: { type: 'api_key', key: 'test-key' } }
+      v: 3,
+      credentials: { custom: { type: 'api_key', key: 'test-key' } },
+      accounts: {}
     })
     if (process.platform !== 'win32') expect(statSync(vaultPath()).mode & 0o777).toBe(0o600)
   })
@@ -58,7 +61,11 @@ describe('AuthVault', () => {
       expires: 1
     })
     await vault.saveCredential('custom', { type: 'api_key', key: 'k' })
-    expect(JSON.parse(readFileSync(vaultPath(), 'utf8')).credentials.chatgpt.access).toBe('a')
+    // The v1 credential is now ChatGPT's one (active) ACCOUNT, not a single slot.
+    const file = JSON.parse(readFileSync(vaultPath(), 'utf8'))
+    expect(file.v).toBe(3)
+    expect(file.accounts.chatgpt.list[0].credential.access).toBe('a')
+    expect(file.accounts.chatgpt.activeId).toBe(file.accounts.chatgpt.list[0].id)
   })
   it('never decrypts encrypted v1 and reports it for native recovery', async () => {
     mkdirSync(dirname(vaultPath()), { recursive: true })
@@ -67,7 +74,7 @@ describe('AuthVault', () => {
     await expect(vault.load()).resolves.toBeNull()
     expect(vault.hasUnreadableLegacyVault()).toBe(true)
   })
-  it('recovers an unreadable encrypted v1 from native snapshots into plaintext v2 without decrypting it', async () => {
+  it('recovers an unreadable encrypted v1 from native snapshots into plaintext v3 without decrypting it', async () => {
     mkdirSync(dirname(vaultPath()), { recursive: true })
     writeFileSync(vaultPath(), JSON.stringify({ v: 1, encrypted: true, data: 'opaque' }))
     const native = (
@@ -83,9 +90,14 @@ describe('AuthVault', () => {
     const sync = new CredentialSync({ vault: new AuthVault() })
     sync.configure({ pi, opencode })
     await sync.start()
-    expect(JSON.parse(readFileSync(vaultPath(), 'utf8'))).toEqual({
-      v: 2,
-      credentials: { chatgpt: { type: 'oauth', access: 'oc', refresh: 'oc', expires: 20 } }
+    expect(JSON.parse(readFileSync(vaultPath(), 'utf8'))).toMatchObject({
+      v: 3,
+      credentials: {},
+      accounts: {
+        chatgpt: {
+          list: [{ credential: { type: 'oauth', access: 'oc', refresh: 'oc', expires: 20 } }]
+        }
+      }
     })
     sync.stop()
   })

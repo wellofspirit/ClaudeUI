@@ -312,6 +312,15 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // in `core/ipc/auth-commands.ts`), so it unwraps like the writes below and
     // unlike the three older reads under it.
     listProviderRegistry: () => unwrap('provider-registry:list'),
+    // The subscription accounts (ADR-068 §2) — safeHandler-wrapped host-side in
+    // the same shared module, so they unwrap like the registry above.
+    listProviderAccounts: (providerId) => unwrap('provider-account:list', providerId),
+    switchProviderAccount: (providerId, accountId) =>
+      unwrap('provider-account:switch', providerId, accountId),
+    removeProviderAccount: (providerId, accountId) =>
+      unwrap('provider-account:remove', providerId, accountId),
+    setProviderAccountsPerSession: (providerId, enabled) =>
+      unwrap('provider-account:set-per-session', providerId, enabled),
     listSharedProviders: () =>
       connection.invoke('shared-provider:list') as ReturnType<ClaudeAPI['listSharedProviders']>,
     getSharedProviderStatuses: () =>

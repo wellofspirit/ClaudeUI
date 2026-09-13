@@ -9,7 +9,17 @@ Standing rules for every implementing agent on this spec:
 - Every behaviour change ships with a guard test the agent proves fails before the fix and passes after. Report both runs.
 - Report results and deviations; never self-certify.
 
-## Slice 1: vault accounts (this kickoff)
+## Slice 1: vault accounts
+
+**Landed 2026-09-13** on `codex-integration` (the commit after `e23d5f93`). Built as specified; the points where the build refined the design:
+
+- A migrated v2 account's id is DERIVED (`sha256(providerId|workspaceId-or-email)` prefix), not random: the migration runs on every read until the next write, so two reads must agree on the id.
+- A credential with no workspace claim matches the active account only when that account has none either (the single slot a v2 migration leaves); it never overwrites an identified account.
+- `saveCredential` routes every OAuth record to `upsertAccount` (the vault has no provider-kind lookup; in v3 `credentials` holds API keys only, so the rules coincide).
+- `removeAccount` rings `onActiveAccountChanged` on both paths that change what the engines hold (promotion, and last-account removal), not only `switchActiveAccount`; a review found the spec's wording left opencode holding a removed credential (ADR-047).
+- The Add sheet keeps its ChatGPT sign-in control once accounts exist, relabelled "Add another account"; the original gate hid it on `connected`, which made "+ Add account" a dead end. Found in review, fixed before commit.
+- The Manage sheet renders from `entry.accounts` on the registry row (present but empty on a disconnected ChatGPT row); `provider-account:list` exists for Slice 2's session picker.
+- Real-app evidence (isolated temp profile via an `os.homedir()` shim passed with Electron's `-r`, never the owner's home): two fabricated accounts render with the active radio, switch re-vends and moves `activeId`, the per-session toggle persists to `providers/chatgpt.json`, removing the active account promotes the other and hides the toggle; a v2 profile shows its one migrated account and the file stays `v: 2` until the first write.
 
 ### Goal
 

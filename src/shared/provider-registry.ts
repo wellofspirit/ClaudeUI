@@ -18,7 +18,7 @@
  * over three stores that is never persisted.
  */
 
-import type { SharedProviderRouteDiagnosis } from './shared-provider'
+import type { SharedProviderAccountSummary, SharedProviderRouteDiagnosis } from './shared-provider'
 import type { EngineId, OpencodeProviderCatalogEntry } from './types'
 
 /** Which store the row's identity comes from. Decides the actions the sheet offers. */
@@ -63,6 +63,16 @@ export interface ProviderEntry {
   engines: Partial<Record<EngineId, ProviderEngineFacts>>
   /** One line under the name, e.g. `"2 of 300 models shown in the picker"`. */
   detail?: string
+  /**
+   * A shared SUBSCRIPTION row's stored accounts (ADR-068 §2): which one is
+   * active, whether per-session pinning is on, and the list itself. Absent on
+   * every other row — a provider holding one API key has no accounts to show,
+   * and neither does a native engine entry.
+   *
+   * Ids, emails and plan names only. The vault is the only thing that ever sees
+   * a token, and this read model is what the phone reads too.
+   */
+  accounts?: ProviderAccounts
   /** Why an enabled, credentialed shared route surfaces zero models. */
   diagnosis?: SharedProviderRouteDiagnosis
   /**
@@ -99,6 +109,13 @@ export interface ProviderEntry {
    * sheet's Remove affordance is gated on its presence.
    */
   opencodeRemoveKind?: NonNullable<OpencodeProviderCatalogEntry['actions']['removeKind']>
+}
+
+/** The accounts half of one shared subscription row. */
+export interface ProviderAccounts {
+  activeId: string | null
+  perSession: boolean
+  list: SharedProviderAccountSummary[]
 }
 
 export interface ProviderRegistrySnapshot {

@@ -121,6 +121,29 @@ describe('the rows', () => {
     expect(badge('opencode:openrouter')).toHaveTextContent('API key')
   })
 
+  it('a multi-account subscription counts its accounts on the badge (ADR-068 §2)', async () => {
+    snapshot = {
+      ...snapshot,
+      entries: snapshot.entries.map((e) =>
+        e.id === 'chatgpt'
+          ? {
+              ...e,
+              accounts: {
+                activeId: 'acc-1',
+                perSession: false,
+                list: [{ id: 'acc-1', email: 'a@example.com' }, { id: 'acc-2' }]
+              }
+            }
+          : e
+      )
+    }
+    await renderList()
+    const badge = within(row('chatgpt')).getByTestId('ProviderList.credential')
+    expect(badge).toHaveTextContent('2 accounts')
+    // Still the connected STATE — only the wording changes.
+    expect(badge).toHaveAttribute('data-id', 'connected')
+  })
+
   it('chips the engines the provider is configured for, claude → opencode → pi', async () => {
     await renderList()
     const chips = (id: string): string[] =>

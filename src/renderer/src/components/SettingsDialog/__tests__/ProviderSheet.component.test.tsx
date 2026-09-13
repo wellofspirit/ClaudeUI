@@ -182,6 +182,9 @@ beforeEach(async () => {
   stub('shared-provider:sync')
   stub('shared-provider:set-key')
   stub('shared-provider:disconnect')
+  stub('provider-account:switch')
+  stub('provider-account:remove')
+  stub('provider-account:set-per-session')
   stub('shared-provider:remove')
   stub('session:set-opencode-provider-disabled')
   stub('session:remove-opencode-provider')
@@ -346,6 +349,142 @@ describe('CREDENTIAL', () => {
     expect(sent('shared-provider:disconnect')).toEqual([])
     await click(screen.getByTestId('ProviderSheet.disconnect'))
     expect(sent('shared-provider:disconnect')).toEqual([['chatgpt']])
+  })
+})
+
+// ── Accounts (ADR-068 §2) ────────────────────────────────────────────
+
+/**
+ * The Credential group becomes an ACCOUNTS card on a shared subscription: one
+ * row per stored account with the active one selected, Remove per row, "+ Add
+ * account" in the group header, and — only once there are two — the per-session
+ * toggle. Every action is asserted by CHANNEL: a radio that re-rendered without
+ * writing, or one that wrote to the wrong account id, would look identical.
+ */
+describe('ACCOUNTS', () => {
+  const twoAccounts = {
+    activeId: 'acc-1',
+    perSession: false,
+    list: [
+      { id: 'acc-1', email: 'daniel@example.com', accountId: 'ws-11112222', planType: 'pro' },
+      { id: 'acc-2', email: 'work@example.com', accountId: 'ws-33334444', planType: 'business' }
+    ]
+  }
+
+  /** Put `accounts` on the ChatGPT row before the sheet is opened. */
+  function withAccounts(accounts: ProviderEntry['accounts']): void {
+    snapshot = {
+      ...snapshot,
+      entries: snapshot.entries.map((e) => (e.id === 'chatgpt' ? { ...e, accounts } : e))
+    }
+  }
+
+  const accountRow = (id: string): HTMLElement =>
+    screen.getAllByTestId('ProviderSheet.account').find((el) => el.dataset.id === id)!
+
+  it('renders one row per account, with the active one selected', async () => {
+    withAccounts(twoAccounts)
+    const sheet = await openSheet('chatgpt')
+    expect(screen.getAllByTestId('ProviderSheet.account').map((el) => el.dataset.id)).toEqual([
+      'acc-1',
+      'acc-2'
+    ])
+    expect(accountRow('acc-1')).toHaveTextContent('daniel@example.com')
+    // The plan and a shortened workspace id, so two rows of the same person's
+    // accounts are still tellable apart.
+    expect(accountRow('acc-2')).toHaveTextContent('business')
+    expect(within(accountRow('acc-1')).getByRole('radio')).toBeChecked()
+    expect(within(accountRow('acc-2')).getByRole('radio')).not.toBeChecked()
+    expect(sheet).toHaveTextContent('Accounts')
+  })
+
+  it('the radio switches the ACTIVE account through provider-account:switch', async () => {
+    withAccounts(twoAccounts)
+    await openSheet('chatgpt')
+    await act(async () => {
+      fireEvent.click(within(accountRow('acc-2')).getByRole('radio'))
+    })
+    expect(sent('provider-account:switch')).toEqual([['chatgpt', 'acc-2']])
+    // Re-read after the write: the row is the only thing that knows it changed.
+    expect(registryReads).toBeGreaterThan(1)
+  })
+
+  it('does not re-switch to the account that is already active', async () => {
+    withAccounts(twoAccounts)
+    await openSheet('chatgpt')
+    await act(async () => {
+      fireEvent.click(within(accountRow('acc-1')).getByRole('radio'))
+    })
+    expect(sent('provider-account:switch')).toEqual([])
+  })
+
+  it('Remove destroys one account, and only after a confirm', async () => {
+    withAccounts(twoAccounts)
+    await openSheet('chatgpt')
+    const remove = (): HTMLElement =>
+      screen.getAllByTestId('ProviderSheet.accountRemove').find((el) => el.dataset.id === 'acc-2')!
+    await click(remove())
+    expect(sent('provider-account:remove')).toEqual([])
+    expect(remove()).toHaveTextContent('Remove?')
+    await click(remove())
+    expect(sent('provider-account:remove')).toEqual([['chatgpt', 'acc-2']])
+  })
+
+  it('the per-session toggle writes set-per-session, and is hidden with ONE account', async () => {
+    withAccounts(twoAccounts)
+    await openSheet('chatgpt')
+    await click(screen.getByTestId('ProviderSheet.perSessionToggle'))
+    expect(sent('provider-account:set-per-session')).toEqual([['chatgpt', true]])
+
+    cleanup()
+    withAccounts({ ...twoAccounts, list: [twoAccounts.list[0]] })
+    await openSheet('chatgpt')
+    // Nothing to pin between: the toggle would configure a choice of one.
+    expect(screen.queryByTestId('ProviderSheet.perSession')).not.toBeInTheDocument()
+  })
+
+  it('Add account hands over to the existing sign-in flow, not a second one', async () => {
+    withAccounts(twoAccounts)
+    await openSheet('chatgpt')
+    await click(screen.getByTestId('ProviderSheet.addAccount'))
+    expect(screen.queryByTestId('ProviderSheet')).not.toBeInTheDocument()
+    expect(screen.getByTestId('ProviderAddSheet.search')).toHaveValue('chatgpt')
+    // Landing on the row is not enough: the row must still OFFER the sign-in
+    // once an account exists, or "+ Add account" opens a sheet with no control.
+    expect(screen.getByTestId('VendorOAuthFlow')).toHaveAttribute('data-id', 'openai-codex')
+    expect(screen.getByTestId('VendorOAuthFlow.start')).toHaveTextContent('Add another account')
+  })
+
+  it('disconnects EVERY account from the footer, on the second press', async () => {
+    withAccounts(twoAccounts)
+    await openSheet('chatgpt')
+    const disconnect = screen.getByTestId('ProviderSheet.disconnect')
+    expect(disconnect).toHaveTextContent('Disconnect all accounts')
+    await click(disconnect)
+    expect(sent('shared-provider:disconnect')).toEqual([])
+    await click(screen.getByTestId('ProviderSheet.disconnect'))
+    expect(sent('shared-provider:disconnect')).toEqual([['chatgpt']])
+  })
+
+  it('falls back to the single-credential row when the registry reports no accounts', async () => {
+    // A row from a build (or a boot) with no account list must not render an
+    // empty Accounts card that looks like "you have no subscription".
+    await openSheet('chatgpt')
+    expect(screen.queryAllByTestId('ProviderSheet.account')).toEqual([])
+    expect(screen.getByTestId('ProviderSheet.credential')).toHaveTextContent('Connected')
+  })
+
+  it('reads at 390px — every account row keeps its radio and its Remove', async () => {
+    withAccounts(twoAccounts)
+    window.innerWidth = 390
+    window.dispatchEvent(new Event('resize'))
+    await openSheet('chatgpt')
+    for (const id of ['acc-1', 'acc-2']) {
+      expect(within(accountRow(id)).getByRole('radio')).toBeInTheDocument()
+    }
+    expect(screen.getAllByTestId('ProviderSheet.accountRemove')).toHaveLength(2)
+    window.innerWidth = 1280
+    window.dispatchEvent(new Event('resize'))
   })
 })
 

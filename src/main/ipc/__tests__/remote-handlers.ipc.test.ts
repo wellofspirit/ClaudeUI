@@ -1656,6 +1656,29 @@ const S4_VENDOR_CREDENTIAL_CHANNELS = [
 const PROVIDER_REGISTRY_CHANNELS = ['provider-registry:list'] as const
 
 /**
+ * ADR-068 §2 — the ChatGPT vault's ACCOUNTS.
+ *
+ * Four channels, declared in the same shared module for the same reason as the
+ * line above: the phone manages the subscription the desktop does, and one
+ * declaration is what stops the two surfaces disagreeing. All `config`, so a
+ * base connection reaches them — a vendor subscription is engine configuration
+ * (ADR-056), and switching which account the host bills is exactly the kind of
+ * thing the everything-remote ruling covers.
+ *
+ * Token-free by construction, pinned in
+ * `main/ipc/__tests__/provider-account-commands.test.ts`: `list` returns ids,
+ * emails, plan names and expiries, and the three mutations return nothing.
+ * ADDING an account is not here — that is the existing `vendor-auth:oauth-*`
+ * pair, which already completes remotely via paste-back.
+ */
+const PROVIDER_ACCOUNT_CHANNELS = [
+  'provider-account:list',
+  'provider-account:remove',
+  'provider-account:set-per-session',
+  'provider-account:switch'
+] as const
+
+/**
  * The redacted status READ (owner ruling, 2026-08-28) — the one `remote:*`
  * channel with a remote registration, and the SIXTH deliberate widening.
  *
@@ -1732,6 +1755,7 @@ describe('remote surface parity (phase 1 port)', () => {
         ...TRUST_LIST_CHANNELS,
         ...S4_VENDOR_CREDENTIAL_CHANNELS,
         ...PROVIDER_REGISTRY_CHANNELS,
+        ...PROVIDER_ACCOUNT_CHANNELS,
         ...REMOTE_VIEW_CHANNELS,
         ...IDE_CHANNELS,
         'codex:auth-status',

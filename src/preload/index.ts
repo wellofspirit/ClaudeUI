@@ -492,6 +492,13 @@ const api: ClaudeAPI = {
   saveSharedAutoMode: (config: import('../shared/types').SharedAutoModeConfig) =>
     ipcRenderer.invoke('config:save-shared-automode', config),
   listProviderRegistry: () => unwrap('provider-registry:list'),
+  listProviderAccounts: (providerId: string) => unwrap('provider-account:list', providerId),
+  switchProviderAccount: (providerId: string, accountId: string) =>
+    unwrap('provider-account:switch', providerId, accountId),
+  removeProviderAccount: (providerId: string, accountId: string) =>
+    unwrap('provider-account:remove', providerId, accountId),
+  setProviderAccountsPerSession: (providerId: string, enabled: boolean) =>
+    unwrap('provider-account:set-per-session', providerId, enabled),
   listSharedProviders: () => unwrap('shared-provider:list'),
   getSharedProviderStatuses: () => unwrap('shared-provider:statuses'),
   listSharedProviderModels: (id: string) => unwrap('shared-provider:models', id),

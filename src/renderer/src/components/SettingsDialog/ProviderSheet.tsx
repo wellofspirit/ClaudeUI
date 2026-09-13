@@ -7,6 +7,15 @@
  * its models reach the picker (MODELS IN THE PICKER). Everything is built from
  * the row vocabulary — the sheet invents no control of its own.
  *
+ * ON A SUBSCRIPTION THE FIRST QUESTION IS PLURAL (ADR-068 §2). The vault holds N
+ * ChatGPT accounts with one ACTIVE, so the Credential group becomes ACCOUNTS: a
+ * radio per account (switching re-vends the credential to every enabled engine),
+ * a Remove per account, "+ Add account" in the header — which is the EXISTING
+ * sign-in, handed to the Add sheet, not a second flow — and, once there are two,
+ * the per-session pinning toggle. Disconnect then means the whole SET, so it
+ * moves to the footer and says so. A row with no account list falls back to the
+ * single-credential rows: an empty Accounts card would read as "no subscription".
+ *
  * IT OWNS NO STATE OF RECORD. Every action routes to an EXISTING writer, and
  * after each write the sheet asks its parent to re-read `provider-registry:list`
  * and re-render it from the fresh entry. There is no change event on the
@@ -123,9 +132,16 @@ const CREDENTIAL_TINT: Record<ProviderCredential, string> = {
 
 export function CredentialChip({
   credential,
+  label,
   testid
 }: {
   credential: ProviderCredential
+  /**
+   * Overrides the WORD, never the state: a multi-account subscription reads
+   * "2 accounts" while still being `connected` (ADR-068 §2), and `data-id`
+   * stays the state so nothing downstream has to parse prose.
+   */
+  label?: string
   testid: string
 }): React.JSX.Element {
   return (
@@ -134,7 +150,7 @@ export function CredentialChip({
       data-id={credential}
       className={`shrink-0 rounded-full px-[7px] text-[10.5px] leading-4 font-medium ${CREDENTIAL_TINT[credential]}`}
     >
-      {CREDENTIAL_LABEL[credential]}
+      {label ?? CREDENTIAL_LABEL[credential]}
     </span>
   )
 }
@@ -279,8 +295,12 @@ export function ProviderSheet({
   /** null = not editing; a string = the key being typed. Never pre-filled. */
   const [keyDraft, setKeyDraft] = useState<string | null>(null)
   const [piKeyDraft, setPiKeyDraft] = useState<string | null>(null)
-  /** Which destructive action is one click from happening. */
-  const [confirming, setConfirming] = useState<'remove' | 'pi-off' | 'disconnect' | null>(null)
+  /**
+   * Which destructive action is one click from happening. A string rather than a
+   * union because one of them is per-ROW (`account:<id>`): arming "Remove" on
+   * one account must not arm it on every other account's row too.
+   */
+  const [confirming, setConfirming] = useState<string | null>(null)
   /** The provider's catalog size, reported up by the curation block. */
   const [catalogTotal, setCatalogTotal] = useState<number | null>(null)
   /**
@@ -378,10 +398,7 @@ export function ProviderSheet({
   }, [run])
 
   /** Two-click confirm: arm on the first press, act on the second. */
-  const confirmThen = (
-    which: 'remove' | 'pi-off' | 'disconnect',
-    action: () => Promise<void>
-  ): void => {
+  const confirmThen = (which: string, action: () => Promise<void>): void => {
     if (confirming !== which) {
       setConfirming(which)
       return
@@ -445,6 +462,107 @@ export function ProviderSheet({
       )}
     </SettingRow>
   )
+
+  /**
+   * The stored subscription accounts (ADR-068 §2), or undefined when this row has
+   * none — a build with no account list, or a provider that never has one. The
+   * single-credential rows below are the fallback, not an empty card: an empty
+   * Accounts card reads as "you have no subscription", which is a different
+   * thing from "this row does not do accounts".
+   */
+  const accounts =
+    isShared && definition?.kind === 'subscription' && entry.accounts?.list.length
+      ? entry.accounts
+      : undefined
+
+  /** Plan and a shortened workspace id — what tells two accounts of one person apart. */
+  function accountDescription(account: { planType?: string; accountId?: string }): string {
+    const workspace = account.accountId
+      ? `Workspace ${account.accountId.length > 14 ? `${account.accountId.slice(0, 14)}…` : account.accountId}`
+      : undefined
+    return [account.planType, workspace].filter(Boolean).join(' · ')
+  }
+
+  /**
+   * One row per account, the active one selected and tinted.
+   *
+   * Switching is a WRITE, not a selection: the vault re-vends the new credential
+   * to every enabled engine, so the radio commits immediately and the row is
+   * re-read from the registry afterwards like every other action on this sheet.
+   */
+  function accountRows(list: NonNullable<typeof accounts>): React.ReactNode {
+    return (
+      <>
+        {list.list.map((account) => {
+          const active = account.id === list.activeId
+          const armed = confirming === `account:${account.id}`
+          return (
+            <SettingRow
+              key={account.id}
+              as="label"
+              testid={`${SHEET}.account`}
+              dataId={account.id}
+              label={account.email || 'Account'}
+              description={accountDescription(account)}
+              className={active ? 'bg-accent/5' : 'hover:bg-bg-hover/40'}
+              leading={
+                <input
+                  type="radio"
+                  name={`${SHEET}-account`}
+                  value={account.id}
+                  checked={active}
+                  disabled={busy}
+                  onChange={() => {
+                    // Already active: re-vending the credential we are already on
+                    // would recycle opencode for nothing.
+                    if (active) return
+                    void run(() => window.api.switchProviderAccount(entry.id, account.id))
+                  }}
+                  className="appearance-none w-4 h-4 shrink-0 rounded-full border-[1.5px] border-border-bright bg-transparent checked:border-accent checked:bg-accent checked:shadow-[inset_0_0_0_3.5px_var(--color-bg-secondary)] cursor-pointer"
+                />
+              }
+            >
+              <Button
+                variant="danger"
+                testid={`${SHEET}.accountRemove`}
+                dataId={account.id}
+                disabled={busy}
+                onClick={() =>
+                  confirmThen(`account:${account.id}`, () =>
+                    window.api.removeProviderAccount(entry.id, account.id)
+                  )
+                }
+              >
+                {armed ? 'Remove?' : 'Remove'}
+              </Button>
+            </SettingRow>
+          )
+        })}
+        {/* One account is not a choice to make per session, so the toggle that
+            configures that choice is not shown until there are two. */}
+        {list.list.length > 1 && (
+          <SettingRow
+            testid={`${SHEET}.perSession`}
+            label="Per-session accounts"
+            description="Let a session pin one account instead of following the active one. New sessions only."
+          >
+            <button
+              type="button"
+              data-testid={`${SHEET}.perSessionToggle`}
+              aria-pressed={list.perSession}
+              disabled={busy}
+              onClick={() =>
+                void run(() => window.api.setProviderAccountsPerSession(entry.id, !list.perSession))
+              }
+              className="cursor-default disabled:opacity-40"
+            >
+              <ToggleSwitch checked={list.perSession} />
+            </button>
+          </SettingRow>
+        )}
+      </>
+    )
+  }
 
   function credentialRows(): React.JSX.Element {
     if (isShared && !shared.resolved) {
@@ -967,6 +1085,22 @@ export function ProviderSheet({
             >
               {confirming === 'remove' ? 'Remove provider?' : 'Remove provider'}
             </Button>
+            {/* With accounts, disconnecting is the whole SET — a per-account
+                Remove is above, on the account it names. */}
+            {accounts && (
+              <Button
+                variant="danger"
+                testid={`${SHEET}.disconnect`}
+                disabled={busy}
+                onClick={() =>
+                  confirmThen('disconnect', () => window.api.disconnectSharedProvider(entry.id))
+                }
+              >
+                {confirming === 'disconnect'
+                  ? 'Disconnect all accounts?'
+                  : 'Disconnect all accounts'}
+              </Button>
+            )}
             {/* One error slot for every write on the sheet: the row that failed is
                 always visible above it, and three copies of the same banner is how
                 a surface ends up reporting a stale failure next to a fresh row. */}
@@ -982,9 +1116,29 @@ export function ProviderSheet({
           </>
         }
       >
-        <SheetGroup testid={`${SHEET}.group`} id="credential" label="Credential">
-          {credentialRows()}
-        </SheetGroup>
+        {accounts ? (
+          <SheetGroup
+            testid={`${SHEET}.group`}
+            id="accounts"
+            label="Accounts"
+            trailing={
+              <Button
+                variant="link"
+                testid={`${SHEET}.addAccount`}
+                disabled={busy || !onAddProvider}
+                onClick={() => onAddProvider?.(entry.id)}
+              >
+                + Add account
+              </Button>
+            }
+          >
+            {accountRows(accounts)}
+          </SheetGroup>
+        ) : (
+          <SheetGroup testid={`${SHEET}.group`} id="credential" label="Credential">
+            {credentialRows()}
+          </SheetGroup>
+        )}
 
         <SheetGroup
           testid={`${SHEET}.group`}

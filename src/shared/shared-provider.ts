@@ -23,6 +23,31 @@ export interface SharedProviderRoute {
   defaultModel?: string
 }
 
+/**
+ * One stored subscription account, as everything OUTSIDE the vault sees it
+ * (ADR-068 §2): an id to name it by, and the identity claims read off the JWT.
+ * Never any token material.
+ */
+export interface SharedProviderAccountSummary {
+  id: string
+  email?: string
+  accountId?: string
+  planType?: string
+}
+
+/** {@link SharedProviderAccountSummary} plus what the refresher knows about it. */
+export interface SharedProviderAccountStatus extends SharedProviderAccountSummary {
+  expiresAt: number
+  needsReauth: boolean
+}
+
+/** What `provider-account:list` answers: the stored accounts and the policy over them. */
+export interface SharedProviderAccountList {
+  activeId: string | null
+  perSession: boolean
+  accounts: SharedProviderAccountStatus[]
+}
+
 export interface SharedProviderDefinition {
   id: string
   name: string
@@ -31,6 +56,13 @@ export interface SharedProviderDefinition {
   baseUrl?: string
   models: SharedProviderModel[]
   routes: Record<ConfigurableHarnessId, SharedProviderRoute>
+  /**
+   * Account policy for a `kind: 'subscription'` provider (ADR-068 §2).
+   * `perSession` off (the default, and the meaning of an absent value) means one
+   * ACTIVE account for everything; on, a session may pin one of the stored
+   * accounts. Meaningless on a custom provider, which holds one API key.
+   */
+  accounts?: { perSession: boolean }
   managed: true
 }
 

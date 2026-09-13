@@ -9,6 +9,8 @@ import type {
 } from './remote-protocol'
 import type {
   ConfigurableHarnessId,
+  SharedProviderAccountList,
+  SharedProviderAccountStatus,
   SharedProviderDefinition,
   SharedProviderModel,
   SharedProviderStatus
@@ -218,6 +220,10 @@ export interface PiAuthStatus {
   accountId?: string
   expiresAt?: number
   needsReauth: boolean
+  /** Every stored ChatGPT account (ADR-068 §2) — ids, emails, plans, expiries. */
+  accounts: SharedProviderAccountStatus[]
+  /** Which of them the engines are vended, or null when there is none. */
+  activeId: string | null
 }
 
 /** Resolved account descriptor held on the session. Populated by ClaudeAuthProvider.probe(). */
@@ -1354,6 +1360,18 @@ interface SharedProviderAPI {
    * read: every row action is one of the write channels below or beside it.
    */
   listProviderRegistry(): Promise<ProviderRegistrySnapshot>
+  /**
+   * The subscription ACCOUNTS of one shared provider (ADR-068 §2) — the same
+   * list the registry row carries, plus each account's expiry and reauth state.
+   * Never token material.
+   */
+  listProviderAccounts(providerId: string): Promise<SharedProviderAccountList>
+  /** Make one stored account the active one: both engine stores are re-vended. */
+  switchProviderAccount(providerId: string, accountId: string): Promise<void>
+  /** Forget one stored account. Removing the active one promotes the newest remaining. */
+  removeProviderAccount(providerId: string, accountId: string): Promise<void>
+  /** Turn per-session account pinning on or off for a subscription provider. */
+  setProviderAccountsPerSession(providerId: string, enabled: boolean): Promise<void>
   listSharedProviders(): Promise<SharedProviderDefinition[]>
   getSharedProviderStatuses(): Promise<SharedProviderStatus[]>
   listSharedProviderModels(id: string): Promise<SharedProviderModel[]>

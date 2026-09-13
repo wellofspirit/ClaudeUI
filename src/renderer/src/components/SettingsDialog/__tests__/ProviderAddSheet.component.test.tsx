@@ -325,6 +325,40 @@ describe('the list', () => {
     )
     expect(screen.queryByTestId('VendorOAuthFlow')).not.toBeInTheDocument()
   })
+
+  it('keeps the sign-in control once accounts exist, as "Add another account" (ADR-068 §2)', async () => {
+    // The Manage sheet's "+ Add account" hands over to THIS row. Hiding the flow
+    // the moment the first account lands made adding a second one impossible:
+    // one account already makes the row `connected`.
+    snapshot = {
+      ...snapshot,
+      entries: [
+        {
+          ...chatgptRow,
+          credential: 'connected' as const,
+          accounts: {
+            activeId: 'acc-1',
+            perSession: false,
+            list: [{ id: 'acc-1', email: 'daniel@example.com' }, { id: 'acc-2' }]
+          }
+        },
+        piXai
+      ]
+    }
+    await openAddSheet()
+    const row = screen
+      .getAllByTestId('ProviderAddSheet.subscription')
+      .find((el) => el.dataset.id === 'chatgpt')!
+    // Still connected, and the chip counts what is already there.
+    expect(within(row).getByTestId('ProviderAddSheet.credential')).toHaveAttribute(
+      'data-id',
+      'connected'
+    )
+    expect(within(row).getByTestId('ProviderAddSheet.credential')).toHaveTextContent('2 accounts')
+    // The existing vault PKCE flow, not a second one.
+    expect(screen.getByTestId('VendorOAuthFlow')).toHaveAttribute('data-id', 'openai-codex')
+    expect(screen.getByTestId('VendorOAuthFlow.start')).toHaveTextContent('Add another account')
+  })
 })
 
 // ── The setup step ───────────────────────────────────────────────────

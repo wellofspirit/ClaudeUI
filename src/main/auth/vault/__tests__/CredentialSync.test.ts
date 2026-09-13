@@ -768,7 +768,12 @@ describe('CredentialSync.disconnectChatgpt', () => {
     expect(pi.remove).toHaveBeenCalledWith('openai-codex')
     expect(opencode.remove).toHaveBeenCalledWith('openai')
     expect(sync.needsReauth).toBe(false)
-    await expect(sync.getStatus()).resolves.toEqual({ connected: false, needsReauth: false })
+    await expect(sync.getStatus()).resolves.toEqual({
+      connected: false,
+      needsReauth: false,
+      accounts: [],
+      activeId: null
+    })
   })
 })
 
@@ -780,7 +785,9 @@ describe('CredentialSync.getStatus', () => {
   it('not connected when the vault is empty', async () => {
     const sync = new CredentialSync({ vault: makeFakeVault(null).vault })
     const status = await sync.getStatus()
-    expect(status).toEqual({ connected: false, needsReauth: false })
+    // A vault with no ACCOUNT support (this fake) reports the plural fields
+    // empty rather than omitting them — one shape for every caller.
+    expect(status).toEqual({ connected: false, needsReauth: false, accounts: [], activeId: null })
   })
 
   it('connected, with email/accountId/expiresAt from the vault credential', async () => {
@@ -799,7 +806,9 @@ describe('CredentialSync.getStatus', () => {
       email: 'user@example.com',
       accountId: 'acct-1',
       expiresAt: 999_999,
-      needsReauth: false
+      needsReauth: false,
+      accounts: [],
+      activeId: null
     })
   })
 
@@ -807,7 +816,13 @@ describe('CredentialSync.getStatus', () => {
     const cred: VaultCredential = { type: 'oauth', access: 'acc', refresh: 'ref', expires: 42 }
     const sync = new CredentialSync({ vault: makeFakeVault(cred).vault })
     const status = await sync.getStatus()
-    expect(status).toEqual({ connected: true, expiresAt: 42, needsReauth: false })
+    expect(status).toEqual({
+      connected: true,
+      expiresAt: 42,
+      needsReauth: false,
+      accounts: [],
+      activeId: null
+    })
     expect('email' in status).toBe(false)
     expect('accountId' in status).toBe(false)
   })

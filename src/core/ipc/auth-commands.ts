@@ -53,6 +53,8 @@
  */
 
 import { safeHandler } from './safe-handler'
+import { CHATGPT_PROVIDER_ID } from '../auth/vault/AuthVault'
+import { credentialSync } from '../auth/vault/CredentialSync'
 import type { CommandConnection, CommandRegistration } from './command-registry'
 import type { EngineAuthProvider } from '../auth/EngineAuthProvider'
 import { sharedProviderService } from '../shared-providers'
@@ -64,7 +66,11 @@ import type {
   VendorAuthMap,
   VendorAuthOption
 } from '../../shared/types'
-import type { ConfigurableHarnessId, SharedProviderDefinition } from '../../shared/shared-provider'
+import type {
+  ConfigurableHarnessId,
+  SharedProviderAccountList,
+  SharedProviderDefinition
+} from '../../shared/shared-provider'
 import type { ProviderRegistrySnapshot } from '../../shared/provider-registry'
 
 /**
@@ -81,6 +87,25 @@ export interface AuthCommandDeps {
 /** True for any caller other than the host's own in-process surface. */
 function isRemote(connection: CommandConnection): boolean {
   return connection.identity.method !== 'host'
+}
+
+/**
+ * The definition behind a `provider-account:*` call, or a refusal.
+ *
+ * Accounts are a SUBSCRIPTION concept (ADR-068 §2) and the account store is the
+ * ChatGPT vault's — a custom provider holds one API key and has nothing to
+ * switch between. Answering an empty list for those would make a broken call
+ * look like a provider with no accounts yet, so it is an error instead.
+ */
+function accountProvider(providerId: string): SharedProviderDefinition {
+  const definition = sharedProviderService
+    .listDefinitions()
+    .find((candidate) => candidate.id === providerId)
+  if (!definition) throw new Error(`Unknown shared provider: ${providerId}`)
+  if (definition.kind !== 'subscription' || definition.id !== CHATGPT_PROVIDER_ID) {
+    throw new Error(`Shared provider "${providerId}" does not have accounts`)
+  }
+  return definition
 }
 
 /**
@@ -298,6 +323,68 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
       capability: 'config',
       kind: 'query',
       handler: safeHandler(async (): Promise<ProviderRegistrySnapshot> => listProviderRegistry())
+    },
+    // -----------------------------------------------------------------------
+    // Subscription ACCOUNTS (ADR-068 §2). The vault holds N ChatGPT accounts and
+    // vends the ACTIVE one to pi and opencode; these four are how the UI reads
+    // and moves that. ADDING an account is deliberately not here — it is the
+    // existing PKCE sign-in (`vendor-auth:oauth-authorize` / `-callback` on pi's
+    // `openai-codex` vendor), whose completion now upserts.
+    //
+    // Token-free like the rest of this family: `list` returns ids, emails, plan
+    // names and expiries; the three mutations return nothing at all.
+    // -----------------------------------------------------------------------
+    {
+      channel: 'provider-account:list',
+      capability: 'config',
+      kind: 'query',
+      handler: safeHandler(async (providerId: string): Promise<SharedProviderAccountList> => {
+        const definition = accountProvider(providerId)
+        const status = await credentialSync.getStatus()
+        return {
+          activeId: status.activeId,
+          perSession: definition.accounts?.perSession === true,
+          // Field-picked rather than passed through: the status is the vault's
+          // shape, and only these fields are ever allowed across a wire.
+          accounts: status.accounts.map(
+            ({ id, email, accountId, planType, expiresAt, needsReauth }) => ({
+              id,
+              ...(email ? { email } : {}),
+              ...(accountId ? { accountId } : {}),
+              ...(planType ? { planType } : {}),
+              expiresAt,
+              needsReauth
+            })
+          )
+        }
+      })
+    },
+    {
+      channel: 'provider-account:switch',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(async (providerId: string, id: string): Promise<void> => {
+        accountProvider(providerId)
+        await credentialSync.switchActiveAccount(id)
+      })
+    },
+    {
+      channel: 'provider-account:remove',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(async (providerId: string, id: string): Promise<void> => {
+        accountProvider(providerId)
+        await credentialSync.removeAccount(id)
+      })
+    },
+    {
+      channel: 'provider-account:set-per-session',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(async (providerId: string, enabled: boolean): Promise<void> => {
+        accountProvider(providerId)
+        await sharedProviderService.setAccountsPerSession(providerId, enabled)
+      })
     },
     {
       channel: 'shared-provider:save',

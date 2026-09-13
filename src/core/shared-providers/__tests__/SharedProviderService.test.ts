@@ -544,6 +544,23 @@ describe('SharedProviderService', () => {
       expect(status.routes.pi.diagnosis).toBe('no-models-discovered')
     })
 
+    it('setAccountsPerSession persists the flag on the subscription definition (ADR-068 §2)', async () => {
+      const { service, records } = setup([chatgpt()])
+
+      await service.setAccountsPerSession('chatgpt', true)
+      expect(records.get('chatgpt')?.accounts).toEqual({ perSession: true })
+
+      await service.setAccountsPerSession('chatgpt', false)
+      expect(records.get('chatgpt')?.accounts).toEqual({ perSession: false })
+    })
+
+    it('refuses per-session accounts on a provider that has none', async () => {
+      const { service } = setup([custom()])
+      await expect(service.setAccountsPerSession('local-api', true)).rejects.toThrow(
+        /subscription/i
+      )
+    })
+
     it('falls back to no-models-discovered when the adapter throws', async () => {
       const { service, opencode } = setup([chatgpt()])
       opencode.diagnoseZeroModels = vi.fn(() => {
