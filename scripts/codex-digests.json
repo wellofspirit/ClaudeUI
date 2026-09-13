@@ -3,18 +3,34 @@
   "sourceCommit": "6b9826e3aa83b1a5947db50f4332cb9c65f1b340",
   "license": "https://raw.githubusercontent.com/openai/codex/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/LICENSE",
   "licenseSha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
-  "platform": "darwin",
-  "arch": "arm64",
-  "binaries": {
-    "codex": {
-      "member": "codex-aarch64-apple-darwin",
-      "archiveSha256": "344310a0a591c1b192e04feff304321a69907c9498baaac331ca7e16ebcef9d7",
-      "binarySha256": "4f85982624b3898c8991cb80c0981b2aa71070e3537046c9a95950318a95afcc"
+  "hosts": {
+    "darwin-arm64": {
+      "binaries": {
+        "codex": {
+          "member": "codex-aarch64-apple-darwin",
+          "archiveSha256": "344310a0a591c1b192e04feff304321a69907c9498baaac331ca7e16ebcef9d7",
+          "binarySha256": "4f85982624b3898c8991cb80c0981b2aa71070e3537046c9a95950318a95afcc"
+        },
+        "codex-code-mode-host": {
+          "member": "codex-code-mode-host-aarch64-apple-darwin",
+          "archiveSha256": "500ee2a02ea598ae519052e7d7d8e201d1db01986f30c214ef4143645dc86fad",
+          "binarySha256": "426d73aaeb2aeef45e98b5add99e8ef9594a31673d281489bb2cb06b38c27423"
+        }
+      }
     },
-    "codex-code-mode-host": {
-      "member": "codex-code-mode-host-aarch64-apple-darwin",
-      "archiveSha256": "500ee2a02ea598ae519052e7d7d8e201d1db01986f30c214ef4143645dc86fad",
-      "binarySha256": "426d73aaeb2aeef45e98b5add99e8ef9594a31673d281489bb2cb06b38c27423"
+    "win32-x64": {
+      "binaries": {
+        "codex.exe": {
+          "member": "codex-x86_64-pc-windows-msvc.exe",
+          "archiveSha256": "4e96740782869faff9d424806d4419afd2ee51ea5ece6cec462912b7098497a1",
+          "binarySha256": "be96b992178b1e467c225800da0d65f2c86d5eba1ef0b14632f65db381cbdfde"
+        },
+        "codex-code-mode-host.exe": {
+          "member": "codex-code-mode-host-x86_64-pc-windows-msvc.exe",
+          "archiveSha256": "656b475bb80d258e3244dc57a1556eb3ce2180791a649ced5e2c8e199c340891",
+          "binarySha256": "7b4987007702973dfeb49ec9a0c11f737488890e208ccb04f7a147769c4bb1f1"
+        }
+      }
     }
   }
 }

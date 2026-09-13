@@ -2,7 +2,7 @@
 import { execFile } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { root, cacheValid, assertPin } from './ensure-codex.mjs'
+import { root, cacheValid, assertPin, codexExecutableName } from './ensure-codex.mjs'
 
 // CLI status may contain key fragments. Neither captured stream nor errors leave this function.
 export function classifyStatus(code, output) {
@@ -31,7 +31,7 @@ export async function nativeStatus() {
     if (!cacheValid(join(root, 'vendor/codex-cli'))) return { failure: 'binary-unavailable' }
     return await new Promise((resolve) => {
       execFile(
-        join(root, 'vendor/codex-cli/codex'),
+        join(root, 'vendor/codex-cli', codexExecutableName()),
         ['login', 'status'],
         {
           // Preserve native identity/storage selection. Do not import any shared vault credentials.

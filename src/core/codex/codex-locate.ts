@@ -3,14 +3,27 @@ import { basename, dirname, join } from 'node:path'
 import { getAppPath } from '../host'
 
 /**
- * Only the macOS arm64 asset has acquisition and runtime evidence so far. Catalog
- * models are `tool_mode: code_mode_only`, so a `codex` without its code-mode host
- * cannot start a single tool; treat that install as unavailable rather than broken.
+ * Hosts whose release assets have a reviewed digest manifest, so acquisition can
+ * install them and the engine may be offered. Mirrors the keys of
+ * `scripts/codex-digests.json#hosts` — a test asserts the two stay in parity, and
+ * that manifest is the place a new host is added first.
+ */
+export const CODEX_SUPPORTED_HOSTS: ReadonlySet<string> = new Set(['darwin-arm64', 'win32-x64'])
+
+export function codexHostSupported(
+  platform: string = process.platform,
+  arch: string = process.arch
+): boolean {
+  return CODEX_SUPPORTED_HOSTS.has(`${platform}-${arch}`)
+}
+
+/**
+ * Catalog models are `tool_mode: code_mode_only`, so a `codex` without its
+ * code-mode host cannot start a single tool; treat that install as unavailable
+ * rather than broken. An unreviewed host never installed one in the first place.
  */
 export function codexBinaryAvailable(): boolean {
-  return (
-    process.platform === 'darwin' && process.arch === 'arm64' && locateCodexCodeModeHost() !== null
-  )
+  return codexHostSupported() && locateCodexCodeModeHost() !== null
 }
 
 /**

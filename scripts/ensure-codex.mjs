@@ -18,13 +18,29 @@ import { tmpdir } from 'node:os'
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 export const manifest = JSON.parse(readFileSync(join(root, 'scripts/codex-digests.json'), 'utf8'))
 export const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
-// Member names become install paths; keep them plain filenames even though the
-// manifest is reviewed in-tree.
-for (const name of Object.keys(manifest.binaries)) {
-  if (/[/\\]/.test(name) || name.startsWith('.')) throw new Error('Invalid Codex manifest member')
+// Install names and member names both become paths (the former under the install
+// directory, the latter inside the archive); keep every one of them a plain
+// filename on every host, even though the manifest is reviewed in-tree.
+for (const host of Object.values(manifest.hosts)) {
+  for (const [name, entry] of Object.entries(host.binaries)) {
+    for (const value of [name, entry.member]) {
+      if (/[/\\]/.test(value) || value.startsWith('.'))
+        throw new Error('Invalid Codex manifest member')
+    }
+  }
 }
 const MAX_ARCHIVE = 128 * 1024 * 1024
-const MAX_PAYLOAD = 256 * 1024 * 1024
+// Windows x64 `codex.exe` unpacks to 298 MB, so the cap is well above the 256 MB
+// that fits macOS arm64; the archives themselves stay under MAX_ARCHIVE (99.5 MB
+// is the largest pinned one).
+const MAX_PAYLOAD = 512 * 1024 * 1024
+const HOST_LABELS = { 'darwin-arm64': 'macOS arm64', 'win32-x64': 'Windows x64' }
+const hostLabel = (key) => HOST_LABELS[key] ?? key
+const supportedHostLabels = () => Object.keys(manifest.hosts).map(hostLabel).join(', ')
+
+/** The install name of the executable that answers `--version` on this host. */
+export const codexExecutableName = (platform = process.platform) =>
+  platform === 'win32' ? 'codex.exe' : 'codex'
 
 /** A mismatched pin is a repository error and fails on every host, supported or not. */
 export function assertManifestPin() {
@@ -32,21 +48,35 @@ export function assertManifestPin() {
   if (version !== manifest.version) throw new Error('Codex pin has no reviewed digest manifest')
 }
 
-/** Only the host the reviewed manifest covers may be provisioned. */
+/**
+ * The reviewed record for one host, flattened into exactly the shape written to
+ * `version.json` (and therefore exactly what `cacheValid` compares), or `null`
+ * for a host the manifest does not cover.
+ */
+export function hostManifest(platform = process.platform, arch = process.arch) {
+  // Own-property lookup only: the key is built from caller-supplied strings.
+  const key = `${platform}-${arch}`
+  if (!Object.hasOwn(manifest.hosts, key)) return null
+  const host = manifest.hosts[key]
+  const { hosts: _hosts, ...shared } = manifest
+  return { ...shared, platform, arch, binaries: host.binaries }
+}
+
+/** Only a host the reviewed manifest covers may be provisioned. */
 export function hostSupported(platform = process.platform, arch = process.arch) {
-  return platform === manifest.platform && arch === manifest.arch
+  return hostManifest(platform, arch) !== null
 }
 
 export function assertPin(platform = process.platform, arch = process.arch) {
   assertManifestPin()
   if (!hostSupported(platform, arch)) {
-    throw new Error('Codex provisioning is verified only on macOS arm64')
+    throw new Error(`Codex provisioning is verified only on: ${supportedHostLabels()}`)
   }
 }
 
 /**
  * Test-only hook: `CLAUDEUI_CODEX_FAKE_HOST=<platform>/<arch>` exercises the
- * unsupported-host skip on a supported machine. A value naming the supported host is
+ * unsupported-host skip on a supported machine. A value naming any supported host is
  * ignored; every other value (malformed included) can only end in the skip below, so
  * a spoofed host never selects an asset or relaxes a digest check.
  */
@@ -59,7 +89,7 @@ function currentHost() {
 
 // Each release archive contains exactly one regular member. Reject other tar dialects,
 // links and extra members rather than maintaining a general archive extractor.
-export function extractBinary(archive, expected = manifest.binaries.codex) {
+export function extractBinary(archive, expected) {
   if (archive.length > MAX_ARCHIVE || sha256(archive) !== expected.archiveSha256) {
     throw new Error('Codex archive digest/size mismatch')
   }
@@ -100,7 +130,11 @@ export function extractBinary(archive, expected = manifest.binaries.codex) {
 
 // Every manifest member must be installed and match its pinned digest: an install
 // missing `codex-code-mode-host` cannot run tools and is a cache miss, not a hit.
-export function cacheValid(directory, expected = manifest) {
+// Windows never reports exec bits (`mode & 0o111` is 0 even for files written
+// 0o755), so that requirement is POSIX-only; keeping it would re-download 127 MB
+// on every Windows postinstall.
+export function cacheValid(directory, expected = hostManifest()) {
+  if (!expected) return false
   try {
     const saved = JSON.parse(readFileSync(join(directory, 'version.json'), 'utf8'))
     return (
@@ -114,7 +148,7 @@ export function cacheValid(directory, expected = manifest) {
         const installed = lstatSync(join(directory, name))
         return (
           installed.isFile() &&
-          (installed.mode & 0o111) !== 0 &&
+          (process.platform === 'win32' || (installed.mode & 0o111) !== 0) &&
           sha256(readFileSync(join(directory, name))) === entry.binarySha256
         )
       }) &&
@@ -139,12 +173,31 @@ async function download(url, maxBytes) {
 }
 
 export function isolatedEnv(directory) {
-  mkdirSync(join(directory, 'home/.codex'), { recursive: true })
-  mkdirSync(join(directory, 'tmp'), { recursive: true })
+  const home = join(directory, 'home')
+  const codexHome = join(directory, 'home/.codex')
+  const tmp = join(directory, 'tmp')
+  mkdirSync(codexHome, { recursive: true })
+  mkdirSync(tmp, { recursive: true })
+  // Windows resolves the user profile and the temp directory from different
+  // variables than POSIX. PATH is System32 only so the preflight runs in a sane
+  // Windows environment rather than inheriting the caller's PATH; SYSTEMROOT is
+  // kept because parts of the Windows runtime resolve it at startup.
+  if (process.platform === 'win32') {
+    const systemRoot = process.env.SYSTEMROOT ?? 'C:\\Windows'
+    return {
+      USERPROFILE: home,
+      CODEX_HOME: codexHome,
+      TEMP: tmp,
+      TMP: tmp,
+      SYSTEMROOT: systemRoot,
+      PATH: join(systemRoot, 'System32'),
+      RUST_LOG: 'off'
+    }
+  }
   return {
-    HOME: join(directory, 'home'),
-    CODEX_HOME: join(directory, 'home/.codex'),
-    TMPDIR: join(directory, 'tmp'),
+    HOME: home,
+    CODEX_HOME: codexHome,
+    TMPDIR: tmp,
     PATH: '/usr/bin:/bin',
     LANG: 'en_US.UTF-8',
     RUST_LOG: 'off'
@@ -220,8 +273,10 @@ export function parseArgs(argv) {
       } else options.archives.push(value)
     } else throw new Error('Invalid Codex arguments')
   }
-  if (options.archives.length > Object.keys(manifest.binaries).length)
-    throw new Error('Invalid Codex arguments')
+  const members = Math.max(
+    ...Object.values(manifest.hosts).map((host) => Object.keys(host.binaries).length)
+  )
+  if (options.archives.length > members) throw new Error('Invalid Codex arguments')
   return options
 }
 
@@ -232,14 +287,15 @@ async function main() {
   // skip rather than a failed install: the engine gates itself off (codex-locate.ts)
   // when the binary is absent. Digest/size mismatches, failed downloads and pins with
   // no manifest stay hard failures.
-  if (!hostSupported(...currentHost())) {
+  const host = hostManifest(...currentHost())
+  if (!host) {
     console.log(
-      'Codex acquisition skipped: only macOS arm64 has a reviewed digest manifest; Codex will be unavailable on this machine'
+      `Codex acquisition skipped: a reviewed digest manifest exists only for ${supportedHostLabels()}; Codex will be unavailable on this machine`
     )
     return
   }
   const destination = join(root, 'vendor/codex-cli')
-  if (!options.force && cacheValid(destination)) {
+  if (!options.force && cacheValid(destination, host)) {
     console.log('Codex verified cache hit')
     return
   }
@@ -251,13 +307,13 @@ async function main() {
   // `codex-code-mode-host`, which Codex resolves beside its own executable. Both
   // release assets are therefore acquired and installed as one unit.
   const payloads = []
-  for (const [name, expected] of Object.entries(manifest.binaries)) {
+  for (const [name, expected] of Object.entries(host.binaries)) {
     const local = supplied.find((bytes) => sha256(bytes) === expected.archiveSha256)
     if (!local && supplied.length > 0) throw new Error('Codex archive missing for a pinned member')
     const archive =
       local ??
       (await download(
-        `https://github.com/openai/codex/releases/download/rust-v${manifest.version}/${expected.member}.tar.gz`,
+        `https://github.com/openai/codex/releases/download/rust-v${host.version}/${expected.member}.tar.gz`,
         MAX_ARCHIVE
       ))
     payloads.push([name, extractBinary(archive, expected)])
@@ -279,15 +335,19 @@ async function main() {
     writeFileSync(join(payload, 'LICENSE'), license)
     writeFileSync(
       join(payload, 'version.json'),
-      JSON.stringify({ ...manifest, licenseSha256: sha256(license) }, null, 2) + '\n'
+      JSON.stringify({ ...host, licenseSha256: sha256(license) }, null, 2) + '\n'
     )
     // Only `codex` answers `--version`; the host is gated by its pinned digest alone.
-    verifyVersion(join(payload, 'codex'), isolation, isolatedEnv(isolation))
+    // `currentHost()` can only ever select a skip, so the real platform names the
+    // executable here.
+    verifyVersion(join(payload, codexExecutableName()), isolation, isolatedEnv(isolation))
     handedOff = true
     // One directory rename publishes every member, so no install can expose
     // `codex` without its host or a host without its `codex`.
     installStaged(stage, destination)
-    console.log(`Codex ${manifest.version} installed and verified (macOS arm64)`)
+    console.log(
+      `Codex ${host.version} installed and verified (${hostLabel(`${host.platform}-${host.arch}`)})`
+    )
   } finally {
     if (!handedOff) rmSync(stage, { recursive: true, force: true })
     rmSync(isolation, { recursive: true, force: true })

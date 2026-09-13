@@ -34,9 +34,12 @@ reject pending RPCs immediately. Disconnect emits once, and failed initializatio
 cannot return the client to ready. POSIX detached groups receive TERM then KILL
 after a bounded grace, even when the root exits first. Windows uses the existing taskkill-first helper
 unchanged. Escaped process groups and PTY descendants are not solved by this
-foundation; Windows/Linux runtime evidence is still required.
+foundation. Windows x64 runtime evidence as of 2026-09-13: acquisition, `codex.exe --version`, app-server
+spawn and initialize, `account/read` and catalog discovery through the settings pane, the real `execpolicy check`
+parser in the unit suite, `check-codex-protocol` (byte-identical generated types), and no orphaned process after the
+harness quit. A signed-in turn and the Windows sandbox path are not yet exercised; Linux runtime evidence is still required.
 
-`scripts/ensure-codex.mjs` acquires the verified macOS arm64 0.154.0 binaries; since `e5bf09b6` it runs from `postinstall` and from every packaging target in `scripts/build.mjs`, and `electron-builder.yml` ships `vendor/codex-cli` (both `codex` and `codex-code-mode-host`) as `Resources/codex-cli`. On a host without a reviewed digest manifest (anything but macOS arm64 today) it skips with one line and exits 0, and the engine gates itself off. Generated
+`scripts/ensure-codex.mjs` acquires the reviewed 0.154.0 binaries for every host in `scripts/codex-digests.json#hosts` — macOS arm64 and Windows x64, the latter installing `codex.exe` and `codex-code-mode-host.exe`; since `e5bf09b6` it runs from `postinstall` and from every packaging target in `scripts/build.mjs`, and `electron-builder.yml` ships `vendor/codex-cli` (both members) as `Resources/codex-cli`. On a host the manifest does not cover (Linux and Windows arm64 today) it skips with one line and exits 0, and the engine gates itself off. Generated
 initialize types are exact CLI output; envelopes are derived from the pinned
 CLI's JSON schema because its TypeScript generator omits them. M1b adds typed
 method maps over this generic transport without claiming runtime payload-schema validation.

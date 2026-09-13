@@ -347,9 +347,15 @@ describe('syncCodexRulesFile', () => {
  * `codex execpolicy check` is the same parser Codex loads rules with, so this
  * runs the real one wherever the vendored binary exists.
  */
-const vendoredCodex = resolve('vendor/codex-cli/codex')
-const canRunCodex =
-  process.platform === 'darwin' && process.arch === 'arm64' && existsSync(vendoredCodex)
+// `../codex-locate` is module-mocked above for the unit tests, so the real host
+// gate has to be pulled in explicitly rather than imported at the top.
+const { codexHostSupported } =
+  await vi.importActual<typeof import('../codex-locate')>('../codex-locate')
+const vendoredCodex = resolve(
+  'vendor/codex-cli',
+  process.platform === 'win32' ? 'codex.exe' : 'codex'
+)
+const canRunCodex = codexHostSupported() && existsSync(vendoredCodex)
 
 describe.skipIf(!canRunCodex)('generated file against the real execpolicy parser', () => {
   const check = (rulesPath: string, argv: string[], codexHome: string) => {

@@ -15,14 +15,21 @@ bun run update-codex
 
 The second command forces reinstall of the same reviewed pin, not an upgrade to
 latest. `scripts/codex-digests.json` pins the release archives, extracted binaries,
-source commit and Apache-2.0 license. Only macOS arm64 is supported. Linux musl
-and Windows release names/digests alone do not establish provisioning readiness.
-Windows archives and ancillary executables have not been inspected in M1a;
-single-executable Windows packaging is deliberately not claimed.
+source commit and Apache-2.0 license. It is a per-host map: `hosts.<platform>-<arch>`
+(Node's own names) carries the install names and digests for one host, and
+`hostManifest()` flattens the entry into the record written to `version.json`.
+macOS arm64 and Windows x64 are pinned. Windows uses the `.exe.tar.gz` assets —
+single-member ustar archives the same extractor handles — and installs `.exe`
+names, which is what Codex looks for when it resolves its code-mode host. Linux
+and Windows arm64 are not pinned: release names and digests alone do not
+establish provisioning readiness, so acquisition skips there with one line.
 
-The release ships two assets that must be installed together:
-`codex-aarch64-apple-darwin.tar.gz` and
-`codex-code-mode-host-aarch64-apple-darwin.tar.gz`. Real catalog models are
+The release ships two assets per host that must be installed together:
+`codex-aarch64-apple-darwin.tar.gz` with
+`codex-code-mode-host-aarch64-apple-darwin.tar.gz` on macOS arm64, and
+`codex-x86_64-pc-windows-msvc.exe.tar.gz` with
+`codex-code-mode-host-x86_64-pc-windows-msvc.exe.tar.gz` on Windows x64. Real
+catalog models are
 `tool_mode: code_mode_only` and run every tool through the separate
 `codex-code-mode-host` executable, which Codex resolves from the directory of its
 own binary (`install-context::code_mode_host_program_from_exe`; the `code_mode_host`
@@ -75,7 +82,11 @@ emit the JSON-RPC envelopes as TypeScript. `generate-json-schema --experimental`
 supplies `JSONRPCMessage` and its definitions; a deliberately limited converter
 emits `envelopes.ts` and fails on unsupported schema constructs. No new dependency
 or general schema generator is introduced. `provenance.json` records both
-commands, source/binary/schema hashes, roots and output hashes, without timestamps.
+commands, the source commit, the schema hash, roots and output hashes, without
+timestamps. Its `codexBinaries` field carries the pinned `codex` payload digest of
+every reviewed host rather than only the one that ran the generator: the output is
+a pure function of the source commit, so `--check` must reach the same verdict on
+macOS and on Windows.
 Generated files are excluded from Prettier to preserve exact upstream output.
 
 The small authored selections in `scripts/generate-codex-protocol.mjs` generate

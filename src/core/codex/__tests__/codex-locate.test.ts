@@ -3,7 +3,12 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { lstatSync } from 'node:fs'
 import { join } from 'node:path'
 import { setHostPaths } from '../../host'
-import { codexBinaryAvailable, locateCodexBinary, locateCodexCodeModeHost } from '../codex-locate'
+import {
+  codexBinaryAvailable,
+  codexHostSupported,
+  locateCodexBinary,
+  locateCodexCodeModeHost
+} from '../codex-locate'
 vi.mock('node:fs', () => ({ lstatSync: vi.fn() }))
 afterEach(() => {
   setHostPaths(null)
@@ -34,13 +39,23 @@ it('returns unavailable rather than falling back to PATH', () => {
   expect(locateCodexBinary()).toBeNull()
   expect(lstatSync).toHaveBeenCalledTimes(1)
 })
-const onSupportedHost = process.platform === 'darwin' && process.arch === 'arm64'
-it.skipIf(!onSupportedHost)(
-  'reports unavailable when the code-mode host is missing beside the binary (macOS arm64)',
+// The set is guarded against `scripts/codex-digests.json#hosts` in codex-tooling.test.ts;
+// here only the predicate's own shape matters.
+it('gates on the hosts with a reviewed acquisition manifest', () => {
+  expect(codexHostSupported('darwin', 'arm64')).toBe(true)
+  expect(codexHostSupported('win32', 'x64')).toBe(true)
+  expect(codexHostSupported('win32', 'arm64')).toBe(false)
+  expect(codexHostSupported('darwin', 'x64')).toBe(false)
+  expect(codexHostSupported('linux', 'x64')).toBe(false)
+  expect(codexHostSupported('linux', 'arm64')).toBe(false)
+})
+const HOST_NAME = process.platform === 'win32' ? 'codex-code-mode-host.exe' : 'codex-code-mode-host'
+it.skipIf(!codexHostSupported())(
+  'reports unavailable when the code-mode host is missing beside the binary',
   () => {
     setHostPaths({ getAppPath: () => '/project' })
     vi.mocked(lstatSync).mockImplementation((path) => {
-      if (String(path).endsWith('codex-code-mode-host')) throw new Error('missing')
+      if (String(path).endsWith(HOST_NAME)) throw new Error('missing')
       return { isFile: () => true } as ReturnType<typeof lstatSync>
     })
     expect(locateCodexBinary()).not.toBeNull()
@@ -49,10 +64,10 @@ it.skipIf(!onSupportedHost)(
     expect(codexBinaryAvailable()).toBe(true)
   }
 )
-it.skipIf(!onSupportedHost)('locates the host only beside the located binary (macOS arm64)', () => {
+it.skipIf(!codexHostSupported())('locates the host only beside the located binary', () => {
   setHostPaths({ getAppPath: () => '/project' })
   vi.mocked(lstatSync).mockReturnValue({ isFile: () => true } as ReturnType<typeof lstatSync>)
-  expect(locateCodexCodeModeHost()).toBe(join('/project/vendor/codex-cli', 'codex-code-mode-host'))
+  expect(locateCodexCodeModeHost()).toBe(join('/project/vendor/codex-cli', HOST_NAME))
   vi.mocked(lstatSync).mockReturnValue({ isFile: () => false } as ReturnType<typeof lstatSync>)
   expect(locateCodexCodeModeHost()).toBeNull()
   expect(codexBinaryAvailable()).toBe(false)

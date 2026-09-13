@@ -35,7 +35,9 @@ spawnPrepRegistry.register('opencode', opencodeSpawnPrep)
 spawnPrepRegistry.register('pi', piSpawnPrep)
 engineRegistry.register('codex', (routingId, win, cwd, opts) => {
   if (!codexBinaryAvailable())
-    throw new Error('Codex is not installed for this platform; run ensure-codex on macOS arm64')
+    throw new Error(
+      'Codex is not installed for this platform; run ensure-codex on a supported host (macOS arm64, Windows x64)'
+    )
   return new CodexSession(routingId, win, cwd, opts)
 })
 spawnPrepRegistry.register('codex', async (model) => {

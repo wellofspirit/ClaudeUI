@@ -135,9 +135,14 @@ async function setupFixture(): Promise<{
   requests: Record<string, unknown>[]
   script: { current: Script }
 }> {
-  const installed = resolve('vendor/codex-cli/codex')
+  const installed = resolve(
+    'vendor/codex-cli',
+    process.platform === 'win32' ? 'codex.exe' : 'codex'
+  )
   expect(createHash('sha256').update(readFileSync(installed)).digest('hex')).toBe(
-    provenance.binarySha256
+    provenance.codexBinaries[
+      `${process.platform}-${process.arch}` as keyof typeof provenance.codexBinaries
+    ]
   )
   directory = realpathSync(mkdtempSync(join(tmpdir(), 'codex-dispatch-target-')))
   const home = join(directory, 'home')

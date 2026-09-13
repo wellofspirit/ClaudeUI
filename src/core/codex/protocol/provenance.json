@@ -1,7 +1,10 @@
 {
   "version": "0.154.0",
   "sourceCommit": "6b9826e3aa83b1a5947db50f4332cb9c65f1b340",
-  "binarySha256": "4f85982624b3898c8991cb80c0981b2aa71070e3537046c9a95950318a95afcc",
+  "codexBinaries": {
+    "darwin-arm64": "4f85982624b3898c8991cb80c0981b2aa71070e3537046c9a95950318a95afcc",
+    "win32-x64": "be96b992178b1e467c225800da0d65f2c86d5eba1ef0b14632f65db381cbdfde"
+  },
   "command": "app-server generate-ts --experimental",
   "envelopeCommand": "app-server generate-json-schema --experimental",
   "envelopeSchemaSha256": "6da4cc373a7ccd01f5608ad4496eeb4d44b6a9b0d3158e85ed66b59f3c0b5114",
