@@ -88,7 +88,8 @@ node scripts/app-shot.mjs --timeout 200000 --out .cache/screenshots/codex-turn.p
 6. **Delete walks the branch tree (2026-09-13).** Deleting a Codex session that has branches deletes the branches first, leaf-first, after a confirmation listing them, stopping non-destructively at the first refusal (spec: next-slices slice G). Archive stays unused.
 7. **Codex as a dispatch target: build it (2026-09-13).** Daniel needs cross-engine dispatch into Codex; spec is next-slices slice H, modelled on the pi target.
 8. **Queue and cost fixes authorized (2026-09-13):** fix the Claude "still shown as queued after pickup" bug and the shared base-loop dropped-boundary hazard; compute Codex equivalent USD from list prices (models.dev, cross-checked with OpenAI); replace the fork sweep with an explicit registry; close a dying child's card; fill the v2 wait card from our own child tracking. Render loss: track only.
-9. Earlier decisions stand: native-owned auth with upstream refresh concurrency accepted; pinned 0.154.0 over stdio; application-held queue via `turn/steer`, never Codex's native next-turn queue; capabilities true only when the whole path works (ADR-030).
+9. **No live guardian-denial chase (2026-09-13).** The approve-anyway path is proven against the real binary with a scripted deny verdict; Daniel chose not to spend real turns forcing the reviewer to deny something live.
+10. Earlier decisions stand: native-owned auth with upstream refresh concurrency accepted; pinned 0.154.0 over stdio; application-held queue via `turn/steer`, never Codex's native next-turn queue; capabilities true only when the whole path works (ADR-030).
 
 ## Current checkpoint
 
