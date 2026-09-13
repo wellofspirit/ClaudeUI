@@ -54,6 +54,18 @@ extraResources:
       - '**/*'
       - '!docs/**'
       - '!examples/**'
+  # Codex resolves `codex-code-mode-host` from the directory of its own
+  # executable, and every catalog model is code-mode-only — so both members ship
+  # together or Codex is unusable. src/core/codex/codex-locate.ts looks for them
+  # in <Resources>/codex-cli, which is what `to:` produces here. LICENSE is the
+  # upstream Apache-2.0 text that ships with the binaries; version.json is the
+  # pinned digest record scripts/ensure-codex.mjs writes.
+  - from: vendor/codex-cli
+    to: codex-cli
+    filter:
+      - codex*
+      - version.json
+      - LICENSE
   - from: out/web
     to: web
 asarUnpack:

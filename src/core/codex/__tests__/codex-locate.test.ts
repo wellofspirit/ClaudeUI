@@ -16,11 +16,15 @@ it('uses host dev path and never PATH', () => {
     join('/project/vendor/codex-cli', process.platform === 'win32' ? 'codex.exe' : 'codex')
   )
 })
-it('tries reserved packaged resource and unpacked paths, rejecting directories/symlinks', () => {
+it('tries packaged resource and unpacked paths, rejecting directories/symlinks', () => {
   setHostPaths({ getAppPath: () => '/Resources/app.asar' })
   vi.mocked(lstatSync).mockReturnValue({ isFile: () => false } as ReturnType<typeof lstatSync>)
   expect(locateCodexBinary()).toBeNull()
   expect(lstatSync).toHaveBeenCalledTimes(2)
+  // extraResources puts the binaries beside app.asar, so that is the first probe.
+  expect(vi.mocked(lstatSync).mock.calls[0][0]).toBe(
+    join('/Resources/codex-cli', process.platform === 'win32' ? 'codex.exe' : 'codex')
+  )
   expect(vi.mocked(lstatSync).mock.calls[1][0]).toContain('app.asar.unpacked')
 })
 it('returns unavailable rather than falling back to PATH', () => {

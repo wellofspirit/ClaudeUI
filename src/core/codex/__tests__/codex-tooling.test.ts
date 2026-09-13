@@ -15,6 +15,8 @@ import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import {
   assertPin,
+  assertManifestPin,
+  hostSupported,
   cacheValid,
   extractBinary,
   manifest,
@@ -78,6 +80,16 @@ it('rejects truncation, trailing members, oversized payloads, corrupt headers an
 it('rejects unsupported platforms instead of selecting a likely asset', () => {
   expect(() => assertPin('linux', 'arm64')).toThrow()
   expect(() => assertPin('win32', 'x64')).toThrow()
+})
+it('separates the host check (a skip) from the pin check (a failure everywhere)', () => {
+  expect(hostSupported('darwin', 'arm64')).toBe(true)
+  expect(hostSupported('darwin', 'x64')).toBe(false)
+  expect(hostSupported('linux', 'arm64')).toBe(false)
+  expect(hostSupported('win32', 'x64')).toBe(false)
+  expect(hostSupported(manifest.platform, manifest.arch)).toBe(true)
+  // The pinned version is reviewed in-tree, so this passes on every host; only a
+  // package.json/manifest disagreement makes it throw.
+  expect(() => assertManifestPin()).not.toThrow()
 })
 it('treats malformed/missing metadata and modified payload as cache misses', () => {
   const dir = temp()

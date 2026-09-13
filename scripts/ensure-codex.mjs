@@ -26,12 +26,35 @@ for (const name of Object.keys(manifest.binaries)) {
 const MAX_ARCHIVE = 128 * 1024 * 1024
 const MAX_PAYLOAD = 256 * 1024 * 1024
 
-export function assertPin(platform = process.platform, arch = process.arch) {
+/** A mismatched pin is a repository error and fails on every host, supported or not. */
+export function assertManifestPin() {
   const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).codexCliVersion
   if (version !== manifest.version) throw new Error('Codex pin has no reviewed digest manifest')
-  if (platform !== manifest.platform || arch !== manifest.arch) {
+}
+
+/** Only the host the reviewed manifest covers may be provisioned. */
+export function hostSupported(platform = process.platform, arch = process.arch) {
+  return platform === manifest.platform && arch === manifest.arch
+}
+
+export function assertPin(platform = process.platform, arch = process.arch) {
+  assertManifestPin()
+  if (!hostSupported(platform, arch)) {
     throw new Error('Codex provisioning is verified only on macOS arm64')
   }
+}
+
+/**
+ * Test-only hook: `CLAUDEUI_CODEX_FAKE_HOST=<platform>/<arch>` exercises the
+ * unsupported-host skip on a supported machine. A value naming the supported host is
+ * ignored; every other value (malformed included) can only end in the skip below, so
+ * a spoofed host never selects an asset or relaxes a digest check.
+ */
+function currentHost() {
+  const fake = process.env.CLAUDEUI_CODEX_FAKE_HOST
+  if (!fake) return [process.platform, process.arch]
+  const [platform, arch] = fake.split('/')
+  return hostSupported(platform, arch) ? [process.platform, process.arch] : [platform, arch]
 }
 
 // Each release archive contains exactly one regular member. Reject other tar dialects,
@@ -204,7 +227,17 @@ export function parseArgs(argv) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2))
-  assertPin()
+  assertManifestPin()
+  // `postinstall` runs on every platform, so a host without a reviewed manifest is a
+  // skip rather than a failed install: the engine gates itself off (codex-locate.ts)
+  // when the binary is absent. Digest/size mismatches, failed downloads and pins with
+  // no manifest stay hard failures.
+  if (!hostSupported(...currentHost())) {
+    console.log(
+      'Codex acquisition skipped: only macOS arm64 has a reviewed digest manifest; Codex will be unavailable on this machine'
+    )
+    return
+  }
   const destination = join(root, 'vendor/codex-cli')
   if (!options.force && cacheValid(destination)) {
     console.log('Codex verified cache hit')

@@ -13,7 +13,17 @@ export function codexBinaryAvailable(): boolean {
   )
 }
 
-/** Vendored paths only. Packaged layouts are reserved; packaging is not wired in M1a. */
+/**
+ * Vendored paths only, never PATH.
+ *
+ *   dev        → <projectRoot>/vendor/codex-cli/codex[.exe]
+ *   production → <Resources>/codex-cli/codex[.exe]        (extraResources)
+ *                <app.asar.unpacked>/vendor/codex-cli/…   (fallback, as pi-locate)
+ *
+ * electron-builder.yml maps vendor/codex-cli → extraResources `codex-cli`, so
+ * `dirname(appPath)` (the Resources directory beside app.asar) is the packaged
+ * hit; the unpacked path only matters if that mapping is ever dropped.
+ */
 export function locateCodexBinary(): string | null {
   const appPath = getAppPath()
   const name = process.platform === 'win32' ? 'codex.exe' : 'codex'
