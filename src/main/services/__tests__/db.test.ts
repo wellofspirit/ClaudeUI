@@ -36,10 +36,10 @@ import {
   hasCodexSessionOverrides,
   deleteCodexSessionOverrides,
   registerCodexFork,
+  recordCodexLineage,
   listCodexForks,
-  deleteCodexFork,
-  codexForkSweepDone,
-  markCodexForkSweepDone
+  listCodexLineage,
+  deleteCodexFork
 } from '../../../core/services/db'
 import { logger } from '../../../core/services/logger'
 
@@ -200,7 +200,9 @@ describe('migration framework — user_version guard', () => {
       // v15: accepted native Codex session overrides and verified identity marker
       // v16: codex_forks — the fork registry the sidebar reads instead of
       //      re-probing every session_meta id the native list omits
-      expect(userVersion(db)).toBe(16)
+      // v17: codex_forks becomes a LINEAGE CACHE (roots too), so the delete
+      //      plan is a cache read instead of a sweep
+      expect(userVersion(db)).toBe(17)
       expect(db.prepare('SELECT * FROM codex_session_overrides').all()).toEqual([])
       expect(db.prepare('SELECT * FROM codex_forks').all()).toEqual([])
       // session_meta must exist and be queryable.
@@ -281,7 +283,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(16)
+      expect(userVersion(db)).toBe(17)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',
@@ -425,7 +427,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(16)
+      expect(userVersion(db)).toBe(17)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         auth_policy: null,
         step_up_tier: 'medium',
@@ -493,8 +495,8 @@ describe('migration framework — user_version guard', () => {
 // Migration framework — transactional application (each up + version bump atomic)
 // ---------------------------------------------------------------------------
 
-describe('Codex fork registry', () => {
-  it('registers a fork once, lists only real forks, and prunes by id', () => {
+describe('Codex lineage cache', () => {
+  it('registers a fork once, unverified, and lists only real branches', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
@@ -508,6 +510,12 @@ describe('Codex fork registry', () => {
         { threadId: 'fork-a', forkedFromId: 'source' },
         { threadId: 'fork-b', forkedFromId: 'source' }
       ])
+      // A fork registered at mint time has NOT been read, so the scan still owes
+      // it one metadata read — which is exactly what a null `verifiedAt` says.
+      expect(listCodexLineage(db)).toEqual([
+        { threadId: 'fork-a', forkedFromId: 'source', verifiedAt: null },
+        { threadId: 'fork-b', forkedFromId: 'source', verifiedAt: null }
+      ])
       deleteCodexFork('fork-a', db)
       expect(listCodexForks(db)).toEqual([{ threadId: 'fork-b', forkedFromId: 'source' }])
     } finally {
@@ -515,48 +523,95 @@ describe('Codex fork registry', () => {
     }
   })
 
-  it('carries the one-time legacy sweep marker without listing it as a fork', () => {
+  /**
+   * THE POINT OF v17: a ROOT earns a row. Under v16 it never did, so every
+   * delete plan re-read every codex `session_meta` id the registry did not name
+   * and the candidate set never shrank.
+   */
+  it('caches a root as a verified row that is not a branch', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      expect(codexForkSweepDone(db)).toBe(false)
-      markCodexForkSweepDone(db)
-      expect(codexForkSweepDone(db)).toBe(true)
-      // The marker is a row in the same table; it must never reach the reader.
+      recordCodexLineage('root', null, 1710, db)
+      recordCodexLineage('fork', 'root', 1711, db)
+      // A root is cached — the scan can now tell "asked, it is a root" from
+      // "never asked" — but it is not a branch of anything, so no plan and no
+      // sidebar read may pick it up.
+      expect(listCodexForks(db)).toEqual([{ threadId: 'fork', forkedFromId: 'root' }])
+      // Sorted, because two rows written in the same millisecond fall back to
+      // the thread id for their order and this test is not about that.
+      expect(
+        [...listCodexLineage(db)].sort((a, b) => a.threadId.localeCompare(b.threadId))
+      ).toEqual([
+        { threadId: 'fork', forkedFromId: 'root', verifiedAt: 1711 },
+        { threadId: 'root', forkedFromId: null, verifiedAt: 1710 }
+      ])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('lets a read REPLACE what a mint-time registration guessed, and tombstone it', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      registerCodexFork('fork', 'root', db)
+      // The scan read the thread: same lineage, now verified against the native
+      // `updatedAt`, so the next scan skips it.
+      recordCodexLineage('fork', 'root', 900, db)
+      expect(listCodexLineage(db)).toEqual([
+        { threadId: 'fork', forkedFromId: 'root', verifiedAt: 900 }
+      ])
+      // Twice-refused: the row stays (so the id is never re-read) but it is no
+      // longer a branch — it is not in any plan and not in any sidebar row.
+      recordCodexLineage('fork', null, null, db)
       expect(listCodexForks(db)).toEqual([])
-      expect(db.prepare('SELECT COUNT(*) AS n FROM codex_forks').get()).toEqual({ n: 1 })
-      // Idempotent: a second boot must not fail on the primary key.
-      markCodexForkSweepDone(db)
-      expect(codexForkSweepDone(db)).toBe(true)
+      expect(listCodexLineage(db)).toEqual([
+        { threadId: 'fork', forkedFromId: null, verifiedAt: null }
+      ])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('never treats a thread that claims itself as its own branch', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      recordCodexLineage('self', 'self', 5, db)
+      expect(listCodexForks(db)).toEqual([])
+      expect(listCodexLineage(db)).toEqual([
+        { threadId: 'self', forkedFromId: 'self', verifiedAt: 5 }
+      ])
     } finally {
       db.close()
     }
   })
 
   /**
-   * The adoption has finished WRONGLY twice — v1 believed a single `-32600`
-   * from `thread/read`, v2 swept only the ids `thread/list` omits (which misses
-   * a fork that has run a turn) — and on a real machine (2026-09-13) the two
-   * together marked it done having registered nothing while two live branches
-   * sat in `session_meta`. Each of those users carries one of the marker rows
-   * below, and neither may count, or they never get the fixed sweep.
+   * The v16 rows every existing user carries: branches with no `verified_at`,
+   * and the one-time adoption MARKER (`thread_id = ''`, generation in
+   * `forked_from_id`) that the cache replaces. The marker must not survive as a
+   * thread id, and a real row must survive as an unverified branch — so the
+   * first scan verifies it exactly once instead of re-adopting anything.
    */
-  it.each([
-    ['v1', null],
-    ['v2', 'adopted-v2']
-  ])('ignores the marker a superseded adoption (%s) left behind', (_generation, value) => {
+  it('migrates v16 rows into the cache and drops the adoption marker', () => {
     const db = openRawDb()
     try {
-      runMigrations(db)
-      db.prepare(
+      runMigrations(
+        db,
+        MIGRATIONS.filter((migration) => migration.version <= 16)
+      )
+      const insert = db.prepare(
         'INSERT INTO codex_forks (thread_id, forked_from_id, created_at) VALUES (?, ?, ?)'
-      ).run('', value, Date.now())
-      expect(codexForkSweepDone(db)).toBe(false)
-      // ...and the re-run replaces it rather than colliding with it.
-      markCodexForkSweepDone(db)
-      expect(codexForkSweepDone(db)).toBe(true)
+      )
+      insert.run('fork', 'root', 1)
+      insert.run('', 'adopted-v3', 2)
+      runMigrations(db)
+      expect(listCodexLineage(db)).toEqual([
+        { threadId: 'fork', forkedFromId: 'root', verifiedAt: null }
+      ])
       expect(db.prepare('SELECT COUNT(*) AS n FROM codex_forks').get()).toEqual({ n: 1 })
-      expect(listCodexForks(db)).toEqual([])
     } finally {
       db.close()
     }

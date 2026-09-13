@@ -12,6 +12,7 @@ import {
   type CodexDeleteHooks,
   type CodexNodeFacts
 } from '../codex/delete'
+import { scanCodexLineage } from '../codex/history'
 import type { CodexDeletePlan } from '../../shared/codex-types'
 import type {
   ClaudePermissions,
@@ -243,12 +244,24 @@ export async function codexDeletePlanFor(
  * `core/codex/delete.ts`). The walk stops at the first refusal and throws
  * naming it; the listing refresh runs either way, which is what puts the
  * surviving rows back on every client after a partial delete.
+ *
+ * `replan` is the walk's one second chance, and it belongs here because the
+ * plan's inputs do: a refusal may mean "a branch this app has never heard of
+ * still references that thread", and the full lineage rescan is the only thing
+ * that can learn one. Facts are recomputed with it — by then a node the walk
+ * stopped is no longer live.
  */
 async function deleteCodexSession(manager: SessionManager, sessionId: string): Promise<void> {
   try {
     await deleteCodexSubtree(
-      await codexDeletePlan(sessionId, codexNodeFacts(manager)),
-      codexDeleteHooks(manager)
+      codexDeletePlan(sessionId, codexNodeFacts(manager)),
+      codexDeleteHooks(manager),
+      {
+        replan: async () => {
+          await scanCodexLineage(undefined, undefined, 'all')
+          return codexDeletePlan(sessionId, codexNodeFacts(manager))
+        }
+      }
     )
   } finally {
     void refreshCanonicalDirectories()
@@ -333,17 +346,27 @@ export async function deleteProject(manager: SessionManager, projectKey: string)
   try {
     for (const id of codexIds) {
       if (swept.has(id)) continue
-      const plan = await codexDeletePlan(id, codexNodeFacts(manager))
-      walkedCodex = true
       // A fork of this root that an earlier walk already removed is not deleted
       // twice: the second delete would be refused as "no such thread", which is
-      // indistinguishable from a real refusal.
-      const nodes = plan.nodes.filter((node) => !swept.has(node.threadId))
-      await deleteCodexSubtree(
-        { nodes, order: plan.order.filter((threadId) => !swept.has(threadId)) },
-        codexDeleteHooks(manager)
-      )
-      for (const node of nodes) swept.add(node.threadId)
+      // indistinguishable from a real refusal. The same filter is applied to a
+      // rescan's plan, for the same reason.
+      const unswept = (plan: CodexDeletePlan): CodexDeletePlan => ({
+        nodes: plan.nodes.filter((node) => !swept.has(node.threadId)),
+        order: plan.order.filter((threadId) => !swept.has(threadId))
+      })
+      const plan = unswept(codexDeletePlan(id, codexNodeFacts(manager)))
+      walkedCodex = true
+      const walked = await deleteCodexSubtree(plan, codexDeleteHooks(manager), {
+        replan: async () => {
+          await scanCodexLineage(undefined, undefined, 'all')
+          return unswept(codexDeletePlan(id, codexNodeFacts(manager)))
+        }
+      })
+      // The WALK's own answer, not the plan's: a rescan can extend it with
+      // branches this plan never named, and a second delete of one of those
+      // would be refused as "no such thread" and abort the whole project.
+      for (const threadId of walked) swept.add(threadId)
+      for (const node of plan.nodes) swept.add(node.threadId)
     }
   } finally {
     // Also on the way out of a REFUSAL: the walk replicates each removal before

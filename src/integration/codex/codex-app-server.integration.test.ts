@@ -23,12 +23,7 @@ import {
   loadCodexHistory,
   resolveCodexForkAnchor
 } from '../../core/codex/history'
-import {
-  listCodexForks,
-  markCodexForkSweepDone,
-  registerCodexFork,
-  setSessionMeta
-} from '../../core/services/db'
+import { listCodexForks, registerCodexFork, setSessionMeta } from '../../core/services/db'
 import { setHostPaths } from '../../core/host'
 import { crossEngineDispatcher } from '../../core/services/cross-engine-dispatcher'
 import type { PendingApproval } from '../../shared/types'
@@ -77,8 +72,9 @@ vi.mock('../../core/services/db', async (importOriginal) => {
     registerCodexFork: (id: string, from: string | null) => actual.registerCodexFork(id, from, db),
     listCodexForks: () => actual.listCodexForks(db),
     deleteCodexFork: (id: string) => actual.deleteCodexFork(id, db),
-    codexForkSweepDone: () => actual.codexForkSweepDone(db),
-    markCodexForkSweepDone: () => actual.markCodexForkSweepDone(db),
+    listCodexLineage: () => actual.listCodexLineage(db),
+    recordCodexLineage: (id: string, from: string | null, verifiedAt: number | null) =>
+      actual.recordCodexLineage(id, from, verifiedAt, db),
     getCodexSessionOverrides: (id: string) => actual.getCodexSessionOverrides(id, db),
     hasCodexSessionOverrides: (id: string) => actual.hasCodexSessionOverrides(id, db),
     ensureCodexSessionOverrides: (id: string) => actual.ensureCodexSessionOverrides(id, db),
@@ -1418,12 +1414,13 @@ it.skipIf(!enabled)(
     // Two negatives, against the real binary, in one list:
     //  - a REGISTERED id the binary can no longer resolve must be pruned (this
     //    is the `-32600` the deleted-thread probe pins), and
-    //  - a codex `session_meta` id that is NOT registered must never be read,
-    //    which is the whole point of retiring the sweep.
+    //  - a codex `session_meta` id the native listing does not carry and the
+    //    lineage cache does not know must never be read by a LISTING, which is
+    //    the whole point of retiring the sweep (the launch scan reads it once,
+    //    and then the cache answers for it).
     const neverMinted = '01890000-0000-7000-8000-00000000dead'
     registerCodexFork(neverMinted, sourceId)
     setSessionMeta('deleted-behind-our-back', { engineId: 'codex' })
-    markCodexForkSweepDone()
     const sidebar = (await listCodexSessions({ cwd, env })).map((entry) => entry.sessionId)
     console.log(
       JSON.stringify({
@@ -1456,7 +1453,8 @@ it.skipIf(!enabled)(
     expect(sidebar).toContain(sourceId)
     expect(sidebar).toContain(forkId)
     expect(sidebar).not.toContain('deleted-behind-our-back')
-    // Pruned: the fork survives, the id the binary refused is gone for good.
+    // Tombstoned: the fork survives, the id the binary refused twice is no
+    // longer a branch of anything (its row stays, so it is never re-read).
     expect(listCodexForks()).toEqual([{ threadId: forkId, forkedFromId: sourceId }])
 
     // The canonical seed `create-session.ts` runs for every branch: the SOURCE

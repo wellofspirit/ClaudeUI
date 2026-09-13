@@ -2,7 +2,7 @@ import { homedir } from 'node:os'
 import { CodexService } from './CodexService'
 import type { CodexClientOptions } from './CodexAppServerClient'
 import { locateCodexBinary } from './codex-locate'
-import { discoverCodexForks, type CodexReadTuning } from './history'
+import type { CodexReadTuning } from './history'
 import { logger } from '../services/logger'
 import {
   deleteCodexFork,
@@ -35,7 +35,7 @@ import type { CodexDeleteNode, CodexDeletePlan } from '../../shared/codex-types'
  * Both refusals, and "no such thread", collapse to the SAME JSON-RPC `-32600`,
  * and the client keeps native payloads out of core, so a caller cannot tell
  * them apart. Every decision here is made from what ClaudeUI itself knows
- * (the fork registry, the session manager), never from the refusal.
+ * (the lineage cache, the session manager), never from the refusal.
  *
  * NATIVE CHILDREN ARE NOT IN THE PLAN. A spawned collab agent is a thread with
  * a `parentThreadId`, and `thread/delete` already removes the whole spawn
@@ -59,18 +59,17 @@ export interface CodexNodeFacts {
 }
 
 /**
- * The subtree of `rootThreadId` in the fork registry, leaf-first.
+ * The subtree of `rootThreadId` in the lineage cache, leaf-first.
  *
  * Pure in its inputs so the ordering can be tested without a database or a
- * binary. `forks` is `listCodexForks()` — every branch ClaudeUI has ever
- * minted, each with the thread it was cut from — and the subtree is every
- * transitive fork of the root, forks of forks included.
+ * binary. `forks` is `listCodexForks()` — every cached BRANCH, each with the
+ * thread it was cut from — and the subtree is every transitive fork of the
+ * root, forks of forks included.
  *
- * Ordering is DEPTH DESCENDING, stable within a depth by registry order, so
- * the root is always last and no node is ever deleted before one that
- * references it. A registry that somehow contains a cycle (`forkedFromId`
- * chains are written once and never rewritten, so it should not) cannot loop
- * this: a thread already in the plan is never expanded twice.
+ * Ordering is DEPTH DESCENDING, stable within a depth by cache order, so the
+ * root is always last and no node is ever deleted before one that references
+ * it. A cache that somehow contains a cycle cannot loop this: a thread already
+ * in the plan is never expanded twice.
  */
 export function buildCodexDeletePlan(
   rootThreadId: string,
@@ -105,39 +104,32 @@ export function buildCodexDeletePlan(
 }
 
 /**
- * The plan for one Codex session: the registry, plus the branches the registry
- * has forgotten.
+ * The plan for one Codex session, read from the LINEAGE CACHE alone.
  *
- * The registry is ClaudeUI's own record of every `thread/fork` it minted (db
- * v16) and the native listing never returns a fork, so the registry is normally
- * the only way to learn a branch exists. Normally is not enough here: a branch
- * missing from it makes the native delete refuse the ROOT, with a `-32600` that
- * says nothing about why (it happened — the first adoption sweep believed a
- * transient refusal and registered nothing). So a delete also pays for one
- * bounded sweep of the codex ids only `session_meta` knows about, and registers
- * what it finds — see `history.discoverCodexForks`. The confirmation modal asks
- * for its plan through this same function, so what the user agrees to and what
- * the walk does are computed the same way.
+ * This used to sweep: every codex `session_meta` id the fork registry did not
+ * name got a `thread/read`, four at a time, on every plan — including the one
+ * the confirmation modal opens. It had to, because a root never earned a
+ * registry row, so the candidate set never shrank (~0.9 s with 25 sessions on
+ * 2026-09-13) and a branch the registry had forgotten made the native delete
+ * refuse the ROOT with a `-32600` that says nothing about why.
+ *
+ * The cache (db v17) records ROOTS too, so "have I asked about this thread?"
+ * is now answerable without asking the binary: the launch scan fills it in the
+ * background, `listCodexSessions` adds anything that appears while the app
+ * runs, and a plan is a synchronous read of what they learned. The one case
+ * that cost the sweep its keep — a branch the cache does not know about — is
+ * handled where the evidence actually appears, in {@link deleteCodexSubtree}:
+ * a refused node triggers ONE full rescan, and the walk continues if that
+ * changed the plan.
+ *
+ * The confirmation modal asks for its plan through this same function, so what
+ * the user agrees to and what the walk does are computed the same way.
  */
-export async function codexDeletePlan(
+export function codexDeletePlan(
   rootThreadId: string,
-  facts: (threadId: string) => CodexNodeFacts,
-  options: CodexDeleteWalkOptions = {}
-): Promise<CodexDeletePlan> {
-  const forks = await discoverCodexForks(
-    { cwd: options.cwd ?? homedir(), env: options.env },
-    options
-  ).catch((error) => {
-    // A sweep that cannot run must not take the delete with it: the registry on
-    // its own is what this always used, and it is right in every case but the
-    // one this sweep exists for.
-    logger.warn(
-      LOG_SOURCE,
-      `delete plan could not sweep for unregistered branches: ${error instanceof Error ? error.message : String(error)}`
-    )
-    return listCodexForks()
-  })
-  return buildCodexDeletePlan(rootThreadId, forks, facts)
+  facts: (threadId: string) => CodexNodeFacts
+): CodexDeletePlan {
+  return buildCodexDeletePlan(rootThreadId, listCodexForks(), facts)
 }
 
 /**
@@ -212,14 +204,23 @@ export interface CodexDeleteHooks {
 }
 
 /**
- * Test seams: the native service and the clock. Neither is injected in
- * production. `service`, `sleep` and `confirmDelayMs` are also the read tuning
- * {@link codexDeletePlan} hands to the fork sweep, so one options object
- * describes the whole delete.
+ * Test seams: the native service and the clock, plus the one production knob —
+ * {@link CodexDeleteWalkOptions.replan}. Neither the service nor the clock is
+ * injected in production.
  */
 export interface CodexDeleteWalkOptions extends Partial<CodexDeleteOptions>, CodexReadTuning {
   retryWindowMs?: number
   retryIntervalMs?: number
+  /**
+   * Re-learn lineage and rebuild the plan after a refusal, ONCE per walk.
+   *
+   * The caller owns it because the caller owns the plan's inputs: the root id,
+   * the liveness/title lookup, and (for a project sweep) the set of threads
+   * earlier walks already removed. `handlers-core` passes a closure that runs
+   * the full lineage scan and rebuilds; omit it and a refusal fails as it
+   * always did.
+   */
+  replan?: () => Promise<CodexDeletePlan>
 }
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
@@ -231,36 +232,65 @@ function label(node: CodexDeleteNode): string {
 
 /**
  * Walk a delete plan leaf-first, stopping non-destructively at the first
- * refusal.
+ * refusal the rescan cannot explain.
  *
  * Per node, in this order: unwatch (a watcher must not fire for a file that is
  * disappearing), stop the holder if one is live, replicate the removal, then
  * ask the binary. A refusal ends the walk THERE — nothing after it is touched,
  * everything before it is already gone — and the thrown error says which node
  * refused and how much of the plan landed. The caller refreshes the sidebar
- * listing afterwards, which puts back the rows that survived: the fork registry
+ * listing afterwards, which puts back the rows that survived: the lineage cache
  * still has them, so the refused branch reappears rather than silently
  * vanishing from every client.
  *
+ * ## The one rescan
+ *
+ * Every refusal is the same `-32600`, so the walk cannot ask the binary WHY.
+ * The one cause it can do something about is a branch the lineage cache does
+ * not know — a fork minted by another client, or by a build that predates the
+ * cache — which makes the binary refuse the node that branch still references.
+ * So the first refusal of a walk buys ONE {@link CodexDeleteWalkOptions.replan}:
+ * a full lineage rescan, then a rebuilt plan.
+ *
+ * If that plan differs from what is left of this one, the walk CONTINUES on it
+ * rather than restarting: the nodes already deleted are skipped (their rows are
+ * forgotten, so a rebuilt plan does not name them anyway) and the newly
+ * discovered branches sort below the refused node, which is exactly where the
+ * leaf-first order needs them. If the plan is unchanged, the refusal was
+ * something else — a holder ClaudeUI cannot stop, a thread that is already gone
+ * — and the original error is thrown as it always was.
+ *
  * ONE service for the whole subtree: each `CodexService` read spawns an
  * app-server process, and a three-node plan does not need three of them.
+ *
+ * Returns the threads it actually deleted, in the order it deleted them — which
+ * a rescan can make LONGER than the plan it was handed, and which a project
+ * sweep needs so it does not plan a second delete of a thread this walk already
+ * removed (that would be refused as "no such thread", indistinguishable from a
+ * real refusal).
  */
 export async function deleteCodexSubtree(
   plan: CodexDeletePlan,
   hooks: CodexDeleteHooks,
   options: CodexDeleteWalkOptions = {}
-): Promise<void> {
-  if (!plan.order.length) return
+): Promise<string[]> {
+  if (!plan.order.length) return []
   if (!options.service) assertCodexInstalled()
   const sleep = options.sleep ?? wait
   const retryWindow = options.retryWindowMs ?? STOPPED_HOLDER_RETRY_MS
   const interval = options.retryIntervalMs ?? STOPPED_HOLDER_RETRY_INTERVAL_MS
-  const byId = new Map(plan.nodes.map((node) => [node.threadId, node]))
   const service =
     options.service ?? new CodexService({ cwd: options.cwd ?? homedir(), env: options.env })
-  const deleted: string[] = []
+  const deleted = new Set<string>()
+  const remaining = (candidate: CodexDeletePlan): string[] =>
+    candidate.order.filter((threadId) => !deleted.has(threadId))
+  let current = plan
+  let byId = new Map(plan.nodes.map((node) => [node.threadId, node]))
+  let rescanned = false
   try {
-    for (const threadId of plan.order) {
+    for (let index = 0; index < current.order.length; index++) {
+      const threadId = current.order[index]
+      if (deleted.has(threadId)) continue
       const node = byId.get(threadId)
       if (!node) continue
       hooks.unwatch(threadId)
@@ -268,6 +298,7 @@ export async function deleteCodexSubtree(
       hooks.removeSession(threadId)
       // Only a thread WE just stopped gets a second chance; see the constants.
       const deadline = node.live ? Date.now() + retryWindow : 0
+      let refusal: Error | null = null
       for (;;) {
         try {
           await service.deleteThread(threadId)
@@ -275,18 +306,35 @@ export async function deleteCodexSubtree(
         } catch (error) {
           if (Date.now() >= deadline) {
             const reason = error instanceof Error ? error.message : String(error)
-            throw new Error(
+            refusal = new Error(
               `Codex refused to delete ${label(node)} (${reason}). ` +
-                `${deleted.length} of ${plan.order.length} threads were deleted; ` +
-                `${plan.order.length - deleted.length} remain.`
+                `${deleted.size} of ${current.order.length} threads were deleted; ` +
+                `${current.order.length - deleted.size} remain.`
             )
+            break
           }
           await sleep(interval)
         }
       }
+      if (refusal) {
+        const rebuilt =
+          rescanned || !options.replan ? null : await options.replan().catch(() => null)
+        rescanned = true
+        if (!rebuilt || remaining(rebuilt).join('\u0000') === remaining(current).join('\u0000'))
+          throw refusal
+        logger.warn(
+          LOG_SOURCE,
+          `${label(node)} was refused; a lineage rescan found ${remaining(rebuilt).length - remaining(current).length} more thread(s). Continuing.`
+        )
+        current = rebuilt
+        byId = new Map(rebuilt.nodes.map((entry) => [entry.threadId, entry]))
+        index = -1
+        continue
+      }
       forgetThread(threadId)
-      deleted.push(threadId)
+      deleted.add(threadId)
     }
+    return [...deleted]
   } finally {
     if (!options.service) service.dispose()
   }

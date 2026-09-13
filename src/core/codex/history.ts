@@ -1,7 +1,7 @@
 import { homedir } from 'node:os'
 import { CodexService } from './CodexService'
 import type { CodexClientOptions } from './CodexAppServerClient'
-import { codexBinaryAvailable } from './codex-locate'
+import { codexBinaryAvailable, locateCodexBinary } from './codex-locate'
 import { codexItemId, mapCodexItem, subAgentActivityResult } from './event-mapper'
 import { assertCodexProvider } from './model-selection'
 import type { SessionInfo, ChatMessage, ForkAnchorResult } from '../../shared/types'
@@ -12,12 +12,9 @@ import {
   getSessionMeta,
   allSessionMeta,
   ensureCodexSessionOverrides,
-  registerCodexFork,
   listCodexForks,
-  deleteCodexFork,
-  type CodexFork,
-  codexForkSweepDone,
-  markCodexForkSweepDone
+  listCodexLineage,
+  recordCodexLineage
 } from '../services/db'
 import { CodexTransportError } from './CodexAppServerClient'
 import { logger } from '../services/logger'
@@ -145,135 +142,118 @@ function listable(thread: Thread): boolean {
 }
 
 /**
- * ONE-TIME adoption of the forks that predate the registry (db v16).
+ * WHICH ids one pass of the lineage scan reads.
  *
- * Existing users' branches are recorded nowhere but `session_meta`, so the
- * first list after the migration reads every codex id there and writes the
- * lineage it finds into the registry. "Exactly once" is the marker row in
- * `codex_forks` itself (`markCodexForkSweepDone`) — no separate settings flag,
- * and not the table's emptiness, which would re-sweep forever for a user who
- * has no forks at all.
- *
- * **EVERY id, listed or not** ({@link unregisteredCodexIds}). The first two
- * versions of this swept only the ids `thread/list` omitted, on the pinned
- * finding that a fork is never listed — which is true only until the fork runs
- * a turn of its own. After that it is listed like any root AND its list entry
- * carries `forkedFromId: null`, so the listing can neither be used to exclude a
- * fork from the sweep nor to learn its lineage. That is what kept two real
- * branches out of the registry on a real machine (2026-09-13) even after the
- * confirm-before-believing fix: they were listed, so they were never read, so
- * nothing ever learned they were branches. `thread/read` is the only place the
- * lineage exists; reading a listed thread is cheap and the price of knowing.
- *
- * A listed thread with no lineage is a ROOT and is left out of the registry —
- * it needs no help being found. An unlisted one is registered with whatever
- * lineage it has, `null` included, because the registry is then the only record
- * that it exists at all.
- *
- * The marker is set only when every id in the sweep was ANSWERED — resolved, or
- * refused TWICE ({@link readThreads}). A transport failure mid-sweep, or a
- * refusal the re-read did not confirm, leaves it unset so the next refresh
- * retries: marking done on an unconfirmed answer is exactly how the first
- * version of this lost two real branches (see {@link THREAD_UNRESOLVABLE}), and
- * losing a branch is the one outcome this must never have.
- *
- * The marker carries a GENERATION (`markCodexForkSweepDone`). Each broken
- * version of this sweep left a marker behind on machines that already ran it,
- * and those users need the adoption to happen again — bumping the generation is
- * what re-runs it exactly once more, with no migration.
- *
- * Returns only the threads the native listing does NOT carry: the listed ones
- * are already sidebar rows, and returning them would double every fork.
+ *  - `new` — listed threads the cache has never heard of. The cheapest pass and
+ *    the only one a sidebar refresh may run: an ACTIVE thread's `updatedAt`
+ *    moves on every turn, so a "changed" pass on the 30 s poll would re-read
+ *    the session the user is talking to, forever.
+ *  - `changed` — the launch pass. `new`, plus any listed thread whose
+ *    `updatedAt` no longer matches the one its lineage was read at (a thread
+ *    can be forked by another client between launches), plus every codex
+ *    `session_meta` id the cache does not know and the listing does not carry
+ *    (a branch that predates the cache, or one that has never run a turn).
+ *  - `all` — every id ClaudeUI knows about, cache row or not, `verified_at`
+ *    ignored. Paid exactly once, by a delete the binary refused: at that point
+ *    the cache is provably missing something and one full re-read is cheaper
+ *    than a wrong answer.
  */
-async function adoptLegacyForks(
-  service: CodexService,
-  native: Set<string>,
-  tuning: CodexReadTuning
-): Promise<Thread[]> {
-  const reads = await readThreads(service, unregisteredCodexIds(), tuning)
-  const adopted: Thread[] = []
-  for (const read of reads) {
-    if (!read.thread || !listable(read.thread)) continue
-    const listedNatively = native.has(read.thread.id)
-    // A root needs no registry row; a thread that claims itself as its own
-    // source is a lineage nothing can walk, so it is treated as a root too.
-    if (
-      (!read.thread.forkedFromId || read.thread.forkedFromId === read.thread.id) &&
-      listedNatively
-    )
-      continue
-    registerCodexFork(read.thread.id, read.thread.forkedFromId ?? null)
-    logger.warn(
-      LOG_SOURCE,
-      `adopted pre-registry Codex branch ${read.thread.id} (forked from ${read.thread.forkedFromId ?? 'unknown'}, ${listedNatively ? 'natively listed' : 'unlisted'})`
-    )
-    if (!listedNatively) adopted.push(read.thread)
-  }
-  if (reads.every((read) => read.thread !== null || read.unresolvable)) markCodexForkSweepDone()
-  return adopted
-}
+export type CodexScanMode = 'new' | 'changed' | 'all'
 
-/**
- * The codex ids `session_meta` knows about and the registry does not.
- *
- * NOT filtered by the native listing: a fork that has run a turn is listed like
- * any root and its list entry carries no `forkedFromId`, so "listed" says
- * nothing about whether a thread is a branch (see {@link adoptLegacyForks}).
- * The cost is one metadata read per unregistered codex session, four at a time,
- * on the two paths that can afford it — the one-time adoption, and a delete.
- */
-function unregisteredCodexIds(): string[] {
-  const registered = new Set(listCodexForks().map((fork) => fork.threadId))
+/** The codex ids `session_meta` carries, whatever the native listing says. */
+function codexSessionMetaIds(): string[] {
   return Object.entries(allSessionMeta())
-    .filter(([id, meta]) => meta.engineId === 'codex' && !registered.has(id))
+    .filter(([, meta]) => meta.engineId === 'codex')
     .map(([id]) => id)
 }
 
+/** What one lineage scan did: how many threads it read, and how much it learned. */
+export interface CodexLineageScan {
+  read: number
+  learned: number
+}
+
 /**
- * Every fork a DELETE has to consider for `rootThreadId`'s subtree.
+ * Learn the lineage of every thread this pass has to read, and CACHE THE ANSWER
+ * either way.
  *
- * The registry is the fast path and it is usually complete, but "usually" is
- * not good enough for a delete: a branch the registry has forgotten is a branch
- * the native delete will refuse the root for, with a `-32600` that says nothing
- * about why. So a delete pays for one sweep of every unregistered codex
- * `session_meta` id — the same bounded, four-at-a-time,
- * confirm-before-believing read the adoption uses — and registers the lineage
- * it finds. Deleting is rare and user-initiated; a sidebar refresh is neither,
- * which is why only this path does it.
+ * The row is the whole point: v16 recorded branches only, so a root was a
+ * candidate for a metadata read forever and the delete sweep never shrank. Here
+ * a root earns `(null, updatedAt)`, a branch earns `(source, updatedAt)`, and an
+ * id the binary refuses TWICE earns `(null, null)` — a tombstone, which is not a
+ * branch, is not a sidebar row, and is not read again unless the native listing
+ * carries the id once more. Only a non-definitive failure (a transport fault, a
+ * single unconfirmed refusal) leaves the row alone, so the next pass retries it.
  *
- * It costs one read per unregistered codex session, every time, because a ROOT
- * is never registered and so is a candidate forever. That is the price of a
- * plan that cannot silently omit a branch, and it is paid once per delete, not
- * once per refresh.
- *
- * Never prunes. A refusal here means "not part of this plan", never "forget
- * this row" — that decision belongs to {@link listCodexSessions}, which has the
- * whole picture.
+ * Returns how many threads were read and how many rows changed the answer the
+ * cache would have given — the caller uses the latter to decide whether the
+ * sidebar needs re-reading.
  */
-export async function discoverCodexForks(
+async function refreshCodexLineage(
+  service: CodexService,
+  listed: Thread[],
+  mode: CodexScanMode,
+  tuning: CodexReadTuning
+): Promise<CodexLineageScan> {
+  const cache = new Map(listCodexLineage().map((row) => [row.threadId, row]))
+  const listedById = new Map(listed.filter(listable).map((thread) => [thread.id, thread]))
+  const candidates = new Set<string>()
+  for (const [id, thread] of listedById)
+    if (
+      mode === 'all' ||
+      !cache.has(id) ||
+      (mode === 'changed' && cache.get(id)!.verifiedAt !== thread.updatedAt)
+    )
+      candidates.add(id)
+  if (mode !== 'new') {
+    for (const id of codexSessionMetaIds())
+      if (mode === 'all' || (!cache.has(id) && !listedById.has(id))) candidates.add(id)
+    if (mode === 'all') for (const id of cache.keys()) candidates.add(id)
+  }
+  const reads = await readThreads(service, [...candidates], tuning)
+  let learned = 0
+  for (const read of reads) {
+    const known = cache.get(read.threadId)
+    if (read.thread) {
+      // A thread that claims itself as its own source is a lineage nothing can
+      // walk, so it is cached as a root.
+      const source =
+        read.thread.forkedFromId && read.thread.forkedFromId !== read.thread.id
+          ? read.thread.forkedFromId
+          : null
+      if (!known || known.forkedFromId !== source) {
+        learned++
+        if (source)
+          logger.warn(LOG_SOURCE, `Codex lineage scan: ${read.thread.id} is a branch of ${source}`)
+      }
+      recordCodexLineage(read.thread.id, source, read.thread.updatedAt)
+    } else if (read.unresolvable) {
+      if (!known || known.forkedFromId !== null) learned++
+      recordCodexLineage(read.threadId, null, null)
+    }
+  }
+  return { read: reads.length, learned }
+}
+
+/**
+ * The lineage scan, as a whole: one `thread/list`, then the metadata reads that
+ * pass needs.
+ *
+ * Wired at boot (`boot/core-services.ts`) in the background, and re-run in the
+ * `all` mode by a delete the binary refused. Gated on `locateCodexBinary`
+ * rather than `codexBinaryAvailable`: reading a thread's metadata needs the
+ * app-server and nothing else, and the delete plan this cache feeds is gated
+ * the same way.
+ */
+export async function scanCodexLineage(
   options: CodexReadOptions = { cwd: homedir() },
-  tuning: CodexReadTuning = {}
-): Promise<CodexFork[]> {
+  tuning: CodexReadTuning = {},
+  mode: CodexScanMode = 'changed'
+): Promise<CodexLineageScan> {
+  if (!tuning.service && !locateCodexBinary()) return { read: 0, learned: 0 }
   const service = tuning.service ?? new CodexService(options)
   try {
-    for (const read of await readThreads(service, unregisteredCodexIds(), tuning)) {
-      // Lineage or nothing: an id with no `forkedFromId` is a root, and a
-      // registry row for it would only make it a candidate on the NEXT sweep
-      // too, without ever joining a subtree.
-      if (
-        !read.thread ||
-        !listable(read.thread) ||
-        !read.thread.forkedFromId ||
-        read.thread.forkedFromId === read.thread.id
-      )
-        continue
-      registerCodexFork(read.thread.id, read.thread.forkedFromId)
-      logger.warn(
-        LOG_SOURCE,
-        `delete plan found unregistered Codex branch ${read.thread.id} (forked from ${read.thread.forkedFromId})`
-      )
-    }
-    return listCodexForks()
+    return await refreshCodexLineage(service, await service.listAllThreads(), mode, tuning)
   } finally {
     if (!tuning.service) service.dispose()
   }
@@ -322,19 +302,24 @@ function adoptThread(thread: Thread): SessionInfo {
  * `thread/list` is the native listing and it does not return a fork until the
  * fork has run a turn of its own (pinned by
  * `src/integration/codex/codex-lifecycle.integration.test.ts`), so a fresh
- * branch would vanish from the sidebar on the next restart. The forks are
- * therefore named explicitly: `CodexSession.start` registers every thread
- * `thread/fork` mints (db v16), and this reads back exactly those ids, four at
- * a time — skipping the ones the native listing already carries, so a fork that
+ * branch would vanish from the sidebar on the next restart. The lineage cache
+ * is what names those branches: `CodexSession.start` records every thread
+ * `thread/fork` mints, the launch scan records everything else, and this reads
+ * back exactly the cached BRANCHES the native listing omits — so a fork that
  * has since run a turn is one row, not two.
  *
- * That registry replaces the old derivation — "every codex `session_meta` id
- * the native list omits" — which after a few deletions was mostly dead ids
- * re-probed on every sidebar refresh. A read the binary refuses TWICE
- * ({@link THREAD_UNRESOLVABLE}) drops the row; a single refusal, or any other
- * failure, keeps it and skips that fork for this round, because neither a
- * transport blip nor a cold app-server may delete a branch. One failure never
- * fails the list.
+ * It also runs the scan's cheapest pass first ({@link CodexScanMode} `new`):
+ * a thread created outside ClaudeUI while the app runs is listed but unknown to
+ * the cache, and reading its lineage here is what keeps a delete plan honest
+ * without waiting for the next launch. `new` and not `changed` on purpose — the
+ * session the user is talking to changes its `updatedAt` every turn, and this
+ * runs on a 30 s poll.
+ *
+ * A read the binary refuses TWICE ({@link THREAD_UNRESOLVABLE}) tombstones the
+ * row, which drops the branch from the sidebar and from every plan; a single
+ * refusal, or any other failure, keeps it and skips that fork for this round,
+ * because neither a transport blip nor a cold app-server may delete a branch.
+ * One failure never fails the list.
  */
 export async function listCodexSessions(
   options: CodexReadOptions = { cwd: homedir() },
@@ -346,20 +331,20 @@ export async function listCodexSessions(
     const listed = await service.listAllThreads()
     const sessions = listed.filter(listable).map(adoptThread)
     const native = new Set(listed.map((thread) => thread.id))
-    // Existing users' forks live only in `session_meta`; adopt them once.
-    const adopted = codexForkSweepDone() ? [] : await adoptLegacyForks(service, native, tuning)
-    for (const thread of adopted) sessions.push(adoptThread(thread))
-    // `seen` is the dedupe, and it is load-bearing now that a fork can be in
-    // BOTH sources: one that has run a turn is natively listed AND in the
-    // registry, and without this it would be two sidebar rows for one thread.
-    const seen = new Set([...native, ...adopted.map((thread) => thread.id)])
+    // A thread that appeared while the app was running — another client's fork,
+    // a terminal `codex` — is listed and uncached, and nothing else would learn
+    // its lineage before the next launch.
+    await refreshCodexLineage(service, listed, 'new', tuning)
+    // The cached branches the native listing does not carry: a fork that has not
+    // run a turn yet. One that HAS is already a row above, and reading it again
+    // would make it two.
     const ids = listCodexForks()
       .map((fork) => fork.threadId)
-      .filter((id) => !seen.has(id))
+      .filter((id) => !native.has(id))
     for (const read of await readThreads(service, ids, tuning)) {
       if (read.thread) {
         if (listable(read.thread)) sessions.push(adoptThread(read.thread))
-      } else if (read.unresolvable) deleteCodexFork(read.threadId)
+      } else if (read.unresolvable) recordCodexLineage(read.threadId, null, null)
     }
     return sessions
   } finally {

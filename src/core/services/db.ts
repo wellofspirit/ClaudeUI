@@ -578,6 +578,44 @@ export const MIGRATIONS: Migration[] = [
         created_at INTEGER NOT NULL
       )`)
     }
+  },
+  {
+    // v17 — the fork registry becomes a LINEAGE CACHE.
+    //
+    // v16 recorded branches only, so a ROOT never earned a row and stayed a
+    // candidate for a `thread/read` forever: every delete plan swept the
+    // lineage of every codex `session_meta` id the table did not name, and the
+    // sweep never shrank (~0.9 s with 25 sessions, ADR-066 open item 3). The
+    // table now holds ONE ROW PER THREAD ClaudeUI has asked about, root or
+    // branch, and having a row is what stops the next scan re-reading it.
+    //
+    //  - `forked_from_id` still means lineage, and NULL now means "a root, a
+    //    thread with no learnable source, or an id the binary has twice said it
+    //    cannot resolve" — the three cases that are alike in the only way any
+    //    reader cares about: they are not a branch of anything.
+    //  - `verified_at` is the NATIVE `updatedAt` (unix seconds) the lineage was
+    //    read at. The launch scan re-reads a thread only when the listing shows
+    //    a different one, so an unchanged thread costs nothing after its first
+    //    read. NULL means "never verified": a v16 row, or a confirmed-gone id.
+    //  - `lineage_checked_at` is the wall clock of that read, for diagnostics.
+    //
+    // The table KEEPS ITS NAME: `CodexSession` registers a branch it mints
+    // through `registerCodexFork` and a rename would be churn in a file this
+    // change does not otherwise touch. Existing rows migrate as they are, with
+    // `verified_at` NULL so the first scan verifies each one exactly once.
+    //
+    // The DATA step drops the one-time adoption MARKER (`thread_id = ''`,
+    // generation in `forked_from_id`). The cache replaces it: an id with a row
+    // is not re-read, which is what the marker was for, without the "have I
+    // swept yet" flag that finished wrongly twice.
+    version: 17,
+    up(db) {
+      db.exec(`
+        ALTER TABLE codex_forks ADD COLUMN verified_at INTEGER;
+        ALTER TABLE codex_forks ADD COLUMN lineage_checked_at INTEGER;
+        DELETE FROM codex_forks WHERE thread_id = '';
+      `)
+    }
   }
 ]
 
@@ -862,7 +900,8 @@ export function deleteCodexSessionOverrides(sessionId: string, db: Db = getDb())
 }
 
 // ---------------------------------------------------------------------------
-// Codex fork registry (v16) — see that migration's comment for the why.
+// Codex lineage cache (v16 table, generalised in v17) — see that migration's
+// comment for the why.
 // ---------------------------------------------------------------------------
 
 /** One registered branch: the forked thread and the thread it was cut from. */
@@ -872,76 +911,107 @@ export interface CodexFork {
 }
 
 /**
- * The one-time legacy-adoption marker, kept IN this table rather than in a
- * second table or a settings flag: it is the same fact ("what does the fork
- * registry know?"), it is written in the same transaction-free way, and the
- * empty string is not a thread id the app-server can ever mint (thread ids are
- * UUIDs). {@link listCodexForks} filters it out, so no reader ever sees it.
+ * One cached thread: its lineage, and the native `updatedAt` that lineage was
+ * read at.
+ *
+ * `forkedFromId === null` is a root, a thread whose source cannot be learned,
+ * or an id the binary has twice refused — see the v17 migration. `verifiedAt`
+ * is what makes the launch scan incremental: a listed thread whose `updatedAt`
+ * still equals it needs no `thread/read` at all. `null` means the row has never
+ * been verified (a v16 row, or a confirmed-gone id).
  */
-const FORK_SWEEP_MARKER = ''
+export interface CodexLineage extends CodexFork {
+  verifiedAt: number | null
+}
 
 /**
- * Which adoption the marker row records, in its otherwise unused
- * `forked_from_id`.
+ * Record a `thread/fork` result. First registration wins — a later resume of
+ * the same branch must not rewrite its lineage or duplicate the row.
  *
- * A GENERATION rather than a boolean, because the adoption has finished wrongly
- * twice and each fix has to reach the users the previous one already marked:
- *
- *  - v1 (`NULL`) believed a single `-32600` from `thread/read`;
- *  - v2 swept only the ids `thread/list` omitted, which misses a fork that has
- *    run a turn — it is listed like a root, and the list entry carries no
- *    lineage.
- *
- * On one real machine (2026-09-13) the two together marked the sweep done with
- * NOTHING registered while two live branches sat in `session_meta`. Bumping
- * this value re-runs the adoption exactly once more, with no migration: the
- * older marker no longer matches, and the next completed sweep overwrites the
- * row. See `codex/history.ts` `adoptLegacyForks`.
+ * The row it writes is UNVERIFIED (`verified_at` null): ClaudeUI learned this
+ * lineage from the fork call, not from a `thread/read`, so the next scan reads
+ * the thread once and fills in the `updatedAt` that stops it reading it again.
  */
-const FORK_SWEEP_GENERATION = 'adopted-v3'
-
-/** Record a `thread/fork` result. First registration wins — a later resume of the
- *  same branch must not rewrite its lineage or duplicate the row. */
 export function registerCodexFork(
   threadId: string,
   forkedFromId: string | null,
   db: Db = getDb()
 ): void {
-  if (threadId === FORK_SWEEP_MARKER) return
+  if (!threadId) return
   db.prepare(
     'INSERT OR IGNORE INTO codex_forks (thread_id, forked_from_id, created_at) VALUES (?, ?, ?)'
   ).run(threadId, forkedFromId, Date.now())
 }
 
-/** Every registered fork, oldest first. The sweep marker is never included. */
+/**
+ * Record what a `thread/read` said about one thread — the LINEAGE SCAN's only
+ * writer.
+ *
+ * Unlike {@link registerCodexFork} this REPLACES what the row held: the read is
+ * the authority (a fork registered at mint time carries no `verifiedAt`, and a
+ * thread the binary has twice refused becomes `(null, null)` — a tombstone that
+ * is not a branch, is not listed, and is never read again unless the native
+ * listing carries it once more).
+ */
+export function recordCodexLineage(
+  threadId: string,
+  forkedFromId: string | null,
+  verifiedAt: number | null,
+  db: Db = getDb()
+): void {
+  if (!threadId) return
+  db.prepare(
+    `INSERT INTO codex_forks (thread_id, forked_from_id, created_at, verified_at, lineage_checked_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(thread_id) DO UPDATE SET
+       forked_from_id     = excluded.forked_from_id,
+       verified_at        = excluded.verified_at,
+       lineage_checked_at = excluded.lineage_checked_at`
+  ).run(threadId, forkedFromId, Date.now(), verifiedAt, Date.now())
+}
+
+/**
+ * Every cached BRANCH, oldest first: the rows the sidebar's unlisted-fork read
+ * and every delete plan are built from.
+ *
+ * Rows with no lineage are excluded here rather than at the call sites, because
+ * "not a branch of anything" is the one thing a root, an unknowable source and
+ * a tombstone have in common, and no reader of this function wants any of them.
+ */
 export function listCodexForks(db: Db = getDb()): CodexFork[] {
   return (
     db
       .prepare(
-        'SELECT thread_id, forked_from_id FROM codex_forks WHERE thread_id <> ? ORDER BY created_at, thread_id'
+        `SELECT thread_id, forked_from_id FROM codex_forks
+         WHERE forked_from_id IS NOT NULL AND forked_from_id <> thread_id
+         ORDER BY created_at, thread_id`
       )
-      .all(FORK_SWEEP_MARKER) as Array<{ thread_id: string; forked_from_id: string | null }>
+      .all() as Array<{ thread_id: string; forked_from_id: string | null }>
   ).map((row) => ({ threadId: row.thread_id, forkedFromId: row.forked_from_id }))
 }
 
-/** Forget one fork — ONLY for a thread the binary has definitively refused. */
+/** Every cached thread, branch or not — the scan's "what do I already know?". */
+export function listCodexLineage(db: Db = getDb()): CodexLineage[] {
+  return (
+    db
+      .prepare(
+        'SELECT thread_id, forked_from_id, verified_at FROM codex_forks ORDER BY created_at, thread_id'
+      )
+      .all() as Array<{
+      thread_id: string
+      forked_from_id: string | null
+      verified_at: number | null
+    }>
+  ).map((row) => ({
+    threadId: row.thread_id,
+    forkedFromId: row.forked_from_id,
+    verifiedAt: row.verified_at
+  }))
+}
+
+/** Forget one thread entirely — for a thread ClaudeUI has just deleted. */
 export function deleteCodexFork(threadId: string, db: Db = getDb()): void {
   db.prepare('DELETE FROM codex_forks WHERE thread_id = ?').run(threadId)
-}
-
-/** Whether the CURRENT adoption of pre-registry forks has already run. */
-export function codexForkSweepDone(db: Db = getDb()): boolean {
-  const marker = db
-    .prepare('SELECT forked_from_id FROM codex_forks WHERE thread_id = ?')
-    .get(FORK_SWEEP_MARKER) as { forked_from_id: string | null } | undefined
-  return marker?.forked_from_id === FORK_SWEEP_GENERATION
-}
-
-/** Record that the current adoption has run. Idempotent; replaces an older generation. */
-export function markCodexForkSweepDone(db: Db = getDb()): void {
-  db.prepare(
-    'INSERT OR REPLACE INTO codex_forks (thread_id, forked_from_id, created_at) VALUES (?, ?, ?)'
-  ).run(FORK_SWEEP_MARKER, FORK_SWEEP_GENERATION, Date.now())
 }
 
 /**

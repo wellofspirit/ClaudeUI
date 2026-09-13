@@ -36,9 +36,9 @@ describe('DB migration — v6 dispatched_usage', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      // Bump alongside MIGRATIONS in db.ts — currently v16 (codex_forks, the
-      // Codex fork registry ADR-066 reads instead of sweeping session_meta).
-      expect(userVersion(db)).toBe(16)
+      // Bump alongside MIGRATIONS in db.ts — currently v17 (codex_forks
+      // generalised into the Codex lineage cache ADR-066 plans deletes from).
+      expect(userVersion(db)).toBe(17)
     } finally {
       db.close()
     }

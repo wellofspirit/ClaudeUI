@@ -16,10 +16,15 @@ import { afterAll, afterEach, expect, it, vi } from 'vitest'
 import { CodexAppServerClient } from '../../core/codex/CodexAppServerClient'
 import { CodexService } from '../../core/codex/CodexService'
 import { CodexSession } from '../../core/codex/CodexSession'
-import { listCodexSessions } from '../../core/codex/history'
+import { listCodexSessions, scanCodexLineage } from '../../core/codex/history'
 import { buildCodexDeletePlan, codexDeletePlan, deleteCodexSubtree } from '../../core/codex/delete'
 import { CodexTransportError } from '../../core/codex/CodexAppServerClient'
-import { listCodexForks, registerCodexFork, setSessionMeta } from '../../core/services/db'
+import {
+  listCodexForks,
+  listCodexLineage,
+  registerCodexFork,
+  setSessionMeta
+} from '../../core/services/db'
 import { setHostPaths } from '../../core/host'
 import provenance from '../../core/codex/protocol/provenance.json'
 
@@ -90,8 +95,9 @@ vi.mock('../../core/services/db', async (importOriginal) => {
     deleteCodexSessionOverrides: (id: string) => actual.deleteCodexSessionOverrides(id, db),
     listCodexForks: () => actual.listCodexForks(db),
     deleteCodexFork: (id: string) => actual.deleteCodexFork(id, db),
-    codexForkSweepDone: () => actual.codexForkSweepDone(db),
-    markCodexForkSweepDone: () => actual.markCodexForkSweepDone(db),
+    listCodexLineage: () => actual.listCodexLineage(db),
+    recordCodexLineage: (id: string, from: string | null, verifiedAt: number | null) =>
+      actual.recordCodexLineage(id, from, verifiedAt, db),
     getCodexSessionOverrides: (id: string) => actual.getCodexSessionOverrides(id, db),
     hasCodexSessionOverrides: (id: string) => actual.hasCodexSessionOverrides(id, db),
     ensureCodexSessionOverrides: (id: string) => actual.ensureCodexSessionOverrides(id, db),
@@ -813,67 +819,124 @@ it.skipIf(!enabled)(
 )
 
 // ---------------------------------------------------------------------------
-// The registry is not the only source of truth a delete can afford to trust
+// The lineage cache, and the one rescan that repairs a plan built from a stale
+// one
 // ---------------------------------------------------------------------------
 //
 // Found on the real app (2026-09-13): `codex_forks` held nothing but the
 // adoption marker, so the plan for a branched root was the root ALONE and the
 // native delete refused it — correctly, since both branches still referenced
-// its history. The two probes below are that failure and its cause.
+// its history. The plan no longer sweeps for that case (db v17: the launch scan
+// fills a cache, and a plan is a cache read), so the recovery has moved to the
+// walk. These probes are that mechanism against the real binary.
+
+/** A root with one branch that has run a turn of its own, and a cold cache. */
+async function branchedFixture(): Promise<{
+  cwd: string
+  env: NodeJS.ProcessEnv
+  errors: string[]
+  rootId: string
+  forkId: string
+}> {
+  const { cwd, env, errors } = await setupFixture(true)
+  const root = await holder(cwd, env)
+  const started = await root.client.request<{ thread: { id: string } }>('thread/start', {
+    cwd,
+    model: 'mock-model',
+    modelProvider: 'fixture',
+    historyMode: 'paginated'
+  })
+  const rootId = started.thread.id
+  const anchor = await runTurn(root.client, root.notifications, rootId, 'one')
+  const forker = await holder(cwd, env)
+  const forked = await forker.client.request<{ thread: { id: string } }>('thread/fork', {
+    threadId: rootId,
+    lastTurnId: anchor,
+    cwd
+  })
+  const forkId = forked.thread.id
+  // THE REAL-WORLD SHAPE: the branch has been used. That is what puts it in
+  // `thread/list` — where the entry carries no `forkedFromId` — so being listed
+  // proves nothing and only `thread/read` can tell a branch from a root.
+  await runTurn(forker.client, forker.notifications, forkId, 'the branch does some work')
+  forker.client.dispose()
+  root.client.dispose()
+  await new Promise((resolve) => setTimeout(resolve, 1500))
+  // Every Codex session is in `session_meta`; neither is in the cache.
+  setSessionMeta(rootId, { engineId: 'codex' })
+  setSessionMeta(forkId, { engineId: 'codex' })
+  expect(listCodexForks()).toEqual([])
+  return { cwd, env, errors, rootId, forkId }
+}
 
 it.skipIf(!enabled)(
-  'plans and deletes a branch that only session_meta knows about',
+  'reads every thread once at launch and none of them at the next launch',
   async () => {
-    const { cwd, env, errors } = await setupFixture(true)
-    const root = await holder(cwd, env)
-    const started = await root.client.request<{ thread: { id: string } }>('thread/start', {
-      cwd,
-      model: 'mock-model',
-      modelProvider: 'fixture',
-      historyMode: 'paginated'
-    })
-    const rootId = started.thread.id
-    const anchor = await runTurn(root.client, root.notifications, rootId, 'one')
-    const forker = await holder(cwd, env)
-    const forked = await forker.client.request<{ thread: { id: string } }>('thread/fork', {
-      threadId: rootId,
-      lastTurnId: anchor,
-      cwd
-    })
-    const forkId = forked.thread.id
-    // THE REAL-WORLD SHAPE: the branch has been used. That is what puts it in
-    // `thread/list` — where the entry carries no `forkedFromId` — and it is why
-    // the sweep that skipped listed ids never learned it was a branch.
-    await runTurn(forker.client, forker.notifications, forkId, 'the branch does some work')
-    forker.client.dispose()
-    root.client.dispose()
-    await new Promise((resolve) => setTimeout(resolve, 1500))
+    const { cwd, env, errors, rootId, forkId } = await branchedFixture()
+    const first = await scanCodexLineage({ cwd, env }, { confirmDelayMs: 50 })
+    // Two listed threads, neither cached: two reads, and both lineages learned
+    // — the ROOT's included, which is the row v16 never wrote and the reason
+    // every delete plan used to re-read every Codex session.
+    expect(first).toEqual({ read: 2, learned: 2 })
+    expect(listCodexLineage().map((row) => [row.threadId, row.forkedFromId])).toEqual(
+      expect.arrayContaining([
+        [rootId, null],
+        [forkId, rootId]
+      ])
+    )
+    // Nothing changed in between, so the second launch asks the binary for the
+    // listing and for nothing else.
+    const second = await scanCodexLineage({ cwd, env }, { confirmDelayMs: 50 })
+    expect(second).toEqual({ read: 0, learned: 0 })
+    console.log(JSON.stringify({ probe: 'lineage-scan', first, second }))
+    // ...and the plan the sidebar's confirmation shows is now a cache read.
+    expect(codexDeletePlan(rootId, () => ({ title: null, live: false })).order).toEqual([
+      forkId,
+      rootId
+    ])
+    expect(errors).toEqual([])
+  },
+  120000
+)
 
-    // The state a user was actually left in: the branch is in `session_meta`
-    // (every Codex session is) and NOT in the fork registry.
-    setSessionMeta(rootId, { engineId: 'codex' })
-    setSessionMeta(forkId, { engineId: 'codex' })
-    expect(listCodexForks()).toEqual([])
-
+it.skipIf(!enabled)(
+  'recovers a delete the binary refused for a branch the cache never learned',
+  async () => {
+    const { cwd, env, errors, rootId, forkId } = await branchedFixture()
     service = new CodexService({ cwd, env, requestTimeoutMs: 15000 })
     // Pinned here too, because the whole probe rests on it: the branch is
     // listed, and its list entry looks exactly like a root's.
     const listedThreads = await service.listAllThreads()
     expect(listedThreads.map((thread) => thread.id).sort()).toEqual([forkId, rootId].sort())
     expect(listedThreads.find((thread) => thread.id === forkId)?.forkedFromId ?? null).toBeNull()
-    const plan = await codexDeletePlan(rootId, () => ({ title: null, live: false }), { cwd, env })
-    // PRE-FIX this was `[rootId]` and the walk was refused on the first node.
-    expect(plan.order).toEqual([forkId, rootId])
-    // The sweep also REGISTERED what it found, so the sidebar has it back.
-    expect(listCodexForks()).toEqual([{ threadId: forkId, forkedFromId: rootId }])
 
+    const facts = (): { title: null; live: boolean } => ({ title: null, live: false })
+    const plan = codexDeletePlan(rootId, facts)
+    // The cache never saw either thread, so the plan is the root alone — and
+    // the binary refuses it, because the branch still references its history.
+    expect(plan.order).toEqual([rootId])
+
+    const rescans: number[] = []
     await deleteCodexSubtree(
       plan,
       { unwatch: () => {}, stop: () => {}, removeSession: () => {} },
-      { cwd, env }
+      {
+        cwd,
+        env,
+        replan: async () => {
+          rescans.push(Date.now())
+          await scanCodexLineage({ cwd, env }, { confirmDelayMs: 50 }, 'all')
+          return codexDeletePlan(rootId, facts)
+        }
+      }
     )
+
+    // ONE rescan, and the walk continued on the plan it produced: the branch
+    // first, then the root that was refused a moment ago.
+    expect(rescans).toHaveLength(1)
     expect(await readable(service, forkId)).toBe(REFUSED)
     expect(await readable(service, rootId)).toBe(REFUSED)
+    expect((await service.listAllThreads()).map((thread) => thread.id)).toEqual([])
     expect(listCodexForks()).toEqual([])
     expect(errors).toEqual([])
   },

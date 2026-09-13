@@ -60,9 +60,18 @@ const { codexDeletePlan, deleteCodexSubtree } = vi.hoisted(() => ({
     nodes: [{ threadId: args[0], title: null, live: false, depth: 0 }],
     order: [args[0]]
   })),
-  deleteCodexSubtree: vi.fn(async (..._args: any[]) => {})
+  // Returns the threads it deleted, exactly as the real walk does — a project
+  // sweep reads that answer to know what it must not plan again.
+  deleteCodexSubtree: vi.fn(async (...args: any[]) => args[0].order as string[])
 }))
 vi.mock('../../../core/codex/delete', () => ({ codexDeletePlan, deleteCodexSubtree }))
+
+// The lineage scan the walk's one rescan runs. Mocked because the real one
+// spawns an app-server; what these tests pin is that a refusal can reach it.
+const { scanCodexLineage } = vi.hoisted(() => ({
+  scanCodexLineage: vi.fn(async () => ({ read: 0, learned: 0 }))
+}))
+vi.mock('../../../core/codex/history', () => ({ scanCodexLineage }))
 
 // Import AFTER mocks.
 import {
@@ -468,6 +477,38 @@ describe('handlers-core', () => {
       expect(refreshCanonicalDirectories).toHaveBeenCalled()
     })
 
+    /**
+     * The walk's one second chance (db v17). A `-32600` may mean "a branch this
+     * app has never heard of still references that thread", and the lineage
+     * cache is the only thing that can learn one — but only `handlers-core`
+     * knows the root id and the liveness lookup a rebuilt plan needs, so the
+     * closure is wired here.
+     */
+    it('hands the Codex walk a replan that rescans lineage and rebuilds', async () => {
+      const manager = {
+        cancel: vi.fn(),
+        get: vi.fn(),
+        has: vi.fn(() => false),
+        forEach: vi.fn()
+      } as any
+      await deleteSession(manager, 'cx-root', '-repo', 'codex')
+      const options = deleteCodexSubtree.mock.calls[0][2] as {
+        replan?: () => Promise<{ order: string[] }>
+      }
+      expect(typeof options?.replan).toBe('function')
+      codexDeletePlan.mockClear()
+      const rebuilt = await options.replan!()
+      // `all`: `verified_at` is ignored, because the cache has just been proven
+      // incomplete by the refusal.
+      expect(scanCodexLineage).toHaveBeenCalledWith(undefined, undefined, 'all')
+      // ...and the plan is rebuilt AFTER the scan, or it would read the same
+      // cache that was wrong a moment ago.
+      expect(scanCodexLineage.mock.invocationCallOrder[0]).toBeLessThan(
+        codexDeletePlan.mock.invocationCallOrder[0]
+      )
+      expect(rebuilt.order).toEqual(['cx-root'])
+    })
+
     it('refreshes the listing even when the Codex walk is refused', async () => {
       const manager = {
         cancel: vi.fn(),
@@ -494,6 +535,7 @@ describe('handlers-core', () => {
       const order: string[] = []
       deleteCodexSubtree.mockImplementation(async (plan: any) => {
         order.push(`codex:${plan.order.join(',')}`)
+        return plan.order as string[]
       })
       deleteProjectFiles.mockImplementation(async () => {
         order.push('unlink-claude')
@@ -517,6 +559,41 @@ describe('handlers-core', () => {
       // the walk already removed it, and a second ask is refused as "no such
       // thread", which is indistinguishable from a real refusal.
       expect(deleteSessionByEngine).not.toHaveBeenCalled()
+    })
+
+    /**
+     * A walk can delete MORE than the plan it was handed: its one rescan finds
+     * branches the lineage cache never knew. Those ids are gone, so planning a
+     * second delete for one of them would be refused as "no such thread" — a
+     * refusal indistinguishable from a real one, which would abort the whole
+     * project delete.
+     */
+    it('does not re-plan a thread the previous walk’s rescan already removed', async () => {
+      const manager = {
+        cancel: vi.fn(),
+        get: vi.fn(),
+        has: vi.fn(() => false),
+        forEach: vi.fn()
+      } as any
+      // The plan for `cx-1` named only itself; the walk also removed `cx-2`.
+      deleteCodexSubtree.mockImplementationOnce(async () => ['cx-1', 'cx-2'])
+      syncCore.setDirectories([
+        {
+          cwd: '/repo',
+          projectKey: '-repo',
+          folderName: 'repo',
+          sessions: [
+            { sessionId: 'cx-1', cwd: '/repo', projectKey: '-repo', engineId: 'codex' },
+            { sessionId: 'cx-2', cwd: '/repo', projectKey: '-repo', engineId: 'codex' }
+          ]
+        }
+      ] as never)
+
+      await deleteProject(manager, '-repo')
+
+      expect(deleteCodexSubtree).toHaveBeenCalledTimes(1)
+      expect(codexDeletePlan.mock.calls.map((call: unknown[]) => call[0])).toEqual(['cx-1'])
+      expect(deleteProjectFiles).toHaveBeenCalledWith('-repo')
     })
 
     it('a refused Codex walk aborts the project delete before anything irreversible', async () => {
