@@ -34,7 +34,12 @@ import {
   setCodexSessionOverrides,
   ensureCodexSessionOverrides,
   hasCodexSessionOverrides,
-  deleteCodexSessionOverrides
+  deleteCodexSessionOverrides,
+  registerCodexFork,
+  listCodexForks,
+  deleteCodexFork,
+  codexForkSweepDone,
+  markCodexForkSweepDone
 } from '../../../core/services/db'
 import { logger } from '../../../core/services/logger'
 
@@ -179,7 +184,7 @@ describe('migration framework — user_version guard', () => {
     }
   })
 
-  it('applies the real production migration set (v1–v15)', () => {
+  it('applies the real production migration set (v1–v16)', () => {
     const db = openRawDb()
     try {
       // Default migration list (production MIGRATIONS).
@@ -193,8 +198,11 @@ describe('migration framework — user_version guard', () => {
       // v13: LAN channel key + the `legacy` policy retirement (ADR-056),
       // v14: remote-IDE posture columns (ADR-064)
       // v15: accepted native Codex session overrides and verified identity marker
-      expect(userVersion(db)).toBe(15)
+      // v16: codex_forks — the fork registry the sidebar reads instead of
+      //      re-probing every session_meta id the native list omits
+      expect(userVersion(db)).toBe(16)
       expect(db.prepare('SELECT * FROM codex_session_overrides').all()).toEqual([])
+      expect(db.prepare('SELECT * FROM codex_forks').all()).toEqual([])
       // session_meta must exist and be queryable.
       const rows = db.prepare('SELECT * FROM session_meta').all()
       expect(rows).toEqual([])
@@ -273,7 +281,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(15)
+      expect(userVersion(db)).toBe(16)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',
@@ -417,7 +425,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(15)
+      expect(userVersion(db)).toBe(16)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         auth_policy: null,
         step_up_tier: 'medium',
@@ -484,6 +492,47 @@ describe('migration framework — user_version guard', () => {
 // ---------------------------------------------------------------------------
 // Migration framework — transactional application (each up + version bump atomic)
 // ---------------------------------------------------------------------------
+
+describe('Codex fork registry', () => {
+  it('registers a fork once, lists only real forks, and prunes by id', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      expect(listCodexForks(db)).toEqual([])
+      registerCodexFork('fork-a', 'source', db)
+      registerCodexFork('fork-b', 'source', db)
+      // A re-registration (a resume of the same branch) must not duplicate the
+      // row or rewrite its lineage.
+      registerCodexFork('fork-a', 'somewhere-else', db)
+      expect(listCodexForks(db)).toEqual([
+        { threadId: 'fork-a', forkedFromId: 'source' },
+        { threadId: 'fork-b', forkedFromId: 'source' }
+      ])
+      deleteCodexFork('fork-a', db)
+      expect(listCodexForks(db)).toEqual([{ threadId: 'fork-b', forkedFromId: 'source' }])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('carries the one-time legacy sweep marker without listing it as a fork', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      expect(codexForkSweepDone(db)).toBe(false)
+      markCodexForkSweepDone(db)
+      expect(codexForkSweepDone(db)).toBe(true)
+      // The marker is a row in the same table; it must never reach the reader.
+      expect(listCodexForks(db)).toEqual([])
+      expect(db.prepare('SELECT COUNT(*) AS n FROM codex_forks').get()).toEqual({ n: 1 })
+      // Idempotent: a second boot must not fail on the primary key.
+      markCodexForkSweepDone(db)
+      expect(codexForkSweepDone(db)).toBe(true)
+    } finally {
+      db.close()
+    }
+  })
+})
 
 describe('migration framework — transactional application', () => {
   it('rolls back partial DDL + the version bump when a migration throws mid-way', () => {

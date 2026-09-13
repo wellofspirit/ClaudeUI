@@ -52,6 +52,7 @@ import type { GuardianApprovalReviewAction } from './protocol/v2/GuardianApprova
 import type { ItemGuardianApprovalReviewCompletedNotification } from './protocol/v2/ItemGuardianApprovalReviewCompletedNotification'
 import type { FileChangeRequestApprovalParams } from './protocol/v2/FileChangeRequestApprovalParams'
 import type { ToolRequestUserInputParams } from './protocol/v2/ToolRequestUserInputParams'
+import type { CollabAgentStatus } from './protocol/v2/CollabAgentStatus'
 import { assertCodexProvider, selectCodexModel } from './model-selection'
 import {
   codexItemId,
@@ -74,12 +75,14 @@ import type { DynamicToolCallResponse } from './protocol/v2/DynamicToolCallRespo
 import type { DynamicToolCallOutputContentItem } from './protocol/v2/DynamicToolCallOutputContentItem'
 import type { ToolResultContent } from '../sdk/types'
 import { unwrapShellCommand } from './command-text'
+import { equivalentCostUsd } from '../../shared/pricing'
 import { BashStreamGate } from '../opencode/bash-stream-gate'
 import {
   setSessionMeta,
   getCodexSessionOverrides,
   setCodexSessionOverrides,
-  ensureCodexSessionOverrides
+  ensureCodexSessionOverrides,
+  registerCodexFork
 } from '../services/db'
 
 const serverMethods = [
@@ -289,6 +292,15 @@ type CodexChild = {
   usage: TokenUsageBreakdown | null
   /** A terminal `session:task-notification` is emitted exactly once. */
   notified: boolean
+  /**
+   * This child's last observed status, in Codex's own vocabulary.
+   *
+   * Written on the same transitions the core derives `AgentStatus` from
+   * (`core/src/agent/status.rs` `agent_status_from_event`): turn start →
+   * running, turn end → completed/errored/interrupted, teardown → shutdown.
+   * Last write wins, so the close always has the final say.
+   */
+  state: CollabAgentStatus
 }
 
 /** One notification for a thread that is not yet known to be a child. */
@@ -311,6 +323,13 @@ const CHILD_TERMINAL_STATUS: Record<string, TaskNotification['status']> = {
   notFound: 'failed',
   shutdown: 'stopped',
   interrupted: 'stopped'
+}
+
+/** The inverse, for the status a closed child reports on a later `wait` card. */
+const CHILD_CLOSED_STATE: Record<TaskNotification['status'], CollabAgentStatus> = {
+  completed: 'completed',
+  failed: 'errored',
+  stopped: 'shutdown'
 }
 
 /** Inline images are the only attachment Codex takes on either transport. */
@@ -453,6 +472,8 @@ export class CodexSession extends BaseSession {
   private nestedAgentWarned = false
   /** The root's own last token totals — the base every child's usage adds to. */
   private rootUsage: ThreadTokenUsage | null = null
+  /** Last computed API-rate equivalent of this session's tokens; null = unpriced. */
+  private equivalentCostUsd: number | null = null
   private output = new Map<string, string>()
   private bashGate = new BashStreamGate((toolUseId, output) =>
     this.send('session:bash-output', { toolUseId, output })
@@ -850,6 +871,11 @@ export class CodexSession extends BaseSession {
         model: { engineId: 'codex', vendorId: response.modelProvider, modelId: response.model }
       })
       ensureCodexSessionOverrides(this.threadId)
+      // A fork is invisible to `thread/list` forever (ADR-066), so the sidebar
+      // can only find this branch again if we say it exists. Registered HERE,
+      // at the one moment its id is known to be a fork's — `listCodexSessions`
+      // reads exactly these ids instead of re-probing every session_meta row.
+      if (branch) registerCodexFork(this.threadId, branch.threadId)
       this.status('idle')
       if (this.effort !== undefined)
         await this.client.request('thread/settings/update', {
@@ -1090,7 +1116,10 @@ export class CodexSession extends BaseSession {
           ? { engineId: 'codex', vendorId: this.native.modelProvider, modelId: this.effectiveModel }
           : null,
       cwd: this.cwd,
-      totalCostUsd: 0,
+      // The same API-rate equivalent the status line carries (and the TopBar's
+      // fallback until one arrives) — see `equivalentCost`. Zero here means
+      // "nothing metered yet or no published price", never "this was free".
+      totalCostUsd: this.equivalentCostUsd ?? 0,
       account: this.account,
       ...(this.native ? { codex: { ...this.native, overrides: { ...this.overrides } } } : {})
     } satisfies SessionStatus)
@@ -1215,6 +1244,54 @@ export class CodexSession extends BaseSession {
   }
 
   /**
+   * The API-rate equivalent of this session's cumulative tokens, or null when
+   * the model has no published price (a hidden/preview catalog entry, or a
+   * provider that is not OpenAI at all).
+   *
+   * The token mapping is Codex's, not Anthropic's, and the difference matters:
+   * `TokenUsageBreakdown.inputTokens` is the TOTAL prompt, with
+   * `cachedInputTokens` (cache hits) and `cacheWriteInputTokens` (tokens written
+   * into the cache) as SUBSETS of it — that is the OpenAI Responses API's
+   * `usage.input_tokens` / `input_tokens_details.{cached_tokens,
+   * cache_write_tokens}`, copied field for field in
+   * `codex-rs/codex-api/src/sse/responses.rs` (`impl From<ResponseCompletedUsage>
+   * for TokenUsage`). Anthropic reports the three DISJOINT, which is why
+   * `claude-session.ts` and `block-usage.ts` pass their input straight through.
+   * So the billable base rate here is what is left after both subsets.
+   *
+   * `reasoningOutputTokens` is likewise a subset of `outputTokens`
+   * (`output_tokens_details.reasoning_tokens`), so reasoning is already counted
+   * once as output and must never be added again.
+   */
+  private equivalentCost(tokens: {
+    input: number
+    output: number
+    cacheRead: number
+    cacheWrite: number
+  }): number | null {
+    if (!this.effectiveModel) return null
+    return equivalentCostUsd(this.native?.modelProvider ?? 'openai', this.effectiveModel, {
+      inputTokens: Math.max(0, tokens.input - tokens.cacheRead - tokens.cacheWrite),
+      outputTokens: tokens.output,
+      cacheWriteTokens: tokens.cacheWrite,
+      // OpenAI publishes ONE cache-write rate; the 5m/1h split is Anthropic's.
+      cacheWrite1hTokens: 0,
+      cacheReadTokens: tokens.cacheRead
+    })
+  }
+
+  /**
+   * A cross-engine dispatch changed this session's spend (ADR-033 slice C).
+   * BaseSession has no status-line builder, so each engine re-emits its own —
+   * the same one-line override ClaudeSession and PiSession carry. Codex's line
+   * is built from token usage, so a dispatch that lands before this thread has
+   * reported any usage of its own shows up on the next `tokenUsage/updated`.
+   */
+  protected override onDispatchedCostsChanged(): void {
+    this.emitMetering()
+  }
+
+  /**
    * The root's cumulative usage PLUS every child's, on the one meter the user
    * looks at. The two never double count: each thread emits its own
    * `thread/tokenUsage/updated` carrying its own cumulative totals for THAT
@@ -1236,16 +1313,23 @@ export class CodexSession extends BaseSession {
     const cacheRead = sum((entry) => entry.cachedInputTokens)
     const cacheWrite = sum((entry) => entry.cacheWriteInputTokens)
     const total = sum((entry) => entry.totalTokens)
+    this.equivalentCostUsd = this.equivalentCost({ input, output, cacheRead, cacheWrite })
     this.send('session:metering', {
       engineId: 'codex',
       vendorId: this.native?.modelProvider ?? 'openai',
       billingType: this.account?.billingType ?? 'unknown',
       tokens: { input, output, cacheRead, cacheWrite, total },
-      equivalentCostUsd: null,
+      equivalentCostUsd: this.equivalentCostUsd,
       contextWindow: { used: usage.last.totalTokens, size: usage.modelContextWindow ?? 0 }
     } satisfies MeteringSnapshot)
     this.send('session:status-line', {
-      totalCostUsd: 0,
+      // The EQUIVALENT, not a real charge: a ChatGPT-subscription turn's true
+      // USD cost is unknowable from here, and `StatusLineData.totalCostUsd` is a
+      // plain number with no "unknown" (see the ADR-066 open item). The API-rate
+      // equivalent is what the other engines show and the only honest figure
+      // available; an unpriced model leaves it at zero rather than guessing.
+      totalCostUsd: this.equivalentCostUsd ?? 0,
+      modelCosts: this.dispatchedCostEntries(),
       totalDurationMs: 0,
       totalApiDurationMs: 0,
       totalInputTokens: input,
@@ -1300,7 +1384,8 @@ export class CodexSession extends BaseSession {
       startedAt: Date.now(),
       toolUses: 0,
       usage: null,
-      notified: false
+      notified: false,
+      state: 'pendingInit'
     }
     this.children.set(childThreadId, child)
     const held = this.childHold.get(childThreadId) ?? []
@@ -1318,6 +1403,7 @@ export class CodexSession extends BaseSession {
   ): void {
     if (method === 'turn/started' && record(value.turn) && typeof value.turn.id === 'string') {
       child.turnId = value.turn.id
+      child.state = 'running'
       return
     }
     if (method === 'turn/completed' && record(value.turn)) {
@@ -1330,6 +1416,33 @@ export class CodexSession extends BaseSession {
       this.client.abortServerRequests(childThreadId, turn.id)
       for (const pending of [...this.pending.values()])
         if (pending.turnId === turn.id) pending.settle()
+      // What this child will report on the next `wait` card, in the same
+      // vocabulary the core's own `agent_status_from_event` uses.
+      if (turn.status !== 'inProgress')
+        child.state =
+          turn.status === 'failed'
+            ? 'errored'
+            : turn.status === 'interrupted'
+              ? 'interrupted'
+              : 'completed'
+      // A child that DIED closes its own card. On the v2 surface nothing else
+      // will: a terminal `subAgentActivity` is only emitted for a child that
+      // FINISHES, and `agentsStates` only ever reaches a v1 transcript, so a
+      // failed or interrupted child would spin under its card until teardown.
+      //
+      // A `completed` turn is NOT terminal and must not close it — on v2 that
+      // means "idle until the next message", and the parent routinely sends
+      // another one.
+      if ((turn.status === 'failed' || turn.status === 'interrupted') && !child.notified) {
+        const failed = turn.status === 'failed'
+        this.dispatch({
+          kind: 'toolResult',
+          toolUseId: child.parentToolUseId,
+          result: failed ? 'Agent failed.' : 'Agent was interrupted.',
+          isError: failed
+        })
+        this.finishChild(childThreadId, child, failed ? 'failed' : 'stopped')
+      }
       return
     }
     if (method === 'thread/tokenUsage/updated' && record(value.tokenUsage)) {
@@ -1437,6 +1550,7 @@ export class CodexSession extends BaseSession {
   ): void {
     if (child.notified) return
     child.notified = true
+    child.state = CHILD_CLOSED_STATE[status]
     this.send('session:task-notification', {
       taskId: childThreadId,
       toolUseId: child.parentToolUseId,
@@ -1649,11 +1763,53 @@ export class CodexSession extends BaseSession {
     }
     const timestamp =
       this.messageHistory.find((message) => message.id === id)?.timestamp ?? Date.now()
-    for (const event of mapCodexItem(this.threadId!, turnId, item, completed, timestamp))
+    for (const event of mapCodexItem(
+      this.threadId!,
+      turnId,
+      this.withKnownAgents(item),
+      completed,
+      timestamp
+    ))
       this.dispatch(event)
     // The tool_use block a held denial was waiting for may have just landed.
     const held = this.heldDenials.get(id)
     if (held) this.offerGuardianOverride(held)
+  }
+
+  /**
+   * A `wait` collab call that names no agents, answered from this session's own
+   * child registry.
+   *
+   * On the v2 surface the native `wait_agent` item arrives with an EMPTY
+   * `receiverThreadIds` and `agentsStates` (v2 reports agent lifecycle through
+   * `subAgentActivity` instead, and only the v1 tool populates those two
+   * fields), so the card rendered null input and "No agent reported a state for
+   * this call." — true of the payload, useless to the reader. This session
+   * already knows every child it spawned and what each one last did, so it
+   * fills them in. The mapper stays pure: it has no registry and must keep
+   * rendering cold history exactly as the wire recorded it.
+   *
+   * Only ever ADDITIVE: a call that does name agents (every v1 one) passes
+   * through untouched, and so does a `wait` on a session with no children.
+   */
+  private withKnownAgents(item: ThreadItem): ThreadItem {
+    if (
+      item.type !== 'collabAgentToolCall' ||
+      item.tool !== 'wait' ||
+      item.receiverThreadIds.length ||
+      !this.children.size
+    )
+      return item
+    return {
+      ...item,
+      receiverThreadIds: [...this.children.keys()],
+      agentsStates: Object.fromEntries(
+        [...this.children].map(([threadId, child]) => [
+          threadId,
+          { status: child.state, message: null }
+        ])
+      )
+    }
   }
 
   private dispatch(event: CodexMappedEvent): void {

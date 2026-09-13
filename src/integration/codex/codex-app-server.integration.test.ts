@@ -23,6 +23,12 @@ import {
   loadCodexHistory,
   resolveCodexForkAnchor
 } from '../../core/codex/history'
+import {
+  listCodexForks,
+  markCodexForkSweepDone,
+  registerCodexFork,
+  setSessionMeta
+} from '../../core/services/db'
 import { setHostPaths } from '../../core/host'
 import { crossEngineDispatcher } from '../../core/services/cross-engine-dispatcher'
 import type { PendingApproval } from '../../shared/types'
@@ -60,13 +66,19 @@ vi.mock('../../core/services/db', async (importOriginal) => {
     // gets far enough to record a row — the target is stubbed — so this exists
     // to keep the mock's export surface honest, not to be called.
     insertDispatchedUsage: vi.fn(),
-    // Real rows, not spies: the fork sweep in `listCodexSessions` IS a
-    // session_meta read, so a stubbed table would make it trivially pass.
-    // `setSessionMeta` and friends take no db handle, so the isolated table is
-    // this map rather than the in-memory database used for the overrides.
+    // Real rows, not spies: the fork registry `listCodexSessions` reads (and
+    // the legacy session_meta sweep it adopts once) must be the real thing, or
+    // a stubbed table would make this trivially pass. `setSessionMeta` and
+    // friends take no db handle, so the isolated session_meta table is this map
+    // rather than the in-memory database used for the overrides and the forks.
     setSessionMeta: (id: string, meta: unknown) => void sessionMeta.set(id, meta),
     getSessionMeta: (id: string) => sessionMeta.get(id),
     allSessionMeta: () => Object.fromEntries(sessionMeta),
+    registerCodexFork: (id: string, from: string | null) => actual.registerCodexFork(id, from, db),
+    listCodexForks: () => actual.listCodexForks(db),
+    deleteCodexFork: (id: string) => actual.deleteCodexFork(id, db),
+    codexForkSweepDone: () => actual.codexForkSweepDone(db),
+    markCodexForkSweepDone: () => actual.markCodexForkSweepDone(db),
     getCodexSessionOverrides: (id: string) => actual.getCodexSessionOverrides(id, db),
     hasCodexSessionOverrides: (id: string) => actual.hasCodexSessionOverrides(id, db),
     ensureCodexSessionOverrides: (id: string) => actual.ensureCodexSessionOverrides(id, db),
@@ -1380,6 +1392,18 @@ it.skipIf(!enabled)(
       resolve('vendor/codex-cli/codex-code-mode-host'),
       join(directory!, 'vendor/codex-cli/codex-code-mode-host')
     )
+    // The registry the sidebar actually reads (db v16): written by
+    // `CodexSession.start` the moment `thread/fork` answered.
+    expect(listCodexForks()).toEqual([{ threadId: forkId, forkedFromId: sourceId }])
+    // Two negatives, against the real binary, in one list:
+    //  - a REGISTERED id the binary can no longer resolve must be pruned (this
+    //    is the `-32600` the deleted-thread probe pins), and
+    //  - a codex `session_meta` id that is NOT registered must never be read,
+    //    which is the whole point of retiring the sweep.
+    const neverMinted = '01890000-0000-7000-8000-00000000dead'
+    registerCodexFork(neverMinted, sourceId)
+    setSessionMeta('deleted-behind-our-back', { engineId: 'codex' })
+    markCodexForkSweepDone()
     const sidebar = (await listCodexSessions({ cwd, env })).map((entry) => entry.sessionId)
     console.log(
       JSON.stringify({
@@ -1411,6 +1435,9 @@ it.skipIf(!enabled)(
     expect(listed).not.toContain(forkId)
     expect(sidebar).toContain(sourceId)
     expect(sidebar).toContain(forkId)
+    expect(sidebar).not.toContain('deleted-behind-our-back')
+    // Pruned: the fork survives, the id the binary refused is gone for good.
+    expect(listCodexForks()).toEqual([{ threadId: forkId, forkedFromId: sourceId }])
 
     // The canonical seed `create-session.ts` runs for every branch: the SOURCE
     // read back through the anchor turn. Without the cut it would show clients

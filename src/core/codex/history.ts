@@ -11,14 +11,107 @@ import {
   setSessionMeta,
   getSessionMeta,
   allSessionMeta,
-  ensureCodexSessionOverrides
+  ensureCodexSessionOverrides,
+  registerCodexFork,
+  listCodexForks,
+  deleteCodexFork,
+  codexForkSweepDone,
+  markCodexForkSweepDone
 } from '../services/db'
+import { CodexTransportError } from './CodexAppServerClient'
 import type { Thread } from './protocol/v2/Thread'
 
 type CodexReadOptions = Pick<CodexClientOptions, 'cwd' | 'env'>
 
-/** How many metadata-only reads the fork sweep keeps on the wire at once. */
+/** How many metadata-only reads the fork pass keeps on the wire at once. */
 const FORK_READ_CONCURRENCY = 4
+
+/**
+ * The ONE JSON-RPC code that means "this thread id will never resolve again".
+ *
+ * `thread/read` answers `-32600` (Invalid Request) for every id the app-server
+ * cannot resolve at all — "thread not loaded: <id>" when neither the rollout
+ * nor a live thread exists, "invalid thread id: <err>" when it does not even
+ * parse (`app-server/src/request_processors/thread_processor.rs`
+ * `read_thread_view` / `thread_read_response_inner`, both through
+ * `error_code.rs::invalid_request`). Everything that is merely BROKEN — an IO
+ * failure reading the rollout, a store fault — becomes `-32603` (Internal), and
+ * a transport fault never reaches a JSON-RPC code at all. That asymmetry is
+ * what makes pruning on this code safe; it is pinned against the real binary by
+ * `codex-lifecycle.integration.test.ts` (`readDeletedFork`).
+ *
+ * The client collapses a JSON-RPC error to `rpc-error-<code>` and drops the
+ * native message (CodexService keeps payloads out of core), so the code is all
+ * there is to match on.
+ */
+const THREAD_UNRESOLVABLE = 'rpc-error--32600'
+
+/** One metadata-only read's outcome: the thread, or why there is none. */
+type ForkRead =
+  { threadId: string; thread: Thread } | { threadId: string; thread: null; unresolvable: boolean }
+
+/**
+ * Read `ids` metadata-only, {@link FORK_READ_CONCURRENCY} at a time, in the
+ * order they were given. One failure never fails the batch — it is reported.
+ */
+async function readThreads(service: CodexService, ids: string[]): Promise<ForkRead[]> {
+  const results = new Array<ForkRead>(ids.length)
+  let next = 0
+  await Promise.all(
+    Array.from({ length: Math.min(FORK_READ_CONCURRENCY, ids.length) }, async () => {
+      for (let index = next++; index < ids.length; index = next++) {
+        const threadId = ids[index]
+        try {
+          const { thread } = await service.readThread({ threadId, includeTurns: false })
+          results[index] = { threadId, thread }
+        } catch (error) {
+          results[index] = {
+            threadId,
+            thread: null,
+            unresolvable: error instanceof CodexTransportError && error.code === THREAD_UNRESOLVABLE
+          }
+        }
+      }
+    })
+  )
+  return results
+}
+
+/** A thread that belongs in the sidebar — a root, not a native child or a scratch thread. */
+function listable(thread: Thread): boolean {
+  return !thread.parentThreadId && !thread.ephemeral
+}
+
+/**
+ * ONE-TIME adoption of the forks that predate the registry (db v16).
+ *
+ * Before the registry, a fork was only findable by re-reading every codex id in
+ * `session_meta` the native list omitted. Existing users' branches are still
+ * only recorded there, so the first list after the migration runs that sweep
+ * exactly once and writes what it finds into the registry. "Exactly once" is
+ * the marker row in `codex_forks` itself (`markCodexForkSweepDone`) — no
+ * separate settings flag, and not the table's emptiness, which would re-sweep
+ * forever for a user who has no forks at all.
+ *
+ * The marker is set only when every id in the sweep was ANSWERED (resolved, or
+ * definitively refused). A transport failure mid-sweep leaves it unset so the
+ * next refresh retries: marking done on a broken read would silently drop a
+ * real fork, which is the one outcome this must never have.
+ */
+async function adoptLegacyForks(service: CodexService, native: Set<string>): Promise<Thread[]> {
+  const unlisted = Object.entries(allSessionMeta())
+    .filter(([id, meta]) => meta.engineId === 'codex' && !native.has(id))
+    .map(([id]) => id)
+  const reads = await readThreads(service, unlisted)
+  const adopted: Thread[] = []
+  for (const read of reads) {
+    if (!read.thread || !listable(read.thread)) continue
+    registerCodexFork(read.thread.id, read.thread.forkedFromId ?? null)
+    adopted.push(read.thread)
+  }
+  if (reads.every((read) => read.thread !== null || read.unresolvable)) markCodexForkSweepDone()
+  return adopted
+}
 
 /**
  * How many spawned child threads one cold read will reconstruct.
@@ -62,11 +155,16 @@ function adoptThread(thread: Thread): SessionInfo {
  *
  * `thread/list` is the native listing and it NEVER returns forks (pinned by
  * `src/integration/codex/codex-lifecycle.integration.test.ts`), so a branch
- * would vanish from the sidebar on the next restart. Since `CodexSession.start`
- * writes `session_meta` for every thread it owns, the codex ids in that table
- * minus the natively listed ones are exactly the forks plus threads deleted
- * behind our back: read each one, keep what the binary still resolves, and drop
- * what it refuses. One failure never fails the list.
+ * would vanish from the sidebar on the next restart. The forks are therefore
+ * named explicitly: `CodexSession.start` registers every thread `thread/fork`
+ * mints (db v16), and this reads back exactly those ids, four at a time.
+ *
+ * That registry replaces the old derivation — "every codex `session_meta` id
+ * the native list omits" — which after a few deletions was mostly dead ids
+ * re-probed on every sidebar refresh. A read the binary refuses DEFINITIVELY
+ * ({@link THREAD_UNRESOLVABLE}) drops the row; any other failure keeps it and
+ * skips that fork for this round, because a transport blip must never delete a
+ * branch. One failure never fails the list.
  */
 export async function listCodexSessions(
   options: CodexReadOptions = { cwd: homedir() }
@@ -75,26 +173,20 @@ export async function listCodexSessions(
   const service = new CodexService(options)
   try {
     const listed = await service.listAllThreads()
-    const sessions = listed
-      .filter((thread) => !thread.parentThreadId && !thread.ephemeral)
-      .map(adoptThread)
+    const sessions = listed.filter(listable).map(adoptThread)
     const native = new Set(listed.map((thread) => thread.id))
-    const unlisted = Object.entries(allSessionMeta())
-      .filter(([id, meta]) => meta.engineId === 'codex' && !native.has(id))
-      .map(([id]) => id)
-    let next = 0
-    await Promise.all(
-      Array.from({ length: Math.min(FORK_READ_CONCURRENCY, unlisted.length) }, async () => {
-        for (let index = next++; index < unlisted.length; index = next++) {
-          const thread = await service
-            .readThread({ threadId: unlisted[index], includeTurns: false })
-            .then((result) => result.thread)
-            .catch(() => undefined)
-          if (thread && !thread.parentThreadId && !thread.ephemeral)
-            sessions.push(adoptThread(thread))
-        }
-      })
-    )
+    // Existing users' forks live only in `session_meta`; adopt them once.
+    const adopted = codexForkSweepDone() ? [] : await adoptLegacyForks(service, native)
+    for (const thread of adopted) sessions.push(adoptThread(thread))
+    const seen = new Set([...native, ...adopted.map((thread) => thread.id)])
+    const ids = listCodexForks()
+      .map((fork) => fork.threadId)
+      .filter((id) => !seen.has(id))
+    for (const read of await readThreads(service, ids)) {
+      if (read.thread) {
+        if (listable(read.thread)) sessions.push(adoptThread(read.thread))
+      } else if (read.unresolvable) deleteCodexFork(read.threadId)
+    }
     return sessions
   } finally {
     service.dispose()

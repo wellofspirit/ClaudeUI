@@ -2,6 +2,7 @@ import { beforeEach, expect, it, vi } from 'vitest'
 import { discoverCodexModels } from '../model-discovery'
 import { listCodexSessions, loadCodexHistory, resolveCodexForkAnchor } from '../history'
 import { setSessionMeta } from '../../services/db'
+import { CodexTransportError } from '../CodexAppServerClient'
 
 const mocks = vi.hoisted(() => ({
   available: true,
@@ -11,7 +12,10 @@ const mocks = vi.hoisted(() => ({
   list: vi.fn(),
   read: vi.fn(),
   meta: vi.fn(() => ({}) as Record<string, { engineId: string }>),
-  dispose: vi.fn()
+  dispose: vi.fn(),
+  /** The fork registry (db v16), as a map so the tests can seed and inspect it. */
+  forks: new Map<string, string | null>(),
+  swept: { done: false }
 }))
 vi.mock('../codex-locate', () => ({ codexBinaryAvailable: () => mocks.available }))
 vi.mock('../CodexService', () => ({
@@ -28,11 +32,21 @@ vi.mock('../../services/db', () => ({
   setSessionMeta: vi.fn(),
   getSessionMeta: () => undefined,
   allSessionMeta: () => mocks.meta(),
-  ensureCodexSessionOverrides: vi.fn()
+  ensureCodexSessionOverrides: vi.fn(),
+  registerCodexFork: (threadId: string, forkedFromId: string | null) => {
+    if (!mocks.forks.has(threadId)) mocks.forks.set(threadId, forkedFromId)
+  },
+  listCodexForks: () =>
+    [...mocks.forks].map(([threadId, forkedFromId]) => ({ threadId, forkedFromId })),
+  deleteCodexFork: (threadId: string) => void mocks.forks.delete(threadId),
+  codexForkSweepDone: () => mocks.swept.done,
+  markCodexForkSweepDone: () => void (mocks.swept.done = true)
 }))
 beforeEach(() => {
   vi.clearAllMocks()
   mocks.available = true
+  mocks.forks.clear()
+  mocks.swept.done = false
   mocks.config.mockResolvedValue({ model_provider: 'openai', model: 'native' })
 })
 
@@ -210,7 +224,7 @@ it('reports a refused source read rather than throwing at the branch button', as
   expect(mocks.dispose).toHaveBeenCalledOnce()
 })
 
-it('restores forks from session metadata, which native listing never returns', async () => {
+it('adopts pre-registry forks once, then reads only what the registry holds', async () => {
   const root = {
     id: 'root',
     model: 'native',
@@ -241,6 +255,66 @@ it('restores forks from session metadata, which native listing never returns', a
     engineId: 'codex',
     model: { engineId: 'codex', vendorId: 'openai', modelId: 'native' }
   })
+  // What the sweep found is now REGISTERED, so the next refresh reads it
+  // directly. `deleted` failed with a non-definitive error, so the sweep is not
+  // marked done and it is retried — once it is refused definitively it is gone
+  // from the round for good (the prune test below).
+  expect([...mocks.forks]).toEqual([['fork', 'root']])
+})
+
+it('never sweeps session metadata again once the registry has been adopted', async () => {
+  const root = {
+    id: 'root',
+    model: 'native',
+    modelProvider: 'openai',
+    name: 'Root',
+    cwd: '/isolated',
+    createdAt: 1,
+    updatedAt: 2
+  }
+  mocks.list.mockResolvedValue([root])
+  // A table full of ids the native list omits — every one of which the old
+  // sweep re-probed on EVERY refresh. None of them may be read now.
+  mocks.meta.mockReturnValue({
+    root: { engineId: 'codex' },
+    'deleted-last-week': { engineId: 'codex' },
+    'deleted-behind-our-back': { engineId: 'codex' },
+    claude: { engineId: 'claude' }
+  })
+  mocks.swept.done = true
+  mocks.forks.set('fork', 'root')
+  mocks.read.mockImplementation(async ({ threadId }: { threadId: string }) => {
+    if (threadId !== 'fork') throw new Error('no such thread')
+    return { thread: { ...root, id: 'fork', name: 'Fork', forkedFromId: 'root' } }
+  })
+  expect((await listCodexSessions()).map((session) => session.sessionId)).toEqual(['root', 'fork'])
+  expect(mocks.read.mock.calls.map(([params]) => params.threadId)).toEqual(['fork'])
+})
+
+it('prunes a definitively refused fork and keeps one whose read merely broke', async () => {
+  const root = {
+    id: 'root',
+    model: 'native',
+    modelProvider: 'openai',
+    name: 'Root',
+    cwd: '/isolated',
+    createdAt: 1,
+    updatedAt: 2
+  }
+  mocks.list.mockResolvedValue([root])
+  mocks.meta.mockReturnValue({ root: { engineId: 'codex' } })
+  mocks.swept.done = true
+  mocks.forks.set('gone', 'root')
+  mocks.forks.set('unreachable', 'root')
+  mocks.read.mockImplementation(async ({ threadId }: { threadId: string }) => {
+    // `-32600` is the app-server's answer for a thread it cannot resolve at all
+    // ("thread not loaded: <id>" / "invalid thread id"); an IO or transport
+    // failure is `-32603` or a transport code, never this.
+    if (threadId === 'gone') throw new CodexTransportError('rpc-error--32600')
+    throw new CodexTransportError('request-timeout')
+  })
+  expect((await listCodexSessions()).map((session) => session.sessionId)).toEqual(['root'])
+  expect([...mocks.forks.keys()]).toEqual(['unreachable'])
 })
 
 it('reconstructs a spawned child transcript under its parent card on a cold read', async () => {

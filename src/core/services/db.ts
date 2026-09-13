@@ -554,6 +554,30 @@ export const MIGRATIONS: Migration[] = [
         updated_at INTEGER NOT NULL
       )`)
     }
+  },
+  {
+    // v16 — the Codex FORK REGISTRY.
+    //
+    // `thread/list` never returns a forked thread, so the sidebar has to know
+    // about a branch some other way. It used to derive them: every codex id in
+    // `session_meta` that the native list omitted got a `thread/read` on every
+    // refresh, which after a few deletions is mostly dead ids re-probed forever
+    // (an unbounded-in-N sweep, ADR-066 open item). This table is the explicit
+    // record instead — written once when `thread/fork` lands, read back as the
+    // exact set of ids to probe, and pruned when the binary says the thread is
+    // gone for good.
+    //
+    // `forked_from_id` is the source thread, kept for lineage/debugging (and
+    // NULLABLE because the one-time adoption of pre-existing forks can only
+    // learn it from the thread itself, which may not carry it).
+    version: 16,
+    up(db) {
+      db.exec(`CREATE TABLE codex_forks (
+        thread_id TEXT PRIMARY KEY,
+        forked_from_id TEXT,
+        created_at INTEGER NOT NULL
+      )`)
+    }
   }
 ]
 
@@ -835,6 +859,68 @@ export function hasCodexSessionOverrides(sessionId: string, db: Db = getDb()): b
 
 export function deleteCodexSessionOverrides(sessionId: string, db: Db = getDb()): void {
   db.prepare('DELETE FROM codex_session_overrides WHERE session_id = ?').run(sessionId)
+}
+
+// ---------------------------------------------------------------------------
+// Codex fork registry (v16) — see that migration's comment for the why.
+// ---------------------------------------------------------------------------
+
+/** One registered branch: the forked thread and the thread it was cut from. */
+export interface CodexFork {
+  threadId: string
+  forkedFromId: string | null
+}
+
+/**
+ * The one-time legacy-adoption marker, kept IN this table rather than in a
+ * second table or a settings flag: it is the same fact ("what does the fork
+ * registry know?"), it is written in the same transaction-free way, and the
+ * empty string is not a thread id the app-server can ever mint (thread ids are
+ * UUIDs). {@link listCodexForks} filters it out, so no reader ever sees it.
+ */
+const FORK_SWEEP_MARKER = ''
+
+/** Record a `thread/fork` result. First registration wins — a later resume of the
+ *  same branch must not rewrite its lineage or duplicate the row. */
+export function registerCodexFork(
+  threadId: string,
+  forkedFromId: string | null,
+  db: Db = getDb()
+): void {
+  if (threadId === FORK_SWEEP_MARKER) return
+  db.prepare(
+    'INSERT OR IGNORE INTO codex_forks (thread_id, forked_from_id, created_at) VALUES (?, ?, ?)'
+  ).run(threadId, forkedFromId, Date.now())
+}
+
+/** Every registered fork, oldest first. The sweep marker is never included. */
+export function listCodexForks(db: Db = getDb()): CodexFork[] {
+  return (
+    db
+      .prepare(
+        'SELECT thread_id, forked_from_id FROM codex_forks WHERE thread_id <> ? ORDER BY created_at, thread_id'
+      )
+      .all(FORK_SWEEP_MARKER) as Array<{ thread_id: string; forked_from_id: string | null }>
+  ).map((row) => ({ threadId: row.thread_id, forkedFromId: row.forked_from_id }))
+}
+
+/** Forget one fork — ONLY for a thread the binary has definitively refused. */
+export function deleteCodexFork(threadId: string, db: Db = getDb()): void {
+  db.prepare('DELETE FROM codex_forks WHERE thread_id = ?').run(threadId)
+}
+
+/** Whether the one-time adoption of pre-registry forks has already run. */
+export function codexForkSweepDone(db: Db = getDb()): boolean {
+  return (
+    db.prepare('SELECT 1 FROM codex_forks WHERE thread_id = ?').get(FORK_SWEEP_MARKER) !== undefined
+  )
+}
+
+/** Record that the one-time adoption has run. Idempotent. */
+export function markCodexForkSweepDone(db: Db = getDb()): void {
+  db.prepare(
+    'INSERT OR IGNORE INTO codex_forks (thread_id, forked_from_id, created_at) VALUES (?, NULL, ?)'
+  ).run(FORK_SWEEP_MARKER, Date.now())
 }
 
 /**

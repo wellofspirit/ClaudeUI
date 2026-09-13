@@ -50,9 +50,9 @@ describe('DB migrations — v3 usage_event + v4 usage_window_sample', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      // Bump alongside MIGRATIONS in db.ts — currently v11 (webauthn_credential
-      // + auth-policy columns, ADR-052 passkeys).
-      expect(userVersion(db)).toBe(15)
+      // Bump alongside MIGRATIONS in db.ts — currently v16 (codex_forks, the
+      // Codex fork registry ADR-066 reads instead of sweeping session_meta).
+      expect(userVersion(db)).toBe(16)
     } finally {
       db.close()
     }

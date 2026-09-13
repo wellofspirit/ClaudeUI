@@ -9,6 +9,8 @@ import { emptyCanonicalState } from '../../shared/sync/state'
 
 const events = vi.hoisted(() => vi.fn())
 const overrides = vi.hoisted(() => new Map<string, unknown>())
+/** The fork registry (db v16) a branch writes its new thread id into. */
+const forks = vi.hoisted(() => new Map<string, string>())
 /** Hermetic Claude permission rules — never the dev machine's real ~/.claude. */
 const rules = vi.hoisted(() => ({
   allow: [] as string[],
@@ -89,6 +91,8 @@ vi.mock('../../services/ui-config', async (importOriginal) => ({
 vi.mock('../../services/db', () => ({
   dispatchedCostsByRouting: () => [],
   setSessionMeta: vi.fn(),
+  registerCodexFork: (threadId: string, forkedFromId: string) =>
+    void forks.set(threadId, forkedFromId),
   getCodexSessionOverrides: (id: string) => overrides.get(id),
   hasCodexSessionOverrides: (id: string) => overrides.has(id),
   ensureCodexSessionOverrides: (id: string) => {
@@ -104,6 +108,7 @@ afterEach(() => {
   sessions.length = 0
   events.mockClear()
   overrides.clear()
+  forks.clear()
   savedRules.mockClear()
   hosted.mermaid.mockClear()
   hosted.mockup.mockClear()
@@ -356,6 +361,16 @@ describe('Codex first session', () => {
       threadId: 'fork',
       effort: 'ultra'
     })
+    // `thread/list` never returns a fork, so the sidebar can only find this
+    // branch again through the registry (db v16) — written here, at the one
+    // moment the id is known to be a fork's.
+    expect([...forks]).toEqual([['fork', 'root']])
+  })
+
+  it('registers nothing when the thread is not a branch', async () => {
+    const { session } = fixture({ resumeSessionId: 'root' })
+    await session.run(null)
+    expect([...forks]).toEqual([])
   })
 
   it('refuses a branch the binary rooted somewhere else', async () => {
@@ -2370,6 +2385,92 @@ describe('Codex native children', () => {
     // it in would misreport how close this thread is to compaction.
     expect(meters.at(-1)!.contextWindow.used).toBe(110)
   })
+
+  it('prices the turn at the API-rate equivalent, with cached and written input split out', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    // The model the user actually picks. Codex's own `thread/settings/updated`
+    // is how a mid-session switch arrives.
+    f.notify('thread/settings/updated', {
+      threadId: 'root',
+      threadSettings: { model: 'gpt-5.6-luna', modelProvider: 'openai', effort: 'ultra' }
+    })
+    f.notify('thread/tokenUsage/updated', {
+      threadId: 'root',
+      turnId: 'turn',
+      tokenUsage: {
+        total: {
+          // 1M prompt tokens of which 600k were cache hits and 200k were
+          // written into the cache, so only 200k bill at the base input rate.
+          inputTokens: 1_000_000,
+          cachedInputTokens: 600_000,
+          cacheWriteInputTokens: 200_000,
+          // Reasoning is a SUBSET of output, never an addition to it.
+          outputTokens: 1_000_000,
+          reasoningOutputTokens: 400_000,
+          totalTokens: 2_000_000
+        },
+        last: {
+          inputTokens: 1_000_000,
+          cachedInputTokens: 600_000,
+          cacheWriteInputTokens: 200_000,
+          outputTokens: 1_000_000,
+          reasoningOutputTokens: 400_000,
+          totalTokens: 2_000_000
+        },
+        modelContextWindow: 4_000_000
+      }
+    })
+    // gpt-5.6-luna: $0.20 in / $0.02 cached / $0.25 written / $1.20 out per MTok
+    // → 0.2 × 0.2 + 0.6 × 0.02 + 0.2 × 0.25 + 1 × 1.2 = 1.302
+    const meters = sent('session:metering') as Array<{ equivalentCostUsd: number | null }>
+    expect(meters.at(-1)!.equivalentCostUsd).toBeCloseTo(1.302, 6)
+    const lines = sent('session:status-line') as Array<{ totalCostUsd: number }>
+    expect(lines.at(-1)!.totalCostUsd).toBeCloseTo(1.302, 6)
+    // `session:status` is only re-emitted when something about the session
+    // changes, so it carries the cost from the next emission onward — the
+    // TopBar reads it only as the pre-status-line fallback.
+    f.notify('thread/settings/updated', {
+      threadId: 'root',
+      threadSettings: { model: 'gpt-5.6-luna', modelProvider: 'openai', effort: 'ultra' }
+    })
+    const statuses = sent('session:status') as Array<{ totalCostUsd: number }>
+    expect(statuses.at(-1)!.totalCostUsd).toBeCloseTo(1.302, 6)
+  })
+
+  it('reports no cost at all for a model with no published price', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    f.notify('thread/tokenUsage/updated', {
+      threadId: 'root',
+      turnId: 'turn',
+      tokenUsage: {
+        total: {
+          inputTokens: 100,
+          cachedInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          outputTokens: 10,
+          reasoningOutputTokens: 0,
+          totalTokens: 110
+        },
+        last: {
+          inputTokens: 100,
+          cachedInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          outputTokens: 10,
+          reasoningOutputTokens: 0,
+          totalTokens: 110
+        },
+        modelContextWindow: 1000
+      }
+    })
+    // The fixture's model is `native`, which no pricing table knows. A guess
+    // would be worse than silence (ADR-030).
+    const meters = sent('session:metering') as Array<{ equivalentCostUsd: number | null }>
+    expect(meters.at(-1)!.equivalentCostUsd).toBeNull()
+    const lines = sent('session:status-line') as Array<{ totalCostUsd: number }>
+    expect(lines.at(-1)!.totalCostUsd).toBe(0)
+  })
 })
 
 describe('Codex hosted tools and children', () => {
@@ -2502,6 +2603,135 @@ describe('Codex native children over multi_agent_v2', () => {
     expect(sent('session:task-notification')).toEqual([
       expect.objectContaining({ taskId: 'child', toolUseId: CARD, status: 'stopped' })
     ])
+  })
+
+  it("closes the card when the child's own turn fails, and marks it an error", async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    activity(f, 'started', 'spawn-call')
+    f.notify('turn/started', { threadId: 'child', turn: { id: 'child-turn' } })
+    // Nothing else will ever close this card: a dying child emits no terminal
+    // `subAgentActivity`, and `agentsStates` is a v1 concept.
+    f.notify('turn/completed', {
+      threadId: 'child',
+      turn: { id: 'child-turn', status: 'failed', items: [], error: { message: 'boom' } }
+    })
+    expect(sent('session:tool-result')).toEqual([
+      { toolUseId: CARD, result: 'Agent failed.', isError: true }
+    ])
+    expect(sent('session:task-notification')).toEqual([
+      expect.objectContaining({ taskId: 'child', toolUseId: CARD, status: 'failed' })
+    ])
+  })
+
+  it("closes the card when the child's own turn is interrupted, without calling it an error", async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    activity(f, 'started', 'spawn-call')
+    f.notify('turn/completed', {
+      threadId: 'child',
+      turn: { id: 'child-turn', status: 'interrupted', items: [] }
+    })
+    // The user (or a parent interrupt) asked for this; red would read as a
+    // failure of the agent rather than as a decision.
+    expect(sent('session:tool-result')).toEqual([
+      { toolUseId: CARD, result: 'Agent was interrupted.', isError: false }
+    ])
+    expect(sent('session:task-notification')).toEqual([
+      expect.objectContaining({ taskId: 'child', toolUseId: CARD, status: 'stopped' })
+    ])
+  })
+
+  it("leaves the card open when the child's turn merely completes", async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    activity(f, 'started', 'spawn-call')
+    // On v2 a child's `completed` turn means "idle until the next message" —
+    // the parent routinely sends another one, so closing here would end the
+    // agent's transcript mid-conversation.
+    f.notify('turn/completed', {
+      threadId: 'child',
+      turn: { id: 'child-turn', status: 'completed', items: [] }
+    })
+    expect(sent('session:tool-result')).toEqual([])
+    expect(sent('session:task-notification')).toEqual([])
+    // And the real terminal signal still closes it exactly once.
+    activity(f, 'completed', 'subagent-completed-child-turn')
+    expect(sent('session:task-notification')).toEqual([
+      expect.objectContaining({ taskId: 'child', status: 'completed' })
+    ])
+  })
+
+  it('answers a v2 wait card from the registry when the wire names no agents', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    activity(f, 'started', 'spawn-call')
+    f.notify('turn/started', { threadId: 'child', turn: { id: 'child-turn' } })
+    f.notify('turn/completed', {
+      threadId: 'child',
+      turn: { id: 'child-turn', status: 'completed', items: [] }
+    })
+    // What v2 actually sends: `wait_agent` with both agent fields empty, because
+    // the surface reports lifecycle through `subAgentActivity` instead.
+    f.notify('item/completed', {
+      threadId: 'root',
+      turnId: 'turn',
+      item: {
+        id: 'wait-call',
+        type: 'collabAgentToolCall',
+        tool: 'wait',
+        status: 'completed',
+        senderThreadId: 'root',
+        receiverThreadIds: [],
+        prompt: null,
+        model: null,
+        reasoningEffort: null,
+        agentsStates: {}
+      }
+    })
+    const card = (sent('session:message') as Array<{ id: string; content: unknown[] }>).find(
+      (message) => message.id === 'codex:["root","turn","wait-call"]'
+    )!
+    expect(card.content[0]).toMatchObject({
+      type: 'tool_use',
+      toolName: 'collab:wait',
+      toolInput: {
+        receiverThreadIds: ['child'],
+        agentsStates: { child: { status: 'completed', message: null } }
+      }
+    })
+    expect(sent('session:tool-result')).toContainEqual({
+      toolUseId: 'codex:["root","turn","wait-call"]',
+      result: 'child: completed',
+      isError: false
+    })
+  })
+
+  it('leaves a wait card that does name its agents exactly as the wire sent it', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    activity(f, 'started', 'spawn-call')
+    f.notify('item/completed', {
+      threadId: 'root',
+      turnId: 'turn',
+      item: {
+        id: 'wait-call',
+        type: 'collabAgentToolCall',
+        tool: 'wait',
+        status: 'completed',
+        senderThreadId: 'root',
+        receiverThreadIds: ['other'],
+        prompt: null,
+        model: null,
+        reasoningEffort: null,
+        agentsStates: { other: { status: 'running', message: 'still going' } }
+      }
+    })
+    expect(sent('session:tool-result')).toContainEqual({
+      toolUseId: 'codex:["root","turn","wait-call"]',
+      result: 'other: running \u2014 still going',
+      isError: false
+    })
   })
 
   it('refuses to nest a v2 grandchild too', async () => {
