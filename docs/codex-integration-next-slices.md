@@ -356,6 +356,8 @@ Owned: `src/core/codex/event-mapper.ts`, `src/core/codex/CodexSession.ts`, `src/
 
 ## Slice G: delete a Codex session by walking its branch tree, with confirmation
 
+**Landed in `01f38172` (2026-09-13).** Departures and findings: spawned collab children need no walk (`thread/delete` removes the spawn subtree itself, confirmed live); the "await disconnected" barrier does not exist (the writer lock is released when the app-server PROCESS exits), so a refused delete of a just-stopped node is retried for 3 s instead; `locateCodexBinary()` gates the delete rather than `codexBinaryAvailable()`; a fork that has run a turn IS listed by `thread/list` without lineage, so adoption (now generation v3) and the plan sweep read metadata for every codex `session_meta` id and never trust the listing; `-32600` from `thread/read` is confirmed by a second spaced read before it counts as gone.
+
 Decided by Daniel on 2026-09-13: delete walks the tree leaf-first after a
 confirmation that lists what will be removed, and stops non-destructively at
 the first refusal. Archive stays unused (ClaudeUI's own "hidden" sessions cover
