@@ -419,3 +419,29 @@ itself) can hand a task to a headless Codex thread through `dispatch_agent`.
 ### Files and boundaries
 
 Owned: `src/core/services/cross-engine-dispatcher.ts` (new codex target path and the availability/guard lines), new `src/core/codex/codex-dispatch-target.ts` (or the policy/turn-input extraction module), `src/core/codex/CodexSession.ts` ONLY to export or lift the shared policy table and `turnInput` (no behaviour change; its tests must pass unchanged), the three source-side tool descriptions for the target list, the dispatcher tests, the new integration file. Do not touch `history.ts`, `db.ts`, `handlers-core.ts`, the Sidebar (slice G owns them), other engines' target paths, or docs.
+
+## Slice I: approvals from nested agents render inline as well as floating
+
+Decided by Daniel on 2026-09-13: keep the floating card, and ALSO bind the same
+approval to the matching tool block inside the nested subagent view.
+
+### As-built facts (re-verify)
+
+- `src/renderer/src/components/chat/FloatingApproval.tsx` `useUnmatchedApprovals` floats every pending approval whose `toolUseId` matches no `tool_use` block in the session's TOP-LEVEL `messages`. Nested transcripts live in `subagentMessages[parentToolUseId]`, so an approval raised by a Codex child agent (bound to the child item's id), or by a dispatched claude/opencode/pi target (bound to the target's inner tool call id, see `gatePiTargetToolCall`), always floats and never renders next to the command it concerns.
+- `MessageBubble.tsx` (~268-295) binds `pendingApprovals` to tool blocks by `toolUseId` and hands the match to `ToolCard` as `approval`, which renders `ApprovalButtons`. `SubagentMessages.tsx` / `SubagentOutputBody.tsx` render the nested transcript without any approval binding.
+
+### Design
+
+1. `SubagentMessages` (and whatever it delegates tool rendering to) receives the session's `pendingApprovals` and binds them to nested `tool_use` blocks by `toolUseId` exactly as `MessageBubble` does, passing the match down so the nested `ToolCard` shows the same `ApprovalButtons`. Same `onApproval` path (`window.api.resolveApproval` or the store action the top level uses); one `requestId`, so answering either surface dismisses both.
+2. `useUnmatchedApprovals` is NOT changed: an approval bound to a nested block still floats, by decision. Add a comment there saying so.
+3. Works for all producers: Codex child agents, and dispatched targets on any engine (verify the dispatcher's forwarded approvals use the inner tool call id that the nested `tool_use` block carries; the Claude and pi target gates do, check opencode's).
+4. No core change; if a core change is needed, stop and report.
+
+### Tests (each must fail before the corresponding change)
+
+- Component: a nested subagent transcript with a `tool_use` block and a pending approval bound to it renders `ApprovalButtons` inside the nested view AND the floating card; clicking Allow in the nested view calls the same resolve with the same `requestId`; an approval for a top-level block does not render in the nested view.
+- Real-app check by the reviewer: a Codex child agent asking for approval in default mode shows both surfaces.
+
+### Files and boundaries
+
+Owned: `src/renderer/src/components/chat/SubagentMessages.tsx`, `SubagentOutputBody.tsx`, `FloatingApproval.tsx` (comment only), their tests. Do not touch core, the reducer, or other renderer components; do not touch the Sidebar (slice G).
