@@ -208,7 +208,7 @@ const VERSIONS: SettingItem = {
 const CODEX_ACCOUNT: SettingItem = {
   key: 'codexNativeAccount',
   label: 'Native Codex account',
-  keywords: 'codex chatgpt openai native device login authentication',
+  keywords: 'codex chatgpt openai native account login authentication vault',
   render: () => <CodexAccount />
 }
 export const PAGE_LOCAL_ITEMS: readonly SettingItem[] = [
@@ -765,7 +765,7 @@ export const PAGES: SettingsPage[] = [
     rail: 'engines',
     icon: <EngineLogo engineId="codex" size={14} />,
     engine: 'codex',
-    description: 'Native account, catalog and policy. No shared-vault credentials are copied.',
+    description: 'Native catalog and policy. The ChatGPT account comes from the shared vault.',
     groups: [{ id: 'account', label: 'Native account', items: [CODEX_ACCOUNT] }]
   }
 ]

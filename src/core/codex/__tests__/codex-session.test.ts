@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CodexSession } from '../CodexSession'
 import type { CodexClient } from '../CodexClient'
+import { codexAuthHook, type CodexAuthHook, type CodexAuthSource } from '../codex-auth-hook'
 import { CodexTransportError, type CodexClientOptions } from '../CodexAppServerClient'
 import type { EngineSpawnOptions } from '../../providers/ISession'
 import type { QueuedItem } from '../../../shared/types'
@@ -126,7 +127,7 @@ afterEach(() => {
   rules.ask = []
 })
 
-function fixture(opts: EngineSpawnOptions = {}) {
+function fixture(opts: EngineSpawnOptions = {}, auth: CodexAuthHook | null = null) {
   let callbacks!: CodexClientOptions
   const policy = {
     approvalPolicy: { granular: { rules: true } },
@@ -170,7 +171,12 @@ function fixture(opts: EngineSpawnOptions = {}) {
   })
   const controllers: AbortController[] = []
   const client = {
-    start: vi.fn(async () => ({})),
+    // Mirrors the real `CodexClient.start`: the identity is taken BEFORE the
+    // caller is allowed to continue (ADR-068 §1).
+    start: vi.fn(async (_params: unknown, hook?: CodexAuthHook | null) => {
+      await hook?.inject()
+      return {}
+    }),
     request,
     dispose: vi.fn(),
     abortServerRequests: vi.fn(() => controllers.forEach((controller) => controller.abort()))
@@ -180,7 +186,7 @@ function fixture(opts: EngineSpawnOptions = {}) {
     null,
     '/isolated',
     opts,
-    { env: { HOME: '/isolated' } },
+    { env: { HOME: '/isolated' }, auth },
     (options) => {
       callbacks = options
       return client as unknown as CodexClient
@@ -3003,5 +3009,134 @@ describe('Codex sub-agent activity after the spawning turn ends', () => {
       delta: 'x'
     })
     expect(sent('session:message').slice(before)).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Slice 2a guard 5 — the session runs as a VAULT account (ADR-068 §1)
+// ---------------------------------------------------------------------------
+
+describe('Codex sessions under an injected ChatGPT account', () => {
+  /** A token source with one account. No vault, no network, no real token. */
+  function authSource(token: string | null): CodexAuthSource {
+    return {
+      injectionTokenFor: vi.fn(async () =>
+        token
+          ? {
+              accessToken: token,
+              chatgptAccountId: 'ws-fixture',
+              chatgptPlanType: 'pro',
+              vaultAccountId: 'acct-fixture'
+            }
+          : null
+      ),
+      getStatus: vi.fn(async () => ({
+        accounts: [{ id: 'acct-fixture', accountId: 'ws-fixture' }]
+      }))
+    }
+  }
+  const statuses = (): Array<Record<string, unknown>> =>
+    events.mock.calls
+      .filter(([channel]) => channel === 'session:status')
+      .map((call) => (call[1] as [string, Record<string, unknown>])[1])
+
+  it('attributes the session to the VAULT account id, with the native email as its label', async () => {
+    const hook = codexAuthHook({ source: authSource('fake-access-jwt') })
+    const { session, request } = fixture({}, hook)
+    const fallback = request.getMockImplementation()!
+    request.mockImplementation((async (method: string, params?: unknown) => {
+      if (method === 'account/read')
+        return { account: { type: 'chatgpt', email: 'owner@example.test', planType: 'pro' } }
+      if (method === 'config/read') return { config: { model: 'native', model_provider: 'openai' } }
+      if (method === 'model/list')
+        return {
+          data: [
+            {
+              model: 'native',
+              supportedReasoningEfforts: [{ reasoningEffort: 'ultra', description: 'Native ultra' }]
+            }
+          ],
+          nextCursor: null
+        }
+      if (method === 'thread/start')
+        return {
+          thread: { id: 'root', turns: [] },
+          model: 'native',
+          modelProvider: 'openai',
+          reasoningEffort: 'ultra'
+        }
+      return fallback(method, params)
+    }) as typeof fallback)
+
+    await session.run(null)
+
+    expect(statuses().at(-1)!.account).toEqual({
+      engineId: 'codex',
+      vendorId: 'openai',
+      authState: 'authenticated',
+      billingType: 'subscription',
+      label: 'owner@example.test',
+      accountId: 'acct-fixture'
+    })
+  })
+
+  it('keeps today’s native derivation when nothing was injected', async () => {
+    const hook = codexAuthHook({ source: authSource(null) })
+    const { session, request } = fixture({}, hook)
+    const base = request.getMockImplementation()!
+    request.mockImplementation((async (method: string, params?: unknown) =>
+      method === 'account/read'
+        ? { account: { type: 'apiKey' } }
+        : base(method, params)) as typeof base)
+
+    await session.run(null)
+
+    expect(statuses().at(-1)!.account).toEqual({
+      engineId: 'codex',
+      vendorId: 'openai',
+      authState: 'authenticated',
+      billingType: 'apiKey'
+    })
+  })
+
+  it('answers the native refresh request, and asks for a sign-in when it cannot', async () => {
+    const source = authSource('fake-access-jwt')
+    const hook = codexAuthHook({ source })
+    const { session, callbacks } = fixture({}, hook)
+    await session.run(null)
+
+    const ask = (): Promise<unknown> =>
+      callbacks.onServerRequest!(
+        'account/chatgptAuthTokens/refresh',
+        { reason: 'unauthorized', previousAccountId: 'ws-fixture' },
+        { id: 99, signal: new AbortController().signal }
+      )
+    await expect(ask()).resolves.toEqual({
+      accessToken: 'fake-access-jwt',
+      chatgptAccountId: 'ws-fixture',
+      chatgptPlanType: 'pro'
+    })
+
+    source.injectionTokenFor = vi.fn(async () => null)
+    events.mockClear()
+    await expect(ask()).rejects.toThrow()
+    expect(events).toHaveBeenCalledWith('session:auth-required', [
+      'temporary',
+      { providerId: 'chatgpt', accountId: 'acct-fixture' }
+    ])
+    const errors = events.mock.calls.filter(([channel]) => channel === 'session:error')
+    expect(errors).toEqual([
+      [
+        'session:error',
+        ['temporary', 'ChatGPT sign-in expired; sign in again from Settings › Models & providers']
+      ]
+    ])
+  })
+
+  it('registers the refresh method on the transport', () => {
+    // Without it the app-server's request is answered `-32601 Method not found`
+    // and the turn is simply lost — nothing else refreshes an injected token.
+    const { callbacks } = fixture({}, codexAuthHook({ source: authSource('fake-access-jwt') }))
+    expect(callbacks.serverMethods).toContain('account/chatgptAuthTokens/refresh')
   })
 })

@@ -890,6 +890,11 @@ export function applyEvent(
       }
       next = withSession(next, id, (s) => ({
         status,
+        // A turn that is running again is the proof the credential works, so the
+        // owed sign-in is cleared HERE rather than on the auth event's own
+        // schedule (ADR-068 §4). `disconnected` returns above and must not
+        // clear it: the reason the process died may be exactly this.
+        ...(status.state === 'running' ? { authRequired: null } : {}),
         ...(status.engineId === 'codex' && status.model
           ? {
               selectedModel: status.codex?.overrides?.model ?? status.model.modelId,
@@ -931,6 +936,20 @@ export function applyEvent(
       const routingId = routingIdOf(event)
       if (!routingId) return state
       return withSession(state, routingId, dismissCompletedTodos)
+    }
+
+    case 'session:auth-required': {
+      const routingId = routingIdOf(event)
+      const data = arg<{ providerId?: string; accountId?: string }>(event, 1)
+      if (!routingId || !data?.providerId || !state.sessions[routingId]) return state
+      const providerId = data.providerId
+      const accountId = data.accountId
+      return withSession(state, routingId, () => ({
+        authRequired: {
+          providerId,
+          ...(typeof accountId === 'string' && accountId ? { accountId } : {})
+        }
+      }))
     }
 
     // -----------------------------------------------------------------------

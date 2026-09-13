@@ -67,6 +67,17 @@ export interface CanonicalSessionState {
   /** A catalog preview is not an explicit native model override. */
   codexModelExplicit?: boolean
   /**
+   * The credential this session needs was rejected and could not be renewed
+   * (ADR-068 §4), cleared the moment a turn starts running again.
+   *
+   * Core-internal and NOT on the wire yet, the same deliberate asymmetry
+   * `seeded` has: nothing renders it until the sign-in dialog lands (slice 3),
+   * and putting a field on `PerSessionSnapshot` that no client reads would
+   * advertise a contract that does not exist. A restored snapshot therefore
+   * comes back null; the event itself rings, so a reconnecting client replays it.
+   */
+  authRequired: { providerId: string; accountId?: string } | null
+  /**
    * Core-internal, never serialized: has this session's transcript been seeded
    * from its on-disk history yet? The shadow comparator masks unseeded sessions,
    * because the renderer loads history through a query the reducer cannot see.
@@ -138,6 +149,7 @@ export function emptySession(routingId: string, cwd = ''): CanonicalSessionState
     sdkActive: false,
     selectedEngineId: 'claude',
     selectedModel: 'default',
+    authRequired: null,
     seeded: false
   }
 }
@@ -220,6 +232,9 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
       selectedEngineId: s.selectedEngineId ?? 'claude',
       selectedModel: s.selectedModel ?? 'default',
       ...(s.codexModelExplicit !== undefined ? { codexModelExplicit: s.codexModelExplicit } : {}),
+      // Not on the wire (see `CanonicalSessionState.authRequired`): a restored
+      // session starts owing no sign-in, and the ringed event re-applies one.
+      authRequired: null,
       seeded: true
     }
   }

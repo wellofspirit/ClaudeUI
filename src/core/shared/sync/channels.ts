@@ -312,6 +312,12 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: false,
     why: 'Rings and fans out; no snapshot field (the card is re-derived from the next turn).'
   },
+  'session:auth-required': {
+    cls: 'replicated',
+    ring: true,
+    canonical: true,
+    why: 'ADR-068 §4: the session remembers which provider/account was rejected until the next turn starts, so a client that reconnects mid-outage still knows a sign-in is owed. Core-internal for now — the wire field and the banner land with the sign-in dialog in slice 3.'
+  },
   'session:auth-source': {
     cls: 'replicated',
     ring: true,

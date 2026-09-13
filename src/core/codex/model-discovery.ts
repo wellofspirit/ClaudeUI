@@ -1,12 +1,15 @@
 import { homedir } from 'node:os'
 import type { EngineModelGroup } from '../../shared/types'
 import { CodexService } from './CodexService'
+import { codexAuthHook } from './codex-auth-hook'
 import { codexBinaryAvailable } from './codex-locate'
 import { assertCodexProvider } from './model-selection'
 
 export async function discoverCodexModels(): Promise<EngineModelGroup[]> {
   if (!codexBinaryAvailable()) return []
-  const service = new CodexService({ cwd: homedir() })
+  // Discovery runs under the vault's ChatGPT account (ADR-068 §1): the catalog a
+  // subscription can see is a property of the identity asking for it.
+  const service = new CodexService({ cwd: homedir(), auth: codexAuthHook() })
   try {
     const [catalog, config] = await Promise.all([service.models(), service.effectiveConfig()])
     assertCodexProvider(config.model_provider)

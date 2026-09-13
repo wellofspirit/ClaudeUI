@@ -67,9 +67,6 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     codexApproval: (id, requestId, decision) =>
       unwrap('session:codex-approval', id, requestId, decision),
     codexAuthStatus: () => unwrap('codex:auth-status'),
-    codexLoginStart: () => unwrap('codex:login-start'),
-    codexLoginStatus: () => unwrap('codex:login-status'),
-    codexLoginCancel: () => unwrap('codex:login-cancel'),
     codexDeletePlan: (threadId) => unwrap('session:codex-delete-plan', threadId),
     pickFolder: () => ipcRenderer.invoke('session:pick-folder'),
     createSession: (

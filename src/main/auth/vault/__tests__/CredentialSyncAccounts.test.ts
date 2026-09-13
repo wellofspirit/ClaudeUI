@@ -392,3 +392,145 @@ describe('CredentialSync.getStatus with accounts', () => {
     sync.stop()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Slice 2a guards 3 and 4 — the ONE token-bearing method, and the silence of
+// everything around it.
+// ---------------------------------------------------------------------------
+
+describe('CredentialSync.injectionTokenFor', () => {
+  it('hands back the ACTIVE account with no refresh when the credential is fresh', async () => {
+    const vault = new AuthVault()
+    const active = await vault.upsertAccount(
+      CHATGPT_PROVIDER_ID,
+      cred({
+        ws: 'ws-a',
+        access: 'fake-access-a',
+        expires: Date.now() + REFRESH_MARGIN_MS + 60_000,
+        planType: 'pro'
+      })
+    )
+    const refreshAccessToken = vi.fn()
+    const sync = new CredentialSync({ vault, refreshAccessToken })
+    sync.configure({ pi: fakeTarget().target, opencode: fakeTarget().target })
+
+    await expect(sync.injectionTokenFor(null)).resolves.toEqual({
+      accessToken: 'fake-access-a',
+      chatgptAccountId: 'ws-a',
+      chatgptPlanType: 'pro',
+      vaultAccountId: active.id
+    })
+    expect(refreshAccessToken).not.toHaveBeenCalled()
+    sync.stop()
+  })
+
+  it('refreshes ONCE inside the margin even when two processes start together', async () => {
+    const vault = new AuthVault()
+    const active = await vault.upsertAccount(
+      CHATGPT_PROVIDER_ID,
+      cred({ ws: 'ws-a', access: 'fake-stale', refresh: 'fake-r', expires: Date.now() + 60_000 })
+    )
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const refreshAccessToken = vi.fn(async () => {
+      await gate
+      return { access_token: 'fake-rotated', refresh_token: 'fake-r2', expires_in: 3600 }
+    })
+    const sync = new CredentialSync({ vault, refreshAccessToken })
+    sync.configure({ pi: fakeTarget().target, opencode: fakeTarget().target })
+
+    const both = Promise.all([sync.injectionTokenFor(null), sync.injectionTokenFor(null)])
+    await Promise.resolve()
+    release()
+    const [first, second] = await both
+
+    // One network refresh for two callers: the per-account single-flight the
+    // scheduled path already uses is what this goes through.
+    expect(refreshAccessToken).toHaveBeenCalledTimes(1)
+    expect(first?.accessToken).toBe('fake-rotated')
+    expect(second?.accessToken).toBe('fake-rotated')
+    expect(first?.vaultAccountId).toBe(active.id)
+    sync.stop()
+  })
+
+  it('answers a REFRESH request from cache: margin 0 refreshes only what expired', async () => {
+    // Codex abandons the turn after 10 s, so the refresh handler passes margin 0
+    // and a token that is merely inside the 15-minute window is answered as is.
+    const vault = new AuthVault()
+    await vault.upsertAccount(
+      CHATGPT_PROVIDER_ID,
+      cred({ ws: 'ws-a', access: 'fake-inside-margin', expires: Date.now() + 60_000 })
+    )
+    const refreshAccessToken = vi.fn()
+    const sync = new CredentialSync({ vault, refreshAccessToken })
+    sync.configure({ pi: fakeTarget().target, opencode: fakeTarget().target })
+
+    const token = await sync.injectionTokenFor(null, 0)
+
+    expect(token?.accessToken).toBe('fake-inside-margin')
+    expect(refreshAccessToken).not.toHaveBeenCalled()
+    sync.stop()
+  })
+
+  it('picks a NAMED account, and refuses one with no workspace id', async () => {
+    const vault = new AuthVault()
+    const first = await vault.upsertAccount(
+      CHATGPT_PROVIDER_ID,
+      cred({ ws: 'ws-a', access: 'fake-access-a', expires: Date.now() + REFRESH_MARGIN_MS + 1_000 })
+    )
+    const second = await vault.upsertAccount(
+      CHATGPT_PROVIDER_ID,
+      cred({
+        ws: 'ws-b',
+        access: 'fake-access-b',
+        refresh: 'fake-rb',
+        expires: Date.now() + REFRESH_MARGIN_MS + 1_000
+      })
+    )
+    const sync = new CredentialSync({ vault, refreshAccessToken: vi.fn() })
+    sync.configure({ pi: fakeTarget().target, opencode: fakeTarget().target })
+
+    expect((await sync.injectionTokenFor(second.id))?.chatgptAccountId).toBe('ws-b')
+    expect((await sync.injectionTokenFor(first.id))?.chatgptAccountId).toBe('ws-a')
+    expect(await sync.injectionTokenFor('no-such-account')).toBeNull()
+
+    // `account/login/start {type:'chatgptAuthTokens'}` REQUIRES a workspace id,
+    // so a credential without one is not injectable at all.
+    await vault.saveAccountCredential(
+      CHATGPT_PROVIDER_ID,
+      second.id,
+      cred({ access: 'fake-access-b', refresh: 'fake-rb', expires: Date.now() + 3_600_000 })
+    )
+    expect(await sync.injectionTokenFor(second.id)).toBeNull()
+    sync.stop()
+  })
+
+  it('an empty vault injects nothing', async () => {
+    const sync = new CredentialSync({ vault: new AuthVault(), refreshAccessToken: vi.fn() })
+    sync.configure({ pi: fakeTarget().target, opencode: fakeTarget().target })
+    await expect(sync.injectionTokenFor(null)).resolves.toBeNull()
+    sync.stop()
+  })
+
+  it('leaves getStatus token-free now that a token-bearing method exists', async () => {
+    const vault = new AuthVault()
+    await vault.upsertAccount(
+      CHATGPT_PROVIDER_ID,
+      cred({
+        ws: 'ws-a',
+        access: 'secret-access-a',
+        refresh: 'secret-refresh-a',
+        expires: Date.now() + REFRESH_MARGIN_MS + 1_000
+      })
+    )
+    const sync = new CredentialSync({ vault, refreshAccessToken: vi.fn() })
+    sync.configure({ pi: fakeTarget().target, opencode: fakeTarget().target })
+
+    const token = await sync.injectionTokenFor(null)
+    expect(token?.accessToken).toBe('secret-access-a')
+    expect(JSON.stringify(await sync.getStatus())).not.toContain('secret-')
+    sync.stop()
+  })
+})

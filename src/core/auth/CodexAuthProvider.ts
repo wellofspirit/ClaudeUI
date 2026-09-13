@@ -1,15 +1,28 @@
 import { homedir } from 'node:os'
 import type { EngineAuthProvider } from './EngineAuthProvider'
 import type { VendorAuthMap } from '../../shared/types'
-import type { CodexAuthStatus, CodexLoginState } from '../../shared/codex-types'
+import type { CodexAuthStatus } from '../../shared/codex-types'
 import { CodexService } from '../codex/CodexService'
+import { codexAuthHook } from '../codex/codex-auth-hook'
 import { codexBinaryAvailable } from '../codex/codex-locate'
+import { credentialSync } from './vault/CredentialSync'
 
+/**
+ * The Codex half of the engine-auth registry (ADR-021).
+ *
+ * ADR-068 §1 moved the IDENTITY out of here: Codex no longer owns a login the
+ * product can start. The vault owns the ChatGPT account, every Codex process is
+ * injected with it, and this provider only REPORTS — first from the vault, and
+ * only when the vault holds nothing from the native store, which is what a user
+ * who signed in with `codex login` themselves still has. The device-code flow it
+ * used to drive survives in `CodexService.startLogin` as tested code with no
+ * product entry point.
+ */
 export class CodexAuthProvider implements EngineAuthProvider {
-  private state: CodexLoginState = { status: 'idle' }
-  private cancel?: () => void
-
-  constructor(private readonly service = new CodexService({ cwd: homedir() })) {}
+  constructor(
+    private readonly service = new CodexService({ cwd: homedir(), auth: codexAuthHook() }),
+    private readonly vault: Pick<typeof credentialSync, 'getStatus'> = credentialSync
+  ) {}
 
   async status(): Promise<CodexAuthStatus> {
     if (!codexBinaryAvailable())
@@ -45,6 +58,23 @@ export class CodexAuthProvider implements EngineAuthProvider {
   }
 
   async probe(): Promise<VendorAuthMap> {
+    // The vault first: an account here IS what every Codex process runs as, so
+    // reporting the native store instead would describe an identity nothing uses.
+    const vault = await this.vault.getStatus().catch(() => null)
+    const active = vault?.accounts.find((account) => account.id === vault.activeId)
+    if (active) {
+      return {
+        openai: {
+          // A revoked refresh token is reported as such rather than as a healthy
+          // subscription (ADR-030): the turn WILL fail, and the sign-in prompt
+          // is the only thing that fixes it.
+          authState: active.needsReauth ? 'unauthenticated' : 'authenticated',
+          billingType: 'subscription',
+          requiresLogin: active.needsReauth,
+          label: active.email ?? 'ChatGPT'
+        }
+      }
+    }
     const status = await this.status()
     return {
       openai: {
@@ -67,47 +97,6 @@ export class CodexAuthProvider implements EngineAuthProvider {
     }
   }
 
-  loginStatus(): CodexLoginState {
-    return { ...this.state }
-  }
-
-  async loginStart(): Promise<CodexLoginState> {
-    if (!codexBinaryAvailable()) throw new Error('Codex is not installed for this platform')
-    if (this.cancel) throw new Error('A native Codex login is already pending')
-    this.state = { status: 'starting' }
-    // Device flow is reachable from both hosts; never opens a host browser.
-    let flow: ReturnType<CodexService['startLogin']>
-    try {
-      flow = this.service.startLogin({ type: 'chatgptDeviceCode' })
-    } catch {
-      this.state = { status: 'failed' }
-      throw new Error('Native Codex login could not start')
-    }
-    this.cancel = flow.cancel
-    void flow.completed.then((result) => {
-      this.state = result
-      this.cancel = undefined
-    })
-    const started = await flow.started.catch(() => {
-      this.state = { status: 'failed' }
-      flow.cancel()
-      this.cancel = undefined
-      throw new Error('Native Codex login failed to start')
-    })
-    if (started.type !== 'chatgptDeviceCode') throw new Error('Unexpected native login response')
-    const url = new URL(started.verificationUrl)
-    if (url.protocol !== 'https:' || !['auth.openai.com', 'chatgpt.com'].includes(url.hostname)) {
-      flow.cancel()
-      throw new Error('Native login returned an unsupported verification URL')
-    }
-    if (this.loginStatus().status === 'starting')
-      this.state = { status: 'waiting', verificationUrl: url.href, userCode: started.userCode }
-    return this.loginStatus()
-  }
-
-  loginCancel(): void {
-    this.cancel?.()
-  }
   dispose(): void {
     this.service.dispose()
   }

@@ -33,17 +33,14 @@ describe('native command authorization', () => {
     const { registry } = fixture()
     // Model and effort now travel over the engine-neutral `session:set-model` /
     // `session:set-effort` commands, so no native settings channel survives.
-    expect([...CODEX_CHANNELS]).toEqual([
-      'session:codex-approval',
-      'codex:auth-status',
-      'codex:login-start',
-      'codex:login-status',
-      'codex:login-cancel'
-    ])
+    // ADR-068 §1 deleted the native device-code login from the product, and with
+    // it the three `codex:login-*` channels; `codex:auth-status` stays as the
+    // availability + model-count query.
+    expect([...CODEX_CHANNELS]).toEqual(['session:codex-approval', 'codex:auth-status'])
     expect(registry.channels('remote')).toEqual([...CODEX_CHANNELS].sort())
   })
 
-  it('answers native approvals with `chat`, and keeps login behind `config`', async () => {
+  it('answers native approvals with `chat`, and keeps the auth read behind `config`', async () => {
     const { registry, session } = fixture()
     const connection = { ...hostConnection(), grants: new Set(['chat'] as const) }
     await registry.dispatch(
@@ -53,8 +50,8 @@ describe('native command authorization', () => {
       connection
     )
     expect(session.resolveCodexApproval).toHaveBeenCalledExactlyOnceWith('pending', 'cancel')
-    // A chat-only connection must not reach the native login ceremony.
-    await expect(registry.dispatch('codex:login-start', 'remote', [], connection)).rejects.toThrow(
+    // A chat-only connection must not reach the account surface.
+    await expect(registry.dispatch('codex:auth-status', 'remote', [], connection)).rejects.toThrow(
       'config'
     )
   })

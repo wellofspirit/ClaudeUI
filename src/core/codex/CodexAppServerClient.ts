@@ -11,7 +11,23 @@ import provenance from './protocol/provenance.json'
 export class CodexTransportError extends Error {
   constructor(
     public readonly code: string,
-    public readonly ambiguousDelivery = false
+    public readonly ambiguousDelivery = false,
+    /**
+     * The native `error.message` of an `rpc-error-*` rejection, carried BESIDE
+     * `message` (which stays the payload-free `Codex transport: <code>` every
+     * existing caller logs and surfaces).
+     *
+     * It exists for exactly one caller: `CodexClient`'s token injection, where
+     * the refusal IS the product message — a `forced_chatgpt_workspace_id` in
+     * the user's `config.toml` rejects tokens from other workspaces and ADR-068
+     * §1 requires that surfaced verbatim rather than as a numeric code. The
+     * native strings on that path name workspaces, never token material
+     * (`account_processor.rs::login_chatgpt_auth_tokens_response`, and
+     * `IdTokenInfoError`, whose variants carry no JWT).
+     *
+     * Nothing else reads it, and nothing logs it.
+     */
+    public readonly nativeMessage?: string
   ) {
     super(`Codex transport: ${code}`)
   }
@@ -322,7 +338,11 @@ export class CodexAppServerClient {
         clearTimeout(request.timer)
         if ('error' in message)
           request.reject(
-            new CodexTransportError(`rpc-error-${(message.error as { code: number }).code}`)
+            new CodexTransportError(
+              `rpc-error-${(message.error as { code: number }).code}`,
+              false,
+              (message.error as { message: string }).message
+            )
           )
         else request.resolve(message.result)
       }

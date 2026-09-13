@@ -1,5 +1,6 @@
 import { CodexClient } from './CodexClient'
 import { CodexTransportError, type CodexClientOptions } from './CodexAppServerClient'
+import type { CodexAuthHook } from './codex-auth-hook'
 import type { Account } from './protocol/v2/Account'
 import type { Config } from './protocol/v2/Config'
 import type { LoginAccountParams } from './protocol/v2/LoginAccountParams'
@@ -43,6 +44,18 @@ const initialize = {
   capabilities: { experimentalApi: true, requestAttestation: false }
 }
 
+/**
+ * What a service is built with. `auth` is the ChatGPT identity its READ clients
+ * run as (ADR-068 §1) and is deliberately absent by default — a service built
+ * without one injects nothing and never reads the vault, which keeps the
+ * real-binary integration suite away from a developer's credentials. The
+ * production read paths (`CodexAuthProvider`, model discovery) supply it.
+ */
+export type CodexServiceOptions = Pick<
+  CodexClientOptions,
+  'cwd' | 'env' | 'requestTimeoutMs' | 'killGraceMs'
+> & { auth?: CodexAuthHook | null }
+
 /** Host-only, bounded read clients. Never starts/resumes/forks a thread or owns a root. */
 export class CodexService {
   private disposed = false
@@ -52,12 +65,17 @@ export class CodexService {
   private catalogRead?: Promise<Model[]>
   private login?: { cancel: () => void }
 
-  constructor(
-    private readonly options: Pick<
-      CodexClientOptions,
-      'cwd' | 'env' | 'requestTimeoutMs' | 'killGraceMs'
-    >
-  ) {}
+  private readonly options: Pick<
+    CodexClientOptions,
+    'cwd' | 'env' | 'requestTimeoutMs' | 'killGraceMs'
+  >
+  private readonly auth: CodexAuthHook | null
+
+  constructor(options: CodexServiceOptions) {
+    const { auth = null, ...transport } = options
+    this.options = transport
+    this.auth = auth
+  }
 
   private client(
     callbacks: Pick<CodexClientOptions, 'onNotification' | 'onDisconnect'> = {}
@@ -76,7 +94,7 @@ export class CodexService {
     if (this.disposed) throw new CodexTransportError('disposed')
     if (!this.reads) {
       const client = this.client()
-      this.reads = { client, ready: client.start(initialize), users: 0 }
+      this.reads = { client, ready: client.start(initialize, this.auth), users: 0 }
     }
     const reads = this.reads
     reads.users++
@@ -319,6 +337,9 @@ export class CodexService {
     this.login = { cancel: () => cancel('cancelled') }
     const started = (async (): Promise<CodexNativeLoginStart> => {
       try {
+        // NO auth hook, deliberately: while external auth is active the native
+        // login paths are refused outright ("External auth is active…",
+        // `account_processor.rs`), so a login process must never be injected.
         await client.start(initialize)
         if (settled) throw new Error('cancelled')
         const result = await client.request('account/login/start', params)

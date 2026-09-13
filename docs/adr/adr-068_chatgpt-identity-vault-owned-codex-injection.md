@@ -29,7 +29,7 @@ The second question is answered by ADR-065's rules: one home per setting, engine
 
 The refresh handler answers from the vault's cached access token first and only falls through to a network refresh when the cached token is itself expired; the 10 s deadline is otherwise easy to miss. A vault refresh that fails with `invalid_grant` makes the handler answer an error, the turn fails, and the session raises the auth-required event of §4.
 
-Owner rulings recorded here: **inject only** — no `auth.json` vend route for the terminal `codex` CLI; the refresh model may be revisited later. The native device-code flow is **removed** from the product UI (it stays in `CodexService` as tested code). The "[UNSTABLE]" label is accepted: the binary is pinned, `check-codex-protocol` regenerates the types on every bump, so a removal fails loudly at bump time, never silently in the field. A `forced_chatgpt_workspace_id` in the user's `config.toml` rejects injected tokens from other workspaces; that error is surfaced verbatim.
+Owner rulings recorded here: **inject only** — no `auth.json` vend route for the terminal `codex` CLI; the refresh model may be revisited later. The native device-code flow is **removed** from the product UI (it stays in `CodexService` as tested code). The "[UNSTABLE]" label is accepted: the binary is pinned, `check-codex-protocol` regenerates the types on every bump, so a removal fails loudly at bump time, never silently in the field. When Codex refuses an injected token (a workspace pin — on 0.154.0 a user-level `forced_chatgpt_workspace_id` did not gate the login in the real-binary test, so in practice this means a managed `allowed_chatgpt_workspaces` policy) the native refusal is surfaced verbatim and the session does not start under another identity.
 
 ### 2. Accounts: a global active account, per-session pinning behind a toggle
 
@@ -86,7 +86,7 @@ Stale copy is corrected: the Default-models note "Codex uses its native configur
 
 - ADR-066's "native-owned auth" section and the spec's auth rows are superseded; `CodexAuthProvider`'s device-code flow, the `codex:login-*` channels and `CodexAccount.tsx` are removed once the injection path is verified live.
 - The vault file moves to a v3 schema (accounts list + active id) with a read-time migration from v2's single credential; `CredentialSync` refreshes N accounts and vends the active one to pi/opencode. `provider-registry:list` gains the account list and the active id for the ChatGPT row.
-- `SessionStatus.account` for Codex carries the vault account id; `codex_session_overrides` gains `accountId`. Usage rows attribute to it.
+- `SessionStatus.account` for Codex carries the vault account id; `codex_session_overrides` gains an `accountId` key in its JSON blob (no schema migration). Usage rows attribute to it.
 - The Claude banner, `AuthErrorBlock`, `VendorAuthRequiredCard` and the settings paste-back rows collapse into `SignInDialog` plus one banner line and one transcript row. `OAuthPasteBackFlow` survives as the dialog's remote panel.
 - Codex threads start with an inherited MCP list once the override probe passes.
 - Trust posture is unchanged from ADR-036: ClaudeUI is already a third application on the shared OpenAI client id; Codex receiving tokens from the vault is the same client id it would use itself.

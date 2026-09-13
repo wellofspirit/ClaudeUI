@@ -198,6 +198,21 @@ export interface CredentialAccountStatus {
   needsReauth: boolean
 }
 
+/**
+ * What ONE Codex process is injected with (ADR-068 §1). The ONLY shape in this
+ * module that carries token material across its boundary — see
+ * {@link CredentialSync.injectionTokenFor}.
+ */
+export interface CodexInjectionToken {
+  /** The ChatGPT access token (a JWT). Never logged, never persisted by Codex. */
+  accessToken: string
+  /** The workspace id Codex keys the account on (`chatgpt_account_id`). */
+  chatgptAccountId: string
+  chatgptPlanType: string | null
+  /** The VAULT account id this token came from — not the workspace id. */
+  vaultAccountId: string
+}
+
 type EngineKey = 'pi' | 'opencode'
 
 function errMessage(err: unknown): string {
@@ -691,6 +706,56 @@ export class CredentialSync {
     if (cred.email) status.email = cred.email
     if (cred.accountId) status.accountId = cred.accountId
     return status
+  }
+
+  /**
+   * **The one method on this class that returns TOKEN MATERIAL.** Everything
+   * else here is deliberately token-free (`getStatus`, and the
+   * `provider-account:*` commands built on it); this exists because Codex is fed
+   * by INJECTION rather than by file (ADR-068 §1) and the host has to hand the
+   * app-server an access token over the wire.
+   *
+   * Nothing in it logs, and its result must never reach a log line, an IPC
+   * result or a snapshot. The two callers are the inject and refresh halves of
+   * `codex-auth-hook.ts`.
+   *
+   * `accountId` null means the ACTIVE account. Returns null when the vault holds
+   * no credential for that account, or when the credential carries no workspace
+   * id: `account/login/start {type:'chatgptAuthTokens'}` REQUIRES
+   * `chatgptAccountId`, so a workspace-less credential cannot be injected at all
+   * and the process is left on whatever Codex's own store holds.
+   *
+   * `refreshMarginMs` decides how eagerly it refreshes first:
+   *
+   *  - at INJECT time the default {@link REFRESH_MARGIN_MS} applies, so a
+   *    process never starts on a token that is about to die mid-turn;
+   *  - the REFRESH server request passes 0, because Codex gives the host 10
+   *    seconds to answer and a cached-but-still-valid token is the answer it
+   *    wants (ADR-068 §1). Only a genuinely expired credential is worth a
+   *    network round trip there.
+   *
+   * The refresh goes through the same per-account single-flight as every
+   * scheduled one, so two processes starting at once cause ONE token request.
+   */
+  async injectionTokenFor(
+    accountId: string | null,
+    refreshMarginMs: number = REFRESH_MARGIN_MS
+  ): Promise<CodexInjectionToken | null> {
+    const key = accountId ?? (await this.readActiveKey())
+    let cred = await this.loadForKey(key)
+    if (!cred) return null
+    if (cred.expires - refreshMarginMs <= this.now()) {
+      await this.runRefresh(key)
+      cred = await this.loadForKey(key)
+      if (!cred) return null
+    }
+    if (!cred.accountId) return null
+    return {
+      accessToken: cred.access,
+      chatgptAccountId: cred.accountId,
+      chatgptPlanType: cred.planType ?? null,
+      vaultAccountId: key
+    }
   }
 
   // -------------------------------------------------------------------------

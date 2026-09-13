@@ -45,6 +45,7 @@ import type { TokenUsageBreakdown } from './protocol/v2/TokenUsageBreakdown'
 import { resolveCodexCapabilities } from '../../shared/model-capabilities'
 import { CodexClient } from './CodexClient'
 import { CodexTransportError, type CodexClientOptions } from './CodexAppServerClient'
+import { CODEX_AUTH_PROVIDER_ID, type CodexAuthHook } from './codex-auth-hook'
 import type { Model } from './protocol/v2/Model'
 import type { JsonValue } from './protocol/serde_json/JsonValue'
 import type { ThreadItem } from './protocol/v2/ThreadItem'
@@ -88,6 +89,10 @@ import {
 } from '../services/db'
 
 const serverMethods = [
+  // ADR-068 §1. The app-server asks US for a fresh ChatGPT token after a 401 and
+  // waits 10 s; nothing else refreshes an injected credential, so a session that
+  // did not register this method would simply lose the turn.
+  'account/chatgptAuthTokens/refresh',
   'item/commandExecution/requestApproval',
   'item/fileChange/requestApproval',
   'item/tool/requestUserInput',
@@ -98,6 +103,20 @@ const serverMethods = [
 ] as const
 const record = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value)
+
+/**
+ * Transport knobs plus the ChatGPT identity this session runs as.
+ *
+ * `auth` is deliberately absent by default: a session built without one injects
+ * nothing and never reads the vault, which is what lets the real-binary
+ * integration suite drive sessions against a scripted localhost provider with no
+ * access to a developer's credentials. `register-engines.ts` is the composition
+ * root that supplies the real hook.
+ */
+export type CodexSessionTransport = Pick<
+  CodexClientOptions,
+  'env' | 'requestTimeoutMs' | 'killGraceMs'
+> & { auth?: CodexAuthHook | null }
 
 /**
  * AUTO-MODE VISIBILITY. Under `auto` the native `auto_review` guardian answers
@@ -422,6 +441,14 @@ export class CodexSession extends BaseSession {
   private native?: CodexSessionState
   private overrides: CodexSettings = {}
   private account: SessionStatus['account'] = null
+  /**
+   * The hook that owns this process's ChatGPT identity (ADR-068 §1), or null
+   * when the caller wired none — in which case the process runs on whatever
+   * Codex's own store holds and nothing here touches the vault.
+   */
+  private readonly auth: CodexAuthHook | null
+  /** The VAULT account id this process was injected with, or null. */
+  private injectedAccountId: string | null = null
   private permissionMode: string
   /** "Allow for this session" clicks, in the shared engine's key vocabulary. */
   private sessionAllows = new Set<string>()
@@ -468,11 +495,26 @@ export class CodexSession extends BaseSession {
     win: HostWindowHandle | null,
     cwd: string,
     private readonly options: EngineSpawnOptions = {},
-    transport: Pick<CodexClientOptions, 'env' | 'requestTimeoutMs' | 'killGraceMs'> = {},
+    transport: CodexSessionTransport = {},
     createClient: (options: CodexClientOptions) => CodexClient = (options) =>
       new CodexClient(options)
   ) {
     super(routingId, win, cwd)
+    const { auth = null, ...clientTransport } = transport
+    this.auth = auth
+    if (this.auth) {
+      this.auth.onAuthRequired = (accountId) => {
+        if (this.closed) return
+        this.send('session:auth-required', {
+          providerId: CODEX_AUTH_PROVIDER_ID,
+          ...(accountId ? { accountId } : {})
+        })
+        this.send(
+          'session:error',
+          'ChatGPT sign-in expired; sign in again from Settings › Models & providers'
+        )
+      }
+    }
     // ADR-030/ADR-033: the STATIC flag says this engine can HOST dispatch_agent;
     // the honest per-session value additionally requires a target engine to
     // exist. ANDed once here (rather than behind a getter, as pi does) because
@@ -483,14 +525,16 @@ export class CodexSession extends BaseSession {
     this.effort = options.effort
     this.permissionMode = options.permissionMode ?? 'default'
     this.client = createClient({
-      ...transport,
+      ...clientTransport,
       cwd,
       serverMethods,
       onNotification: (method, params) => this.notification(method, params),
       onServerRequest: (method, params, context) =>
-        method === 'item/tool/call'
-          ? this.hostedToolCall(params, context)
-          : this.requestApproval(method, params, context),
+        method === 'account/chatgptAuthTokens/refresh'
+          ? this.refreshInjectedToken(params)
+          : method === 'item/tool/call'
+            ? this.hostedToolCall(params, context)
+            : this.requestApproval(method, params, context),
       onDisconnect: (error) => this.disconnected(error)
     })
   }
@@ -718,17 +762,36 @@ export class CodexSession extends BaseSession {
       else this.model = saved.model
       if (this.effort !== undefined) this.overrides.effort = this.effort
       else this.effort = saved.effort
-      await this.client.start({
-        clientInfo: { name: 'claudeui_session', title: 'Codex session', version: '1' },
-        capabilities: { experimentalApi: true, requestAttestation: false }
-      })
+      await this.client.start(
+        {
+          clientInfo: { name: 'claudeui_session', title: 'Codex session', version: '1' },
+          capabilities: { experimentalApi: true, requestAttestation: false }
+        },
+        this.auth
+      )
+      // Null when nothing was injected: the process runs on Codex's own login and
+      // the account below is derived from `account/read` exactly as before.
+      this.injectedAccountId = this.auth?.injectedAccountId ?? null
       const { config } = await this.client.request('config/read', {
         cwd: this.cwd,
         includeLayers: false
       })
       assertCodexProvider(config.model_provider)
       const account = (await this.client.request('account/read', { refreshToken: false })).account
-      if (account?.type === 'chatgpt' || account?.type === 'apiKey')
+      if (this.injectedAccountId) {
+        // An injected process IS the vault's subscription, whatever `account/read`
+        // makes of the token: the email it reports is parsed from the very JWT we
+        // sent. `accountId` is the VAULT account id, which is what usage rows and
+        // (slice 2b) the per-session pin attribute to.
+        this.account = {
+          engineId: 'codex',
+          vendorId: 'openai',
+          authState: 'authenticated',
+          billingType: 'subscription',
+          ...(account?.type === 'chatgpt' && account.email ? { label: account.email } : {}),
+          accountId: this.injectedAccountId
+        }
+      } else if (account?.type === 'chatgpt' || account?.type === 'apiKey')
         this.account = {
           engineId: 'codex',
           vendorId: 'openai',
@@ -2119,6 +2182,24 @@ export class CodexSession extends BaseSession {
       context.signal.addEventListener('abort', abort, { once: true })
       this.send('session:approval-request', card)
     })
+  }
+
+  /**
+   * Answer `account/chatgptAuthTokens/refresh` (ADR-068 §1).
+   *
+   * Codex sends this after a 401, waits ten seconds, and abandons the turn if
+   * nothing comes back — so the hook answers from the vault's CACHED token
+   * unless it has genuinely expired. A rejection here becomes the transport's
+   * fixed JSON-RPC error (never our message: Codex refuses to log it because it
+   * "may contain a token"), and the hook's `onAuthRequired` has already put the
+   * one-line sign-in notice on the session.
+   *
+   * With no hook there is nothing to answer with: the process is running on
+   * Codex's own login, whose refresh Codex owns.
+   */
+  private async refreshInjectedToken(params: unknown): Promise<unknown> {
+    if (!this.auth) throw new Error('This Codex session holds no ClaudeUI-managed credential')
+    return this.auth.onRefreshRequest(params)
   }
 
   private requestApproval(

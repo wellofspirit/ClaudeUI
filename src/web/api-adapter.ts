@@ -62,9 +62,6 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     codexApproval: (id, requestId, decision) =>
       unwrap('session:codex-approval', id, requestId, decision),
     codexAuthStatus: () => unwrap('codex:auth-status'),
-    codexLoginStart: () => unwrap('codex:login-start'),
-    codexLoginStatus: () => unwrap('codex:login-status'),
-    codexLoginCancel: () => unwrap('codex:login-cancel'),
     codexDeletePlan: (threadId) => unwrap('session:codex-delete-plan', threadId),
     platform: 'web',
     // Never on the web client. The verifier hooks are a LOCAL harness affordance

@@ -1758,10 +1758,10 @@ describe('remote surface parity (phase 1 port)', () => {
         ...PROVIDER_ACCOUNT_CHANNELS,
         ...REMOTE_VIEW_CHANNELS,
         ...IDE_CHANNELS,
+        // ADR-068 §1: the three `codex:login-*` channels are gone with the
+        // native device-code UI; the vault owns the ChatGPT identity and
+        // `provider-account:*` is how a remote client reads it.
         'codex:auth-status',
-        'codex:login-start',
-        'codex:login-status',
-        'codex:login-cancel',
         'session:codex-approval',
         // Read-only: what deleting a Codex session would remove (slice G).
         'session:codex-delete-plan'

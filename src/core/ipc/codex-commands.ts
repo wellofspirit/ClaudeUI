@@ -3,13 +3,7 @@ import type { SessionManager } from '../services/session-manager'
 import { codexAuthProvider } from '../auth/CodexAuthProvider'
 import type { CodexApprovalDecision } from '../../shared/codex-types'
 
-export const CODEX_CHANNELS = [
-  'session:codex-approval',
-  'codex:auth-status',
-  'codex:login-start',
-  'codex:login-status',
-  'codex:login-cancel'
-] as const
+export const CODEX_CHANNELS = ['session:codex-approval', 'codex:auth-status'] as const
 
 export function codexCommands(
   manager: SessionManager
@@ -40,28 +34,13 @@ export function codexCommands(
       }
     },
     {
+      // Availability + model count only. The IDENTITY comes from the vault now
+      // (ADR-068 §1) and is read through `provider-account:list`; the native
+      // device-code channels this family used to carry are deleted with the UI.
       channel: 'codex:auth-status',
       capability: 'config',
       kind: 'query',
       handler: () => codexAuthProvider.status()
-    },
-    {
-      channel: 'codex:login-start',
-      capability: 'config',
-      kind: 'command',
-      handler: () => codexAuthProvider.loginStart()
-    },
-    {
-      channel: 'codex:login-status',
-      capability: 'config',
-      kind: 'query',
-      handler: () => codexAuthProvider.loginStatus()
-    },
-    {
-      channel: 'codex:login-cancel',
-      capability: 'config',
-      kind: 'command',
-      handler: () => codexAuthProvider.loginCancel()
     }
   ]
 }

@@ -81,6 +81,7 @@ import type {
 // CodexSession.ts — importing that module here would be a require-cycle.
 import { CodexClient } from '../codex/CodexClient'
 import type { CodexClientOptions, CodexTransportError } from '../codex/CodexAppServerClient'
+import { codexAuthHook, type CodexAuthHook } from '../codex/codex-auth-hook'
 import { codexBinaryAvailable } from '../codex/codex-locate'
 import { codexModePolicy, codexTurnInput } from '../codex/codex-turn-policy'
 import { assertCodexProvider, selectCodexModel } from '../codex/model-selection'
@@ -370,6 +371,15 @@ export type SpawnCodexTargetFn = (opts: CodexTargetSpawnOpts) => Promise<CodexCl
 /** The real one: one `codex app-server` child per target, nothing else. */
 const defaultSpawnCodexTarget: SpawnCodexTargetFn = async (opts) => new CodexClient(opts)
 
+/**
+ * How a dispatch target gets its ChatGPT identity (ADR-068 §1): a FACTORY, one
+ * hook per target, because a hook remembers which account its process was
+ * injected with. Absent by default — a dispatcher built without it injects
+ * nothing and never reads the vault, which is what keeps the real-binary target
+ * integration hermetic; the singleton below supplies the real one.
+ */
+export type CodexAuthHookFactory = () => CodexAuthHook
+
 export interface DispatcherDeps {
   serverManager: {
     acquire(cwd: string): Promise<{ baseUrl: string; authHeader: string }>
@@ -383,6 +393,8 @@ export interface DispatcherDeps {
   spawnPiTarget?: SpawnPiTargetFn
   /** Defaults to the real `new CodexClient(...)` (ADR-033 slice H). */
   spawnCodexTarget?: SpawnCodexTargetFn
+  /** Defaults to none — no ChatGPT token is injected into dispatch targets. */
+  codexAuth?: CodexAuthHookFactory
   maxConcurrent?: number
   /**
    * Absolute per-turn cap for the CLAUDE and PI directions. The opencode
@@ -1459,6 +1471,7 @@ export class CrossEngineDispatcher {
   private readonly spawnClaudeQuery: SpawnClaudeQueryFn
   private readonly spawnPiTarget: SpawnPiTargetFn
   private readonly spawnCodexTarget: SpawnCodexTargetFn
+  private readonly codexAuth: CodexAuthHookFactory | undefined
   private readonly recordDispatchedUsage: (row: Omit<DispatchedUsageRow, 'id'>) => void
 
   /** Keyed by target session id (opencode session id, or Claude session UUID). */
@@ -1504,6 +1517,7 @@ export class CrossEngineDispatcher {
     this.spawnClaudeQuery = deps.spawnClaudeQuery ?? defaultSpawnClaudeQuery
     this.spawnPiTarget = deps.spawnPiTarget ?? defaultSpawnPiTarget
     this.spawnCodexTarget = deps.spawnCodexTarget ?? defaultSpawnCodexTarget
+    this.codexAuth = deps.codexAuth
     this.now = deps.now ?? Date.now
     this.recordDispatchedUsage = deps.recordDispatchedUsage ?? insertDispatchedUsage
   }
@@ -4337,10 +4351,16 @@ export class CrossEngineDispatcher {
     })
 
     try {
-      await entry.client.start({
-        clientInfo: { name: 'claudeui_dispatch', title: 'Codex dispatch target', version: '1' },
-        capabilities: { experimentalApi: true, requestAttestation: false }
-      })
+      // A headless target is still one of "every app-server ClaudeUI starts"
+      // (ADR-068 §1), and it must bill the same subscription the caller runs on:
+      // slice 2a always injects the ACTIVE account, 2b the caller's pin.
+      await entry.client.start(
+        {
+          clientInfo: { name: 'claudeui_dispatch', title: 'Codex dispatch target', version: '1' },
+          capabilities: { experimentalApi: true, requestAttestation: false }
+        },
+        this.codexAuth?.()
+      )
       const { config } = await entry.client.request('config/read', {
         cwd: ctx.cwd,
         includeLayers: false
@@ -4812,5 +4832,6 @@ export class CrossEngineDispatcher {
 export const crossEngineDispatcher = new CrossEngineDispatcher({
   serverManager: opencodeServerManager,
   makeClient: (baseUrl, authHeader) => new OpencodeClient(baseUrl, authHeader),
-  loadEngineConfig
+  loadEngineConfig,
+  codexAuth: codexAuthHook
 })

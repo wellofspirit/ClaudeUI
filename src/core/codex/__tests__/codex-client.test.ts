@@ -3,6 +3,8 @@ import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CodexAppServerClient, type CodexClientOptions } from '../CodexAppServerClient'
+import { CodexClient, CodexInjectionError } from '../CodexClient'
+import type { CodexAuthHook } from '../codex-auth-hook'
 import type { InitializeParams } from '../protocol/InitializeParams'
 
 const mocks = vi.hoisted(() => ({ spawn: vi.fn(), locate: vi.fn() }))
@@ -438,4 +440,101 @@ describe('Codex JSONL client', () => {
       expect(disconnect).toHaveBeenCalledTimes(1)
     }
   )
+})
+
+/**
+ * Slice 2a guard 1 — ChatGPT token injection on the REAL transport (ADR-068 §1).
+ *
+ * `CodexClient.start` is what every app-server ClaudeUI owns goes through, so
+ * this is the one place the order is provable: handshake, then
+ * `account/login/start`, then — and only then — a resolved `start()`. The child
+ * process is the same mocked pair the suite above drives; no binary, no vault
+ * and no token that could be mistaken for a real one.
+ */
+describe('ChatGPT token injection', () => {
+  let typed: CodexClient
+  function hook(token: Awaited<ReturnType<CodexAuthHook['inject']>>): CodexAuthHook {
+    return {
+      inject: vi.fn(async () => token),
+      onRefreshRequest: vi.fn(),
+      injectedAccountId: token?.vaultAccountId ?? null
+    }
+  }
+  /** Drives the handshake and hands the STILL-PENDING `start()` back, boxed. */
+  async function handshake(
+    auth: CodexAuthHook
+  ): Promise<{ started: ReturnType<CodexClient['start']> }> {
+    typed = new CodexClient({ cwd: '/isolated', onDisconnect: disconnect })
+    const started = typed.start(init, auth)
+    void started.catch(() => {})
+    version.stdout.write('codex-cli 0.154.0\n')
+    version.emit('close', 0)
+    await ticks()
+    frame({ id: 0, result: initialized })
+    await ticks()
+    return { started }
+  }
+  afterEach(() => typed?.dispose())
+
+  it('sends initialize, then exactly the injected triple, and resolves only after the login response', async () => {
+    const { started } = await handshake(
+      hook({
+        accessToken: 'fake-access-jwt',
+        chatgptAccountId: 'ws-fixture',
+        chatgptPlanType: 'pro',
+        vaultAccountId: 'acct-fixture'
+      })
+    )
+    expect(writes[0]).toMatchObject({ id: 0, method: 'initialize' })
+    expect(writes[1]).toEqual({ method: 'initialized' })
+    expect(writes[2]).toEqual({
+      id: 1,
+      method: 'account/login/start',
+      params: {
+        type: 'chatgptAuthTokens',
+        accessToken: 'fake-access-jwt',
+        chatgptAccountId: 'ws-fixture',
+        chatgptPlanType: 'pro'
+      }
+    })
+    // Nothing may run under the previous identity: `start` is still pending.
+    let settled = false
+    void started.then(() => (settled = true))
+    await ticks()
+    expect(settled).toBe(false)
+    frame({ id: 1, result: {} })
+    await started
+  })
+
+  it('surfaces a native refusal verbatim and disposes the process', async () => {
+    const { started } = await handshake(
+      hook({
+        accessToken: 'fake-access-jwt',
+        chatgptAccountId: 'ws-wrong',
+        chatgptPlanType: null,
+        vaultAccountId: 'acct-fixture'
+      })
+    )
+    const native =
+      'External auth must use one of workspace(s) ["ws-forced"], but received "ws-wrong".'
+    frame({ id: 1, error: { code: -32600, message: native } })
+    await expect(started).rejects.toThrow(native)
+    await expect(started).rejects.toBeInstanceOf(CodexInjectionError)
+    // No retry and no fallback to native auth: the process is gone, and nothing
+    // can be sent under the identity Codex just refused.
+    expect(disconnect).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ code: 'disposed' })
+    )
+    await expect(typed.request('account/read', { refreshToken: false })).rejects.toMatchObject({
+      code: 'not-ready'
+    })
+  })
+
+  it('sends no login at all when the vault has nothing to inject', async () => {
+    const auth = hook(null)
+    const { started } = await handshake(auth)
+    await started
+    expect(auth.inject).toHaveBeenCalledOnce()
+    expect(writes.map((write) => write.method)).toEqual(['initialize', 'initialized'])
+  })
 })

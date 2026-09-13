@@ -4,6 +4,7 @@ export interface CodexMethods {
   "account/login/start": { params: import("./v2/LoginAccountParams").LoginAccountParams; result: import("./v2/LoginAccountResponse").LoginAccountResponse };
   "account/login/cancel": { params: import("./v2/CancelLoginAccountParams").CancelLoginAccountParams; result: import("./v2/CancelLoginAccountResponse").CancelLoginAccountResponse };
   "account/logout": { params: undefined; result: import("./v2/LogoutAccountResponse").LogoutAccountResponse };
+  "account/rateLimits/read": { params: import("./v2/GetAccountRateLimitsParams").GetAccountRateLimitsParams; result: import("./v2/GetAccountRateLimitsResponse").GetAccountRateLimitsResponse };
   "model/list": { params: import("./v2/ModelListParams").ModelListParams; result: import("./v2/ModelListResponse").ModelListResponse };
   "config/read": { params: import("./v2/ConfigReadParams").ConfigReadParams; result: import("./v2/ConfigReadResponse").ConfigReadResponse };
   "configRequirements/read": { params: undefined; result: import("./v2/ConfigRequirementsReadResponse").ConfigRequirementsReadResponse };
@@ -23,6 +24,7 @@ export interface CodexMethods {
   "turn/interrupt": { params: import("./v2/TurnInterruptParams").TurnInterruptParams; result: import("./v2/TurnInterruptResponse").TurnInterruptResponse };
 }
 export interface CodexServerMethods {
+  "account/chatgptAuthTokens/refresh": { params: import("./v2/ChatgptAuthTokensRefreshParams").ChatgptAuthTokensRefreshParams; result: import("./v2/ChatgptAuthTokensRefreshResponse").ChatgptAuthTokensRefreshResponse };
   "item/commandExecution/requestApproval": { params: import("./v2/CommandExecutionRequestApprovalParams").CommandExecutionRequestApprovalParams; result: import("./v2/CommandExecutionRequestApprovalResponse").CommandExecutionRequestApprovalResponse };
   "item/fileChange/requestApproval": { params: import("./v2/FileChangeRequestApprovalParams").FileChangeRequestApprovalParams; result: import("./v2/FileChangeRequestApprovalResponse").FileChangeRequestApprovalResponse };
   "item/tool/requestUserInput": { params: import("./v2/ToolRequestUserInputParams").ToolRequestUserInputParams; result: import("./v2/ToolRequestUserInputResponse").ToolRequestUserInputResponse };
@@ -32,6 +34,7 @@ export interface CodexServerMethods {
 export interface CodexNotifications {
   "account/login/completed": import("./v2/AccountLoginCompletedNotification").AccountLoginCompletedNotification;
   "account/updated": import("./v2/AccountUpdatedNotification").AccountUpdatedNotification;
+  "account/rateLimits/updated": import("./v2/AccountRateLimitsUpdatedNotification").AccountRateLimitsUpdatedNotification;
   "thread/started": import("./v2/ThreadStartedNotification").ThreadStartedNotification;
   "thread/status/changed": import("./v2/ThreadStatusChangedNotification").ThreadStatusChangedNotification;
   "thread/settings/updated": import("./v2/ThreadSettingsUpdatedNotification").ThreadSettingsUpdatedNotification;

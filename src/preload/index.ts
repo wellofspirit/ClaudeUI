@@ -77,9 +77,6 @@ const api: ClaudeAPI = {
   codexApproval: (id, requestId, decision) =>
     unwrap('session:codex-approval', id, requestId, decision),
   codexAuthStatus: () => unwrap('codex:auth-status'),
-  codexLoginStart: () => unwrap('codex:login-start'),
-  codexLoginStatus: () => unwrap('codex:login-status'),
-  codexLoginCancel: () => unwrap('codex:login-cancel'),
   codexDeletePlan: (threadId) => unwrap('session:codex-delete-plan', threadId),
   platform: process.platform,
   // Resolved here, in the one process that sees BOTH forms of the opt-in: the

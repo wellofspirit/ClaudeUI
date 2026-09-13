@@ -21,6 +21,9 @@ export const methods = {
   'account/login/start': ['LoginAccountParams', 'LoginAccountResponse'],
   'account/login/cancel': ['CancelLoginAccountParams', 'CancelLoginAccountResponse'],
   'account/logout': [null, 'LogoutAccountResponse'],
+  // Per-account subscription limits. Generated now (ADR-068 §2); the usage
+  // panel that reads them lands in slice 2b.
+  'account/rateLimits/read': ['GetAccountRateLimitsParams', 'GetAccountRateLimitsResponse'],
   'model/list': ['ModelListParams', 'ModelListResponse'],
   'config/read': ['ConfigReadParams', 'ConfigReadResponse'],
   'configRequirements/read': [null, 'ConfigRequirementsReadResponse'],
@@ -51,6 +54,13 @@ export const methods = {
   )
 }
 export const serverMethods = {
+  // ADR-068 §1: the app-server asks the HOST for a fresh ChatGPT access token
+  // after a 401 (`app-server/src/external_auth.rs`), waits 10 s, and never
+  // refreshes an injected token itself.
+  'account/chatgptAuthTokens/refresh': [
+    'ChatgptAuthTokensRefreshParams',
+    'ChatgptAuthTokensRefreshResponse'
+  ],
   'item/commandExecution/requestApproval': [
     'CommandExecutionRequestApprovalParams',
     'CommandExecutionRequestApprovalResponse'
@@ -69,6 +79,7 @@ export const serverMethods = {
 export const notifications = {
   'account/login/completed': 'AccountLoginCompletedNotification',
   'account/updated': 'AccountUpdatedNotification',
+  'account/rateLimits/updated': 'AccountRateLimitsUpdatedNotification',
   'thread/started': 'ThreadStartedNotification',
   'thread/status/changed': 'ThreadStatusChangedNotification',
   'thread/settings/updated': 'ThreadSettingsUpdatedNotification',
@@ -185,7 +196,18 @@ function main() {
       const variants = JSON.parse(text).oneOf
       for (const [method, [params]] of Object.entries(entries)) {
         const variant = variants.find((value) => value.properties?.method?.enum?.[0] === method)
-        if (!variant || (params && variant.properties.params?.$ref !== `#/definitions/${params}`))
+        // A method whose params are OPTIONAL on the wire declares them as
+        // `anyOf: [{$ref}, {type:'null'}]` rather than a bare `$ref`
+        // (`account/rateLimits/read`). Both forms still pin the exact params
+        // definition by NAME — which is the whole point of this check — so the
+        // nullable shape is unwrapped rather than treated as a mismatch.
+        const node = variant?.properties.params
+        const ref =
+          node?.$ref ??
+          (Array.isArray(node?.anyOf) && node.anyOf.length === 2 && node.anyOf[1]?.type === 'null'
+            ? node.anyOf[0]?.$ref
+            : undefined)
+        if (!variant || (params && ref !== `#/definitions/${params}`))
           throw new Error('Method schema mismatch')
       }
     }

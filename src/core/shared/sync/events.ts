@@ -219,6 +219,16 @@ export interface SyncEventMap {
     data: { vendorId: string; message: string }
   ) => void
   /**
+   * A credential the session needs was rejected and cannot be renewed
+   * (ADR-068 §4). Codex raises it when it cannot answer the app-server's
+   * `account/chatgptAuthTokens/refresh`; slice 3 generalizes it to every engine
+   * and replaces `session:vendor-auth-required` with it.
+   */
+  'session:auth-required': (
+    routingId: string,
+    data: { providerId: string; accountId?: string }
+  ) => void
+  /**
    * Login status from session init: 'authenticated' | 'none'. The
    * oauth-vs-api-key distinction lives only in the auth probe's billingType
    * (ADR-014 / ADR-021).

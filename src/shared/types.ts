@@ -2562,9 +2562,6 @@ export interface ClaudeAPI
     decision: import('./codex-types').CodexApprovalDecision
   ): Promise<void>
   codexAuthStatus(): Promise<import('./codex-types').CodexAuthStatus>
-  codexLoginStart(): Promise<import('./codex-types').CodexLoginState>
-  codexLoginStatus(): Promise<import('./codex-types').CodexLoginState>
-  codexLoginCancel(): Promise<void>
   /** What deleting this Codex thread would remove: the thread and every branch cut from it. */
   codexDeletePlan(threadId: string): Promise<import('./codex-types').CodexDeletePlan>
   /** Relay a log message from the renderer to the main process logger */

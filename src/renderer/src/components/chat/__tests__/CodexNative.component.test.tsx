@@ -1,70 +1,117 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { chooseSelectMenuOption, selectMenuValue } from '../../../../../test/helpers/select-menu'
-import { useSessionStore } from '../../../stores/session-store'
-import type { EngineModelGroup } from '../../../../../shared/types'
+import type { ClaudeAPI, EngineModelGroup } from '../../../../../shared/types'
+import type { CodexAuthStatus } from '../../../../../shared/codex-types'
 import { CodexApprovalCard } from '../CodexApprovalCard'
 import { ApprovalButtons } from '../ApprovalButtons'
 import { CodexAccount } from '../../SettingsDialog/CodexAccount'
 
+type AccountList = Awaited<ReturnType<ClaudeAPI['listProviderAccounts']>>
+const NO_ACCOUNTS: AccountList = { activeId: null, perSession: false, accounts: [] }
 const api = {
   getEngineModels: vi.fn(async (): Promise<EngineModelGroup[]> => []),
   codexApproval: vi.fn(async () => {}),
   respondApproval: vi.fn(async () => {}),
-  codexAuthStatus: vi.fn(async () => ({ available: true, authenticated: false, authKind: null })),
-  codexLoginStatus: vi.fn(async () => ({ status: 'idle' })),
-  codexLoginStart: vi.fn(async () => ({
-    status: 'waiting',
-    verificationUrl: 'https://auth.openai.com/codex/device',
-    userCode: 'FIXTURE'
+  codexAuthStatus: vi.fn(async (): Promise<CodexAuthStatus> => ({
+    available: true,
+    authenticated: false,
+    authKind: null
   })),
-  codexLoginCancel: vi.fn(async () => {})
+  listProviderAccounts: vi.fn(async (): Promise<AccountList> => NO_ACCOUNTS)
 }
 beforeEach(() => {
   vi.clearAllMocks()
-  api.codexLoginStatus.mockResolvedValue({ status: 'idle' })
+  api.codexAuthStatus.mockResolvedValue({ available: true, authenticated: false, authKind: null })
+  api.listProviderAccounts.mockResolvedValue(NO_ACCOUNTS)
   Object.defineProperty(window, 'api', { configurable: true, value: { ...window.api, ...api } })
 })
 
+/**
+ * Slice 2a guard 7 — the Codex account ROW (ADR-068 §1).
+ *
+ * The device-code pane, its poller and its three channels are gone: the vault
+ * owns the ChatGPT identity, so this row only reports which account Codex runs
+ * as and links to where accounts are managed.
+ */
 describe('native controls', () => {
-  it('refreshes discovered models before a completed login stops its poller', async () => {
-    vi.useFakeTimers()
+  const account = (over: Partial<AccountList['accounts'][number]> = {}): AccountList => ({
+    activeId: 'acct-one',
+    perSession: false,
+    accounts: [
+      {
+        id: 'acct-one',
+        email: 'owner@example.test',
+        planType: 'pro',
+        accountId: 'ws-one',
+        expiresAt: 0,
+        needsReauth: false,
+        ...over
+      }
+    ]
+  })
+
+  it('names the active vault account, its plan and how many exist', async () => {
+    api.listProviderAccounts.mockResolvedValue({
+      ...account(),
+      accounts: [
+        ...account().accounts,
+        { id: 'acct-two', expiresAt: 0, needsReauth: false, accountId: 'ws-two' }
+      ]
+    })
+    render(<CodexAccount />)
+    await waitFor(() =>
+      expect(screen.getByTestId('CodexAccount')).toHaveTextContent('ChatGPT · owner@example.test')
+    )
+    expect(screen.getByTestId('CodexAccount.plan')).toHaveTextContent('pro')
+    expect(screen.getByTestId('CodexAccount')).toHaveTextContent('2 accounts available')
+    expect(window.api.listProviderAccounts).toHaveBeenCalledWith('chatgpt')
+  })
+
+  it('says so when Codex is running on its own login', async () => {
+    api.codexAuthStatus.mockResolvedValue({
+      available: true,
+      authenticated: true,
+      authKind: 'chatgpt'
+    })
+    render(<CodexAccount />)
+    await waitFor(() =>
+      expect(screen.getByTestId('CodexAccount')).toHaveTextContent('Not signed in through ClaudeUI')
+    )
+    expect(screen.getByTestId('CodexAccount')).toHaveTextContent(
+      'Codex is using its own login; sign in here to manage it in ClaudeUI'
+    )
+  })
+
+  it('offers a sign-in when nothing is signed in anywhere, and starts no login itself', async () => {
+    render(<CodexAccount />)
+    await waitFor(() =>
+      expect(screen.getByTestId('CodexAccount')).toHaveTextContent(
+        'Sign in to ChatGPT to run Codex under a ClaudeUI-managed account'
+      )
+    )
+    expect(screen.queryByTestId('CodexAccount.signIn')).toBeNull()
+    expect(screen.queryByTestId('CodexAccount.deviceCode')).toBeNull()
+  })
+
+  it('sends the shared-provider deep link', async () => {
+    const opened = vi.fn()
+    window.addEventListener('open-settings', opened)
     try {
-      await act(async () => {
-        render(<CodexAccount />)
+      api.listProviderAccounts.mockResolvedValue(account())
+      render(<CodexAccount />)
+      await waitFor(() => expect(screen.getByTestId('CodexAccount.manage')).toBeInTheDocument())
+      fireEvent.click(screen.getByTestId('CodexAccount.manage'))
+      expect(opened).toHaveBeenCalledOnce()
+      expect((opened.mock.calls[0][0] as CustomEvent).detail).toEqual({
+        page: 'models',
+        group: 'providers'
       })
-      await act(async () => {
-        fireEvent.click(screen.getByTestId('CodexAccount.signIn'))
-      })
-      api.codexLoginStatus.mockResolvedValue({ status: 'completed' })
-      api.getEngineModels.mockResolvedValue([
-        {
-          engineId: 'codex',
-          vendorId: 'openai',
-          vendorName: 'Native',
-          models: [
-            {
-              engineId: 'codex',
-              value: 'native-after-login',
-              displayName: 'Native',
-              description: ''
-            }
-          ]
-        }
-      ])
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(1500)
-      })
-      expect(api.getEngineModels).toHaveBeenCalledOnce()
-      expect(
-        useSessionStore
-          .getState()
-          .availableModels.some((model) => model.value === 'native-after-login')
-      ).toBe(true)
     } finally {
-      vi.useRealTimers()
+      window.removeEventListener('open-settings', opened)
     }
   })
+
   it('uses native question IDs, including cancel without a fabricated answer', async () => {
     render(
       <CodexApprovalCard
@@ -203,16 +250,5 @@ describe('native controls', () => {
       />
     )
     expect(screen.getByTestId('CodexApprovalCard')).toBeInTheDocument()
-  })
-
-  it('does not initiate login on mount and exposes the explicit device flow', async () => {
-    render(<CodexAccount />)
-    await waitFor(() => expect(screen.getByTestId('CodexAccount.signIn')).toBeEnabled())
-    expect(api.codexLoginStart).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByTestId('CodexAccount.signIn'))
-    await waitFor(() =>
-      expect(screen.getByTestId('CodexAccount.deviceCode')).toHaveTextContent('FIXTURE')
-    )
-    expect(screen.getByRole('link')).toHaveAttribute('href', 'https://auth.openai.com/codex/device')
   })
 })

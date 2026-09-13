@@ -7,6 +7,7 @@ import { ClaudeSession } from '../services/claude-session'
 import { OpencodeSession } from '../opencode/OpencodeSession'
 import { PiSession } from '../pi/PiSession'
 import { CodexSession } from '../codex/CodexSession'
+import { codexAuthHook } from '../codex/codex-auth-hook'
 import { codexBinaryAvailable } from '../codex/codex-locate'
 import { syncCodexRulesFile } from '../codex/rules-sync'
 import { engineRegistry } from './EngineRegistry'
@@ -38,7 +39,10 @@ engineRegistry.register('codex', (routingId, win, cwd, opts) => {
     throw new Error(
       'Codex is not installed for this platform; run ensure-codex on a supported host (macOS arm64, Windows x64)'
     )
-  return new CodexSession(routingId, win, cwd, opts)
+  // The composition root for ADR-068 §1: every session ClaudeUI starts runs as
+  // the vault's ACTIVE ChatGPT account. One hook per session — it remembers
+  // which account this process was injected with.
+  return new CodexSession(routingId, win, cwd, opts, { auth: codexAuthHook() })
 })
 spawnPrepRegistry.register('codex', async (model) => {
   if (!codexBinaryAvailable()) throw new Error('Codex is not installed for this platform')
