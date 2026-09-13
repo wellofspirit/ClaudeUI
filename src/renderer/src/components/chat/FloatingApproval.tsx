@@ -173,6 +173,18 @@ export function ApprovalCardView({
 // Logic layer — hooks, store access, IPC calls
 // ---------------------------------------------------------------------------
 
+/**
+ * Every pending approval with no matching tool_use block in the session's
+ * TOP-LEVEL transcript.
+ *
+ * Nested transcripts (`subagentMessages`) are deliberately NOT consulted. Since
+ * Slice I, `SubagentMessages` binds the same approval to the nested tool card,
+ * so an approval raised inside a subagent renders on BOTH surfaces — a decided
+ * duplication, not an oversight: a nested card can be scrolled out of view or
+ * sit behind a collapsed task card, and an approval nobody can find is a hung
+ * turn. Both surfaces carry the same `requestId`, so answering either resolves
+ * the request and dismisses the other.
+ */
 function useUnmatchedApprovals(): PendingApproval[] {
   const pendingApprovals = useActiveSession((s) => s.pendingApprovals)
   const messages = useActiveSession((s) => s.messages)
