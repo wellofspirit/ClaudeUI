@@ -31,7 +31,47 @@ User types mid-turn → sendPrompt() → MessageChannel.push() → CLI stdin
 **`queue_message` is NOT needed** — the native steer path already handles injection. This patch only adds what's missing:
 
 1. **`dequeue_message`** — withdraw a queued item before it's consumed
-2. **`queued_command_consumed`** — notification when the CLI processes the steer
+2. **`queued_command_consumed`** — notification when the CLI processes the steer,
+   on **both** of the CLI's take-from-queue paths (A2 + A3, see next section)
+
+## Background: the TWO ways cli.js takes an item off its queue
+
+This is the single most important architectural fact for this patch, and the
+one that made the consumed notification look "flaky" for a year.
+
+```
+                       U.enqueue({mode:"prompt", value, uuid})
+                                        │
+                      ┌─────────────────┴──────────────────┐
+                      │                                    │
+        a turn is RUNNING                       cli.js is BETWEEN TURNS
+                      │                                    │
+   query loop mid-turn absorption          headless drainCommandQueue loop
+   messageQueue.consume(…,                   while(!$s()&&(V=…U.dequeue…)){
+     {reason:"absorbed_mid_turn"})              …runs V.value as the
+                      │                          turn's PROMPT… }
+   builds a `queued_command`                              │
+   ATTACHMENT (yEe) and yields it               NO attachment is ever built:
+                      │                          the turn-start attachment
+   outbound normalizer `case"attachment"`        builder is called with an
+                      │                          EMPTY queued-command list —
+             ┌────────┴────────┐                 `Xne(At,O,te??null,[],…)`
+        [Part A2 fires]                                    │
+                                                     [Part A3 fires]
+```
+
+**Both paths are reachable while ClaudeUI shows a queued card**, because
+ClaudeUI's "session is busy" and cli.js's "a turn is running" are not the same
+predicate. The clearest case is a background subagent: the main turn's `result`
+has already landed (cli.js idle, its `gt` flag false), but the subagent's
+`stream_event`s keep `ClaudeSession.isProcessing` true, so the user's send is
+queued, pushed into cli.js's queue, and the queue subscriber fires
+`drainCommandQueue` immediately — path 2, where A2 is structurally blind.
+
+Symptom when only A2 exists: the agent visibly starts answering the queued
+message, but the QueuedMessageCard stays "queued" until the whole response
+finishes, at which point `ClaudeSession.flushQueueAtTurnEnd` clears it
+wholesale. That is the bug Part A3 fixes.
 
 ## The Problems
 
@@ -42,6 +82,14 @@ Once `sendPrompt` pushes a message into the CLI's queue, there's no way to remov
 ### 2. No notification when a steer is consumed
 
 The CLI processes queued commands in `submitMessage`'s attachment handler, but only yields a replay user message when `replayUserMessages=true` (which is `false` by default). ClaudeUI gets zero notification that the steer was picked up — the QueuedMessageCard just vanishes silently when the turn ends.
+
+### 3. No notification when the between-turns drain takes a queued command
+
+Fixing (2) only covers the mid-turn absorption path. When cli.js is between
+turns it `dequeue`s the command and runs it as the **next turn's prompt**, with
+no `queued_command` attachment anywhere — so the notification from (2) never
+fires and the queue card is stranded for the whole response. See
+"Background: the TWO ways cli.js takes an item off its queue" above.
 
 ## The Fix
 
@@ -100,6 +148,121 @@ The `queued_command_consumed` system message tells ClaudeUI to:
 - Add the queued text as a visible user message in the chat
 - Clear the QueuedMessageCard
 
+### Part A3: `queued_command_consumed` on the between-turns drain (cli.js)
+
+**Marker**: `/*PATCHED:queue-control-drained*/`
+
+The headless streaming loop's drain runs a queued command as the **next turn's
+prompt**. Nothing about that path produces a `queued_command` attachment, so A2
+cannot observe it. A3 emits the same notification from the drain itself.
+
+#### Anchor (unique, 1 match)
+
+The first statement that runs only once the drained batch is final (both
+`consumeCancelPending` filters have had their chance to `continue` past the
+turn) and the turn is committed — the user-message-uuid stamp:
+
+```js
+let Kr = ICt(cn)
+mr = Kr === void 0 ? void 0 : { userMessageUuid: Kr, anchor: ct.at(-1) }
+```
+
+`userMessageUuid:<x>,anchor:` occurs exactly once in the bundle. `apply.mjs`
+additionally pins the argument (`cn`) to the batch name captured below, which is
+what keeps this on the drain loop rather than some other stamp site.
+
+#### Name capture — read off the drain's OWN replay emitter
+
+Everything injected comes from one statement a few hundred chars earlier in the
+same loop body (the `w.replayUserMessages && cn.length>1` block), which is what
+proves all three names are in scope at the injection point:
+
+```js
+for (let pe of cn)
+  if (pe.uuid && pe.uuid !== V.uuid) {
+    let _e = cN(pe.origin)
+    Ct.enqueue({
+      type: 'user',
+      message: { role: 'user', content: pe.value },
+      session_id: K(),
+      parent_tool_use_id: null,
+      uuid: pe.uuid,
+      isReplay: !0 /* … */
+    })
+  }
+```
+
+| Captured  | 2.1.261 | What it is                                      |
+| --------- | ------- | ----------------------------------------------- |
+| batch     | `cn`    | the drained command batch (coalesced, filtered) |
+| outbound  | `Ct`    | `transport.outbound` — the direct stdout queue  |
+| sessionFn | `K`     | session-id getter                               |
+
+#### Before
+
+```js
+…Nn.push(...cn.map((_e)=>_e.uuid).filter((_e)=>_e!==void 0))}let Kr=ICt(cn);…
+```
+
+#### After
+
+```js
+…Nn.push(...cn.map((_e)=>_e.uuid).filter((_e)=>_e!==void 0))}/*PATCHED:queue-control-drained*/for(let q6 of cn)if(q6.mode==="prompt")Ct.enqueue({type:"system",subtype:"queued_command_consumed",prompt:q6.value,source_uuid:q6.uuid,session_id:K(),uuid:globalThis.crypto.randomUUID()});let Kr=ICt(cn);…
+```
+
+#### Why the emitted shape needs no consumer change
+
+cli.js builds the mid-turn attachment from the same two command fields, so A2
+and A3 emit byte-identical payloads:
+
+```js
+// yEe (getQueuedCommandAttachments) — the A2 source
+return { type:"queued_command", prompt: D /* = p.value */, source_uuid: p.uuid, … }
+```
+
+`prompt` is therefore the queued value **verbatim** on both paths (string, or a
+content-block array for an image/PDF prompt), and ClaudeUI normalizes it with
+the same `queuedCommandText` rule it already used.
+
+#### Why `Ct.enqueue` and not `yield`
+
+`Ct` is `transport.outbound`, the **direct** stdout queue. Messages `yield`ed by
+the query generator pass through the outbound normalizer (`Au`), whose
+`case"system"` arm is a whitelist:
+
+```js
+case"system":switch(e.subtype){case"status":…case"init":case"notification":case"api_retry":
+  case"model_refusal_no_fallback":case"memory_recall":case"thinking_tokens":case"compact_boundary":
+  yield e;return;case"model_fallback":case"model_consent_fallback":yield e;return;default:return}
+```
+
+— a `queued_command_consumed` yielded there would hit `default:return` and be
+silently dropped. `Ct.enqueue` bypasses it. That is the same path
+`task_notification`, `control_request_progress` and `bridge_state` take, all of
+which reach ClaudeUI today. (A2 is unaffected: it yields from
+`case"attachment"`, already past the system whitelist.)
+
+#### Why it's safe
+
+- **Per command, not per coalesced merge.** The drain merges `cn` into one
+  command (`V=_f(cn)`) before running the turn; the injection iterates the batch
+  so N queued items produce N notifications, each correlatable against its own
+  ClaudeUI queue item.
+- **Ordinary (never-queued) sends travel this drain too**, so they also emit a
+  notification. That is a no-op on the consumer: `SessionQueue.consumeByText`
+  only matches items in state `queued`, and returns `undefined` otherwise.
+- **`mode==="prompt"` mirrors cli.js's own attachment filter** (`nyt` /
+  `vfs = {"prompt","task-notification"}`), minus `task-notification` — those are
+  the wake-router's internal agent deliveries, never a ClaudeUI queue item.
+  `orphaned-permission` / `poll-event` drains are excluded by the same gate.
+- **`isMeta` is deliberately NOT filtered**, for the same reason A2 does not
+  filter forwarded-intent commands: an uncorrelated notification is a no-op,
+  a missing one strands a queue card.
+- **Placed after both cancel-pending filters**, so a command cancelled out of
+  the batch (`cancel_queued` / `cancel_async_message`) is never announced as
+  consumed. ClaudeUI does not use those control requests — it recalls via
+  `dequeue_message` — but the ordering costs nothing.
+
 ### Part B: `dequeueMessage()` SDK method (sdk.mjs)
 
 Exposes `dequeueMessage(value)` on the query object, which sends a `dequeue_message` control request.
@@ -108,19 +271,21 @@ Exposes `dequeueMessage(value)` on the query object, which sends a `dequeue_mess
 
 All minified function names are extracted **dynamically** from content patterns.
 
-| What                         | Stable Anchor / Pattern                                                                                                                                                                                                                                                                                                              |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Injection point (A1)         | The stream-json control-request fallback. Four lookalikes exist — see "Picking the right fallback" below.                                                                                                                                                                                                                            |
-| Dispatch-chain start         | `<msgVar>.type==="control_request"` — nearest occurrence before the anchor. Every local name A1 injects (reply helper, queue instance) must be captured **between** it and the anchor; that window is what proves the name is in scope.                                                                                              |
-| Success response helper      | `),<fn>(c,{})}}catch` — in the stop_task handler, searched only inside the dispatch chain. 2.1.261: `Xe`, defined alongside its error twin as `Xe=function(f,M){wt.enqueue(A5(f.request_id,M))},…,Be=function(f,M){wt.enqueue(_B(f.request_id,M))}`.                                                                                 |
-| Queue push + loop starter    | `<fn>({mode:"prompt",value:<v>.message.content,uuid:<v>.uuid}),<fn>()`                                                                                                                                                                                                                                                               |
-| Queue push definition        | `function <fn>(<A>…){…<arr>.push({...<A>,priority:<A>.priority??"next",timestamp:` — **cross-check only; nothing injects it.** See the v2.1.197 / v2.1.241 / v2.1.261 notes.                                                                                                                                                         |
-| Queue remove-by-predicate    | `function <fn>(<v>){let <v>=[];for(let <v>=<queue>.length-1`                                                                                                                                                                                                                                                                         |
-| Queue instance (A1)          | the `cancel_async_message` sibling handler: `subtype==="cancel_async_message"){let <u>=<msgVar>.request.message_uuid,<r>=<Q>.isFoldInFlight(<u>)?[]:<Q>.dequeueAllMatching(` — `<Q>` is the queue. Asserted unique **and** inside the dispatch chain.                                                                                |
-| Extract queue text           | `<fn>(<var>.value)` — near popAllEditable. **Not captured any more** — the rule is inlined into the predicate (see v2.1.241 note 3).                                                                                                                                                                                                 |
-| queued_command handler (A2)  | 2.1.261: `case"attachment":if(<d>&&<e>.attachment.type==="queued_command"){let <P>=<smn>(<e>.attachment,<e>);if(<P>)yield{...<P>,session_id:<e>.session_id};return}`. 2.1.241: same `case` but `yield{...<seo>(…),session_id:…};return}` (non-nullable builder). Older: `else if(G&&<var>.attachment.type==="queued_command")yield{` |
-| Session ID / UUID generators | `session_id:<fn>(),uuid:<fn>()` within the yield. **Not needed since 2.1.241** — the message's own `<e>.session_id` is in scope and uuid uses `globalThis.crypto.randomUUID()`.                                                                                                                                                      |
-| sdk.mjs stopTask             | `async stopTask(<v>){await this.request({subtype:"stop_task",task_id:<v>})}`                                                                                                                                                                                                                                                         |
+| What                         | Stable Anchor / Pattern                                                                                                                                                                                                                                                                                                                                                         |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Injection point (A1)         | The stream-json control-request fallback. Four lookalikes exist — see "Picking the right fallback" below.                                                                                                                                                                                                                                                                       |
+| Dispatch-chain start         | `<msgVar>.type==="control_request"` — nearest occurrence before the anchor. Every local name A1 injects (reply helper, queue instance) must be captured **between** it and the anchor; that window is what proves the name is in scope.                                                                                                                                         |
+| Success response helper      | `),<fn>(c,{})}}catch` — in the stop_task handler, searched only inside the dispatch chain. 2.1.261: `Xe`, defined alongside its error twin as `Xe=function(f,M){wt.enqueue(A5(f.request_id,M))},…,Be=function(f,M){wt.enqueue(_B(f.request_id,M))}`.                                                                                                                            |
+| Queue push + loop starter    | `<fn>({mode:"prompt",value:<v>.message.content,uuid:<v>.uuid}),<fn>()`                                                                                                                                                                                                                                                                                                          |
+| Queue push definition        | `function <fn>(<A>…){…<arr>.push({...<A>,priority:<A>.priority??"next",timestamp:` — **cross-check only; nothing injects it.** See the v2.1.197 / v2.1.241 / v2.1.261 notes.                                                                                                                                                                                                    |
+| Queue remove-by-predicate    | `function <fn>(<v>){let <v>=[];for(let <v>=<queue>.length-1`                                                                                                                                                                                                                                                                                                                    |
+| Queue instance (A1)          | the `cancel_async_message` sibling handler: `subtype==="cancel_async_message"){let <u>=<msgVar>.request.message_uuid,<r>=<Q>.isFoldInFlight(<u>)?[]:<Q>.dequeueAllMatching(` — `<Q>` is the queue. Asserted unique **and** inside the dispatch chain.                                                                                                                           |
+| Extract queue text           | `<fn>(<var>.value)` — near popAllEditable. **Not captured any more** — the rule is inlined into the predicate (see v2.1.241 note 3).                                                                                                                                                                                                                                            |
+| queued_command handler (A2)  | 2.1.261: `case"attachment":if(<d>&&<e>.attachment.type==="queued_command"){let <P>=<smn>(<e>.attachment,<e>);if(<P>)yield{...<P>,session_id:<e>.session_id};return}`. 2.1.241: same `case` but `yield{...<seo>(…),session_id:…};return}` (non-nullable builder). Older: `else if(G&&<var>.attachment.type==="queued_command")yield{`                                            |
+| Session ID / UUID generators | `session_id:<fn>(),uuid:<fn>()` within the yield. **Not needed since 2.1.241** — the message's own `<e>.session_id` is in scope and uuid uses `globalThis.crypto.randomUUID()`.                                                                                                                                                                                                 |
+| Drain name source (A3)       | the drain's own coalesced-command replay emitter: `for(let <pe> of <cn>)if(<pe>.uuid&&<pe>.uuid!==<V>.uuid){let <_e>=<fn>(<pe>.origin);<Ct>.enqueue({type:"user",message:{role:"user",content:<pe>.value},session_id:<K>(),parent_tool_use_id:null,uuid:<pe>.uuid,isReplay:!0` — yields `<cn>` (batch), `<Ct>` (outbound) and `<K>` (session id), all in scope by construction. |
+| Drain injection point (A3)   | `let <Kr>=<fn>(<cn>);<mr>=<Kr>===void 0?void 0:{userMessageUuid:<Kr>,anchor:` — `userMessageUuid:…,anchor:` is globally unique; `<cn>` is backreferenced to the batch captured above, and the match is required to fall within 4000 chars **after** the replay emitter (same loop body).                                                                                        |
+| sdk.mjs stopTask             | `async stopTask(<v>){await this.request({subtype:"stop_task",task_id:<v>})}`                                                                                                                                                                                                                                                                                                    |
 
 ### Picking the right fallback (A1 injection point)
 
@@ -221,9 +386,11 @@ Consequences for this patch:
   insurance, since chunk bodies are one long line each.
 - **Scope is per chunk.** A name captured at its definition site is not a
   binding at an injection site in another chunk. This patch is unaffected only
-  because everything it injects (`Xe`, `U`, `r`, and A2's `e`/`d`/`smn`) is read
-  out of the same chunk it edits — `chunk-gj501zgt.js`, whose exports are
-  `runHeadless` & co. `apply.mjs` asserts that rather than assuming it.
+  because everything it injects (`Xe`, `U`, `r`, A2's `e`/`d`/`smn`, and A3's
+  `cn`/`Ct`/`K`) is read out of the same chunk it edits — `chunk-gj501zgt.js`
+  on win32-x64, `chunk-6pmdkhea.js` on darwin-arm64, whose exports are
+  `runHeadless` & co. `apply.mjs` asserts that rather than assuming it (never
+  hard-code the hash — the chunk set is host-specific).
   (`background-task` and `usage-relay`, which anchor on the same fallback, DO
   need cross-chunk resolution — see their READMEs.)
 
@@ -368,24 +535,75 @@ Edit after consumption:
 ## Verification
 
 1. `node patch/queue-control/apply.mjs` against a fresh pristine `cli.js` — exits 0,
-   both markers reported OK. Run it again — both parts report "already applied".
+   all three markers reported OK. Run it again — all three report "already applied".
 2. **Read the patched region** (apply.mjs prints the offsets); on a chunked
    bundle also syntax-check the chunk you edited, which the whole-file
-   `node --check` cannot do (the concat is not one valid module):
+   `node --check` cannot do (the concat is not one valid module). A1/A2/A3 all
+   live in the same chunk, so one check covers them — locate it by marker
+   rather than by name, since the chunk hash changes per version and platform:
 
    ```bash
    node -e 'const fs=require("fs");const s=fs.readFileSync("vendor/claude-cli/cli.js","utf8");
-   const i=s.indexOf("// @bun-chunk B:/~BUN/root/chunk-gj501zgt.js");
+   const i=s.lastIndexOf("// @bun-chunk", s.indexOf("PATCHED:queue-control-drained"));
    const j=s.indexOf("// @bun-chunk", i+1);
+   console.log(s.slice(i, s.indexOf("\n", i)));
    fs.writeFileSync("/tmp/c.mjs", s.slice(s.indexOf("\n",i)+1, j))'
    node --check /tmp/c.mjs
    ```
 
 3. `node patch/apply-all.mjs` — patches apply with markers
+   (or `bun run ensure-cli` for extract → patch → rebundle → structure check)
 4. `bun run typecheck` — no errors
-5. Manual test:
+5. Behavioral harness — **spends real tokens**: `node patch/queue-control/test.mjs`.
+   It covers both emit sites: a mid-turn steer (A2) and a message pushed on the
+   first `result`, which the between-turns drain runs as the next turn's prompt
+   (A3). Both notifications are identified by their `prompt` field.
+6. Manual test:
    - Send a prompt that triggers a long tool call
    - Type a steer message mid-turn
    - QueuedMessageCard shows with Edit button
    - When consumed: message appears in chat, card disappears
    - Click Edit before consumption: text returns to input
+   - **A3 regression check:** launch a background subagent (`Task` with
+     `run_in_background`), wait until only the subagent is streaming, then send
+     a message. The card must clear and the bubble appear as the new turn
+     starts — not when the whole response finishes.
+
+## Discovery Method (Part A3, 2026-09-13)
+
+1. **Symptom** (Daniel, seen repeatedly): on the Claude engine, while the main
+   agent waits on a background subagent, a queued message is visibly picked up
+   and answered — but the QueuedMessageCard stays "queued" for the whole
+   response and only clears at turn end.
+2. **Ruled out a consumer-side mismatch first.** `claude-session.ts` normalizes
+   `msg.prompt` through `queuedCommandText` before `consumeByText`, which is the
+   known attachment/array trap — so a mismatch would have to be something else.
+   It wasn't: the notification never arrived at all.
+3. **Enumerated every `consume` on the queue** —
+   `rg -o -b '.{0,60}\.consume\(.{0,80}' vendor/claude-cli/cli.js` — and found
+   three reasons: `absorbed_mid_turn` (two sites, the query loop),
+   `delivered_as_tool_result`, and `delivered_to_agent` (the wake router). None
+   of them is the user-steer path at idle.
+4. **Found the fourth take-path, which is a `dequeue`, not a `consume`:** the
+   headless loop's `while(!$s()&&(V=dn?U.dequeue(ud):fr()))` drain. It runs the
+   command as the turn's prompt.
+5. **Proved no attachment is built there.** The turn-start attachment builder is
+   called with an empty queued-command list —
+   `Xne(At,O,te??null,[],…)` — so `yEe` (which is what turns a command into a
+   `queued_command` attachment) never sees it, and A2's `case"attachment"` hook
+   cannot fire.
+6. **Confirmed the state that makes this reachable from the UI.** cli.js's
+   `gt` (turn-running) flag is already false once the main turn's `result`
+   landed; ClaudeUI's `isProcessing` is flipped back to true by the background
+   subagent's `stream_event`s (`dispatchMessage`, the
+   `type === 'assistant' || type === 'stream_event'` guard). So ClaudeUI queues
+   while cli.js drains — immediately, via the queue's `subscribe` → `Ar()`.
+7. **Dead end worth recording:** the obvious "just emit a `type:"system"`
+   message from the query generator" does not work. The outbound normalizer's
+   `case"system"` is a subtype whitelist ending in `default:return`, so the
+   message is dropped with no error. The fix has to use `Ct.enqueue`
+   (`transport.outbound`), the direct stdout queue — the same one
+   `task_notification` and `bridge_state` use.
+8. **No consumer change needed.** `yEe` builds the attachment as
+   `{prompt: <cmd>.value, source_uuid: <cmd>.uuid}`, so emitting those two
+   fields from the drain produces a payload byte-identical to A2's.

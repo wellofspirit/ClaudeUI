@@ -1231,10 +1231,15 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       return
     }
     if (msg.subtype === 'queued_command_consumed') {
-      // cli.js has taken this text off its queue and is injecting it into the
-      // turn (docs/protocol-cc/04-system-subtypes.md §4.10). Text correlation is
+      // cli.js has taken this text off its queue (docs/protocol-cc/
+      // 04-system-subtypes.md §4.10). Either it absorbed the item into the
+      // running turn as an attachment, or — when cli.js was between turns —
+      // it dequeued the item and is starting a fresh turn with it as the
+      // prompt; `queue-control` Parts A2 and A3 emit the same message for both,
+      // so this handler does not have to tell them apart. Text correlation is
       // all the wire gives us — ADR-053 pins first-match, duplicates being
-      // interchangeable.
+      // interchangeable — and a prompt that was never queued here (every
+      // ordinary send travels the drain too) is a no-op in `consumeByText`.
       //
       // `msg.prompt` is the queued attachment's prompt VERBATIM, so it is an
       // ARRAY of content blocks whenever the queued message carried images or a
@@ -1536,8 +1541,14 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    * post-send ack consumes each one. Claude has no such hold:
    * {@link onPromptQueued} pushes into cli.js's native queue the instant an item
    * lands, and a push that races the turn's `result` is taken by cli.js as the
-   * NEXT turn's fresh prompt — so `queued_command_consumed` never arrives and
-   * the item would sit 'queued' on every client's card while its text runs.
+   * NEXT turn's fresh prompt.
+   *
+   * A SAFETY NET, not the mechanism. `queue-control` Part A3 (2026-09-13) made
+   * the between-turns drain emit `queued_command_consumed` too, so the drain
+   * normally consumes the item — with the right text, at the right moment —
+   * before this ever sees it. What is left for this flush is the ordering
+   * residue: a push whose drain notification has not reached us by the time
+   * `result` does, and any item cli.js loses track of.
    *
    * Marking everything still pending 'consumed' here is truthful in BOTH states
    * a `result` can find:
@@ -1546,7 +1557,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    *     our already-consumed item (`consumeByText` matches `state === 'queued'`
    *     only, and `emit()` has already pruned it);
    *  b) the push landed after `result` and is already running as a fresh prompt,
-   *     with no consumed notification ever coming.
+   *     its A3 notification still in flight behind this `result`.
    * Either way the text WILL run, which is exactly what 'consumed' asserts. One
    * broadcast covers the whole list, and renderer synthesis stays exactly-once
    * because the chat message id is derived from the item id (`steer-${itemId}`).

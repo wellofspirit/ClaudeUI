@@ -84,6 +84,12 @@ export abstract class BaseSession implements ISession {
   private flushingQueue = false
 
   /**
+   * A boundary fired while a flush was mid-forward. Remembered rather than
+   * dropped — see {@link flushQueuedItems}.
+   */
+  private queueFlushRerun = false
+
+  /**
    * Thinking-span clock (SyncCore phase 4b). `thinkingStartedAt` is the wall
    * clock at the first thinking delta of the current span; `sealedThinkingMs`
    * holds an already-sealed span's elapsed time until the next
@@ -198,29 +204,53 @@ export abstract class BaseSession implements ISession {
 
   /**
    * Forward every held item, oldest first, at an engine sub-turn boundary.
-   * Serialized: a boundary firing while a forward is in flight is a no-op —
-   * the running loop picks newly queued items up on its next pass.
+   *
+   * Serialized — only one flush runs at a time — but a boundary that lands
+   * while a forward is in flight is REMEMBERED, not dropped, and costs one
+   * more pass once the in-flight flush settles.
+   *
+   * Dropping it (the original behaviour) stranded items, because the running
+   * pass does NOT necessarily pick them up: a forward the engine refused
+   * leaves its item `queued` and breaks the loop, and the boundary that was
+   * swallowed is frequently the last one this turn — `turn end` in particular
+   * emits nothing after itself. The item then sat visible-but-dead on every
+   * client's queue card until the user sent something else. The concrete race:
+   * a mid-turn steer is still awaiting the engine when the turn ends; the
+   * turn-end call returns early; the steer is refused (no turn to steer); and
+   * nothing ever retries it as a fresh turn.
+   *
+   * Termination: the rerun flag is set only by an incoming boundary and is
+   * coalesced (one extra pass however many boundaries arrive during a pass),
+   * so passes are bounded by real engine events.
    */
   protected async flushQueuedItems(): Promise<void> {
-    if (this.flushingQueue) return
+    if (this.flushingQueue) {
+      this.queueFlushRerun = true
+      return
+    }
     this.flushingQueue = true
     try {
-      for (let item = this.queue.nextUnforwarded(); item; item = this.queue.nextUnforwarded()) {
-        this.queue.markForwarded(item)
-        await this.forwardQueuedItem(item)
-        // Delivery is acknowledged by the engine's own post-success path
-        // (onPromptDelivered). Still pending here means the send failed —
-        // which already surfaced `session:error` — so put the item back in the
-        // recallable pool and stop; the next boundary retries it. Never mark it
-        // consumed: that would paint a message into the transcript that the
-        // engine never received.
-        if (item.state === 'queued') {
-          this.queue.unmarkForwarded(item)
-          break
+      do {
+        this.queueFlushRerun = false
+        for (let item = this.queue.nextUnforwarded(); item; item = this.queue.nextUnforwarded()) {
+          this.queue.markForwarded(item)
+          await this.forwardQueuedItem(item)
+          // Delivery is acknowledged by the engine's own post-success path
+          // (onPromptDelivered). Still pending here means the send failed —
+          // which already surfaced `session:error` — so put the item back in
+          // the recallable pool and stop; the next boundary (including one
+          // that arrived during this await) retries it. Never mark it
+          // consumed: that would paint a message into the transcript that the
+          // engine never received.
+          if (item.state === 'queued') {
+            this.queue.unmarkForwarded(item)
+            break
+          }
         }
-      }
+      } while (this.queueFlushRerun)
     } finally {
       this.flushingQueue = false
+      this.queueFlushRerun = false
     }
   }
 

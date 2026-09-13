@@ -361,9 +361,27 @@ API error triggered automatic retry inside the streaming layer.
 
 ## 4.10 `queued_command_consumed` (PATCHED)
 
-Mid-turn queued steer consumed as an attachment.
+A queued command was taken off cli.js's queue and is now running.
 
-**Anchor:** `12805826` (patched by `patch/queue-control`).
+**Two emit sites**, because cli.js has two ways of taking an item off the queue —
+`patch/queue-control` hooks both (Parts A2 and A3), and they emit the same shape:
+
+| Site                                                         | When                                                                                 | Patch part |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------ | ---------- |
+| Outbound normalizer, `case"attachment"`                      | A turn is RUNNING: the command is absorbed mid-turn as a `queued_command` attachment | A2         |
+| Headless `drainCommandQueue` loop, at the user-message stamp | cli.js is BETWEEN TURNS: the command is dequeued and run as the next turn's PROMPT   | A3         |
+
+The drain path builds **no attachment at all** (its turn-start attachment builder
+is called with an empty queued-command list), so before A3 existed a message
+picked up between turns produced no notification — the UI's queue card only
+cleared on the turn-end flush, after the whole answer. That state is reachable
+whenever the host still considers the session busy while cli.js is idle — most
+visibly while a background subagent streams.
+
+Because the drain is also how an ordinary never-queued prompt reaches its turn,
+A3 fires for those too. Consumers must correlate against their own queue and
+treat an uncorrelated notification as a no-op (ClaudeUI: `consumeByText` only
+matches items still in state `queued`).
 
 **Gate:** Requires `queue-control` patch.
 
@@ -379,9 +397,11 @@ Mid-turn queued steer consumed as an attachment.
 }
 ```
 
-**`prompt` is NOT always a string.** The patch yields `prompt: <attachment>.prompt`
-verbatim, and `attachment.prompt` is whatever was pushed into the queue — which is the
-pushed message's `message.content`. That is a plain string for a text-only prompt and a
+**`prompt` is NOT always a string.** A2 yields `prompt: <attachment>.prompt` verbatim
+and A3 yields `prompt: <command>.value` — the same value, since cli.js builds the
+attachment from the command (`{prompt: <command>.value, source_uuid: <command>.uuid}`).
+Either way it is whatever was pushed into the queue — the pushed message's
+`message.content`. That is a plain string for a text-only prompt and a
 **content-block array** (`[{type:'image',…}, {type:'text',text}]`) whenever the prompt
 carried an image or a PDF. cli.js branches on this at every read site rather than
 normalizing at the emit site:
@@ -401,7 +421,11 @@ is why taking an image-carrying queued message BACK always worked while noticing
 been CONSUMED did not. Consumers must normalize before comparing: ClaudeUI does it in
 `src/core/sdk/queued-command-text.ts`.
 
-**Ordering:** Followed by a `user` message with `isReplay: true` when `replayUserMessages=true`. UI uses this to dismiss the "queued" card and show the text as a normal user message.
+**Ordering:** From the attachment site (A2), followed by a `user` message with
+`isReplay: true` when `replayUserMessages=true`. From the drain site (A3), it is
+emitted before the turn it starts — i.e. before that turn's first `assistant` /
+`stream_event`. UI uses this to dismiss the "queued" card and show the text as a
+normal user message.
 
 ---
 
