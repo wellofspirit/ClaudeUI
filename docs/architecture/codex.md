@@ -196,7 +196,7 @@ ADR-038 while compensating for Codex's missing dynamic-call resolution event.
 Built: `CodexEngineToolMap` feeds the existing renderer `ToolView` kinds; the
 three hosted UI tools run over the native dynamic-tool channel (`30421310`,
 `hostedMcp: true`); `dispatch_agent` makes Codex a dispatch SOURCE (`843b4ecf`,
-`crossEngineDispatch: true`, ADR-033 amendment). Native children render as subagent transcripts under the spawning card on both collab surfaces (`5452d3c5`, `subagents: true`). Planned: Codex as a dispatch TARGET.
+`crossEngineDispatch: true`, ADR-033 amendment). Native children render as subagent transcripts under the spawning card on both collab surfaces (`5452d3c5`, `subagents: true`). Codex is also a dispatch TARGET (`749886cc`): the dispatcher runs a headless thread per target under the caller's mode.
 
 Register hosted dynamic tools only with explicit experimental initialization and a tested definition set. Reuse handlers rather than cloning mermaid/mockup/file/dispatch behavior. Add a Codex engine tool map alongside the existing renderer maps and feed neutral `ToolView` kinds. Native MCP remains native; dynamic-tool support alone does not prove the full hosted-MCP control contract.
 

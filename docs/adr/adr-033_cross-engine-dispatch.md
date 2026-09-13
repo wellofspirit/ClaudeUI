@@ -289,5 +289,4 @@ the user's mode, and `extra.signal` set to the app-server request's abort signal
 fires, so an ended turn stops the target as a cli.js interrupt does. The shared permission engine
 gates it as kind `task` (ask in default/acceptEdits/auto, deny in plan); an ask is a card bound to the
 call's id. `crossEngineDispatchAvailable('codex')` is always true because claude is a bundled target,
-the same reasoning as the opencode branch. Codex as a TARGET is not built: the dispatcher has no Codex
-target factory and refuses `codex` as `req.engine`.
+the same reasoning as the opencode branch. Codex as a TARGET landed in `749886cc`: a headless `CodexClient` per target, the caller's autonomy mode written into the thread baseline at `thread/start` (plan: untrusted + read-only + writes denied at the gate; default/acceptEdits: untrusted + workspace-write with asks forwarded to the caller; auto: on-request + native reviewer), no dynamic tools (no recursion), model allowlist checked before the thread exists, `turn/interrupt` on stop, continuation only by a thread id this dispatcher created, usage rows carrying the API-rate equivalent cost or null.

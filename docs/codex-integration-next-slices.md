@@ -390,6 +390,8 @@ Owned: `src/core/ipc/handlers-core.ts` (the codex branch of `deleteSession`/`del
 
 ## Slice H: Codex as a cross-engine dispatch target
 
+**Landed in `749886cc` (2026-09-13).** Departures from the text, all deliberate: an unknown `session_id` is refused rather than resumed (a model-authored id must not reopen arbitrary threads); a model is optional for a Codex target because the catalog is readable before the thread exists, so the allowlist stays enforceable; the usage row's cost is null, not zero, for an unpriced model; `auto` is allow-all at the target's gate because a target has no human and the native reviewer is the decider; the `acceptEdits` outside-workspace narrowing is duplicated in the dispatcher; `maxCostUsd` is enforced on the equivalent. Fixture findings: a `[model_providers.openai]` table in config.toml is ignored (only `openai_base_url` redirects the built-in provider) and the built-in provider attempts a WebSocket upgrade first, so an HTTP fixture must answer 426.
+
 Decided by Daniel on 2026-09-13: build it. A Claude, opencode or pi session
 (and, once the same-engine guard allows it, another engine only, never Codex
 itself) can hand a task to a headless Codex thread through `dispatch_agent`.
