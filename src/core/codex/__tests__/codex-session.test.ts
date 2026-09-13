@@ -7,6 +7,7 @@ import type { EngineSpawnOptions } from '../../providers/ISession'
 import type { QueuedItem } from '../../../shared/types'
 import { applyEvent } from '../../shared/sync/reducer'
 import { emptyCanonicalState } from '../../shared/sync/state'
+import recordedElicitation from './fixtures/mcp-tool-approval-elicitation.json'
 
 const events = vi.hoisted(() => vi.fn())
 const overrides = vi.hoisted(() => new Map<string, unknown>())
@@ -293,6 +294,26 @@ function fixture(opts: EngineSpawnOptions = {}, auth: CodexAuthHook | null = nul
     void result.catch(() => {})
     return { result, controller }
   }
+  /**
+   * Drive one `mcpServer/elicitation/request` — the MCP tool approval (Slice
+   * 4b). The base payload is the request RECORDED from the pinned binary
+   * (`fixtures/mcp-tool-approval-elicitation.json`, captured by
+   * `src/integration/codex/codex-mcp-approval.integration.test.ts`), so these
+   * unit guards and the real wire cannot drift.
+   */
+  const elicitation = (params: Record<string, unknown> = {}) => {
+    const before = cards().length
+    const controller = new AbortController()
+    controllers.push(controller)
+    const result = callbacks.onServerRequest!(
+      'mcpServer/elicitation/request',
+      { ...recordedElicitation, threadId: 'root', turnId: 'turn', ...params },
+      { id: controllers.length, signal: controller.signal }
+    )
+    void result.catch(() => {})
+    const card = cards().length > before ? cards().at(-1) : undefined
+    return { result, card, controller }
+  }
   /** Every `session:queue-changed` payload, oldest first (ADR-053 full lists). */
   const queues = (): QueuedItem[][] =>
     events.mock.calls
@@ -306,6 +327,7 @@ function fixture(opts: EngineSpawnOptions = {}, auth: CodexAuthHook | null = nul
     approval,
     fileChange,
     dynamicCall,
+    elicitation,
     cards,
     queues,
     listed,
@@ -3561,5 +3583,217 @@ describe('Codex inherits the shared MCP list', () => {
     const { session } = fixture()
     await session.run(null)
     expect(warnings()).toEqual([])
+  })
+})
+
+/**
+ * Slice 4b — MCP tool approvals through the shared permission engine.
+ *
+ * Codex has no `item/mcpToolCall/requestApproval`. Before an MCP tool runs under
+ * a mode that asks, the app-server sends `mcpServer/elicitation/request`, and
+ * `core/src/mcp_tool_call.rs` reads anything but `accept` — the `Method not
+ * found` of an unregistered method included — as
+ * `ReviewDecision::denied("user rejected MCP tool call")`, which is what made
+ * every inherited MCP tool unusable in the default mode.
+ *
+ * The payload every case here drives is the request RECORDED from the pinned
+ * binary; the accept and decline bodies are proven to really approve and really
+ * refuse in `src/integration/codex/codex-mcp-approval.integration.test.ts`.
+ */
+describe('Codex MCP tool approvals', () => {
+  const ACCEPT = { action: 'accept', content: {} }
+  const DECLINE = { action: 'decline', content: null }
+  const TOOL = 'mcp__verify-stub__ping'
+  /** Every `session:warning` text this session emitted, oldest first. */
+  const warnings = (): string[] =>
+    events.mock.calls
+      .filter(([channel]) => channel === 'session:warning')
+      .map((call) => (call[1] as [string, string])[1])
+  const errors = (): string[] =>
+    events.mock.calls
+      .filter(([channel]) => channel === 'session:error')
+      .map((call) => (call[1] as [string, string])[1])
+
+  it('registers the elicitation method with the transport', async () => {
+    const { session, callbacks } = fixture()
+    await session.run(null)
+    // Not registered = "Method not found" = a silent rejection of every MCP tool
+    // call. This is the whole slice in one assertion.
+    expect(callbacks.serverMethods).toContain('mcpServer/elicitation/request')
+  })
+
+  it('declines on a user deny rule and says which rule denied it', async () => {
+    rules.deny = [TOOL]
+    const { session, elicitation } = fixture()
+    await session.run('hello')
+    const denied = elicitation()
+    expect(denied.card).toBeUndefined()
+    expect(await denied.result).toEqual(DECLINE)
+    expect(errors()).toContain(`Denied by permission rule: ${TOOL}`)
+  })
+
+  it('accepts on a user allow rule without raising a card', async () => {
+    rules.allow = [TOOL]
+    const { session, elicitation } = fixture()
+    await session.run('hello')
+    const allowed = elicitation()
+    expect(allowed.card).toBeUndefined()
+    expect(await allowed.result).toEqual(ACCEPT)
+  })
+
+  it('accepts on a server-wide allow rule', async () => {
+    rules.allow = ['mcp__verify-stub']
+    const { session, elicitation } = fixture()
+    await session.run('hello')
+    expect(await elicitation().result).toEqual(ACCEPT)
+  })
+
+  it('asks with a standard card in the mcp__ vocabulary and honours every answer', async () => {
+    const first = fixture()
+    await first.session.run('hello')
+    const pending = first.elicitation()
+    expect(pending.card).toMatchObject({
+      toolName: TOOL,
+      // `tool_params` from the form's `_meta`, display only — the recorded
+      // request carries an empty argument object.
+      input: {}
+    })
+    expect(pending.card.codex).toBeUndefined()
+    expect(pending.card.suggestions.map((s: { rules: unknown }) => s.rules)).toEqual([
+      [{ toolName: TOOL }],
+      [{ toolName: TOOL }],
+      [{ toolName: TOOL }]
+    ])
+    first.session.resolveApproval(pending.card.requestId, 'allow')
+    expect(await pending.result).toEqual(ACCEPT)
+
+    const refused = first.elicitation()
+    first.session.resolveApproval(refused.card.requestId, 'deny')
+    expect(await refused.result).toEqual(DECLINE)
+
+    const session = fixture()
+    await session.session.run('hello')
+    const forSession = session.elicitation()
+    session.session.resolveApproval(forSession.card.requestId, 'allowForSession')
+    expect(await forSession.result).toEqual(ACCEPT)
+    // The next identical call is allowed with no card at all.
+    const repeat = session.elicitation()
+    expect(repeat.card).toBeUndefined()
+    expect(await repeat.result).toEqual(ACCEPT)
+  })
+
+  it('persists an mcp__ allow rule the human ticked on the card', async () => {
+    const { session, elicitation } = fixture()
+    await session.run('hello')
+    const pending = elicitation()
+    session.resolveApproval(pending.card.requestId, 'allow', undefined, [
+      pending.card.suggestions[0]
+    ])
+    expect(await pending.result).toEqual(ACCEPT)
+    expect(savedRules).toHaveBeenCalledWith(
+      'user',
+      expect.objectContaining({ allow: [TOOL] }),
+      '/isolated'
+    )
+  })
+
+  it('gates under auto exactly like default', async () => {
+    const { session, elicitation } = fixture({ permissionMode: 'auto' })
+    await session.run('hello')
+    const pending = elicitation()
+    expect(pending.card).toMatchObject({ toolName: TOOL })
+    session.resolveApproval(pending.card.requestId, 'allow')
+    expect(await pending.result).toEqual(ACCEPT)
+  })
+
+  it('declines in plan mode with the plan reason', async () => {
+    // The shared engine's plan-mode base denies every kind that is not a read or
+    // a search, and `mcp` is one of them: an MCP tool is not plan-safe and
+    // nothing on the elicitation says whether it writes. This is the shared
+    // verdict, not a Codex carve-out — see the slice report.
+    const { session, elicitation } = fixture({ permissionMode: 'plan' })
+    await session.run('hello')
+    const denied = elicitation()
+    expect(denied.card).toBeUndefined()
+    expect(await denied.result).toEqual(DECLINE)
+    expect(errors()).toContainEqual(expect.stringContaining('Plan mode is read-only'))
+  })
+
+  it('falls back to the server scope when the form does not name a tool', async () => {
+    rules.deny = ['mcp__verify-stub']
+    const { session, elicitation } = fixture()
+    await session.run('hello')
+    // A connector template replaces the message wholesale, so the tool name is
+    // unreadable; the gate narrows to the server rather than guessing.
+    const denied = elicitation({ message: 'Allow Calendar to create an event?' })
+    expect(denied.card).toBeUndefined()
+    expect(await denied.result).toEqual(DECLINE)
+    expect(errors()).toContain('Denied by permission rule: mcp__verify-stub')
+  })
+
+  it('declines a form that is not the tool approval, with one warning', async () => {
+    const { session, elicitation } = fixture()
+    await session.run('hello')
+    const other = elicitation({
+      _meta: null,
+      message: 'What is your favourite colour?',
+      requestedSchema: { type: 'object', properties: { colour: { type: 'string' } } }
+    })
+    expect(other.card).toBeUndefined()
+    expect(await other.result).toEqual(DECLINE)
+    expect(warnings()).toEqual(['verify-stub asked a question ClaudeUI cannot show yet'])
+  })
+
+  it('never echoes back the persistence options Codex offered', async () => {
+    const { session, elicitation } = fixture()
+    await session.run('hello')
+    const pending = elicitation()
+    session.resolveApproval(pending.card.requestId, 'allowForSession')
+    const reply = (await pending.result) as Record<string, unknown>
+    // `persist: "session"` on the RESPONSE `_meta` is what Codex reads as
+    // "remember this" (`parse_mcp_tool_approval_elicitation_response`), and the
+    // app-server really does forward a response `_meta` into
+    // `Op::ResolveElicitation`. ClaudeUI owns rules and session allows
+    // (ADR-067), so nothing goes back.
+    expect(reply).toEqual(ACCEPT)
+    expect(reply).not.toHaveProperty('_meta')
+  })
+
+  it('cancels a pending elicitation when its owning turn ends', async () => {
+    const { session, elicitation, notify } = fixture()
+    await session.run('hello')
+    const pending = elicitation()
+    expect(pending.card).toBeDefined()
+    notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn', status: 'completed', items: [] }
+    })
+    // `abortServerRequests` has already torn the request down, so the parked
+    // promise rejects rather than answering a question nobody waits on.
+    await expect(pending.result).rejects.toThrow('cancelled')
+    expect(events).toHaveBeenCalledWith('session:approval-dismiss', [
+      'temporary',
+      { requestId: pending.card.requestId }
+    ])
+  })
+
+  it('refuses an elicitation for a turn this session does not own', async () => {
+    const { session, elicitation } = fixture()
+    await session.run('hello')
+    await expect(elicitation({ turnId: 'other' }).result).rejects.toThrow(
+      'no live owning root turn'
+    )
+    await expect(elicitation({ threadId: 'stranger' }).result).rejects.toThrow(
+      'no live owning root turn'
+    )
+  })
+
+  it('takes the running turn when the app-server could not correlate one', async () => {
+    // `turnId` is nullable on this params type alone: MCP models elicitation as
+    // a standalone server-to-client request, so the correlation is best effort.
+    rules.allow = [TOOL]
+    const { session, elicitation } = fixture()
+    await session.run('hello')
+    expect(await elicitation({ turnId: null }).result).toEqual(ACCEPT)
   })
 })

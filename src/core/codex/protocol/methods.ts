@@ -30,6 +30,7 @@ export interface CodexServerMethods {
   "item/tool/requestUserInput": { params: import("./v2/ToolRequestUserInputParams").ToolRequestUserInputParams; result: import("./v2/ToolRequestUserInputResponse").ToolRequestUserInputResponse };
   "item/permissions/requestApproval": { params: import("./v2/PermissionsRequestApprovalParams").PermissionsRequestApprovalParams; result: import("./v2/PermissionsRequestApprovalResponse").PermissionsRequestApprovalResponse };
   "item/tool/call": { params: import("./v2/DynamicToolCallParams").DynamicToolCallParams; result: import("./v2/DynamicToolCallResponse").DynamicToolCallResponse };
+  "mcpServer/elicitation/request": { params: import("./v2/McpServerElicitationRequestParams").McpServerElicitationRequestParams; result: import("./v2/McpServerElicitationRequestResponse").McpServerElicitationRequestResponse };
 }
 export interface CodexNotifications {
   "account/login/completed": import("./v2/AccountLoginCompletedNotification").AccountLoginCompletedNotification;

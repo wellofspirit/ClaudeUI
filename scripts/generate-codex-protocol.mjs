@@ -74,7 +74,17 @@ export const serverMethods = {
     'PermissionsRequestApprovalParams',
     'PermissionsRequestApprovalResponse'
   ],
-  'item/tool/call': ['DynamicToolCallParams', 'DynamicToolCallResponse']
+  'item/tool/call': ['DynamicToolCallParams', 'DynamicToolCallResponse'],
+  // The ONLY gate point an MCP tool call has on this wire (Slice 4b). Codex has
+  // no `item/mcpToolCall/requestApproval`: before an MCP tool runs under a mode
+  // that asks, `core/src/mcp_tool_call.rs` sends a form ELICITATION, and
+  // anything but `accept` becomes `ReviewDecision::denied("user rejected MCP
+  // tool call")` — including the "Method not found" an unregistered method
+  // earns, which is what made every inherited MCP tool unusable before this.
+  'mcpServer/elicitation/request': [
+    'McpServerElicitationRequestParams',
+    'McpServerElicitationRequestResponse'
+  ]
 }
 export const notifications = {
   'account/login/completed': 'AccountLoginCompletedNotification',

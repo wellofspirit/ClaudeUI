@@ -48,6 +48,12 @@ import { CodexTransportError, type CodexClientOptions } from './CodexAppServerCl
 import { CODEX_AUTH_PROVIDER_ID, type CodexAuthHook } from './codex-auth-hook'
 import { chatgptRateLimits } from './chatgpt-rate-limits'
 import { collectClaudeMcpForCodex } from './codex-mcp-bridge'
+import {
+  MCP_ELICITATION_ACCEPT,
+  MCP_ELICITATION_DECLINE,
+  mcpRuleToolName,
+  readMcpToolApproval
+} from './mcp-elicitation'
 import type { RateLimitSnapshot } from './protocol/v2/RateLimitSnapshot'
 import type { Model } from './protocol/v2/Model'
 import type { JsonValue } from './protocol/serde_json/JsonValue'
@@ -102,7 +108,12 @@ const serverMethods = [
   'item/permissions/requestApproval',
   // ClaudeUI's own hosted tools, offered on `thread/start` and called back here
   // (codex-hosted-tools.ts). Not an approval — it is the tool RUN itself.
-  'item/tool/call'
+  'item/tool/call',
+  // The ONLY gate an MCP tool call has (Slice 4b): Codex asks for MCP approval
+  // as a form ELICITATION, and reads anything but `accept` — the `Method not
+  // found` of an unregistered method included — as "user rejected MCP tool
+  // call". See `mcp-elicitation.ts`.
+  'mcpServer/elicitation/request'
 ] as const
 const record = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value)
@@ -303,6 +314,14 @@ type Pending = {
   questions?: ToolRequestUserInputParams['questions']
   /** `sessionAllows` keys to add when a human answers `allowForSession`. */
   allowKeys: string[]
+  /**
+   * The native reply for this request type, given the human's verdict. Every
+   * `requestApproval` request answers `{ decision }`;
+   * `mcpServer/elicitation/request` answers `{ action, content }` instead, so
+   * the SHAPE travels with the parked request rather than being re-derived
+   * where the card is answered.
+   */
+  reply: (accepted: boolean) => unknown
   settle: (value?: unknown) => void
 }
 
@@ -555,7 +574,9 @@ export class CodexSession extends BaseSession {
           ? this.refreshInjectedToken(params)
           : method === 'item/tool/call'
             ? this.hostedToolCall(params, context)
-            : this.requestApproval(method, params, context),
+            : method === 'mcpServer/elicitation/request'
+              ? this.mcpElicitation(params, context)
+              : this.requestApproval(method, params, context),
       onDisconnect: (error) => this.disconnected(error)
     })
   }
@@ -2398,7 +2419,10 @@ export class CodexSession extends BaseSession {
     allowKeys: string[],
     context: Parameters<NonNullable<CodexClientOptions['onServerRequest']>>[2],
     choices: CodexApprovalDecision[] = [],
-    questions?: ToolRequestUserInputParams['questions']
+    questions?: ToolRequestUserInputParams['questions'],
+    reply: (accepted: boolean) => unknown = (accepted) => ({
+      decision: accepted ? 'accept' : 'decline'
+    })
   ): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const abort = (): void => settle()
@@ -2414,6 +2438,7 @@ export class CodexSession extends BaseSession {
         choices: [...choices],
         questions,
         allowKeys,
+        reply,
         settle
       })
       context.signal.addEventListener('abort', abort, { once: true })
@@ -2437,6 +2462,103 @@ export class CodexSession extends BaseSession {
   private async refreshInjectedToken(params: unknown): Promise<unknown> {
     if (!this.auth) throw new Error('This Codex session holds no ClaudeUI-managed credential')
     return this.auth.onRefreshRequest(params)
+  }
+
+  /**
+   * Answer `mcpServer/elicitation/request` — the one gate an MCP tool call has
+   * on this wire (Slice 4b, ADR-067's "Codex executes; ClaudeUI decides").
+   *
+   * Codex has no MCP-specific approval request: `core/src/mcp_tool_call.rs`
+   * sends a form elicitation before the tool runs and reads anything but
+   * `accept` as `ReviewDecision::denied("user rejected MCP tool call")` — which
+   * is what an unregistered method earned before this method existed, and why
+   * every inherited MCP tool was unusable under the default mode.
+   *
+   * The verdict comes from the SAME evaluator and the same merged `~/.claude`
+   * rules the command and file-change approvals use, under the tool name
+   * Claude's own MCP rule vocabulary spells: `mcp__<server>__<tool>`. Allow
+   * accepts, deny declines with a `session:error` naming the rule (neither
+   * native reply carries a reason), ask raises the standard card whose
+   * "always allow" suggestions and session-allow key are in that same
+   * vocabulary. Codex's own persistence options are never echoed back.
+   *
+   * An elicitation that is NOT the tool approval is declined with one warning:
+   * rendering arbitrary MCP forms is out of scope, and leaving the request
+   * unanswered would stall the server that asked.
+   */
+  private mcpElicitation(
+    value: unknown,
+    context: Parameters<NonNullable<CodexClientOptions['onServerRequest']>>[2]
+  ): Promise<unknown> {
+    const child =
+      record(value) && typeof value.threadId === 'string' && value.threadId !== this.threadId
+        ? this.children.get(value.threadId)
+        : undefined
+    const ownThread = record(value) && value.threadId === this.threadId
+    // `turnId` is NULLABLE here, unlike every `*/requestApproval` params type:
+    // MCP models elicitation as a standalone server-to-client request and the
+    // app-server only correlates a turn when it can. An uncorrelated one still
+    // belongs to whatever turn this connection is running, which is the turn
+    // the card has to be cancelled with.
+    const turnId =
+      record(value) && typeof value.turnId === 'string'
+        ? value.turnId
+        : child
+          ? child.turnId
+          : this.turnId
+    if (
+      this.closed ||
+      context.signal.aborted ||
+      !record(value) ||
+      (!ownThread && !child) ||
+      typeof turnId !== 'string' ||
+      (child
+        ? child.turnId !== null && child.turnId !== turnId
+        : turnId !== this.turnId || this.endedTurns.has(turnId))
+    )
+      return Promise.reject(new Error('Codex request has no live owning root turn'))
+    const approval = readMcpToolApproval(value)
+    if (!approval) {
+      const server = typeof value.serverName === 'string' ? value.serverName : 'An MCP server'
+      this.send('session:warning', `${server} asked a question ClaudeUI cannot show yet`)
+      return Promise.resolve(MCP_ELICITATION_DECLINE)
+    }
+    const toolName = mcpRuleToolName(approval.server, approval.tool)
+    const verdict = this.gate([{ tool: toolName, input: {} }])
+    if (verdict.decision === 'allow') return Promise.resolve(MCP_ELICITATION_ACCEPT)
+    if (verdict.decision === 'deny') {
+      this.send('session:error', verdict.reason!)
+      return Promise.resolve(MCP_ELICITATION_DECLINE)
+    }
+    // The elicitation names no thread ITEM (the app-server's own TODO says core
+    // cannot correlate one yet), so the card has no transcript row to bind to
+    // and floats — actionable, just not inline. The native request id keeps it
+    // unique within this process generation.
+    const toolUseId = codexItemId(
+      value.threadId as string,
+      turnId,
+      `mcp-elicitation-${JSON.stringify(context.id)}`
+    )
+    const requestId = this.approvalRequestId(toolUseId, context.id)
+    if (this.pending.has(requestId)) return Promise.reject(new Error('Duplicate Codex approval'))
+    const card: PendingApproval = {
+      requestId,
+      toolUseId,
+      toolName,
+      // Display only — `tool_params` is what the model passed, and nothing in
+      // the ladder gates on an MCP tool's arguments.
+      input: approval.params,
+      suggestions: this.buildApprovalSuggestions(toolName)
+    }
+    return this.park(
+      card,
+      turnId,
+      [sessionAllowKey(toolName, {})],
+      context,
+      [],
+      undefined,
+      (accepted) => (accepted ? MCP_ELICITATION_ACCEPT : MCP_ELICITATION_DECLINE)
+    )
   }
 
   private requestApproval(
@@ -2666,7 +2788,10 @@ export class CodexSession extends BaseSession {
    */
   private buildApprovalSuggestions(tool: string, ruleContent?: string): PermissionSuggestion[] {
     const rule = {
-      toolName: PI_TOOL_TO_CLAUDE_TOOL[tool],
+      // An MCP tool is ALREADY spelled in Claude's rule vocabulary
+      // (`mcp__<server>__<tool>`), which is why it is passed through rather than
+      // translated: the map only covers the seven names with a pi analogue.
+      toolName: PI_TOOL_TO_CLAUDE_TOOL[tool] ?? tool,
       ...(ruleContent ? { ruleContent } : {})
     }
     return (['userSettings', 'projectSettings', 'localSettings'] as const).map((destination) => ({
@@ -2754,7 +2879,7 @@ export class CodexSession extends BaseSession {
     }
     if (decision === 'allowForSession')
       for (const key of pending.allowKeys) this.sessionAllows.add(key)
-    pending.settle({ decision: decision === 'deny' ? 'decline' : 'accept' })
+    pending.settle(pending.reply(decision !== 'deny'))
     // No rules cache to invalidate here: `gate()` re-reads the merged rules per
     // request, so a newly persisted rule is honoured on the very next approval.
     if (updatedPermissions && updatedPermissions.length > 0)

@@ -63,6 +63,10 @@ export const CodexEngineToolMap: EngineToolMap = {
     // Native children (ADR-066 slice F): the spawn call is the card the child's
     // transcript hangs off, which is exactly what the shared TaskCard renders.
     if (name === 'collab:spawnAgent') return 'task'
+    // An inherited MCP tool's approval card (Slice 4b) is named in Claude's rule
+    // vocabulary, `mcp__<server>__<tool>`, so it takes the generic MCP kind the
+    // other engines give the same shape (shared/tool-kinds.ts).
+    if (name.startsWith('mcp__')) return 'mcp'
     return 'unknown'
   },
   displayName(name) {

@@ -29,7 +29,11 @@ import {
   installStaged,
   CodexRecoveryError
 } from '../../../../scripts/ensure-codex.mjs'
-import { checkOutput, codexBinaryDigests } from '../../../../scripts/generate-codex-protocol.mjs'
+import {
+  checkOutput,
+  codexBinaryDigests,
+  serverMethods
+} from '../../../../scripts/generate-codex-protocol.mjs'
 import { CODEX_SUPPORTED_HOSTS } from '../codex-locate'
 import provenance from '../protocol/provenance.json'
 const directories: string[] = []
@@ -385,4 +389,20 @@ it('check mode detects changed, missing and extra output without rewriting', () 
   expect(() => checkOutput(dir, files)).not.toThrow()
   writeFileSync(join(dir, 'extra.ts'), 'extra')
   expect(() => checkOutput(dir, files)).toThrow('drift')
+})
+
+/**
+ * Slice 4b guard 1 — the MCP approval elicitation is in the generator's
+ * selection, so the two upstream types it needs stay generated and pinned. A
+ * method missing here regenerates a `methods.ts` without it, which makes the
+ * session's own registration a type error long before anything reaches a
+ * binary.
+ */
+it('selects the MCP elicitation server request for generation', () => {
+  expect(serverMethods['mcpServer/elicitation/request']).toEqual([
+    'McpServerElicitationRequestParams',
+    'McpServerElicitationRequestResponse'
+  ])
+  expect(provenance.roots).toContain('v2/McpServerElicitationRequestParams')
+  expect(provenance.roots).toContain('v2/McpServerElicitationRequestResponse')
 })

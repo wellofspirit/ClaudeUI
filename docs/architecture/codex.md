@@ -127,6 +127,32 @@ deny rules bind even under `auto` and prefix allows skip the ask; the file is
 regenerated on core boot, after a user-scope permission write and in the Codex
 spawn prep, only when its source hash changes.
 
+An MCP tool call is gated through the same ladder, but it does not arrive as a
+`requestApproval` at all. Codex 0.154.0 has no `item/mcpToolCall/requestApproval`:
+before an MCP tool runs under a mode that asks, `core/src/mcp_tool_call.rs`
+sends the server request `mcpServer/elicitation/request` carrying a FORM whose
+`_meta.codex_approval_kind` is `mcp_tool_call`, and reads anything but an
+`accept` back — including the `Method not found` an unregistered method earns —
+as `ReviewDecision::denied("user rejected MCP tool call")`, which is exactly what
+every inherited server's first tool call hit. `mcp-elicitation.ts` reads the
+form and `CodexSession.mcpElicitation` answers it: the gated tool name is
+`mcp__<server>__<tool>` in Claude's own MCP rule vocabulary (kind `mcp`), allow
+answers `{action: "accept", content: {}}`, deny answers
+`{action: "decline"}` plus the usual `session:error`, and ask raises the
+standard card whose always-allow suggestions and session-allow key use that same
+name. The form names its tool only in the message (`Allow the <server> MCP
+server to run tool "<tool>"?` — the meta key `tool_name` exists upstream but the
+core's builder does not set it), so a message a connector template rewrote
+narrows the gate to `mcp__<server>`, which never widens a verdict. Codex's own
+persistence options are never echoed back: a response `_meta.persist` really is
+forwarded into `Op::ResolveElicitation`, and ClaudeUI owns rules and session
+allows. An elicitation that is not the tool approval is declined with one
+`session:warning` naming the server; rendering arbitrary MCP forms is not built.
+The exact request is recorded in
+`src/core/codex/__tests__/fixtures/mcp-tool-approval-elicitation.json` and
+re-captured on every run of
+`src/integration/codex/codex-mcp-approval.integration.test.ts`.
+
 `codex_session_overrides` (migration 15) now holds model and effort only. Rows
 written before the shared gate still carry the retired
 `approvalPolicy`/`sandbox`/`approvalsReviewer` keys; `savedCodexOverrides` drops

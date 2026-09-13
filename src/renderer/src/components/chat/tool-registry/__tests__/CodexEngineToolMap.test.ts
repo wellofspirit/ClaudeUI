@@ -23,6 +23,9 @@ describe('CodexEngineToolMap.kindOf', () => {
     // Cross-engine dispatch (slice E) rides the same bare-name channel and
     // renders on the engine-neutral TaskCard, exactly as pi's does.
     ['dispatch_agent', 'task'],
+    // Slice 4b: an inherited MCP tool's approval card, in Claude's rule vocabulary.
+    ['mcp__verify-stub__ping', 'mcp'],
+    ['mcp__verify-stub', 'mcp'],
     ['somethingElse', 'unknown']
   ]
   it.each(cases)('kindOf(%s) === %s', (name, kind) => {
