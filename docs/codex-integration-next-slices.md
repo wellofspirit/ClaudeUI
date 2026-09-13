@@ -422,6 +422,8 @@ Owned: `src/core/services/cross-engine-dispatcher.ts` (new codex target path and
 
 ## Slice I: approvals from nested agents render inline as well as floating
 
+**Landed in `4be947f9` (2026-09-13).** Store-side binding inside `SubagentMessages`; floating kept. Finding: the opencode dispatch target's forwarded approvals carry no tool id, so they float only until a core change adds `props.tool.callID`.
+
 Decided by Daniel on 2026-09-13: keep the floating card, and ALSO bind the same
 approval to the matching tool block inside the nested subagent view.
 
@@ -445,3 +447,8 @@ approval to the matching tool block inside the nested subagent view.
 ### Files and boundaries
 
 Owned: `src/renderer/src/components/chat/SubagentMessages.tsx`, `SubagentOutputBody.tsx`, `FloatingApproval.tsx` (comment only), their tests. Do not touch core, the reducer, or other renderer components; do not touch the Sidebar (slice G).
+
+## Follow-ups landed on 2026-09-13 without a doc spec (kickoffs were inline)
+
+- **Queue (`d4d5bf60`)**: `patch/queue-control` Part A3 announces the between-turns drain pickup (`docs/protocol-cc/04-system-subtypes.md` §4.10 has both emit sites); `BaseSession.flushQueuedItems` remembers a mid-flush boundary and runs one more pass. Live harness 10/10.
+- **Codex follow-ups (`76453c7f`)**: fork registry (db v16 `codex_forks`, one-time adoption of pre-registry forks, prune only on `-32600`), API-rate equivalent cost for the Codex catalog models (prices in `src/shared/pricing.ts`, sources cited), a child's failed/interrupted turn closes its card, the v2 wait card is filled from the session's child registry.
