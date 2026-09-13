@@ -1,6 +1,104 @@
 # Codex integration handoff
 
-## Resume here
+## Resume here (ADR-068 arc — 2026-09-14)
+
+**Start with `docs/adr/adr-068_chatgpt-identity-vault-owned-codex-injection.md` and `docs/codex-accounts-spec.md`.** The spec is the source of truth for this arc: every slice has a kickoff, and every landed slice has a "Landed …" paragraph recording the as-built deviations. The older "Resume here" below is the pre-ADR-068 state and stays as history.
+
+### What is committed (all local on `codex-integration`, oldest first; nothing pushed since the previous handoff — confirm with `git log origin/codex-integration..HEAD`)
+
+```text
+e23d5f93 docs(codex): ADR-068 + spec (vault-owned ChatGPT identity, Codex by token injection, accounts, one sign-in dialog)
+855755af feat(auth): Slice 1 — vault holds N accounts, one active, vended to pi/opencode; Accounts card + per-session toggle
+786902fd feat(codex): Slice 2a — inject the vault token into every Codex process; refresh answered from the vault
+81822982 feat(codex): Slice 2b — per-session account pin, account picker, per-account rate limits (credits for business plans)
+a54776e7 feat(auth): Slice 3 — SignInDialog for Anthropic + ChatGPT, one session:auth-required from every engine
+772d89eb fix(auth): CredentialSync refresh timer overflowed for expiries beyond 2^31 ms and refreshed immediately
+37ccd411 feat(codex): Slice 4 — inherit the shared Claude MCP list as a per-thread override (merges into the native table)
+c3c32850 feat(codex): Slice 4b — MCP tool approvals via mcpServer/elicitation/request through the shared permission engine
+```
+
+Every one of these was reviewed line by line by the main model, gated (typecheck, lint, full `bun run test`, `CODEX_INTEGRATION=1 bun run test:integration`, `check-codex-protocol` where the protocol changed), and driven in the real Electron app before commit. Live evidence that exists: a real signed-in Codex turn under an injected vault token (the first on Windows), the account picker pinning a session to a second account on a live process, the sign-in dialog opened from the bad-token discovery banner, the real app-server spawning a `.mcp.json` stub and the model calling its tool after the approval card was allowed.
+
+### What is NOT committed: Slice 5a, unreviewed
+
+The working tree holds a full Slice 5a implementation delivered by an Opus implementer at the very end of the previous session. **The main model has NOT read it, has NOT verified its guard tests fail-before, and has NOT driven it in the app.** Treat it exactly as a fresh implementer report under ADR-026:
+
+```text
+M docs/codex-spike.md
+M scripts/generate-codex-protocol.mjs
+M src/core/codex/CodexAppServerClient.ts
+M src/core/codex/CodexService.ts
+M src/core/codex/__tests__/codex-commands.test.ts
+M src/core/codex/__tests__/codex-service.test.ts
+M src/core/codex/protocol/methods.ts
+M src/core/codex/protocol/provenance.json
+M src/core/codex/rules-sync.ts
+M src/core/ipc/codex-commands.ts
+M src/main/ipc/__tests__/remote-handlers.ipc.test.ts
+M src/preload/index.ts
+M src/renderer/src/components/SessionView.tsx
+M src/renderer/src/components/SettingsDialog/OpencodeConfigPanes.tsx
+M src/renderer/src/components/SettingsDialog/__tests__/settings-pages.unit.test.tsx
+M src/renderer/src/components/SettingsDialog/settings-pages.tsx
+M src/renderer/src/components/SettingsDialog/settings-sections.tsx
+M src/renderer/src/components/Sidebar/SettingsPanel.tsx
+M src/renderer/src/components/chat/ChatPanel/TopBar.tsx
+M src/shared/codex-types.ts
+M src/shared/types.ts
+M src/test/helpers/boot-test-app.ts
+M src/web/__tests__/api-adapter.test.ts
+M src/web/api-adapter.ts
+?? src/core/codex/__tests__/codex-config.test.ts
+?? src/core/codex/codex-config.ts
+?? src/core/codex/protocol/v2/ConfigBatchWriteParams.ts
+?? src/core/codex/protocol/v2/ConfigEdit.ts
+?? src/core/codex/protocol/v2/ConfigValueWriteParams.ts
+?? src/core/codex/protocol/v2/ConfigWriteResponse.ts
+?? src/core/codex/protocol/v2/MergeStrategy.ts
+?? src/core/codex/protocol/v2/OverriddenMetadata.ts
+?? src/core/codex/protocol/v2/WriteStatus.ts
+?? src/integration/codex/codex-config-write.integration.test.ts
+?? src/renderer/src/components/SettingsDialog/CodexConfigPanes.tsx
+?? src/renderer/src/components/SettingsDialog/__tests__/CodexConfigPanes.component.test.tsx
+?? src/renderer/src/components/SettingsDialog/use-codex-config.ts
+```
+
+Gates over this tree as of the handoff:
+
+```text
+$ tsc --noEmit -p tsconfig.web.json --composite false
+TYPECHECK_EXIT=0
+$ eslint --cache .
+LINT_EXIT=0
+ Test Files  655 passed (655)
+      Tests  12226 passed | 8 skipped (12234)
+Codex protocol matches pinned generator
+```
+
+Next session, in order: (1) `git status --short` must equal the list above (plus the two unrelated untracked `voice-coordinator` docs, which belong to someone else — never touch them); (2) read every changed line, starting with `src/core/codex/codex-config.ts` (the service over `config/read` + `config/batchWrite`), `use-codex-config.ts` (the one shared config store), `CodexConfigPanes.tsx` (eleven groups), the `settings-pages.tsx` groups, the generated `v2/Config*Write*` types and the generator diff, `rules-sync.ts` (a Recompile command was expected), `TopBar.tsx` / `Sidebar/SettingsPanel.tsx` (why were they touched?), and the probe write-up appended to `docs/codex-spike.md` § "`config/batchWrite` probe" — its findings matter: `value: null` REMOVES a key, a stale `expectedVersion` fails with `configVersionConflict` in `error.data.config_write_error_code`, and `batchWrite` does NOT validate keys against the schema (a misremembered key is written silently and breaks the next session), which is why the page's key list must come from `config_toml.rs` / the generated types, not from the ADR table; (3) re-run the gates and `CODEX_INTEGRATION=1 bunx vitest run --project integration src/integration/codex/codex-config-write.integration.test.ts`; (4) drive the real app against an ISOLATED profile with a fabricated `config.toml` (recipe below — note the shim does not redirect `CODEX_HOME` for the child, so set `CODEX_HOME` to a temp dir in the harness env for this drive) and check that flipping a toggle changes exactly that key; (5) add the "Landed" paragraph to the spec's Slice 5a and commit precisely by file list; (6) then dispatch Slice 5b from its kickoff in the spec (Codex segments on Default models / Dispatch / Auto-mode judge, `engines/codex.json` defaults, stale strings).
+
+### How this arc is worked
+
+ADR-026 as practised: the main model writes the kickoff into the spec, an Opus `general-purpose` agent implements against it with the standing rules at the top of the spec (no git state moves, no repo format, no deleting others' files, no real credentials, guard tests proven failing first), the main model reads every line, re-runs gates, proves fail-before from a clean HEAD worktree when in doubt (`git worktree add --detach .cache/wt-head <sha>` + a `node_modules` junction, then copy the new test files in), drives the app, and commits by explicit file list. Slices 1 and 2b each needed two or three review rounds; the fixes were real (a dead "+ Add account" button, a missing opencode recycle, a pre-spawn pin that never surfaced, an unhandled rejection from the picker).
+
+### Recipes that took time to find
+
+- **Isolated-profile app drive.** Electron ignores `NODE_OPTIONS --require`, and rewriting `USERPROFILE` breaks its crashpad launch. What works: `.cache/app-shot-home.mjs` (a gitignored copy of `scripts/app-shot.mjs` whose launch reads `APP_SHOT_ELECTRON_ARGS`, `;`-separated) passing Electron's own `-r <shim>` where the shim only patches `os.homedir()` to `CLAUDEUI_TEST_HOME`; run with `MSYS_NO_PATHCONV=1` and Windows-format paths. The shim was in the previous session's scratchpad (`home-shim.cjs`, ten lines: `require('node:os').homedir = () => process.env.CLAUDEUI_TEST_HOME`) — recreate it. LIMIT: it isolates only the main process (vault, providers, DB); child processes (cli.js, codex) still see the real `USERPROFILE`/`CODEX_HOME`.
+- **Never launch the app against the real home while the owner's app is running**: two instances race the vault's token refresh. Reviewer-only exceptions were made for short, read-mostly drives; the vault's mtime was checked afterwards.
+- **Fabricated profiles need JWT-shaped access tokens** (unsigned `alg: none` with `exp`, `email`, `https://api.openai.com/auth.chatgpt_account_id`); Codex parses the claims and rejects a plain string with "invalid ID token format". Far-future expiries must stay under the timer clamp fix or they would have been refreshed at once (now fixed in `772d89eb`).
+- **Real-binary integration on Windows x64**: `CODEX_INTEGRATION=1 bunx vitest run --project integration src/integration/codex/<file>`. The ADR-068 tests (`codex-injection`, `codex-mcp-override`, `codex-mcp-approval`, `codex-config-write`) are gated for macOS arm64 AND Windows x64; the older Codex suites are still macOS-only. On Windows the child runs unsandboxed, so the fixture must serve `chatgpt_base_url` and `GET /v1/models` itself or a fake token earns real 401s.
+- **Scratch directory for live Codex turns:** `D:\WorkPlace\codex-scratch` (README, `mcp-stub.cjs`, `.mcp.json` declaring `verify-stub` with a `ping` tool answering `pong-from-mcp`). Real turns there spend the owner's ChatGPT quota; keep them to one short prompt.
+- **Eval-driven session start in the harness:** `st.createNewSession(id, cwd, true)`, then `setSelectedEngine("codex")`, then `window.api.createSession(id, cwd, undefined, undefined, "default", undefined, undefined, undefined, undefined, "codex")`, then `sendPrompt`. Codex rekeys the routing id to the native thread id, so find the session by `cwd` afterwards, not by the minted id.
+
+### Findings from the binary worth keeping (all recorded in `docs/codex-spike.md`)
+
+Per-thread `config.mcp_servers` overrides merge per key into the user's table (both nested and dotted forms). MCP tool approval is a form elicitation on `mcpServer/elicitation/request` with `_meta.codex_approval_kind = "mcp_tool_call"`, no question id, tool name only in the message; accept body is `{ action: "accept", content: {} }`. A user-level `forced_chatgpt_workspace_id` does not gate an injected token. A business workspace reports credits, not rate windows. `config/batchWrite`: `null` removes, stale version → `configVersionConflict`, no schema validation of keys.
+
+### Open items after Slice 5
+
+Slice 5b; ADR-068's status line to "Implemented" with an as-built section once 5b lands; a push when Daniel asks; the model-picker and welcome-tile sign-in entry points deferred from Slice 3; pi has no distinguishable auth error (no `session:auth-required` from it); Codex→Codex dispatch is refused so the "caller pin reaches the target" wiring is dormant; headless-server device code is designed but not built; the macOS legs of the new integration tests have not run; the Rename → Orrery arc is untouched by this work.
+
+## Resume here (pre-ADR-068 — historical)
 
 Work continues on **`codex-integration`** (from `pre-release`). Forty-three Codex commits are on it. The first twenty-one were pushed to `origin/codex-integration` on 2026-09-12 with Daniel's approval; everything after `5eaf7bf5` is local until he asks for another push. The worktree is clean apart from two unrelated pre-existing untracked files (`docs/headless-server.md`, `docs/manual.md`). Oldest first:
 
