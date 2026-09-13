@@ -21,7 +21,10 @@ import provenance from '../../core/codex/protocol/provenance.json'
 
 /**
  * DOES AN INTERRUPTED HOSTED-TOOL CALL SURVIVE INTO COLD HISTORY? NO — pinned
- * against Codex 0.154.0 on 2026-09-13. See the assertions at the bottom.
+ * against Codex 0.154.0 on 2026-09-13. See the assertions at the bottom. LIVE,
+ * the call is answered by ClaudeUI itself: the binary sends nothing, so the
+ * core synthesizes the failed result the card needs (`finishTurn` ->
+ * `failUnresolvedHostedCalls`), which is the other half of what is pinned here.
  *
  * An M2-era probe found an interrupted dynamic tool call absent from both the
  * immediate and the cold native history, and the integration spec kept a
@@ -345,7 +348,7 @@ function toolBlocks(
 }
 
 it.skipIf(!enabled)(
-  'loses an interrupted hosted-tool call: no result live, no item in cold history',
+  'answers an interrupted hosted-tool call itself: synthesized result live, no item in cold history',
   async () => {
     const { cwd, env, errors } = await setupHostedToolFixture()
     session = new CodexSession(
@@ -440,26 +443,32 @@ it.skipIf(!enabled)(
     )
 
     // THE ANSWER, 2026-09-13, against pinned Codex 0.154.0. The M2 finding
-    // STANDS, and slice C did not change it:
+    // about the BINARY stands, and slice C did not change it:
     //
-    //  - LIVE: the card is a bare `tool_use` with NO result. The mapper only
-    //    emits a `tool_result` for a COMPLETED `dynamicToolCall` item, and the
-    //    binary never completes one that is still outstanding when the turn is
-    //    interrupted — `finishTurn`'s authoritative replay of `turn.items` has
-    //    nothing to replay.
+    //  - The binary never completes a `dynamicToolCall` that is still
+    //    outstanding when the turn is interrupted, so the mapper (which only
+    //    emits a `tool_result` for a COMPLETED item) has nothing to emit and
+    //    `finishTurn`'s authoritative replay of `turn.items` has nothing to
+    //    replay.
     //  - COLD: the interrupted turn's items are `["userMessage"]`. The
     //    `dynamicToolCall` item is not in the rollout at all, so no read of any
     //    kind can bring it back.
     //
-    // So an interrupted hosted-tool call is unrecoverable from native history
-    // by construction, and the only honest thing ClaudeUI shows after a
-    // restart is the incompleteness warning below. Nothing here is a bug to
-    // fix in this module; a durable record would have to be ClaudeUI's own
-    // (the spec's "presentation supplement"), which is NOT built.
-    expect(liveBlocks.map((block) => [block.type, block.toolName])).toEqual([
-      ['tool_use', 'render_mermaid']
-    ])
-    expect(liveResult, 'the binary completed an interrupted dynamic call after all').toBeUndefined()
+    // What CHANGED is what ClaudeUI does with that: leaving the card a bare
+    // `tool_use` left it spinning for good, so the core now tombstones every
+    // unresolved hosted call when the turn ends interrupted, with cli.js's own
+    // wording for a tool call Esc cut short. That is a LIVE record only — the
+    // durable one would have to be ClaudeUI's own (the spec's "presentation
+    // supplement"), which is deliberately NOT built, so a restart still shows
+    // nothing but the incompleteness warning below.
+    expect(liveBlocks.map((block) => block.type)).toEqual(['tool_use', 'tool_result'])
+    expect(liveBlocks[0]).toMatchObject({ toolName: 'render_mermaid', toolUseId: callId })
+    expect(liveResult, 'the interrupted call was left without a result after all').toEqual({
+      type: 'tool_result',
+      toolUseId: callId,
+      toolResult: '[Request interrupted by user for tool use]',
+      isError: true
+    })
     expect(raw.turns).toHaveLength(1)
     expect(raw.turns[0].status).toBe('interrupted')
     expect(raw.turns[0].items.map((item) => item.type)).toEqual(['userMessage'])

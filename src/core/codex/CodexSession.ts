@@ -162,6 +162,21 @@ function guardianActionLabel(action: GuardianApprovalReviewAction): string {
 const OVERRIDABLE_ACTIONS = new Set(['command', 'execve', 'applyPatch'])
 
 /**
+ * What a hosted tool call that will never come back is left holding.
+ *
+ * `[Request interrupted by user for tool use]` is cli.js's OWN tombstone for a
+ * tool call Esc cut short (the literal is in `vendor/claude-cli/cli.js`, and
+ * `claude-session.ts`'s `stopTask` names it), reused verbatim so a stopped
+ * Codex card reads exactly like a stopped Claude one. Nothing renders off the
+ * TEXT — `ToolCard`'s error state is `result.isError` alone — so the second
+ * string costs nothing and avoids blaming a user for a stop they did not ask
+ * for.
+ */
+const INTERRUPTED_HOSTED_TOOL = '[Request interrupted by user for tool use]'
+/** The same tombstone for a stop nobody asked for: a failed turn, a lost transport. */
+const STOPPED_HOSTED_TOOL = '[Request stopped before the tool use finished]'
+
+/**
  * The v2 notification carries a CAMEL-cased projection of the core's own
  * `GuardianAssessmentAction` (`app-server-protocol/src/protocol/v2/item.rs`,
  * `From<CoreGuardianAssessmentAction>`), but
@@ -989,6 +1004,9 @@ export class CodexSession extends BaseSession {
 
   private disconnected(error?: CodexTransportError): void {
     if (this.closed) return
+    // Read before `turnId` is cleared below — the in-flight turn is what a
+    // still-unanswered hosted call belongs to.
+    const turnId = this.turnId
     this.closed = true
     this.busy = false
     this.sending = false
@@ -998,6 +1016,10 @@ export class CodexSession extends BaseSession {
     this.output.clear()
     this.heldDenials.clear()
     this.ambiguousSteers.clear()
+    // Same duty as the children below: a hosted call whose answer died with the
+    // connection gets a result, not a spinner. A teardown is the user's own
+    // Stop / close; a transport error is not, and says so.
+    this.failUnresolvedHostedCalls(error ? STOPPED_HOSTED_TOOL : INTERRUPTED_HOSTED_TOOL, turnId)
     // The process that hosted them is going, so every child goes with it: the
     // app-server owns every spawned thread in-process, and killing it kills
     // them. Say so on each open card rather than leaving a spinner forever.
@@ -1615,9 +1637,58 @@ export class CodexSession extends BaseSession {
       this.dismissGuardianOverride(requestId)
   }
 
+  /**
+   * Tombstone every hosted tool call that has a `tool_use` row and no result.
+   *
+   * A `dynamicToolCall` the model started is completed by the BINARY on a turn
+   * that ends normally, and `finishTurn`'s authoritative replay of `turn.items`
+   * delivers that completion. An interrupted turn has no such item to replay:
+   * the core drops a call that was still outstanding — it never reaches the
+   * rollout either, so no read of any kind can bring it back (pinned against
+   * the real binary by `codex-interrupted-tool.integration.test.ts`). The live
+   * transcript is then a bare `tool_use`, and the card spins for good unless
+   * the result the binary will never send is synthesized here.
+   *
+   * Only ever ADDITIVE: a `tool_use` that already has a `tool_result` is
+   * skipped, so a result the replay did deliver is never overwritten and one
+   * call is tombstoned once. Native `commandExecution` / `fileChange` items are
+   * deliberately out of scope — the binary completes those itself on an
+   * interrupt, so they are not orphaned in the first place.
+   */
+  private failUnresolvedHostedCalls(text: string, turnId: string | null): void {
+    // `codexItemId` encodes [thread, turn, item] as JSON, so every id minted for
+    // one turn shares the prefix an EMPTY item id produces, its own `""]` tail
+    // dropped. Scoping matters: a late `turn/completed` for an earlier turn must
+    // not tombstone a call the live turn is still running. A disconnect passes
+    // no turn (nothing can run again) and sweeps the lot.
+    const prefix =
+      this.threadId && turnId ? codexItemId(this.threadId, turnId, '').replace(/""\]$/, '') : ''
+    const blocks = this.messageHistory.flatMap((message) => message.content)
+    const settled = new Set(
+      blocks.flatMap((block) => (block.type === 'tool_result' ? [block.toolUseId] : []))
+    )
+    for (const block of blocks) {
+      if (
+        block.type !== 'tool_use' ||
+        !block.toolUseId.startsWith(prefix) ||
+        !CODEX_HOSTED_TOOL_NAMES.has(block.toolName) ||
+        settled.has(block.toolUseId)
+      )
+        continue
+      settled.add(block.toolUseId)
+      this.dispatch({ kind: 'toolResult', toolUseId: block.toolUseId, result: text, isError: true })
+    }
+  }
+
   private finishTurn(turn: Turn): void {
     if (!this.threadId || typeof turn.id !== 'string' || this.endedTurns.has(turn.id)) return
     for (const item of turn.items ?? []) this.item(turn.id, item, true, true)
+    // After the replay, never before it: what that did not complete never will.
+    if (turn.status === 'interrupted' || turn.status === 'failed')
+      this.failUnresolvedHostedCalls(
+        turn.status === 'interrupted' ? INTERRUPTED_HOSTED_TOOL : STOPPED_HOSTED_TOOL,
+        turn.id
+      )
     this.endedTurns.add(turn.id)
     this.client.abortServerRequests(this.threadId, turn.id)
     for (const pending of [...this.pending.values()]) {

@@ -1809,6 +1809,149 @@ describe('Codex hosted tools', () => {
       )
     ).toBe(true)
   })
+
+  /**
+   * A hosted call the turn END leaves outstanding. The binary completes a
+   * `dynamicToolCall` itself on a turn that finishes normally, but an
+   * INTERRUPTED turn drops the item entirely — it is not in `turn.items` and
+   * not in the rollout either (pinned against the real binary by
+   * `codex-interrupted-tool.integration.test.ts`), so without a synthesized
+   * result the card is a `tool_use` that spins for good.
+   */
+  describe('when the turn ends with a call still outstanding', () => {
+    const CARD = 'codex:["root","turn","call-1"]'
+    const TOMBSTONE = '[Request interrupted by user for tool use]'
+    const results = (): Record<string, unknown>[] =>
+      events.mock.calls
+        .filter(([channel]) => channel === 'session:tool-result')
+        .map((call) => (call[1] as [string, Record<string, unknown>])[1])
+    const blocks = (session: CodexSession): Record<string, unknown>[] =>
+      session
+        .getMessages()
+        .flatMap((message) => message.content as unknown as Record<string, unknown>[])
+        .filter((block) => block.type === 'tool_use' || block.type === 'tool_result')
+    /** The item the binary emits when the model starts a hosted call. */
+    const item = (status: string, done: boolean) => ({
+      id: 'call-1',
+      type: 'dynamicToolCall',
+      namespace: null,
+      tool: 'render_mermaid',
+      arguments: { source: 'graph TD; A-->B' },
+      status,
+      contentItems: done ? [{ type: 'inputText', text: 'Diagram rendered.' }] : null,
+      success: done ? true : null,
+      durationMs: null
+    })
+    /** Start the call for real: the row lands, and the handler hangs until aborted. */
+    const inFlight = async (f: ReturnType<typeof fixture>) => {
+      hosted.mermaid.mockImplementationOnce((async (
+        _input: unknown,
+        extra: { signal: AbortSignal }
+      ) => {
+        await new Promise((resolve) =>
+          extra.signal.addEventListener('abort', resolve, { once: true })
+        )
+        return { content: [{ type: 'text', text: 'too late' }] }
+      }) as never)
+      f.notify('item/started', {
+        threadId: 'root',
+        turnId: 'turn',
+        item: item('inProgress', false)
+      })
+      f.dynamicCall()
+      await vi.waitFor(() => expect(hosted.mermaid).toHaveBeenCalled())
+    }
+    const ended = (f: ReturnType<typeof fixture>, status: string, items: unknown[] = []) =>
+      f.notify('turn/completed', { threadId: 'root', turn: { id: 'turn', status, items } })
+
+    it('synthesizes exactly one failed result for a call an interrupt cut short', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      await inFlight(f)
+      expect(results()).toEqual([])
+      ended(f, 'interrupted')
+      expect(results()).toEqual([{ toolUseId: CARD, result: TOMBSTONE, isError: true }])
+      // The card the user is looking at, not just the wire.
+      expect(blocks(f.session)).toEqual([
+        expect.objectContaining({ type: 'tool_use', toolUseId: CARD }),
+        { type: 'tool_result', toolUseId: CARD, toolResult: TOMBSTONE, isError: true }
+      ])
+      // A second `turn/completed` for the same turn is already a no-op, but the
+      // dedupe is the transcript's own: one call, one result, ever.
+      f.notify('turn/completed', {
+        threadId: 'root',
+        turn: { id: 'turn', status: 'interrupted', items: [] }
+      })
+      expect(results()).toHaveLength(1)
+    })
+
+    it('never overwrites the result the authoritative replay delivered', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      await inFlight(f)
+      // The interrupt raced the completion and lost: `turn.items` carries the
+      // finished call, so the replay answers it and nothing may be synthesized.
+      ended(f, 'interrupted', [item('completed', true)])
+      expect(results()).toEqual([{ toolUseId: CARD, result: 'Diagram rendered.', isError: false }])
+    })
+
+    it('synthesizes nothing for a turn that ended normally', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      await inFlight(f)
+      // Deliberately result-less on a `completed` turn — a shape the binary does
+      // not produce. The status gate, not the missing result, is what decides.
+      ended(f, 'completed')
+      expect(results()).toEqual([])
+      expect(blocks(f.session)).toEqual([
+        expect.objectContaining({ type: 'tool_use', toolUseId: CARD })
+      ])
+    })
+
+    it('tombstones an in-flight call when the transport is lost', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      await inFlight(f)
+      f.callbacks.onDisconnect!(new CodexTransportError('closed'))
+      // A stop nobody asked for does not blame the user for it.
+      expect(results()).toEqual([
+        {
+          toolUseId: CARD,
+          result: '[Request stopped before the tool use finished]',
+          isError: true
+        }
+      ])
+    })
+
+    it('tombstones an in-flight call when the session is torn down', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      await inFlight(f)
+      f.session.dispose()
+      expect(results()).toEqual([{ toolUseId: CARD, result: TOMBSTONE, isError: true }])
+    })
+
+    it('leaves a native command item alone — the binary completes its own', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      f.notify('item/started', {
+        threadId: 'root',
+        turnId: 'turn',
+        item: {
+          id: 'command',
+          type: 'commandExecution',
+          command: 'pwd',
+          cwd: '/isolated',
+          status: 'inProgress',
+          aggregatedOutput: '',
+          exitCode: null,
+          durationMs: null
+        }
+      })
+      ended(f, 'interrupted')
+      expect(results()).toEqual([])
+    })
+  })
 })
 
 /**
