@@ -353,3 +353,37 @@ control surface (the user does not drive children directly).
 ### Files and boundaries
 
 Owned: `src/core/codex/event-mapper.ts`, `src/core/codex/CodexSession.ts`, `src/core/codex/history.ts`, `src/renderer/src/components/chat/tool-registry/CodexEngineToolMap.ts`, `src/shared/model-capabilities.ts` (codex block), their tests, `src/integration/codex/`. Do not touch other engines, the reducer, the renderer's subagent views, or docs. If the reducer or the shared subagent types need a change, stop and report.
+
+## Slice G: delete a Codex session by walking its branch tree, with confirmation
+
+Decided by Daniel on 2026-09-13: delete walks the tree leaf-first after a
+confirmation that lists what will be removed, and stops non-destructively at
+the first refusal. Archive stays unused (ClaudeUI's own "hidden" sessions cover
+that need).
+
+### As-built facts (re-verify)
+
+- Native rules pinned by `src/integration/codex/codex-lifecycle.integration.test.ts`: `thread/delete` and `thread/archive` are refused while a process holds the thread; a thread with a surviving descendant fork is refused even when unloaded; archiving the descendant does not lift that, only deleting it does; a fork's deletion is ordinary once its holder is stopped. EVERY refusal is the same JSON-RPC `-32600`, so a caller cannot tell "held" from "has a branch" from "no such thread". `CodexService.deleteThread` says "callers must stop the owning root process first".
+- `src/core/ipc/handlers-core.ts` `deleteSession(manager, sessionId, projectKey, engineId)` refuses Codex today, and for the other engines does: `unwatchForDelete`, `manager.cancel(sessionId)` (a live session's routing id IS the thread id after rekey), `syncCore.removeSession`, `deleteSessionByEngine` → `engine-history.ts` `delete`, then `refreshCanonicalDirectories()`. `deleteProject` sweeps a project's sessions through the same path.
+- The renderer's Sidebar already owns a confirmation modal (`deleteTarget` / `confirmDelete`, `Sidebar.tsx` ~600-640) and calls `window.api.deleteSession(sessionId, projectKey, engineId)`.
+- The fork registry (follow-up A of the 2026-09-13 Codex agent, in the same session as this spec) records each fork's id and `forkedFromId`; native children (collab agents) carry `parentThreadId` and are never listed or shown as sessions. Whether deleting a root that has spawned children is refused for the children's sake must be probed (the fixture can spawn one).
+
+### Design
+
+1. **Plan query.** New core query `codex:delete-plan(threadId)` returning `{nodes: [{threadId, title, live: boolean, depth}], order: threadId[]}`: the subtree from the fork registry (a fork's forks included), leaf-first order, each node's title from the sidebar listing when known, `live` when `SessionManager` holds it. Exposed through the same command surface as `deleteSession` (desktop IPC and remote, `chat` capability, read-only so it can be a query).
+2. **Confirmation.** The Sidebar's existing modal, when the target is a Codex session, fetches the plan and lists the branches that will go with it ("Also deletes 2 branches: …"), marking live ones as "will be stopped". A single "Delete all" confirms. No plan needed for a leaf: the existing text stands.
+3. **Walk.** `handlers-core.deleteSession` for Codex: compute the plan again (never trust the renderer's copy), then for each node leaf-first: `unwatchForDelete`, `manager.cancel` if live and await its `disconnected` status (bounded wait), `syncCore.removeSession`, `service.deleteThread`. On success remove the node's `session_meta`, overrides and fork-registry rows. On the FIRST refusal stop: nothing after it is touched, everything before it is gone; throw an error naming the node that refused and what was already deleted, and `refreshCanonicalDirectories()` so every client's sidebar is truthful. Because the refusal code is ambiguous, retry a refused delete exactly once after a short delay only when the node was live a moment ago (the holder may still be exiting); otherwise do not retry.
+4. **Children.** If the probe shows a root with spawned children is refused for them, include children in the walk (they are threads with `parentThreadId`; discover them via `thread/list` since children ARE listed) and say so in the confirmation ("and 1 helper agent"). If not refused, do nothing special.
+5. **`deleteProject`** for a directory containing Codex sessions goes through the same walk per root; a branch whose root is elsewhere is just a node.
+6. **Capabilities:** none new; `engine-history.ts` `delete` for codex stops being `unsupported`.
+
+### Tests (each must fail before the corresponding change)
+
+- Plan: registry with root → fork → fork-of-fork yields leaf-first order and marks the live one.
+- Walk: mocked service deletes in order; a refusal at node 2 leaves node 3 untouched, removes node 1's rows, throws naming node 2; a live node is cancelled and awaited before its delete; rows and canonical entries removed only for deleted nodes.
+- Renderer: the modal lists branches for a Codex target and not for a leaf.
+- Integration (`CODEX_INTEGRATION=1`): real root with two forks, one fork held by a live session: the walk stops the holder, deletes leaf-first, the root is gone from `thread/list` and refused by `thread/read`; a second case where a holder cannot be stopped (a separate service process holds a fork) shows the non-destructive stop; and the children probe.
+
+### Files and boundaries
+
+Owned: `src/core/ipc/handlers-core.ts` (the codex branch of `deleteSession`/`deleteProject`), a new `src/core/codex/delete.ts`, `src/core/codex/history.ts` (registry reads), `src/core/services/engine-history.ts` (codex `delete`), `src/core/services/db.ts` (registry reads/removals only), the command registration for the plan query, `src/renderer/src/components/Sidebar/Sidebar.tsx` (modal contents) and its tests, `src/integration/codex/`. Do not touch other engines' delete paths.
