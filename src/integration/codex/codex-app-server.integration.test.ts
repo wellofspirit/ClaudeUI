@@ -331,15 +331,35 @@ async function setupFixture(
           // out of the root's own next request. JSON-in-JSON, so the quotes may
           // be escaped.
           const spawned = /agent_id\\?"\s*:\s*\\?"([0-9a-fA-F-]{8,})/.exec(body)?.[1]
+          // The CHILD's own step index, counted the same way as the root's but
+          // over the requests the root marker is absent from. Only needed when
+          // `nativeCommand` scripts a command on the child rather than the root.
+          const childTurns = requests.filter(
+            (entry) =>
+              !isGuardianRequest(entry) &&
+              entry.generate !== false &&
+              !JSON.stringify(entry).includes(ROOT_TURN_MARKER)
+          ).length
           const nativeAgentItem =
             nativeAgent && request.generate !== false && !guardian
               ? !root
-                ? {
-                    type: 'message',
-                    id: 'msg-child',
-                    role: 'assistant',
-                    content: [{ type: 'output_text', text: 'fixture child complete' }]
-                  }
+                ? nativeCommand && childTurns === 1
+                  ? {
+                      type: 'function_call',
+                      call_id: 'fixture-child-command',
+                      name: 'exec_command',
+                      arguments: JSON.stringify({
+                        cmd: `printf fixture-approved > "${cwd}/approval.txt"`,
+                        sandbox_permissions: 'require_escalated',
+                        justification: 'Isolated fixture write inside the test directory'
+                      })
+                    }
+                  : {
+                      type: 'message',
+                      id: 'msg-child',
+                      role: 'assistant',
+                      content: [{ type: 'output_text', text: 'fixture child complete' }]
+                    }
                 : rootTurns === 1
                   ? {
                       type: 'function_call',
@@ -1659,6 +1679,74 @@ it.skipIf(!enabled)(
     } finally {
       service.dispose()
     }
+  },
+  180000
+)
+
+/**
+ * A child spawned AFTER the session leaves auto inherits the new mode, not the
+ * one the thread started under (2026-09-13 investigation).
+ *
+ * `turn/start`'s `approvalsReviewer`/`approvalPolicy`/`sandboxPolicy` are NOT
+ * turn-scoped: `turn_processor.rs` builds them through the same
+ * `build_thread_settings_overrides` that `thread/settings/update` uses, and
+ * `session/turn_input.rs` `apply_started` commits them through
+ * `new_turn_with_sub_id` -> `update_settings_if`, which replaces
+ * `state.session_configuration`. `build_per_turn_config` then reads
+ * `session_configuration.step_settings.{approval_policy,approvals_reviewer}`
+ * into the turn's own `Config`, and `multi_agents_common.rs`
+ * `apply_spawn_agent_runtime_overrides` copies exactly that `turn.config` onto
+ * the child. So the per-turn override IS the baseline update.
+ *
+ * The assertion is the discriminating one: under a STALE auto baseline this
+ * same fixture produces zero client approvals, one guardian review request and
+ * a written file (measured), because `on-request` + `auto_review` answers the
+ * child's escalation itself. Under the switched-to `default` baseline the
+ * escalation reaches the human instead and nothing runs until it is answered.
+ */
+it.skipIf(!enabled)(
+  'a child spawned after the session leaves auto asks the human, not the guardian',
+  async () => {
+    const { cwd, env, errors, requests, rootPrompt } = await setupFixture(
+      true,
+      true,
+      true,
+      false,
+      false,
+      'v2'
+    )
+    session = new CodexSession(
+      'isolated-agents-mode-switch',
+      null,
+      cwd,
+      { permissionMode: 'auto' },
+      { env, requestTimeoutMs: 20000 }
+    )
+    await session.run(null)
+    await session.setPermissionMode('default')
+    await session.run(rootPrompt)
+    const card = await vi.waitFor(
+      () => {
+        const call = coreEvents.mock.calls.find(
+          ([channel]) => channel === 'session:approval-request'
+        )
+        expect(call).toBeDefined()
+        return (call![1] as [string, { requestId: string; toolName: string }])[1]
+      },
+      { timeout: 60000, interval: 200 }
+    )
+    expect(card.toolName).toBe('commandExecution')
+    // The native reviewer never saw it: no guardian prompt was ever issued, and
+    // the command had not run while the human's answer was outstanding.
+    expect(requests.some((request) => isGuardianRequest(request))).toBe(false)
+    expect(existsSync(join(cwd, 'approval.txt'))).toBe(false)
+    session.resolveApproval(card.requestId, 'allow')
+    await vi.waitFor(() => expect(existsSync(join(cwd, 'approval.txt'))).toBe(true), {
+      timeout: 30000,
+      interval: 200
+    })
+    expect(readFileSync(join(cwd, 'approval.txt'), 'utf8')).toBe('fixture-approved')
+    expect(errors).toEqual([])
   },
   180000
 )
