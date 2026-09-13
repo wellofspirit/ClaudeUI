@@ -1,6 +1,6 @@
 # ADR-065 — Settings IA v2: pages, groups, and one row vocabulary
 
-**Status:** **Implemented** (2026-09-08) — the seven phases below landed on branch `settings-v2`; see § As built for what the implementation changed about this decision.
+**Status:** **Implemented** (2026-09-08); amended by [ADR-068](adr-068_chatgpt-identity-vault-owned-codex-injection.md) (ChatGPT row gains accounts + a Codex route; Codex engine page curated; Codex segments on judge / Default models / Dispatch) — the seven phases below landed on branch `settings-v2`; see § As built for what the implementation changed about this decision.
 **Supersedes:** the "scope tabs" settings IA described in `docs/architecture/persistence.md` § Settings & config (Common / Claude / opencode / pi tabs over 43 sections)
 **Relates to:** ADR-023 (auto mode), ADR-027 (test data attributes), ADR-033 (cross-engine dispatch), ADR-036 (unified auth vault), ADR-048 (mobile surface pattern)
 

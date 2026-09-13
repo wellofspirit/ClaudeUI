@@ -4,7 +4,7 @@
 **Date:** 2026-09-10
 **Supersedes:** [ADR-017](adr-017_codex-app-server-backend.md) as the current Codex design, and only ADR-019's dormant-Codex restriction.
 **Amends:** [ADR-022](adr-022_opencode-permission-mapping.md) and [ADR-050](adr-050_auto-mode-as-the-default-autonomy.md) for Codex only.
-**Amended by:** [ADR-067](adr-067_codex-shared-permission-model.md) (2026-09-11) replaces the section "Phase-1 permissions are native, not shared Auto": Codex now runs under ClaudeUI's shared permission modes and rules, and the ADR-022/ADR-050 carve-outs below no longer apply.
+**Amended by:** [ADR-068](adr-068_chatgpt-identity-vault-owned-codex-injection.md) (2026-09-13) supersedes the section "Authentication is native-owned": the vault owns the ChatGPT identity and Codex is fed by `chatgptAuthTokens` injection. [ADR-067](adr-067_codex-shared-permission-model.md) (2026-09-11) replaces the section "Phase-1 permissions are native, not shared Auto": Codex now runs under ClaudeUI's shared permission modes and rules, and the ADR-022/ADR-050 carve-outs below no longer apply.
 
 ## Context
 
@@ -61,6 +61,8 @@ Cold definitions persist. Redefinition, fork inheritance, and recursion scrubbin
 Cross-engine dispatch in both directions is the goal, but the existing dispatcher uses separate target clients, not `ISession` targets. Add a Codex target factory and explicit policy envelopes for Codex targets and Codex sources dispatching elsewhere. Propagate approvals and enforce restrictions; unsupported mappings fail closed. Do not extend the existing legacy Auto-to-bypass or plan-to-ask escalation to Codex paths. Unknown or estimated USD cannot enforce a hard billing cap. Decide supported time/token limits explicitly and account for cancellation overshoot and failed-turn spend.
 
 ### Authentication is native-owned
+
+> **Superseded by [ADR-068](adr-068_chatgpt-identity-vault-owned-codex-injection.md).** Kept as the record of the phase-1 decision; the as-built direction is vault-owned identity with token injection.
 
 Codex owns login, credential storage, and refresh. The current product UI drives native device-code login on both desktop and remote clients. Browser/API-key service foundations are not additional exposed UI flows. No experimental external-token injection or shared-vault feed-in is used. Real device login remains a main-reviewer gate; it was not executed by the implementation agent.
 

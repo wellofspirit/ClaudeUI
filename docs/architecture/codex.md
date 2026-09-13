@@ -210,6 +210,8 @@ Usage attaches to effective engine/model/account and owning turn. Tokens and nat
 
 ## Auth and service gates
 
+> **Direction changed by [ADR-068](../adr/adr-068_chatgpt-identity-vault-owned-codex-injection.md) (2026-09-13):** the vault owns the ChatGPT identity and feeds every Codex process by `chatgptAuthTokens` injection after `initialize`, answering `account/chatgptAuthTokens/refresh` from the vault. The paragraphs below describe the phase-1 native-owned build that this replaces; they are updated slice by slice as ADR-068 lands.
+
 Native-owned authentication is selected: Codex owns login, credential storage, and refresh; ClaudeUI drives supported native flows and surfaces account metadata. Native browser/device-code/API-key behavior still needs integration testing. Experimental external-token injection and vault-to-Codex feeding are not phase-1 paths. A later opt-in native-Codex-to-vault adoption flow may share acquired tokens, but requires a single refresh owner and synchronization design before enabling other consumers. ADR-036's existing pi/opencode feeds remain unchanged.
 
 Begin authorized account testing with read-only `account/read` without refresh. Use vault skill/tool secure injection for any later credential use; never expose tokens in logs, commands, IPC, or screenshots. No mass logout or native-store rewrite. Resolve concurrent refresh ownership before authenticated sessions and service clients run together. Remote login must not open a host browser unexpectedly; clients receive only non-secret account/login metadata. Account changes must reconcile model availability and usage attribution.

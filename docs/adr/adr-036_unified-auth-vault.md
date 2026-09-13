@@ -1,6 +1,6 @@
 # ADR-036: Unified auth vault — ClaudeUI drives Codex OAuth once, feeds pi + opencode
 
-**Status:** Amended by ADR-037; extended by ADR-057 (the vault's Codex OAuth completes from a remote browser by paste-back — the host still holds the PKCE verifier and performs the exchange)
+**Status:** Amended by ADR-037 and by [ADR-068](adr-068_chatgpt-identity-vault-owned-codex-injection.md) (N accounts per provider; Codex as a third consumer fed by token injection, not by file); extended by ADR-057 (the vault's Codex OAuth completes from a remote browser by paste-back — the host still holds the PKCE verifier and performs the exchange)
 **Date:** 2026-07-21
 **Relates to:** ADR-021 (neutral auth), ADR-014 (Claude OAuth over cli.js — the deliberately-different
 precedent), ADR-019 (opencode backend), ADR-035 (pi backend), ADR-030 (capability honesty)

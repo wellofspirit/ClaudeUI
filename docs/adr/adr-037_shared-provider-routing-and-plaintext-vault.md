@@ -1,6 +1,6 @@
 # ADR-037: Shared provider routing and plaintext credential vault
 
-**Status:** Accepted
+**Status:** Accepted; amended by [ADR-068](adr-068_chatgpt-identity-vault-owned-codex-injection.md) (`ConfigurableHarnessId` gains `codex`; the Codex route is injection, and Claude Code stays excluded)
 **Date:** 2026-07-22
 **Amends:** ADR-036
 
