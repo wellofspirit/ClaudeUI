@@ -36,8 +36,7 @@ after a bounded grace, even when the root exits first. Windows uses the existing
 unchanged. Escaped process groups and PTY descendants are not solved by this
 foundation; Windows/Linux runtime evidence is still required.
 
-`scripts/ensure-codex.mjs` supports only verified macOS arm64 0.154.0 acquisition.
-Its package commands are opt-in, with no build/postinstall/release hook. Generated
+`scripts/ensure-codex.mjs` acquires the verified macOS arm64 0.154.0 binaries; since `e5bf09b6` it runs from `postinstall` and from every packaging target in `scripts/build.mjs`, and `electron-builder.yml` ships `vendor/codex-cli` (both `codex` and `codex-code-mode-host`) as `Resources/codex-cli`. On a host without a reviewed digest manifest (anything but macOS arm64 today) it skips with one line and exits 0, and the engine gates itself off. Generated
 initialize types are exact CLI output; envelopes are derived from the pinned
 CLI's JSON schema because its TypeScript generator omits them. M1b adds typed
 method maps over this generic transport without claiming runtime payload-schema validation.
