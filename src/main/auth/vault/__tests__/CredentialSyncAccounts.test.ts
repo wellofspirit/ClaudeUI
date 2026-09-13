@@ -534,3 +534,40 @@ describe('CredentialSync.injectionTokenFor', () => {
     sync.stop()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Timer overflow — a far-off expiry must not refresh immediately
+// ---------------------------------------------------------------------------
+
+describe('CredentialSync — a credential expiring beyond the setTimeout cap', () => {
+  it('re-arms instead of refreshing at once, then refreshes when actually due', async () => {
+    vi.useFakeTimers()
+    const now = Date.now()
+    const vault = new AuthVault()
+    // 60 days out: the naive delay is > 2^31-1 ms, which Node clamps to 1 ms.
+    const sixtyDays = 60 * 24 * 60 * 60 * 1000
+    await vault.upsertAccount(
+      CHATGPT_PROVIDER_ID,
+      cred({ ws: 'ws-a', refresh: 'fake-ra', expires: now + sixtyDays })
+    )
+    const refreshAccessToken = vi.fn(async (refresh: string) => ({
+      access_token: `${refresh}-next-access`,
+      refresh_token: `${refresh}-next`,
+      expires_in: 3600
+    }))
+    const sync = new CredentialSync({ vault, refreshAccessToken })
+    sync.configure({ pi: fakeTarget().target, opencode: fakeTarget().target })
+    await sync.start()
+
+    // Past the clamp point, and well past it: still nothing to refresh.
+    await vi.advanceTimersByTimeAsync(2 ** 31)
+    expect(refreshAccessToken).not.toHaveBeenCalled()
+    // Right up to the margin: still nothing.
+    await vi.advanceTimersByTimeAsync(sixtyDays - 2 ** 31 - REFRESH_MARGIN_MS - 1_000)
+    expect(refreshAccessToken).not.toHaveBeenCalled()
+    // Into the margin: exactly one refresh.
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(refreshAccessToken).toHaveBeenCalledTimes(1)
+    sync.stop()
+  })
+})

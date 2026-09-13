@@ -74,6 +74,8 @@ export const OPENCODE_CODEX_VENDOR_ID = 'openai'
  * (and rotating the refresh token) themselves.
  */
 export const REFRESH_MARGIN_MS = 15 * 60 * 1000
+/** The longest delay `setTimeout` honours; anything above fires after 1 ms. */
+export const MAX_TIMER_DELAY_MS = 2 ** 31 - 1
 
 /** Debounce window for the fs.watch resync — matches automation-manager.ts's own 500ms precedent. */
 export const DEFAULT_WATCH_DEBOUNCE_MS = 500
@@ -876,7 +878,21 @@ export class CredentialSync {
     // reset point; the give-up path deliberately re-arms via armRefreshTimer()
     // to keep escalating.
     this.runtime(key).giveUpCount = 0
-    this.armRefreshTimer(key, Math.max(0, cred.expires - REFRESH_MARGIN_MS - this.now()))
+    const delay = Math.max(0, cred.expires - REFRESH_MARGIN_MS - this.now())
+    // Node clamps a setTimeout delay above 2^31-1 ms (~24.8 days) to 1 ms, so a
+    // credential that far from expiry would be refreshed IMMEDIATELY — rotating
+    // a perfectly good token for nothing, or marking a long-lived one revoked
+    // when the authority refuses. Beyond the cap the timer only re-arms.
+    if (delay > MAX_TIMER_DELAY_MS) {
+      this.clearRefreshTimer(key)
+      this.clearRetryTimer(key)
+      this.runtime(key).refreshTimer = setTimeout(
+        () => this.scheduleRefresh(key, cred),
+        MAX_TIMER_DELAY_MS
+      )
+      return
+    }
+    this.armRefreshTimer(key, delay)
   }
 
   /** Arm one account's refresh timer at an explicit delay, clearing its prior refresh/retry timer. */
