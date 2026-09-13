@@ -5713,6 +5713,21 @@ describe('CrossEngineDispatcher — codex direction (slice H): the policy envelo
     }
   )
 
+  it('inherits NO MCP servers — a headless target gets no config override (ADR-068 §5)', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, makeCtx())
+    await tick()
+    target.completeTurn()
+    await pending
+
+    // Same reasoning as the dynamic tools below: a dispatched agent is a
+    // scrubbed, single-purpose thread. Slice 4 gave INTERACTIVE Codex sessions
+    // the user's Claude MCP list; this pins that the target path was left out of
+    // it, so no dispatch quietly spawns the user's MCP servers headlessly.
+    expect(target.threadStartParams()).not.toHaveProperty('config')
+  })
+
   it('offers NO dynamicTools and no item/tool/call server method — a target can neither dispatch nor run a hosted tool', async () => {
     const target = makeFakeCodexTarget()
     const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })

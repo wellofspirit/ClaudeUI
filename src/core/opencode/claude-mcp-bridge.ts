@@ -17,7 +17,7 @@
  */
 
 import type { McpServerConfig } from '../../shared/types'
-import { loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
+import { mergeClaudeMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
 import { logger } from '../services/logger'
 
 // ---------------------------------------------------------------------------
@@ -102,11 +102,7 @@ export function translateClaudeMcpServer(cfg: McpServerConfig): OpencodeMcpEntry
 export function collectClaudeMcpForOpencode(cwd: string): Record<string, OpencodeMcpEntry> {
   try {
     // Merge: user first (lowest priority), then project, then local (highest priority).
-    const merged: Record<string, McpServerConfig> = {
-      ...loadMcpServers('user'),
-      ...loadMcpServers('project', cwd),
-      ...loadMcpServers('local', cwd)
-    }
+    const merged: Record<string, McpServerConfig> = mergeClaudeMcpServers(cwd)
 
     const disabled = new Set(readDisabledMcpServers(cwd))
 

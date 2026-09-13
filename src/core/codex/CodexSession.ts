@@ -47,6 +47,7 @@ import { CodexClient } from './CodexClient'
 import { CodexTransportError, type CodexClientOptions } from './CodexAppServerClient'
 import { CODEX_AUTH_PROVIDER_ID, type CodexAuthHook } from './codex-auth-hook'
 import { chatgptRateLimits } from './chatgpt-rate-limits'
+import { collectClaudeMcpForCodex } from './codex-mcp-bridge'
 import type { RateLimitSnapshot } from './protocol/v2/RateLimitSnapshot'
 import type { Model } from './protocol/v2/Model'
 import type { JsonValue } from './protocol/serde_json/JsonValue'
@@ -856,12 +857,32 @@ export class CodexSession extends BaseSession {
       // that somehow starts without one (native queue, a future steer path)
       // still runs under this mode's policy rather than the user's config.
       const { approvalPolicy, sandbox, approvalsReviewer } = this.modePolicy()
+      // The shared Claude MCP list, translated into Codex's own `mcp_servers`
+      // shape and delivered as the per-thread override (ADR-068 §5). It rides on
+      // `params`, so start, resume and fork cannot drift apart. Read ONCE, here:
+      // a `.mcp.json` edited later applies to the next session, which is what the
+      // settings row says. The override MERGES into whatever the user declared in
+      // `config.toml` (probed against 0.154.0), so native entries — including the
+      // OAuth servers Claude's shape cannot express — keep working alongside.
+      const inheritedMcp = collectClaudeMcpForCodex(this.cwd)
+      if (inheritedMcp.skipped.length > 0)
+        // `start()` runs at most once per session (`this.starting` latches it),
+        // so this is the one warning ADR-068 §5 asks for.
+        this.send(
+          'session:warning',
+          `SSE MCP servers are not supported by Codex: ${inheritedMcp.skipped.join(', ')}`
+        )
       const params = {
         cwd: this.cwd,
         ...(this.model !== undefined ? { model: this.model } : {}),
         approvalPolicy,
         sandbox,
-        approvalsReviewer
+        approvalsReviewer,
+        // Absent, not empty: an empty table is still an override, and the
+        // no-MCP user must reach the binary exactly as before this slice.
+        ...(Object.keys(inheritedMcp.servers).length > 0
+          ? { config: { mcp_servers: inheritedMcp.servers } }
+          : {})
       }
       const response = branch
         ? // Copies the source THROUGH `lastTurnId` into a NEW thread and leaves

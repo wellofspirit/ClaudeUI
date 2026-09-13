@@ -43,6 +43,19 @@ vi.mock('../../services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 /**
+ * The inherited Claude MCP list (ADR-068 §5). The real collector reads the
+ * DEVELOPER's `~/.claude` and `~/.claude.json`, so it is pinned here exactly as
+ * the permission rules above are: what these tests measure is what `start()`
+ * does with the answer, never what this machine happens to have configured.
+ */
+const mcp = vi.hoisted(() => ({
+  servers: {} as Record<string, unknown>,
+  skipped: [] as string[]
+}))
+vi.mock('../codex-mcp-bridge', () => ({
+  collectClaudeMcpForCodex: vi.fn(() => ({ servers: mcp.servers, skipped: mcp.skipped }))
+}))
+/**
  * ClaudeUI's hosted tools reach Codex over the dynamic-tool channel. The real
  * handlers validate mermaid syntax and WRITE MOCKUPS TO DISK, neither of which
  * belongs in a unit test, so both in-process MCP factories are stubbed with one
@@ -133,6 +146,8 @@ afterEach(() => {
   rules.allow = []
   rules.deny = []
   rules.ask = []
+  mcp.servers = {}
+  mcp.skipped = []
 })
 
 function fixture(opts: EngineSpawnOptions = {}, auth: CodexAuthHook | null = null) {
@@ -3463,5 +3478,88 @@ describe('a live session forwards its ChatGPT rate limits', () => {
     // and guessing at the active one would put another subscription's numbers
     // on this session's bars.
     expect(rateLimitStore.record).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * Slice 4 guard 3 (ADR-068 §5) — the inherited Claude MCP list reaches the
+ * thread, as the per-thread `config` override and nothing else.
+ *
+ * The MERGE half of this (native `config.toml` entries survive the override) is
+ * not assertable here, only against the binary: it lives in
+ * `src/integration/codex/codex-mcp-override.integration.test.ts`.
+ */
+describe('Codex inherits the shared MCP list', () => {
+  const inherited = {
+    docs: { command: 'node', args: ['docs-server.js'] },
+    search: { url: 'https://example.test/mcp' }
+  }
+  /** Every `session:warning` text this session emitted, oldest first. */
+  const warnings = (): string[] =>
+    events.mock.calls
+      .filter(([channel]) => channel === 'session:warning')
+      .map((call) => (call[1] as [string, string])[1])
+
+  it('sends the collected servers as config.mcp_servers on thread/start', async () => {
+    mcp.servers = inherited
+    const { session, request } = fixture()
+    await session.run(null)
+    expect(request).toHaveBeenCalledWith(
+      'thread/start',
+      expect.objectContaining({ config: { mcp_servers: inherited } })
+    )
+  })
+
+  it('sends them on thread/resume too — a resumed thread is not a fresh one', async () => {
+    mcp.servers = inherited
+    const { session, request } = fixture({ resumeSessionId: 'root' })
+    await session.run(null)
+    expect(request).toHaveBeenCalledWith(
+      'thread/resume',
+      expect.objectContaining({ config: { mcp_servers: inherited } })
+    )
+  })
+
+  it('sends them on thread/fork', async () => {
+    mcp.servers = inherited
+    const { session, request } = fixture({
+      resumeSessionId: 'root',
+      resumeSessionAt: 'turn-1',
+      forkSession: true
+    })
+    await session.run(null)
+    expect(request).toHaveBeenCalledWith(
+      'thread/fork',
+      expect.objectContaining({ config: { mcp_servers: inherited } })
+    )
+  })
+
+  it('sends NO config key at all when nothing is inherited', async () => {
+    const { session, request } = fixture()
+    await session.run(null)
+    const params = request.mock.calls.find(([method]) => method === 'thread/start')?.[1] as Record<
+      string,
+      unknown
+    >
+    // `config: {}` is not the same as absent: an empty override is still an
+    // override, and this is the path every user without a `.mcp.json` takes.
+    expect(params).not.toHaveProperty('config')
+  })
+
+  it('warns ONCE, naming the SSE servers Codex has no transport for', async () => {
+    mcp.servers = inherited
+    mcp.skipped = ['legacy_sse', 'other_sse']
+    const { session } = fixture()
+    await session.run(null)
+    expect(warnings()).toEqual([
+      'SSE MCP servers are not supported by Codex: legacy_sse, other_sse'
+    ])
+  })
+
+  it('says nothing when every server translated', async () => {
+    mcp.servers = inherited
+    const { session } = fixture()
+    await session.run(null)
+    expect(warnings()).toEqual([])
   })
 })

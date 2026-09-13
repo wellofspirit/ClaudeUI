@@ -62,6 +62,13 @@ vi.mock('../../core/services/claude-settings', () => ({
   }),
   saveClaudePermissions: vi.fn()
 }))
+// Same reasoning for the shared MCP list `CodexSession` now inherits
+// (ADR-068 §5): the real collector reads THIS machine's ~/.claude and would
+// spawn the developer's own MCP servers inside the isolated app-server. Pinned
+// empty, so these probes measure the binary, not the dev box.
+vi.mock('../../core/codex/codex-mcp-bridge', () => ({
+  collectClaudeMcpForCodex: () => ({ servers: {}, skipped: [] })
+}))
 const persistence = vi.hoisted(() => ({ close: () => {}, reset: () => {} }))
 /** The isolated `session_meta` table these probes read their fork ids out of. */
 const sessionMeta = vi.hoisted(() => new Map<string, unknown>())
