@@ -54,9 +54,15 @@ ADR-026 as practised: the main model writes the kickoff into the spec, an Opus `
 
 Per-thread `config.mcp_servers` overrides merge per key into the user's table (both nested and dotted forms). MCP tool approval is a form elicitation on `mcpServer/elicitation/request` with `_meta.codex_approval_kind = "mcp_tool_call"`, no question id, tool name only in the message; accept body is `{ action: "accept", content: {} }`. A user-level `forced_chatgpt_workspace_id` does not gate an injected token. A business workspace reports credits, not rate windows. `config/batchWrite`: `null` removes, stale version → `configVersionConflict`, no schema validation of keys.
 
+### Decisions 2026-09-14 (after the arc)
+
+- **Project-scope deny rules under Auto: leave it.** Daniel ruled that only user-scope Bash rules are compiled into `~/.codex/rules/claudeui.rules`; project-scope rules bind on Codex in plan/default/acceptEdits through ClaudeUI's evaluator and not under Auto. The Permissions row's sentence already says so. Rejected alternative: compiling into `<project>/.codex/rules/`, which writes a generated file into the repository and only loads for projects Codex marks trusted.
+- **Linux: Daniel takes it** on a Mac with Linux emulation (digest manifest, acquisition, app-server spawn, process tree). Nothing to prepare on Windows.
+- **Sign-in entry points (model picker + welcome tile):** the owner-approved mockup is `mockup.html` at the repo root (untracked, screen 5, "Model picker: greyed models whose provider is unauthenticated carry a Sign in item that opens the dialog"; "Welcome screen: engine tile without a usable account shows Sign in instead of Start"). Built next as Slice 6 of the spec.
+
 ### Open items after Slice 5
 
-A push when Daniel asks; the model-picker and welcome-tile sign-in entry points deferred from Slice 3; pi has no distinguishable auth error (no `session:auth-required` from it); Codex→Codex dispatch is refused so the "caller pin reaches the target" wiring is dormant; headless-server device code is designed but not built; the macOS legs of the new integration tests have not run; the Rename → Orrery arc is untouched by this work.
+ the model-picker and welcome-tile sign-in entry points deferred from Slice 3; pi has no distinguishable auth error (no `session:auth-required` from it); Codex→Codex dispatch is refused so the "caller pin reaches the target" wiring is dormant; headless-server device code is designed but not built; the macOS legs of the new integration tests have not run; the Rename → Orrery arc is untouched by this work.
 
 ## Resume here (pre-ADR-068 — historical)
 
