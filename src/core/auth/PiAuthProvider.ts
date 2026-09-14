@@ -25,7 +25,14 @@ import path from 'path'
 import { piAgentDir } from '../services/pi-session-list'
 import { invalidatePiModelCache } from '../pi/model-discovery'
 import { readJsonFileForWrite, writeJsonAtomic } from '../services/write-json-atomic'
-import type { AccountRef, AuthState, VendorAuthMap, VendorAuthOption } from '../../shared/types'
+import type {
+  AccountRef,
+  AuthState,
+  VendorAuthMap,
+  VendorAuthOption,
+  VendorDeviceCodeStart,
+  VendorDeviceCodeStatus
+} from '../../shared/types'
 import type { EngineAuthProvider } from './EngineAuthProvider'
 import { PI_API_KEY_VENDOR_IDS, PI_SUBSCRIPTION_VENDOR_IDS } from './pi-vendor-ids'
 import {
@@ -99,6 +106,16 @@ function writeAuthFile(data: PiAuthFile): void {
   writeJsonAtomic(resolvePiAuthJsonPath(), data, { indent: 2 })
 }
 
+/** The host-side record of one device-code wait — see {@link PiAuthProvider.deviceCodeStart}. */
+interface DeviceCodeWait {
+  startedAt: number
+  /** Host wall-clock ms the flow dies at; the flow enforces it, this is for diagnosis. */
+  expiresAt: number
+  state: VendorDeviceCodeStatus['state']
+  /** Host message, `error` only. Never token material. */
+  error?: string
+}
+
 export class PiAuthProvider implements EngineAuthProvider {
   /**
    * Snapshot from the LAST probe() call — read synchronously by
@@ -111,6 +128,13 @@ export class PiAuthProvider implements EngineAuthProvider {
    * synchronous buildPiAccountRef() call, not to avoid repeated work.
    */
   private lastProbe: VendorAuthMap = {}
+
+  /**
+   * The one in-flight device-code wait (ADR-068 §3, Slice 7). Held on the
+   * provider singleton because the wait outlives the invoke that started it —
+   * see {@link deviceCodeStart}. Single-flight: a second start replaces it.
+   */
+  private deviceWait: DeviceCodeWait | undefined
 
   async probe(): Promise<VendorAuthMap> {
     const map = this.computeVendorMap()
@@ -270,6 +294,77 @@ export class PiAuthProvider implements EngineAuthProvider {
     }
   }
 
+  /**
+   * ADR-068 §3 / Slice 7: start a DEVICE-CODE sign-in instead of the loopback
+   * one — "open this link, type this code", which is the flow a phone can
+   * actually finish. Same vendor gate as `oauthAuthorize`.
+   *
+   * THE WAIT IS HOST-OWNED, and that is the point. `credentialSync.completeLogin()`
+   * is kicked off here and deliberately NOT awaited: a device code lives for
+   * fifteen minutes, and the web transport (`web/connection.ts`,
+   * `INVOKE_TIMEOUT_MS = 30_000`) rejects any invoke that outlives thirty
+   * seconds — on the one client that uses device code. So the outcome lands in
+   * {@link deviceWait} and the client asks {@link deviceCodeStatus} for it.
+   * A dropped socket then costs nothing: the host is still polling, and the
+   * reconnected client picks the answer up.
+   *
+   * SINGLE-FLIGHT by holder identity: a second start replaces `deviceWait`, and
+   * the background settler writes only if it still owns the slot. The vault
+   * enforces the other half — `claimLoginSlot` cancels a live device flow.
+   */
+  async deviceCodeStart(vendorId: string): Promise<VendorDeviceCodeStart> {
+    if (vendorId !== PI_CODEX_VENDOR_ID) {
+      throw new Error(
+        `PiAuthProvider.deviceCodeStart: only '${PI_CODEX_VENDOR_ID}' is driven; got '${vendorId}'`
+      )
+    }
+    const started = await credentialSync.beginDeviceCodeLogin()
+    const wait: DeviceCodeWait = {
+      startedAt: Date.now(),
+      expiresAt: started.expiresAt,
+      state: 'pending'
+    }
+    this.deviceWait = wait
+    // Not awaited. `.then(ok, err)` rather than a floating promise + catch, so
+    // neither outcome can surface as an unhandled rejection.
+    void credentialSync.completeLogin().then(
+      () => this.settleDeviceWait(wait, 'done'),
+      (err: unknown) => {
+        const detail = err instanceof Error ? err.message : String(err)
+        // A cancellation is not a failure to report — the user did it, or a
+        // second start superseded this one.
+        if (/cancelled/i.test(detail)) this.settleDeviceWait(wait, 'cancelled')
+        else this.settleDeviceWait(wait, 'error', detail)
+      }
+    )
+    return started
+  }
+
+  /**
+   * Where the started wait has got to. `cancelled` is also the answer when NO
+   * flow is live, so a client that missed the cancellation stops polling instead
+   * of waiting forever. Carries the host's message on `error` and nothing else —
+   * never a token, never the `device_auth_id`.
+   */
+  async deviceCodeStatus(): Promise<VendorDeviceCodeStatus> {
+    const wait = this.deviceWait
+    if (!wait) return { state: 'cancelled' }
+    return wait.state === 'error' && wait.error
+      ? { state: 'error', error: wait.error }
+      : { state: wait.state }
+  }
+
+  /** Write a terminal state, but only for the wait that still owns the slot, and only once. */
+  private settleDeviceWait(
+    wait: DeviceCodeWait,
+    state: DeviceCodeWait['state'],
+    error?: string
+  ): void {
+    if (this.deviceWait !== wait || wait.state !== 'pending') return
+    wait.state = state
+    if (error) wait.error = error
+  }
+
   async oauthCallback(vendorId: string, _method: number, code?: string): Promise<boolean> {
     if (vendorId !== PI_CODEX_VENDOR_ID) {
       throw new Error(
@@ -292,6 +387,10 @@ export class PiAuthProvider implements EngineAuthProvider {
 
   async cancelVendorOauth(): Promise<void> {
     credentialSync.cancelLogin()
+    // Mark the holder immediately rather than waiting for the background
+    // completion to reject: the client's very next status poll must see this,
+    // and on a fake/settled flow that rejection may never arrive at all.
+    if (this.deviceWait) this.settleDeviceWait(this.deviceWait, 'cancelled')
   }
 
   // -------------------------------------------------------------------------

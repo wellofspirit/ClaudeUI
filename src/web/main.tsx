@@ -375,6 +375,33 @@ function RemoteApp(): React.JSX.Element {
       hydrateReplica(snapshot, isResync)
       setReady(true)
     })
+    // ADR-068 §3 (Slice 6, fixed in Slice 7): the ChatGPT auth view the model
+    // picker and the composer hint read is NOT in the snapshot — it comes from
+    // `provider-registry:list`, and the desktop gets it from
+    // `hydrateConfigFromDisk`, which only `renderer/src/main.tsx` runs. Without
+    // this the web client sat on `'unknown'` for the whole session, so a headless
+    // user with no ChatGPT account saw Codex's models undimmed, no "Sign in to
+    // ChatGPT" item and no composer hint — the exact "never advertise what does
+    // not work" failure ADR-030 forbids.
+    //
+    // FIRST hydration only, deliberately. The read composes three optional
+    // stores and CAN START AN OPENCODE SERVER (the reason Slice 6 kept it out of
+    // the desktop's boot `Promise.all`), while a re-sync fires on every
+    // background→foreground transition — constantly, on a phone. The answer only
+    // moves when someone signs in or out, and both of those already refresh it
+    // (`closeSignIn`, and every settings sheet that mutates the registry). A
+    // desktop sign-in while this tab is backgrounded therefore leaves it stale
+    // until the next reload: the cost is an advisory hint and a dimmed picker
+    // group, which is the cheaper of the two errors.
+    //
+    // Fire-and-forget: every surface renders `'unknown'` — i.e. exactly as it
+    // does today — until the answer lands, and the action swallows its own
+    // failure rather than claiming "signed out".
+    if (!isResync) {
+      void import('@renderer/stores/session-store').then(({ useSessionStore }) =>
+        useSessionStore.getState().refreshProviderAuth()
+      )
+    }
   }, [])
 
   // Catchup events are replayed through the connection's live onEvent handler

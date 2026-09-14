@@ -25,9 +25,16 @@
  * reporting it — which is what makes "close it and keep working" safe.
  *
  * THE HOST VARIANT IS DERIVED, NEVER CHOSEN (ADR-057). A web client has no host
- * browser to wait on, so it gets the two-step paste panel; the desktop opens its
- * own browser and gets "Waiting for the browser…" with a manual link. A user
- * cannot pick the wrong one because there is nothing to pick.
+ * browser to wait on; the desktop opens its own browser and gets "Waiting for
+ * the browser…" with a manual link. A user cannot pick the wrong one because
+ * there is nothing to pick.
+ *
+ * WHICH REMOTE ChatGPT FLOW (Slice 7, ADR-068 §3) is the one thing the user CAN
+ * change, and only in one direction: a web client defaults to DEVICE CODE
+ * (`DeviceCodeFlow` — open a link, type a code, the host polls), and "Paste the
+ * callback URL instead" falls back to ADR-057's `OAuthPasteBackFlow` for a
+ * server that has device code turned off. Anthropic is untouched either way —
+ * cli.js owns that flow — and the desktop never sees either panel.
  *
  * VISUAL VOCABULARY. `SettingRow` / `SheetGroup` / `Button` from the settings
  * dialog, so an account row here reads as the same object as an account row in
@@ -49,6 +56,7 @@ import { useEscapeLayer } from '../shared/use-escape-layer'
 import { SettingRow, Button } from '../SettingsDialog/settings-controls'
 import { SheetGroup } from '../SettingsDialog/SheetFrame'
 import { OAuthOutcomeNotice, OAuthPasteBackFlow, classifyOAuthError } from './OAuthPasteBackFlow'
+import { DeviceCodeFlow } from './DeviceCodeFlow'
 
 const DIALOG = 'SignInDialog'
 
@@ -78,6 +86,9 @@ interface AccountRow {
 
 type Stage = 'choose' | 'flow' | 'done'
 
+/** The two ChatGPT flows a WEB client can run — see `chatgptFlow` below. */
+type ChatgptFlowKind = 'device' | 'paste'
+
 export function SignInDialog(): React.JSX.Element | null {
   const request = useSessionStore((s) => s.signInDialog)
   if (!request) return null
@@ -97,6 +108,7 @@ function SignInDialogBody({ request }: { request: SignInRequest }): React.JSX.El
     submitOAuthCode,
     cancelSignIn,
     authorizeVendorOAuth,
+    authorizeVendorDeviceCode,
     submitVendorOAuthCode,
     cancelVendorOAuth,
     setAuthState,
@@ -112,6 +124,7 @@ function SignInDialogBody({ request }: { request: SignInRequest }): React.JSX.El
       submitOAuthCode: s.submitOAuthCode,
       cancelSignIn: s.cancelSignIn,
       authorizeVendorOAuth: s.authorizeVendorOAuth,
+      authorizeVendorDeviceCode: s.authorizeVendorDeviceCode,
       submitVendorOAuthCode: s.submitVendorOAuthCode,
       cancelVendorOAuth: s.cancelVendorOAuth,
       setAuthState: s.setAuthState,
@@ -125,6 +138,15 @@ function SignInDialogBody({ request }: { request: SignInRequest }): React.JSX.El
   const isWeb = window.api.platform === 'web'
 
   const [stage, setStage] = useState<Stage>('choose')
+  /**
+   * Which ChatGPT flow the web client is on (Slice 7). Device code is the
+   * DEFAULT — "open this link, type this code" is the step a phone can finish —
+   * and "Paste the callback URL instead" drops to ADR-057's panel for a server
+   * with device code turned off. Ignored on desktop and for Anthropic.
+   */
+  const [chatgptFlow, setChatgptFlow] = useState<ChatgptFlowKind>('device')
+  /** Which mode the live flow was started in, so the paste fallback restarts the same one. */
+  const [flowMode, setFlowMode] = useState<'reauth' | 'add'>('reauth')
   /** null while the account read is in flight — the chooser must not flash empty. */
   const [accounts, setAccounts] = useState<AccountRow[] | null>(null)
   const [busy, setBusy] = useState(false)
@@ -199,10 +221,11 @@ function SignInDialogBody({ request }: { request: SignInRequest }): React.JSX.El
   }, [collectOutcome])
 
   const start = useCallback(
-    async (mode: 'reauth' | 'add'): Promise<void> => {
+    async (mode: 'reauth' | 'add', flowKind?: ChatgptFlowKind): Promise<void> => {
       setError(null)
       setBusy(true)
       setStage('flow')
+      setFlowMode(mode)
       try {
         if (providerId === 'anthropic') {
           if (mode === 'add') {
@@ -213,6 +236,16 @@ function SignInDialogBody({ request }: { request: SignInRequest }): React.JSX.El
           } else {
             await signIn()
           }
+          return
+        }
+        // Slice 7: a WEB client defaults to device code — the host requests a
+        // code and polls, and this promise resolves only once the credential is
+        // stored, exactly like the desktop loopback's. The paste fallback and
+        // the desktop both stay on the PKCE flow.
+        if (isWeb && (flowKind ?? chatgptFlow) === 'device') {
+          const device = await authorizeVendorDeviceCode('pi', CODEX_VENDOR_ID)
+          if (device.ok) await finish()
+          else if (device.error) setError(device.error)
           return
         }
         const result = await authorizeVendorOAuth('pi', CODEX_VENDOR_ID)
@@ -227,7 +260,17 @@ function SignInDialogBody({ request }: { request: SignInRequest }): React.JSX.El
         setBusy(false)
       }
     },
-    [providerId, signIn, authorizeVendorOAuth, setAccountsState, setAuthState, finish]
+    [
+      providerId,
+      isWeb,
+      chatgptFlow,
+      signIn,
+      authorizeVendorOAuth,
+      authorizeVendorDeviceCode,
+      setAccountsState,
+      setAuthState,
+      finish
+    ]
   )
 
   // Open: read the accounts, then decide whether there is anything to choose
@@ -318,7 +361,40 @@ function SignInDialogBody({ request }: { request: SignInRequest }): React.JSX.El
     void done.finally(() => setSubmitting(false))
   }
 
-  const flowPanel = isWeb ? (
+  /**
+   * Abandon the device code and fall back to ADR-057's paste panel — the escape
+   * hatch for a server with device code turned off, or a user who would rather
+   * copy a URL. Cancels host-side first (that flow holds the vault's single
+   * login slot; a PKCE start would otherwise be refused as "already in
+   * progress"), then restarts in the SAME mode the user chose.
+   */
+  const pasteInstead = (): void => {
+    cancelVendorOAuth()
+    setChatgptFlow('paste')
+    void start(flowMode, 'paste')
+  }
+
+  /** The live device-code flow, when that is what is running (web + ChatGPT only). */
+  const deviceState =
+    isWeb && providerId === 'chatgpt' && vendorOAuth?.stage === 'device-code'
+      ? vendorOAuth
+      : undefined
+  const onDeviceFlow = isWeb && providerId === 'chatgpt' && chatgptFlow === 'device'
+
+  const flowPanel = onDeviceFlow ? (
+    <DeviceCodeFlow
+      id={providerId}
+      verificationUrl={deviceState?.verificationUrl}
+      userCode={deviceState?.userCode}
+      expiresAt={deviceState?.expiresAt}
+      // Busy only until the host answers with a code: the wait AFTER that is the
+      // flow's normal state, and locking Copy for fifteen minutes of it would
+      // make the panel useless.
+      busy={busy && !deviceState}
+      onCancel={cancelFlow}
+      onPasteInstead={pasteInstead}
+    />
+  ) : isWeb ? (
     <OAuthPasteBackFlow
       variant={providerId === 'anthropic' ? 'code' : 'url'}
       id={providerId}

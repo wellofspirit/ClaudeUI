@@ -55,6 +55,7 @@ import {
   type TokenResponse,
   type VaultCredential
 } from './codex-oauth'
+import type { DeviceCodeStart } from './codex-device-code'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -119,6 +120,12 @@ export interface VaultLike {
   completeLogin(): Promise<VaultCredential>
   /** ADR-057 remote paste-back completion. Optional so fakes stay minimal. */
   completeLoginFromPastedInput?(input: string): Promise<VaultCredential>
+  /**
+   * ADR-068 §3 / Slice 7 device-code start. Optional so fakes stay minimal.
+   * `completeLogin()` then awaits whichever flow the vault has live, which is
+   * why there is no `completeDeviceCodeLogin` twin.
+   */
+  beginDeviceCodeLogin?(): Promise<DeviceCodeStart>
   cancelLogin(): void
 }
 
@@ -512,14 +519,28 @@ export class CredentialSync {
   }
 
   /**
+   * Start the DEVICE-CODE flow (ADR-068 §3, Slice 7) instead of the loopback
+   * one. There is no `completeDeviceCodeLogin` twin on purpose: the vault holds
+   * ONE login slot, so `completeLogin()` below already awaits whichever flow was
+   * started last, and `cancelLogin()` already cancels either.
+   */
+  async beginDeviceCodeLogin(): Promise<DeviceCodeStart> {
+    if (!this.vault.beginDeviceCodeLogin) {
+      throw new Error('CredentialSync: vault does not support device-code login')
+    }
+    return this.vault.beginDeviceCodeLogin()
+  }
+
+  /**
    * On success: feed both engine stores, arm the refresh scheduler, and start
    * the fs-watch resync.
    *
    * `pastedInput` (ADR-057) drives the remote paste-back completion instead of
    * the desktop loopback wait — the host still performs the exchange. Absent,
-   * the loopback path is awaited exactly as before. Everything AFTER the vault
-   * completion (feed / schedule / watch / needsReauth reset) is identical, so
-   * the two paths share this one body.
+   * the vault completes whichever flow is LIVE: the desktop loopback, or the
+   * Slice 7 device-code poll. Everything AFTER the vault completion is identical
+   * for all three, so it lives in {@link applyCompletedLogin} and no path owns a
+   * copy of it.
    */
   async completeLogin(pastedInput?: string): Promise<VaultCredential> {
     const generation = this.lifecycleGeneration
@@ -527,6 +548,18 @@ export class CredentialSync {
       pastedInput !== undefined
         ? await this.completeVaultLoginFromPaste(pastedInput)
         : await this.vault.completeLogin()
+    return this.applyCompletedLogin(cred, generation)
+  }
+
+  /**
+   * The one post-completion tail every login path runs: honour a cancellation
+   * that raced the exchange, clear the account's `needsReauth`, vend it when it
+   * is the active one, arm its refresh timer and start the watchers.
+   */
+  private async applyCompletedLogin(
+    cred: VaultCredential,
+    generation: number
+  ): Promise<VaultCredential> {
     if (!this.isCurrent(generation)) {
       await this.removeChatgptCredential()
       throw new Error('ChatGPT login was cancelled')

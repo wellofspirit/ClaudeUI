@@ -48,6 +48,7 @@
 // Electron's main process never hit this because it is not bundled this way.
 import 'reflect-metadata'
 import { codexAuthProvider } from '../core/auth/CodexAuthProvider'
+import { requireServerEngineAuth } from './engine-auth'
 import * as fs from 'fs'
 import * as path from 'path'
 import { setSqliteDriver, type SqliteDriver } from '../core/services/sqlite-driver'
@@ -278,19 +279,19 @@ async function main(): Promise<void> {
     // surface by construction — so the LABEL is what stops a headless box
     // claiming a `desktop-renderer` it does not have.
     hostActor: hostConnection('server-console'),
-    // The desktop-auth pair. A headless server has no OAuth browser and no
-    // multi-account UI, so both refuse loudly rather than pretending: the
-    // channels stay REGISTERED (the surface must not depend on the host, or the
-    // remote UI would render a different app on a server than on a desktop) and
-    // fail with a message that names the reason.
+    // The desktop-auth pair.
+    //
+    // `requireEngineAuth` drives the ChatGPT vault for `pi` and `codex` here —
+    // device code (ADR-068 §3) was built FOR this deployment and paste-back
+    // (ADR-057) works here too — and refuses `claude` and `opencode`, whose
+    // flows genuinely live inside cli.js and the opencode server. See
+    // `engine-auth.ts` for the whole rule. Multi-account switching has no
+    // headless UI and still refuses. The channels stay REGISTERED either way
+    // (the surface must not depend on the host, or the remote UI would render a
+    // different app on a server than on a desktop) and fail with a message that
+    // names the reason.
     authDeps: {
-      requireEngineAuth: (engineId) => {
-        if (engineId === 'codex') return codexAuthProvider
-        throw new Error(
-          'Engine sign-in is not available on the headless server yet — sign in on the desktop app; ' +
-            'the credential vault is shared.'
-        )
-      },
+      requireEngineAuth: requireServerEngineAuth,
       setAccountEnabled: () => {
         throw new Error('Multi-account switching is not available on the headless server.')
       }

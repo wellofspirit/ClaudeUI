@@ -1006,6 +1006,9 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       unwrap('vendor-auth:set-key', engineId, vendorId, key),
     vendorAuthOauthAuthorize: (engineId, vendorId, method, inputs) =>
       unwrap('vendor-auth:oauth-authorize', engineId, vendorId, method, inputs),
+    vendorAuthDeviceCodeStart: (engineId, vendorId) =>
+      unwrap('vendor-auth:device-code-start', engineId, vendorId),
+    vendorAuthDeviceCodeStatus: (engineId) => unwrap('vendor-auth:device-code-status', engineId),
     vendorAuthOauthCallback: (engineId, vendorId, method, code) =>
       unwrap('vendor-auth:oauth-callback', engineId, vendorId, method, code),
     vendorAuthRemove: (engineId, vendorId) => unwrap('vendor-auth:remove', engineId, vendorId),

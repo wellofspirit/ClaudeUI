@@ -273,6 +273,30 @@ describe('web api-adapter — auth / account / vendor-auth reach the remote hand
       undefined
     )
 
+    // Slice 7: the device-code START carries back only display material, and the
+    // WAIT is the ordinary callback with an empty code — one new channel, not two.
+    connection.invoke.mockResolvedValueOnce({
+      ok: true,
+      data: { verificationUrl: 'https://issuer.test/codex/device', userCode: 'AB-12', expiresAt: 9 }
+    })
+    await expect(api.vendorAuthDeviceCodeStart('pi', 'openai-codex')).resolves.toEqual({
+      verificationUrl: 'https://issuer.test/codex/device',
+      userCode: 'AB-12',
+      expiresAt: 9
+    })
+    expect(connection.invoke).toHaveBeenCalledWith(
+      'vendor-auth:device-code-start',
+      'pi',
+      'openai-codex'
+    )
+
+    // The WAIT is this poll, not a long `oauth-callback` invoke — that one would
+    // be rejected after 30 s by INVOKE_TIMEOUT_MS on the very client that uses
+    // device code.
+    connection.invoke.mockResolvedValueOnce({ ok: true, data: { state: 'pending' } })
+    await expect(api.vendorAuthDeviceCodeStatus('pi')).resolves.toEqual({ state: 'pending' })
+    expect(connection.invoke).toHaveBeenCalledWith('vendor-auth:device-code-status', 'pi')
+
     connection.invoke.mockResolvedValueOnce({ ok: true, data: true })
     await expect(
       api.vendorAuthOauthCallback('pi', 'openai-codex', 0, 'http://localhost:1455/cb?code=c')
@@ -415,6 +439,16 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     method: 'vendorAuthOauthAuthorize',
     channel: 'vendor-auth:oauth-authorize',
     args: ['pi', 'openai-codex', 0, { team: 'x' }]
+  },
+  {
+    method: 'vendorAuthDeviceCodeStart',
+    channel: 'vendor-auth:device-code-start',
+    args: ['pi', 'openai-codex']
+  },
+  {
+    method: 'vendorAuthDeviceCodeStatus',
+    channel: 'vendor-auth:device-code-status',
+    args: ['pi']
   },
   {
     method: 'vendorAuthOauthCallback',

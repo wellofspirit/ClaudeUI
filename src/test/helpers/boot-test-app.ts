@@ -336,6 +336,12 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     vendorAuthOauthAuthorize: async () => {
       throw new Error('Vendor auth not available in tests')
     },
+    vendorAuthDeviceCodeStart: async () => {
+      throw new Error('Vendor auth not available in tests')
+    },
+    vendorAuthDeviceCodeStatus: async () => {
+      throw new Error('Vendor auth not available in tests')
+    },
     vendorAuthOauthCallback: async () => {
       throw new Error('Vendor auth not available in tests')
     },

@@ -392,6 +392,108 @@ describe('CredentialSync route policy', () => {
     }
   })
 
+  // ── Device code (ADR-068 §3, Slice 7) ─────────────────────────────────────
+
+  it('beginDeviceCodeLogin delegates to the vault and returns only the three display fields', async () => {
+    const { vault } = makeFakeVault(null)
+    const start = vi.fn(async () => ({
+      verificationUrl: 'https://issuer.test/codex/device',
+      userCode: 'ABCD-1234',
+      expiresAt: 999
+    }))
+    vault.beginDeviceCodeLogin = start
+    const sync = new CredentialSync({ vault })
+    await expect(sync.beginDeviceCodeLogin()).resolves.toEqual({
+      verificationUrl: 'https://issuer.test/codex/device',
+      userCode: 'ABCD-1234',
+      expiresAt: 999
+    })
+    expect(start).toHaveBeenCalled()
+  })
+
+  it('beginDeviceCodeLogin throws when the vault has no device-code support', async () => {
+    // makeFakeVault does not implement the optional beginDeviceCodeLogin.
+    const { vault } = makeFakeVault(null)
+    const sync = new CredentialSync({ vault })
+    await expect(sync.beginDeviceCodeLogin()).rejects.toThrow(/does not support device-code login/)
+  })
+
+  it('a DEVICE-CODE completion runs the same tail: vault upsert, both engines fed, watchers armed', async () => {
+    vi.useFakeTimers()
+    try {
+      const now = 6_000_000
+      vi.setSystemTime(now)
+      const cred: VaultCredential = {
+        type: 'oauth',
+        access: 'device-acc',
+        refresh: 'device-ref',
+        expires: now + 3_600_000
+      }
+      const { vault, state } = makeFakeVault(null)
+      // The vault completes whichever flow is live — for a device login that is
+      // the poll, and CredentialSync must not care which it was.
+      vault.beginDeviceCodeLogin = vi.fn(async () => ({
+        verificationUrl: 'https://issuer.test/codex/device',
+        userCode: 'ABCD-1234',
+        expiresAt: now + 900_000
+      }))
+      vault.completeLogin = vi.fn(async () => {
+        state.current = cred
+        return cred
+      })
+      const pi = fakeFeedTarget()
+      const opencode = fakeFeedTarget()
+      const sync = new CredentialSync({ vault })
+      sync.configure({ pi: pi.target, opencode: opencode.target })
+
+      await sync.beginDeviceCodeLogin()
+      const result = await sync.completeLogin()
+
+      expect(result).toBe(cred)
+      expect(vault.completeLogin).toHaveBeenCalled()
+      expect(pi.feed).toHaveBeenCalled()
+      expect(opencode.feed).toHaveBeenCalled()
+      sync.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a DEVICE-CODE completion that lost its generation is dropped, not vended', async () => {
+    const { vault } = makeFakeVault(null)
+    const cred: VaultCredential = {
+      type: 'oauth',
+      access: 'device-acc',
+      refresh: 'device-ref',
+      expires: Date.now() + 3_600_000
+    }
+    const pi = fakeFeedTarget()
+    const opencode = fakeFeedTarget()
+    const sync = new CredentialSync({ vault })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+    // Disconnect (which bumps the generation) lands while the poll is still out.
+    vault.completeLogin = vi.fn(async () => {
+      await sync.disconnectChatgpt()
+      return cred
+    })
+    await expect(sync.completeLogin()).rejects.toThrow(/login was cancelled/)
+    expect(pi.feed).not.toHaveBeenCalled()
+    expect(opencode.feed).not.toHaveBeenCalled()
+  })
+
+  it('cancelLogin cancels whichever flow the vault holds, device code included', async () => {
+    const { vault } = makeFakeVault(null)
+    vault.beginDeviceCodeLogin = vi.fn(async () => ({
+      verificationUrl: 'https://issuer.test/codex/device',
+      userCode: 'ABCD-1234',
+      expiresAt: 1
+    }))
+    const sync = new CredentialSync({ vault })
+    await sync.beginDeviceCodeLogin()
+    sync.cancelLogin()
+    expect(vault.cancelLogin).toHaveBeenCalled()
+  })
+
   it('completeLogin(pastedInput) throws when the vault has no paste support', async () => {
     // makeFakeVault does not implement the optional completeLoginFromPastedInput.
     const { vault } = makeFakeVault(null)

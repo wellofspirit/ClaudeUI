@@ -1701,6 +1701,39 @@ interface FileAPI {
   listWorktrees(cwd: string): Promise<WorktreeEntry[]>
 }
 
+/**
+ * What a device-code sign-in tells the CLIENT (ADR-068 §3, Slice 7). Everything
+ * here is display material: the page to open, the code to type, and when the
+ * host stops polling. The `device_auth_id` the host polls with never crosses the
+ * wire. Structurally mirrored by `DeviceCodeStart` in
+ * `core/auth/vault/codex-device-code.ts`, which owns the flow.
+ */
+export interface VendorDeviceCodeStart {
+  verificationUrl: string
+  userCode: string
+  /** Wall-clock ms (host clock) at which the flow expires — 15 minutes after it started. */
+  expiresAt: number
+}
+
+/**
+ * Where a started device-code sign-in has got to (ADR-068 §3, Slice 7).
+ *
+ * The WAIT is host-owned: `vendor-auth:device-code-start` kicks the poll off in
+ * the background and the client asks this question every few seconds, rather
+ * than holding one long invoke open. It has to work that way on the web —
+ * `web/connection.ts` caps every invoke at 30 s (`INVOKE_TIMEOUT_MS`) and a
+ * device code lives for fifteen minutes — and it also survives a reconnect,
+ * because the host, not the socket, is holding the outcome.
+ *
+ * `error` carries the host's own message; the other three carry nothing.
+ * `cancelled` is also the answer when NO flow is live, so a client that missed
+ * the cancellation stops polling instead of waiting forever.
+ */
+export interface VendorDeviceCodeStatus {
+  state: 'pending' | 'done' | 'error' | 'cancelled'
+  error?: string
+}
+
 /** Engine-routed per-vendor auth API (opencode's multi-vendor auth model). */
 interface VendorAuthAPI {
   /** Probe all vendors for a given engine. */
@@ -1721,6 +1754,18 @@ interface VendorAuthAPI {
     method: number,
     inputs?: Record<string, string>
   ): Promise<{ url: string; method: 'auto' | 'code'; instructions: string }>
+  /**
+   * Start a DEVICE-CODE sign-in for a vendor (ADR-068 §3, Slice 7 — ChatGPT via
+   * pi's `openai-codex` today). This ALSO starts the host-side wait; the caller
+   * follows it with {@link vendorAuthDeviceCodeStatus}, never with a long
+   * `vendorAuthOauthCallback` invoke.
+   */
+  vendorAuthDeviceCodeStart(engineId: EngineId, vendorId: string): Promise<VendorDeviceCodeStart>
+  /**
+   * How the started device-code sign-in is going. Polled; never carries a token.
+   * See {@link VendorDeviceCodeStatus} for why the wait is not one long invoke.
+   */
+  vendorAuthDeviceCodeStatus(engineId: EngineId): Promise<VendorDeviceCodeStatus>
   /** Submit the OAuth code (paste-code flow). Omit code for auto/loopback flow. */
   vendorAuthOauthCallback(
     engineId: EngineId,

@@ -1005,6 +1005,32 @@ function setCapped<K, V>(map: Map<K, V>, key: K, value: V, cap: number): void {
 let vendorOAuthFlowToken = 0
 
 /**
+ * How often the device-code flow asks the host how it is going (ADR-068 §3,
+ * Slice 7). The WAIT cannot be one long invoke: `web/connection.ts` rejects any
+ * invoke that outlives `INVOKE_TIMEOUT_MS` (30 s) and a device code lives for
+ * fifteen minutes, on the one client that uses this flow. Three seconds is well
+ * inside Codex's own default poll cadence and costs a `config` query each time.
+ */
+export const DEVICE_CODE_POLL_MS = 3000
+
+/** Plain delay between status polls. */
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * The ONE post-success tail every remote ChatGPT completion runs — the paste-back
+ * submit and the Slice 7 device-code wait. Clearing the flow retires the panel;
+ * the registry read is what makes the picker and the composer hint (Slice 6) stop
+ * claiming the provider is signed out. Fire-and-forget, like `closeSignIn`'s own
+ * call: the read is advisory and must never delay the dialog's done state.
+ */
+function finishVendorOAuthSuccess(): void {
+  useSessionStore.getState().setVendorOAuth(null)
+  void useSessionStore.getState().refreshProviderAuth()
+}
+
+/**
  * Global git status cache keyed by cwd.
  * When polling updates arrive they're cached here so that newly-loaded
  * or switched-to sessions with the same cwd get instant git status
@@ -1109,12 +1135,21 @@ function coldSessionIds(
 export interface VendorOAuthState {
   engineId: string
   vendorId: string
-  stage: 'waiting' | 'error' | 'paste'
+  stage: 'waiting' | 'error' | 'paste' | 'device-code'
   instructions: string
   /** Authorize URL — `paste` stage only (the client opens it, not the host). */
   url?: string
   /** Index into the vendor's auth options, needed by `vendor-auth:oauth-callback`. */
   method?: number
+  /**
+   * `device-code` stage only (ADR-068 §3, Slice 7): the page the user opens on
+   * any device, the code they type there, and when the host stops polling. The
+   * user code is display material — no token, and no `device_auth_id`, ever
+   * reaches the renderer.
+   */
+  verificationUrl?: string
+  userCode?: string
+  expiresAt?: number
   /**
    * Verbatim backend message — `error` stage only, and only for flows that
    * reached it through S4-UI's paths (the legacy desktop `auto` failure sets no
@@ -1499,6 +1534,17 @@ export interface SessionState {
    * stage it consumes is never set on desktop.
    */
   submitVendorOAuthCode(pasted: string): Promise<{ ok: boolean; error?: string }>
+  /**
+   * The remote ChatGPT DEFAULT (ADR-068 §3, Slice 7): ask the host for a device
+   * code, park the flow at `device-code` so the panel can render it, then POLL
+   * the host for the outcome. Resolves `ok` only once the credential is stored.
+   */
+  authorizeVendorDeviceCode(
+    engineId: EngineId,
+    vendorId: string,
+    /** Poll cadence; defaults to {@link DEVICE_CODE_POLL_MS}. A test seam — the suite passes 0. */
+    pollIntervalMs?: number
+  ): Promise<{ ok: boolean; error?: string }>
   /** Respawn the session's cli.js process (so it re-reads freshly-stored
    *  credentials) and resend a prompt. Used by the post-login Retry. */
   retrySend: (routingId: string, prompt: string) => Promise<void>
@@ -2863,6 +2909,65 @@ export const useSessionStore = create<SessionState>((set) => ({
       return { ok: false, error: message }
     }
   },
+  authorizeVendorDeviceCode: async (engineId, vendorId, pollIntervalMs = DEVICE_CODE_POLL_MS) => {
+    // Claim the flow token BEFORE the first await: Cancel bumps it, and every
+    // post-await state-set below bails when it moved — the same guard the
+    // loopback `auto` path uses, and what makes "a second start cancels the
+    // first" hold on the renderer side too.
+    const token = ++vendorOAuthFlowToken
+    const superseded = (): boolean => vendorOAuthFlowToken !== token
+    const flowError = (msg: string): { ok: false; error: string } => {
+      useSessionStore
+        .getState()
+        .setVendorOAuth({ engineId, vendorId, stage: 'error', instructions: '', error: msg })
+      return { ok: false, error: msg }
+    }
+    try {
+      // The start ALSO starts the host-side wait. This path deliberately never
+      // calls `vendorAuthOauthCallback`: that invoke would be rejected after
+      // thirty seconds by `web/connection.ts`'s INVOKE_TIMEOUT_MS, on the one
+      // client that uses device code, and a dropped socket would lose it.
+      const started = await window.api.vendorAuthDeviceCodeStart(engineId, vendorId)
+      if (superseded()) return { ok: false }
+      useSessionStore.getState().setVendorOAuth({
+        engineId,
+        vendorId,
+        stage: 'device-code',
+        instructions: '',
+        verificationUrl: started.verificationUrl,
+        userCode: started.userCode,
+        expiresAt: started.expiresAt
+      })
+
+      // Poll the host until it has an answer. The HOST bounds this loop — its
+      // flow enforces the fifteen-minute cap and reports `error` when it lapses
+      // — so there is no second deadline here to drift from that one.
+      for (;;) {
+        await wait(pollIntervalMs)
+        if (superseded()) return { ok: false }
+        const status = await window.api.vendorAuthDeviceCodeStatus(engineId)
+        if (superseded()) return { ok: false }
+        if (status.state === 'pending') continue
+        // `cancelled` covers both "the user pressed Cancel" and "no flow is
+        // live": nothing to report either way, and the panel belongs to whoever
+        // cancelled it.
+        if (status.state === 'cancelled') return { ok: false }
+        if (status.state === 'error') {
+          return flowError(status.error ?? 'The sign-in did not complete. Start again.')
+        }
+        finishVendorOAuthSuccess()
+        return { ok: true }
+      }
+    } catch (err) {
+      // A cancel is not a failure to report: either this flow was superseded
+      // (Cancel bumped the token) or the host threw its own cancellation while
+      // the renderer was still waiting. Both leave the panel to whoever cancelled.
+      if (superseded()) return { ok: false }
+      const messageText = errorText(err)
+      if (/cancelled/i.test(messageText)) return { ok: false }
+      return flowError(messageText)
+    }
+  },
   submitVendorOAuthCode: async (pasted) => {
     const flow = useSessionStore.getState().vendorOAuth
     if (!flow || flow.stage !== 'paste' || flow.method === undefined) {
@@ -2893,7 +2998,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         pasted
       )
       if (!ok) return fail('The vendor rejected that sign-in. Start again from step 1.')
-      useSessionStore.getState().setVendorOAuth(null)
+      finishVendorOAuthSuccess()
       return { ok: true }
     } catch (err) {
       return fail(errorText(err))

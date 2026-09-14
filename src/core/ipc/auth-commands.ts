@@ -64,7 +64,9 @@ import type {
   AuthFlowState,
   EngineId,
   VendorAuthMap,
-  VendorAuthOption
+  VendorAuthOption,
+  VendorDeviceCodeStart,
+  VendorDeviceCodeStatus
 } from '../../shared/types'
 import type {
   ConfigurableHarnessId,
@@ -263,6 +265,50 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
           return result
         }
       )
+    },
+    {
+      channel: 'vendor-auth:device-code-start',
+      capability: 'config',
+      kind: 'command',
+      handler: safeHandler(
+        async (engineId: EngineId, vendorId: string): Promise<VendorDeviceCodeStart> => {
+          const provider = deps.requireEngineAuth(engineId)
+          if (!provider.deviceCodeStart) {
+            throw new Error(`Engine "${engineId}" does not support deviceCodeStart`)
+          }
+          const started = await provider.deviceCodeStart(vendorId)
+          // Rebuilt field-by-field, not spread: the flow object could grow a
+          // field (device_auth_id is the one that must never leave the host) and
+          // a spread would ship it the day it appears (ADR-068 §3 / Slice 7).
+          return {
+            verificationUrl: started.verificationUrl,
+            userCode: started.userCode,
+            expiresAt: started.expiresAt
+          }
+        }
+      )
+    },
+    {
+      // The WAIT the start above kicked off. A `query`, polled every few seconds
+      // — not one long invoke: the web transport rejects any invoke that outlives
+      // thirty seconds (`web/connection.ts`, `INVOKE_TIMEOUT_MS`) and a device
+      // code lives for fifteen minutes. It also means a dropped socket costs the
+      // client nothing: the host holds the outcome.
+      channel: 'vendor-auth:device-code-status',
+      capability: 'config',
+      kind: 'query',
+      handler: safeHandler(async (engineId: EngineId): Promise<VendorDeviceCodeStatus> => {
+        const provider = deps.requireEngineAuth(engineId)
+        if (!provider.deviceCodeStatus) {
+          throw new Error(`Engine "${engineId}" does not support deviceCodeStart`)
+        }
+        const status = await provider.deviceCodeStatus()
+        // Rebuilt, like the start result: only the state and, on a failure, the
+        // host's own message ever reach the client.
+        return status.state === 'error' && status.error
+          ? { state: 'error', error: status.error }
+          : { state: status.state }
+      })
     },
     {
       channel: 'vendor-auth:oauth-callback',

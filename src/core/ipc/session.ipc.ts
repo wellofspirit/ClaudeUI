@@ -431,6 +431,8 @@ const SESSION_IPC_CHANNELS = [
   'vendor-auth:list-keys',
   'vendor-auth:set-key',
   'vendor-auth:oauth-authorize',
+  'vendor-auth:device-code-start',
+  'vendor-auth:device-code-status',
   'vendor-auth:oauth-callback',
   'vendor-auth:oauth-cancel',
   'vendor-auth:remove'

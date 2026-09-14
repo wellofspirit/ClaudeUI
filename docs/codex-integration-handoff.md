@@ -2,7 +2,7 @@
 
 ## Resume here (ADR-068 arc — 2026-09-14)
 
-**Start with `docs/adr/adr-068_chatgpt-identity-vault-owned-codex-injection.md` and `docs/codex-accounts-spec.md`.** The spec is the source of truth for this arc: every slice has a kickoff, and every landed slice has a "Landed …" paragraph recording the as-built deviations. Slices 1–6 are landed; ADR-068 is Implemented. Next: a push when Daniel asks, then the deferred items listed under "Open items". The older "Resume here" below is the pre-ADR-068 state and stays as history.
+**Start with `docs/adr/adr-068_chatgpt-identity-vault-owned-codex-injection.md` and `docs/codex-accounts-spec.md`.** The spec is the source of truth for this arc: every slice has a kickoff, and every landed slice has a "Landed …" paragraph recording the as-built deviations. Slices 1–7 are landed; ADR-068 is Implemented. Next: a push when Daniel asks, then the deferred items listed under "Open items". The older "Resume here" below is the pre-ADR-068 state and stays as history.
 
 ### What is committed (all local on `codex-integration`, oldest first; nothing pushed since the previous handoff — confirm with `git log origin/codex-integration..HEAD`)
 
@@ -69,7 +69,13 @@ In this order:
 3. **Metering attribution — folded into the usage-tracking dashboard revamp**, a broader discussion after the Codex integration. Open questions to carry there: child vs cross-engine attribution on usage rows, metering under a pinned account's identity, double counting after rekey/resume, failed-turn spend, and whether an estimated USD cap can gate dispatch.
 4. **Grandchild rendering for every harness that supports nested dispatch** — not urgent; discuss the nested subagent view before building. Codex refuses a child's own spawn today with one error; the work is recursive binding, a nested transcript view, interrupt cascade, cold reconstruction and usage folding.
 
+### Slice 7: landed 2026-09-14 (the commit after `1adbbe23`)
+
+Device-code sign-in for ChatGPT on remote clients, reviewed over three rounds. The hermetic-server drive (`bun src/server/main.ts serve --port 47831 --bind 127.0.0.1` on a scratch `USERPROFILE` with `set-password`, `CLAUDEUI_APP_PATH` at the repo after `build:web`, Playwright from `.cache/` so it resolves the repo's `playwright`) found three defects the unit suites could not: the wait rode a 30-second web invoke, the web client never refreshed `providerAuth`, and the server refused every engine but Codex. All three are fixed and guarded; details in the spec's Slice 7 Landed paragraph. Recipe notes: the web login's scrypt proof lives in `sessionStorage`; the usercode request to `auth.openai.com` mints a code and signs nothing in, so it is safe in a drive.
+
 ### Follow-ups (Daniel, 2026-09-14)
+
+- **Headless-server device code: DONE** (Slice 7). Remaining on that surface: pi's PKCE fallback binds port 1455 on the server box for its timeout (two concurrent fallbacks would collide); the dialog's post-Cancel state with no stored account.
 
 - **pi raises no `session:auth-required`.** pi's wire has no distinguishable auth error today, so a rejected ChatGPT credential on pi surfaces as a generic turn failure rather than the Slice 3 row. Needs a pi wire probe (`docs/protocol-pi/`, `vendor/pi-cli/docs/`) to find or request a typed signal before the row can be wired.
 - **macOS legs of the four new integration tests** (`codex-injection`, `codex-mcp-override`, `codex-mcp-approval`, `codex-config-write`) have only run on Windows x64; run them on a Mac with `CODEX_INTEGRATION=1`.

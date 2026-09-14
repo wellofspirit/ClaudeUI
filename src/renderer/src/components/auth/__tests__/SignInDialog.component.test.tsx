@@ -55,6 +55,13 @@ const CHATGPT_ACCOUNTS = {
   ]
 }
 
+/** What `vendor-auth:device-code-start` answers (Slice 7) — display material only. */
+const DEVICE_CODE = {
+  verificationUrl: 'https://auth.openai.com/codex/device',
+  userCode: 'ABCD-1234',
+  expiresAt: 0
+}
+
 const CHATGPT_DEFINITION = {
   id: 'chatgpt',
   name: 'ChatGPT',
@@ -113,6 +120,9 @@ function installApi(platform: string, over: Record<string, unknown> = {}): void 
     })),
     vendorAuthOauthCallback: vi.fn(async () => true),
     vendorAuthOauthCancel: vi.fn(async () => {}),
+    vendorAuthDeviceCodeStart: vi.fn(async () => DEVICE_CODE),
+    vendorAuthDeviceCodeStatus: vi.fn(async () => ({ state: 'pending' })),
+    listProviderRegistry: vi.fn(async () => ({ entries: [], opencodeInstalled: false })),
     // retrySend
     createSession: vi.fn(async () => {}),
     sendPrompt: vi.fn(async () => {}),
@@ -263,6 +273,11 @@ describe('SignInDialog — ChatGPT', () => {
     await act(async () => {
       fireEvent.click(screen.getByTestId('SignInDialog.reauth'))
     })
+    // Slice 7 made device code the web DEFAULT; the paste panel is now reached
+    // through its escape hatch, and this is still the flow it lands on.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('DeviceCodeFlow.pasteInstead'))
+    })
     const flow = screen.getByTestId('OAuthPasteBackFlow')
     expect(flow).toHaveAttribute('data-variant', 'url')
 
@@ -283,6 +298,102 @@ describe('SignInDialog — ChatGPT', () => {
   })
 })
 
+// ── Device code, the web ChatGPT default (ADR-068 §3, Slice 7) ──────────────
+describe('SignInDialog — ChatGPT device code', () => {
+  it('on web the ChatGPT flow DEFAULTS to device code, showing the URL, the code and the wait', async () => {
+    installApi('web')
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.reauth'))
+    })
+    expect(window.api.vendorAuthDeviceCodeStart).toHaveBeenCalledWith('pi', 'openai-codex')
+    // The PKCE authorize is NOT started — one flow holds the vault's login slot.
+    expect(window.api.vendorAuthOauthAuthorize).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('OAuthPasteBackFlow')).toBeNull()
+
+    expect(screen.getByTestId('DeviceCodeFlow.url')).toHaveAttribute(
+      'href',
+      DEVICE_CODE.verificationUrl
+    )
+    expect(screen.getByTestId('DeviceCodeFlow.code')).toHaveTextContent('ABCD-1234')
+    expect(screen.getByTestId('DeviceCodeFlow.copy')).toBeTruthy()
+    expect(screen.getByTestId('DeviceCodeFlow.cancel')).toBeTruthy()
+    expect(screen.getByTestId('DeviceCodeFlow.waiting')).toHaveTextContent(
+      'Waiting for you to enter the code'
+    )
+    // The WAIT is the host-owned status poll, never a long `oauth-callback`
+    // invoke — that one dies at 30 s on the web (Slice 7 review).
+    expect(window.api.vendorAuthOauthCallback).not.toHaveBeenCalled()
+  })
+
+  it('Copy puts the user code on the clipboard', async () => {
+    const writeText = vi.fn(async () => {})
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true
+    })
+    installApi('web')
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.reauth'))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('DeviceCodeFlow.copy'))
+    })
+    expect(writeText).toHaveBeenCalledWith('ABCD-1234')
+  })
+
+  it('"Paste the callback URL instead" cancels the device flow and starts the PKCE one', async () => {
+    installApi('web')
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.reauth'))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('DeviceCodeFlow.pasteInstead'))
+    })
+    // Host-side release first: the device flow holds the vault's ONE login slot,
+    // so a PKCE start before the cancel would be refused as "already in progress".
+    expect(window.api.vendorAuthOauthCancel).toHaveBeenCalledWith('pi')
+    expect(window.api.vendorAuthOauthAuthorize).toHaveBeenCalledWith('pi', 'openai-codex', 0)
+    expect(screen.getByTestId('OAuthPasteBackFlow')).toHaveAttribute('data-variant', 'url')
+    expect(screen.queryByTestId('DeviceCodeFlow')).toBeNull()
+  })
+
+  it('the DESKTOP never sees the device panel — it keeps the loopback wait', async () => {
+    installApi('darwin')
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.reauth'))
+    })
+    expect(window.api.vendorAuthDeviceCodeStart).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('DeviceCodeFlow')).toBeNull()
+  })
+
+  it('Anthropic on web is untouched — cli.js owns that flow', async () => {
+    installApi('web')
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.reauth'))
+    })
+    expect(window.api.vendorAuthDeviceCodeStart).not.toHaveBeenCalled()
+    expect(screen.getByTestId('OAuthPasteBackFlow')).toHaveAttribute('data-variant', 'code')
+  })
+
+  it('a device-code failure renders through the outcome notice', async () => {
+    installApi('web', {
+      vendorAuthDeviceCodeStart: vi.fn(async () => {
+        throw new Error('device code login is not enabled for this Codex server.')
+      })
+    })
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.reauth'))
+    })
+    expect(screen.getByTestId('OAuthOutcomeNotice')).toHaveTextContent('not enabled for this Codex')
+  })
+})
+
 describe('SignInDialog — on a phone (390px)', () => {
   it('is usable: the account rows, the flow and the actions are all reachable', async () => {
     ;(globalThis as unknown as { window: { innerWidth: number } }).window.innerWidth = 390
@@ -297,6 +408,12 @@ describe('SignInDialog — on a phone (390px)', () => {
     expect(screen.getAllByTestId('SignInDialog.account')).toHaveLength(2)
     await act(async () => {
       fireEvent.click(screen.getByTestId('SignInDialog.reauth'))
+    })
+    // The phone gets device code by default (Slice 7) — the paste field is one
+    // tap away and still reachable at 390px.
+    expect(screen.getByTestId('DeviceCodeFlow.code')).toBeTruthy()
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('DeviceCodeFlow.pasteInstead'))
     })
     expect(screen.getByTestId('OAuthPasteBackFlow.input')).toBeTruthy()
     expect(screen.getByTestId('OAuthPasteBackFlow.submit')).toBeTruthy()

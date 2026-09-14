@@ -5,6 +5,11 @@ import { createHash, randomBytes } from 'node:crypto'
 import { validateSharedProviderId } from '../../../shared/shared-provider'
 import { logger } from '../../services/logger'
 import { CodexLoginFlow, type LoginFlow, type VaultCredential } from './codex-oauth'
+import {
+  CodexDeviceCodeFlow,
+  type DeviceCodeFlowLike,
+  type DeviceCodeStart
+} from './codex-device-code'
 
 export function claudeUiDir(): string {
   return path.join(os.homedir(), '.claude', 'ui')
@@ -60,19 +65,37 @@ interface VaultFileV3 {
 export interface AuthVaultDeps {
   now?: () => number
   loginFlowFactory?: () => LoginFlow
+  /**
+   * The device-code sibling of {@link loginFlowFactory} (ADR-068 §3, Slice 7).
+   * Separate factory rather than a mode flag on the loopback one: the two flows
+   * share no machinery — one binds a loopback server, the other polls an
+   * endpoint — and both stay behind an injection point so tests use fakes.
+   */
+  deviceCodeFlowFactory?: () => DeviceCodeFlowLike
   /** Injectable account-id minter — tests want deterministic ids. */
   newAccountId?: () => string
 }
 
+/**
+ * The ONE login slot, tagged with which kind of flow is in it. `completeLogin`
+ * awaits whichever it holds, so every caller above this line (CredentialSync,
+ * PiAuthProvider, the IPC layer) stays flow-agnostic.
+ */
+type ActiveLoginFlow =
+  { kind: 'loopback'; flow: LoginFlow } | { kind: 'device'; flow: DeviceCodeFlowLike }
+
 export class AuthVault {
   private readonly now: () => number
   private readonly loginFlowFactory: () => LoginFlow
+  private readonly deviceCodeFlowFactory: () => DeviceCodeFlowLike
   private readonly newAccountId: () => string
-  private activeFlow: LoginFlow | undefined
+  private activeFlow: ActiveLoginFlow | undefined
 
   constructor(deps: AuthVaultDeps = {}) {
     this.now = deps.now ?? (() => Date.now())
     this.loginFlowFactory = deps.loginFlowFactory ?? (() => new CodexLoginFlow({ now: this.now }))
+    this.deviceCodeFlowFactory =
+      deps.deviceCodeFlowFactory ?? (() => new CodexDeviceCodeFlow({ now: this.now }))
     this.newAccountId = deps.newAccountId ?? (() => randomBytes(8).toString('hex'))
   }
 
@@ -253,35 +276,82 @@ export class AuthVault {
       return false
     }
   }
-  async beginLogin(): Promise<{ authorizeUrl: string }> {
-    if (this.activeFlow) {
-      // Supersede a ZOMBIE flow — one that already reached a terminal outcome
-      // (its 5-min timeout fired, or it errored/was cancelled) but whose
-      // completeLogin() was never called, so activeFlow was never cleared.
-      // Without this, an abandoned authorize (user closed the browser tab, or
-      // the renderer reloaded between authorize and callback) would block
-      // re-login with "a login is already in progress" until cancel or restart.
-      // A flow that is still LIVE (isSettled false, or a fake with no isSettled)
-      // still blocks a concurrent login — the single-flight guard is preserved.
-      if (this.activeFlow.isSettled?.()) {
-        this.activeFlow = undefined
-      } else {
-        throw new Error('AuthVault: a login is already in progress')
-      }
+  /**
+   * Take the single login slot for a new attempt, or refuse.
+   *
+   * Three cases, in order:
+   *
+   *  1. _A ZOMBIE flow_ — one that already reached a terminal outcome (its 5-min
+   *     timeout fired, its device code expired, or it errored/was cancelled) but
+   *     whose completeLogin() was never called, so activeFlow was never cleared.
+   *     Superseded. Without this, an abandoned authorize (user closed the
+   *     browser tab, or the renderer reloaded between authorize and callback)
+   *     would block re-login with "a login is already in progress" until cancel
+   *     or restart.
+   *  2. _A LIVE DEVICE flow_ — CANCELLED, and the slot taken (ADR-068 §3, Slice
+   *     7 design point 6: "a second `device-code-start` while one is live
+   *     cancels the first"). A device flow holds the slot for a full FIFTEEN
+   *     minutes with nothing host-side to shorten it, so refusing here is how a
+   *     page reload or a second tab strands the user for a quarter of an hour.
+   *     Cancelling is also what makes the dialog's "Paste the callback URL
+   *     instead" safe: it fires the cancel and the PKCE start back to back, and
+   *     the cancel no longer has to win that race.
+   *  3. _A LIVE LOOPBACK flow_ — still refused, as before. Its 5-minute timeout
+   *     bounds it, its browser tab is open in front of the user, and its
+   *     loopback server is bound to a fixed port; tearing it down under a second
+   *     caller would abort a sign-in the user is in the middle of.
+   */
+  private claimLoginSlot(): void {
+    const active = this.activeFlow
+    if (!active) return
+    if (active.flow.isSettled?.()) {
+      this.activeFlow = undefined
+      return
     }
-    this.activeFlow = this.loginFlowFactory()
+    if (active.kind === 'device') {
+      active.flow.cancel()
+      this.activeFlow = undefined
+      return
+    }
+    throw new Error('AuthVault: a login is already in progress')
+  }
+
+  async beginLogin(): Promise<{ authorizeUrl: string }> {
+    this.claimLoginSlot()
+    const flow = this.loginFlowFactory()
+    this.activeFlow = { kind: 'loopback', flow }
     try {
-      return { authorizeUrl: (await this.activeFlow.start()).authorizeUrl }
+      return { authorizeUrl: (await flow.start()).authorizeUrl }
     } catch (err) {
       this.activeFlow = undefined
       throw err
     }
   }
-  async completeLogin(): Promise<VaultCredential> {
-    const flow = this.activeFlow
-    if (!flow) throw new Error('AuthVault: no login in progress — call beginLogin() first')
+  /**
+   * Start a DEVICE-CODE login (ADR-068 §3, Slice 7) into the same single slot,
+   * so `completeLogin()` / `cancelLogin()` need no new verb. Returns only what
+   * the user has to see: the page to open, the code to type, and when it dies.
+   */
+  async beginDeviceCodeLogin(): Promise<DeviceCodeStart> {
+    this.claimLoginSlot()
+    const flow = this.deviceCodeFlowFactory()
+    this.activeFlow = { kind: 'device', flow }
     try {
-      const credential = await flow.waitForCallback()
+      return await flow.start()
+    } catch (err) {
+      this.activeFlow = undefined
+      throw err
+    }
+  }
+  /** Await whichever flow is live — the loopback redirect, or the device-code poll — then persist. */
+  async completeLogin(): Promise<VaultCredential> {
+    const active = this.activeFlow
+    if (!active) throw new Error('AuthVault: no login in progress — call beginLogin() first')
+    try {
+      const credential =
+        active.kind === 'device'
+          ? await active.flow.waitForCompletion()
+          : await active.flow.waitForCallback()
       await this.save(credential)
       return credential
     } finally {
@@ -296,9 +366,13 @@ export class AuthVault {
    * without the method, or a flow kind that has no loopback to bypass).
    */
   async completeLoginFromPastedInput(input: string): Promise<VaultCredential> {
-    const flow = this.activeFlow
-    if (!flow) throw new Error('AuthVault: no login in progress — call beginLogin() first')
-    if (!flow.completeFromPastedInput) {
+    const active = this.activeFlow
+    if (!active) throw new Error('AuthVault: no login in progress — call beginLogin() first')
+    // A device-code flow has no loopback to bypass and no verifier of its own —
+    // the server holds both — so it falls into the same refusal as a fake
+    // without the method.
+    const flow = active.kind === 'loopback' ? active.flow : undefined
+    if (!flow?.completeFromPastedInput) {
       throw new Error('AuthVault: the active login flow does not support pasted completion')
     }
     try {
@@ -310,7 +384,7 @@ export class AuthVault {
     }
   }
   cancelLogin(): void {
-    this.activeFlow?.cancel()
+    this.activeFlow?.flow.cancel()
     this.activeFlow = undefined
   }
 

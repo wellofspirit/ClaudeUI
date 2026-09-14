@@ -442,6 +442,10 @@ const api: ClaudeAPI = {
     method: number,
     inputs?: Record<string, string>
   ) => unwrap('vendor-auth:oauth-authorize', engineId, vendorId, method, inputs),
+  vendorAuthDeviceCodeStart: (engineId: import('../shared/types').EngineId, vendorId: string) =>
+    unwrap('vendor-auth:device-code-start', engineId, vendorId),
+  vendorAuthDeviceCodeStatus: (engineId: import('../shared/types').EngineId) =>
+    unwrap('vendor-auth:device-code-status', engineId),
   vendorAuthOauthCallback: (
     engineId: import('../shared/types').EngineId,
     vendorId: string,

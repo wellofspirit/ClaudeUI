@@ -1698,6 +1698,35 @@ const PROVIDER_ACCOUNT_CHANNELS = [
 const CODEX_ACCOUNT_PIN_CHANNELS = ['session:set-account', 'usage:chatgpt-limits'] as const
 
 /**
+ * ADR-068 §3 (Slice 7) — device-code sign-in for ChatGPT.
+ *
+ * Its own line rather than a 23rd entry in {@link S4_VENDOR_CREDENTIAL_CHANNELS}
+ * for the same reason `provider-registry:list` got one: that const is the record
+ * of one dated sweep, and this is a NEW channel declared in the same shared
+ * module. It exists FOR the remote client — paste-back can complete a ChatGPT
+ * sign-in from any browser, but copying a dead page's address bar on a phone is
+ * the step device code removes.
+ *
+ * A `config` command plus a `config` query, so a base connection reaches both (a
+ * vendor subscription is engine configuration — ADR-056). Token-free by
+ * construction and pinned in
+ * `main/ipc/__tests__/vendor-device-code-commands.test.ts`: the start carries
+ * exactly `verificationUrl` / `userCode` / `expiresAt`, the status carries a
+ * state and at most the host's own error message, and the `device_auth_id` the
+ * host polls with never leaves the host.
+ *
+ * TWO channels because the WAIT cannot be one long invoke: `web/connection.ts`
+ * rejects any invoke that outlives `INVOKE_TIMEOUT_MS` (30 s) and a device code
+ * lives for fifteen minutes. The host owns the wait; the client polls the query.
+ * That is also what makes a mid-wait reconnect free — the outcome is on the host,
+ * not in a promise attached to a dead socket.
+ */
+const CHATGPT_DEVICE_CODE_CHANNELS = [
+  'vendor-auth:device-code-start',
+  'vendor-auth:device-code-status'
+] as const
+
+/**
  * The redacted status READ (owner ruling, 2026-08-28) — the one `remote:*`
  * channel with a remote registration, and the SIXTH deliberate widening.
  *
@@ -1776,6 +1805,7 @@ describe('remote surface parity (phase 1 port)', () => {
         ...PROVIDER_REGISTRY_CHANNELS,
         ...PROVIDER_ACCOUNT_CHANNELS,
         ...CODEX_ACCOUNT_PIN_CHANNELS,
+        ...CHATGPT_DEVICE_CODE_CHANNELS,
         ...REMOTE_VIEW_CHANNELS,
         ...IDE_CHANNELS,
         // ADR-068 §1: the three `codex:login-*` channels are gone with the
