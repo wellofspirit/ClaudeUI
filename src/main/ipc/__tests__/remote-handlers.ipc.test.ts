@@ -1782,6 +1782,12 @@ describe('remote surface parity (phase 1 port)', () => {
         // native device-code UI; the vault owns the ChatGPT identity and
         // `provider-account:*` is how a remote client reads it.
         'codex:auth-status',
+        // ADR-068 §6 (Slice 5a): the Codex engine page writes `config.toml`
+        // through the app-server, and a remote client edits settings exactly as
+        // the desktop one does.
+        'codex-config:read',
+        'codex-config:write',
+        'codex:recompile-rules',
         'session:codex-approval',
         // Read-only: what deleting a Codex session would remove (slice G).
         'session:codex-delete-plan'

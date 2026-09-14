@@ -77,6 +77,10 @@ const api: ClaudeAPI = {
   codexApproval: (id, requestId, decision) =>
     unwrap('session:codex-approval', id, requestId, decision),
   codexAuthStatus: () => unwrap('codex:auth-status'),
+  readCodexConfig: () => unwrap('codex-config:read'),
+  writeCodexConfig: (edits, expectedVersion) =>
+    unwrap('codex-config:write', edits, expectedVersion),
+  recompileCodexRules: () => unwrap('codex:recompile-rules'),
   codexDeletePlan: (threadId) => unwrap('session:codex-delete-plan', threadId),
   platform: process.platform,
   // Resolved here, in the one process that sees BOTH forms of the opt-in: the

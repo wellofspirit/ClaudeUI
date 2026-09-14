@@ -2,7 +2,7 @@
 
 ## Resume here (ADR-068 arc — 2026-09-14)
 
-**Start with `docs/adr/adr-068_chatgpt-identity-vault-owned-codex-injection.md` and `docs/codex-accounts-spec.md`.** The spec is the source of truth for this arc: every slice has a kickoff, and every landed slice has a "Landed …" paragraph recording the as-built deviations. The older "Resume here" below is the pre-ADR-068 state and stays as history.
+**Start with `docs/adr/adr-068_chatgpt-identity-vault-owned-codex-injection.md` and `docs/codex-accounts-spec.md`.** The spec is the source of truth for this arc: every slice has a kickoff, and every landed slice has a "Landed …" paragraph recording the as-built deviations. Slices 1–5a are landed; 5b is next. The older "Resume here" below is the pre-ADR-068 state and stays as history.
 
 ### What is committed (all local on `codex-integration`, oldest first; nothing pushed since the previous handoff — confirm with `git log origin/codex-integration..HEAD`)
 
@@ -15,67 +15,21 @@ a54776e7 feat(auth): Slice 3 — SignInDialog for Anthropic + ChatGPT, one sessi
 772d89eb fix(auth): CredentialSync refresh timer overflowed for expiries beyond 2^31 ms and refreshed immediately
 37ccd411 feat(codex): Slice 4 — inherit the shared Claude MCP list as a per-thread override (merges into the native table)
 c3c32850 feat(codex): Slice 4b — MCP tool approvals via mcpServer/elicitation/request through the shared permission engine
+463b060b docs(codex): handoff for the ADR-068 arc
+<next>   feat(codex): Slice 5a — config.toml through the app-server; the Engines › Codex page
 ```
 
 Every one of these was reviewed line by line by the main model, gated (typecheck, lint, full `bun run test`, `CODEX_INTEGRATION=1 bun run test:integration`, `check-codex-protocol` where the protocol changed), and driven in the real Electron app before commit. Live evidence that exists: a real signed-in Codex turn under an injected vault token (the first on Windows), the account picker pinning a session to a second account on a live process, the sign-in dialog opened from the bad-token discovery banner, the real app-server spawning a `.mcp.json` stub and the model calling its tool after the approval card was allowed.
 
-### What is NOT committed: Slice 5a, unreviewed
+### Slice 5a: landed 2026-09-14 (the commit after `463b060b`)
 
-The working tree holds a full Slice 5a implementation delivered by an Opus implementer at the very end of the previous session. **The main model has NOT read it, has NOT verified its guard tests fail-before, and has NOT driven it in the app.** Treat it exactly as a fresh implementer report under ADR-026:
+Reviewed line by line, gated (typecheck, lint, full `bun run test` — 655 files — `CODEX_INTEGRATION=1` on `codex-config-write.integration.test.ts`, `check-codex-protocol`, prettier), and driven four times in the real Electron app against an isolated profile. The review found and fixed three things the implementer's report did not show, all recorded in the spec's "Landed" paragraph: the write result carried an `ok` key, which the preload/web `unwrap` treats as the IPC envelope (the renderer received `undefined`, and the store's write queue stayed rejected after the first click — seen as three page errors on the first drive); two toggle defaults were inverted against the Codex source (`shell_environment_policy.ignore_default_excludes` defaults to `true`, and analytics are OFF under `codex app-server` unless `--analytics-default-enabled` is passed, which ClaudeUI never does); and two number placeholders asserted defaults the pinned checkout does not contain. Guard tests for the toggle defaults were proven failing before the fix (`expected 'true' to be 'false'` on `aria-pressed`).
 
-```text
-M docs/codex-spike.md
-M scripts/generate-codex-protocol.mjs
-M src/core/codex/CodexAppServerClient.ts
-M src/core/codex/CodexService.ts
-M src/core/codex/__tests__/codex-commands.test.ts
-M src/core/codex/__tests__/codex-service.test.ts
-M src/core/codex/protocol/methods.ts
-M src/core/codex/protocol/provenance.json
-M src/core/codex/rules-sync.ts
-M src/core/ipc/codex-commands.ts
-M src/main/ipc/__tests__/remote-handlers.ipc.test.ts
-M src/preload/index.ts
-M src/renderer/src/components/SessionView.tsx
-M src/renderer/src/components/SettingsDialog/OpencodeConfigPanes.tsx
-M src/renderer/src/components/SettingsDialog/__tests__/settings-pages.unit.test.tsx
-M src/renderer/src/components/SettingsDialog/settings-pages.tsx
-M src/renderer/src/components/SettingsDialog/settings-sections.tsx
-M src/renderer/src/components/Sidebar/SettingsPanel.tsx
-M src/renderer/src/components/chat/ChatPanel/TopBar.tsx
-M src/shared/codex-types.ts
-M src/shared/types.ts
-M src/test/helpers/boot-test-app.ts
-M src/web/__tests__/api-adapter.test.ts
-M src/web/api-adapter.ts
-?? src/core/codex/__tests__/codex-config.test.ts
-?? src/core/codex/codex-config.ts
-?? src/core/codex/protocol/v2/ConfigBatchWriteParams.ts
-?? src/core/codex/protocol/v2/ConfigEdit.ts
-?? src/core/codex/protocol/v2/ConfigValueWriteParams.ts
-?? src/core/codex/protocol/v2/ConfigWriteResponse.ts
-?? src/core/codex/protocol/v2/MergeStrategy.ts
-?? src/core/codex/protocol/v2/OverriddenMetadata.ts
-?? src/core/codex/protocol/v2/WriteStatus.ts
-?? src/integration/codex/codex-config-write.integration.test.ts
-?? src/renderer/src/components/SettingsDialog/CodexConfigPanes.tsx
-?? src/renderer/src/components/SettingsDialog/__tests__/CodexConfigPanes.component.test.tsx
-?? src/renderer/src/components/SettingsDialog/use-codex-config.ts
-```
+Drive recipe that worked (Windows, Git Bash): the `.cache/app-shot-home.mjs` harness copy with `APP_SHOT_ELECTRON_ARGS="-r;<win path>\home-shim.cjs"`, `CLAUDEUI_TEST_HOME=<win path>\home`, `CODEX_HOME=<win path>\home\.codex`, `MSYS_NO_PATHCONV=1`; open the page with `--eval "window.dispatchEvent(new CustomEvent('open-settings',{detail:{page:'codex'}}))"` then `--wait 9000` (one app-server start per read and per write, about 3 s each on this machine), click by `CodexConfigPane.*` testids, and read the DOM back with one `--eval` before the screenshot. Click a select BEFORE actions that scroll the dialog: the anchored menu did not stay open after a scroll (pre-existing, noted in the spec). The fabricated `config.toml` must be reset between drives.
 
-Gates over this tree as of the handoff:
+### Next: Slice 5b
 
-```text
-$ tsc --noEmit -p tsconfig.web.json --composite false
-TYPECHECK_EXIT=0
-$ eslint --cache .
-LINT_EXIT=0
- Test Files  655 passed (655)
-      Tests  12226 passed | 8 skipped (12234)
-Codex protocol matches pinned generator
-```
-
-Next session, in order: (1) `git status --short` must equal the list above (plus the two unrelated untracked `voice-coordinator` docs, which belong to someone else — never touch them); (2) read every changed line, starting with `src/core/codex/codex-config.ts` (the service over `config/read` + `config/batchWrite`), `use-codex-config.ts` (the one shared config store), `CodexConfigPanes.tsx` (eleven groups), the `settings-pages.tsx` groups, the generated `v2/Config*Write*` types and the generator diff, `rules-sync.ts` (a Recompile command was expected), `TopBar.tsx` / `Sidebar/SettingsPanel.tsx` (why were they touched?), and the probe write-up appended to `docs/codex-spike.md` § "`config/batchWrite` probe" — its findings matter: `value: null` REMOVES a key, a stale `expectedVersion` fails with `configVersionConflict` in `error.data.config_write_error_code`, and `batchWrite` does NOT validate keys against the schema (a misremembered key is written silently and breaks the next session), which is why the page's key list must come from `config_toml.rs` / the generated types, not from the ADR table; (3) re-run the gates and `CODEX_INTEGRATION=1 bunx vitest run --project integration src/integration/codex/codex-config-write.integration.test.ts`; (4) drive the real app against an ISOLATED profile with a fabricated `config.toml` (recipe below — note the shim does not redirect `CODEX_HOME` for the child, so set `CODEX_HOME` to a temp dir in the harness env for this drive) and check that flipping a toggle changes exactly that key; (5) add the "Landed" paragraph to the spec's Slice 5a and commit precisely by file list; (6) then dispatch Slice 5b from its kickoff in the spec (Codex segments on Default models / Dispatch / Auto-mode judge, `engines/codex.json` defaults, stale strings).
+Dispatch Slice 5b from its kickoff in `docs/codex-accounts-spec.md` (Codex segments on Default models / Cross-engine dispatch / Auto-mode judge / Permissions, `engines/codex.json` defaults, the two stale strings). The config service it writes `auto_review.policy` through is `src/core/codex/codex-config.ts` via `window.api.writeCodexConfig` / `useCodexConfig` (`use-codex-config.ts`), whose result is discriminated on `status`. Then ADR-068's status line to "Implemented" with an as-built section.
 
 ### How this arc is worked
 

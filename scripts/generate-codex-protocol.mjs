@@ -26,6 +26,13 @@ export const methods = {
   'account/rateLimits/read': ['GetAccountRateLimitsParams', 'GetAccountRateLimitsResponse'],
   'model/list': ['ModelListParams', 'ModelListResponse'],
   'config/read': ['ConfigReadParams', 'ConfigReadResponse'],
+  // ADR-068 §6 / Slice 5a: ClaudeUI never parses or rewrites TOML itself. Every
+  // write to `config.toml` goes through the app-server's own writer, which is
+  // `toml_edit`-based and therefore keeps comments and untouched siblings.
+  // `config/value/write` is the single-key form; `config/batchWrite` is the one
+  // the service uses (it is the only form that takes `reloadUserConfig`).
+  'config/value/write': ['ConfigValueWriteParams', 'ConfigWriteResponse'],
+  'config/batchWrite': ['ConfigBatchWriteParams', 'ConfigWriteResponse'],
   'configRequirements/read': [null, 'ConfigRequirementsReadResponse'],
   'thread/settings/update': ['ThreadSettingsUpdateParams', 'ThreadSettingsUpdateResponse'],
   // Retries an action the native approval reviewer denied, after a human

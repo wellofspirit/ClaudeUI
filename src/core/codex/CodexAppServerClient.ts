@@ -27,10 +27,39 @@ export class CodexTransportError extends Error {
      *
      * Nothing else reads it, and nothing logs it.
      */
-    public readonly nativeMessage?: string
+    public readonly nativeMessage?: string,
+    /**
+     * The native machine-readable error TAG of an `rpc-error-*` rejection, when
+     * the app-server attached one: `error.data.config_write_error_code`, the one
+     * `data` shape 0.154.0 emits (`request_processors/config_processor.rs`
+     * `config_write_error`). `ConfigVersionConflict` is the value the Codex
+     * config service has to branch on — a stale `expectedVersion` is a NORMAL
+     * outcome (the file moved under us) that re-reads and retries, while every
+     * other write failure is shown to the user verbatim.
+     *
+     * Payload-free by construction, like `code`: the extractor below admits only
+     * a short bare-ASCII-identifier string, so it can carry a variant NAME and
+     * never a config value, a path or token material. Nothing logs it.
+     */
+    public readonly nativeCode?: string
   ) {
     super(`Codex transport: ${code}`)
   }
+}
+
+/**
+ * The variant name inside a JSON-RPC `error.data`, or undefined.
+ *
+ * Deliberately narrow: one known key, a string of at most 64 characters drawn
+ * from `[A-Za-z]` only. Anything else — a nested object, a path, a message, a
+ * number — is dropped rather than carried, so no value out of the user's config
+ * can ride out of the transport on this field.
+ */
+function nativeErrorCode(error: Record<string, unknown>): string | undefined {
+  const data = error.data
+  if (!record(data)) return undefined
+  const tag = data.config_write_error_code
+  return typeof tag === 'string' && /^[A-Za-z]{1,64}$/.test(tag) ? tag : undefined
 }
 export interface CodexClientOptions {
   cwd: string
@@ -341,7 +370,8 @@ export class CodexAppServerClient {
             new CodexTransportError(
               `rpc-error-${(message.error as { code: number }).code}`,
               false,
-              (message.error as { message: string }).message
+              (message.error as { message: string }).message,
+              nativeErrorCode(message.error as Record<string, unknown>)
             )
           )
         else request.resolve(message.result)

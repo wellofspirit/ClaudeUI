@@ -307,6 +307,18 @@ const ICON_PI = icon(
   </>
 )
 
+/**
+ * Codex's own file, and when a change to it binds.
+ *
+ * Every group on the page wears the same pair, because the binary's own
+ * `reloadUserConfig` doc is explicit that the session-static values (model,
+ * reasoning effort, plan-mode effort, service tier, personality) are NOT
+ * hot-reloaded — so "next session" is the only promise that holds for the whole
+ * page. Managed and Raw config carry neither: nothing there is written.
+ */
+const CODEX_FILE = 'config.toml'
+const CODEX_NEXT_SESSION = 'Applies to newly started Codex sessions.'
+
 /** `engines/<engine>.json` — the storage tag of a per-engine group. */
 const engineFile = (engine: EngineId): string => `engines/${engine}.json`
 
@@ -765,8 +777,100 @@ export const PAGES: SettingsPage[] = [
     rail: 'engines',
     icon: <EngineLogo engineId="codex" size={14} />,
     engine: 'codex',
-    description: 'Native catalog and policy. The ChatGPT account comes from the shared vault.',
-    groups: [{ id: 'account', label: 'Native account', items: [CODEX_ACCOUNT] }]
+    description:
+      "Codex's own configuration. Only the key you change is written to config.toml; other keys and comments are kept. Approvals, sandbox mode and the reviewer are set by the session's permission mode, not here.",
+    groups: [
+      { id: 'account', label: 'Account', items: [CODEX_ACCOUNT] },
+      {
+        id: 'model',
+        label: 'Model behaviour',
+        appliesOn: 'next-session',
+        note: CODEX_NEXT_SESSION,
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-model')
+      },
+      {
+        id: 'context',
+        label: 'Context & compaction',
+        appliesOn: 'next-session',
+        note: CODEX_NEXT_SESSION,
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-context')
+      },
+      {
+        id: 'instructions',
+        label: 'Instructions',
+        appliesOn: 'next-session',
+        note: CODEX_NEXT_SESSION,
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-instructions')
+      },
+      {
+        id: 'sandbox',
+        label: 'Workspace sandbox',
+        // The mock's badge: this group tunes the workspace-write profile, which
+        // is the sandbox `acceptEdits` and `auto` resolve to (ADR-067).
+        badge: 'acceptEdits · Auto',
+        appliesOn: 'next-session',
+        note: CODEX_NEXT_SESSION,
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-sandbox')
+      },
+      {
+        id: 'shell',
+        label: 'Shell environment',
+        appliesOn: 'next-session',
+        note: CODEX_NEXT_SESSION,
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-shell')
+      },
+      {
+        id: 'tools',
+        label: 'Tools & search',
+        appliesOn: 'next-session',
+        note: CODEX_NEXT_SESSION,
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-tools')
+      },
+      {
+        id: 'agents',
+        label: 'Native agents',
+        appliesOn: 'next-session',
+        note: CODEX_NEXT_SESSION,
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-agents')
+      },
+      {
+        id: 'mcp',
+        label: 'MCP servers',
+        badge: 'Shared · all engines',
+        appliesOn: 'next-session',
+        note: 'The inherited list is read when a Codex thread starts, so a change applies to the next session.',
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-mcp')
+      },
+      {
+        id: 'history',
+        label: 'History & privacy',
+        appliesOn: 'next-session',
+        note: CODEX_NEXT_SESSION,
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-history')
+      },
+      {
+        id: 'managed',
+        label: 'Managed',
+        badge: 'Locked',
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-managed')
+      },
+      {
+        id: 'raw',
+        label: 'Raw config',
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-raw')
+      }
+    ]
   }
 ]
 
@@ -918,7 +1022,19 @@ export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; gro
   'pi-config-images': { page: 'pi', group: 'attachments' },
   'pi-config-workspace': { page: 'pi', group: 'workspace' },
   'pi-config-network': { page: 'pi', group: 'network' },
-  'pi-config-raw': { page: 'pi', group: 'raw' }
+  'pi-config-raw': { page: 'pi', group: 'raw' },
+
+  'codex-config-model': { page: 'codex', group: 'model' },
+  'codex-config-context': { page: 'codex', group: 'context' },
+  'codex-config-instructions': { page: 'codex', group: 'instructions' },
+  'codex-config-sandbox': { page: 'codex', group: 'sandbox' },
+  'codex-config-shell': { page: 'codex', group: 'shell' },
+  'codex-config-tools': { page: 'codex', group: 'tools' },
+  'codex-config-agents': { page: 'codex', group: 'agents' },
+  'codex-config-mcp': { page: 'codex', group: 'mcp' },
+  'codex-config-history': { page: 'codex', group: 'history' },
+  'codex-config-managed': { page: 'codex', group: 'managed' },
+  'codex-config-raw': { page: 'codex', group: 'raw' }
 }
 
 // ── Search ───────────────────────────────────────────────────────────

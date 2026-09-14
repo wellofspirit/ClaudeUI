@@ -7,6 +7,8 @@ export interface CodexMethods {
   "account/rateLimits/read": { params: import("./v2/GetAccountRateLimitsParams").GetAccountRateLimitsParams; result: import("./v2/GetAccountRateLimitsResponse").GetAccountRateLimitsResponse };
   "model/list": { params: import("./v2/ModelListParams").ModelListParams; result: import("./v2/ModelListResponse").ModelListResponse };
   "config/read": { params: import("./v2/ConfigReadParams").ConfigReadParams; result: import("./v2/ConfigReadResponse").ConfigReadResponse };
+  "config/value/write": { params: import("./v2/ConfigValueWriteParams").ConfigValueWriteParams; result: import("./v2/ConfigWriteResponse").ConfigWriteResponse };
+  "config/batchWrite": { params: import("./v2/ConfigBatchWriteParams").ConfigBatchWriteParams; result: import("./v2/ConfigWriteResponse").ConfigWriteResponse };
   "configRequirements/read": { params: undefined; result: import("./v2/ConfigRequirementsReadResponse").ConfigRequirementsReadResponse };
   "thread/settings/update": { params: import("./v2/ThreadSettingsUpdateParams").ThreadSettingsUpdateParams; result: import("./v2/ThreadSettingsUpdateResponse").ThreadSettingsUpdateResponse };
   "thread/approveGuardianDeniedAction": { params: import("./v2/ThreadApproveGuardianDeniedActionParams").ThreadApproveGuardianDeniedActionParams; result: import("./v2/ThreadApproveGuardianDeniedActionResponse").ThreadApproveGuardianDeniedActionResponse };

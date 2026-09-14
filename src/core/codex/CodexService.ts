@@ -3,6 +3,9 @@ import { CodexTransportError, type CodexClientOptions } from './CodexAppServerCl
 import type { CodexAuthHook } from './codex-auth-hook'
 import type { Account } from './protocol/v2/Account'
 import type { Config } from './protocol/v2/Config'
+import type { ConfigBatchWriteParams } from './protocol/v2/ConfigBatchWriteParams'
+import type { ConfigReadResponse } from './protocol/v2/ConfigReadResponse'
+import type { ConfigWriteResponse } from './protocol/v2/ConfigWriteResponse'
 import type { LoginAccountParams } from './protocol/v2/LoginAccountParams'
 import type { LoginAccountResponse } from './protocol/v2/LoginAccountResponse'
 import type { Model } from './protocol/v2/Model'
@@ -184,6 +187,56 @@ export class CodexService {
     const [catalog, config] = await Promise.all([this.models(), this.effectiveConfig()])
     assertCodexProvider(config.model_provider)
     return { model: selectCodexModel(catalog, config.model, explicitModel), catalog }
+  }
+
+  /**
+   * `config/read` WITH layers — the raw read the Codex settings page is built
+   * on (ADR-068 §6, Slice 5a).
+   *
+   * Unlike {@link effectiveConfig} this returns the response whole, layers
+   * included, because the page needs three things the picked projection cannot
+   * carry: the base USER layer's own TOML (what "changed from default" means on
+   * that page — the key is present in the user's file), that layer's `version`
+   * (the optimistic-concurrency token every write must echo), and its `file`
+   * (the write target and the Raw config row's key line). Shaping it into the
+   * product snapshot is `codex-config.ts`'s job, not the transport's.
+   */
+  readConfigLayers(cwd?: string): Promise<ConfigReadResponse> {
+    return this.read((client) =>
+      client.request('config/read', { includeLayers: true, cwd: cwd ?? this.options.cwd })
+    )
+  }
+
+  /**
+   * One `config/batchWrite`, then the `config/read` that shows its result — on
+   * the SAME client, inside one `read()` operation.
+   *
+   * They are one method because `read()` disposes its client the moment the last
+   * user drops: a write followed by a separate read is two app-server children,
+   * so every toggle on the settings page would pay two process starts (~2.4 s
+   * each on the pinned binary) before the row could show what it had written.
+   * Here the child is started once and answers both.
+   *
+   * The app-server owns the TOML writer, so comments and untouched siblings
+   * survive and ClaudeUI never has to parse or re-emit the file.
+   *
+   * Errors are NOT collapsed — `read()` rethrows a `CodexTransportError`
+   * unchanged, and its `nativeCode` / `nativeMessage` are exactly what the
+   * caller needs to tell a version conflict (retry) from a refusal (show). A
+   * refused write never reaches the read: the whole operation rejects, which is
+   * right, because there is nothing new to show.
+   */
+  batchWriteConfigAndRead(
+    params: ConfigBatchWriteParams,
+    cwd?: string
+  ): Promise<{ write: ConfigWriteResponse; read: ConfigReadResponse }> {
+    return this.read(async (client) => ({
+      write: await client.request('config/batchWrite', params),
+      read: await client.request('config/read', {
+        includeLayers: true,
+        cwd: cwd ?? this.options.cwd
+      })
+    }))
   }
 
   effectiveConfig(): Promise<CodexEffectiveConfig> {

@@ -119,3 +119,118 @@ export interface CodexDeletePlan {
   nodes: CodexDeleteNode[]
   order: string[]
 }
+
+// ── Codex's own configuration (ADR-068 §6, Slice 5a) ────────────────────────
+
+/**
+ * A JSON value as it crosses the config boundary. Structurally the same as the
+ * generated `serde_json/JsonValue`, restated here so the shared API surface —
+ * which the web client and the preload both import — does not pull the whole
+ * generated protocol tree into the renderer bundle.
+ */
+export type CodexConfigValue =
+  null | boolean | number | string | CodexConfigValue[] | { [key: string]: CodexConfigValue }
+
+/**
+ * One read of Codex's `config.toml` through the app-server (`config/read` with
+ * layers). ClaudeUI never parses TOML: this IS the parse.
+ *
+ * `user` is the BASE user layer's own table — the profile-less `user` layer, the
+ * file at `file`. It is the page's "changed from default" oracle: a row is
+ * modified exactly when its key path is present here, which is what makes Reset
+ * a removal (probe (c), `docs/codex-spike.md`).
+ *
+ * `effective` is the merged view every layer produced, so a row can show what it
+ * falls back to when the user's file says nothing.
+ *
+ * `version` is the base user layer's optimistic-concurrency token: every write
+ * echoes it, and a write that does not match is refused rather than clobbering
+ * an edit made outside ClaudeUI.
+ */
+export interface CodexConfigSnapshot {
+  version: string
+  /** Absolute path to the user's `config.toml` — the write target. */
+  file: string
+  /**
+   * The selected profile-v2 layer's name when one is active, else null. Shown
+   * (never written) in the Managed group, because a profile layer overrides the
+   * very rows this page draws.
+   */
+  profile: string | null
+  user: Record<string, CodexConfigValue>
+  effective: Record<string, CodexConfigValue>
+  /** Which layer each effective key came from, keyed by key path. */
+  origins: Record<string, { layer: string; version: string }>
+}
+
+/** One key path to set, or — with `value: null` — to REMOVE (probe (c)). */
+export interface CodexConfigEdit {
+  keyPath: string
+  value: CodexConfigValue | null
+}
+
+/**
+ * The outcome of a `config.toml` write, discriminated on `status`.
+ *
+ * Deliberately NOT an `ok` flag: the preload and web `unwrap` helpers treat ANY
+ * object carrying an `ok` key as the IPC transport envelope (`{ ok, data, error
+ * }`) and hand the renderer its `data` — so a `{ ok: true, … }` result arrived as
+ * `undefined` and a `{ ok: false }` refusal was thrown as a generic transport
+ * failure (seen live on 2026-09-14: three page errors and a poisoned write
+ * queue). `codex-config.test.ts` pins the absence of that key.
+ *
+ *  · `ok` — written. `snapshot` is the config as it stands AFTER the write, read
+ *    on the same app-server child that performed it: a settings click costs ONE
+ *    process start rather than two, and the page cannot land on a third state
+ *    between a separate write and a separate read.
+ *  · `version-conflict` — the file moved under us since the read. A NORMAL
+ *    outcome, not a user error: the store re-reads and says so once.
+ *  · `refused` — the app-server rejected the edit (unknown key, invalid value,
+ *    a managed/requirements-locked key). `message` is the native sentence,
+ *    verbatim, because only Codex knows why. Never contains token material.
+ *  · `unavailable` — no Codex binary, or the transport broke.
+ */
+export type CodexConfigWriteResult =
+  | { status: 'ok'; version: string; snapshot: CodexConfigSnapshot }
+  | { status: 'version-conflict' }
+  | { status: 'refused'; message: string }
+  | { status: 'unavailable' }
+
+/**
+ * The compiled Bash-rule file ClaudeUI owns under `$CODEX_HOME/rules/`
+ * (ADR-067). Read-only status for the Codex page's Managed group; the Recompile
+ * action is what writes.
+ */
+export interface CodexRulesStatus {
+  path: string
+  /** How many `prefix_rule` lines the current Claude rules compile to. */
+  rules: number
+  /** How many of the user's rules could not be expressed as an argv prefix. */
+  skipped: number
+  /** The file's mtime, ISO 8601, or null when it has never been written. */
+  syncedAt: string | null
+  /** The file on disk is byte-identical to what ClaudeUI would write now. */
+  upToDate: boolean
+}
+
+/**
+ * One open of the Codex settings page: the config snapshot and the compiled
+ * rules status, read together because both are what the page needs before it
+ * can draw a row, and two channels would be two round trips for one card set.
+ *
+ * `config` is null when Codex is not installed or the read failed; `error` then
+ * says which, and the page renders its self-gating row rather than empty
+ * controls (the pi/opencode `PaneShell` convention).
+ */
+export interface CodexConfigRead {
+  config: CodexConfigSnapshot | null
+  rules: CodexRulesStatus
+  /**
+   * The Claude MCP list Codex threads inherit (ADR-068 §5, Slice 4). Names
+   * only — the page states how many servers a Codex thread will start with and
+   * links to the MCP dialog; the definitions are edited there, not here.
+   * `skipped` are the SSE servers Codex has no transport for.
+   */
+  mcp: { inherited: string[]; skipped: string[] }
+  error?: string
+}

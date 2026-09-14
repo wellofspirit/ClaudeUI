@@ -68,6 +68,19 @@ import {
   OpencodeManagedKeysSection
 } from './OpencodeConfigPanes'
 import {
+  CodexAgentsSection,
+  CodexContextSection,
+  CodexHistorySection,
+  CodexInstructionsSection,
+  CodexManagedSection,
+  CodexMcpSection,
+  CodexModelBehaviorSection,
+  CodexRawConfigSection,
+  CodexSandboxSection,
+  CodexShellEnvSection,
+  CodexToolsSection
+} from './CodexConfigPanes'
+import {
   PiSessionBehaviorSection,
   PiModelsSection,
   PiToolsSection,
@@ -3979,6 +3992,312 @@ export const SECTIONS: Section[] = [
         keywords:
           'pi config raw json settings theme tuiMode fullscreen markdown terminal keybindings externalEditor enabledModels warnings defaultProvider defaultThinkingLevel advanced',
         render: () => <PiRawConfigSection />
+      }
+    ]
+  },
+  {
+    id: 'codex-config-model',
+    label: 'Model behaviour',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M12 3l2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'codexModelBehavior',
+        label: 'Model behaviour',
+        keywords:
+          'codex model_reasoning_summary model_verbosity plan_mode_reasoning_effort service_tier personality review_model reasoning summary verbosity effort tier tone reviewer',
+        render: () => <CodexModelBehaviorSection />
+      }
+    ]
+  },
+  {
+    id: 'codex-config-context',
+    label: 'Context & compaction',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <polygon points="12 2 2 7 12 12 22 7 12 2" />
+        <polyline points="2 17 12 22 22 17" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'codexContext',
+        label: 'Context & compaction',
+        keywords:
+          'codex model_context_window model_auto_compact_token_limit scope tool_output_token_limit project_doc_max_bytes project_doc_fallback_filenames compact_prompt AGENTS.md compaction context window tokens',
+        render: () => <CodexContextSection />
+      }
+    ]
+  },
+  {
+    id: 'codex-config-instructions',
+    label: 'Instructions',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+        <polyline points="14 2 14 8 20 8" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'codexInstructions',
+        label: 'Instructions',
+        keywords:
+          'codex instructions developer_instructions include_environment_context include_permissions_instructions include_collaboration_mode_instructions include_apps_instructions system prompt',
+        render: () => <CodexInstructionsSection />
+      }
+    ]
+  },
+  {
+    id: 'codex-config-sandbox',
+    label: 'Workspace sandbox',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'codexSandbox',
+        label: 'Workspace sandbox',
+        keywords:
+          'codex sandbox_workspace_write network_access writable_roots exclude_tmpdir_env_var exclude_slash_tmp allow_login_shell project_root_markers windows sandbox private desktop',
+        render: () => <CodexSandboxSection />
+      }
+    ]
+  },
+  {
+    id: 'codex-config-shell',
+    label: 'Shell environment',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <polyline points="4 17 10 11 4 5" />
+        <line x1="12" y1="19" x2="20" y2="19" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'codexShellEnv',
+        label: 'Shell environment',
+        keywords:
+          'codex shell_environment_policy inherit ignore_default_excludes exclude include_only environment variables secrets',
+        render: () => <CodexShellEnvSection />
+      }
+    ]
+  },
+  {
+    id: 'codex-config-tools',
+    label: 'Tools & search',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M14.7 6.3a4 4 0 01-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 015.4-5.4z" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'codexTools',
+        label: 'Tools & search',
+        keywords:
+          'codex web_search update_plan experimental_request_user_input browser_use computer_use features background_terminal_max_timeout hosted tools',
+        render: () => <CodexToolsSection />
+      }
+    ]
+  },
+  {
+    id: 'codex-config-agents',
+    label: 'Native agents',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" />
+        <circle cx="9" cy="7" r="4" />
+        <path d="M23 21v-2a4 4 0 00-3-3.87" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'codexAgents',
+        label: 'Native agents',
+        keywords:
+          'codex agents enabled max_concurrent_threads_per_session max_depth default_subagent_model default_subagent_reasoning_effort subagent multi-agent',
+        render: () => <CodexAgentsSection />
+      }
+    ]
+  },
+  {
+    id: 'codex-config-mcp',
+    label: 'MCP servers',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M9 2v6M15 2v6" />
+        <path d="M6 8h12v4a6 6 0 01-12 0z" />
+        <path d="M12 18v4" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'codexMcp',
+        label: 'MCP servers',
+        keywords:
+          'codex mcp mcp_servers inherited claude mcp_optional_startup_grace_ms tools servers',
+        render: () => <CodexMcpSection />
+      }
+    ]
+  },
+  {
+    id: 'codex-config-history',
+    label: 'History & privacy',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <circle cx="12" cy="12" r="10" />
+        <polyline points="12 6 12 12 16 14" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'codexHistory',
+        label: 'History & privacy',
+        keywords:
+          'codex history persistence analytics feedback thread_unload_delay_secs privacy telemetry',
+        render: () => <CodexHistorySection />
+      }
+    ]
+  },
+  {
+    id: 'codex-config-managed',
+    label: 'Managed keys',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <rect x="4" y="10" width="16" height="10" rx="2" />
+        <path d="M8 10V7a4 4 0 018 0v3" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'codexManaged',
+        label: 'Managed keys',
+        keywords:
+          'codex model_provider check_for_update_on_startup approval_policy sandbox_mode approvals_reviewer profile rules claudeui.rules execpolicy recompile managed locked',
+        render: () => <CodexManagedSection />
+      }
+    ]
+  },
+  {
+    id: 'codex-config-raw',
+    label: 'Raw config',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M12 15a3 3 0 100-6 3 3 0 000 6z" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'codexRawConfig',
+        label: 'Raw config (config.toml)',
+        keywords:
+          'codex config.toml raw hooks plugins marketplaces skills otel notify model_providers profiles projects mcp_oauth apps memories goals file_opener advanced',
+        render: () => <CodexRawConfigSection />
       }
     ]
   }

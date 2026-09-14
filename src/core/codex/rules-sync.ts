@@ -38,10 +38,19 @@
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { ClaudePermissions } from '../../shared/types'
+import type { CodexRulesStatus } from '../../shared/codex-types'
 import { parseClaudeRule } from '../opencode/permission-compiler'
 import { loadClaudePermissions } from '../services/claude-settings'
 import { logger } from '../services/logger'
@@ -250,6 +259,48 @@ function recordedHash(path: string): string | null {
 }
 
 /**
+ * What the Codex page's Managed group shows about the compiled rules file
+ * (ADR-068 §6): where it is, how many rules it would carry, how many of the
+ * user's rules could not be expressed, and whether the file on disk is what
+ * ClaudeUI would write now.
+ *
+ * READ-ONLY — it never writes and is never armed-gated, so the settings page can
+ * describe the file without creating it. `syncedAt` is the file's mtime rather
+ * than a recorded timestamp: the file's own header carries a content hash, not a
+ * clock, and the mtime is the only honest "last written" this can report.
+ */
+export function codexRulesStatus(
+  options: { codexHome?: string; perms?: ClaudePermissions } = {}
+): CodexRulesStatus {
+  const codexHome = options.codexHome ?? resolveCodexHome()
+  const path = join(codexHome, RULES_DIR, RULES_FILE)
+  try {
+    const perms = options.perms ?? loadClaudePermissions('user')
+    const compiled = compileClaudeRulesToExecpolicy(perms)
+    const rules = compiled.text
+      .trimEnd()
+      .split('\n')
+      .filter((line) => !line.startsWith('#')).length
+    let syncedAt: string | null = null
+    try {
+      syncedAt = new Date(statSync(path).mtimeMs).toISOString()
+    } catch {
+      syncedAt = null // absent — never synced
+    }
+    return {
+      path,
+      rules,
+      skipped: compiled.skipped.length,
+      syncedAt,
+      upToDate: recordedHash(path) === compiled.hash
+    }
+  } catch (err) {
+    logger.warn(LOG, `Failed to read the compiled rule status at ${path}`, err)
+    return { path, rules: 0, skipped: 0, syncedAt: null, upToDate: false }
+  }
+}
+
+/**
  * Regenerate `$CODEX_HOME/rules/claudeui.rules` when its content would change.
  *
  * Called from three places, all of which are "before the next Codex thread"
@@ -267,7 +318,7 @@ function recordedHash(path: string): string | null {
  * only — before {@link armCodexRulesSync} has run.
  */
 export function syncCodexRulesFile(
-  options: { codexHome?: string; perms?: ClaudePermissions } = {}
+  options: { codexHome?: string; perms?: ClaudePermissions; force?: boolean } = {}
 ): CodexRulesSyncResult {
   const codexHome = options.codexHome ?? resolveCodexHome()
   const path = join(codexHome, RULES_DIR, RULES_FILE)
@@ -286,7 +337,12 @@ export function syncCodexRulesFile(
     }
     const perms = options.perms ?? loadClaudePermissions('user')
     const compiled = compileClaudeRulesToExecpolicy(perms)
-    if (recordedHash(path) === compiled.hash) {
+    // `force` is the settings page's Recompile button (ADR-068 §6): the hash
+    // check answers "would the CONTENT change", and the whole reason a user
+    // presses Recompile is that the file on disk was changed or removed under
+    // ClaudeUI, which the hash of an unreadable file already reports — but a
+    // hand-edited file with the original hash line would not.
+    if (!options.force && recordedHash(path) === compiled.hash) {
       logger.debug(LOG, `${path} is up to date`)
       return { wrote: false, path, skipped: compiled.skipped }
     }

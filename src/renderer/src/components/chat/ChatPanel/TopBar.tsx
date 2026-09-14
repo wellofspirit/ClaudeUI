@@ -121,6 +121,23 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const [permissionsOpen, setPermissionsOpen] = useState(false)
   const [skillsOpen, setSkillsOpen] = useState(false)
   const [mcpOpen, setMcpOpen] = useState(false)
+
+  /**
+   * Settings' one link INTO the MCP surface (ADR-068 §6: the Codex page's MCP
+   * group states how many servers a thread inherits and sends the user here to
+   * change them).
+   *
+   * An event rather than a prop for the same reason `open-settings` is one: the
+   * dialog's state lives in this bar, the link lives inside a static settings
+   * group definition several trees away, and the two hosts of the settings
+   * dialog close themselves on the same event so the MCP dialog is not opened
+   * behind one.
+   */
+  useEffect(() => {
+    const handler = (): void => setMcpOpen(true)
+    window.addEventListener('open-mcp-servers', handler)
+    return () => window.removeEventListener('open-mcp-servers', handler)
+  }, [])
   const [overflowOpen, setOverflowOpen] = useState(false)
   const overflowRef = useRef<HTMLDivElement>(null)
   /** The typed IDE refusal currently being explained, or null. */

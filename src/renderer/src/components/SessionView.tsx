@@ -227,8 +227,14 @@ export function SessionView(): React.JSX.Element {
       setMobileSettings({ target: settingsTargetFromEvent(event) })
       setSidebarCollapsed(true)
     }
+    // Same hand-off as the desktop host: a link out of settings closes it.
+    const leave = (): void => setMobileSettings(null)
     window.addEventListener('open-settings', handler)
-    return () => window.removeEventListener('open-settings', handler)
+    window.addEventListener('open-mcp-servers', leave)
+    return () => {
+      window.removeEventListener('open-settings', handler)
+      window.removeEventListener('open-mcp-servers', leave)
+    }
   }, [isMobile])
 
   // Global Shift+Tab to cycle permission mode

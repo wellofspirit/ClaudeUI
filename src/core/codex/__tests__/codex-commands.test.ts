@@ -12,6 +12,25 @@ vi.mock('../../auth/CodexAuthProvider', () => ({
   }
 }))
 vi.mock('../../services/db', () => ({ appendAuditLog: vi.fn() }))
+vi.mock('../codex-config', () => ({
+  readCodexConfig: vi.fn(async () => {
+    throw new Error('Codex is not installed')
+  }),
+  writeCodexConfig: vi.fn(async () => ({ status: 'ok', version: 'v2' }))
+}))
+vi.mock('../rules-sync', () => ({
+  codexRulesStatus: vi.fn(() => ({
+    path: '/tmp/claudeui.rules',
+    rules: 2,
+    skipped: 0,
+    syncedAt: null,
+    upToDate: false
+  })),
+  syncCodexRulesFile: vi.fn(() => ({ wrote: true, path: '/tmp/claudeui.rules', skipped: [] }))
+}))
+vi.mock('../codex-mcp-bridge', () => ({
+  collectClaudeMcpForCodex: vi.fn(() => ({ servers: { docs: {} }, skipped: ['legacy'] }))
+}))
 
 function fixture(engineId = 'codex') {
   const session = {
@@ -36,7 +55,14 @@ describe('native command authorization', () => {
     // ADR-068 §1 deleted the native device-code login from the product, and with
     // it the three `codex:login-*` channels; `codex:auth-status` stays as the
     // availability + model-count query.
-    expect([...CODEX_CHANNELS]).toEqual(['session:codex-approval', 'codex:auth-status'])
+    expect([...CODEX_CHANNELS]).toEqual([
+      'session:codex-approval',
+      'codex:auth-status',
+      // Slice 5a: Codex's own config.toml, read/written through the app-server.
+      'codex-config:read',
+      'codex-config:write',
+      'codex:recompile-rules'
+    ])
     expect(registry.channels('remote')).toEqual([...CODEX_CHANNELS].sort())
   })
 
@@ -81,4 +107,73 @@ describe('native command authorization', () => {
       ).rejects.toThrow('routing ID')
     }
   )
+})
+
+describe('Codex config commands (Slice 5a)', () => {
+  it('answers a failed read as a STATE the page renders, never as a throw', async () => {
+    const { registry } = fixture()
+    // The Codex page self-gates exactly as the pi and opencode panes do, so an
+    // absent binary must come back as data. It still carries the rules status
+    // and the inherited MCP list, which do not need Codex to be installed.
+    const result = (await registry.dispatch(
+      'codex-config:read',
+      'desktop',
+      [],
+      hostConnection()
+    )) as {
+      config: unknown
+      error?: string
+      rules: { rules: number }
+      mcp: { inherited: string[]; skipped: string[] }
+    }
+    expect(result.config).toBeNull()
+    expect(result.error).toContain('not installed')
+    expect(result.rules.rules).toBe(2)
+    expect(result.mcp).toEqual({ inherited: ['docs'], skipped: ['legacy'] })
+  })
+
+  it('refuses a malformed write at the perimeter, before the binary is reached', async () => {
+    const { registry } = fixture()
+    const { writeCodexConfig } = await import('../codex-config')
+    for (const args of [
+      [[], 'v1'],
+      [[{ keyPath: '', value: 1 }], 'v1'],
+      [[{ keyPath: 'a', value: 1 }], ''],
+      [Array.from({ length: 65 }, () => ({ keyPath: 'a', value: 1 })), 'v1']
+    ]) {
+      await expect(
+        registry.dispatch('codex-config:write', 'desktop', args, hostConnection())
+      ).rejects.toThrow(/Invalid Codex config/)
+    }
+    expect(writeCodexConfig).not.toHaveBeenCalled()
+
+    await registry.dispatch(
+      'codex-config:write',
+      'desktop',
+      [[{ keyPath: 'model_verbosity', value: 'high' }], 'v1'],
+      hostConnection()
+    )
+    expect(writeCodexConfig).toHaveBeenCalledExactlyOnceWith(
+      [{ keyPath: 'model_verbosity', value: 'high' }],
+      'v1'
+    )
+  })
+
+  it('recompiles the rule file FORCED and answers the fresh status', async () => {
+    const { registry } = fixture()
+    const { syncCodexRulesFile } = await import('../rules-sync')
+    const status = await registry.dispatch('codex:recompile-rules', 'desktop', [], hostConnection())
+    // Forced: the reason to press Recompile is that the file on disk is not what
+    // ClaudeUI wrote, which the content hash alone would not catch.
+    expect(syncCodexRulesFile).toHaveBeenCalledExactlyOnceWith({ force: true })
+    expect(status).toMatchObject({ rules: 2 })
+  })
+
+  it('keeps both config channels behind `config`, out of reach of a chat-only client', async () => {
+    const { registry } = fixture()
+    const connection = { ...hostConnection(), grants: new Set(['chat'] as const) }
+    for (const channel of ['codex-config:read', 'codex-config:write', 'codex:recompile-rules']) {
+      await expect(registry.dispatch(channel, 'remote', [], connection)).rejects.toThrow('config')
+    }
+  })
 })

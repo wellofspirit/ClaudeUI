@@ -186,6 +186,8 @@ interface RowProps {
   /** Accent dot + hover Reset (ADR-065). See `leafState`. */
   modified?: boolean
   onReset?: () => void
+  /** Dependent row: nests exactly one level under the row it depends on. */
+  indent?: boolean
   children: React.ReactNode
 }
 
@@ -199,6 +201,7 @@ export function LeafRow({
   testidPrefix = PANE_TESTID,
   modified,
   onReset,
+  indent,
   children
 }: RowProps): React.JSX.Element {
   return (
@@ -212,6 +215,7 @@ export function LeafRow({
       errorTestid={`${testidPrefix}.error`}
       modified={modified}
       onReset={onReset}
+      indent={indent}
     >
       {children}
     </SettingRow>
@@ -228,6 +232,7 @@ export function StackedRow({
   testidPrefix = PANE_TESTID,
   modified,
   onReset,
+  indent,
   children
 }: RowProps): React.JSX.Element {
   return (
@@ -242,6 +247,7 @@ export function StackedRow({
       errorTestid={`${testidPrefix}.error`}
       modified={modified}
       onReset={onReset}
+      indent={indent}
     >
       {children}
     </SettingRow>
@@ -263,7 +269,8 @@ export function ToggleRow({
   error,
   testidPrefix = PANE_TESTID,
   modified,
-  onReset
+  onReset,
+  indent
 }: {
   configKey: string
   label: string
@@ -275,6 +282,8 @@ export function ToggleRow({
   testidPrefix?: string
   modified?: boolean
   onReset?: () => void
+  /** Dependent row: nests exactly one level under the row it depends on. */
+  indent?: boolean
 }): React.JSX.Element {
   return (
     <div data-testid={`${testidPrefix}.row`} data-id={configKey}>
@@ -288,6 +297,7 @@ export function ToggleRow({
         errorTestid={`${testidPrefix}.error`}
         modified={modified}
         onReset={onReset}
+        indent={indent}
         testid={`${testidPrefix}.toggle`}
         dataId={configKey}
       />

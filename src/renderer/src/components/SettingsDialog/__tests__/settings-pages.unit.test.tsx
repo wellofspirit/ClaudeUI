@@ -114,7 +114,22 @@ describe('PAGES structure', () => {
         'raw'
       ],
       pi: ['session', 'retry', 'tools', 'attachments', 'workspace', 'resources', 'network', 'raw'],
-      codex: ['account']
+      // Slice 5a (ADR-068 §6): the Codex page grew the curated groups over
+      // `config.toml`, in the one-home table's order.
+      codex: [
+        'account',
+        'model',
+        'context',
+        'instructions',
+        'sandbox',
+        'shell',
+        'tools',
+        'agents',
+        'mcp',
+        'history',
+        'managed',
+        'raw'
+      ]
     }
     for (const page of PAGES) expect(page.groups.map((g) => g.id)).toEqual(expected[page.id])
   })
@@ -130,6 +145,22 @@ describe('PAGES structure', () => {
       expect(g.note, `pi/${g.id}`).toBeTruthy()
     }
     for (const g of pageOf('claude').groups) expect(g.appliesOn).toBe('next-session')
+    // Codex writes ONE file, and the binary does not hot-reload the
+    // session-static keys on it, so every group that writes says "next session"
+    // with the same tag. Account, Managed and Raw config write nothing.
+    for (const g of pageOf('codex').groups) {
+      if (['account', 'managed', 'raw'].includes(g.id)) {
+        expect(g.appliesOn, `codex/${g.id}`).toBeUndefined()
+        continue
+      }
+      expect(g.appliesOn, `codex/${g.id}`).toBe('next-session')
+      expect(g.note, `codex/${g.id}`).toBeTruthy()
+    }
+    for (const g of pageOf('codex').groups) {
+      expect(storageOf(g, 'codex'), `codex/${g.id}`).toBe(
+        g.id === 'account' ? undefined : 'config.toml'
+      )
+    }
     // ClaudeUI's own settings apply at once — no badge, no note.
     for (const g of pageOf('appearance').groups) expect(g.appliesOn).toBeUndefined()
   })

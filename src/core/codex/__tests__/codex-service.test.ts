@@ -70,6 +70,55 @@ describe('read service ownership', () => {
       itemsView: 'full'
     })
   })
+  it('writes config.toml and reads it back on ONE client, in that order', async () => {
+    // ADR-068 §6: the settings page re-reads after every write, and `read()`
+    // disposes its client the moment the last user drops — so a write followed
+    // by a SEPARATE read would start two app-server children per toggle click
+    // (~2.4 s each on the pinned binary). Both requests belong to one operation.
+    mocks.request.mockImplementation(async (method) =>
+      method === 'config/batchWrite'
+        ? { status: 'ok', version: 'v2', filePath: '/c.toml', overriddenMetadata: null }
+        : { config: {}, origins: {}, layers: [] }
+    )
+    const result = await new CodexService(options).batchWriteConfigAndRead(
+      {
+        edits: [{ keyPath: 'model_verbosity', value: 'high', mergeStrategy: 'replace' }],
+        expectedVersion: 'v1',
+        reloadUserConfig: true
+      },
+      '/home/u'
+    )
+    expect(mocks.clients).toHaveLength(1)
+    expect(mocks.request.mock.calls.map(([method]) => method)).toEqual([
+      'config/batchWrite',
+      'config/read'
+    ])
+    expect(mocks.request).toHaveBeenLastCalledWith('config/read', {
+      includeLayers: true,
+      cwd: '/home/u'
+    })
+    expect(result.write.version).toBe('v2')
+    expect(result.read.layers).toEqual([])
+    expect(mocks.clients[0].dispose).toHaveBeenCalledOnce()
+  })
+
+  it('never reads back a write the binary refused', async () => {
+    // There is nothing new to show, and a read after a refusal would hand the
+    // caller a snapshot that looks like a successful write.
+    mocks.request.mockImplementation(async (method) => {
+      if (method === 'config/batchWrite') throw new CodexTransportError('rpc-error--32600')
+      return { config: {}, origins: {}, layers: [] }
+    })
+    await expect(
+      new CodexService(options).batchWriteConfigAndRead({
+        edits: [],
+        expectedVersion: 'v1',
+        reloadUserConfig: true
+      })
+    ).rejects.toBeInstanceOf(CodexTransportError)
+    expect(mocks.request.mock.calls.map(([method]) => method)).toEqual(['config/batchWrite'])
+  })
+
   it('retains a shared reader until the final parallel request settles', async () => {
     let complete!: (result: unknown) => void
     mocks.request.mockImplementation((method) =>

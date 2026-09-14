@@ -2573,6 +2573,22 @@ export interface ClaudeAPI
     decision: import('./codex-types').CodexApprovalDecision
   ): Promise<void>
   codexAuthStatus(): Promise<import('./codex-types').CodexAuthStatus>
+  /**
+   * Codex's own `config.toml` plus the compiled Bash-rule status (ADR-068 §6).
+   * Read through the app-server — ClaudeUI never parses TOML.
+   */
+  readCodexConfig(): Promise<import('./codex-types').CodexConfigRead>
+  /**
+   * Apply edits to `config.toml` in ONE `config/batchWrite`. `value: null`
+   * REMOVES a key (that is what a row's Reset does). `expectedVersion` is the
+   * version the caller last read; a mismatch is reported, never clobbered.
+   */
+  writeCodexConfig(
+    edits: import('./codex-types').CodexConfigEdit[],
+    expectedVersion: string
+  ): Promise<import('./codex-types').CodexConfigWriteResult>
+  /** Recompile `$CODEX_HOME/rules/claudeui.rules` and answer its fresh status. */
+  recompileCodexRules(): Promise<import('./codex-types').CodexRulesStatus>
   /** What deleting this Codex thread would remove: the thread and every branch cut from it. */
   codexDeletePlan(threadId: string): Promise<import('./codex-types').CodexDeletePlan>
   /** Relay a log message from the renderer to the main process logger */
