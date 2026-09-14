@@ -62,7 +62,7 @@ Per-thread `config.mcp_servers` overrides merge per key into the user's table (b
 
 ### Open items after Slice 5
 
- the model-picker and welcome-tile sign-in entry points deferred from Slice 3; pi has no distinguishable auth error (no `session:auth-required` from it); Codex→Codex dispatch is refused so the "caller pin reaches the target" wiring is dormant; headless-server device code is designed but not built; the macOS legs of the new integration tests have not run; the Rename → Orrery arc is untouched by this work.
+the model-picker and welcome-tile sign-in entry points deferred from Slice 3; pi has no distinguishable auth error (no `session:auth-required` from it); Codex→Codex dispatch is refused so the "caller pin reaches the target" wiring is dormant; headless-server device code is designed but not built; the macOS legs of the new integration tests have not run; the Rename → Orrery arc is untouched by this work.
 
 ## Resume here (pre-ADR-068 — historical)
 
