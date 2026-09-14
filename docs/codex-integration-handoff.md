@@ -60,6 +60,15 @@ Per-thread `config.mcp_servers` overrides merge per key into the user's table (b
 - **Linux: Daniel takes it** on a Mac with Linux emulation (digest manifest, acquisition, app-server spawn, process tree). Nothing to prepare on Windows.
 - **Sign-in entry points (model picker + welcome tile):** the owner-approved mockup is `mockup.html` at the repo root (untracked, screen 5, "Model picker: greyed models whose provider is unauthenticated carry a Sign in item that opens the dialog"; "Welcome screen: engine tile without a usable account shows Sign in instead of Start"). Built next as Slice 6 of the spec.
 
+### Roadmap after the Codex integration (Daniel, 2026-09-14)
+
+In this order:
+
+1. **History mappers, with a cross-harness tool survey — new session.** Add mappers and cards for every native Codex item kind the read/list path does not name today (`webSearch`, `imageGeneration`, `imageView`, `plan`, `contextCompaction`, `functionCallOutput`, `hookPrompt`, `enteredReviewMode`/`exitedReviewMode`, `sleep`; `mcpToolCall` renders through the generic body). Daniel wants this done properly: research EVERY tool and method each harness exposes (cli.js stream-json — `docs/protocol-cc/`; opencode HTTP+SSE — `vendor/opencode-src`; pi RPC — `docs/protocol-pi/`; Codex app-server — `protocol/v2/ThreadItem.ts` and the notification catalog in `docs/codex-spike.md`), inventory them against ClaudeUI's card vocabulary, and map each one deliberately. Start by building that inventory table before writing any mapper. Guards: canonical/desktop/web equality after a cold resume per kind.
+2. **Per-item volatile stream — a design discussion first.** Text and reasoning deltas are item-scoped canonical upserts today; only command-output tails ride the volatile lane. Moving deltas per item onto the volatile lane touches SyncCore's stream protocol (per-session today), the replica projection and all three clients; write the design note and discuss before code.
+3. **Metering attribution — folded into the usage-tracking dashboard revamp**, a broader discussion after the Codex integration. Open questions to carry there: child vs cross-engine attribution on usage rows, metering under a pinned account's identity, double counting after rekey/resume, failed-turn spend, and whether an estimated USD cap can gate dispatch.
+4. **Grandchild rendering for every harness that supports nested dispatch** — not urgent; discuss the nested subagent view before building. Codex refuses a child's own spawn today with one error; the work is recursive binding, a nested transcript view, interrupt cascade, cold reconstruction and usage folding.
+
 ### Open items after Slice 5
 
 the model-picker and welcome-tile sign-in entry points deferred from Slice 3; pi has no distinguishable auth error (no `session:auth-required` from it); Codex→Codex dispatch is refused so the "caller pin reaches the target" wiring is dormant; headless-server device code is designed but not built; the macOS legs of the new integration tests have not run; the Rename → Orrery arc is untouched by this work.
