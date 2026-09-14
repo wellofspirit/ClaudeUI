@@ -141,11 +141,13 @@ export function resolveOpencodeModel(models: ModelInfo[], preferred?: string): s
  */
 function perEngineDefaultModel(
   engineId: EngineId,
-  opencodeDefaultModel: string,
-  piDefaultModel: string
+  defaults: EngineDefaultModels
 ): string | undefined {
-  if (engineId === 'opencode') return opencodeDefaultModel
-  if (engineId === 'pi') return piDefaultModel
+  if (engineId === 'opencode') return defaults.opencodeDefaultModel
+  if (engineId === 'pi') return defaults.piDefaultModel
+  // Codex's is the empty string when nothing is configured, and
+  // `defaultModelValue` turns that back into '' — "say nothing on the wire".
+  if (engineId === 'codex') return defaults.codexDefaultModel
   return undefined
 }
 
@@ -163,6 +165,13 @@ export interface EngineDefaultModels {
   opencodeDefaultModelConfigured: boolean
   piDefaultModel: string
   piDefaultModelConfigured: boolean
+  /**
+   * `engines/codex.json#codexConfig.defaultModel`, or '' when unset. Unlike the
+   * other two there is NO fallback constant behind it: blank means ClaudeUI
+   * names no model on `turn/start` and Codex's own layers decide (ADR-068 §6).
+   */
+  codexDefaultModel: string
+  codexDefaultModelConfigured: boolean
 }
 
 /** Narrow a store snapshot to the default-model inputs. */
@@ -171,12 +180,16 @@ export function engineDefaultModels(state: {
   opencodeDefaultModelConfigured: boolean
   piDefaultModel: string
   piDefaultModelConfigured: boolean
+  codexDefaultModel: string
+  codexDefaultModelConfigured: boolean
 }): EngineDefaultModels {
   return {
     opencodeDefaultModel: state.opencodeDefaultModel,
     opencodeDefaultModelConfigured: state.opencodeDefaultModelConfigured,
     piDefaultModel: state.piDefaultModel,
-    piDefaultModelConfigured: state.piDefaultModelConfigured
+    piDefaultModelConfigured: state.piDefaultModelConfigured,
+    codexDefaultModel: state.codexDefaultModel,
+    codexDefaultModelConfigured: state.codexDefaultModelConfigured
   }
 }
 
@@ -202,7 +215,27 @@ export function resolveEngineDefaultModel(
   models: ModelInfo[],
   defaults: EngineDefaultModels
 ): string | null {
-  if (engineId === 'codex') return models.find((model) => model.engineId === 'codex')?.value ?? null
+  if (engineId === 'codex') {
+    const codex = models.filter((model) => isModelForEngine(model, 'codex'))
+    // An EMPTY catalog keeps answering null whether or not a default is
+    // configured — unlike opencode and pi, Codex has its own diagnosis for that
+    // state (a broken install, or a ChatGPT credential the API refused) and
+    // `reportStaleDefaultModel` probes the vendor to tell them apart. Letting a
+    // configured value through here would swallow that banner.
+    if (codex.length === 0) return null
+    // From here it is the opencode/pi rule: a CONFIGURED default the catalog no
+    // longer lists resolves to null — the picker stays unset and banners the
+    // name — never to a substitute whose capabilities differ (ADR-059).
+    if (defaults.codexDefaultModelConfigured) {
+      return codex.some((model) => model.value === defaults.codexDefaultModel)
+        ? defaults.codexDefaultModel
+        : null
+    }
+    // Nothing configured: the catalog head, which the session then omits from
+    // `turn/start` (`codexModelExplicit` stays false) so Codex's own configured
+    // model actually runs. The value exists only so the picker has a row.
+    return codex[0].value
+  }
   if (engineId === 'opencode') {
     const oc = models.filter((model) => isModelForEngine(model, 'opencode'))
     if (defaults.opencodeDefaultModelConfigured && oc.length > 0) {
@@ -271,8 +304,19 @@ function reportStaleDefaultModel(routingId: string, engineId: EngineId, model: s
 }
 
 /** The configured-but-missing default model for `engineId`, for error copy. */
-function configuredDefaultModelOf(engineId: EngineId, defaults: EngineDefaultModels): string {
-  if (engineId === 'codex') return ''
+function configuredDefaultModelOf(
+  engineId: EngineId,
+  defaults: EngineDefaultModels,
+  models: ModelInfo[]
+): string {
+  // Codex answers '' for the EMPTY-catalog failure, which is what tells
+  // `reportStaleDefaultModel` to probe the vendor and choose between "check the
+  // installation" and "sign in again". A configured model the catalog reported
+  // WITHOUT is a different failure with different advice, so it is named.
+  if (engineId === 'codex') {
+    const hasCatalog = models.some((model) => isModelForEngine(model, 'codex'))
+    return hasCatalog && defaults.codexDefaultModelConfigured ? defaults.codexDefaultModel : ''
+  }
   return engineId === 'pi' ? defaults.piDefaultModel : defaults.opencodeDefaultModel
 }
 
@@ -480,6 +524,7 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     loadedEngineConfig,
     opencodeSettings,
     piEngineConfig,
+    codexEngineConfig,
     userPermissions
   ] = await Promise.all([
     window.api.loadSettings(),
@@ -493,6 +538,9 @@ export async function hydrateConfigFromDisk(): Promise<void> {
       .catch((): import('../../../shared/types').OpencodeConfigSettings => ({})),
     window.api
       .loadEngineConfig('pi')
+      .catch((): import('../../../shared/types').EngineConfig => ({})),
+    window.api
+      .loadEngineConfig('codex')
       .catch((): import('../../../shared/types').EngineConfig => ({})),
     // `permissions.defaultMode` (user scope) seeds the mode of sessions created
     // in this app run. Remote-registered channel, so the web client hydrates
@@ -577,7 +625,12 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     // while the model exists and must diverge the moment it does not.
     opencodeDefaultModelConfigured: !!opencodeSettings?.model,
     piDefaultModel: piEngineConfig?.piConfig?.defaultModel || PI_DEFAULT_MODEL,
-    piDefaultModelConfigured: !!piEngineConfig?.piConfig?.defaultModel
+    piDefaultModelConfigured: !!piEngineConfig?.piConfig?.defaultModel,
+    // No builtin fallback for Codex: blank stays blank, which is what makes the
+    // native `model` win (ADR-068 §6).
+    codexDefaultModel: codexEngineConfig?.codexConfig?.defaultModel || '',
+    codexDefaultModelConfigured: !!codexEngineConfig?.codexConfig?.defaultModel,
+    codexDefaultEffort: codexEngineConfig?.codexConfig?.defaultEffort || ''
   })
   // Replicated app-level state goes through the replica (SyncCore phase 4c), which
   // projects it into the store. Not a competing source of truth: the HOST seeds
@@ -1113,6 +1166,16 @@ export interface SessionState {
   piDefaultModel: string
   /** The pi twin of {@link opencodeDefaultModelConfigured}. */
   piDefaultModelConfigured: boolean
+  /** Configurable Codex default model (engines/codex.json `codexConfig.defaultModel`,
+   *  ADR-068 §6). '' = say nothing on `turn/start` and let Codex's own layers decide. */
+  codexDefaultModel: string
+  /** The Codex twin of {@link opencodeDefaultModelConfigured}. There is no builtin
+   *  constant behind it, so this is simply "the key is non-empty". */
+  codexDefaultModelConfigured: boolean
+  /** Configurable Codex reasoning tier (engines/codex.json `codexConfig.defaultEffort`).
+   *  A NATIVE tier value from the model catalog, not an {@link EffortLevel}; '' = the
+   *  model's own default. */
+  codexDefaultEffort: string
   /** `settings.defaultAutonomyMode` mapped to a renderer PermissionMode. A
    *  SESSION-BOOTSTRAP concern only: it seeds the mode of sessions created from
    *  here on. Running sessions keep the mode they were spawned with (cli.js
@@ -1214,6 +1277,8 @@ export interface SessionState {
   setOpencodeDefaultModel: (model: string) => void
   /** Update the configurable pi default model (mirrors piConfig.defaultModel, M3). */
   setPiDefaultModel: (model: string) => void
+  /** Update the configurable Codex session defaults (mirrors codexConfig, ADR-068 §6). */
+  setCodexDefaults: (defaults: { model?: string; effort?: string }) => void
   /** Mirror a Settings-dialog `permissions.defaultMode` write so sessions created
    *  later in THIS app run pick it up without a restart. */
   setDefaultPermissionMode: (mode: PermissionMode) => void
@@ -1463,6 +1528,9 @@ export const useSessionStore = create<SessionState>((set) => ({
   opencodeDefaultModelConfigured: false,
   piDefaultModel: PI_DEFAULT_MODEL,
   piDefaultModelConfigured: false,
+  codexDefaultModel: '',
+  codexDefaultModelConfigured: false,
+  codexDefaultEffort: '',
   // Pre-hydration seed only. `hydrate()` overwrites this from
   // `settings.defaultAutonomyMode` before any session can be created; 'default'
   // is the conservative placeholder for the window in between.
@@ -1592,7 +1660,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         defaultModel === null
           ? engineId === 'codex' && sticky
             ? sticky
-            : configuredDefaultModelOf(engineId, defaults)
+            : configuredDefaultModelOf(engineId, defaults, state.availableModels)
           : null
       if (
         engineId === 'opencode' &&
@@ -1627,7 +1695,17 @@ export const useSessionStore = create<SessionState>((set) => ({
           permissionMode: bootstrapPermissionMode(state, engineId),
           selectedEngineId: engineId,
           selectedModel: seededModel,
-          ...(engineId === 'codex' ? { codexModelExplicit: !!sticky } : {}),
+          // A CONFIGURED default is an explicit choice as much as a sticky pick
+          // is (ADR-059): both name a model the user chose, and both must ride
+          // `turn/start` rather than letting Codex's own layers decide. Gated on
+          // a resolved value so an orphaned default (seededModel '') does not
+          // claim to be explicit about nothing.
+          ...(engineId === 'codex'
+            ? {
+                codexModelExplicit:
+                  !!seededModel && (!!sticky || defaults.codexDefaultModelConfigured)
+              }
+            : {}),
           // Seed status.engineId/capabilities to match so they're correct before spawn
           status: {
             ...EMPTY_SESSION_STATE.status,
@@ -1728,7 +1806,11 @@ export const useSessionStore = create<SessionState>((set) => ({
       selectedEngineId: engineId,
       selectedModel: model,
       reasoningVariant: null,
-      ...(engineId === 'codex' ? { codexModelExplicit: false } : {}),
+      // Switching TO codex lands on whatever `resolveEngineDefaultModel` just
+      // returned; that is an explicit pick only when the user CONFIGURED it.
+      ...(engineId === 'codex'
+        ? { codexModelExplicit: !!model && defaults.codexDefaultModelConfigured }
+        : {}),
       // Engine-neutral: a mode the TARGET engine cannot offer would otherwise
       // survive the switch and show a pill the Shift+Tab cycle skips over.
       permissionMode:
@@ -1743,7 +1825,11 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     })
     if (resolved === null) {
-      reportStaleDefaultModel(id, engineId, configuredDefaultModelOf(engineId, defaults))
+      reportStaleDefaultModel(
+        id,
+        engineId,
+        configuredDefaultModelOf(engineId, defaults, state.availableModels)
+      )
     }
     patchLocalApp({ sessionEngines })
     saveSessionConfig(state, { sessionEngines })
@@ -1757,6 +1843,15 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   setPiDefaultModel: (model) =>
     set({ piDefaultModel: model || PI_DEFAULT_MODEL, piDefaultModelConfigured: !!model }),
+
+  // One action for both keys, because the settings pane writes them into one
+  // `codexConfig` block and a partial update must not reset the other half.
+  setCodexDefaults: ({ model, effort }) =>
+    set((state) => ({
+      codexDefaultModel: model ?? state.codexDefaultModel,
+      codexDefaultModelConfigured: (model ?? state.codexDefaultModel) !== '',
+      codexDefaultEffort: effort ?? state.codexDefaultEffort
+    })),
 
   setDefaultPermissionMode: (mode) => set({ defaultPermissionMode: mode }),
 
@@ -1800,7 +1895,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       const selectedModel =
         persistedModel ??
         engineMeta(persistedEngineId).defaultModelValue(
-          perEngineDefaultModel(persistedEngineId, state.opencodeDefaultModel, state.piDefaultModel)
+          perEngineDefaultModel(persistedEngineId, engineDefaultModels(state))
         )
       // Engine identity for the LOCAL historical-load path (gpt#3): the restored
       // engine must also drive status.engineId + capabilities, otherwise a pi /

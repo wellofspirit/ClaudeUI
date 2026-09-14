@@ -567,6 +567,127 @@ describe('InputBox FC — rendered', () => {
     expect(viewProps.selectedModel.shortName).toBe('Native default')
   })
 
+  it('previews the CONFIGURED codex default on the welcome screen (Slice 5b)', () => {
+    // Same rule as the sticky pick above, one rung lower: with no session and no
+    // sticky model, the pill must answer for what `createNewSession` will seed —
+    // `codexConfig.defaultModel`, which is an EXPLICIT choice (ADR-059), so the
+    // pill names it instead of reading "Native default".
+    useSessionStore.setState({
+      activeSessionId: null,
+      lastSelectedEngineId: 'codex',
+      lastSelectedModelByEngine: {},
+      codexDefaultModel: 'gpt-5.6-codex-mini',
+      codexDefaultModelConfigured: true,
+      availableModels: [
+        { value: 'gpt-6-astra', displayName: 'GPT-6-Astra', description: '', engineId: 'codex' },
+        {
+          value: 'gpt-5.6-codex-mini',
+          displayName: 'GPT-5.6-Codex-mini',
+          description: '',
+          engineId: 'codex'
+        }
+      ]
+    })
+    mirrorStoreIntoReplica()
+    renderFC()
+    expect(viewProps.selectedModel.shortName).toBe('GPT-5.6-Codex-mini')
+  })
+
+  it('sends the configured codex effort with the spawn, and nothing when it is blank', async () => {
+    const spawn = async (): Promise<void> => {
+      await act(async () => {
+        useSessionStore.getState().setDraftText('go')
+      })
+      await act(async () => {
+        await viewProps.onSend()
+      })
+    }
+    useSessionStore.setState((state) => ({
+      codexDefaultModel: 'gpt-5.6-codex',
+      codexDefaultModelConfigured: true,
+      codexDefaultEffort: 'xhigh',
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedEngineId: 'codex',
+          selectedModel: 'gpt-5.6-codex',
+          codexModelExplicit: true,
+          sdkActive: false,
+          isHistorical: false,
+          status: {
+            ...state.sessions[FC_ROUTE].status,
+            sessionId: null,
+            engineId: 'codex',
+            capabilities: resolveCodexCapabilities()
+          }
+        }
+      },
+      availableModels: [
+        { value: 'gpt-5.6-codex', displayName: 'GPT-5.6-Codex', description: '', engineId: 'codex' }
+      ]
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    await spawn()
+    expect(ipcCalls['session:create'][0][5]).toBe('gpt-5.6-codex')
+    expect(ipcCalls['session:create'][0][2]).toBe('xhigh')
+  })
+
+  it('keeps the configured effort PAIRED with the configured model — a different pick runs its own tier', async () => {
+    // The Default-models pane offers only the tiers the configured model
+    // publishes, so `defaultEffort` is a statement about THAT model. A session
+    // the user steered onto another model must not carry it:
+    // `CodexSession.validateEffort` would refuse the start for a mismatch the
+    // user never chose.
+    useSessionStore.setState((state) => ({
+      codexDefaultModel: 'gpt-5.6-codex',
+      codexDefaultModelConfigured: true,
+      codexDefaultEffort: 'xhigh',
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedEngineId: 'codex',
+          selectedModel: 'gpt-5.6-codex-mini',
+          codexModelExplicit: true,
+          sdkActive: false,
+          isHistorical: false,
+          status: {
+            ...state.sessions[FC_ROUTE].status,
+            sessionId: null,
+            engineId: 'codex',
+            capabilities: resolveCodexCapabilities()
+          }
+        }
+      },
+      availableModels: [
+        {
+          value: 'gpt-5.6-codex',
+          displayName: 'GPT-5.6-Codex',
+          description: '',
+          engineId: 'codex'
+        },
+        {
+          value: 'gpt-5.6-codex-mini',
+          displayName: 'GPT-5.6-Codex-mini',
+          description: '',
+          engineId: 'codex'
+        }
+      ]
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    await act(async () => {
+      useSessionStore.getState().setDraftText('go')
+    })
+    await act(async () => {
+      await viewProps.onSend()
+    })
+    expect(ipcCalls['session:create'][0][5]).toBe('gpt-5.6-codex-mini')
+    expect(ipcCalls['session:create'][0][2]).toBeUndefined()
+  })
+
   it('codex shortName is the display name, not the native description sentence', () => {
     // Codex's catalog ships a marketing sentence in `description`; only
     // claude/opencode/pi discovery follow the "Name · detail" convention the

@@ -1067,6 +1067,44 @@ export function CodexManagedSection(): React.JSX.Element {
   )
 }
 
+// ── Auto-mode judge (Sessions & autonomy › Auto-mode judge) ──────────────
+//
+// NOT a group on the Codex page: it is the Codex SEGMENT of a topic card the
+// other two engines already fill (ADR-068 §6). What sits there for opencode and
+// pi is a judge-MODEL picker over `engines/<engine>.json#autoMode`, because
+// ClaudeUI's own classifier gates their tool calls. Codex has no such seam — its
+// guardian reviews the action inside the engine (ADR-067), so ClaudeUI's
+// classifier never sees a Codex tool call and there is no model to choose.
+//
+// What IS configurable is the guardian's extra policy text, which Codex folds
+// into the guardian prompt (`core/src/config/mod.rs`: `auto_review.policy` →
+// `normalize_guardian_policy_config` → `guardian_policy_config`). That is Codex's
+// analogue of the trust lists. It is read when the config layers load — once per
+// thread — so a change binds on the next session, never mid-turn.
+
+export function CodexAutoReviewSection(): React.JSX.Element {
+  const api = useCodexConfig()
+  return (
+    <PaneShell testid="CodexAutoReviewSection" api={api}>
+      <ManagedRow
+        configKey="approvals_reviewer"
+        label="Judge"
+        why="Codex reviews its own actions with its native guardian, so there is no judge model to pick. Which reviewer answers an escalation follows the session's permission mode (ADR-067)."
+        value="Guardian"
+        locked="Native"
+      />
+      <TextAreaRow
+        api={api}
+        path={['auto_review', 'policy']}
+        label="Guardian policy"
+        helper="Extra instructions folded into the guardian's prompt — what to wave through, what to escalate. Blank leaves Codex's own policy alone."
+        placeholder="e.g. Never approve a command that writes outside the workspace."
+        rows={5}
+      />
+    </PaneShell>
+  )
+}
+
 // ── Raw config ───────────────────────────────────────────────────────────────
 
 /**

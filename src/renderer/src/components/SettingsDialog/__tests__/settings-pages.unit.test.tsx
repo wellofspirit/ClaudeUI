@@ -222,17 +222,19 @@ describe('PAGES structure', () => {
     }
   })
 
-  it('byEngine groups list their engines in claude → opencode → pi order', () => {
-    expect(enginesOf(pageOf('sessions').groups[2])).toEqual(['opencode', 'pi'])
+  it('byEngine groups list their engines in claude → opencode → pi → codex order', () => {
+    expect(enginesOf(pageOf('sessions').groups[2])).toEqual(['opencode', 'pi', 'codex'])
     expect(enginesOf(pageOf('models').groups.find((g) => g.id === 'defaults')!)).toEqual([
       'claude',
       'opencode',
-      'pi'
+      'pi',
+      'codex'
     ])
     // pi joined as a dispatch TARGET: core has accepted it since M4c, the UI
     // pane is what was missing (ADR-065 § Cross-engine dispatch into pi).
-    expect(enginesOf(pageOf('dispatch').groups[0])).toEqual(['claude', 'opencode', 'pi'])
-    expect(enginesOf(pageOf('dispatch').groups[1])).toEqual(['claude', 'opencode', 'pi'])
+    // Codex joined on the same terms with ADR-068 §6 (slice H accepted it).
+    expect(enginesOf(pageOf('dispatch').groups[0])).toEqual(['claude', 'opencode', 'pi', 'codex'])
+    expect(enginesOf(pageOf('dispatch').groups[1])).toEqual(['claude', 'opencode', 'pi', 'codex'])
   })
 
   it('the Limits card follows the Dispatch-into segment instead of drawing its own', () => {
@@ -259,8 +261,11 @@ describe('PAGES structure', () => {
 
     // The dispatch Limits note names the target and its callers.
     const limits = pageOf('dispatch').groups[1]
-    expect(noteOf(limits, 'pi')).toContain('into pi from a Claude or opencode session')
-    expect(noteOf(limits, 'claude')).toContain('into Claude from an opencode or pi session')
+    // Codex hosts `dispatch_agent` too (ADR-033 slice H), so it is named as a
+    // possible CALLER of every other target, not only as a target of its own.
+    expect(noteOf(limits, 'pi')).toContain('into pi from a Claude, opencode or Codex session')
+    expect(noteOf(limits, 'claude')).toContain('into Claude from an opencode, pi or Codex session')
+    expect(noteOf(limits, 'codex')).toContain('into Codex from a Claude, opencode or pi session')
   })
 
   it('the Limits card carries no applies-later badge and no storage tag', () => {
@@ -307,6 +312,49 @@ describe('PAGES structure', () => {
     expect(storageOf(defaults, 'opencode')).toBe('opencode.jsonc')
     expect(storageOf(defaults, 'pi')).toBe('settings.json')
     expect(storageOf(defaults, 'claude')).toBeUndefined()
+  })
+})
+
+describe('Codex on the topic pages (ADR-068 §6, Slice 5b)', () => {
+  const defaults = (): SettingsGroup => pageOf('models').groups.find((g) => g.id === 'defaults')!
+  const judge = (): SettingsGroup => pageOf('sessions').groups.find((g) => g.id === 'judge')!
+
+  it('Default models gains a codex segment over engines/codex.json', () => {
+    expect(enginesOf(defaults())).toEqual(['claude', 'opencode', 'pi', 'codex'])
+    expect(storageOf(defaults(), 'codex')).toBe('engines/codex.json')
+    expect(appliesOnOf(defaults(), 'codex')).toBe('next-session')
+    expect(noteOf(defaults(), 'codex')).toBe('Applies to new Codex sessions.')
+  })
+
+  it('Dispatch into / Limits gain a codex segment and name its real callers', () => {
+    const [into, limits] = pageOf('dispatch').groups
+    expect(enginesOf(into)).toEqual(['claude', 'opencode', 'pi', 'codex'])
+    expect(enginesOf(limits)).toEqual(['claude', 'opencode', 'pi', 'codex'])
+    expect(storageOf(into, 'codex')).toBe('engines/codex.json')
+    expect(noteOf(limits, 'codex')).toContain('a Claude, opencode or pi session')
+  })
+
+  it('the Auto-mode judge gains a codex segment over config.toml', () => {
+    expect(enginesOf(judge())).toEqual(['opencode', 'pi', 'codex'])
+    // The Codex rows write `auto_review.policy` in Codex's own file, not
+    // `engines/codex.json#autoMode` — the reviewer there is NATIVE (ADR-067).
+    expect(storageOf(judge(), 'codex')).toBe('config.toml')
+    expect(storageOf(judge(), 'pi')).toBe('engines/pi.json')
+    expect(noteOf(judge(), 'codex')).toContain('Read once per thread')
+  })
+
+  it('the two stale Codex strings are gone', () => {
+    // "Codex uses its native configured model." — written before Codex had a
+    // configured ClaudeUI default at all.
+    for (const engine of enginesOf(defaults())) {
+      expect(noteOf(defaults(), engine)).not.toBe('Codex uses its native configured model.')
+    }
+    // DISPATCH_CALLERS.codex = 'unsupported' — the dispatcher has accepted
+    // Codex as a target since ADR-033 slice H.
+    const limits = pageOf('dispatch').groups[1]
+    for (const engine of enginesOf(limits)) {
+      expect(noteOf(limits, engine)).not.toContain('unsupported')
+    }
   })
 })
 

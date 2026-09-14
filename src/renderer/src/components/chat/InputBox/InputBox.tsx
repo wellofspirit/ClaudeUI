@@ -55,17 +55,60 @@ export function codexModelIsExplicit(
       }
     | undefined,
   sticky: string | undefined,
-  codexModels: ReadonlyArray<{ value: string }>
+  codexModels: ReadonlyArray<{ value: string }>,
+  /** `engines/codex.json#codexConfig.defaultModel`, '' when unset (Slice 5b). */
+  configuredDefault: string = ''
 ): boolean {
   // Welcome screen: no session holds the pick yet, so answer for the one
   // `createNewSession` is about to seed — it marks a sticky model explicit, and
-  // drops it only when a codex catalog exists that no longer lists it.
-  if (!session)
+  // drops it only when a codex catalog exists that no longer lists it. A
+  // CONFIGURED default is the next rung of the same ladder (ADR-059: naming it
+  // in settings is as explicit as picking it in the picker), and the store
+  // seeds it in exactly this order.
+  if (!session) {
+    const candidate = sticky || configuredDefault
     return (
-      !!sticky && (codexModels.length === 0 || codexModels.some((model) => model.value === sticky))
+      !!candidate &&
+      (codexModels.length === 0 || codexModels.some((model) => model.value === candidate))
     )
+  }
   if (!session.selectedModel) return false
   return !!(session.codexModelExplicit || session.isHistorical || session.status.sessionId)
+}
+
+/**
+ * The configured native tier to send with a FRESH Codex spawn, or undefined.
+ *
+ * PAIRED with the model. The Default-models pane offers only the tiers the
+ * configured default model publishes, so `codexConfig.defaultEffort` is a
+ * statement about THAT model: a session the user steered onto another model
+ * (a sticky pick) runs that model's own default tier, because sending the
+ * configured one would make `CodexSession.validateEffort` refuse the start for a
+ * mismatch the user never chose. With no default model configured the tier came
+ * from the union, so it goes when the catalog says the session's model publishes
+ * it, and when the model is Codex's own (not explicit, unknown here) — where a
+ * mismatch is the loud thread-start failure ADR-059 wants, not a silent drop.
+ */
+export function codexDefaultEffortFor(
+  defaults: {
+    codexDefaultModel: string
+    codexDefaultModelConfigured: boolean
+    codexDefaultEffort: string
+  },
+  model: string | undefined,
+  codexModels: ReadonlyArray<{
+    value: string
+    nativeEffortOptions?: ReadonlyArray<{ value: string }>
+  }>
+): string | undefined {
+  const effort = defaults.codexDefaultEffort
+  if (!effort) return undefined
+  if (defaults.codexDefaultModelConfigured)
+    return model === defaults.codexDefaultModel ? effort : undefined
+  if (!model) return effort
+  const options = codexModels.find((m) => m.value === model)?.nativeEffortOptions
+  if (!options || options.length === 0) return effort
+  return options.some((option) => option.value === effort) ? effort : undefined
 }
 
 const ACCEPTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
@@ -281,6 +324,13 @@ export function InputBox(): React.JSX.Element {
     const exact = sameEngine.find((m) => m.value === selectedModelValue)
     if (exact) return exact
     if (engine === 'codex') {
+      // Welcome screen, no sticky pick: the CONFIGURED default is what
+      // `createNewSession` will seed, so the pill must name it rather than the
+      // catalog's first row (which the spawn would not carry).
+      if (!activeSessionId && engineDefaults.codexDefaultModelConfigured) {
+        const configured = sameEngine.find((mm) => mm.value === engineDefaults.codexDefaultModel)
+        if (configured) return configured
+      }
       if (
         activeSessionId &&
         (codexModelExplicit || isHistorical || startedSessionId) &&
@@ -428,16 +478,26 @@ export function InputBox(): React.JSX.Element {
     const state = useSessionStore.getState()
     const session = state.sessions[routingId]
     const engineId = session?.selectedEngineId ?? 'claude'
-    if (engineId === 'codex')
-      return {
-        model: codexModelIsExplicit(
-          session,
-          state.lastSelectedModelByEngine.codex,
-          codexCatalogOf(state.availableModels)
-        )
-          ? session?.selectedModel
-          : undefined
-      }
+    if (engineId === 'codex') {
+      const model = codexModelIsExplicit(
+        session,
+        state.lastSelectedModelByEngine.codex,
+        codexCatalogOf(state.availableModels),
+        state.codexDefaultModel
+      )
+        ? session?.selectedModel
+        : undefined
+      // The configured NATIVE tier seeds a session that has no thread yet, and
+      // only when it is paired with the session's model (`codexDefaultEffortFor`).
+      // A resume must not carry it: `CodexSession.start` folds an explicit
+      // effort OVER the thread's remembered one, so re-sending the default
+      // would silently undo a live `thread/settings/update` the user made.
+      const fresh = !session?.status.sessionId && !session?.isHistorical
+      const effort = fresh
+        ? codexDefaultEffortFor(state, model, codexCatalogOf(state.availableModels))
+        : undefined
+      return { model, ...(effort ? { effort } : {}) }
+    }
     const modelInfo = state.availableModels.find(
       (m) => m.value === session?.selectedModel && (m.engineId ?? 'claude') === engineId
     )
@@ -477,7 +537,8 @@ export function InputBox(): React.JSX.Element {
       !codexModelIsExplicit(
         session,
         state.lastSelectedModelByEngine.codex,
-        codexCatalogOf(state.availableModels)
+        codexCatalogOf(state.availableModels),
+        state.codexDefaultModel
       )
     )
       return
@@ -1100,7 +1161,12 @@ export function InputBox(): React.JSX.Element {
       models={pickerModels}
       selectedModel={
         effectiveEngineId === 'codex' &&
-        !codexModelIsExplicit(activeCodexSession, stickyCodexModel, pickerModels)
+        !codexModelIsExplicit(
+          activeCodexSession,
+          stickyCodexModel,
+          pickerModels,
+          engineDefaults.codexDefaultModel
+        )
           ? {
               ...selectedModel,
               displayName: 'Native configured model',

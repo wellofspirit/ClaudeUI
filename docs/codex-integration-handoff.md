@@ -2,7 +2,7 @@
 
 ## Resume here (ADR-068 arc — 2026-09-14)
 
-**Start with `docs/adr/adr-068_chatgpt-identity-vault-owned-codex-injection.md` and `docs/codex-accounts-spec.md`.** The spec is the source of truth for this arc: every slice has a kickoff, and every landed slice has a "Landed …" paragraph recording the as-built deviations. Slices 1–5a are landed; 5b is next. The older "Resume here" below is the pre-ADR-068 state and stays as history.
+**Start with `docs/adr/adr-068_chatgpt-identity-vault-owned-codex-injection.md` and `docs/codex-accounts-spec.md`.** The spec is the source of truth for this arc: every slice has a kickoff, and every landed slice has a "Landed …" paragraph recording the as-built deviations. Slices 1–5b are landed; ADR-068 is Implemented. Next: a push when Daniel asks, then the deferred items listed under "Open items". The older "Resume here" below is the pre-ADR-068 state and stays as history.
 
 ### What is committed (all local on `codex-integration`, oldest first; nothing pushed since the previous handoff — confirm with `git log origin/codex-integration..HEAD`)
 
@@ -16,7 +16,9 @@ a54776e7 feat(auth): Slice 3 — SignInDialog for Anthropic + ChatGPT, one sessi
 37ccd411 feat(codex): Slice 4 — inherit the shared Claude MCP list as a per-thread override (merges into the native table)
 c3c32850 feat(codex): Slice 4b — MCP tool approvals via mcpServer/elicitation/request through the shared permission engine
 463b060b docs(codex): handoff for the ADR-068 arc
-<next>   feat(codex): Slice 5a — config.toml through the app-server; the Engines › Codex page
+3be8e0b2 feat(codex): Slice 5a — config.toml through the app-server; the Engines › Codex page
+<next>   feat(codex): Slice 5b — Codex on Default models, Dispatch, the judge and Permissions; engines/codex.json defaults
+<next>   docs(adr): ADR-068 Implemented, as built
 ```
 
 Every one of these was reviewed line by line by the main model, gated (typecheck, lint, full `bun run test`, `CODEX_INTEGRATION=1 bun run test:integration`, `check-codex-protocol` where the protocol changed), and driven in the real Electron app before commit. Live evidence that exists: a real signed-in Codex turn under an injected vault token (the first on Windows), the account picker pinning a session to a second account on a live process, the sign-in dialog opened from the bad-token discovery banner, the real app-server spawning a `.mcp.json` stub and the model calling its tool after the approval card was allowed.
@@ -27,9 +29,13 @@ Reviewed line by line, gated (typecheck, lint, full `bun run test` — 655 files
 
 Drive recipe that worked (Windows, Git Bash): the `.cache/app-shot-home.mjs` harness copy with `APP_SHOT_ELECTRON_ARGS="-r;<win path>\home-shim.cjs"`, `CLAUDEUI_TEST_HOME=<win path>\home`, `CODEX_HOME=<win path>\home\.codex`, `MSYS_NO_PATHCONV=1`; open the page with `--eval "window.dispatchEvent(new CustomEvent('open-settings',{detail:{page:'codex'}}))"` then `--wait 9000` (one app-server start per read and per write, about 3 s each on this machine), click by `CodexConfigPane.*` testids, and read the DOM back with one `--eval` before the screenshot. Click a select BEFORE actions that scroll the dialog: the anchored menu did not stay open after a scroll (pre-existing, noted in the spec). The fabricated `config.toml` must be reset between drives.
 
-### Next: Slice 5b
+### Slice 5b: landed 2026-09-14 (the commit after `3be8e0b2`)
 
-Dispatch Slice 5b from its kickoff in `docs/codex-accounts-spec.md` (Codex segments on Default models / Cross-engine dispatch / Auto-mode judge / Permissions, `engines/codex.json` defaults, the two stale strings). The config service it writes `auto_review.policy` through is `src/core/codex/codex-config.ts` via `window.api.writeCodexConfig` / `useCodexConfig` (`use-codex-config.ts`), whose result is discriminated on `status`. Then ADR-068's status line to "Implemented" with an as-built section.
+Reviewed line by line, gated (typecheck, lint, full `bun run test` — 658 files, 12276 tests — `check-codex-protocol`, prettier, `git diff --check`), and driven twice in the real app against the isolated profile (the three topic segments plus the permissions row; then the default-model pick, the written `engines/codex.json`, and a session seeded from it through `window.__claudeuiVerifier.sessionStore`). One reviewer fix: the configured effort is now PAIRED with the configured model (`codexDefaultEffortFor` in `InputBox.tsx`), because a sticky pick of another model would have made `CodexSession.validateEffort` refuse every new session; guard proven failing first. The implementer's deviations (all four `DISPATCH_CALLERS` corrected, empty-catalog `null` kept for the sign-in banner, one shared `engines/codex.json` object) were checked and accepted; details in the spec's Landed paragraph.
+
+### Next
+
+ADR-068 is flipped to Implemented with an as-built section in the same session. Remaining for this arc: a push when Daniel asks; the deferred items under "Open items after Slice 5" below; the two pre-existing observations recorded in the 5a/5b Landed paragraphs (anchored select menu closing after a scroll; `PiSessionDefaultModel`'s private copy of `engines/pi.json`).
 
 ### How this arc is worked
 
@@ -50,7 +56,7 @@ Per-thread `config.mcp_servers` overrides merge per key into the user's table (b
 
 ### Open items after Slice 5
 
-Slice 5b; ADR-068's status line to "Implemented" with an as-built section once 5b lands; a push when Daniel asks; the model-picker and welcome-tile sign-in entry points deferred from Slice 3; pi has no distinguishable auth error (no `session:auth-required` from it); Codex→Codex dispatch is refused so the "caller pin reaches the target" wiring is dormant; headless-server device code is designed but not built; the macOS legs of the new integration tests have not run; the Rename → Orrery arc is untouched by this work.
+A push when Daniel asks; the model-picker and welcome-tile sign-in entry points deferred from Slice 3; pi has no distinguishable auth error (no `session:auth-required` from it); Codex→Codex dispatch is refused so the "caller pin reaches the target" wiring is dormant; headless-server device code is designed but not built; the macOS legs of the new integration tests have not run; the Rename → Orrery arc is untouched by this work.
 
 ## Resume here (pre-ADR-068 — historical)
 

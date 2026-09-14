@@ -57,7 +57,7 @@ import {
 } from './RemoteServerSettings'
 import { ProviderList } from './ProviderList'
 import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
-import { useOpencodeInstalled, usePiInstalled } from './use-engine-installed'
+import { useEngineInstalled, useOpencodeInstalled, usePiInstalled } from './use-engine-installed'
 import {
   OpencodeSessionBehaviorSection,
   OpencodeToolOutputSection,
@@ -69,6 +69,7 @@ import {
 } from './OpencodeConfigPanes'
 import {
   CodexAgentsSection,
+  CodexAutoReviewSection,
   CodexContextSection,
   CodexHistorySection,
   CodexInstructionsSection,
@@ -249,10 +250,24 @@ function ProxyTestButton({ proxy }: { proxy: ProxySettings }): React.JSX.Element
 
 // ── Global Permissions summary (rendered inside SettingsDialog) ──────
 
+/**
+ * Which engines the user's Claude permission rules actually reach.
+ *
+ * Codex only when its binary is present: `syncCodexRulesFile` refuses to compile
+ * anything without one (`codexBinaryAvailable()` in rules-sync.ts), so claiming
+ * the chip on a machine with no Codex would advertise a file that is never
+ * written. Declared out here so the array identity is stable across renders.
+ */
+const CLAUDE_ONLY_RULE_ENGINES: readonly EngineId[] = ['claude']
+const CLAUDE_AND_CODEX_RULE_ENGINES: readonly EngineId[] = ['claude', 'codex']
+
 function GlobalPermissionsSummary(): React.JSX.Element {
   const [perms, setPerms] = useState<ClaudePermissions | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
   const cwd = useActiveSession((s) => s.cwd)
+  // `null` while the probe is in flight — the Claude-only form until it answers,
+  // so a slow round trip never flashes a Codex chip at a machine without it.
+  const codexInstalled = useEngineInstalled('codex') === true
 
   useEffect(() => {
     window.api
@@ -285,10 +300,23 @@ function GlobalPermissionsSummary(): React.JSX.Element {
         testid="GlobalPermissionsSummary"
         label="Permission rules"
         description={summary}
-        engine="claude"
+        // Two chips when Codex is there, because these rules really do reach
+        // two engines (ADR-067): the USER-scope Bash rules are compiled into
+        // Codex's own execpolicy file, where a deny becomes a `forbidden` prefix
+        // and an allow skips the ask. PROJECT-scope rules are not compiled — the
+        // file is global to the user config layer, so one project's allows would
+        // leak into every other, which is what the row below says.
+        engine={codexInstalled ? CLAUDE_AND_CODEX_RULE_ENGINES : CLAUDE_ONLY_RULE_ENGINES}
         action="Edit rules"
         onAction={() => setDialogOpen(true)}
       />
+      {codexInstalled && (
+        <SettingRow
+          testid="GlobalPermissionsSummary.codexRules"
+          dimmed
+          description="Your user-scope Bash rules are also compiled into ~/.codex/rules/claudeui.rules, so a deny blocks the command in every Codex mode. Project-scope rules are not compiled."
+        />
+      )}
       <PermissionsDialog
         open={dialogOpen}
         onClose={() => setDialogOpen(false)}
@@ -838,17 +866,31 @@ function dispatchSnapshot(engineId: EngineId): EngineConfig | null {
   return DISPATCH_STORES.get(engineId)?.config ?? null
 }
 
-/** Merge a patch into the engine's `dispatch` block and persist the whole file. */
-function updateDispatchConfig(engineId: EngineId, patch: Partial<DispatchConfig>): void {
+/**
+ * Merge a patch into the engine's config and persist the WHOLE file.
+ *
+ * The top-level entry point, because `dispatch` is not the only block edited
+ * through this store any more: Codex's Default-models segment writes
+ * `codexConfig` into the same `engines/codex.json`, and `saveEngineConfig`
+ * replaces the file with whatever it is handed. Two panes holding two copies is
+ * exactly the data loss the store's doc comment above describes — and they ARE
+ * mounted together, because a settings SEARCH mounts up to eight live buckets
+ * from different pages at once.
+ */
+function updateEngineConfigObject(engineId: EngineId, patch: Partial<EngineConfig>): void {
   const entry = DISPATCH_STORES.get(engineId)
   if (!entry || entry.config === null) return
-  const next: EngineConfig = {
-    ...entry.config,
-    dispatch: { ...(entry.config.dispatch ?? {}), ...patch }
-  }
+  const next: EngineConfig = { ...entry.config, ...patch }
   entry.config = next
   emitDispatchConfig(entry)
   window.api.saveEngineConfig(engineId, next).catch(() => {})
+}
+
+/** Merge a patch into the engine's `dispatch` block and persist the whole file. */
+function updateDispatchConfig(engineId: EngineId, patch: Partial<DispatchConfig>): void {
+  const current = DISPATCH_STORES.get(engineId)?.config
+  if (!current) return
+  updateEngineConfigObject(engineId, { dispatch: { ...(current.dispatch ?? {}), ...patch } })
 }
 
 interface DispatchConfigApi {
@@ -859,14 +901,25 @@ interface DispatchConfigApi {
   update: (patch: Partial<DispatchConfig>) => void
 }
 
-function useDispatchConfig(engineId: EngineId): DispatchConfigApi {
+/** The shared `EngineConfig` object for one engine — the store, unwrapped. */
+function useEngineConfigObject(engineId: EngineId): {
+  engineCfg: EngineConfig | null
+  update: (patch: Partial<EngineConfig>) => void
+} {
   const subscribe = useCallback(
     (listener: () => void) => subscribeDispatchConfig(engineId, listener),
     [engineId]
   )
   const getSnapshot = useCallback(() => dispatchSnapshot(engineId), [engineId])
   const engineCfg = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+  return {
+    engineCfg,
+    update: useCallback((patch) => updateEngineConfigObject(engineId, patch), [engineId])
+  }
+}
 
+function useDispatchConfig(engineId: EngineId): DispatchConfigApi {
+  const { engineCfg } = useEngineConfigObject(engineId)
   return {
     engineCfg,
     dispatch: engineCfg?.dispatch ?? {},
@@ -1163,6 +1216,8 @@ const OPENCODE_DISPATCH_ABSENT =
   'opencode is not installed. Cross-engine dispatch lets a Claude or pi session delegate a task to an opencode agent (e.g. a GPT-backed review).'
 const PI_DISPATCH_ABSENT =
   'pi is not installed. Cross-engine dispatch lets a Claude or opencode session delegate a task to a pi agent.'
+const CODEX_DISPATCH_ABSENT =
+  'Codex is not installed. Cross-engine dispatch lets a Claude, opencode or pi session delegate a task to a Codex agent.'
 
 export function ClaudeDispatchIntoSection(): React.JSX.Element {
   const installed = useOpencodeInstalled()
@@ -1247,6 +1302,38 @@ export function PiDispatchLimitsSection(): React.JSX.Element {
   )
 }
 
+/**
+ * Codex as a dispatch TARGET (ADR-068 §6, Slice 5b). `resolveAndRunCodex` has
+ * read `engines/codex.json#dispatch` — `defaultModel`, `allowedModels`,
+ * `maxCostUsd` — since ADR-033 slice H; only the pane was missing, which is why
+ * `DISPATCH_CALLERS.codex` still said "unsupported". No timeouts here: the
+ * turn/idle watchdog belongs to the opencode target path alone.
+ */
+export function CodexDispatchIntoSection(): React.JSX.Element {
+  const installed = useEngineInstalled('codex')
+  return (
+    <DispatchIntoSection
+      engineId="codex"
+      testid="CodexDispatchSection"
+      installed={installed}
+      notInstalledMessage={CODEX_DISPATCH_ABSENT}
+      noModelsMessage="No Codex models detected."
+    />
+  )
+}
+
+export function CodexDispatchLimitsSection(): React.JSX.Element {
+  const installed = useEngineInstalled('codex')
+  return (
+    <DispatchLimitsSection
+      engineId="codex"
+      testid="CodexDispatchSection"
+      installed={installed}
+      notInstalledMessage={CODEX_DISPATCH_ABSENT}
+    />
+  )
+}
+
 // ── Whole-direction compositions ─────────────────────────────────────
 //
 // One direction's two halves, in page order. The dialog mounts the halves
@@ -1278,6 +1365,139 @@ export function PiDispatchSection(): React.JSX.Element {
       <PiDispatchIntoSection />
       <PiDispatchLimitsSection />
     </>
+  )
+}
+
+// ── Codex session defaults (Models & providers › Default models) ─────
+//
+// ClaudeUI's OWN default for a Codex session, NOT `config.toml`. Codex already
+// resolves a `model` from its own layers for the working directory; this is what
+// ClaudeUI names on `turn/start`, which wins over that. Blank therefore means
+// "say nothing", and that is what keeps the native value in charge — the
+// behaviour every Codex session had before this pane existed (ADR-068 §6).
+//
+// It writes `codexConfig` into the SAME `engines/codex.json` the Dispatch page's
+// two cards write `dispatch` into, so it shares their config object rather than
+// holding its own copy (ADR-065 § "two panes over one config"). With separate
+// copies, a settings SEARCH — which mounts live panes from several pages at once
+// — would let whichever saved second erase the other's block.
+
+/** The empty row of the Codex model picker: no ClaudeUI opinion at all. */
+const CODEX_MODEL_DEFAULT_LABEL = "Default (Codex's own configured model)"
+/** The empty row of the effort select. */
+const CODEX_EFFORT_DEFAULT_LABEL = "Default (the model's own tier)"
+
+/**
+ * The native reasoning tiers to offer.
+ *
+ * Per MODEL when a default model is chosen — Codex validates the effort against
+ * the model's `supportedReasoningEfforts` at thread start and REFUSES a tier it
+ * does not publish, so offering another model's tiers here would configure a
+ * session that cannot start. With no model chosen the union is the honest set:
+ * the session could run on any of them.
+ */
+function codexEffortOptions(models: ModelInfo[], selected: string): string[] {
+  const scope = selected ? models.filter((m) => m.value === selected) : models
+  return [...new Set(scope.flatMap((m) => (m.nativeEffortOptions ?? []).map((o) => o.value)))]
+}
+
+export function CodexDefaultsSection(): React.JSX.Element {
+  const installed = useEngineInstalled('codex')
+  const { engineCfg, update } = useEngineConfigObject('codex')
+  const models = useDispatchModels('codex')
+  const testid = 'CodexDefaultsSection'
+
+  const gate = dispatchGateRow(
+    testid,
+    installed,
+    engineCfg !== null,
+    'Codex is not installed, so there is no session to give a default model to.'
+  )
+  if (gate) return gate
+
+  const codexConfig = engineCfg?.codexConfig ?? {}
+  const defaultModel = codexConfig.defaultModel ?? ''
+  const defaultEffort = codexConfig.defaultEffort ?? ''
+  const efforts = codexEffortOptions(models, defaultModel)
+
+  // Both keys live in one block, so one writer — a partial write of `codexConfig`
+  // would drop the sibling key.
+  const save = (patch: { defaultModel?: string; defaultEffort?: string }): void => {
+    const next = { ...codexConfig, ...patch }
+    update({
+      codexConfig: {
+        ...(next.defaultModel ? { defaultModel: next.defaultModel } : {}),
+        ...(next.defaultEffort ? { defaultEffort: next.defaultEffort } : {})
+      }
+    })
+    // Mirror into the store so sessions created later in THIS app run pick the
+    // change up without a restart — the same rule `setPiDefaultModel` follows.
+    useSessionStore.getState().setCodexDefaults({
+      ...(patch.defaultModel !== undefined ? { model: patch.defaultModel } : {}),
+      ...(patch.defaultEffort !== undefined ? { effort: patch.defaultEffort } : {})
+    })
+  }
+
+  // A tier the chosen model does not publish would make every new session fail
+  // at `thread/start`, so it is surfaced rather than silently dropped.
+  const effortOrphaned = !!defaultEffort && efforts.length > 0 && !efforts.includes(defaultEffort)
+
+  return (
+    <div data-testid={testid} className="divide-y divide-border/55">
+      <div>
+        <SettingRow
+          testid={`${testid}.defaultModelRow`}
+          label="Default model"
+          description="The model new Codex sessions start with. Unset lets Codex pick from its own config for the working directory."
+          keyText="engines/codex.json · codexConfig.defaultModel"
+          modified={defaultModel !== ''}
+          onReset={() => save({ defaultModel: '' })}
+        >
+          <span data-testid={`${testid}.defaultModel`} data-value={defaultModel}>
+            <ModelPicker
+              variant="field"
+              placement="down"
+              emptyOption={{ label: CODEX_MODEL_DEFAULT_LABEL }}
+              models={toModelDisplays(models)}
+              selectedModel={selectedModelDisplay(models, defaultModel, CODEX_MODEL_DEFAULT_LABEL)}
+              onSelectModel={(v) => save({ defaultModel: v })}
+            />
+          </span>
+        </SettingRow>
+        <StaleModelNotice testid={`${testid}.defaultModel`} models={models} value={defaultModel} />
+      </div>
+
+      <SettingRow
+        testid={`${testid}.defaultEffortRow`}
+        label="Reasoning effort"
+        description="The native tier new Codex sessions start on. Only the tiers the chosen model publishes are offered."
+        keyText="engines/codex.json · codexConfig.defaultEffort"
+        modified={defaultEffort !== ''}
+        onReset={() => save({ defaultEffort: '' })}
+      >
+        <SelectField
+          testid={`${testid}.defaultEffort`}
+          dataId="codexConfig.defaultEffort"
+          value={defaultEffort}
+          options={[
+            { value: '', label: CODEX_EFFORT_DEFAULT_LABEL },
+            ...efforts.map((value) => ({
+              value,
+              label: value.charAt(0).toUpperCase() + value.slice(1)
+            }))
+          ]}
+          onChange={(v) => save({ defaultEffort: v })}
+        />
+      </SettingRow>
+
+      {effortOrphaned && (
+        <SettingRow
+          testid={`${testid}.staleEffort`}
+          label={`"${defaultEffort}" is not a tier ${defaultModel} publishes, so new sessions would be refused at thread start. Pick one of: ${efforts.join(', ')}.`}
+          labelClassName="text-warning"
+        />
+      )}
+    </div>
   )
 }
 
@@ -4298,6 +4518,106 @@ export const SECTIONS: Section[] = [
         keywords:
           'codex config.toml raw hooks plugins marketplaces skills otel notify model_providers profiles projects mcp_oauth apps memories goals file_opener advanced',
         render: () => <CodexRawConfigSection />
+      }
+    ]
+  },
+  // ── Codex on the TOPIC pages (ADR-068 §6, Slice 5b) ────────────────
+  //
+  // Three sections that are not the Codex engine page: the Codex segment of
+  // Default models, of Cross-engine dispatch, and of the Auto-mode judge. They
+  // live here rather than on the Codex page because a user configuring "default
+  // models" is comparing engines, not visiting one — which is the whole reason
+  // ADR-065 made those cards per-engine segments.
+  {
+    id: 'codex-models',
+    label: 'Default model',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <ellipse cx="12" cy="5" rx="9" ry="3" />
+        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'codexModels',
+        label: 'Default model & effort',
+        keywords:
+          'codex default model reasoning effort tier codexConfig defaultModel defaultEffort engines/codex.json native',
+        render: () => <CodexDefaultsSection />
+      }
+    ]
+  },
+  {
+    id: 'codex-dispatch',
+    label: 'Cross-engine dispatch',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M17 3l4 4-4 4" />
+        <path d="M21 7H9a4 4 0 00-4 4v1" />
+        <path d="M7 21l-4-4 4-4" />
+        <path d="M3 17h12a4 4 0 004-4v-1" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'codexDispatch',
+        label: 'Cross-engine dispatch',
+        keywords:
+          'codex dispatch cross engine agent delegate model allowlist default target incoming',
+        render: () => <CodexDispatchIntoSection />
+      },
+      {
+        key: 'codexDispatchLimits',
+        label: 'Dispatch limits',
+        keywords: 'codex dispatch cost cap budget usd limit',
+        render: () => <CodexDispatchLimitsSection />
+      }
+    ]
+  },
+  {
+    id: 'codex-automode',
+    label: 'Auto mode',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        <path d="M9 12l2 2 4-4" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'codexAutoMode',
+        label: 'Guardian policy',
+        keywords:
+          'codex auto mode guardian auto_review policy reviewer judge native approvals_reviewer permission',
+        render: () => <CodexAutoReviewSection />
       }
     ]
   }

@@ -322,12 +322,20 @@ const CODEX_NEXT_SESSION = 'Applies to newly started Codex sessions.'
 /** `engines/<engine>.json` — the storage tag of a per-engine group. */
 const engineFile = (engine: EngineId): string => `engines/${engine}.json`
 
-/** Who can dispatch INTO each engine — the other two, named in the Limits note. */
+/**
+ * Who can dispatch INTO each engine — the other THREE, named in the Limits note.
+ * Every engine both hosts `dispatch_agent` and is an accepted target
+ * (`crossEngineDispatchAvailable` / the target switch in
+ * `cross-engine-dispatcher.ts`), so each row is the full complement minus
+ * itself: the dispatcher refuses same-engine work outright.
+ */
 const DISPATCH_CALLERS: Record<EngineId, string> = {
-  codex: 'unsupported',
-  claude: 'an opencode or pi',
-  opencode: 'a Claude or pi',
-  pi: 'a Claude or opencode'
+  // Codex became a real dispatch TARGET with ADR-033 slice H; only the settings
+  // pane was missing, which is what "unsupported" used to describe.
+  codex: 'a Claude, opencode or pi',
+  claude: 'an opencode, pi or Codex',
+  opencode: 'a Claude, pi or Codex',
+  pi: 'a Claude, opencode or Codex'
 }
 
 /**
@@ -336,7 +344,7 @@ const DISPATCH_CALLERS: Record<EngineId, string> = {
  * silent `appliesOn` would be computed and then dropped.
  */
 const DEFAULT_MODEL_NOTES: Record<EngineId, string> = {
-  codex: 'Codex uses its native configured model.',
+  codex: 'Applies to new Codex sessions.',
   claude: 'Applies to new Claude sessions.',
   opencode: 'Changes here apply when the opencode server restarts for a working directory.',
   pi: 'Applies to new pi sessions.'
@@ -404,12 +412,19 @@ export const PAGES: SettingsPage[] = [
       {
         id: 'judge',
         label: 'Auto-mode judge',
-        storage: engineFile,
+        // Codex is the odd one out on both fields: its reviewer is NATIVE
+        // (ADR-067), so what there is to configure is guardian policy text in
+        // Codex's own `config.toml`, not a judge model in `engines/codex.json`.
+        storage: (engine) => (engine === 'codex' ? CODEX_FILE : engineFile(engine)),
         appliesOn: 'next-session',
-        note: 'The judge sees tool calls, not their output. Read once per session — reopen a session to pick up a change.',
+        note: (engine) =>
+          engine === 'codex'
+            ? 'Codex reviews its own actions with the native guardian. Read once per thread — start a session to pick up a change.'
+            : 'The judge sees tool calls, not their output. Read once per session — reopen a session to pick up a change.',
         byEngine: {
           opencode: itemsOf('opencode-automode'),
-          pi: itemsOf('pi-automode')
+          pi: itemsOf('pi-automode'),
+          codex: itemsOf('codex-automode')
         }
       },
       {
@@ -484,13 +499,22 @@ export const PAGES: SettingsPage[] = [
         // are its own jsonc, read when the per-cwd SERVER restarts; pi's are
         // pi's settings.json, read at session start.
         storage: (engine) =>
-          engine === 'opencode' ? 'opencode.jsonc' : engine === 'pi' ? 'settings.json' : undefined,
+          engine === 'opencode'
+            ? 'opencode.jsonc'
+            : engine === 'pi'
+              ? 'settings.json'
+              : engine === 'codex'
+                ? engineFile('codex')
+                : undefined,
         appliesOn: (engine) => (engine === 'opencode' ? 'next-server-start' : 'next-session'),
         note: (engine) => DEFAULT_MODEL_NOTES[engine],
         byEngine: {
           claude: itemsOf('effortDefaults'),
           opencode: itemsOf('opencode-models'),
-          pi: itemsOf('pi-config-models')
+          pi: itemsOf('pi-config-models'),
+          // ClaudeUI's OWN default for a Codex session, in `engines/codex.json`
+          // — not the `model` key on the Codex page, which is Codex's file.
+          codex: itemsOf('codex-models')
         }
       },
       {
@@ -520,7 +544,8 @@ export const PAGES: SettingsPage[] = [
         byEngine: {
           claude: itemsOf('claude-dispatch', ['claudeDispatch']),
           opencode: itemsOf('opencode-dispatch', ['opencodeDispatch']),
-          pi: itemsOf('pi-dispatch', ['piDispatch'])
+          pi: itemsOf('pi-dispatch', ['piDispatch']),
+          codex: itemsOf('codex-dispatch', ['codexDispatch'])
         }
       },
       {
@@ -542,7 +567,8 @@ export const PAGES: SettingsPage[] = [
         byEngine: {
           claude: itemsOf('claude-dispatch', ['claudeDispatchLimits']),
           opencode: itemsOf('opencode-dispatch', ['opencodeDispatchLimits']),
-          pi: itemsOf('pi-dispatch', ['piDispatchLimits'])
+          pi: itemsOf('pi-dispatch', ['piDispatchLimits']),
+          codex: itemsOf('codex-dispatch', ['codexDispatchLimits'])
         }
       }
     ]
@@ -898,8 +924,12 @@ export function visibleGroups(
   return page.groups.filter((g) => !g.requires || (resolved ? resolved[g.requires] === true : true))
 }
 
-/** The engines a byEngine group offers, always in claude → opencode → pi order. */
-const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi']
+/**
+ * The engines a byEngine group offers, in the order the Engines rail lists their
+ * pages — claude → opencode → pi → codex. Codex joined last (ADR-068 §6); it is
+ * appended rather than slotted in so no existing segment changes position.
+ */
+const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi', 'codex']
 
 export function enginesOf(group: SettingsGroup): EngineId[] {
   if (!group.byEngine) return []
@@ -981,6 +1011,7 @@ export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; gro
   permissions: { page: 'sessions', group: 'permissions' },
   'opencode-automode': { page: 'sessions', group: 'judge' },
   'pi-automode': { page: 'sessions', group: 'judge' },
+  'codex-automode': { page: 'sessions', group: 'judge' },
   'trust-lists': { page: 'sessions', group: 'trust' },
   session: { page: 'sessions', group: 'retention' },
 
@@ -991,12 +1022,14 @@ export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; gro
   effortDefaults: { page: 'models', group: 'defaults' },
   'opencode-models': { page: 'models', group: 'defaults' },
   'pi-config-models': { page: 'models', group: 'defaults' },
+  'codex-models': { page: 'models', group: 'defaults' },
   'vendor-anthropic': { page: 'models', group: 'anthropic' },
   accounts: { page: 'models', group: 'accounts' },
 
   'claude-dispatch': { page: 'dispatch', group: 'into' },
   'opencode-dispatch': { page: 'dispatch', group: 'into' },
   'pi-dispatch': { page: 'dispatch', group: 'into' },
+  'codex-dispatch': { page: 'dispatch', group: 'into' },
 
   mockup: { page: 'mockups', group: 'network' },
 

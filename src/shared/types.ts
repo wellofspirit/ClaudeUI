@@ -654,6 +654,30 @@ export interface EngineConfig {
   dispatch?: DispatchConfig
   /** pi engine-configurable settings (M3). Lives in engines/pi.json. */
   piConfig?: PiConfig
+  /** Codex engine-configurable settings (ADR-068 §6). Lives in engines/codex.json. */
+  codexConfig?: CodexEngineConfig
+}
+
+/**
+ * ClaudeUI's OWN per-engine defaults for Codex — NOT `config.toml`.
+ *
+ * Codex's native file already carries a `model`, and the Engines › Codex page
+ * edits it through the app-server. This block is the ClaudeUI-side answer to a
+ * different question: what a session STARTED FROM CLAUDEUI runs on, which is
+ * carried on `turn/start` and therefore overrides whatever the working
+ * directory's layers resolve to. Blank means "say nothing", which is what makes
+ * the native value win — today's behaviour, and the reason neither key has a
+ * fallback constant the way `piConfig.defaultModel` has `PI_DEFAULT_MODEL`.
+ *
+ * A value here IS an explicit choice (ADR-059): a session seeded from it carries
+ * `codexModelExplicit`, so a model the catalog no longer lists banners rather
+ * than silently resolving to something else.
+ */
+export interface CodexEngineConfig {
+  /** Native Codex model id (`gpt-5.6-codex`), from `model/list`. */
+  defaultModel?: string
+  /** Native reasoning tier, from the selected model's `supportedReasoningEfforts`. */
+  defaultEffort?: string
 }
 
 /**
