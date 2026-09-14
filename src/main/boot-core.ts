@@ -41,7 +41,13 @@ import { setLiveSessionCanceller, cancelClaudeSessions } from './services/sessio
 import { claudeAuthProvider } from './auth/ClaudeAuthProvider'
 import { engineAuthRegistry } from './auth/EngineAuthRegistry'
 import { getHostWindow } from '../core/services/host-window'
-import { setHostAuth, setHostIsPackaged, setHostMockup, setHostPicker } from '../core/host'
+import {
+  setHostAuth,
+  setHostIsPackaged,
+  setHostMockup,
+  setHostOAuthLoopback,
+  setHostPicker
+} from '../core/host'
 import { routeHttpMockup, serveMockup } from './services/mockup-protocol'
 import type { SessionManager } from '../core/services/session-manager'
 import type { AutomationManager } from '../core/services/automation-manager'
@@ -127,6 +133,13 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
     return result.filePaths[0]
   })
   setHostIsPackaged(() => app.isPackaged)
+  // The vendor-OAuth redirect (`http://localhost:1455/auth/callback`, registered
+  // to the ChatGPT client and therefore unchangeable — ADR-057) lands on THIS
+  // machine's loopback, because the desktop opens the consent browser here. The
+  // headless server leaves this unset: there the redirect reaches the remote
+  // client's own loopback and the code comes back by paste-back or device code,
+  // so binding the fixed port would only make concurrent sign-ins collide.
+  setHostOAuthLoopback(true)
 
   // The desktop-auth dependencies the `auth:*` / `account:*` / `vendor-auth:*`
   // family needs on BOTH transports. `engineAuthRegistry` is populated by the

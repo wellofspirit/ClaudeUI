@@ -455,6 +455,19 @@ export interface CodexLoginFlowOptions {
   deps?: OAuthDeps
   /** Clock used for `expires` math. Defaults to Date.now. */
   now?: () => number
+  /**
+   * Bind the loopback callback server? Defaults to `true` (the desktop).
+   *
+   * `false` is the HEADLESS shape: the redirect URI is registered to CLIENT_ID
+   * and cannot change (ADR-057), so on `claudeui-server` the browser's redirect
+   * lands on the REMOTE machine's own loopback and can never reach this process.
+   * The listener would then receive nothing while holding the fixed port 1455
+   * for the whole `timeoutMs`, so two concurrent server sign-ins would collide
+   * on EADDRINUSE. With `false` everything else is identical — PKCE, state, the
+   * armed pending wait, the timeout, and a byte-identical authorize URL — and
+   * the code arrives through `completeFromPastedInput` instead.
+   */
+  loopback?: boolean
 }
 
 type TerminalResult = { ok: true; cred: VaultCredential } | { ok: false; err: Error }
@@ -480,6 +493,8 @@ export class CodexLoginFlow implements LoginFlow {
   private readonly timeoutMs: number
   private readonly deps: OAuthDeps
   private readonly now: () => number
+  /** Whether start() binds the loopback callback server. See CodexLoginFlowOptions.loopback. */
+  private readonly loopback: boolean
 
   private server: Server | undefined
   /** The port actually bound, read off server.address() after listen() resolves — may differ from requestedPort when requestedPort is 0. */
@@ -496,6 +511,7 @@ export class CodexLoginFlow implements LoginFlow {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
     this.deps = options.deps ?? defaultDeps()
     this.now = options.now ?? (() => Date.now())
+    this.loopback = options.loopback ?? true
   }
 
   /** `http://localhost:<port>/auth/callback` — the port actually bound once listening, else the requested one. */
@@ -525,12 +541,18 @@ export class CodexLoginFlow implements LoginFlow {
     // thrown start() and, `timeoutMs` later, rejects a pendingPromise no one is
     // awaiting — an unhandled rejection. On a bind failure, tear the (optimist-
     // ically armed) pending wait down and rethrow so the flow is left inert.
-    try {
-      await this.listen()
-    } catch (err) {
-      this.pending = undefined
-      this.pendingPromise = undefined
-      throw err
+    //
+    // With `loopback: false` there is nothing to bind and nothing to fail: the
+    // redirect never comes back to this host, so `boundPort` stays undefined and
+    // `redirectUri` falls through to the requested (registered) port.
+    if (this.loopback) {
+      try {
+        await this.listen()
+      } catch (err) {
+        this.pending = undefined
+        this.pendingPromise = undefined
+        throw err
+      }
     }
 
     this.timeoutHandle = setTimeout(() => {

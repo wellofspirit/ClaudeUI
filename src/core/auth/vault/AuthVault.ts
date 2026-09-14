@@ -4,6 +4,7 @@ import * as path from 'node:path'
 import { createHash, randomBytes } from 'node:crypto'
 import { validateSharedProviderId } from '../../../shared/shared-provider'
 import { logger } from '../../services/logger'
+import { hostOAuthLoopback } from '../../host'
 import { CodexLoginFlow, type LoginFlow, type VaultCredential } from './codex-oauth'
 import {
   CodexDeviceCodeFlow,
@@ -74,6 +75,14 @@ export interface AuthVaultDeps {
   deviceCodeFlowFactory?: () => DeviceCodeFlowLike
   /** Injectable account-id minter — tests want deterministic ids. */
   newAccountId?: () => string
+  /**
+   * Port for the DEFAULT loopback flow. Production never sets it (the redirect
+   * URI is registered to 1455 — ADR-057); it exists so a test can exercise the
+   * default factory on an ephemeral port instead of the fixed one. Ignored when
+   * `loginFlowFactory` is supplied, and deliberately absent from the module
+   * singleton's construction.
+   */
+  loginFlowPort?: number
 }
 
 /**
@@ -93,7 +102,21 @@ export class AuthVault {
 
   constructor(deps: AuthVaultDeps = {}) {
     this.now = deps.now ?? (() => Date.now())
-    this.loginFlowFactory = deps.loginFlowFactory ?? (() => new CodexLoginFlow({ now: this.now }))
+    // `hostOAuthLoopback()` is read per CALL, not captured here: this class has a
+    // module singleton (`authVault` below) constructed at import time, long
+    // before `bootCore()` publishes the desktop host hooks. An unwired host —
+    // `claudeui-server` — gets `false`, so its PKCE sign-ins never bind port
+    // 1455 and two concurrent ones cannot collide (the code arrives by
+    // paste-back; see `CodexLoginFlowOptions.loopback`).
+    const loginFlowPort = deps.loginFlowPort
+    this.loginFlowFactory =
+      deps.loginFlowFactory ??
+      (() =>
+        new CodexLoginFlow({
+          now: this.now,
+          loopback: hostOAuthLoopback(),
+          ...(loginFlowPort === undefined ? {} : { port: loginFlowPort })
+        }))
     this.deviceCodeFlowFactory =
       deps.deviceCodeFlowFactory ?? (() => new CodexDeviceCodeFlow({ now: this.now }))
     this.newAccountId = deps.newAccountId ?? (() => randomBytes(8).toString('hex'))

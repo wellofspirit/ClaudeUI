@@ -277,6 +277,7 @@ import { setIpcBridge } from '../../test/stubs/electron-shim'
 import { bootCore, type CoreBoot } from '../../main/boot-core'
 import { getSessionManager } from '../../core/ipc/session.ipc'
 import { getHostWindow } from '../../core/services/host-window'
+import { hostOAuthLoopback } from '../../core/host'
 import { syncCore } from '../../core/services/sync-host'
 import { listAuditLog, setRemoteConfig } from '../../core/services/db'
 
@@ -420,6 +421,14 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
     const status = core.remoteServer.getStatus()
     expect(status.running).toBe(true)
     expect(status.port).toBe(port)
+  })
+
+  it('publishes the desktop host hooks, including the OAuth loopback (F2)', () => {
+    // `bootCore()` is the ONE place the desktop wires the `src/core/host.ts`
+    // seams, and the loopback flag is the one whose UNSET fallback is a real
+    // behaviour (the headless server completes a ChatGPT PKCE sign-in by
+    // paste-back and must not bind port 1455). A desktop boot must publish it.
+    expect(hostOAuthLoopback()).toBe(true)
   })
 
   it('answers sync with a sync-full snapshot built from the canonical seeds', async () => {

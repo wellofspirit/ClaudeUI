@@ -54,6 +54,30 @@ function canListen(port: number): Promise<boolean> {
   })
 }
 
+/**
+ * True if a fresh server can bind `port` ON 127.0.0.1 — the exact interface
+ * CodexLoginFlow binds. `canListen()` above binds the wildcard address, which
+ * on Windows happily coexists with a 127.0.0.1 bind of the same port, so it can
+ * NOT be used to prove "nothing is listening".
+ */
+function canListenLoopback(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const probe = createServer()
+    probe.once('error', () => resolve(false))
+    probe.listen(port, '127.0.0.1', () => probe.close(() => resolve(true)))
+  })
+}
+
+/** A concrete, currently-free ephemeral port (bind 0, read it back, release it). */
+async function freePort(): Promise<number> {
+  const probe = createServer()
+  const port = await new Promise<number>((resolve) =>
+    probe.listen(0, '127.0.0.1', () => resolve((probe.address() as { port: number }).port))
+  )
+  await new Promise<void>((resolve) => probe.close(() => resolve()))
+  return port
+}
+
 describe('CodexLoginFlow', () => {
   it('resolves waitForCallback with a credential built from the mocked exchange, then frees the port', async () => {
     const idToken = makeJwt({ chatgpt_account_id: 'acct-1', email: 'user@example.com' })
@@ -210,5 +234,107 @@ describe('CodexLoginFlow', () => {
     } finally {
       await new Promise<void>((r) => blocker.close(() => r()))
     }
+  })
+})
+
+/**
+ * F2 — the headless server must not bind port 1455 for a ChatGPT PKCE sign-in.
+ *
+ * With `loopback: false` the flow keeps everything EXCEPT the listener: PKCE,
+ * state, the armed pending wait, the timeout, and the byte-identical authorize
+ * URL (the redirect URI is registered to CLIENT_ID and cannot change — ADR-057).
+ * The code arrives by paste-back instead of a redirect this host could receive.
+ */
+describe('CodexLoginFlow with loopback disabled (headless)', () => {
+  it('binds nothing, so two concurrent flows on the same port do not collide', async () => {
+    const port = await freePort()
+    const first = new CodexLoginFlow({ port, loopback: false, timeoutMs: 50_000 })
+    const second = new CodexLoginFlow({ port, loopback: false, timeoutMs: 50_000 })
+    try {
+      const a = await first.start()
+      const b = await second.start()
+
+      // Neither start() threw EADDRINUSE, and the port is still free: no listener.
+      expect(await canListenLoopback(port)).toBe(true)
+      // The authorize URL is unchanged — same registered redirect, same port.
+      for (const { authorizeUrl } of [a, b]) {
+        expect(new URL(authorizeUrl).searchParams.get('redirect_uri')).toBe(
+          `http://localhost:${port}/auth/callback`
+        )
+      }
+      expect(a.state).not.toBe(b.state)
+    } finally {
+      first.cancel()
+      second.cancel()
+    }
+  })
+
+  it('keeps the registered localhost:1455 redirect when no port is passed', async () => {
+    const flow = new CodexLoginFlow({ loopback: false, timeoutMs: 50_000 })
+    try {
+      const { authorizeUrl } = await flow.start()
+      expect(new URL(authorizeUrl).searchParams.get('redirect_uri')).toBe(
+        'http://localhost:1455/auth/callback'
+      )
+      // Whether the port is left unbound is proven on an ephemeral port above;
+      // probing 1455 here would fail spuriously on a dev box mid sign-in.
+    } finally {
+      flow.cancel()
+    }
+  })
+
+  it('completes through completeFromPastedInput with a matching state', async () => {
+    const idToken = makeJwt({ chatgpt_account_id: 'acct-headless', email: 'headless@example.com' })
+    const deps = fakeExchangeDeps({
+      id_token: idToken,
+      access_token: 'access-headless',
+      refresh_token: 'refresh-headless',
+      expires_in: 3600
+    })
+    const port = await freePort()
+    const flow = new CodexLoginFlow({ port, loopback: false, deps, now: () => 1_000 })
+    const { state } = await flow.start()
+    expect(await canListenLoopback(port)).toBe(true)
+
+    const cred = await flow.completeFromPastedInput(
+      `http://localhost:${port}/auth/callback?code=pasted-code&state=${encodeURIComponent(state)}`
+    )
+
+    expect(cred).toEqual({
+      type: 'oauth',
+      access: 'access-headless',
+      refresh: 'refresh-headless',
+      expires: 1_000 + 3600 * 1000,
+      accountId: 'acct-headless',
+      email: 'headless@example.com'
+    })
+    expect(flow.isSettled()).toBe(true)
+    // terminate() ran with no server to close — and left the port untouched.
+    expect(await canListenLoopback(port)).toBe(true)
+  })
+
+  it('rejects a mismatched pasted state as CSRF', async () => {
+    const flow = new CodexLoginFlow({ loopback: false, timeoutMs: 50_000 })
+    await flow.start()
+    await expect(flow.completeFromPastedInput('?code=c&state=not-the-state')).rejects.toThrow(
+      /CSRF/
+    )
+  })
+
+  it('cancel() rejects the pending wait', async () => {
+    const flow = new CodexLoginFlow({ loopback: false, timeoutMs: 50_000 })
+    await flow.start()
+    const waitPromise = flow.waitForCallback()
+
+    flow.cancel()
+
+    await expect(waitPromise).rejects.toThrow('Login cancelled')
+    expect(flow.isSettled()).toBe(true)
+  })
+
+  it('still arms the timeout', async () => {
+    const flow = new CodexLoginFlow({ loopback: false, timeoutMs: 15 })
+    await flow.start()
+    await expect(flow.waitForCallback()).rejects.toThrow(/timeout/i)
   })
 })

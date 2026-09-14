@@ -136,6 +136,38 @@ export function pickHostDirectory(): Promise<string | null> {
 }
 
 // ---------------------------------------------------------------------------
+// Vendor-OAuth loopback listener
+// ---------------------------------------------------------------------------
+
+let hostOAuthLoopbackEnabled: boolean | null = null
+
+/**
+ * Publish whether this host can RECEIVE the vendor-OAuth redirect on its own
+ * loopback (or clear it). The desktop wires `true` in `boot-core`: the browser
+ * it opens runs on the same machine, so `http://localhost:1455/auth/callback`
+ * lands on a listener this process owns.
+ */
+export function setHostOAuthLoopback(enabled: boolean | null): void {
+  hostOAuthLoopbackEnabled = enabled
+}
+
+/**
+ * Whether to bind the vendor-OAuth loopback listener. **Defaults to `false`** —
+ * i.e. the headless behaviour, which is the point of this seam.
+ *
+ * The ChatGPT client is registered to the fixed `http://localhost:1455/auth/callback`
+ * and the redirect URI cannot change (ADR-057), so on `claudeui-server` the
+ * redirect lands on the REMOTE browser's own loopback, never on the server box.
+ * A listener there would receive nothing, hold the fixed port for the flow's
+ * five-minute timeout, and make two concurrent sign-ins collide on `EADDRINUSE`.
+ * The code arrives by paste-back (`completeFromPastedInput`) or device code
+ * instead, neither of which needs a port.
+ */
+export function hostOAuthLoopback(): boolean {
+  return hostOAuthLoopbackEnabled ?? false
+}
+
+// ---------------------------------------------------------------------------
 // Native notifications
 // ---------------------------------------------------------------------------
 

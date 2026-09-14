@@ -15,6 +15,8 @@ import {
   CodexDeviceCodeFlow,
   DeviceCodeCancelledError
 } from '../../../../core/auth/vault/codex-device-code'
+import { setHostOAuthLoopback } from '../../../../core/host'
+import { createServer } from 'node:http'
 let testHome: string
 beforeEach(() => {
   testHome = mkdtempSync(join(tmpdir(), 'auth-vault-'))
@@ -411,5 +413,95 @@ describe('AuthVault lifecycle compatibility', () => {
     const vault = new AuthVault({ deviceCodeFlowFactory: () => (n++ === 0 ? boom : second) })
     await expect(vault.beginDeviceCodeLogin()).rejects.toThrow(/status 500/)
     await expect(vault.beginDeviceCodeLogin()).resolves.toMatchObject({ userCode: 'ABCD-1234' })
+  })
+})
+
+/**
+ * F2 — the DEFAULT login-flow factory reads the loopback host hook at CALL time.
+ *
+ * The headless server wires no host hooks at all, so the fallback (`false`) is
+ * the headless behaviour: a PKCE sign-in there completes by paste-back and must
+ * not bind port 1455 on the server box. The desktop publishes `true` in
+ * `bootCore()` — late, after the `authVault` singleton was constructed — which
+ * is why the flag is read per flow rather than captured in the constructor.
+ */
+describe('AuthVault default login flow — host loopback seam (F2)', () => {
+  afterEach(() => setHostOAuthLoopback(null))
+
+  /** True if a fresh server can bind `port` on 127.0.0.1 (the flow's own interface). */
+  function canListenLoopback(port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const probe = createServer()
+      probe.once('error', () => resolve(false))
+      probe.listen(port, '127.0.0.1', () => probe.close(() => resolve(true)))
+    })
+  }
+
+  async function freePort(): Promise<number> {
+    const probe = createServer()
+    const port = await new Promise<number>((resolve) =>
+      probe.listen(0, '127.0.0.1', () => resolve((probe.address() as { port: number }).port))
+    )
+    await new Promise<void>((resolve) => probe.close(() => resolve()))
+    return port
+  }
+
+  it('binds NO listener when no host published a loopback (headless fallback)', async () => {
+    const port = await freePort()
+    const vault = new AuthVault({ loginFlowPort: port })
+    try {
+      const { authorizeUrl } = await vault.beginLogin()
+      // The registered redirect is unchanged — only the listener is gone.
+      expect(new URL(authorizeUrl).searchParams.get('redirect_uri')).toBe(
+        `http://localhost:${port}/auth/callback`
+      )
+      expect(await canListenLoopback(port)).toBe(true)
+    } finally {
+      vault.cancelLogin()
+    }
+  })
+
+  it('two concurrent headless vaults do not collide on the fixed port', async () => {
+    const port = await freePort()
+    const first = new AuthVault({ loginFlowPort: port })
+    const second = new AuthVault({ loginFlowPort: port })
+    try {
+      await expect(first.beginLogin()).resolves.toMatchObject({
+        authorizeUrl: expect.stringContaining('oauth/authorize')
+      })
+      await expect(second.beginLogin()).resolves.toMatchObject({
+        authorizeUrl: expect.stringContaining('oauth/authorize')
+      })
+    } finally {
+      first.cancelLogin()
+      second.cancelLogin()
+    }
+  })
+
+  it('binds the loopback when the desktop host published one', async () => {
+    setHostOAuthLoopback(true)
+    const port = await freePort()
+    const vault = new AuthVault({ loginFlowPort: port })
+    await vault.beginLogin()
+    expect(await canListenLoopback(port)).toBe(false)
+
+    vault.cancelLogin()
+    // cancel() closes the server asynchronously; give terminate() its turn.
+    await vi.waitFor(async () => expect(await canListenLoopback(port)).toBe(true))
+  })
+
+  it('reads the hook per flow, so late desktop wiring is honoured', async () => {
+    const port = await freePort()
+    const vault = new AuthVault({ loginFlowPort: port })
+    await vault.beginLogin()
+    expect(await canListenLoopback(port)).toBe(true)
+    vault.cancelLogin()
+
+    // The desktop wires the hook AFTER the module singleton was constructed.
+    setHostOAuthLoopback(true)
+    await vault.beginLogin()
+    expect(await canListenLoopback(port)).toBe(false)
+    vault.cancelLogin()
+    await vi.waitFor(async () => expect(await canListenLoopback(port)).toBe(true))
   })
 })

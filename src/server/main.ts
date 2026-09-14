@@ -53,7 +53,13 @@ import { requireServerEngineAuth } from './engine-auth'
 import * as fs from 'fs'
 import * as path from 'path'
 import { setSqliteDriver, type SqliteDriver } from '../core/services/sqlite-driver'
-import { setHostAuth, setHostIsPackaged, setHostPaths, setHostPicker } from '../core/host'
+import {
+  setHostAuth,
+  setHostIsPackaged,
+  setHostOAuthLoopback,
+  setHostPaths,
+  setHostPicker
+} from '../core/host'
 import { logger } from '../core/services/logger'
 import { CliError, HELP_TEXT, parseServerArgs, type ServerOptions } from './cli'
 import { runFirstBootChain } from './first-boot'
@@ -162,6 +168,13 @@ function installHostAdapters(): void {
   // because the session layer would then believe a Claude account is active.
   // Vendor OAuth from a headless box is S4.
   setHostAuth(null)
+
+  // No vendor-OAuth loopback: the ChatGPT redirect is registered to
+  // `http://localhost:1455/auth/callback` (ADR-057), which lands on the REMOTE
+  // browser's own loopback, never on this box. The code arrives by paste-back
+  // or device code, so binding the fixed port here would only make concurrent
+  // sign-ins collide. `null` is the fallback anyway; stated so the choice reads.
+  setHostOAuthLoopback(null)
 }
 
 /** Apply the bootstrap flags that must land BEFORE the listener starts. */
