@@ -69,6 +69,12 @@ In this order:
 3. **Metering attribution — folded into the usage-tracking dashboard revamp**, a broader discussion after the Codex integration. Open questions to carry there: child vs cross-engine attribution on usage rows, metering under a pinned account's identity, double counting after rekey/resume, failed-turn spend, and whether an estimated USD cap can gate dispatch.
 4. **Grandchild rendering for every harness that supports nested dispatch** — not urgent; discuss the nested subagent view before building. Codex refuses a child's own spawn today with one error; the work is recursive binding, a nested transcript view, interrupt cascade, cold reconstruction and usage folding.
 
+### Follow-ups (Daniel, 2026-09-14)
+
+- **pi raises no `session:auth-required`.** pi's wire has no distinguishable auth error today, so a rejected ChatGPT credential on pi surfaces as a generic turn failure rather than the Slice 3 row. Needs a pi wire probe (`docs/protocol-pi/`, `vendor/pi-cli/docs/`) to find or request a typed signal before the row can be wired.
+- **macOS legs of the four new integration tests** (`codex-injection`, `codex-mcp-override`, `codex-mcp-approval`, `codex-config-write`) have only run on Windows x64; run them on a Mac with `CODEX_INTEGRATION=1`.
+- `mockup.html` (the owner's visual reference for the arc) was removed from the repo root on 2026-09-14 at Daniel's request; the spec's Landed paragraphs describe what was built from it.
+
 ### Open items after Slice 5
 
 pi has no distinguishable auth error (no `session:auth-required` from it); Codex→Codex dispatch is refused so the "caller pin reaches the target" wiring is dormant; headless-server device code is designed but not built; the macOS legs of the new integration tests have not run; the Rename → Orrery arc is untouched by this work.
