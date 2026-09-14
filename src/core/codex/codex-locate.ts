@@ -1,5 +1,5 @@
 import { lstatSync } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, posix } from 'node:path'
 import { getAppPath } from '../host'
 
 /**
@@ -44,7 +44,9 @@ export function codexLinuxSandboxWarning(
   const entries = (env.PATH ?? '').split(':').filter((entry) => entry !== '')
   // A PATH entry is a directory to look INSIDE, exactly as `which` does; an entry
   // that is itself named `bwrap` is not the executable.
-  if (entries.some((entry) => isExecutableFile(join(entry, 'bwrap')))) return null
+  // A Linux PATH is always POSIX; the platform join would produce backslashes
+  // when this runs under the Windows host's test suite.
+  if (entries.some((entry) => isExecutableFile(posix.join(entry, 'bwrap')))) return null
   return (
     'Codex sandboxed commands need bubblewrap: no `bwrap` on PATH. Install the ' +
     'bubblewrap package (apt, dnf, apk or pacman) and restart; until then every ' +
