@@ -2,7 +2,7 @@
 
 ## Resume here (ADR-068 arc — 2026-09-14)
 
-**Start with `docs/adr/adr-068_chatgpt-identity-vault-owned-codex-injection.md` and `docs/codex-accounts-spec.md`.** The spec is the source of truth for this arc: every slice has a kickoff, and every landed slice has a "Landed …" paragraph recording the as-built deviations. Slices 1–5b are landed; ADR-068 is Implemented. Next: a push when Daniel asks, then the deferred items listed under "Open items". The older "Resume here" below is the pre-ADR-068 state and stays as history.
+**Start with `docs/adr/adr-068_chatgpt-identity-vault-owned-codex-injection.md` and `docs/codex-accounts-spec.md`.** The spec is the source of truth for this arc: every slice has a kickoff, and every landed slice has a "Landed …" paragraph recording the as-built deviations. Slices 1–6 are landed; ADR-068 is Implemented. Next: a push when Daniel asks, then the deferred items listed under "Open items". The older "Resume here" below is the pre-ADR-068 state and stays as history.
 
 ### What is committed (all local on `codex-integration`, oldest first; nothing pushed since the previous handoff — confirm with `git log origin/codex-integration..HEAD`)
 
@@ -58,7 +58,7 @@ Per-thread `config.mcp_servers` overrides merge per key into the user's table (b
 
 - **Project-scope deny rules under Auto: leave it.** Daniel ruled that only user-scope Bash rules are compiled into `~/.codex/rules/claudeui.rules`; project-scope rules bind on Codex in plan/default/acceptEdits through ClaudeUI's evaluator and not under Auto. The Permissions row's sentence already says so. Rejected alternative: compiling into `<project>/.codex/rules/`, which writes a generated file into the repository and only loads for projects Codex marks trusted.
 - **Linux: Daniel takes it** on a Mac with Linux emulation (digest manifest, acquisition, app-server spawn, process tree). Nothing to prepare on Windows.
-- **Sign-in entry points (model picker + welcome tile):** the owner-approved mockup is `mockup.html` at the repo root (untracked, screen 5, "Model picker: greyed models whose provider is unauthenticated carry a Sign in item that opens the dialog"; "Welcome screen: engine tile without a usable account shows Sign in instead of Start"). Built next as Slice 6 of the spec.
+- **Sign-in entry points (model picker + composer): LANDED as Slice 6** the same day (the commit after `015616ad`), from the owner mockup `mockup.html` at the repo root (untracked). Reviewed, gated and driven with and without a fabricated ChatGPT account; details in the spec's Slice 6 Landed paragraph.
 
 ### Roadmap after the Codex integration (Daniel, 2026-09-14)
 
@@ -71,7 +71,7 @@ In this order:
 
 ### Open items after Slice 5
 
-the model-picker and welcome-tile sign-in entry points deferred from Slice 3; pi has no distinguishable auth error (no `session:auth-required` from it); Codex→Codex dispatch is refused so the "caller pin reaches the target" wiring is dormant; headless-server device code is designed but not built; the macOS legs of the new integration tests have not run; the Rename → Orrery arc is untouched by this work.
+pi has no distinguishable auth error (no `session:auth-required` from it); Codex→Codex dispatch is refused so the "caller pin reaches the target" wiring is dormant; headless-server device code is designed but not built; the macOS legs of the new integration tests have not run; the Rename → Orrery arc is untouched by this work.
 
 ## Resume here (pre-ADR-068 — historical)
 

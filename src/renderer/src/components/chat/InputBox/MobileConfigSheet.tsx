@@ -28,6 +28,7 @@ import {
   ADAPTIVE_UNSUPPORTED_TOOLTIP,
   accountLabel,
   deriveModelGroups,
+  groupSignIn,
   unsupportedTooltip,
   type AccountChoice,
   type ModelDisplay
@@ -175,6 +176,8 @@ function OptionButton({
   dataValue,
   active,
   disabled,
+  /** Still selectable, just visibly de-emphasised (an unauthenticated provider's models). */
+  dimmed,
   title,
   onClick,
   children
@@ -183,6 +186,7 @@ function OptionButton({
   dataValue: string
   active: boolean
   disabled?: boolean
+  dimmed?: boolean
   title?: string
   onClick: () => void
   children: React.ReactNode
@@ -196,6 +200,8 @@ function OptionButton({
       title={title}
       onClick={onClick}
       className={`w-full flex items-center justify-between gap-3 px-4 min-h-[52px] text-left transition-colors border-b border-border/50 last:border-b-0 ${
+        !disabled && dimmed ? 'opacity-60 ' : ''
+      }${
         disabled
           ? 'opacity-40 cursor-not-allowed text-text-muted'
           : active
@@ -294,6 +300,9 @@ function ModelPage({
   onSelect: (value: string) => void
 }): React.JSX.Element {
   const [freeOnly, setFreeOnly] = useState(false)
+  // Same source and same rule as the desktop ModelPicker (ADR-068 §3, Slice 6).
+  const providerAuth = useSessionStore((state) => state.providerAuth)
+  const openSignIn = useSessionStore((state) => state.openSignIn)
   const groups = useMemo(() => deriveModelGroups(models), [models])
   const isGrouped = groups.length > 1
   const hasFreeModels = useMemo(() => models.some((m) => m.free), [models])
@@ -323,43 +332,61 @@ function ModelPage({
           </button>
         </div>
       )}
-      {displayedGroups.map((group) => (
-        <div key={group.key}>
-          {isGrouped && (
-            <div className="px-4 pt-3 pb-1 text-[10px] text-text-muted font-medium uppercase tracking-wider">
-              {group.label}
-            </div>
-          )}
-          {group.items.map((m) => (
-            <OptionButton
-              key={m.value}
-              testId="MobileConfigSheet.modelOption"
-              dataValue={m.value}
-              active={m.value === selectedModel.value}
-              onClick={() => onSelect(m.value)}
-            >
-              <div className="min-w-0 flex flex-col gap-0.5">
-                <span className="flex items-center gap-1.5 min-w-0">
-                  <span className="text-[13px] truncate">{m.shortName}</span>
-                  {m.free && (
-                    <span
-                      data-testid="MobileConfigSheet.modelFreeBadge"
-                      className="shrink-0 text-[9px] px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-medium uppercase tracking-wide"
-                    >
-                      Free
+      {displayedGroups.map((group) => {
+        const signIn = groupSignIn(group, providerAuth)
+        return (
+          <div key={group.key}>
+            {isGrouped && (
+              <div className="px-4 pt-3 pb-1 text-[10px] text-text-muted font-medium uppercase tracking-wider">
+                {group.label}
+              </div>
+            )}
+            {signIn && (
+              // The DESKTOP testid on purpose: the two surfaces never co-render
+              // (isMobile picks one), and one selector keeps a drive from having
+              // to know which composer it is looking at.
+              <button
+                type="button"
+                data-testid="ModelPicker.signIn"
+                data-id={signIn.providerId}
+                onClick={() => openSignIn({ providerId: signIn.providerId, mode: 'reauth' })}
+                className="w-full flex items-center px-4 min-h-[44px] text-[13px] text-accent text-left border-b border-border/50 cursor-pointer"
+              >
+                Sign in to {signIn.label}
+              </button>
+            )}
+            {group.items.map((m) => (
+              <OptionButton
+                key={m.value}
+                testId="MobileConfigSheet.modelOption"
+                dataValue={m.value}
+                active={m.value === selectedModel.value}
+                dimmed={!!signIn}
+                onClick={() => onSelect(m.value)}
+              >
+                <div className="min-w-0 flex flex-col gap-0.5">
+                  <span className="flex items-center gap-1.5 min-w-0">
+                    <span className="text-[13px] truncate">{m.shortName}</span>
+                    {m.free && (
+                      <span
+                        data-testid="MobileConfigSheet.modelFreeBadge"
+                        className="shrink-0 text-[9px] px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-medium uppercase tracking-wide"
+                      >
+                        Free
+                      </span>
+                    )}
+                  </span>
+                  {m.description && (
+                    <span className="text-[11px] text-text-muted truncate">
+                      {m.description.split('·')[1]?.trim()}
                     </span>
                   )}
-                </span>
-                {m.description && (
-                  <span className="text-[11px] text-text-muted truncate">
-                    {m.description.split('·')[1]?.trim()}
-                  </span>
-                )}
-              </div>
-            </OptionButton>
-          ))}
-        </div>
-      ))}
+                </div>
+              </OptionButton>
+            ))}
+          </div>
+        )
+      })}
     </div>
   )
 }

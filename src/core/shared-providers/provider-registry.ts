@@ -186,11 +186,16 @@ export async function listProviderRegistry(): Promise<ProviderRegistrySnapshot> 
       perSession:
         definitions.find((definition) => definition.id === CHATGPT_PROVIDER_ID)?.accounts
           ?.perSession === true,
-      list: vaultStatus.accounts.map(({ id, email, accountId, planType }) => ({
+      // `needsReauth` rides along because a stored account IS the credential
+      // (`sharedCredential`): without it a revoked refresh token still reads
+      // `connected` everywhere downstream. It is a boolean the vault already
+      // publishes through `getStatus()`, never token material.
+      list: vaultStatus.accounts.map(({ id, email, accountId, planType, needsReauth }) => ({
         id,
         ...(email ? { email } : {}),
         ...(accountId ? { accountId } : {}),
-        ...(planType ? { planType } : {})
+        ...(planType ? { planType } : {}),
+        ...(needsReauth ? { needsReauth: true } : {})
       }))
     },
     opencodeCatalog,

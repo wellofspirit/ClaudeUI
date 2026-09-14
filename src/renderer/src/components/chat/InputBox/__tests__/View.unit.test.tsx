@@ -478,3 +478,50 @@ describe('StatusLine — {cost} placeholder', () => {
     expect(renderWithCost(1.5)).toHaveTextContent('Cost: $1.50')
   })
 })
+
+/**
+ * The composer's pre-spawn sign-in hint (ADR-068 §3, Slice 6). The VIEW only
+ * renders what InputBox composed; the pre-spawn gating itself is guarded in
+ * InputBox.component.test.ts.
+ */
+describe('InputBoxView — sign-in hint', () => {
+  beforeEach(() => {
+    useSessionStore.setState({ signInDialog: null })
+  })
+
+  it('renders nothing when there is no hint', () => {
+    render(<InputBoxView {...makeProps()} />)
+    expect(screen.queryByTestId('InputBox.signInHint')).toBeNull()
+  })
+
+  it('names the engine and the provider, and opens the dialog in reauth mode', () => {
+    render(
+      <InputBoxView
+        {...makeProps({
+          signInHint: { providerId: 'chatgpt', engineLabel: 'Codex', providerLabel: 'ChatGPT' }
+        })}
+      />
+    )
+    const hint = screen.getByTestId('InputBox.signInHint')
+    expect(hint).toHaveAttribute('data-id', 'chatgpt')
+    expect(hint).toHaveTextContent('Codex needs a ChatGPT sign-in.')
+
+    fireEvent.click(screen.getByTestId('InputBox.signInHint.action'))
+    expect(useSessionStore.getState().signInDialog).toEqual({
+      providerId: 'chatgpt',
+      mode: 'reauth'
+    })
+  })
+
+  it('never disables Send — sending anyway is the honest path (ADR-030)', () => {
+    render(
+      <InputBoxView
+        {...makeProps({
+          text: 'hello',
+          signInHint: { providerId: 'anthropic', engineLabel: 'Claude', providerLabel: 'Anthropic' }
+        })}
+      />
+    )
+    expect(screen.getByTestId('InputBox.send')).not.toBeDisabled()
+  })
+})

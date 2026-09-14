@@ -43,6 +43,7 @@ import {
   type SignInProviderId,
   type SignInRequest
 } from '../../stores/session-store'
+import { SIGN_IN_PROVIDER_LABEL } from '../../utils/sign-in-provider'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { useEscapeLayer } from '../shared/use-escape-layer'
 import { SettingRow, Button } from '../SettingsDialog/settings-controls'
@@ -56,10 +57,9 @@ const CODEX_VENDOR_ID = 'openai-codex'
 /** The shared vault's id for the ChatGPT subscription. */
 const CHATGPT_ID = 'chatgpt'
 
-const PROVIDER_NAME: Record<SignInProviderId, string> = {
-  anthropic: 'Claude',
-  chatgpt: 'ChatGPT'
-}
+// One name table for every entry point (Slice 6): the picker item, the composer
+// hint and this heading must agree on what the provider is called.
+const PROVIDER_NAME = SIGN_IN_PROVIDER_LABEL
 
 const PROVIDER_BLURB: Record<SignInProviderId, string> = {
   anthropic: 'Your Claude subscription, used by Claude Code sessions.',

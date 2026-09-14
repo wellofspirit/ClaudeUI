@@ -15,6 +15,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, act, within } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { ProviderList } from '../ProviderList'
+import { useSessionStore } from '../../../stores/session-store'
+import { UNKNOWN_PROVIDER_AUTH } from '../../../utils/sign-in-provider'
 import type {
   ProviderEntry,
   ProviderRegistrySnapshot
@@ -242,5 +244,51 @@ describe('Manage', () => {
     })
     expect(navigate).toHaveBeenCalledWith({ page: 'models', group: 'accounts' })
     expect(screen.queryByTestId('ProviderSheet')).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * The composer's hint and the model picker's Sign in item read the SAME
+ * registry through the store (ADR-068 §3, Slice 6), and it publishes no change
+ * event. Every sheet write lands on this component's re-read, so the store
+ * refresh has to happen here or those surfaces go stale behind an open settings
+ * dialog — with the picker still offering a sign-in the user just completed.
+ */
+describe('the store’s provider-auth view', () => {
+  beforeEach(() => {
+    useSessionStore.setState({ providerAuth: UNKNOWN_PROVIDER_AUTH })
+  })
+
+  it('is refreshed from the same read the list makes', async () => {
+    await renderList()
+    expect(useSessionStore.getState().providerAuth.chatgpt).toBe('authenticated')
+    expect(useSessionStore.getState().providerAuth.chatgptRoutes).toEqual({
+      pi: true,
+      opencode: true
+    })
+  })
+
+  it('follows a real sheet write, through the same re-read', async () => {
+    app.bridge.ipcMain.handle('shared-provider:set-route', async () => undefined)
+    await renderList()
+    await act(async () => {
+      fireEvent.click(
+        screen.getAllByTestId('ProviderList.manage').find((el) => el.dataset.id === 'chatgpt')!
+      )
+    })
+    // What the NEXT read will answer — the write itself is stubbed.
+    snapshot = {
+      entries: [anthropic, { ...chatgpt, credential: 'none' }, openrouter, ollama],
+      opencodeInstalled: true
+    }
+    const piToggle = screen
+      .getAllByTestId('ProviderSheet.engineToggle')
+      .find((el) => el.closest('[data-id="pi"]'))!
+    await act(async () => {
+      fireEvent.click(piToggle)
+    })
+    await vi.waitFor(() =>
+      expect(useSessionStore.getState().providerAuth.chatgpt).toBe('unauthenticated')
+    )
   })
 })

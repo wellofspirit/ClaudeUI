@@ -2142,3 +2142,109 @@ describe('InputBox FC — pi model fallback (C1 fix)', () => {
     expect(viewProps.selectedModel.displayName).toBe('Default')
   })
 })
+
+// ---------------------------------------------------------------------------
+// Pre-spawn sign-in hint — ADR-068 §3, Slice 6
+//
+// The hint is the ONE affordance that exists only before a session reaches a
+// backend: after that, the reactive AuthRequiredRow owns a rejected credential
+// and a second, permanent banner would be noise. So the gate itself — not just
+// the rendering — is what needs a guard.
+// ---------------------------------------------------------------------------
+
+describe('InputBox FC — pre-spawn sign-in hint', () => {
+  const HINT_ROUTE = 'hint-route-1'
+
+  let app: Awaited<ReturnType<typeof import('@test/helpers/boot-test-app').bootTestApp>>
+
+  beforeEach(async () => {
+    const { bootTestApp } = await import('@test/helpers/boot-test-app')
+    app = await bootTestApp()
+    app.bridge.ipcMain.handle('session:get-models', () => [])
+    app.bridge.ipcMain.handle('session:get-engine-models', () => [])
+    app.bridge.ipcMain.handle('file:list-dir', () => [])
+
+    useSessionStore.setState({
+      activeSessionId: null,
+      sessions: {},
+      recentSessionIds: [],
+      lastSelectedEngineId: 'claude',
+      availableModels: [],
+      providerAuth: { anthropic: 'unauthenticated', chatgpt: 'unknown', chatgptRoutes: {} }
+    })
+    mirrorStoreIntoReplica()
+    useSessionStore.getState().createNewSession(HINT_ROUTE, '/test/cwd')
+    useSessionStore.setState({ activeSessionId: HINT_ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    vi.clearAllMocks()
+  })
+
+  /** Patch the active session, mirror, render, and hand back the composed hint. */
+  function renderWith(patch: Record<string, unknown> = {}): InputBoxViewProps['signInHint'] {
+    if (Object.keys(patch).length > 0) {
+      useSessionStore.setState((state) => ({
+        sessions: { ...state.sessions, [HINT_ROUTE]: { ...state.sessions[HINT_ROUTE], ...patch } }
+      }))
+      mirrorStoreIntoReplica()
+    }
+    render(createElement(InputBox))
+    return viewProps.signInHint
+  }
+
+  it('names the engine and provider on an unspawned Claude session', () => {
+    expect(renderWith()).toEqual({
+      providerId: 'anthropic',
+      engineLabel: 'Claude',
+      providerLabel: 'Claude'
+    })
+  })
+
+  it('disappears once the session has spawned', () => {
+    const session = useSessionStore.getState().sessions[HINT_ROUTE]
+    expect(renderWith({ status: { ...session.status, sessionId: 'sess-1' } })).toBeNull()
+  })
+
+  it('never shows on a historical session', () => {
+    expect(renderWith({ isHistorical: true })).toBeNull()
+  })
+
+  it('never shows once the session carries messages (a fork before its first send)', () => {
+    expect(
+      renderWith({
+        messages: [
+          { id: 'm1', role: 'user' as const, content: [{ type: 'text' as const, text: 'hi' }] }
+        ]
+      })
+    ).toBeNull()
+  })
+
+  it.each(['authenticated', 'unknown'] as const)('stays hidden while the provider is %s', (s) => {
+    useSessionStore.setState({
+      providerAuth: { anthropic: s, chatgpt: 'unknown', chatgptRoutes: {} }
+    })
+    expect(renderWith()).toBeNull()
+  })
+
+  it('follows the selected engine — Codex asks for ChatGPT', () => {
+    useSessionStore.setState({
+      providerAuth: { anthropic: 'authenticated', chatgpt: 'unauthenticated', chatgptRoutes: {} },
+      availableModels: [
+        {
+          value: 'gpt-5.6-codex',
+          displayName: 'GPT-5.6 Codex',
+          description: '',
+          engineId: 'codex' as const,
+          vendorId: 'openai'
+        }
+      ]
+    })
+    expect(renderWith({ selectedEngineId: 'codex', selectedModel: 'gpt-5.6-codex' })).toEqual({
+      providerId: 'chatgpt',
+      engineLabel: 'Codex',
+      providerLabel: 'ChatGPT'
+    })
+  })
+})

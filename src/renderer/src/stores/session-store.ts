@@ -4,6 +4,13 @@ import { VOICE_LANGUAGES } from '../../../shared/types'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import type { EffortLevel } from '../../../shared/model-capabilities'
 import type { SharedProviderAccountList } from '../../../shared/shared-provider'
+import type { ProviderRegistrySnapshot } from '../../../shared/provider-registry'
+import {
+  anthropicAuthState,
+  chatgptAuthFromRegistry,
+  UNKNOWN_PROVIDER_AUTH,
+  type ProviderAuthView
+} from '../utils/sign-in-provider'
 import {
   DEFAULT_AUTONOMY_MODE,
   PERMISSION_TO_AUTONOMY,
@@ -632,6 +639,13 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     codexDefaultModelConfigured: !!codexEngineConfig?.codexConfig?.defaultModel,
     codexDefaultEffort: codexEngineConfig?.codexConfig?.defaultEffort || ''
   })
+  // Who is signed in, for the picker/composer entry points (ADR-068 §3). NOT in
+  // the Promise.all above: `provider-registry:list` is a slow read (it can start
+  // an opencode server to enumerate its catalog) and nothing else on this path
+  // waits for it — the surfaces render `'unknown'`, i.e. exactly as before, until
+  // it lands.
+  void useSessionStore.getState().refreshProviderAuth()
+
   // Replicated app-level state goes through the replica (SyncCore phase 4c), which
   // projects it into the store. Not a competing source of truth: the HOST seeds
   // canonical from these same files at the same point in boot
@@ -1218,6 +1232,18 @@ export interface SessionState {
   authSource: string | null
   /** Vendor auth map from the engine auth probe (Phase 4). Null until first probe. */
   vendorAuth: VendorAuthMap | null
+  /**
+   * The renderer's ONE view of "who is signed in" (ADR-068 §3, Slice 6), for the
+   * entry points that must not offer a sign-in nobody can complete: the model
+   * picker's dimmed groups and the composer's pre-spawn hint.
+   *
+   * TWO writers, disjoint keys. `anthropic` is derived by {@link SessionState.setVendorAuth}
+   * from the engine auth probe — the only production writer of `vendorAuth` —
+   * and `chatgpt`/`chatgptRoutes` by {@link SessionState.refreshProviderAuth}
+   * from `provider-registry:list`. Both start `'unknown'`, which renders exactly
+   * as the app did before this existed: an unprobed host is not a signed-out one.
+   */
+  providerAuth: ProviderAuthView
   /** Multi-account state (ADR-015). Null until first load/event. */
   accountsState: AccountsState | null
   /** Global vendor OAuth flow state (auto/loopback OAuth in progress). */
@@ -1428,6 +1454,16 @@ export interface SessionState {
   setAuthState: (data: AuthFlowState) => void
   setAuthSource: (source: string) => void
   setVendorAuth: (map: VendorAuthMap) => void
+  /**
+   * Re-read the provider registry into {@link SessionState.providerAuth}. Safe
+   * to call repeatedly and never throws: a failed read leaves ChatGPT
+   * `'unknown'` rather than claiming the user is signed out.
+   *
+   * `snapshot` short-circuits the read for a caller that has just made it —
+   * `provider-registry:list` can start an opencode server to enumerate its
+   * catalog, so the settings list must not pay for it twice per write.
+   */
+  refreshProviderAuth: (snapshot?: ProviderRegistrySnapshot) => Promise<void>
   setAccountsState: (data: AccountsState) => void
   /** Mark every session SDK-inactive so the next send respawns cli.js (ADR-015). */
   respawnAllSessions: () => void
@@ -1549,6 +1585,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   authState: null,
   authSource: null,
   vendorAuth: null,
+  providerAuth: UNKNOWN_PROVIDER_AUTH,
   accountsState: null,
   vendorOAuth: null,
   signInDialog: null,
@@ -2665,7 +2702,25 @@ export const useSessionStore = create<SessionState>((set) => ({
   // snapshot synchronously; the terminal transition arrives via onAuthState.
   setAuthState: (data) => set({ authState: data }),
   setAuthSource: (source) => set({ authSource: source }),
-  setVendorAuth: (map) => set({ vendorAuth: map }),
+  setVendorAuth: (map) =>
+    set((s) => ({
+      vendorAuth: map,
+      providerAuth: { ...s.providerAuth, anthropic: anthropicAuthState(map) }
+    })),
+  refreshProviderAuth: async (snapshot) => {
+    // The registry publishes no change event, so every caller is a moment the
+    // answer can have changed: boot, the sign-in dialog closing, and each
+    // settings write that re-lists it.
+    let resolved: ProviderRegistrySnapshot | null = snapshot ?? null
+    if (!resolved) {
+      try {
+        resolved = await window.api.listProviderRegistry()
+      } catch {
+        /* No vault, no host, or the read failed — 'unknown', never 'signed out'. */
+      }
+    }
+    set((s) => ({ providerAuth: { ...s.providerAuth, ...chatgptAuthFromRegistry(resolved) } }))
+  },
   setAccountsState: (data) => set({ accountsState: data }),
   respawnAllSessions: () => {
     for (const id of Object.keys(useSessionStore.getState().sessions)) {
@@ -2699,7 +2754,13 @@ export const useSessionStore = create<SessionState>((set) => ({
   },
   setVendorOAuth: (state) => set({ vendorOAuth: state }),
   openSignIn: (request) => set({ signInDialog: request }),
-  closeSignIn: () => set({ signInDialog: null }),
+  closeSignIn: () => {
+    set({ signInDialog: null })
+    // The dialog's OUTCOME is what changes the answer, and it has no completion
+    // event of its own — closing it is the one moment every path (done,
+    // cancelled, dismissed mid-flow) passes through.
+    void useSessionStore.getState().refreshProviderAuth()
+  },
   cancelVendorOAuth: () => {
     // Invalidate any in-flight `auto` flow so its late-resolving callback can't
     // re-set vendorOAuth after the user cancelled (SHOULD-FIX 4).

@@ -13,6 +13,11 @@ import {
 } from '../../../../shared/model-capabilities'
 import type { EngineId, VendorId } from '../../../../shared/types'
 import { ENGINE_META, engineMeta } from '../../../../shared/engine-meta'
+import {
+  SIGN_IN_PROVIDER_LABEL,
+  signInProviderFor,
+  type ProviderAuthView
+} from '../../utils/sign-in-provider'
 import { ChevronIcon } from './ChevronIcon'
 import { EngineLogo } from './EngineLogo'
 import { useAnchoredMenu } from './use-anchored-menu'
@@ -61,11 +66,25 @@ export function unsupportedTooltip(level: EffortLevel): string {
 export const ADAPTIVE_UNSUPPORTED_TOOLTIP =
   'Adaptive thinking is only supported on Opus 4.6+, Opus 4.7, and Sonnet 4.6'
 
-/** Derive groups from a flat model list by (engineId, vendorId) pairing. Shared with MobileConfigSheet's ModelPage. */
-export function deriveModelGroups(
-  models: ModelDisplay[]
-): Array<{ key: string; label: string; items: ModelDisplay[] }> {
-  const groupMap = new Map<string, { label: string; items: ModelDisplay[] }>()
+/**
+ * Derive groups from a flat model list by (engineId, vendorId) pairing. Shared
+ * with MobileConfigSheet's ModelPage.
+ *
+ * The defaulted `engineId`/`vendorId` come back out on the group because the
+ * pair is not only the key: it is also what decides which sign-in (if any)
+ * backs the group ({@link signInProviderFor}), and re-parsing it out of the
+ * string key in two components is how the two would drift.
+ */
+export interface ModelGroup {
+  key: string
+  label: string
+  engineId: EngineId
+  vendorId: VendorId
+  items: ModelDisplay[]
+}
+
+export function deriveModelGroups(models: ModelDisplay[]): ModelGroup[] {
+  const groupMap = new Map<string, Omit<ModelGroup, 'key'>>()
   for (const m of models) {
     const engineId = m.engineId ?? 'claude'
     const vendorId = m.vendorId ?? 'anthropic'
@@ -74,11 +93,28 @@ export function deriveModelGroups(
       // Build a human label: "Claude · Anthropic" or "opencode · <vendorName>"
       const vendorLabel = vendorId.charAt(0).toUpperCase() + vendorId.slice(1)
       const engineLabel = engineMeta(engineId).label
-      groupMap.set(key, { label: `${engineLabel} · ${vendorLabel}`, items: [] })
+      groupMap.set(key, { label: `${engineLabel} · ${vendorLabel}`, engineId, vendorId, items: [] })
     }
     groupMap.get(key)!.items.push(m)
   }
   return Array.from(groupMap.entries()).map(([key, g]) => ({ key, ...g }))
+}
+
+/**
+ * The group's Sign in item, or null. `'unknown'` renders as today: the picker
+ * must never call a provider signed-out on the strength of a read that has not
+ * happened.
+ *
+ * Shared with MobileConfigSheet's ModelPage so the two surfaces cannot disagree
+ * about which groups are gated.
+ */
+export function groupSignIn(
+  group: Pick<ModelGroup, 'engineId' | 'vendorId'>,
+  providerAuth: ProviderAuthView
+): { providerId: 'anthropic' | 'chatgpt'; label: string } | null {
+  const resolved = signInProviderFor(group.engineId, group.vendorId, providerAuth)
+  if (!resolved || resolved.state !== 'unauthenticated') return null
+  return { providerId: resolved.providerId, label: SIGN_IN_PROVIDER_LABEL[resolved.providerId] }
 }
 
 export function EnginePicker({
@@ -198,6 +234,12 @@ export function ModelPicker({
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
   useClickOutside(ref, open, () => setOpen(false))
+
+  // The picker reads the auth VIEW, never IPC (ADR-068 §3, Slice 6): every
+  // call site — composer, settings, automation form — then gets the same
+  // gating without four props to keep in sync.
+  const providerAuth = useSessionStore((state) => state.providerAuth)
+  const openSignIn = useSessionStore((state) => state.openSignIn)
 
   // BOTH VARIANTS: an open menu is the top Escape layer, so the key closes the
   // menu and stops there instead of falling through to the sheet or dialog
@@ -335,48 +377,71 @@ export function ModelPicker({
               </button>
             </div>
           )}
-          {displayedGroups.map((group) => (
-            <div key={group.key}>
-              {isGrouped && (
-                <div className="px-3 pt-2 pb-0.5 text-[10px] text-text-muted font-medium uppercase tracking-wider">
-                  {group.label}
-                </div>
-              )}
-              {group.items.map((m) => (
-                <button
-                  key={m.value}
-                  data-testid="ModelPicker.option"
-                  data-value={m.value}
-                  onClick={() => {
-                    onSelectModel(m.value)
-                    setOpen(false)
-                  }}
-                  className={`w-full flex flex-col px-3 py-1.5 transition-colors cursor-pointer text-left ${
-                    m.value === selectedModel.value
-                      ? 'text-text-primary bg-bg-hover'
-                      : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
-                  }`}
-                >
-                  <span className="flex items-center gap-1.5">
-                    <span className="text-[12px]">{m.shortName}</span>
-                    {m.free && (
-                      <span
-                        data-testid="ModelPicker.freeBadge"
-                        className="text-[9px] px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-medium uppercase tracking-wide"
-                      >
-                        Free
+          {displayedGroups.map((group) => {
+            const signIn = groupSignIn(group, providerAuth)
+            return (
+              <div key={group.key}>
+                {isGrouped && (
+                  <div className="px-3 pt-2 pb-0.5 text-[10px] text-text-muted font-medium uppercase tracking-wider">
+                    {group.label}
+                  </div>
+                )}
+                {signIn && (
+                  <button
+                    type="button"
+                    data-testid="ModelPicker.signIn"
+                    data-id={signIn.providerId}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      openSignIn({ providerId: signIn.providerId, mode: 'reauth' })
+                      setOpen(false)
+                    }}
+                    className="w-full flex items-center px-3 py-1.5 text-[12px] text-accent hover:bg-bg-hover transition-colors cursor-pointer text-left"
+                  >
+                    Sign in to {signIn.label}
+                  </button>
+                )}
+                {group.items.map((m) => (
+                  <button
+                    key={m.value}
+                    data-testid="ModelPicker.option"
+                    data-value={m.value}
+                    onClick={() => {
+                      onSelectModel(m.value)
+                      setOpen(false)
+                    }}
+                    // Dimmed, NOT disabled: picking a model and then signing in is
+                    // a legitimate order, and a picker that refuses the click
+                    // leaves the user nowhere.
+                    className={`w-full flex flex-col px-3 py-1.5 transition-colors cursor-pointer text-left ${
+                      signIn ? 'opacity-60 ' : ''
+                    }${
+                      m.value === selectedModel.value
+                        ? 'text-text-primary bg-bg-hover'
+                        : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+                    }`}
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <span className="text-[12px]">{m.shortName}</span>
+                      {m.free && (
+                        <span
+                          data-testid="ModelPicker.freeBadge"
+                          className="text-[9px] px-1 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-medium uppercase tracking-wide"
+                        >
+                          Free
+                        </span>
+                      )}
+                    </span>
+                    {m.description && (
+                      <span className="text-text-muted text-[10px]">
+                        {m.description.split('·')[1]?.trim()}
                       </span>
                     )}
-                  </span>
-                  {m.description && (
-                    <span className="text-text-muted text-[10px]">
-                      {m.description.split('·')[1]?.trim()}
-                    </span>
-                  )}
-                </button>
-              ))}
-            </div>
-          ))}
+                  </button>
+                ))}
+              </div>
+            )
+          })}
           {trailingOption && (
             <button
               data-testid="ModelPicker.option"

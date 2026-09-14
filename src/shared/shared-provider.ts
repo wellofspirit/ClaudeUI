@@ -24,6 +24,22 @@ export interface SharedProviderRoute {
 }
 
 /**
+ * The NATIVE provider id ChatGPT's route lands on in each configurable harness
+ * (ADR-068 §3). The managed `chatgpt` definition pins both — the mapping is not
+ * the user's to change — and `SharedProviderRepository.normalizeChatgpt` rewrites
+ * a hand-edited file back to it.
+ *
+ * Lives here rather than beside the definition because the RENDERER needs the
+ * same fact: "does this picker group belong to the ChatGPT route?" is asked of
+ * a `(engineId, vendorId)` pair, and answering it from a second hard-coded copy
+ * is how a route rename would silently stop offering a sign-in.
+ */
+export const CHATGPT_ROUTE_PROVIDER_IDS: Record<ConfigurableHarnessId, string> = {
+  pi: 'openai-codex',
+  opencode: 'openai'
+}
+
+/**
  * One stored subscription account, as everything OUTSIDE the vault sees it
  * (ADR-068 §2): an id to name it by, and the identity claims read off the JWT.
  * Never any token material.

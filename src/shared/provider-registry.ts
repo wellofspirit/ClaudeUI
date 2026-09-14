@@ -111,11 +111,25 @@ export interface ProviderEntry {
   opencodeRemoveKind?: NonNullable<OpencodeProviderCatalogEntry['actions']['removeKind']>
 }
 
+/**
+ * One stored account as the registry projects it: the summary claims plus the
+ * ONE piece of refresher state a read model may show.
+ *
+ * `needsReauth` is not token material and not a secret — it is the vault's own
+ * "this credential is dead, no retry will help" flag (`CredentialSync`), and
+ * without it a row whose refresh token was revoked still reads `connected`
+ * (`sharedCredential` counts a STORED account as the credential). Optional
+ * because a source that cannot answer must not be forced to claim `false`.
+ */
+export interface ProviderAccountSummary extends SharedProviderAccountSummary {
+  needsReauth?: boolean
+}
+
 /** The accounts half of one shared subscription row. */
 export interface ProviderAccounts {
   activeId: string | null
   perSession: boolean
-  list: SharedProviderAccountSummary[]
+  list: ProviderAccountSummary[]
 }
 
 export interface ProviderRegistrySnapshot {

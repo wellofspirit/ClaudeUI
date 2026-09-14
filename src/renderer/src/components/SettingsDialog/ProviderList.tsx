@@ -32,6 +32,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
+import { useSessionStore } from '../../stores/session-store'
 import type { EngineId } from '../../../../shared/types'
 import type { ProviderEntry, ProviderRegistrySnapshot } from '../../../../shared/provider-registry'
 import type { SharedProviderRouteDiagnosis } from '../../../../shared/shared-provider'
@@ -101,6 +102,13 @@ export function ProviderList({
       const next = await window.api.listProviderRegistry()
       setSnapshot(next)
       setError(null)
+      // The composer's hint and the model picker's Sign in item read the SAME
+      // registry through the store (ADR-068 §3, Slice 6), and it publishes no
+      // change event either. This is the one place every sheet's write lands
+      // (`handleWrote` / `handleAdded` both route here), so refreshing beside
+      // the re-read keeps those surfaces from going stale behind an open
+      // settings dialog.
+      void useSessionStore.getState().refreshProviderAuth(next)
       return next
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
