@@ -35,7 +35,7 @@ Reviewed line by line, gated (typecheck, lint, full `bun run test` — 658 files
 
 ### Next
 
-ADR-068 is flipped to Implemented with an as-built section in the same session. Remaining for this arc: a push when Daniel asks; the deferred items under "Open items after Slice 5" below; the two pre-existing observations recorded in the 5a/5b Landed paragraphs (anchored select menu closing after a scroll; `PiSessionDefaultModel`'s private copy of `engines/pi.json`).
+ADR-068 is flipped to Implemented with an as-built section in the same session. Remaining for this arc: the deferred items under "Open items after Slice 5" below. The two pre-existing observations from the 5a/5b Landed paragraphs were fixed and pushed the same day: anchored menus now follow their trigger on scroll and close only when it leaves the viewport (`use-anchored-menu.ts`), and `PiSessionDefaultModel` shares the one `engines/pi.json` object through the extracted `use-engine-config.ts` store. Daniel granted standing authorization (2026-09-14) to push `codex-integration` after every reviewed commit.
 
 ### How this arc is worked
 
