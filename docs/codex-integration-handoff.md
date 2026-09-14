@@ -4,7 +4,20 @@
 
 **Start with `docs/adr/adr-068_chatgpt-identity-vault-owned-codex-injection.md` and `docs/codex-accounts-spec.md`.** The spec is the source of truth for this arc: every slice has a kickoff, and every landed slice has a "Landed …" paragraph recording the as-built deviations. Slices 1–7 are landed; ADR-068 is Implemented. Next: a push when Daniel asks, then the deferred items listed under "Open items". The older "Resume here" below is the pre-ADR-068 state and stays as history.
 
-### What is committed (all local on `codex-integration`, oldest first; nothing pushed since the previous handoff — confirm with `git log origin/codex-integration..HEAD`)
+### Before this branch merges into `pre-release` (state on 2026-09-14, HEAD `75c92402`, everything pushed)
+
+Everything planned for the branch is built, reviewed line by line, gated and driven. What still stands between it and a merge:
+
+1. **No PR exists.** Nothing on this branch has run through CI's macOS and Linux runners (ADR-061 gates). Open `codex-integration → pre-release` to get that signal; the unit and component suites are expected to pass there, but that is an assumption until the PR shows it.
+2. **macOS legs of the four new real-binary integration tests** (`codex-injection`, `codex-mcp-override`, `codex-mcp-approval`, `codex-config-write`) have never run. They are gated by `CODEX_INTEGRATION=1`, so CI will not run them; run them on a Mac.
+3. **Linux**: no digest manifest, acquisition skips, Codex is unavailable there by design. Daniel takes it on a Mac with Linux emulation (ruling above).
+4. **Windows residuals**: the sandbox path and process-tree cleanup under load are unverified.
+5. **Real-account evidence for the newest slices** — Daniel's, because each spends the real account: one Codex turn started on a configured default model (Slice 5b; the wire is pinned by test up to `session:create`), and one real device-code sign-in completed from a phone (Slice 7; everything up to the code being shown is proven live, nothing was completed).
+6. **Decide whether the history mappers block the merge.** Cold history omits several native item kinds (roadmap item 1). Recommendation: merge first, mappers next; Daniel's call.
+
+Deferred by ruling and NOT merge blockers: the roadmap items (mappers + harness survey, volatile stream, metering in the usage revamp, grandchildren), the follow-ups (pi auth event, pi PKCE fallback on port 1455 headless, the dialog's post-Cancel state), project-scope deny rules under Auto (leave it).
+
+### What is committed (all local on `codex-integration`, oldest first; all pushed as of 2026-09-14)
 
 ```text
 e23d5f93 docs(codex): ADR-068 + spec (vault-owned ChatGPT identity, Codex by token injection, accounts, one sign-in dialog)
