@@ -416,7 +416,17 @@ export interface EngineCapabilities {
   sandbox: boolean
   proxy: boolean
   autonomyModes: AutonomyMode[]
-  auth: { canDriveLogin: boolean; multiAccount: boolean }
+  /**
+   * `canDriveLogin` — the app can start this engine's sign-in itself.
+   * `multiAccount`  — the engine's own store holds several accounts at once.
+   * `perSessionAccount` — a SINGLE session can be pinned to one stored account
+   *   independently of the global active one (ADR-068 §2). True for Codex only:
+   *   its identity is injected per process (`account/login/start
+   *   {type:'chatgptAuthTokens'}`), so re-pointing one live process costs one
+   *   request. pi and opencode read a single-slot file, and Claude would need a
+   *   per-spawn credential directory — a separate decision, not this flag.
+   */
+  auth: { canDriveLogin: boolean; multiAccount: boolean; perSessionAccount: boolean }
   /**
    * ADR-033 (cross-engine dispatch) + ADR-030 (capability honesty): "this
    * engine can host the `dispatch_agent` tool AND at least one OTHER engine is
@@ -438,6 +448,8 @@ export interface EngineCapabilities {
  * ThinkingMode/EffortLevel come from this module (the single source of truth).
  */
 export interface ReasoningCapability {
+  /** Native catalog values, not coerced into Claude's effort vocabulary. */
+  nativeEffort?: { options: Array<{ value: string; description: string }> }
   /** Thinking mode picker (adaptive|enabled|disabled). Present when model supports thinking. */
   thinking?: { modes: readonly ThinkingMode[]; supportsBudget?: boolean }
   /** Effort tier picker. Present when model supports effort levels. */
@@ -486,8 +498,92 @@ export const CLAUDE_ENGINE_CAPABILITIES: EngineCapabilities = {
   sandbox: true,
   proxy: true,
   autonomyModes: ['plan', 'ask', 'autoEdit', 'full'],
-  auth: { canDriveLogin: true, multiAccount: true },
+  auth: { canDriveLogin: true, multiAccount: true, perSessionAccount: false },
   crossEngineDispatch: true
+}
+
+export const CODEX_ENGINE_CAPABILITIES: EngineCapabilities = {
+  voice: false,
+  // ClaudeUI's three hosted UI tools (render_mermaid / create_mockup /
+  // show_mockup) run over Codex's native dynamic-tool channel — declared on
+  // `thread/start`, called back as `item/tool/call`
+  // (src/core/codex/codex-hosted-tools.ts). True on BOTH paths, which is what
+  // ADR-030 asks before the flag goes up: a resumed thread keeps them, because
+  // the specs live in the rollout's SessionMeta and come back from there even
+  // though `thread/resume` has no field to re-send them (pinned end to end by
+  // src/integration/codex/codex-app-server.integration.test.ts). It does NOT
+  // mean Codex hosts MCP servers — the runtime MCP verbs stay gated on method
+  // presence (`mcpServerStatus` and friends), which this engine has none of,
+  // and the MCP UI is `engineId === 'claude'` only.
+  hostedMcp: true,
+  backgroundTasks: false,
+  // Native children (ADR-066 slice F). Codex's stock `multi_agent_v1` tools
+  // spawn child THREADS in the root's own process; the app-server attaches
+  // every initialized connection to every thread it creates, so this client
+  // sees each child's items, deltas and approval requests on the same
+  // connection and renders them as the spawning call's subagent transcript.
+  // True on BOTH paths, which is what ADR-030 asks before the flag goes up:
+  // live (CodexSession's child routing) and cold (`loadCodexHistory` reads each
+  // child thread back under the same parent tool_use id).
+  subagents: true,
+  // Plan mode is ClaudeUI's own read-only autonomy, enforced by the shared
+  // permission engine over `untrusted` + a readOnly native sandbox (ADR-066).
+  plan: true,
+  // Native `thread/fork`, whose granularity is the TURN: a branch copies the
+  // source through the turn that owns the clicked message into a NEW thread and
+  // leaves the source untouched. Both flags go up together because that verb is
+  // the only branch this engine has — there is no whole-session clone separate
+  // from it, so `fork` without `forkFromMessage` would describe nothing. The
+  // renderer's optimistic seed still slices at the MESSAGE, so a branch cut
+  // mid-turn shows fewer rows than it actually kept until the next cold load
+  // replaces the seed with the fork's own history (ADR-066).
+  fork: true,
+  forkFromMessage: true,
+  // Both true together, as on pi: they gate the SAME send-while-busy
+  // affordance, and ADR-053's full path works here — core holds the item
+  // (recallable), forwards it with `turn/steer` + `expectedTurnId` at the next
+  // completed sub-turn item, and broadcasts the `consumed` transition.
+  // `capabilities.steer` is read nowhere in the renderer (InputBox derives
+  // `queueEnabled` from `queue` alone); it is the ADR-030 honesty flag for
+  // "this lands in the RUNNING turn", which `turn/steer` is.
+  steer: true,
+  queue: true,
+  slashCommands: false,
+  skills: false,
+  sideQuestion: false,
+  interactiveApprovals: true,
+  sandbox: false,
+  proxy: false,
+  autonomyModes: ['ask', 'autoEdit', 'full', 'plan'],
+  // ADR-068 §2: the ONE engine whose session can be pinned to a stored
+  // ChatGPT account of its own — the identity is injected per app-server
+  // process, so re-pointing a live one is a single `account/login/start`.
+  auth: { canDriveLogin: true, multiAccount: false, perSessionAccount: true },
+  // ADR-033 slice E — Codex as a dispatch SOURCE: `dispatch_agent` rides the
+  // same native dynamic-tool channel the hosted three do, gated by the shared
+  // permission engine (kind `task`: asks in default/acceptEdits/auto, denies
+  // in plan) and executed by `CodexSession.dispatchAgent` against the shared
+  // `crossEngineDispatcher`. Codex as a dispatch TARGET is NOT shipped — the
+  // dispatcher has no Codex target factory, so a `codex` target is refused.
+  // The honest per-session value ANDs this with the runtime
+  // `crossEngineDispatchAvailable('codex')` check (CodexSession's constructor).
+  crossEngineDispatch: true
+}
+
+export function resolveCodexCapabilities(model?: {
+  vision?: boolean
+  nativeEffortOptions?: Array<{ value: string; description: string }>
+}): ResolvedCapabilities {
+  return resolveCapabilities(CODEX_ENGINE_CAPABILITIES, {
+    reasoning: model?.nativeEffortOptions?.length
+      ? { nativeEffort: { options: model.nativeEffortOptions } }
+      : {},
+    vision: model?.vision ?? false,
+    toolCalling: true,
+    contextWindow: 0,
+    maxOutput: 0,
+    promptCaching: false
+  })
 }
 
 /**
@@ -616,7 +712,7 @@ export const OPENCODE_ENGINE_CAPABILITIES: EngineCapabilities = {
   sandbox: false,
   proxy: false,
   autonomyModes: ['plan', 'ask', 'full'],
-  auth: { canDriveLogin: true, multiAccount: false },
+  auth: { canDriveLogin: true, multiAccount: false, perSessionAccount: false },
   crossEngineDispatch: true
 }
 
@@ -826,7 +922,7 @@ export const PI_ENGINE_CAPABILITIES: EngineCapabilities = {
   sandbox: false,
   proxy: false,
   autonomyModes: ['ask', 'autoEdit', 'full', 'plan'],
-  auth: { canDriveLogin: true, multiAccount: false },
+  auth: { canDriveLogin: true, multiAccount: false, perSessionAccount: false },
   crossEngineDispatch: true
 }
 

@@ -22,6 +22,7 @@ export type SettingsPageId =
   | 'claude'
   | 'opencode'
   | 'pi'
+  | 'codex'
 
 /** A place in the settings dialog: a page, optionally a group inside it. */
 export interface SettingsTarget {

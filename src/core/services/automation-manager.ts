@@ -542,7 +542,7 @@ export class AutomationManager {
 
     try {
       const result = await this.runOneShotQuery(automation, automation.prompt)
-      run.totalCostUsd += result.costUsd
+      run.totalCostUsd = (run.totalCostUsd ?? 0) + result.costUsd
       run.status = 'success'
       run.resultSummary = result.lastText.slice(0, 200) || undefined
     } catch (err) {

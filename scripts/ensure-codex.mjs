@@ -1,0 +1,372 @@
+#!/usr/bin/env node
+import { createHash } from 'node:crypto'
+import { gunzipSync } from 'node:zlib'
+import { execFileSync } from 'node:child_process'
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  renameSync,
+  lstatSync
+} from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { tmpdir } from 'node:os'
+
+export const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+export const manifest = JSON.parse(readFileSync(join(root, 'scripts/codex-digests.json'), 'utf8'))
+export const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
+// Install names and member names both become paths (the former under the install
+// directory, the latter inside the archive); keep every one of them a plain
+// filename on every host, even though the manifest is reviewed in-tree.
+for (const host of Object.values(manifest.hosts)) {
+  for (const [name, entry] of Object.entries(host.binaries)) {
+    for (const value of [name, entry.member]) {
+      if (/[/\\]/.test(value) || value.startsWith('.'))
+        throw new Error('Invalid Codex manifest member')
+    }
+  }
+}
+const MAX_ARCHIVE = 128 * 1024 * 1024
+// Windows x64 `codex.exe` unpacks to 298 MB, so the cap is well above the 256 MB
+// that fits macOS arm64; the archives themselves stay under MAX_ARCHIVE (99.5 MB
+// is the largest pinned one, the linux-x64 `codex`).
+const MAX_PAYLOAD = 512 * 1024 * 1024
+const HOST_LABELS = {
+  'darwin-arm64': 'macOS arm64',
+  'win32-x64': 'Windows x64',
+  'linux-x64': 'Linux x64',
+  'linux-arm64': 'Linux arm64'
+}
+const hostLabel = (key) => HOST_LABELS[key] ?? key
+const supportedHostLabels = () => Object.keys(manifest.hosts).map(hostLabel).join(', ')
+
+/** The install name of the executable that answers `--version` on this host. */
+export const codexExecutableName = (platform = process.platform) =>
+  platform === 'win32' ? 'codex.exe' : 'codex'
+
+/** A mismatched pin is a repository error and fails on every host, supported or not. */
+export function assertManifestPin() {
+  const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).codexCliVersion
+  if (version !== manifest.version) throw new Error('Codex pin has no reviewed digest manifest')
+}
+
+/**
+ * The reviewed record for one host, flattened into exactly the shape written to
+ * `version.json` (and therefore exactly what `cacheValid` compares), or `null`
+ * for a host the manifest does not cover.
+ */
+export function hostManifest(platform = process.platform, arch = process.arch) {
+  // Own-property lookup only: the key is built from caller-supplied strings.
+  const key = `${platform}-${arch}`
+  if (!Object.hasOwn(manifest.hosts, key)) return null
+  const host = manifest.hosts[key]
+  const { hosts: _hosts, ...shared } = manifest
+  return { ...shared, platform, arch, binaries: host.binaries }
+}
+
+/** Only a host the reviewed manifest covers may be provisioned. */
+export function hostSupported(platform = process.platform, arch = process.arch) {
+  return hostManifest(platform, arch) !== null
+}
+
+export function assertPin(platform = process.platform, arch = process.arch) {
+  assertManifestPin()
+  if (!hostSupported(platform, arch)) {
+    throw new Error(`Codex provisioning is verified only on: ${supportedHostLabels()}`)
+  }
+}
+
+/**
+ * Test-only hook: `CLAUDEUI_CODEX_FAKE_HOST=<platform>/<arch>` exercises the
+ * unsupported-host skip on a supported machine. A value naming any supported host is
+ * ignored; every other value (malformed included) can only end in the skip below, so
+ * a spoofed host never selects an asset or relaxes a digest check.
+ */
+function currentHost() {
+  const fake = process.env.CLAUDEUI_CODEX_FAKE_HOST
+  if (!fake) return [process.platform, process.arch]
+  const [platform, arch] = fake.split('/')
+  return hostSupported(platform, arch) ? [process.platform, process.arch] : [platform, arch]
+}
+
+// Each release archive contains exactly one regular member. Reject other tar dialects,
+// links and extra members rather than maintaining a general archive extractor.
+export function extractBinary(archive, expected) {
+  if (archive.length > MAX_ARCHIVE || sha256(archive) !== expected.archiveSha256) {
+    throw new Error('Codex archive digest/size mismatch')
+  }
+  const tar = gunzipSync(archive, { maxOutputLength: MAX_PAYLOAD + 10240 })
+  if (tar.length < 1536 || tar.length % 512 !== 0) throw new Error('Invalid Codex tar length')
+  const header = tar.subarray(0, 512)
+  const cstr = (start, length) =>
+    header
+      .subarray(start, start + length)
+      .toString('utf8')
+      .split('\0')[0]
+  const octal = (start, length) => {
+    const value = cstr(start, length).trim()
+    if (!/^[0-7]+$/.test(value)) throw new Error('Invalid Codex tar number')
+    return Number.parseInt(value, 8)
+  }
+  let sum = 0
+  for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 32 : header[i]
+  const size = octal(124, 12)
+  const end = 512 + Math.ceil(size / 512) * 512
+  if (
+    cstr(0, 100) !== expected.member ||
+    /[/\\]/.test(expected.member) ||
+    cstr(345, 155) !== '' ||
+    cstr(157, 100) !== '' ||
+    ![0, 48].includes(header[156]) ||
+    sum !== octal(148, 8) ||
+    size === 0 ||
+    size > MAX_PAYLOAD ||
+    end + 1024 > tar.length ||
+    !tar.subarray(512 + size).every((byte) => byte === 0)
+  )
+    throw new Error('Invalid Codex tar member')
+  const binary = tar.subarray(512, 512 + size)
+  if (sha256(binary) !== expected.binarySha256) throw new Error('Codex payload digest mismatch')
+  return binary
+}
+
+// Every manifest member must be installed and match its pinned digest: an install
+// missing `codex-code-mode-host` cannot run tools and is a cache miss, not a hit.
+// Windows never reports exec bits (`mode & 0o111` is 0 even for files written
+// 0o755), so that requirement is POSIX-only; keeping it would re-download 127 MB
+// on every Windows postinstall.
+export function cacheValid(directory, expected = hostManifest()) {
+  if (!expected) return false
+  try {
+    const saved = JSON.parse(readFileSync(join(directory, 'version.json'), 'utf8'))
+    return (
+      Object.entries(expected).every(
+        ([key, value]) => key === 'binaries' || saved[key] === value
+      ) &&
+      Object.entries(expected.binaries).every(([name, entry]) => {
+        const recorded = saved.binaries?.[name]
+        if (!recorded || Object.entries(entry).some(([key, value]) => recorded[key] !== value))
+          return false
+        const installed = lstatSync(join(directory, name))
+        return (
+          installed.isFile() &&
+          (process.platform === 'win32' || (installed.mode & 0o111) !== 0) &&
+          sha256(readFileSync(join(directory, name))) === entry.binarySha256
+        )
+      }) &&
+      sha256(readFileSync(join(directory, 'LICENSE'))) === expected.licenseSha256
+    )
+  } catch {
+    return false
+  }
+}
+
+async function download(url, maxBytes) {
+  const response = await fetch(url, { signal: AbortSignal.timeout(180000) })
+  if (!response.ok || !response.body) throw new Error('Codex download failed')
+  const chunks = []
+  let size = 0
+  for await (const chunk of response.body) {
+    size += chunk.length
+    if (size > maxBytes) throw new Error('Codex download exceeds limit')
+    chunks.push(chunk)
+  }
+  return Buffer.concat(chunks)
+}
+
+export function isolatedEnv(directory) {
+  const home = join(directory, 'home')
+  const codexHome = join(directory, 'home/.codex')
+  const tmp = join(directory, 'tmp')
+  mkdirSync(codexHome, { recursive: true })
+  mkdirSync(tmp, { recursive: true })
+  // Windows resolves the user profile and the temp directory from different
+  // variables than POSIX. PATH is System32 only so the preflight runs in a sane
+  // Windows environment rather than inheriting the caller's PATH; SYSTEMROOT is
+  // kept because parts of the Windows runtime resolve it at startup.
+  if (process.platform === 'win32') {
+    const systemRoot = process.env.SYSTEMROOT ?? 'C:\\Windows'
+    return {
+      USERPROFILE: home,
+      CODEX_HOME: codexHome,
+      TEMP: tmp,
+      TMP: tmp,
+      SYSTEMROOT: systemRoot,
+      PATH: join(systemRoot, 'System32'),
+      RUST_LOG: 'off'
+    }
+  }
+  return {
+    HOME: home,
+    CODEX_HOME: codexHome,
+    TMPDIR: tmp,
+    PATH: '/usr/bin:/bin',
+    LANG: 'en_US.UTF-8',
+    RUST_LOG: 'off'
+  }
+}
+
+export function verifyVersion(binary, cwd, env) {
+  let output
+  try {
+    output = execFileSync(binary, ['--version'], {
+      cwd,
+      env,
+      timeout: 15000,
+      maxBuffer: 4096,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf8'
+    })
+  } catch {
+    throw new Error('Codex version check failed')
+  }
+  if (output.trim() !== `codex-cli ${manifest.version}`) throw new Error('Codex version mismatch')
+}
+
+export class CodexRecoveryError extends Error {
+  constructor(backup) {
+    super('Codex installation and rollback failed; prior installation retained')
+    this.backup = backup
+  }
+}
+
+/** Owns stage cleanup once a verified payload is ready to replace the install. */
+export function installStaged(stage, destination, rename = renameSync) {
+  const backup = join(stage, 'previous')
+  let moved = false
+  let preserveBackup = false
+  try {
+    try {
+      rename(destination, backup)
+      moved = true
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+    try {
+      rename(join(stage, 'payload'), destination)
+    } catch (error) {
+      if (moved) {
+        try {
+          rename(backup, destination)
+        } catch {
+          preserveBackup = true
+          throw new CodexRecoveryError(backup)
+        }
+      }
+      throw error
+    }
+  } finally {
+    if (!preserveBackup) rmSync(stage, { recursive: true, force: true })
+  }
+}
+
+/** Offline archives are matched to manifest members by digest, not by flag order. */
+export function parseArgs(argv) {
+  const options = { force: false, archives: [], license: undefined }
+  for (let index = 0; index < argv.length; index++) {
+    const flag = argv[index]
+    if (flag === '--force') options.force = true
+    else if (flag === '--archive' || flag === '--license') {
+      const value = argv[++index]
+      if (!value || value.startsWith('--')) throw new Error('Invalid Codex arguments')
+      if (flag === '--license') {
+        if (options.license !== undefined) throw new Error('Invalid Codex arguments')
+        options.license = value
+      } else options.archives.push(value)
+    } else throw new Error('Invalid Codex arguments')
+  }
+  const members = Math.max(
+    ...Object.values(manifest.hosts).map((host) => Object.keys(host.binaries).length)
+  )
+  if (options.archives.length > members) throw new Error('Invalid Codex arguments')
+  return options
+}
+
+async function main() {
+  const options = parseArgs(process.argv.slice(2))
+  assertManifestPin()
+  // `postinstall` runs on every platform, so a host without a reviewed manifest is a
+  // skip rather than a failed install: the engine gates itself off (codex-locate.ts)
+  // when the binary is absent. Digest/size mismatches, failed downloads and pins with
+  // no manifest stay hard failures.
+  const host = hostManifest(...currentHost())
+  if (!host) {
+    console.log(
+      `Codex acquisition skipped: a reviewed digest manifest exists only for ${supportedHostLabels()}; Codex will be unavailable on this machine`
+    )
+    return
+  }
+  const destination = join(root, 'vendor/codex-cli')
+  if (!options.force && cacheValid(destination, host)) {
+    console.log('Codex verified cache hit')
+    return
+  }
+  const supplied = options.archives.map((path) => {
+    if (lstatSync(path).size > MAX_ARCHIVE) throw new Error('Codex archive exceeds limit')
+    return readFileSync(path)
+  })
+  // Catalog models are `tool_mode: code_mode_only` and run every tool through
+  // `codex-code-mode-host`, which Codex resolves beside its own executable. Both
+  // release assets are therefore acquired and installed as one unit.
+  const payloads = []
+  for (const [name, expected] of Object.entries(host.binaries)) {
+    const local = supplied.find((bytes) => sha256(bytes) === expected.archiveSha256)
+    if (!local && supplied.length > 0) throw new Error('Codex archive missing for a pinned member')
+    const archive =
+      local ??
+      (await download(
+        `https://github.com/openai/codex/releases/download/rust-v${host.version}/${expected.member}.tar.gz`,
+        MAX_ARCHIVE
+      ))
+    payloads.push([name, extractBinary(archive, expected)])
+  }
+  if (options.license && lstatSync(options.license).size > 65536)
+    throw new Error('Codex license exceeds limit')
+  const license = options.license
+    ? readFileSync(options.license)
+    : await download(manifest.license, 65536)
+  if (sha256(license) !== manifest.licenseSha256) throw new Error('Invalid Codex license digest')
+  mkdirSync(join(root, 'vendor'), { recursive: true })
+  const stage = mkdtempSync(join(root, 'vendor/.codex-stage-'))
+  const isolation = mkdtempSync(join(tmpdir(), 'codex-version-'))
+  let handedOff = false
+  try {
+    const payload = join(stage, 'payload')
+    mkdirSync(payload)
+    for (const [name, bytes] of payloads) writeFileSync(join(payload, name), bytes, { mode: 0o755 })
+    writeFileSync(join(payload, 'LICENSE'), license)
+    writeFileSync(
+      join(payload, 'version.json'),
+      JSON.stringify({ ...host, licenseSha256: sha256(license) }, null, 2) + '\n'
+    )
+    // Only `codex` answers `--version`; the host is gated by its pinned digest alone.
+    // `currentHost()` can only ever select a skip, so the real platform names the
+    // executable here.
+    verifyVersion(join(payload, codexExecutableName()), isolation, isolatedEnv(isolation))
+    handedOff = true
+    // One directory rename publishes every member, so no install can expose
+    // `codex` without its host or a host without its `codex`.
+    installStaged(stage, destination)
+    console.log(
+      `Codex ${host.version} installed and verified (${hostLabel(`${host.platform}-${host.arch}`)})`
+    )
+  } finally {
+    if (!handedOff) rmSync(stage, { recursive: true, force: true })
+    rmSync(isolation, { recursive: true, force: true })
+  }
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    if (error instanceof CodexRecoveryError) {
+      // Only our generated recovery location is printed, never the underlying OS error.
+      console.error(
+        `Codex rollback failed; prior installation retained at ${JSON.stringify(error.backup)}`
+      )
+    } else console.error('Codex acquisition failed; check pin, platform, archive and connectivity')
+    process.exitCode = 1
+  })
+}

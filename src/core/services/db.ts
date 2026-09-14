@@ -21,6 +21,7 @@
  */
 
 import * as fs from 'fs'
+import { parseCodexSettings } from '../codex/settings'
 import * as path from 'path'
 import * as os from 'os'
 import { getSqliteDriver, setDbOpenProbe, type SqliteDatabase } from './sqlite-driver'
@@ -543,6 +544,78 @@ export const MIGRATIONS: Migration[] = [
         ALTER TABLE remote_config ADD COLUMN ide_cli_path TEXT;
       `)
     }
+  },
+  {
+    version: 15,
+    up(db) {
+      db.exec(`CREATE TABLE codex_session_overrides (
+        session_id TEXT PRIMARY KEY,
+        settings_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`)
+    }
+  },
+  {
+    // v16 — the Codex FORK REGISTRY.
+    //
+    // `thread/list` never returns a forked thread, so the sidebar has to know
+    // about a branch some other way. It used to derive them: every codex id in
+    // `session_meta` that the native list omitted got a `thread/read` on every
+    // refresh, which after a few deletions is mostly dead ids re-probed forever
+    // (an unbounded-in-N sweep, ADR-066 open item). This table is the explicit
+    // record instead — written once when `thread/fork` lands, read back as the
+    // exact set of ids to probe, and pruned when the binary says the thread is
+    // gone for good.
+    //
+    // `forked_from_id` is the source thread, kept for lineage/debugging (and
+    // NULLABLE because the one-time adoption of pre-existing forks can only
+    // learn it from the thread itself, which may not carry it).
+    version: 16,
+    up(db) {
+      db.exec(`CREATE TABLE codex_forks (
+        thread_id TEXT PRIMARY KEY,
+        forked_from_id TEXT,
+        created_at INTEGER NOT NULL
+      )`)
+    }
+  },
+  {
+    // v17 — the fork registry becomes a LINEAGE CACHE.
+    //
+    // v16 recorded branches only, so a ROOT never earned a row and stayed a
+    // candidate for a `thread/read` forever: every delete plan swept the
+    // lineage of every codex `session_meta` id the table did not name, and the
+    // sweep never shrank (~0.9 s with 25 sessions, ADR-066 open item 3). The
+    // table now holds ONE ROW PER THREAD ClaudeUI has asked about, root or
+    // branch, and having a row is what stops the next scan re-reading it.
+    //
+    //  - `forked_from_id` still means lineage, and NULL now means "a root, a
+    //    thread with no learnable source, or an id the binary has twice said it
+    //    cannot resolve" — the three cases that are alike in the only way any
+    //    reader cares about: they are not a branch of anything.
+    //  - `verified_at` is the NATIVE `updatedAt` (unix seconds) the lineage was
+    //    read at. The launch scan re-reads a thread only when the listing shows
+    //    a different one, so an unchanged thread costs nothing after its first
+    //    read. NULL means "never verified": a v16 row, or a confirmed-gone id.
+    //  - `lineage_checked_at` is the wall clock of that read, for diagnostics.
+    //
+    // The table KEEPS ITS NAME: `CodexSession` registers a branch it mints
+    // through `registerCodexFork` and a rename would be churn in a file this
+    // change does not otherwise touch. Existing rows migrate as they are, with
+    // `verified_at` NULL so the first scan verifies each one exactly once.
+    //
+    // The DATA step drops the one-time adoption MARKER (`thread_id = ''`,
+    // generation in `forked_from_id`). The cache replaces it: an id with a row
+    // is not re-read, which is what the marker was for, without the "have I
+    // swept yet" flag that finished wrongly twice.
+    version: 17,
+    up(db) {
+      db.exec(`
+        ALTER TABLE codex_forks ADD COLUMN verified_at INTEGER;
+        ALTER TABLE codex_forks ADD COLUMN lineage_checked_at INTEGER;
+        DELETE FROM codex_forks WHERE thread_id = '';
+      `)
+    }
   }
 ]
 
@@ -751,7 +824,9 @@ interface SessionMetaRow {
 
 function rowToMeta(row: SessionMetaRow): SessionMeta {
   const engineId: EngineId =
-    row.engine_id === 'opencode' || row.engine_id === 'pi' ? row.engine_id : 'claude'
+    row.engine_id === 'opencode' || row.engine_id === 'pi' || row.engine_id === 'codex'
+      ? row.engine_id
+      : 'claude'
   if (row.model_id != null) {
     return {
       engineId,
@@ -780,6 +855,163 @@ export function getSessionMeta(sessionId: string): SessionMeta | undefined {
   const row = db.prepare('SELECT * FROM session_meta WHERE session_id = ?').get(sessionId) as
     SessionMetaRow | undefined
   return row ? rowToMeta(row) : undefined
+}
+
+/** Explicit accepted native choices, independent of client-projected session_meta deletion. */
+export function getCodexSessionOverrides(sessionId: string, db: Db = getDb()): unknown {
+  const row = db
+    .prepare('SELECT settings_json FROM codex_session_overrides WHERE session_id = ?')
+    .get(sessionId) as { settings_json: string } | undefined
+  if (!row) return undefined
+  try {
+    return JSON.parse(row.settings_json)
+  } catch {
+    throw new Error('Saved Codex session overrides are invalid')
+  }
+}
+
+export function setCodexSessionOverrides(
+  sessionId: string,
+  settings: import('../../shared/codex-types').CodexSettings,
+  db: Db = getDb()
+): void {
+  const parsed = parseCodexSettings(settings)
+  db.prepare(
+    `INSERT INTO codex_session_overrides (session_id, settings_json, updated_at) VALUES (?, ?, ?)
+    ON CONFLICT(session_id) DO UPDATE SET settings_json = excluded.settings_json, updated_at = excluded.updated_at`
+  ).run(sessionId, JSON.stringify(parsed), Date.now())
+}
+
+export function ensureCodexSessionOverrides(sessionId: string, db: Db = getDb()): void {
+  db.prepare(
+    'INSERT OR IGNORE INTO codex_session_overrides (session_id, settings_json, updated_at) VALUES (?, ?, ?)'
+  ).run(sessionId, '{}', Date.now())
+}
+
+export function hasCodexSessionOverrides(sessionId: string, db: Db = getDb()): boolean {
+  return (
+    db.prepare('SELECT 1 FROM codex_session_overrides WHERE session_id = ?').get(sessionId) !==
+    undefined
+  )
+}
+
+export function deleteCodexSessionOverrides(sessionId: string, db: Db = getDb()): void {
+  db.prepare('DELETE FROM codex_session_overrides WHERE session_id = ?').run(sessionId)
+}
+
+// ---------------------------------------------------------------------------
+// Codex lineage cache (v16 table, generalised in v17) — see that migration's
+// comment for the why.
+// ---------------------------------------------------------------------------
+
+/** One registered branch: the forked thread and the thread it was cut from. */
+export interface CodexFork {
+  threadId: string
+  forkedFromId: string | null
+}
+
+/**
+ * One cached thread: its lineage, and the native `updatedAt` that lineage was
+ * read at.
+ *
+ * `forkedFromId === null` is a root, a thread whose source cannot be learned,
+ * or an id the binary has twice refused — see the v17 migration. `verifiedAt`
+ * is what makes the launch scan incremental: a listed thread whose `updatedAt`
+ * still equals it needs no `thread/read` at all. `null` means the row has never
+ * been verified (a v16 row, or a confirmed-gone id).
+ */
+export interface CodexLineage extends CodexFork {
+  verifiedAt: number | null
+}
+
+/**
+ * Record a `thread/fork` result. First registration wins — a later resume of
+ * the same branch must not rewrite its lineage or duplicate the row.
+ *
+ * The row it writes is UNVERIFIED (`verified_at` null): ClaudeUI learned this
+ * lineage from the fork call, not from a `thread/read`, so the next scan reads
+ * the thread once and fills in the `updatedAt` that stops it reading it again.
+ */
+export function registerCodexFork(
+  threadId: string,
+  forkedFromId: string | null,
+  db: Db = getDb()
+): void {
+  if (!threadId) return
+  db.prepare(
+    'INSERT OR IGNORE INTO codex_forks (thread_id, forked_from_id, created_at) VALUES (?, ?, ?)'
+  ).run(threadId, forkedFromId, Date.now())
+}
+
+/**
+ * Record what a `thread/read` said about one thread — the LINEAGE SCAN's only
+ * writer.
+ *
+ * Unlike {@link registerCodexFork} this REPLACES what the row held: the read is
+ * the authority (a fork registered at mint time carries no `verifiedAt`, and a
+ * thread the binary has twice refused becomes `(null, null)` — a tombstone that
+ * is not a branch, is not listed, and is never read again unless the native
+ * listing carries it once more).
+ */
+export function recordCodexLineage(
+  threadId: string,
+  forkedFromId: string | null,
+  verifiedAt: number | null,
+  db: Db = getDb()
+): void {
+  if (!threadId) return
+  db.prepare(
+    `INSERT INTO codex_forks (thread_id, forked_from_id, created_at, verified_at, lineage_checked_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(thread_id) DO UPDATE SET
+       forked_from_id     = excluded.forked_from_id,
+       verified_at        = excluded.verified_at,
+       lineage_checked_at = excluded.lineage_checked_at`
+  ).run(threadId, forkedFromId, Date.now(), verifiedAt, Date.now())
+}
+
+/**
+ * Every cached BRANCH, oldest first: the rows the sidebar's unlisted-fork read
+ * and every delete plan are built from.
+ *
+ * Rows with no lineage are excluded here rather than at the call sites, because
+ * "not a branch of anything" is the one thing a root, an unknowable source and
+ * a tombstone have in common, and no reader of this function wants any of them.
+ */
+export function listCodexForks(db: Db = getDb()): CodexFork[] {
+  return (
+    db
+      .prepare(
+        `SELECT thread_id, forked_from_id FROM codex_forks
+         WHERE forked_from_id IS NOT NULL AND forked_from_id <> thread_id
+         ORDER BY created_at, thread_id`
+      )
+      .all() as Array<{ thread_id: string; forked_from_id: string | null }>
+  ).map((row) => ({ threadId: row.thread_id, forkedFromId: row.forked_from_id }))
+}
+
+/** Every cached thread, branch or not — the scan's "what do I already know?". */
+export function listCodexLineage(db: Db = getDb()): CodexLineage[] {
+  return (
+    db
+      .prepare(
+        'SELECT thread_id, forked_from_id, verified_at FROM codex_forks ORDER BY created_at, thread_id'
+      )
+      .all() as Array<{
+      thread_id: string
+      forked_from_id: string | null
+      verified_at: number | null
+    }>
+  ).map((row) => ({
+    threadId: row.thread_id,
+    forkedFromId: row.forked_from_id,
+    verifiedAt: row.verified_at
+  }))
+}
+
+/** Forget one thread entirely — for a thread ClaudeUI has just deleted. */
+export function deleteCodexFork(threadId: string, db: Db = getDb()): void {
+  db.prepare('DELETE FROM codex_forks WHERE thread_id = ?').run(threadId)
 }
 
 /**
@@ -860,7 +1092,7 @@ export function renameSessionMeta(oldId: string, newId: string, fallback?: Sessi
 /**
  * Import session metadata from a legacy sessionEngines record (from sessions.json).
  * Only runs if the session_meta table is empty — ensures a one-time migration.
- * Codex/unknown engineIds are clamped to 'claude', matching the Phase-1 clamp.
+ * Recognized engine IDs are preserved. Unknown legacy IDs retain the existing clamp.
  *
  * Call this after the first DB open, before any reads.
  */
@@ -880,9 +1112,12 @@ export function importSessionEnginesOnce(
   )
 
   for (const [sessionId, entry] of entries) {
-    // Clamp unknown/codex engineIds to 'claude'
+    // Do not infer recovery of previously clamped rows from model names.
     const engineId: EngineId =
-      entry.engineId === 'claude' || entry.engineId === 'opencode' || entry.engineId === 'pi'
+      entry.engineId === 'claude' ||
+      entry.engineId === 'opencode' ||
+      entry.engineId === 'pi' ||
+      entry.engineId === 'codex'
         ? (entry.engineId as EngineId)
         : 'claude'
 

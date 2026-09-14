@@ -7,11 +7,13 @@
  * one trigger on mobile and the individual pickers on desktop — is covered
  * separately in View.unit.test.tsx.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, fireEvent, within } from '@testing-library/react'
 import { MobileConfigSheet, type MobileConfigSheetProps } from '../MobileConfigSheet'
 import type { ModelDisplay } from '../../../shared/InlinePickers'
 import { useEscapeLayer, __escapeLayerCount } from '../../../shared/use-escape-layer'
+import { useSessionStore } from '../../../../stores/session-store'
+import { UNKNOWN_PROVIDER_AUTH, type ProviderAuthView } from '../../../../utils/sign-in-provider'
 
 const opusModel: ModelDisplay = {
   value: 'claude-opus-4-7',
@@ -51,6 +53,13 @@ function makeProps(overrides: Partial<MobileConfigSheetProps> = {}): MobileConfi
     effort: 'high',
     effortSupported: true,
     allowedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+    showAccountPicker: false,
+    accounts: [],
+    activeAccountId: null,
+    pinnedAccountId: null,
+    onSelectAccount: vi.fn(),
+    onAddAccount: vi.fn(),
+    onAccountMenuOpen: vi.fn(),
     onSelectMode: vi.fn(),
     onSelectEngine: vi.fn(),
     onSelectModel: vi.fn(),
@@ -580,5 +589,113 @@ describe('MobileConfigSheet — dialog chrome', () => {
     rerender(<MobileConfigSheet {...makeProps({ effortSupported: false })} />)
     expect(screen.getByText('Run configuration')).toBeInTheDocument()
     expect(screen.queryByTestId('MobileConfigSheet.effortOption')).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * Slice 2b guard 6 (mobile half) — the ChatGPT account page (ADR-068 §2).
+ *
+ * Same list, same vocabulary and the same follow-active-vs-pinned distinction
+ * the desktop `AccountPicker` draws; the sheet is a different surface, not a
+ * different model.
+ */
+describe('MobileConfigSheet — the ChatGPT account page', () => {
+  const accounts = [
+    { id: 'acct-a', email: 'a@example.test', planType: 'pro' },
+    { id: 'acct-b', email: 'b@example.test', planType: 'plus' }
+  ]
+  const accountProps = (over: Partial<MobileConfigSheetProps> = {}): MobileConfigSheetProps =>
+    makeProps({
+      showAccountPicker: true,
+      accounts,
+      activeAccountId: 'acct-a',
+      pinnedAccountId: null,
+      ...over
+    })
+
+  it('has no account row at all when the picker is gated off', () => {
+    render(<MobileConfigSheet {...makeProps()} />)
+    fireEvent.click(screen.getByTestId('MobileConfigSheet.trigger'))
+    expect(screen.queryByTestId('MobileConfigSheet.account')).toBeNull()
+  })
+
+  it('summarises follow-active on the row and drills into the same list', () => {
+    const props = accountProps()
+    render(<MobileConfigSheet {...props} />)
+    fireEvent.click(screen.getByTestId('MobileConfigSheet.trigger'))
+
+    const row = screen.getByTestId('MobileConfigSheet.account')
+    expect(row.textContent).toContain('Active · a@example.test')
+    fireEvent.click(row)
+
+    expect(props.onAccountMenuOpen).toHaveBeenCalledTimes(1)
+    const options = screen.getAllByTestId('MobileConfigSheet.accountOption')
+    expect(options.map((option) => option.getAttribute('data-value'))).toEqual([
+      '__active__',
+      'acct-a',
+      'acct-b'
+    ])
+    fireEvent.click(options[2])
+    expect(props.onSelectAccount).toHaveBeenCalledWith('acct-b')
+    // Selecting returns to root, like every other page in this sheet.
+    expect(screen.getByTestId('MobileConfigSheet.account')).toBeTruthy()
+  })
+
+  it('shows the pin on the row and offers the way to add an account', () => {
+    const props = accountProps({ pinnedAccountId: 'acct-b' })
+    render(<MobileConfigSheet {...props} />)
+    fireEvent.click(screen.getByTestId('MobileConfigSheet.trigger'))
+    expect(screen.getByTestId('MobileConfigSheet.account').textContent).toContain('b@example.test')
+
+    fireEvent.click(screen.getByTestId('MobileConfigSheet.account'))
+    fireEvent.click(screen.getByTestId('MobileConfigSheet.accountAdd'))
+    expect(props.onAddAccount).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
+ * The mobile ModelPage mirrors the desktop ModelPicker (ADR-068 §3, Slice 6),
+ * down to the testid — the two never co-render, so one selector answers "is the
+ * sign-in offered?" whichever composer is on screen.
+ */
+describe('MobileConfigSheet — model submenu sign-in', () => {
+  function setAuth(patch: Partial<ProviderAuthView>): void {
+    useSessionStore.setState({
+      providerAuth: { ...UNKNOWN_PROVIDER_AUTH, ...patch },
+      signInDialog: null
+    })
+  }
+
+  beforeEach(() => setAuth({}))
+
+  function openModelPage(props: MobileConfigSheetProps = makeProps()): void {
+    render(<MobileConfigSheet {...props} />)
+    openSheet()
+    fireEvent.click(screen.getByTestId('MobileConfigSheet.model'))
+  }
+
+  it('offers the sign-in and dims the options for an unauthenticated group', () => {
+    setAuth({ anthropic: 'unauthenticated' })
+    openModelPage()
+
+    const item = screen.getByTestId('ModelPicker.signIn')
+    expect(item).toHaveAttribute('data-id', 'anthropic')
+    expect(item).toHaveTextContent('Sign in to Claude')
+    expect(screen.getByTestId('MobileConfigSheet.modelOption').className).toContain('opacity-60')
+
+    fireEvent.click(item)
+    expect(useSessionStore.getState().signInDialog).toEqual({
+      providerId: 'anthropic',
+      mode: 'reauth'
+    })
+  })
+
+  it.each(['authenticated', 'unknown'] as const)('shows nothing for a %s group', (state) => {
+    setAuth({ anthropic: state })
+    openModelPage()
+    expect(screen.queryByTestId('ModelPicker.signIn')).toBeNull()
+    expect(screen.getByTestId('MobileConfigSheet.modelOption').className).not.toContain(
+      'opacity-60'
+    )
   })
 })

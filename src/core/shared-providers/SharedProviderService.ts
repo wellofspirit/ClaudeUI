@@ -199,6 +199,21 @@ export class SharedProviderService {
     })
   }
 
+  /**
+   * Turn per-session account pinning on or off for a SUBSCRIPTION provider
+   * (ADR-068 §2). Enqueued with every other definition write, so it cannot
+   * interleave with a route change and lose one of the two.
+   */
+  async setAccountsPerSession(id: string, enabled: boolean): Promise<void> {
+    await this.enqueue(async () => {
+      const definition = this.requireDefinition(id)
+      if (definition.kind !== 'subscription') {
+        throw new Error('Per-session accounts are only supported for subscription providers')
+      }
+      this.repository.save({ ...definition, accounts: { perSession: enabled } })
+    })
+  }
+
   async setApiKey(id: string, key: string): Promise<void> {
     await this.enqueue(async () => {
       const definition = this.requireDefinition(id)

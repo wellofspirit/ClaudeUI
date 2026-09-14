@@ -4,7 +4,7 @@ import type { ISession, EngineSpawnOptions } from '../providers/ISession'
 import { engineRegistry } from '../providers/EngineRegistry'
 // Side-effect: registers all engine factories (claude, …) at module load time
 import '../providers/register-engines'
-import { loadSessionHistory } from './session-history'
+import { readSessionHistory as loadSessionHistory } from './engine-history'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { renameDispatchedUsage } from './db'
 import { logger } from './logger'

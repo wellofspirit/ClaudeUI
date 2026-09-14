@@ -96,8 +96,16 @@ export interface SettingRowProps {
   description?: string
   /** The engine-native config key this row writes (11px mono, under the text). */
   keyText?: string
-  /** Outlined chip after the label — the setting exists for this engine only. */
-  engine?: EngineId
+  /**
+   * Outlined chip(s) after the label — which engines the setting reaches.
+   *
+   * A LIST because one store can feed more than one engine: the Claude
+   * permission rules are also compiled into Codex's execpolicy file (ADR-067),
+   * so that row is honestly two chips, not a Claude-only row with a sentence
+   * about Codex. Each chip keeps its own `data-id`, so an assertion written
+   * against the single-engine form still resolves.
+   */
+  engine?: EngineId | readonly EngineId[]
   appliesOn?: AppliesOn
   /**
    * This row's value differs from the default. There is NO persistent
@@ -206,15 +214,16 @@ export function SettingRow({
           >
             <span className="min-w-0">{label}</span>
             {labelBadge}
-            {engine && (
+            {(typeof engine === 'string' ? [engine] : (engine ?? [])).map((id) => (
               <span
+                key={id}
                 data-testid={`${tid}.engine`}
-                data-id={engine}
+                data-id={id}
                 className="shrink-0 border border-border rounded-full px-[7px] text-[10.5px] leading-4 text-text-secondary"
               >
-                {engineMeta(engine).label}
+                {engineMeta(id).label}
               </span>
-            )}
+            ))}
             {locked && (
               <span
                 data-testid={`${tid}.locked`}
@@ -815,7 +824,7 @@ export function ActionRow({
 }: {
   label: string
   description?: string
-  engine?: EngineId
+  engine?: EngineId | readonly EngineId[]
   action: string
   onAction: () => void
   disabled?: boolean

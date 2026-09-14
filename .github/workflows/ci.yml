@@ -71,6 +71,19 @@ jobs:
           path: .cache/claude-cli
           key: ${{ runner.os }}-claude-cli-src-${{ steps.cli-version.outputs.version }}
 
+      - name: Read codex CLI version
+        id: codex-version
+        shell: bash
+        run: echo "version=$(node -p "require('./package.json').codexCliVersion")" >> "$GITHUB_OUTPUT"
+
+      # No restore-keys: `cacheValid` rehashes every pinned payload, so a partial
+      # hit from another pin is a guaranteed re-download rather than a saving.
+      - name: Cache codex CLI binaries
+        uses: actions/cache@v6
+        with:
+          path: vendor/codex-cli
+          key: ${{ runner.os }}-${{ runner.arch }}-codex-cli-${{ steps.codex-version.outputs.version }}
+
       - name: Cache Electron binaries
         uses: actions/cache@v6
         with:

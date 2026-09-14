@@ -22,6 +22,8 @@
  * edge would be a cycle). Anything both sides need lives in `settings-target.ts`.
  */
 import type { EngineId } from '../../../../shared/types'
+import { CodexAccount } from './CodexAccount'
+import { EngineLogo } from '../shared/EngineLogo'
 import type { EngineCapabilities } from '../../../../shared/model-capabilities'
 import { engineMeta } from '../../../../shared/engine-meta'
 import { SECTIONS, type Section, type SettingItem } from './settings-sections'
@@ -203,10 +205,17 @@ const VERSIONS: SettingItem = {
 }
 
 /** Item keys defined in THIS file rather than pulled from `SECTIONS`. */
+const CODEX_ACCOUNT: SettingItem = {
+  key: 'codexNativeAccount',
+  label: 'Native Codex account',
+  keywords: 'codex chatgpt openai native account login authentication vault',
+  render: () => <CodexAccount />
+}
 export const PAGE_LOCAL_ITEMS: readonly SettingItem[] = [
   SANDBOX_CROSS_LINK,
   OTHER_ENGINE_PERMISSIONS,
-  VERSIONS
+  VERSIONS,
+  CODEX_ACCOUNT
 ]
 
 // ── Icons (14px, stroke 1.8 — the rail size on the boards) ───────────
@@ -298,14 +307,35 @@ const ICON_PI = icon(
   </>
 )
 
+/**
+ * Codex's own file, and when a change to it binds.
+ *
+ * Every group on the page wears the same pair, because the binary's own
+ * `reloadUserConfig` doc is explicit that the session-static values (model,
+ * reasoning effort, plan-mode effort, service tier, personality) are NOT
+ * hot-reloaded — so "next session" is the only promise that holds for the whole
+ * page. Managed and Raw config carry neither: nothing there is written.
+ */
+const CODEX_FILE = 'config.toml'
+const CODEX_NEXT_SESSION = 'Applies to newly started Codex sessions.'
+
 /** `engines/<engine>.json` — the storage tag of a per-engine group. */
 const engineFile = (engine: EngineId): string => `engines/${engine}.json`
 
-/** Who can dispatch INTO each engine — the other two, named in the Limits note. */
+/**
+ * Who can dispatch INTO each engine — the other THREE, named in the Limits note.
+ * Every engine both hosts `dispatch_agent` and is an accepted target
+ * (`crossEngineDispatchAvailable` / the target switch in
+ * `cross-engine-dispatcher.ts`), so each row is the full complement minus
+ * itself: the dispatcher refuses same-engine work outright.
+ */
 const DISPATCH_CALLERS: Record<EngineId, string> = {
-  claude: 'an opencode or pi',
-  opencode: 'a Claude or pi',
-  pi: 'a Claude or opencode'
+  // Codex became a real dispatch TARGET with ADR-033 slice H; only the settings
+  // pane was missing, which is what "unsupported" used to describe.
+  codex: 'a Claude, opencode or pi',
+  claude: 'an opencode, pi or Codex',
+  opencode: 'a Claude, pi or Codex',
+  pi: 'a Claude, opencode or Codex'
 }
 
 /**
@@ -314,6 +344,7 @@ const DISPATCH_CALLERS: Record<EngineId, string> = {
  * silent `appliesOn` would be computed and then dropped.
  */
 const DEFAULT_MODEL_NOTES: Record<EngineId, string> = {
+  codex: 'Applies to new Codex sessions.',
   claude: 'Applies to new Claude sessions.',
   opencode: 'Changes here apply when the opencode server restarts for a working directory.',
   pi: 'Applies to new pi sessions.'
@@ -381,12 +412,19 @@ export const PAGES: SettingsPage[] = [
       {
         id: 'judge',
         label: 'Auto-mode judge',
-        storage: engineFile,
+        // Codex is the odd one out on both fields: its reviewer is NATIVE
+        // (ADR-067), so what there is to configure is guardian policy text in
+        // Codex's own `config.toml`, not a judge model in `engines/codex.json`.
+        storage: (engine) => (engine === 'codex' ? CODEX_FILE : engineFile(engine)),
         appliesOn: 'next-session',
-        note: 'The judge sees tool calls, not their output. Read once per session — reopen a session to pick up a change.',
+        note: (engine) =>
+          engine === 'codex'
+            ? 'Codex reviews its own actions with the native guardian. Read once per thread — start a session to pick up a change.'
+            : 'The judge sees tool calls, not their output. Read once per session — reopen a session to pick up a change.',
         byEngine: {
           opencode: itemsOf('opencode-automode'),
-          pi: itemsOf('pi-automode')
+          pi: itemsOf('pi-automode'),
+          codex: itemsOf('codex-automode')
         }
       },
       {
@@ -461,13 +499,22 @@ export const PAGES: SettingsPage[] = [
         // are its own jsonc, read when the per-cwd SERVER restarts; pi's are
         // pi's settings.json, read at session start.
         storage: (engine) =>
-          engine === 'opencode' ? 'opencode.jsonc' : engine === 'pi' ? 'settings.json' : undefined,
+          engine === 'opencode'
+            ? 'opencode.jsonc'
+            : engine === 'pi'
+              ? 'settings.json'
+              : engine === 'codex'
+                ? engineFile('codex')
+                : undefined,
         appliesOn: (engine) => (engine === 'opencode' ? 'next-server-start' : 'next-session'),
         note: (engine) => DEFAULT_MODEL_NOTES[engine],
         byEngine: {
           claude: itemsOf('effortDefaults'),
           opencode: itemsOf('opencode-models'),
-          pi: itemsOf('pi-config-models')
+          pi: itemsOf('pi-config-models'),
+          // ClaudeUI's OWN default for a Codex session, in `engines/codex.json`
+          // — not the `model` key on the Codex page, which is Codex's file.
+          codex: itemsOf('codex-models')
         }
       },
       {
@@ -497,7 +544,8 @@ export const PAGES: SettingsPage[] = [
         byEngine: {
           claude: itemsOf('claude-dispatch', ['claudeDispatch']),
           opencode: itemsOf('opencode-dispatch', ['opencodeDispatch']),
-          pi: itemsOf('pi-dispatch', ['piDispatch'])
+          pi: itemsOf('pi-dispatch', ['piDispatch']),
+          codex: itemsOf('codex-dispatch', ['codexDispatch'])
         }
       },
       {
@@ -519,7 +567,8 @@ export const PAGES: SettingsPage[] = [
         byEngine: {
           claude: itemsOf('claude-dispatch', ['claudeDispatchLimits']),
           opencode: itemsOf('opencode-dispatch', ['opencodeDispatchLimits']),
-          pi: itemsOf('pi-dispatch', ['piDispatchLimits'])
+          pi: itemsOf('pi-dispatch', ['piDispatchLimits']),
+          codex: itemsOf('codex-dispatch', ['codexDispatchLimits'])
         }
       }
     ]
@@ -747,6 +796,107 @@ export const PAGES: SettingsPage[] = [
         items: itemsOf('pi-config-raw')
       }
     ]
+  },
+  {
+    id: 'codex',
+    label: 'Codex',
+    rail: 'engines',
+    icon: <EngineLogo engineId="codex" size={14} />,
+    engine: 'codex',
+    description:
+      "Codex's own configuration. Only the key you change is written to config.toml; other keys and comments are kept. Approvals, sandbox mode and the reviewer are set by the session's permission mode, not here.",
+    groups: [
+      { id: 'account', label: 'Account', items: [CODEX_ACCOUNT] },
+      {
+        id: 'model',
+        label: 'Model behaviour',
+        appliesOn: 'next-session',
+        note: CODEX_NEXT_SESSION,
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-model')
+      },
+      {
+        id: 'context',
+        label: 'Context & compaction',
+        appliesOn: 'next-session',
+        note: CODEX_NEXT_SESSION,
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-context')
+      },
+      {
+        id: 'instructions',
+        label: 'Instructions',
+        appliesOn: 'next-session',
+        note: CODEX_NEXT_SESSION,
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-instructions')
+      },
+      {
+        id: 'sandbox',
+        label: 'Workspace sandbox',
+        // The mock's badge: this group tunes the workspace-write profile, which
+        // is the sandbox `acceptEdits` and `auto` resolve to (ADR-067).
+        badge: 'acceptEdits · Auto',
+        appliesOn: 'next-session',
+        note: CODEX_NEXT_SESSION,
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-sandbox')
+      },
+      {
+        id: 'shell',
+        label: 'Shell environment',
+        appliesOn: 'next-session',
+        note: CODEX_NEXT_SESSION,
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-shell')
+      },
+      {
+        id: 'tools',
+        label: 'Tools & search',
+        appliesOn: 'next-session',
+        note: CODEX_NEXT_SESSION,
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-tools')
+      },
+      {
+        id: 'agents',
+        label: 'Native agents',
+        appliesOn: 'next-session',
+        note: CODEX_NEXT_SESSION,
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-agents')
+      },
+      {
+        id: 'mcp',
+        label: 'MCP servers',
+        badge: 'Shared · all engines',
+        appliesOn: 'next-session',
+        note: 'The inherited list is read when a Codex thread starts, so a change applies to the next session.',
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-mcp')
+      },
+      {
+        id: 'history',
+        label: 'History & privacy',
+        appliesOn: 'next-session',
+        note: CODEX_NEXT_SESSION,
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-history')
+      },
+      {
+        id: 'managed',
+        label: 'Managed',
+        badge: 'Locked',
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-managed')
+      },
+      {
+        id: 'raw',
+        label: 'Raw config',
+        storage: CODEX_FILE,
+        items: itemsOf('codex-config-raw')
+      }
+    ]
   }
 ]
 
@@ -774,8 +924,12 @@ export function visibleGroups(
   return page.groups.filter((g) => !g.requires || (resolved ? resolved[g.requires] === true : true))
 }
 
-/** The engines a byEngine group offers, always in claude → opencode → pi order. */
-const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi']
+/**
+ * The engines a byEngine group offers, in the order the Engines rail lists their
+ * pages — claude → opencode → pi → codex. Codex joined last (ADR-068 §6); it is
+ * appended rather than slotted in so no existing segment changes position.
+ */
+const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi', 'codex']
 
 export function enginesOf(group: SettingsGroup): EngineId[] {
   if (!group.byEngine) return []
@@ -857,6 +1011,7 @@ export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; gro
   permissions: { page: 'sessions', group: 'permissions' },
   'opencode-automode': { page: 'sessions', group: 'judge' },
   'pi-automode': { page: 'sessions', group: 'judge' },
+  'codex-automode': { page: 'sessions', group: 'judge' },
   'trust-lists': { page: 'sessions', group: 'trust' },
   session: { page: 'sessions', group: 'retention' },
 
@@ -867,12 +1022,14 @@ export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; gro
   effortDefaults: { page: 'models', group: 'defaults' },
   'opencode-models': { page: 'models', group: 'defaults' },
   'pi-config-models': { page: 'models', group: 'defaults' },
+  'codex-models': { page: 'models', group: 'defaults' },
   'vendor-anthropic': { page: 'models', group: 'anthropic' },
   accounts: { page: 'models', group: 'accounts' },
 
   'claude-dispatch': { page: 'dispatch', group: 'into' },
   'opencode-dispatch': { page: 'dispatch', group: 'into' },
   'pi-dispatch': { page: 'dispatch', group: 'into' },
+  'codex-dispatch': { page: 'dispatch', group: 'into' },
 
   mockup: { page: 'mockups', group: 'network' },
 
@@ -898,7 +1055,19 @@ export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; gro
   'pi-config-images': { page: 'pi', group: 'attachments' },
   'pi-config-workspace': { page: 'pi', group: 'workspace' },
   'pi-config-network': { page: 'pi', group: 'network' },
-  'pi-config-raw': { page: 'pi', group: 'raw' }
+  'pi-config-raw': { page: 'pi', group: 'raw' },
+
+  'codex-config-model': { page: 'codex', group: 'model' },
+  'codex-config-context': { page: 'codex', group: 'context' },
+  'codex-config-instructions': { page: 'codex', group: 'instructions' },
+  'codex-config-sandbox': { page: 'codex', group: 'sandbox' },
+  'codex-config-shell': { page: 'codex', group: 'shell' },
+  'codex-config-tools': { page: 'codex', group: 'tools' },
+  'codex-config-agents': { page: 'codex', group: 'agents' },
+  'codex-config-mcp': { page: 'codex', group: 'mcp' },
+  'codex-config-history': { page: 'codex', group: 'history' },
+  'codex-config-managed': { page: 'codex', group: 'managed' },
+  'codex-config-raw': { page: 'codex', group: 'raw' }
 }
 
 // ── Search ───────────────────────────────────────────────────────────

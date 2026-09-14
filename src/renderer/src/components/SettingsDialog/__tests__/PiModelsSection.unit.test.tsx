@@ -10,12 +10,13 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import type { ReactElement } from 'react'
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react'
-import { SECTIONS } from '../settings-sections'
+import { SECTIONS, PiDispatchIntoSection } from '../settings-sections'
 import { useSessionStore, PI_DEFAULT_MODEL } from '../../../stores/session-store'
 import type { EngineConfig, EngineModelGroup } from '../../../../../shared/types'
 
-const loadEngineConfig = vi.fn(async (): Promise<EngineConfig> => ({}))
+const loadEngineConfig = vi.fn(async (_engineId: string): Promise<EngineConfig> => ({}))
 const saveEngineConfig = vi.fn(async () => {})
 const getEngineModels = vi.fn(async (): Promise<EngineModelGroup[]> => [])
 const getPiModelCatalogGroups = vi.fn(async (): Promise<EngineModelGroup[]> => [])
@@ -68,20 +69,22 @@ function pickModel(field: HTMLElement, value: string): void {
   fireEvent.click(option!)
 }
 
-function renderSection(): void {
+function modelsPane(): ReactElement {
   const item = SECTIONS.find((section) => section.id === 'pi-config-models')!.items.find(
     (item) => item.key === 'piModels'
   )!
-  render(
-    item.render(
-      {} as never,
-      () => {},
-      {} as never,
-      () => {},
-      {} as never,
-      () => {}
-    )
+  return item.render(
+    {} as never,
+    () => {},
+    {} as never,
+    () => {},
+    {} as never,
+    () => {}
   )
+}
+
+function renderSection(): void {
+  render(modelsPane())
 }
 
 describe('pi session-default model (Models & thinking pane)', () => {
@@ -250,5 +253,66 @@ describe('pi session-default model (Models & thinking pane)', () => {
       'config write failed'
     )
     expect(screen.getByTestId('ModelAllowlistDialog')).toBeInTheDocument()
+  })
+
+  // ── One config object per engine ───────────────────────────────────
+  //
+  // `saveEngineConfig` replaces the WHOLE `engines/pi.json`, and a settings
+  // SEARCH mounts live buckets from several pages at once — so this pane and
+  // the pi Dispatch panes are on screen together, over one file. When this pane
+  // held its own `useState` copy, the second save of a session erased the block
+  // the first had written (the copy predated it).
+  describe('shares one engines/pi.json object with the pi dispatch pane', () => {
+    const dispatched = { defaultModel: 'anthropic/claude-sonnet-5' }
+
+    function renderBoth(): void {
+      render(
+        <>
+          {modelsPane()}
+          <PiDispatchIntoSection />
+        </>
+      )
+    }
+
+    it('mounting both panes reads the file once', async () => {
+      loadEngineConfig.mockResolvedValue({ dispatch: dispatched })
+      renderBoth()
+      await screen.findByTestId('PiDefaultModelSection.defaultModel')
+      await screen.findByTestId('PiDispatchSection.defaultModel')
+
+      expect(loadEngineConfig.mock.calls.filter((call) => call[0] === 'pi')).toHaveLength(1)
+    })
+
+    it('neither pane erases the other block', async () => {
+      loadEngineConfig.mockResolvedValue({ dispatch: dispatched })
+      renderBoth()
+      const field = await screen.findByTestId('PiDefaultModelSection.defaultModel')
+      await screen.findByTestId('PiDispatchSection.defaultModel')
+
+      // 1. This pane writes `piConfig` — and must carry the `dispatch` block it
+      //    found on disk through untouched.
+      pickModel(field, 'openai-codex/gpt-5.6-luna')
+      await waitFor(() =>
+        expect(saveEngineConfig).toHaveBeenNthCalledWith(1, 'pi', {
+          dispatch: dispatched,
+          piConfig: { defaultModel: 'openai-codex/gpt-5.6-luna' }
+        })
+      )
+
+      // 2. The dispatch pane then writes `dispatch` — against the object the
+      //    save above left behind, so the default model survives.
+      const chip = screen
+        .getAllByTestId('PiDispatchSection.allowedModel')
+        .find((el) => el.getAttribute('data-id') === 'anthropic/claude-sonnet-5')
+      expect(chip, 'allowedModel chip for anthropic/claude-sonnet-5').toBeTruthy()
+      fireEvent.click(chip!)
+
+      await waitFor(() =>
+        expect(saveEngineConfig).toHaveBeenNthCalledWith(2, 'pi', {
+          dispatch: { ...dispatched, allowedModels: ['anthropic/claude-sonnet-5'] },
+          piConfig: { defaultModel: 'openai-codex/gpt-5.6-luna' }
+        })
+      )
+    })
   })
 })

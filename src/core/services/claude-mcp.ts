@@ -100,6 +100,24 @@ export function loadMcpServers(scope: McpScope, cwd?: string): Record<string, Mc
 }
 
 /**
+ * The one MERGE ORDER every engine bridge inherits: user (lowest), then
+ * project, then local (highest). A name declared in more than one scope
+ * resolves to the narrowest declaration, which is Claude Code's own precedence.
+ *
+ * Shared by `collectClaudeMcpForOpencode` and `collectClaudeMcpForCodex` so the
+ * two translations cannot drift on WHICH servers they see — only on how each
+ * one is shaped for its engine. Callers still apply `readDisabledMcpServers`
+ * themselves: the disabled list is per-cwd policy, not part of the merge.
+ */
+export function mergeClaudeMcpServers(cwd: string): Record<string, McpServerConfig> {
+  return {
+    ...loadMcpServers('user'),
+    ...loadMcpServers('project', cwd),
+    ...loadMcpServers('local', cwd)
+  }
+}
+
+/**
  * Read the disabledMcpServers list from ~/.claude.json's project entry.
  *
  * The CLI stores per-project disabled MCP server names in:

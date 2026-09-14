@@ -116,7 +116,10 @@ const SHARED_DECLARATION_SOURCES = [
   // The redacted status read (owner ruling, 2026-08-28) — the ONE `remote:*`
   // channel served on both transports. Every `remote:*` MUTATION is absent from
   // this list because it is absent from the registry entirely.
-  'src/core/ipc/remote-view-commands.ts'
+  'src/core/ipc/remote-view-commands.ts',
+  // ADR-066 — the native-Codex family (settings, approvals, the login
+  // ceremony), spread by both transports from one declaration.
+  'src/core/ipc/codex-commands.ts'
 ]
 
 /**
@@ -224,6 +227,24 @@ const PROVIDER_REGISTRY_SWEEP: Record<
   { capability: Capability; kind: 'command' | 'query' }
 > = {
   'provider-registry:list': { capability: 'config', kind: 'query' }
+}
+
+/**
+ * ADR-068 §2 — the subscription ACCOUNTS family, declared beside the provider
+ * registry it feeds.
+ *
+ * Its own table for the same reason that one has one. All `config`: the account
+ * list is provider configuration, it carries no key material, and the phone must
+ * be able to switch which account the host bills.
+ */
+const PROVIDER_ACCOUNT_SWEEP: Record<
+  string,
+  { capability: Capability; kind: 'command' | 'query' }
+> = {
+  'provider-account:list': { capability: 'config', kind: 'query' },
+  'provider-account:switch': { capability: 'config', kind: 'command' },
+  'provider-account:remove': { capability: 'config', kind: 'command' },
+  'provider-account:set-per-session': { capability: 'config', kind: 'command' }
 }
 
 /** channel → declared capability, parsed from remote-handlers.ts registrations. */
@@ -400,6 +421,37 @@ describe('remote channel parity (R5)', () => {
 
     const declared = remoteDeclarations()
     for (const channel of Object.keys(PROVIDER_REGISTRY_SWEEP)) {
+      expect(declared.get(channel), `${channel} has no remote registration`).toBe('config')
+      expect(AUTH_OFF_GRANTS.has(declared.get(channel)!)).toBe(true)
+    }
+  })
+
+  it('the provider ACCOUNT family is declared once, base-reachable, and on both transports', () => {
+    // The registry test above, applied to ADR-068's four: same shared module,
+    // same `config` reachability, and never re-declared inline — a second
+    // declaration in one registrar is how the desktop and the phone would end up
+    // with different rules for switching the billed account.
+    const shared = read('src/core/ipc/auth-commands.ts')
+    const declRe = /channel:\s*'([^']+)',\s*capability:\s*'([^']+)',\s*kind:\s*'([^']+)'/g
+    const found = new Map<string, { capability: Capability; kind: string }>()
+    for (let m = declRe.exec(shared); m; m = declRe.exec(shared)) {
+      if (!(m[1] in PROVIDER_ACCOUNT_SWEEP)) continue
+      expect(found.has(m[1]), `${m[1]} is declared twice in auth-commands.ts`).toBe(false)
+      found.set(m[1], { capability: m[2] as Capability, kind: m[3] })
+    }
+    expect(Object.fromEntries(found)).toEqual(PROVIDER_ACCOUNT_SWEEP)
+
+    const registrars = [
+      read('src/core/ipc/session.ipc.ts'),
+      read('src/core/ipc/remote-handlers.ts')
+    ].join('\n')
+    const inline = Object.keys(PROVIDER_ACCOUNT_SWEEP).filter((c) =>
+      registrars.includes(`channel: '${c}'`)
+    )
+    expect(inline, `re-declared inline in a transport registrar: ${inline.join(', ')}`).toEqual([])
+
+    const declared = remoteDeclarations()
+    for (const channel of Object.keys(PROVIDER_ACCOUNT_SWEEP)) {
       expect(declared.get(channel), `${channel} has no remote registration`).toBe('config')
       expect(AUTH_OFF_GRANTS.has(declared.get(channel)!)).toBe(true)
     }

@@ -42,6 +42,16 @@ describe('SettingRow', () => {
     expect(description).toHaveClass('text-text-secondary')
   })
 
+  it('renders ONE chip per engine when a row reaches several (Slice 5b)', () => {
+    // The Claude permission rules are also compiled into Codex's execpolicy
+    // file (ADR-067), so that row is honestly two chips. Each keeps its own
+    // `data-id`, which is what an assertion written for the single form reads.
+    render(<SettingRow label="Permission rules" engine={['claude', 'codex']} />)
+    const chips = screen.getAllByTestId('SettingRow.engine')
+    expect(chips.map((c) => c.getAttribute('data-id'))).toEqual(['claude', 'codex'])
+    expect(chips.map((c) => c.textContent)).toEqual(['Claude', 'Codex'])
+  })
+
   it('renders the engine chip and the applies-later badge, and NO changed dot', () => {
     render(
       <SettingRow
@@ -56,6 +66,8 @@ describe('SettingRow', () => {
     )
     expect(screen.getByTestId('SettingRow.engine')).toHaveTextContent('Claude')
     expect(screen.getByTestId('SettingRow.badge')).toHaveTextContent('Next server start')
+    // One chip when one engine is named — the single-engine form is unchanged.
+    expect(screen.getAllByTestId('SettingRow.engine')).toHaveLength(1)
     // The accent dot was removed on the owner's request (2026-09-08): a changed
     // row has no persistent indicator, only the hover Reset below.
     expect(screen.queryByTestId('SettingRow.modified')).not.toBeInTheDocument()

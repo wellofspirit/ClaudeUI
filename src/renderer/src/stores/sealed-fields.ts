@@ -16,7 +16,7 @@
  *
  * The complement is just as deliberate. Channels classified `canonical: false`
  * (usage, git summaries, error/warning/sandbox toasts, MCP status, auth banners,
- * vendor-auth cards, automation, mockup reloads) have **no snapshot field to fold
+ * automation, mockup reloads) have **no snapshot field to fold
  * into**: they are transient client state that a resync legitimately drops — the
  * as-built behavior, recorded in sync-channels.md rather than invented here. They
  * keep their per-channel listeners and their store writers, and
@@ -75,6 +75,7 @@ export const SEALED_SESSION_FIELDS = [
   'sdkActive',
   'selectedEngineId',
   'selectedModel',
+  'authRequired',
   /**
    * Not a snapshot field of its own: the per-session mirror of the app-level
    * `worktreeInfoMap`, projected from it. Sealed with the map so the two cannot
@@ -118,6 +119,7 @@ export const SEALED_SESSION_FIELD_SOURCE: Readonly<
   sdkActive: 'sdkActive',
   selectedEngineId: 'selectedEngineId',
   selectedModel: 'selectedModel',
+  authRequired: 'authRequired',
   worktreeInfo: 'worktreeInfoMap',
   thinkingStartedAt: 'streamingThinking'
 }
@@ -173,7 +175,6 @@ export const TRANSIENT_SESSION_FIELDS = [
   'warnings', // session:warning
   'sandboxViolations', // session:sandbox-violation
   'gitStatus', // git:status-update
-  'vendorAuthRequired', // session:vendor-auth-required
   'bashOutputs', // session:bash-output   (volatile lane, no snapshot field)
   'backgroundOutputs', // session:background-output
   'voiceState', // voice:state   (host-local)
@@ -183,6 +184,8 @@ export const TRANSIENT_SESSION_FIELDS = [
 /** App-level equivalents of {@link TRANSIENT_SESSION_FIELDS}. */
 export const TRANSIENT_APP_FIELDS = [
   'accountUsage', // usage:data
+  'providerAccounts', // provider-account:list   (host-local read)
+  'chatgptLimits', // usage:chatgpt-limits    (host-local read, nudged by usage:chatgpt-limits-changed)
   'blockUsage', // usage:block-data
   'authState', // auth:state       (host-local)
   'authSource', // session:auth-source

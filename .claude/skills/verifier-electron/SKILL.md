@@ -43,6 +43,9 @@ Run from the project root:
 ```
 node scripts/app-shot.mjs [--out <png>] [--needle <text>] [--settle <ms>]
                           [--click <selector>]...   # repeatable, clicked in order
+                          [--wait <ms>] [--eval <js>]  # ordered with --click/--press/--type
+                          [--state]                  # print renderer state after the shot
+                          [--timeout <ms>]           # watchdog, default 60000
                           [--keep]                   # leave the app open (implies --headed)
                           [--with-remote]            # don't suppress remote access
                           [--headed]                 # show the window on-screen
@@ -96,6 +99,42 @@ all still work because the window is genuinely shown and keeps painting
 compositor frames at all and hangs `screenshot()`. Pass `--headed` to opt out
 and get a normal visible window; `--keep` implies `--headed`, since an
 invisible, taskbar-less instance left running is impossible to close by hand.
+
+## Reading renderer state (`--eval`, `--state`, `--wait`)
+
+The DOM tells you what rendered; it can't tell you whether the store had the data
+at all. For the class of bug where those differ — a turn whose assistant messages
+never appear, but core's canonical state has them — the harness launches the app
+with `CLAUDEUI_VERIFIER_HOOKS=1`, which makes the renderer publish
+`window.__claudeuiVerifier`: the live Zustand store, the replica's canonical
+state, and a `snapshot()` summary of both. The app publishes **nothing** without
+that opt-in (`src/shared/verifier-hooks.ts`); it is a harness affordance, never a
+user's app.
+
+- `--state` — after the shot, prints one line `STATE <json>`:
+
+  ```
+  STATE {"activeSessionId":"abc","sessions":[{"id":"abc","messageCount":12,"roles":{"user":6,"assistant":6},"state":"idle"}],"canonical":{"activeSessionId":"abc","sessions":[{"id":"abc","messageCount":12}]}}
+  ```
+
+  Read it as a three-way comparison on the **message counts**. `canonical` is the
+  authority the store projects from: **canonical ahead of the store** = the
+  projection dropped it; **store and canonical agree but the DOM doesn't** = the
+  component dropped it. The two `activeSessionId`s are allowed to differ —
+  selection is resolved client-locally (ADR-041), so canonical holds what the last
+  hydration decided, not what you just clicked. Don't chase that one.
+  `STATE null` means the hook wasn't there (a stale `out/`, or an app this
+  harness didn't launch) — rebuild before reading anything into it.
+
+- `--eval '<expr>'` — evaluates the expression in the renderer and prints
+  `EVAL <json>`. Repeatable, ordered with the other steps, so you can probe
+  before and after a click:
+  `--eval 'window.__claudeuiVerifier.sessionStore.getState().activeSessionId'`.
+  Anything not JSON-serialisable comes back `null` — summarise inside the
+  expression rather than dumping objects.
+- `--wait <ms>` — a pause as its own ordered step, for a transition that outlasts
+  the 1.2 s each action already waits. It counts against the watchdog, so raise
+  `--timeout` alongside it.
 
 ## Driving the UI
 

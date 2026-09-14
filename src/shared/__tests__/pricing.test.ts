@@ -275,6 +275,45 @@ describe('equivalentCostUsd — openai pricing', () => {
 })
 
 // ---------------------------------------------------------------------------
+// The models Codex's own catalog offers (ADR-066). Both sources are quoted in
+// OPENAI_PRICING; these pin every published column so a bad edit shows up as a
+// wrong cost rather than as a plausible one.
+// ---------------------------------------------------------------------------
+
+describe('equivalentCostUsd — the Codex catalog models', () => {
+  const rates: Array<[string, number, number, number, number]> = [
+    // model, input, cached input, cache write, output — all per MTok
+    ['gpt-6-astra', 10, 1, 12.5, 50],
+    ['gpt-5.6-sol', 4, 0.4, 5, 20],
+    ['gpt-5.6-terra', 2, 0.2, 2.5, 12],
+    ['gpt-5.6-luna', 0.2, 0.02, 0.25, 1.2],
+    ['gpt-5.2', 1.75, 0.175, 1.75, 14]
+  ]
+  for (const [model, input, cacheRead, cacheWrite, output] of rates)
+    it(`${model}: $${input} in / $${cacheRead} cached / $${cacheWrite} written / $${output} out`, () => {
+      expect(equivalentCostUsd('openai', model, oneMTok({ inputTokens: 1_000_000 }))).toBeCloseTo(
+        input
+      )
+      expect(
+        equivalentCostUsd('openai', model, oneMTok({ cacheReadTokens: 1_000_000 }))
+      ).toBeCloseTo(cacheRead)
+      expect(
+        equivalentCostUsd('openai', model, oneMTok({ cacheWriteTokens: 1_000_000 }))
+      ).toBeCloseTo(cacheWrite)
+      expect(equivalentCostUsd('openai', model, oneMTok({ outputTokens: 1_000_000 }))).toBeCloseTo(
+        output
+      )
+    })
+
+  // Codex's hidden models have no published price. A guess would be worse than
+  // "unknown", so the lookup must stay null for them.
+  for (const model of ['gpt-daybreak-blue-latest', 'gpt-daybreak-red-latest', 'codex-auto-review'])
+    it(`${model}: unpriced → null`, () => {
+      expect(equivalentCostUsd('openai', model, oneMTok({ inputTokens: 1_000_000 }))).toBeNull()
+    })
+})
+
+// ---------------------------------------------------------------------------
 // Multi-vendor coverage — Google
 // ---------------------------------------------------------------------------
 

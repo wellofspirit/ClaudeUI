@@ -2,7 +2,7 @@
  * Unit tests for the Claude→opencode permission rule compiler (ADR-022).
  * Pure function: ClaudePermissions (Tool(specifier) strings) → opencode ruleset.
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { join } from 'node:path'
 import {
   parseClaudeRule,
@@ -11,9 +11,29 @@ import {
   suggestOpencodeAllowRule,
   suggestionRuleToClaudeString,
   suggestionDestinationToScope,
+  persistAllowSuggestions,
   withoutAllowRules
 } from '../permission-compiler'
-import type { ClaudePermissions } from '../../../shared/types'
+import type { ClaudePermissions, PermissionSuggestion } from '../../../shared/types'
+
+// The store the shared persister writes through — never the dev machine's real
+// ~/.claude. `loadClaudePermissions` answers from `stored`, `save` writes back.
+const stored = vi.hoisted(() => new Map<string, ClaudePermissions>())
+const saved = vi.hoisted(() => vi.fn())
+vi.mock('../../services/claude-settings', () => ({
+  loadClaudePermissions: (scope: string) =>
+    stored.get(scope) ?? {
+      allow: [],
+      deny: [],
+      ask: [],
+      additionalDirectories: [],
+      defaultMode: undefined
+    },
+  saveClaudePermissions: saved
+}))
+vi.mock('../../services/logger', () => ({
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+}))
 
 function perms(p: Partial<ClaudePermissions>): ClaudePermissions {
   return { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined, ...p }
@@ -194,6 +214,78 @@ describe('suggestionRuleToClaudeString + suggestionDestinationToScope', () => {
     expect(suggestionDestinationToScope('localSettings')).toBe('local')
     expect(suggestionDestinationToScope('session')).toBeNull()
     expect(suggestionDestinationToScope('cliArg')).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// persistAllowSuggestions — the ONE copy behind Codex/pi/opencode sessions.
+// ---------------------------------------------------------------------------
+
+describe('persistAllowSuggestions', () => {
+  const rule = (destination: string, ruleContent: string): PermissionSuggestion => ({
+    type: 'addRules',
+    behavior: 'allow',
+    destination,
+    rules: [{ toolName: 'Bash', ruleContent }]
+  })
+
+  beforeEach(() => {
+    stored.clear()
+    saved.mockClear()
+  })
+
+  it('writes each destination to its own scope, merging with what is already there', () => {
+    stored.set('user', {
+      allow: ['Read'],
+      deny: [],
+      ask: [],
+      additionalDirectories: [],
+      defaultMode: undefined
+    })
+    expect(
+      persistAllowSuggestions(
+        [
+          rule('userSettings', 'ls'),
+          rule('projectSettings', 'git status'),
+          rule('localSettings', 'pwd'),
+          // Same scope twice → one write carrying both rules.
+          rule('localSettings', 'whoami')
+        ],
+        '/work'
+      )
+    ).toBe(true)
+    expect(saved.mock.calls.map(([scope, perms, cwd]) => [scope, perms.allow, cwd])).toEqual([
+      ['user', ['Read', 'Bash(ls)'], '/work'],
+      ['project', ['Bash(git status)'], '/work'],
+      ['local', ['Bash(pwd)', 'Bash(whoami)'], '/work']
+    ])
+  })
+
+  it('skips destinations with no on-disk scope, and reports nothing written', () => {
+    // `session`/`cliArg` are the engines' own in-memory grants (opencode's
+    // `always` reply, Codex's sessionAllows) — there is no file to touch.
+    expect(persistAllowSuggestions([rule('session', 'ls'), rule('cliArg', 'ls')], '/work')).toBe(
+      false
+    )
+    // Non-allow / non-addRules suggestions are not permission grants either.
+    expect(
+      persistAllowSuggestions(
+        [
+          { ...rule('userSettings', 'ls'), behavior: 'deny' },
+          { ...rule('userSettings', 'ls'), type: 'setMode' },
+          { type: 'addRules', behavior: 'allow', destination: 'userSettings' }
+        ],
+        '/work'
+      )
+    ).toBe(false)
+    expect(saved).not.toHaveBeenCalled()
+  })
+
+  it('swallows a failing store write and reports nothing written', () => {
+    saved.mockImplementationOnce(() => {
+      throw new Error('EACCES')
+    })
+    expect(persistAllowSuggestions([rule('userSettings', 'ls')], '/work')).toBe(false)
   })
 })
 

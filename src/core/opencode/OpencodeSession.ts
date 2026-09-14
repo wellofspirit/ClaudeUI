@@ -44,11 +44,10 @@ import { BashStreamGate } from './bash-stream-gate'
 import { discoverOpencodeSkills } from './command-skill-discovery'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { recordUsageEvent } from '../services/usage-recorder'
-import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
+import { loadClaudePermissions } from '../services/claude-settings'
 import {
   compileClaudeRulesToOpencode,
-  suggestionDestinationToScope,
-  suggestionRuleToClaudeString,
+  persistAllowSuggestions,
   withoutAllowRules
 } from './permission-compiler'
 import type { OpencodePermissionRule } from './permission-compiler'
@@ -80,6 +79,7 @@ import {
 import { loadEngineConfig, loadSharedAutoModeConfig } from '../services/ui-config'
 import type { ClaudePermissions, PermissionScope } from '../../shared/types'
 import { blockUsageService } from '../services/block-usage'
+import { opencodeAuthRequiredProviderId } from '../shared-providers/chatgpt-route'
 import {
   crossEngineDispatcher,
   crossEngineDispatchAvailable
@@ -1228,10 +1228,14 @@ export class OpencodeSession extends BaseSession {
 
       case 'auth-required':
         this.isProcessing = false
-        this.send('session:vendor-auth-required', {
-          vendorId: output.vendorId,
-          message: output.message
+        // ADR-068 §4: one event for every engine, naming the PROVIDER the
+        // sign-in dialog can act on rather than opencode's own vendor id. The
+        // event carries no text, so opencode's verbatim message rides along as
+        // an ordinary error row — dropping it would lose the vendor's own words.
+        this.send('session:auth-required', {
+          providerId: opencodeAuthRequiredProviderId(output.vendorId)
         })
+        this.send('session:error', output.message)
         this.sendStatus()
         this.resetInactivityTimer()
         break
@@ -1445,33 +1449,9 @@ export class OpencodeSession extends BaseSession {
 
     // Persist the rule to the shared store so it recompiles onto opencode next
     // spawn + shows in PermissionsDialog (session + shared store — ADR-022).
-    if (persist) this.persistAllowRules(updatedPermissions!)
-  }
-
-  /** Write "always allow" suggestions to the shared Claude permission store. */
-  private persistAllowRules(suggestions: PermissionSuggestion[]): void {
-    try {
-      const byScope = new Map<'user' | 'project' | 'local', string[]>()
-      for (const s of suggestions) {
-        if (s.type !== 'addRules' || s.behavior !== 'allow' || !s.rules) continue
-        const scope = suggestionDestinationToScope(s.destination)
-        if (!scope) continue // 'session' → opencode's 'always' reply already covers it
-        const arr = byScope.get(scope) ?? []
-        for (const r of s.rules) arr.push(suggestionRuleToClaudeString(r))
-        byScope.set(scope, arr)
-      }
-      for (const [scope, ruleStrings] of byScope) {
-        const perms = loadClaudePermissions(scope, this.cwd)
-        const allowSet = new Set(perms.allow)
-        for (const r of ruleStrings) allowSet.add(r)
-        saveClaudePermissions(scope, { ...perms, allow: [...allowSet] }, this.cwd)
-      }
-    } catch (err) {
-      logger.warn(
-        'OpencodeSession',
-        `persisting allow rules failed: ${err instanceof Error ? err.message : String(err)}`
-      )
-    }
+    // 'session' destinations are skipped by the shared persister — opencode's
+    // own `always` reply already covers them.
+    if (persist) persistAllowSuggestions(updatedPermissions!, this.cwd, 'OpencodeSession')
   }
 
   async setModel(model: string): Promise<void> {

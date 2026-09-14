@@ -5,6 +5,7 @@ import type { AutomationRun, ChatMessage } from '../../../../../shared/types'
 import { MessageBubble } from '../../chat/MessageBubble'
 import { ImageGalleryProvider } from '../../shared/ImageViewer'
 import { DiagramGalleryProvider } from '../../chat/DiagramGallery'
+import { COST_UNKNOWN } from '../../../utils/cost'
 
 export interface AutomationRunHistoryViewProps {
   run: AutomationRun | null
@@ -90,8 +91,16 @@ export function AutomationRunHistoryView({
         <span className="text-xs text-text-muted">{time}</span>
         <span className="text-xs">{statusIcon}</span>
         <span className="text-xs text-text-muted">{duration}</span>
-        {run.totalCostUsd > 0 && (
-          <span className="text-xs text-text-muted">${run.totalCostUsd.toFixed(4)}</span>
+        {run.totalCostUsd === null ? (
+          <span data-testid="AutomationRunHistory.cost" className="text-xs text-text-muted">
+            {COST_UNKNOWN}
+          </span>
+        ) : (
+          run.totalCostUsd > 0 && (
+            <span data-testid="AutomationRunHistory.cost" className="text-xs text-text-muted">
+              ${run.totalCostUsd.toFixed(4)}
+            </span>
+          )
         )}
         {isRunning && (
           <button

@@ -91,10 +91,22 @@ describe('translateClaudeMcpServer', () => {
 // ---------------------------------------------------------------------------
 
 // Vitest module mocking: mock the Claude MCP service so no filesystem reads occur.
-vi.mock('../../services/claude-mcp', () => ({
-  loadMcpServers: vi.fn(),
-  readDisabledMcpServers: vi.fn()
-}))
+vi.mock('../../services/claude-mcp', () => {
+  const loadMcpServers = vi.fn()
+  return {
+    loadMcpServers,
+    readDisabledMcpServers: vi.fn(),
+    // The three-scope merge moved into `claude-mcp.ts` so the Codex bridge can
+    // share it (ADR-068 §5). Re-expressed here over the SAME mocked reads, so
+    // every assertion below — precedence, the per-scope call args, the
+    // throwing-read case — keeps measuring what it always did.
+    mergeClaudeMcpServers: vi.fn((cwd: string) => ({
+      ...(loadMcpServers('user') as object),
+      ...(loadMcpServers('project', cwd) as object),
+      ...(loadMcpServers('local', cwd) as object)
+    }))
+  }
+})
 
 // Also mock the logger to suppress output in tests.
 vi.mock('../../services/logger', () => ({

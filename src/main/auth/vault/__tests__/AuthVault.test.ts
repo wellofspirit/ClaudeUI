@@ -11,6 +11,10 @@ vi.mock('node:os', async () => {
 import { AuthVault, vaultPath } from '../../../../core/auth/vault/AuthVault'
 import { CredentialSync, type CodexFeedTarget } from '../../../../core/auth/vault/CredentialSync'
 import type { VaultCredential } from '../../../../core/auth/vault/codex-oauth'
+import {
+  CodexDeviceCodeFlow,
+  DeviceCodeCancelledError
+} from '../../../../core/auth/vault/codex-device-code'
 let testHome: string
 beforeEach(() => {
   testHome = mkdtempSync(join(tmpdir(), 'auth-vault-'))
@@ -18,12 +22,15 @@ beforeEach(() => {
 })
 afterEach(() => rmSync(testHome, { recursive: true, force: true }))
 describe('AuthVault', () => {
-  it('writes a plaintext v2 0600 generic credential map', async () => {
+  it('writes a plaintext v3 0600 generic credential map', async () => {
     const vault = new AuthVault()
     await vault.saveCredential('custom', { type: 'api_key', key: 'test-key' })
+    // v3 (ADR-068 §2): `credentials` holds API keys only; OAuth subscriptions
+    // live under `accounts`, which an API-key-only vault leaves empty.
     expect(JSON.parse(readFileSync(vaultPath(), 'utf8'))).toEqual({
-      v: 2,
-      credentials: { custom: { type: 'api_key', key: 'test-key' } }
+      v: 3,
+      credentials: { custom: { type: 'api_key', key: 'test-key' } },
+      accounts: {}
     })
     if (process.platform !== 'win32') expect(statSync(vaultPath()).mode & 0o777).toBe(0o600)
   })
@@ -58,7 +65,11 @@ describe('AuthVault', () => {
       expires: 1
     })
     await vault.saveCredential('custom', { type: 'api_key', key: 'k' })
-    expect(JSON.parse(readFileSync(vaultPath(), 'utf8')).credentials.chatgpt.access).toBe('a')
+    // The v1 credential is now ChatGPT's one (active) ACCOUNT, not a single slot.
+    const file = JSON.parse(readFileSync(vaultPath(), 'utf8'))
+    expect(file.v).toBe(3)
+    expect(file.accounts.chatgpt.list[0].credential.access).toBe('a')
+    expect(file.accounts.chatgpt.activeId).toBe(file.accounts.chatgpt.list[0].id)
   })
   it('never decrypts encrypted v1 and reports it for native recovery', async () => {
     mkdirSync(dirname(vaultPath()), { recursive: true })
@@ -67,7 +78,7 @@ describe('AuthVault', () => {
     await expect(vault.load()).resolves.toBeNull()
     expect(vault.hasUnreadableLegacyVault()).toBe(true)
   })
-  it('recovers an unreadable encrypted v1 from native snapshots into plaintext v2 without decrypting it', async () => {
+  it('recovers an unreadable encrypted v1 from native snapshots into plaintext v3 without decrypting it', async () => {
     mkdirSync(dirname(vaultPath()), { recursive: true })
     writeFileSync(vaultPath(), JSON.stringify({ v: 1, encrypted: true, data: 'opaque' }))
     const native = (
@@ -83,9 +94,14 @@ describe('AuthVault', () => {
     const sync = new CredentialSync({ vault: new AuthVault() })
     sync.configure({ pi, opencode })
     await sync.start()
-    expect(JSON.parse(readFileSync(vaultPath(), 'utf8'))).toEqual({
-      v: 2,
-      credentials: { chatgpt: { type: 'oauth', access: 'oc', refresh: 'oc', expires: 20 } }
+    expect(JSON.parse(readFileSync(vaultPath(), 'utf8'))).toMatchObject({
+      v: 3,
+      credentials: {},
+      accounts: {
+        chatgpt: {
+          list: [{ credential: { type: 'oauth', access: 'oc', refresh: 'oc', expires: 20 } }]
+        }
+      }
     })
     sync.stop()
   })
@@ -257,5 +273,143 @@ describe('AuthVault lifecycle compatibility', () => {
     const vault = new AuthVault({ loginFlowFactory: () => live })
     await vault.beginLogin()
     await expect(vault.beginLogin()).rejects.toThrow(/already in progress/)
+  })
+
+  // ── Device code (ADR-068 §3, Slice 7) ─────────────────────────────────────
+  function deviceFlow(
+    overrides: Partial<
+      import('../../../../core/auth/vault/codex-device-code').DeviceCodeFlowLike
+    > = {}
+  ) {
+    return {
+      start: vi.fn(async () => ({
+        verificationUrl: 'https://issuer.test/codex/device',
+        userCode: 'ABCD-1234',
+        expiresAt: 900_000
+      })),
+      waitForCompletion: vi.fn(async () => ({
+        type: 'oauth' as const,
+        access: 'device-acc',
+        refresh: 'device-ref',
+        expires: 7
+      })),
+      cancel: vi.fn(),
+      ...overrides
+    }
+  }
+
+  it('beginDeviceCodeLogin starts the DEVICE flow and completeLogin awaits THAT flow', async () => {
+    const device = deviceFlow()
+    const loopback = flow()
+    const vault = new AuthVault({
+      loginFlowFactory: () => loopback,
+      deviceCodeFlowFactory: () => device
+    })
+
+    const started = await vault.beginDeviceCodeLogin()
+    expect(started).toEqual({
+      verificationUrl: 'https://issuer.test/codex/device',
+      userCode: 'ABCD-1234',
+      expiresAt: 900_000
+    })
+    expect(loopback.start).not.toHaveBeenCalled()
+
+    const cred = await vault.completeLogin()
+    expect(device.waitForCompletion).toHaveBeenCalled()
+    expect(loopback.waitForCallback).not.toHaveBeenCalled()
+    // Persisted through the SAME save the loopback path uses.
+    await expect(vault.load()).resolves.toMatchObject({ access: 'device-acc' })
+    expect(cred.access).toBe('device-acc')
+    // The slot is released, so a second completion has nothing to await.
+    await expect(vault.completeLogin()).rejects.toThrow(/no login/)
+  })
+
+  it('cancelLogin cancels a live device flow', async () => {
+    const device = deviceFlow({ isSettled: () => false })
+    const vault = new AuthVault({ deviceCodeFlowFactory: () => device })
+    await vault.beginDeviceCodeLogin()
+    vault.cancelLogin()
+    expect(device.cancel).toHaveBeenCalled()
+  })
+
+  it('a second device-code start CANCELS the live first one and takes the slot', async () => {
+    // A device flow holds the slot for fifteen minutes; refusing here is how a
+    // page reload or a second tab strands the user for a quarter of an hour
+    // (ADR-068 §3, Slice 7 design point 6).
+    const first = new CodexDeviceCodeFlow({
+      deps: {
+        issuer: 'https://issuer.test',
+        fetch: (async (url: string) =>
+          String(url).endsWith('/usercode')
+            ? {
+                ok: true,
+                status: 200,
+                json: async () => ({ device_auth_id: 'dev-1', user_code: 'AB-12' })
+              }
+            : // "not yet" — so the flow parks in the sleep below and only the
+              // cancel can ever settle it.
+              { ok: false, status: 403 }) as unknown as typeof fetch
+      },
+      // Never resolves on its own, so only the cancel can settle it.
+      sleep: () => new Promise<void>(() => {})
+    })
+    const second = deviceFlow()
+    let n = 0
+    const vault = new AuthVault({
+      deviceCodeFlowFactory: () => (n++ === 0 ? first : second)
+    })
+
+    await vault.beginDeviceCodeLogin()
+    const abandoned = first.waitForCompletion()
+    void abandoned.catch(() => {})
+
+    await expect(vault.beginDeviceCodeLogin()).resolves.toMatchObject({ userCode: 'ABCD-1234' })
+    await expect(abandoned).rejects.toBeInstanceOf(DeviceCodeCancelledError)
+    expect(second.start).toHaveBeenCalled()
+  })
+
+  it('a loopback start after a LIVE device flow cancels it and proceeds', async () => {
+    const device = deviceFlow({ isSettled: () => false })
+    const loopback = flow()
+    const vault = new AuthVault({
+      loginFlowFactory: () => loopback,
+      deviceCodeFlowFactory: () => device
+    })
+    await vault.beginDeviceCodeLogin()
+    await expect(vault.beginLogin()).resolves.toMatchObject({
+      authorizeUrl: 'https://example.test/auth'
+    })
+    expect(device.cancel).toHaveBeenCalled()
+  })
+
+  it('a LIVE LOOPBACK flow still refuses both kinds of start', async () => {
+    const vault = new AuthVault({
+      loginFlowFactory: () => flow({ isSettled: () => false }),
+      deviceCodeFlowFactory: () => deviceFlow()
+    })
+    await vault.beginLogin()
+    await expect(vault.beginLogin()).rejects.toThrow(/already in progress/)
+    await expect(vault.beginDeviceCodeLogin()).rejects.toThrow(/already in progress/)
+  })
+
+  it('a device flow refuses pasted completion — it has no verifier of its own', async () => {
+    const vault = new AuthVault({ deviceCodeFlowFactory: () => deviceFlow() })
+    await vault.beginDeviceCodeLogin()
+    await expect(vault.completeLoginFromPastedInput('x')).rejects.toThrow(
+      /does not support pasted completion/
+    )
+  })
+
+  it('a failed device start releases the slot instead of wedging the vault', async () => {
+    const boom = deviceFlow({
+      start: vi.fn(async () => {
+        throw new Error('device code request failed with status 500')
+      })
+    })
+    const second = deviceFlow()
+    let n = 0
+    const vault = new AuthVault({ deviceCodeFlowFactory: () => (n++ === 0 ? boom : second) })
+    await expect(vault.beginDeviceCodeLogin()).rejects.toThrow(/status 500/)
+    await expect(vault.beginDeviceCodeLogin()).resolves.toMatchObject({ userCode: 'ABCD-1234' })
   })
 })

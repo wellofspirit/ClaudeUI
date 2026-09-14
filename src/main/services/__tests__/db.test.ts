@@ -29,6 +29,18 @@ import {
   type Migration,
   type Db
 } from '../../../core/services/db'
+import {
+  getCodexSessionOverrides,
+  setCodexSessionOverrides,
+  ensureCodexSessionOverrides,
+  hasCodexSessionOverrides,
+  deleteCodexSessionOverrides,
+  registerCodexFork,
+  recordCodexLineage,
+  listCodexForks,
+  listCodexLineage,
+  deleteCodexFork
+} from '../../../core/services/db'
 import { logger } from '../../../core/services/logger'
 
 // Each test gets a fresh in-memory DB (closeDb() resets the singleton).
@@ -43,6 +55,44 @@ afterEach(() => {
 function openRawDb(): Db {
   return new BetterSqlite3(':memory:')
 }
+
+describe('Codex session overrides', () => {
+  it('preserves accepted choices independently of projected metadata and validates stored fields', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      expect(getCodexSessionOverrides('native', db)).toBeUndefined()
+      ensureCodexSessionOverrides('native', db)
+      expect(hasCodexSessionOverrides('native', db)).toBe(true)
+      expect(getCodexSessionOverrides('native', db)).toEqual({})
+      setCodexSessionOverrides('native', { model: 'gpt-native', effort: 'ultra' }, db)
+      ensureCodexSessionOverrides('native', db)
+      db.exec(
+        "INSERT INTO session_meta (session_id, engine_id, updated_at) VALUES ('native', 'codex', 0); DELETE FROM session_meta WHERE session_id = 'native'"
+      )
+      expect(getCodexSessionOverrides('native', db)).toEqual({
+        model: 'gpt-native',
+        effort: 'ultra'
+      })
+      // Native policy keys are no longer a storable setting — the session's
+      // shared PermissionMode owns approval/sandbox/reviewer (ADR-066).
+      expect(() =>
+        setCodexSessionOverrides('native', { approvalPolicy: 'never' } as never, db)
+      ).toThrow('Unsupported')
+      // `reset` is no longer a settings verb at all (no channel ever sent one).
+      expect(() => setCodexSessionOverrides('native', { reset: true } as never, db)).toThrow(
+        'Unsupported'
+      )
+      expect(() =>
+        setCodexSessionOverrides('native', { credential: 'synthetic' } as never, db)
+      ).toThrow('Unsupported')
+      deleteCodexSessionOverrides('native', db)
+      expect(hasCodexSessionOverrides('native', db)).toBe(false)
+    } finally {
+      db.close()
+    }
+  })
+})
 
 /** Read user_version off a db. */
 function userVersion(db: Db): number {
@@ -134,7 +184,7 @@ describe('migration framework — user_version guard', () => {
     }
   })
 
-  it('applies the real production migration set (v1–v14)', () => {
+  it('applies the real production migration set (v1–v16)', () => {
     const db = openRawDb()
     try {
       // Default migration list (production MIGRATIONS).
@@ -147,7 +197,14 @@ describe('migration framework — user_version guard', () => {
       // v12: step-up tier columns + audit detail/retention (ADR-054),
       // v13: LAN channel key + the `legacy` policy retirement (ADR-056),
       // v14: remote-IDE posture columns (ADR-064)
-      expect(userVersion(db)).toBe(14)
+      // v15: accepted native Codex session overrides and verified identity marker
+      // v16: codex_forks — the fork registry the sidebar reads instead of
+      //      re-probing every session_meta id the native list omits
+      // v17: codex_forks becomes a LINEAGE CACHE (roots too), so the delete
+      //      plan is a cache read instead of a sweep
+      expect(userVersion(db)).toBe(17)
+      expect(db.prepare('SELECT * FROM codex_session_overrides').all()).toEqual([])
+      expect(db.prepare('SELECT * FROM codex_forks').all()).toEqual([])
       // session_meta must exist and be queryable.
       const rows = db.prepare('SELECT * FROM session_meta').all()
       expect(rows).toEqual([])
@@ -226,7 +283,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(14)
+      expect(userVersion(db)).toBe(17)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',
@@ -370,7 +427,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(14)
+      expect(userVersion(db)).toBe(17)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         auth_policy: null,
         step_up_tier: 'medium',
@@ -437,6 +494,129 @@ describe('migration framework — user_version guard', () => {
 // ---------------------------------------------------------------------------
 // Migration framework — transactional application (each up + version bump atomic)
 // ---------------------------------------------------------------------------
+
+describe('Codex lineage cache', () => {
+  it('registers a fork once, unverified, and lists only real branches', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      expect(listCodexForks(db)).toEqual([])
+      registerCodexFork('fork-a', 'source', db)
+      registerCodexFork('fork-b', 'source', db)
+      // A re-registration (a resume of the same branch) must not duplicate the
+      // row or rewrite its lineage.
+      registerCodexFork('fork-a', 'somewhere-else', db)
+      expect(listCodexForks(db)).toEqual([
+        { threadId: 'fork-a', forkedFromId: 'source' },
+        { threadId: 'fork-b', forkedFromId: 'source' }
+      ])
+      // A fork registered at mint time has NOT been read, so the scan still owes
+      // it one metadata read — which is exactly what a null `verifiedAt` says.
+      expect(listCodexLineage(db)).toEqual([
+        { threadId: 'fork-a', forkedFromId: 'source', verifiedAt: null },
+        { threadId: 'fork-b', forkedFromId: 'source', verifiedAt: null }
+      ])
+      deleteCodexFork('fork-a', db)
+      expect(listCodexForks(db)).toEqual([{ threadId: 'fork-b', forkedFromId: 'source' }])
+    } finally {
+      db.close()
+    }
+  })
+
+  /**
+   * THE POINT OF v17: a ROOT earns a row. Under v16 it never did, so every
+   * delete plan re-read every codex `session_meta` id the registry did not name
+   * and the candidate set never shrank.
+   */
+  it('caches a root as a verified row that is not a branch', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      recordCodexLineage('root', null, 1710, db)
+      recordCodexLineage('fork', 'root', 1711, db)
+      // A root is cached — the scan can now tell "asked, it is a root" from
+      // "never asked" — but it is not a branch of anything, so no plan and no
+      // sidebar read may pick it up.
+      expect(listCodexForks(db)).toEqual([{ threadId: 'fork', forkedFromId: 'root' }])
+      // Sorted, because two rows written in the same millisecond fall back to
+      // the thread id for their order and this test is not about that.
+      expect(
+        [...listCodexLineage(db)].sort((a, b) => a.threadId.localeCompare(b.threadId))
+      ).toEqual([
+        { threadId: 'fork', forkedFromId: 'root', verifiedAt: 1711 },
+        { threadId: 'root', forkedFromId: null, verifiedAt: 1710 }
+      ])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('lets a read REPLACE what a mint-time registration guessed, and tombstone it', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      registerCodexFork('fork', 'root', db)
+      // The scan read the thread: same lineage, now verified against the native
+      // `updatedAt`, so the next scan skips it.
+      recordCodexLineage('fork', 'root', 900, db)
+      expect(listCodexLineage(db)).toEqual([
+        { threadId: 'fork', forkedFromId: 'root', verifiedAt: 900 }
+      ])
+      // Twice-refused: the row stays (so the id is never re-read) but it is no
+      // longer a branch — it is not in any plan and not in any sidebar row.
+      recordCodexLineage('fork', null, null, db)
+      expect(listCodexForks(db)).toEqual([])
+      expect(listCodexLineage(db)).toEqual([
+        { threadId: 'fork', forkedFromId: null, verifiedAt: null }
+      ])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('never treats a thread that claims itself as its own branch', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(db)
+      recordCodexLineage('self', 'self', 5, db)
+      expect(listCodexForks(db)).toEqual([])
+      expect(listCodexLineage(db)).toEqual([
+        { threadId: 'self', forkedFromId: 'self', verifiedAt: 5 }
+      ])
+    } finally {
+      db.close()
+    }
+  })
+
+  /**
+   * The v16 rows every existing user carries: branches with no `verified_at`,
+   * and the one-time adoption MARKER (`thread_id = ''`, generation in
+   * `forked_from_id`) that the cache replaces. The marker must not survive as a
+   * thread id, and a real row must survive as an unverified branch — so the
+   * first scan verifies it exactly once instead of re-adopting anything.
+   */
+  it('migrates v16 rows into the cache and drops the adoption marker', () => {
+    const db = openRawDb()
+    try {
+      runMigrations(
+        db,
+        MIGRATIONS.filter((migration) => migration.version <= 16)
+      )
+      const insert = db.prepare(
+        'INSERT INTO codex_forks (thread_id, forked_from_id, created_at) VALUES (?, ?, ?)'
+      )
+      insert.run('fork', 'root', 1)
+      insert.run('', 'adopted-v3', 2)
+      runMigrations(db)
+      expect(listCodexLineage(db)).toEqual([
+        { threadId: 'fork', forkedFromId: 'root', verifiedAt: null }
+      ])
+      expect(db.prepare('SELECT COUNT(*) AS n FROM codex_forks').get()).toEqual({ n: 1 })
+    } finally {
+      db.close()
+    }
+  })
+})
 
 describe('migration framework — transactional application', () => {
   it('rolls back partial DDL + the version bump when a migration throws mid-way', () => {
@@ -709,11 +889,11 @@ describe('importSessionEnginesOnce', () => {
     expect(getSessionMeta('s2')?.model).toBeUndefined()
   })
 
-  it('clamps unknown/codex engineId to claude', () => {
+  it('preserves codex engineId during legacy import', () => {
     importSessionEnginesOnce({
       'legacy-codex': { engineId: 'codex' }
     })
-    expect(getSessionMeta('legacy-codex')?.engineId).toBe('claude')
+    expect(getSessionMeta('legacy-codex')?.engineId).toBe('codex')
   })
 
   it('accepts "pi" as a legitimate engineId (not clamped to claude)', () => {

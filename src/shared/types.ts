@@ -9,6 +9,8 @@ import type {
 } from './remote-protocol'
 import type {
   ConfigurableHarnessId,
+  SharedProviderAccountList,
+  SharedProviderAccountStatus,
   SharedProviderDefinition,
   SharedProviderModel,
   SharedProviderStatus
@@ -118,6 +120,8 @@ export interface FileAttachment {
 }
 
 export interface ChatMessage {
+  /** Native acknowledgement replaces a host-minted pending user row by identity. */
+  replacesMessageId?: string
   id: string
   role: 'user' | 'assistant' | 'system'
   content: ContentBlock[]
@@ -138,7 +142,7 @@ export interface ChatMessage {
   thinkingDurationMs?: number
 }
 
-export type EngineId = 'claude' | 'opencode' | 'pi'
+export type EngineId = 'claude' | 'opencode' | 'pi' | 'codex'
 
 /** Open-ended union: known vendors are named; unknown ones fall through as plain strings. */
 export type VendorId = 'anthropic' | 'openai' | 'google' | 'local' | (string & {})
@@ -216,6 +220,10 @@ export interface PiAuthStatus {
   accountId?: string
   expiresAt?: number
   needsReauth: boolean
+  /** Every stored ChatGPT account (ADR-068 §2) — ids, emails, plans, expiries. */
+  accounts: SharedProviderAccountStatus[]
+  /** Which of them the engines are vended, or null when there is none. */
+  activeId: string | null
 }
 
 /** Resolved account descriptor held on the session. Populated by ClaudeAuthProvider.probe(). */
@@ -229,12 +237,20 @@ export interface AccountRef {
 }
 
 export interface SessionStatus {
+  /** Native Codex policy is authoritative; shared PermissionMode does not apply. */
+  codex?: import('./codex-types').CodexSessionState
   state: 'idle' | 'running' | 'error' | 'disconnected'
   sessionId: string | null
   /** Vendor-qualified model identity. Null until the engine reports a model. */
   model: ModelRef | null
   cwd: string | null
-  totalCostUsd: number
+  /**
+   * Session cost in USD, or null when the engine cannot price the turn (no
+   * published price for the model). Null means UNKNOWN — 0 means known to be
+   * zero (a free model, or nothing metered yet on an engine that does price
+   * its models). Renderers show a placeholder for null, never "$0.00".
+   */
+  totalCostUsd: number | null
   engineId: EngineId
   capabilities: ResolvedCapabilities
   /** Resolved account descriptor from the engine auth provider. Null until probed. */
@@ -251,6 +267,7 @@ export interface PermissionSuggestion {
 }
 
 export interface PendingApproval {
+  codex?: import('./codex-types').CodexApprovalPayload
   requestId: string
   /**
    * cli.js-assigned tool_use id for the invocation being prompted. The
@@ -637,6 +654,30 @@ export interface EngineConfig {
   dispatch?: DispatchConfig
   /** pi engine-configurable settings (M3). Lives in engines/pi.json. */
   piConfig?: PiConfig
+  /** Codex engine-configurable settings (ADR-068 §6). Lives in engines/codex.json. */
+  codexConfig?: CodexEngineConfig
+}
+
+/**
+ * ClaudeUI's OWN per-engine defaults for Codex — NOT `config.toml`.
+ *
+ * Codex's native file already carries a `model`, and the Engines › Codex page
+ * edits it through the app-server. This block is the ClaudeUI-side answer to a
+ * different question: what a session STARTED FROM CLAUDEUI runs on, which is
+ * carried on `turn/start` and therefore overrides whatever the working
+ * directory's layers resolve to. Blank means "say nothing", which is what makes
+ * the native value win — today's behaviour, and the reason neither key has a
+ * fallback constant the way `piConfig.defaultModel` has `PI_DEFAULT_MODEL`.
+ *
+ * A value here IS an explicit choice (ADR-059): a session seeded from it carries
+ * `codexModelExplicit`, so a model the catalog no longer lists banners rather
+ * than silently resolving to something else.
+ */
+export interface CodexEngineConfig {
+  /** Native Codex model id (`gpt-5.6-codex`), from `model/list`. */
+  defaultModel?: string
+  /** Native reasoning tier, from the selected model's `supportedReasoningEfforts`. */
+  defaultEffort?: string
 }
 
 /**
@@ -968,6 +1009,8 @@ export interface WatchUpdate {
 }
 
 export interface ModelInfo {
+  nativeEffortOptions?: Array<{ value: string; description: string }>
+  nativeDefaultEffort?: string
   value: string
   displayName: string
   description: string
@@ -1061,6 +1104,13 @@ export interface ForkAnchorResult {
 
 interface SessionAPI {
   platform: string
+  /**
+   * True only when this launch opted into the verifier hooks
+   * (`CLAUDEUI_VERIFIER_HOOKS=1` / `--claudeui-verifier-hooks`), which is what
+   * makes the renderer publish `window.__claudeuiVerifier`. False on the web
+   * client, always. See `src/shared/verifier-hooks.ts`.
+   */
+  verifierHooks: boolean
   pickFolder(): Promise<string | null>
   createSession(
     routingId: string,
@@ -1146,6 +1196,13 @@ interface SessionAPI {
     statusLine: StatusLineData | null
     taskPrompts: Record<string, string>
     warnings: string[]
+    /**
+     * Subagent transcripts the reader already resolved, by PARENT tool_use id.
+     * Codex's native children are threads on the same connection, so its reader
+     * returns them inline; Claude's live in per-agent JSONL files and are
+     * fetched separately through {@link loadSubagentHistory}.
+     */
+    subagentMessages?: Record<string, ChatMessage[]>
   }>
   loadSubagentHistory(
     sessionId: string,
@@ -1218,6 +1275,12 @@ interface SessionAPI {
   setPermissionMode(routingId: string, mode: string): Promise<void>
   setModel(routingId: string, model: string): Promise<void>
   setEffort(routingId: string, effort: string): Promise<void>
+  /**
+   * Pin a session to one stored vendor account, or `null` to follow the active
+   * one (ADR-068 §2). Only Codex answers it today
+   * (`capabilities.auth.perSessionAccount`); every other engine rejects.
+   */
+  setSessionAccount(routingId: string, accountId: string | null): Promise<void>
   setThinkingMode(routingId: string, mode: string): Promise<void>
   setReasoningVariant(routingId: string, variant: string | null): Promise<void>
   getModels(): Promise<ModelInfo[]>
@@ -1327,6 +1390,18 @@ interface SharedProviderAPI {
    * read: every row action is one of the write channels below or beside it.
    */
   listProviderRegistry(): Promise<ProviderRegistrySnapshot>
+  /**
+   * The subscription ACCOUNTS of one shared provider (ADR-068 §2) — the same
+   * list the registry row carries, plus each account's expiry and reauth state.
+   * Never token material.
+   */
+  listProviderAccounts(providerId: string): Promise<SharedProviderAccountList>
+  /** Make one stored account the active one: both engine stores are re-vended. */
+  switchProviderAccount(providerId: string, accountId: string): Promise<void>
+  /** Forget one stored account. Removing the active one promotes the newest remaining. */
+  removeProviderAccount(providerId: string, accountId: string): Promise<void>
+  /** Turn per-session account pinning on or off for a subscription provider. */
+  setProviderAccountsPerSession(providerId: string, enabled: boolean): Promise<void>
   listSharedProviders(): Promise<SharedProviderDefinition[]>
   getSharedProviderStatuses(): Promise<SharedProviderStatus[]>
   listSharedProviderModels(id: string): Promise<SharedProviderModel[]>
@@ -1626,6 +1701,39 @@ interface FileAPI {
   listWorktrees(cwd: string): Promise<WorktreeEntry[]>
 }
 
+/**
+ * What a device-code sign-in tells the CLIENT (ADR-068 §3, Slice 7). Everything
+ * here is display material: the page to open, the code to type, and when the
+ * host stops polling. The `device_auth_id` the host polls with never crosses the
+ * wire. Structurally mirrored by `DeviceCodeStart` in
+ * `core/auth/vault/codex-device-code.ts`, which owns the flow.
+ */
+export interface VendorDeviceCodeStart {
+  verificationUrl: string
+  userCode: string
+  /** Wall-clock ms (host clock) at which the flow expires — 15 minutes after it started. */
+  expiresAt: number
+}
+
+/**
+ * Where a started device-code sign-in has got to (ADR-068 §3, Slice 7).
+ *
+ * The WAIT is host-owned: `vendor-auth:device-code-start` kicks the poll off in
+ * the background and the client asks this question every few seconds, rather
+ * than holding one long invoke open. It has to work that way on the web —
+ * `web/connection.ts` caps every invoke at 30 s (`INVOKE_TIMEOUT_MS`) and a
+ * device code lives for fifteen minutes — and it also survives a reconnect,
+ * because the host, not the socket, is holding the outcome.
+ *
+ * `error` carries the host's own message; the other three carry nothing.
+ * `cancelled` is also the answer when NO flow is live, so a client that missed
+ * the cancellation stops polling instead of waiting forever.
+ */
+export interface VendorDeviceCodeStatus {
+  state: 'pending' | 'done' | 'error' | 'cancelled'
+  error?: string
+}
+
 /** Engine-routed per-vendor auth API (opencode's multi-vendor auth model). */
 interface VendorAuthAPI {
   /** Probe all vendors for a given engine. */
@@ -1646,6 +1754,18 @@ interface VendorAuthAPI {
     method: number,
     inputs?: Record<string, string>
   ): Promise<{ url: string; method: 'auto' | 'code'; instructions: string }>
+  /**
+   * Start a DEVICE-CODE sign-in for a vendor (ADR-068 §3, Slice 7 — ChatGPT via
+   * pi's `openai-codex` today). This ALSO starts the host-side wait; the caller
+   * follows it with {@link vendorAuthDeviceCodeStatus}, never with a long
+   * `vendorAuthOauthCallback` invoke.
+   */
+  vendorAuthDeviceCodeStart(engineId: EngineId, vendorId: string): Promise<VendorDeviceCodeStart>
+  /**
+   * How the started device-code sign-in is going. Polled; never carries a token.
+   * See {@link VendorDeviceCodeStatus} for why the wait is not one long invoke.
+   */
+  vendorAuthDeviceCodeStatus(engineId: EngineId): Promise<VendorDeviceCodeStatus>
   /** Submit the OAuth code (paste-code flow). Omit code for auto/loopback flow. */
   vendorAuthOauthCallback(
     engineId: EngineId,
@@ -1665,6 +1785,11 @@ interface VendorAuthAPI {
 
 interface AccountAPI {
   fetchAccountUsage(): Promise<AccountUsage>
+  /**
+   * Per-account ChatGPT rate limits (ADR-068 §2). `refresh` asks the host to
+   * read them from Codex first; without it the last known map comes back.
+   */
+  fetchChatgptLimits(refresh?: boolean): Promise<ChatgptRateLimits>
   fetchBlockUsage(): Promise<BlockUsageData>
   /** Filter usage analytics to one account email (null = all accounts) */
   setUsageAccountFilter(account: string | null): Promise<void>
@@ -2511,6 +2636,30 @@ export interface ClaudeAPI
     VoiceAPI,
     SharedProviderAPI,
     PluginAPI {
+  codexApproval(
+    routingId: string,
+    requestId: string,
+    decision: import('./codex-types').CodexApprovalDecision
+  ): Promise<void>
+  codexAuthStatus(): Promise<import('./codex-types').CodexAuthStatus>
+  /**
+   * Codex's own `config.toml` plus the compiled Bash-rule status (ADR-068 §6).
+   * Read through the app-server — ClaudeUI never parses TOML.
+   */
+  readCodexConfig(): Promise<import('./codex-types').CodexConfigRead>
+  /**
+   * Apply edits to `config.toml` in ONE `config/batchWrite`. `value: null`
+   * REMOVES a key (that is what a row's Reset does). `expectedVersion` is the
+   * version the caller last read; a mismatch is reported, never clobbered.
+   */
+  writeCodexConfig(
+    edits: import('./codex-types').CodexConfigEdit[],
+    expectedVersion: string
+  ): Promise<import('./codex-types').CodexConfigWriteResult>
+  /** Recompile `$CODEX_HOME/rules/claudeui.rules` and answer its fresh status. */
+  recompileCodexRules(): Promise<import('./codex-types').CodexRulesStatus>
+  /** What deleting this Codex thread would remove: the thread and every branch cut from it. */
+  codexDeletePlan(threadId: string): Promise<import('./codex-types').CodexDeletePlan>
   /** Relay a log message from the renderer to the main process logger */
   logRelay(level: string, source: string, message: string): void
   /** App + SDK version info for display in Settings */
@@ -2533,6 +2682,38 @@ export interface RateWindow {
   usedPercent: number // 0-100
   resetsAt: string | null // ISO8601 timestamp
 }
+
+/**
+ * ChatGPT subscription usage for ONE stored vault account (ADR-068 §2).
+ *
+ * Codex's `RateLimitSnapshot` maps onto {@link RateWindow} one to one —
+ * `usedPercent` is already 0-100 and `resetsAt` is a unix timestamp in SECONDS
+ * (`protocol/src/protocol.rs`: "Unix timestamp (seconds since epoch) when the
+ * window resets"), converted to ISO 8601 on the way in so the panel's existing
+ * `formatResetTime` works unchanged.
+ *
+ * `primary` is the rolling 5-hour window and `secondary` the weekly one; either
+ * is null when the backend did not report it, which the panel shows as
+ * unavailable rather than as zero usage.
+ */
+export interface ChatgptAccountLimits {
+  email?: string
+  planType?: string
+  primary: RateWindow | null
+  secondary: RateWindow | null
+  /**
+   * A CREDITS-based plan (a business workspace, seen live 2026-09-14) reports no
+   * windows at all — both are null in `rateLimits` and in
+   * `rateLimitsByLimitId.codex` — and answers with a credit balance instead.
+   * Percentage bars are not the shape that plan has, so the balance is what the
+   * panel shows for it. Absent when the backend says the account has no credits.
+   */
+  credits?: { unlimited: boolean; balance: string | null }
+  fetchedAt: number
+}
+
+/** Every account's limits, keyed by VAULT account id (never the workspace id). */
+export type ChatgptRateLimits = Record<string, ChatgptAccountLimits>
 
 export interface ExtraUsage {
   isEnabled: boolean
@@ -2636,7 +2817,9 @@ export interface AuthFlowState {
  *   totalDurationMs + (turnStartedAtMs ? Date.now() - turnStartedAtMs : 0)
  */
 export interface StatusLineData {
-  totalCostUsd: number
+  /** Cumulative session cost in USD; null when unpriced/unknown (see
+   *  {@link SessionStatus.totalCostUsd} — 0 still means known-zero). */
+  totalCostUsd: number | null
   totalDurationMs: number
   totalApiDurationMs: number
   totalInputTokens: number
@@ -2863,7 +3046,8 @@ export interface AutomationRun {
   startedAt: number
   finishedAt: number | null
   status: 'running' | 'success' | 'error'
-  totalCostUsd: number
+  /** Run cost in USD; null when the engine could not price the run. */
+  totalCostUsd: number | null
   error?: string
   resultSummary?: string
   /** SDK session ID — used to locate the project JSONL for message history */

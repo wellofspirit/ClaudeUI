@@ -26,6 +26,7 @@ import {
   type ModelDisplay
 } from '../../shared/InlinePickers'
 import { SelectMenu } from '../../shared/SelectMenu'
+import { COST_UNKNOWN } from '../../../utils/cost'
 import {
   DirectoryBrowserDialog,
   type DirectoryBrowserDialogProps
@@ -707,7 +708,9 @@ function ConfigurePanel(p: ConfigurePanelProps): React.JSX.Element {
               effort={effort}
               allowedEffortLevels={allowedEffortLevels}
               supported={effortSupported}
-              onSelectEffort={onSelectEffort}
+              // No native-effort engine here (automation targets Claude's fixed
+              // ladder), so every value the picker can emit IS an EffortLevel.
+              onSelectEffort={(level) => onSelectEffort(level as EffortLevel)}
             />
           </div>
         </InspectorRow>
@@ -824,7 +827,14 @@ function RunRow({ run, onClick }: { run: AutomationRun; onClick: () => void }): 
     minute: '2-digit'
   })
   const duration = run.finishedAt ? formatMs(run.finishedAt - run.startedAt) : 'running'
-  const cost = run.totalCostUsd > 0 ? `$${run.totalCostUsd.toFixed(4)}` : null
+  // null cost = the engine could not price the run; say so rather than hide it
+  // (a hidden figure reads as "free"). A real 0 stays hidden, as before.
+  const cost =
+    run.totalCostUsd === null
+      ? COST_UNKNOWN
+      : run.totalCostUsd > 0
+        ? `$${run.totalCostUsd.toFixed(4)}`
+        : null
   const statusConfig =
     run.status === 'success'
       ? { bg: 'bg-green-500/15', fg: 'text-green-400', label: '✓' }

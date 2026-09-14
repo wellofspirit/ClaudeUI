@@ -5,6 +5,15 @@ import * as path from 'path'
 import type { SessionManager } from '../services/session-manager'
 import { scanSkills } from '../services/skill-scanner'
 import { saveCleanupPeriodDays, saveClaudePermissions } from '../services/claude-settings'
+import { syncCodexRulesFile } from '../codex/rules-sync'
+import {
+  codexDeletePlan,
+  deleteCodexSubtree,
+  type CodexDeleteHooks,
+  type CodexNodeFacts
+} from '../codex/delete'
+import { scanCodexLineage } from '../codex/history'
+import type { CodexDeletePlan } from '../../shared/codex-types'
 import type {
   ClaudePermissions,
   EngineId,
@@ -31,6 +40,7 @@ import { cwdToProjectKey } from '../../shared/project-key'
 import { applyProxyEnv, applyEndpointEnv, applyModelEnv } from '../providers/claude-spawn-prep'
 import type { ISession } from '../providers/ISession'
 import { PERMISSION_MODE_CYCLE } from '../../shared/permission-modes'
+import { getSessionMeta } from '../services/db'
 
 // ---------------------------------------------------------------------------
 // Shared session-domain IPC handler bodies (desktop IPC + remote WebSocket)
@@ -98,7 +108,7 @@ export function sendPrompt(
   routingId: string,
   prompt: string,
   attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-): void {
+): void | Promise<void> {
   const session = manager.get(routingId)
   if (!session) throw new Error(`No session for routingId: ${routingId}`)
   // Check before run() — if the session is already active this send queues.
@@ -106,13 +116,15 @@ export function sendPrompt(
     session.enqueuePrompt(prompt, attachments)
     return
   }
-  session.run(prompt, attachments)
+  const id = `msg-${crypto.randomUUID()}`
+  if (session.engineId !== 'codex') session.run(prompt, attachments)
   emitEvent('session:user-message', [
     routingId,
     // `msg-` prefix + randomUUID mirrors what the renderer minted, so nothing
     // downstream (React keys, retraction bookkeeping) sees a new id SHAPE.
-    { id: `msg-${crypto.randomUUID()}`, timestamp: Date.now(), prompt, attachments }
+    { id, timestamp: Date.now(), prompt, attachments }
   ])
+  if (session.engineId === 'codex') return session.run(prompt, attachments, id)
 }
 
 /**
@@ -183,6 +195,80 @@ function unwatchForDelete(sessionId: string): void {
 }
 
 /**
+ * What a Codex delete plan needs to know about each thread it lists: the title
+ * the user would recognise it by, and whether a process still holds it.
+ *
+ * The title comes from the canonical directory listing rather than from the
+ * engine, because a fork the user has never opened has no live session and no
+ * `session_meta` title — the sidebar row is the only place its name exists.
+ */
+function codexNodeFacts(manager: SessionManager): (threadId: string) => CodexNodeFacts {
+  const listed = syncCore.getCanonicalState().directories.flatMap((group) => group.sessions)
+  return (threadId) => ({
+    title: listed.find((session) => session.sessionId === threadId)?.title ?? null,
+    live: manager.has(threadId)
+  })
+}
+
+/** The three side effects above, handed to the Codex walk per node. */
+function codexDeleteHooks(manager: SessionManager): CodexDeleteHooks {
+  return {
+    unwatch: unwatchForDelete,
+    stop: (threadId) => manager.cancel(threadId),
+    removeSession: (threadId) => syncCore.removeSession(threadId)
+  }
+}
+
+/**
+ * What deleting `threadId` would remove: the thread and every branch cut from
+ * it, leaf-first.
+ *
+ * A read-only query, so the confirmation can say what it is about to do. The
+ * walk below recomputes its own plan and never trusts the answer a client was
+ * shown — by the time the user clicks, a branch may have appeared or gone.
+ */
+export async function codexDeletePlanFor(
+  manager: SessionManager,
+  threadId: string
+): Promise<CodexDeletePlan> {
+  if (typeof threadId !== 'string' || !threadId || threadId.length > 512)
+    throw new Error('Invalid Codex thread ID')
+  return codexDeletePlan(threadId, codexNodeFacts(manager))
+}
+
+/**
+ * Delete one persisted Codex session AND every branch cut from it.
+ *
+ * Not a choice: the binary refuses to delete a thread whose history a fork
+ * still references, so the subtree goes leaf-first or nothing goes at all (see
+ * `core/codex/delete.ts`). The walk stops at the first refusal and throws
+ * naming it; the listing refresh runs either way, which is what puts the
+ * surviving rows back on every client after a partial delete.
+ *
+ * `replan` is the walk's one second chance, and it belongs here because the
+ * plan's inputs do: a refusal may mean "a branch this app has never heard of
+ * still references that thread", and the full lineage rescan is the only thing
+ * that can learn one. Facts are recomputed with it — by then a node the walk
+ * stopped is no longer live.
+ */
+async function deleteCodexSession(manager: SessionManager, sessionId: string): Promise<void> {
+  try {
+    await deleteCodexSubtree(
+      codexDeletePlan(sessionId, codexNodeFacts(manager)),
+      codexDeleteHooks(manager),
+      {
+        replan: async () => {
+          await scanCodexLineage(undefined, undefined, 'all')
+          return codexDeletePlan(sessionId, codexNodeFacts(manager))
+        }
+      }
+    )
+  } finally {
+    void refreshCanonicalDirectories()
+  }
+}
+
+/**
  * Delete one persisted session, everywhere.
  *
  * `sessionId` is also the routingId of a live session for it, when there is one
@@ -194,10 +280,17 @@ export async function deleteSession(
   projectKey: string,
   engineId?: EngineId
 ): Promise<void> {
+  const actualEngine = manager.get(sessionId)?.engineId ?? getSessionMeta(sessionId)?.engineId
+  if (engineId && actualEngine && engineId !== actualEngine)
+    throw new Error('Session deletion engine does not match persisted identity')
+  if (engineId === 'codex' || actualEngine === 'codex')
+    return deleteCodexSession(manager, sessionId)
+  if (engineId && !['claude', 'opencode', 'pi'].includes(engineId))
+    throw new Error('Unsupported deletion engine')
   unwatchForDelete(sessionId)
   manager.cancel(sessionId)
   syncCore.removeSession(sessionId)
-  await deleteSessionByEngine(sessionId, projectKey, engineId)
+  await deleteSessionByEngine(sessionId, projectKey, engineId ?? actualEngine)
   // opencode / pi deletes touch no watched path, so nothing else would tell the
   // other clients their sidebar row is stale until the next poll.
   void refreshCanonicalDirectories()
@@ -230,7 +323,60 @@ export async function deleteProject(manager: SessionManager, projectKey: string)
   for (const [routingId, session] of Object.entries(state.sessions)) {
     if (cwdToProjectKey(session.cwd) === projectKey) ids.add(routingId)
   }
+
+  // Codex FIRST, and by subtree.
+  //
+  // Each root is walked leaf-first through the same path a single delete takes,
+  // before anything irreversible happens to the other engines: a native refusal
+  // (a thread some other process still holds) aborts the whole project delete
+  // rather than leaving Claude's directory unlinked behind a session that
+  // survived. A branch whose root is elsewhere is just a node — which also
+  // means a root here can take a fork that lives in ANOTHER project with it,
+  // because the binary will not delete the source while the fork references it.
+  const codexIds = new Set(
+    [...ids].filter(
+      (id) =>
+        state.sessions[id]?.status.engineId === 'codex' ||
+        group?.sessions.find((s) => s.sessionId === id)?.engineId === 'codex' ||
+        getSessionMeta(id)?.engineId === 'codex'
+    )
+  )
+  const swept = new Set<string>()
+  let walkedCodex = false
+  try {
+    for (const id of codexIds) {
+      if (swept.has(id)) continue
+      // A fork of this root that an earlier walk already removed is not deleted
+      // twice: the second delete would be refused as "no such thread", which is
+      // indistinguishable from a real refusal. The same filter is applied to a
+      // rescan's plan, for the same reason.
+      const unswept = (plan: CodexDeletePlan): CodexDeletePlan => ({
+        nodes: plan.nodes.filter((node) => !swept.has(node.threadId)),
+        order: plan.order.filter((threadId) => !swept.has(threadId))
+      })
+      const plan = unswept(codexDeletePlan(id, codexNodeFacts(manager)))
+      walkedCodex = true
+      const walked = await deleteCodexSubtree(plan, codexDeleteHooks(manager), {
+        replan: async () => {
+          await scanCodexLineage(undefined, undefined, 'all')
+          return unswept(codexDeletePlan(id, codexNodeFacts(manager)))
+        }
+      })
+      // The WALK's own answer, not the plan's: a rescan can extend it with
+      // branches this plan never named, and a second delete of one of those
+      // would be refused as "no such thread" and abort the whole project.
+      for (const threadId of walked) swept.add(threadId)
+      for (const node of plan.nodes) swept.add(node.threadId)
+    }
+  } finally {
+    // Also on the way out of a REFUSAL: the walk replicates each removal before
+    // it asks the binary, so an aborted sweep leaves clients missing rows for
+    // sessions that still exist until the listing is re-read.
+    if (walkedCodex) void refreshCanonicalDirectories()
+  }
+
   for (const id of ids) {
+    if (swept.has(id)) continue
     unwatchForDelete(id)
     manager.cancel(id)
     syncCore.removeSession(id)
@@ -239,7 +385,11 @@ export async function deleteProject(manager: SessionManager, projectKey: string)
   // Engine-owned storage first (see above). `allSettled`: one engine being down
   // must not abandon the rest of the delete — the Claude unlink below is the
   // irreversible step and it still has to run.
-  const foreign = (group?.sessions ?? []).filter((s) => s.engineId && s.engineId !== 'claude')
+  // Codex is excluded: its threads went through the subtree walk above, and
+  // asking the binary to delete one again would be refused as "no such thread".
+  const foreign = (group?.sessions ?? []).filter(
+    (s) => s.engineId && s.engineId !== 'claude' && !swept.has(s.sessionId)
+  )
   const results = await Promise.allSettled(
     foreign.map((s) => deleteSessionByEngine(s.sessionId, projectKey, s.engineId))
   )
@@ -519,11 +669,47 @@ export async function setModel(
   emitConfigChanged(session, routingId, { model, reasoningVariant: null })
 }
 
-export function setEffort(manager: SessionManager, routingId: string, effort: string): void {
+export async function setEffort(
+  manager: SessionManager,
+  routingId: string,
+  effort: string
+): Promise<void> {
   const s = manager.get(routingId)
-  if (s && s.capabilities.reasoning.effort == null) return
-  s?.setEffort?.(effort)
+  // Either reasoning axis counts: Claude/opencode report `effort` levels, Codex
+  // reports `nativeEffort` options from its own model catalog.
+  if (s && s.capabilities.reasoning.effort == null && s.capabilities.reasoning.nativeEffort == null)
+    return
+  await s?.setEffort?.(effort)
   emitConfigChanged(s, routingId, { effort })
+}
+
+/**
+ * Pin a session to one stored vendor account (ADR-068 §2).
+ *
+ * Engine-neutral by channel and capability-gated by
+ * `capabilities.auth.perSessionAccount`, so it REFUSES loudly on an engine that
+ * has no such thing rather than resolving into nothing — a silent no-op here
+ * would leave the picker showing a pin the session never took. Validation of the
+ * id itself belongs to the session (only it can ask the vault), and its error
+ * text reaches the caller unchanged.
+ *
+ * No `session:config-changed` echo: the pin is not one of that event's four
+ * fields, and the session re-emits `session:status` (carrying
+ * `codex.pinnedAccountId`) as part of applying it, which is what every replica
+ * folds.
+ */
+export async function setAccount(
+  manager: SessionManager,
+  routingId: string,
+  accountId: string | null
+): Promise<void> {
+  if (accountId !== null && (typeof accountId !== 'string' || !accountId || accountId.length > 256))
+    throw new Error('Invalid account id')
+  const session = manager.get(routingId)
+  if (!session) throw new Error('No active session')
+  if (!session.capabilities.auth.perSessionAccount || !session.setAccount)
+    throw new Error('This engine does not support per-session accounts')
+  await session.setAccount(accountId)
 }
 
 export function setThinkingMode(manager: SessionManager, routingId: string, mode: string): void {
@@ -582,6 +768,10 @@ export function savePermissionsAndNotify(
   cwd?: string
 ): void {
   saveClaudePermissions(scope, permissions, cwd)
+  // Codex reads user permission rules only through the generated execpolicy file
+  // (see `codex/rules-sync.ts`), which compiles USER scope alone — a project or
+  // local write cannot change its content, so only a user write regenerates it.
+  if (scope === 'user') syncCodexRulesFile()
   manager.forEach((session) => {
     if (!cwd || session.cwd === cwd || scope === 'user') {
       session.notifySettingsChanged?.().catch(() => {})

@@ -6,6 +6,7 @@ import type {
   ProxySettings
 } from '../shared/types'
 import { buildMockupUrl } from '../shared/mockup-url'
+import { verifierHooksEnabled } from '../shared/verifier-hooks'
 
 /**
  * Factory for IPC event handler registration.
@@ -73,7 +74,20 @@ async function unwrap<T>(channel: string, ...args: unknown[]): Promise<T> {
 }
 
 const api: ClaudeAPI = {
+  codexApproval: (id, requestId, decision) =>
+    unwrap('session:codex-approval', id, requestId, decision),
+  codexAuthStatus: () => unwrap('codex:auth-status'),
+  readCodexConfig: () => unwrap('codex-config:read'),
+  writeCodexConfig: (edits, expectedVersion) =>
+    unwrap('codex-config:write', edits, expectedVersion),
+  recompileCodexRules: () => unwrap('codex:recompile-rules'),
+  codexDeletePlan: (threadId) => unwrap('session:codex-delete-plan', threadId),
   platform: process.platform,
+  // Resolved here, in the one process that sees BOTH forms of the opt-in: the
+  // env var (inherited from main) and the `--claudeui-verifier-hooks` switch main
+  // forwards via `additionalArguments`. The renderer has neither, so it reads the
+  // answer off `window.api` instead. See `src/shared/verifier-hooks.ts`.
+  verifierHooks: verifierHooksEnabled(),
   pickFolder: () => ipcRenderer.invoke('session:pick-folder'),
   createSession: (
     routingId: string,
@@ -202,6 +216,8 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:set-model', routingId, model),
   setEffort: (routingId: string, effort: string) =>
     ipcRenderer.invoke('session:set-effort', routingId, effort),
+  setSessionAccount: (routingId: string, accountId: string | null) =>
+    ipcRenderer.invoke('session:set-account', routingId, accountId),
   setThinkingMode: (routingId: string, mode: string) =>
     ipcRenderer.invoke('session:set-thinking-mode', routingId, mode),
   setReasoningVariant: (routingId: string, variant: string | null) =>
@@ -343,6 +359,8 @@ const api: ClaudeAPI = {
 
   // Account usage (5hr / 7-day rate limits)
   fetchAccountUsage: () => ipcRenderer.invoke('usage:fetch'),
+  fetchChatgptLimits: (refresh?: boolean) =>
+    ipcRenderer.invoke('usage:chatgpt-limits', refresh ?? false),
 
   // Block usage analytics
   fetchBlockUsage: () => ipcRenderer.invoke('usage:fetch-block'),
@@ -424,6 +442,10 @@ const api: ClaudeAPI = {
     method: number,
     inputs?: Record<string, string>
   ) => unwrap('vendor-auth:oauth-authorize', engineId, vendorId, method, inputs),
+  vendorAuthDeviceCodeStart: (engineId: import('../shared/types').EngineId, vendorId: string) =>
+    unwrap('vendor-auth:device-code-start', engineId, vendorId),
+  vendorAuthDeviceCodeStatus: (engineId: import('../shared/types').EngineId) =>
+    unwrap('vendor-auth:device-code-status', engineId),
   vendorAuthOauthCallback: (
     engineId: import('../shared/types').EngineId,
     vendorId: string,
@@ -479,6 +501,13 @@ const api: ClaudeAPI = {
   saveSharedAutoMode: (config: import('../shared/types').SharedAutoModeConfig) =>
     ipcRenderer.invoke('config:save-shared-automode', config),
   listProviderRegistry: () => unwrap('provider-registry:list'),
+  listProviderAccounts: (providerId: string) => unwrap('provider-account:list', providerId),
+  switchProviderAccount: (providerId: string, accountId: string) =>
+    unwrap('provider-account:switch', providerId, accountId),
+  removeProviderAccount: (providerId: string, accountId: string) =>
+    unwrap('provider-account:remove', providerId, accountId),
+  setProviderAccountsPerSession: (providerId: string, enabled: boolean) =>
+    unwrap('provider-account:set-per-session', providerId, enabled),
   listSharedProviders: () => unwrap('shared-provider:list'),
   getSharedProviderStatuses: () => unwrap('shared-provider:statuses'),
   listSharedProviderModels: (id: string) => unwrap('shared-provider:models', id),

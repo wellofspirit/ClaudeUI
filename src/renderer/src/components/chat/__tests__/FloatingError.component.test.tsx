@@ -6,7 +6,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent } from '@testing-library/react'
-import { useSessionStore } from '../../../stores/session-store'
+import { useSessionStore, CODEX_SIGN_IN_REQUIRED_ERROR } from '../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { FloatingError } from '../FloatingError'
 
@@ -74,5 +74,28 @@ describe('FloatingError', () => {
 
     const { container } = render(<FloatingError />)
     expect(container.textContent).toContain('model fallback warning')
+  })
+
+  /**
+   * ADR-068 §4, the SERVICE path. An empty Codex catalog because the vault's
+   * ChatGPT credential was refused used to read as "check your installation",
+   * which is unfixable advice for a sign-in problem. It is the ONE error in this
+   * list with an action.
+   */
+  it('offers Sign in for the refused-ChatGPT Codex banner, and only for it', () => {
+    useSessionStore.getState().addError(ROUTE, 'Something else broke')
+    useSessionStore.getState().addError(ROUTE, CODEX_SIGN_IN_REQUIRED_ERROR)
+    useSessionStore.setState({ signInDialog: null })
+
+    const { getAllByTestId } = render(<FloatingError />)
+    const signIn = getAllByTestId('FloatingError.signIn')
+    expect(signIn).toHaveLength(1)
+
+    fireEvent.click(signIn[0])
+    expect(useSessionStore.getState().signInDialog).toEqual({
+      providerId: 'chatgpt',
+      mode: 'reauth'
+    })
+    expect(useSessionStore.getState().sessions[ROUTE].errors).toEqual(['Something else broke'])
   })
 })

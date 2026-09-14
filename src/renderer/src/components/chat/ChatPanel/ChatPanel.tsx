@@ -13,7 +13,7 @@ import { SentFilesWidget } from '../../SentFilesWidget'
 import { FloatingApproval } from '../FloatingApproval'
 import { BtwCard } from '../BtwCard'
 import { FloatingError } from '../FloatingError'
-import { VendorAuthRequiredCard } from '../VendorAuthRequiredCard'
+import { AuthRequiredRow } from '../AuthRequiredRow'
 import { AuthBanner } from '../AuthBanner'
 import { SandboxViolationToast } from '../SandboxViolationToast'
 import { useIsMobile } from '../../../hooks/useIsMobile'
@@ -399,7 +399,7 @@ export function ChatPanel(): React.JSX.Element {
         </div>
       )}
       <FloatingApproval />
-      <VendorAuthRequiredCard />
+      <AuthRequiredRow />
       <FloatingError />
       <SandboxViolationToast />
     </div>

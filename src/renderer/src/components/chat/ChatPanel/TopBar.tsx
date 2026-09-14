@@ -14,6 +14,7 @@ import { useTerminalAvailability } from '../../terminal/terminal-availability'
 import { useIdeAvailability } from '../ide-availability'
 import { IdeUnavailableDialog } from '../IdeUnavailableDialog'
 import { shortModelName } from '../../usage/usage-utils'
+import { COST_UNKNOWN, formatCostOrUnknown, formatCostUsd } from '../../../utils/cost'
 import { ideLaunchPageHtml } from '../../../../../shared/ide-launch-page'
 import {
   ideUnavailableReason,
@@ -28,11 +29,6 @@ function formatDuration(ms: number): string {
   if (ms < 60000) return `${Math.floor(ms / 1000)}s`
   if (ms < 3_600_000) return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`
   return `${Math.floor(ms / 3_600_000)}h ${Math.floor((ms % 3_600_000) / 60000)}m`
-}
-
-/** Format a cost figure consistently with the existing Cost/breakdown rows. */
-function formatCost(costUsd: number): string {
-  return `$${costUsd < 0.01 ? costUsd.toFixed(4) : costUsd.toFixed(2)}`
 }
 
 /**
@@ -125,6 +121,23 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const [permissionsOpen, setPermissionsOpen] = useState(false)
   const [skillsOpen, setSkillsOpen] = useState(false)
   const [mcpOpen, setMcpOpen] = useState(false)
+
+  /**
+   * Settings' one link INTO the MCP surface (ADR-068 §6: the Codex page's MCP
+   * group states how many servers a thread inherits and sends the user here to
+   * change them).
+   *
+   * An event rather than a prop for the same reason `open-settings` is one: the
+   * dialog's state lives in this bar, the link lives inside a static settings
+   * group definition several trees away, and the two hosts of the settings
+   * dialog close themselves on the same event so the MCP dialog is not opened
+   * behind one.
+   */
+  useEffect(() => {
+    const handler = (): void => setMcpOpen(true)
+    window.addEventListener('open-mcp-servers', handler)
+    return () => window.removeEventListener('open-mcp-servers', handler)
+  }, [])
   const [overflowOpen, setOverflowOpen] = useState(false)
   const overflowRef = useRef<HTMLDivElement>(null)
   /** The typed IDE refusal currently being explained, or null. */
@@ -295,7 +308,11 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   }, [])
 
   const displaySessionId = sdkSessionId || activeSessionId
-  const cost = statusLine ? statusLine.totalCostUsd : fallbackCost
+  // null = the engine could not price this session (never "free" — see
+  // SessionStatus.totalCostUsd). Kept nullable all the way to the render so
+  // the tooltip can say so instead of printing a fabricated $0.00.
+  const cost: number | null = statusLine ? statusLine.totalCostUsd : fallbackCost
+  const costUnknown = cost === null
   const totalDurationMs = statusLine?.totalDurationMs ?? 0
   const totalApiDurationMs = statusLine?.totalApiDurationMs ?? 0
   const turnStartedAtMs = statusLine?.turnStartedAtMs ?? null
@@ -315,7 +332,13 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const dispatchedCostUsd = rawModelCosts
     .filter((m) => m.dispatched)
     .reduce((acc, m) => acc + m.costUsd, 0)
-  const totalInclDispatchedUsd = cost + dispatchedCostUsd
+  // An unknown headline + a known dispatched figure is still worth showing:
+  // the dispatched spend is real money and the row says the rest is unknown,
+  // rather than silently reporting the dispatched part as the whole total.
+  const totalInclDispatchedUsd = (cost ?? 0) + dispatchedCostUsd
+  // Show the Cost tile when there is something to say: a real figure, a
+  // dispatched figure, or an explicit "we could not price this".
+  const showCost = cost === null || cost > 0 || hasDispatchedCost
 
   // Tick every second while the tooltip is open and a turn is in flight, so
   // "Session time" keeps counting up live instead of freezing until the next
@@ -630,16 +653,16 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
                         </div>
                       </button>
                     )}
-                    {(cost > 0 ||
-                      hasDispatchedCost ||
-                      sessionDurationMs > 0 ||
-                      totalApiDurationMs > 0) && (
+                    {(showCost || sessionDurationMs > 0 || totalApiDurationMs > 0) && (
                       <div className="flex gap-4">
-                        {(cost > 0 || hasDispatchedCost) && (
+                        {showCost && (
                           <div>
                             <div className="text-[10px] text-text-muted mb-0.5">Cost</div>
-                            <div className="text-[11px] text-text-secondary font-mono">
-                              ${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}
+                            <div
+                              data-testid="TopBar.cost"
+                              className="text-[11px] text-text-secondary font-mono"
+                            >
+                              {formatCostOrUnknown(cost)}
                             </div>
                             {showCostBreakdown && (
                               <div data-testid="TopBar.costBreakdown" className="mt-1 space-y-0.5">
@@ -657,20 +680,23 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
                                         : shortModelName(m.modelId)}
                                     </span>
                                     <span className="text-[10px] text-text-secondary font-mono shrink-0">
-                                      {formatCost(m.costUsd)}
+                                      {formatCostUsd(m.costUsd)}
                                     </span>
                                   </div>
                                 ))}
                                 {hasDispatchedCost && (
                                   <div
                                     data-testid="TopBar.costTotalInclDispatched"
+                                    {...(costUnknown ? { 'data-cost-unknown': 'true' } : {})}
                                     className="flex items-center justify-between gap-3 pt-0.5 mt-0.5 border-t border-border/50"
                                   >
                                     <span className="text-[10px] text-text-muted truncate">
                                       Total incl. dispatched
                                     </span>
                                     <span className="text-[10px] text-text-secondary font-mono shrink-0">
-                                      {formatCost(totalInclDispatchedUsd)}
+                                      {costUnknown
+                                        ? `${formatCostUsd(dispatchedCostUsd)} + ${COST_UNKNOWN}`
+                                        : formatCostUsd(totalInclDispatchedUsd)}
                                     </span>
                                   </div>
                                 )}

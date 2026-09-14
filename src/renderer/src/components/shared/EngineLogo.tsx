@@ -148,6 +148,26 @@ function PiMark({
 // compile error until its mark is added (rather than silently rendering Claude).
 type EngineMarkProps = { size: number; className: string; testid: string; engineId: EngineId }
 const ENGINE_MARK = {
+  codex: ({ size, className, testid, engineId }: EngineMarkProps) => (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      className={className}
+      aria-label="Codex"
+      data-testid={testid}
+      data-engine={engineId}
+    >
+      <path
+        d="M5 6l6 6-6 6m9 0h5"
+        stroke="currentColor"
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  ),
   claude: ClaudeMark,
   opencode: OpencodeMark,
   pi: PiMark

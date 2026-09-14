@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { CodexApprovalCard } from './CodexApprovalCard'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import type { ApprovalDecision, ContentBlock, PendingApproval } from '../../../../shared/types'
 import { AlwaysAllowSection } from './PermissionSuggestions'
@@ -31,6 +32,8 @@ export function ApprovalCardView({
   onRespond,
   showAllowForSession = false
 }: ApprovalCardViewProps): React.JSX.Element {
+  // See ApprovalButtons: the codex card is the native-question surface only.
+  if (approval.codex?.questions) return <CodexApprovalCard approval={approval} />
   const input = approval.input
   const toolName = approval.toolName
   const isSandboxEscape = !!input?.dangerouslyDisableSandbox
@@ -170,6 +173,18 @@ export function ApprovalCardView({
 // Logic layer — hooks, store access, IPC calls
 // ---------------------------------------------------------------------------
 
+/**
+ * Every pending approval with no matching tool_use block in the session's
+ * TOP-LEVEL transcript.
+ *
+ * Nested transcripts (`subagentMessages`) are deliberately NOT consulted. Since
+ * Slice I, `SubagentMessages` binds the same approval to the nested tool card,
+ * so an approval raised inside a subagent renders on BOTH surfaces — a decided
+ * duplication, not an oversight: a nested card can be scrolled out of view or
+ * sit behind a collapsed task card, and an approval nobody can find is a hung
+ * turn. Both surfaces carry the same `requestId`, so answering either resolves
+ * the request and dismisses the other.
+ */
 function useUnmatchedApprovals(): PendingApproval[] {
   const pendingApprovals = useActiveSession((s) => s.pendingApprovals)
   const messages = useActiveSession((s) => s.messages)

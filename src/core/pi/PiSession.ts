@@ -109,11 +109,7 @@ import {
 } from '../automode/ground-truth'
 import { PiJudge } from './pi-judge'
 import { loadEngineConfig, loadSharedAutoModeConfig } from '../services/ui-config'
-import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
-import {
-  suggestionDestinationToScope,
-  suggestionRuleToClaudeString
-} from '../opencode/permission-compiler'
+import { persistAllowSuggestions } from '../opencode/permission-compiler'
 // Reused AS-IS (not copied/forked — ADR-026 additive-only on shared seams):
 // pure key/value dedup+throttle gate, no opencode-specific assumption baked
 // in (verified — takes a caller-supplied emit callback and ambient
@@ -2022,39 +2018,13 @@ export class PiSession extends BaseSession {
   }
 
   /**
-   * Write "always allow" suggestions to the shared Claude permission store —
-   * mirrors OpencodeSession.persistAllowRules (same shared helpers
-   * `suggestionDestinationToScope`/`suggestionRuleToClaudeString` from
-   * permission-compiler.ts; the small grouping loop is intentionally
-   * duplicated here rather than extracted, per the M2a kickoff spec). Also
-   * invalidates the rules cache so the newly-persisted rule is honored on the
-   * VERY NEXT gate call in this same session, without waiting for an explicit
-   * notifySettingsChanged().
+   * Write "always allow" suggestions to the shared Claude permission store (the
+   * one copy lives in permission-compiler.ts) and invalidate the rules cache so
+   * the newly-persisted rule is honored on the VERY NEXT gate call in this same
+   * session, without waiting for an explicit notifySettingsChanged().
    */
   private persistAllowRules(suggestions: PermissionSuggestion[]): void {
-    try {
-      const byScope = new Map<'user' | 'project' | 'local', string[]>()
-      for (const s of suggestions) {
-        if (s.type !== 'addRules' || s.behavior !== 'allow' || !s.rules) continue
-        const scope = suggestionDestinationToScope(s.destination)
-        if (!scope) continue
-        const arr = byScope.get(scope) ?? []
-        for (const r of s.rules) arr.push(suggestionRuleToClaudeString(r))
-        byScope.set(scope, arr)
-      }
-      for (const [scope, ruleStrings] of byScope) {
-        const perms = loadClaudePermissions(scope, this.cwd)
-        const allowSet = new Set(perms.allow)
-        for (const r of ruleStrings) allowSet.add(r)
-        saveClaudePermissions(scope, { ...perms, allow: [...allowSet] }, this.cwd)
-      }
-      if (byScope.size > 0) this.cachedRules = null
-    } catch (err) {
-      logger.warn(
-        'PiSession',
-        `persisting allow rules failed: ${err instanceof Error ? err.message : String(err)}`
-      )
-    }
+    if (persistAllowSuggestions(suggestions, this.cwd, 'PiSession')) this.cachedRules = null
   }
 
   /** Hot-reload parity with Claude: invalidate the cached rules so the NEXT gate call re-reads the (just-edited) permission files from disk. */

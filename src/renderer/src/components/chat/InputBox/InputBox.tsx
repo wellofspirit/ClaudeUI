@@ -7,6 +7,7 @@ import {
   engineDefaultModels,
   resolveEngineDefaultModel
 } from '../../../stores/session-store'
+import { resolveRekeyed } from '../../../stores/replica'
 import type { FileAttachment, VoiceState as VoiceStateType } from '../../../../../shared/types'
 import { v4 as uuid } from 'uuid'
 import { resolveSendAction, filterModelsForEngine } from './utils'
@@ -17,6 +18,8 @@ import { useFileMention } from '../../../hooks/useFileMention'
 import { useIsMobile } from '../../../hooks/useIsMobile'
 import { InputBoxView } from './View'
 import { autoModeAvailableForEngine } from '../../../../../shared/permission-modes'
+import { engineMeta } from '../../../../../shared/engine-meta'
+import { SIGN_IN_PROVIDER_LABEL, signInProviderFor } from '../../../utils/sign-in-provider'
 import type { PermissionMode } from '../../../../../shared/types'
 import {
   claudeModelCapabilities,
@@ -28,6 +31,87 @@ import {
   type EffortLevel,
   type ThinkingMode
 } from '../../../../../shared/model-capabilities'
+
+const codexCatalogOf = (models: ReadonlyArray<{ value: string; engineId?: string }>) =>
+  models.filter((model) => model.engineId === 'codex')
+
+/**
+ * THE predicate for "this Codex spawn carries an explicit model". The request
+ * (`resolveSessionSdkOptions`) sends `selectedModel` exactly when this is true,
+ * and the pill reads "Native default" exactly when it is false. Keeping two
+ * copies of the rule is what let the pill advertise a catalog model the request
+ * then omitted, so Codex silently ran its own configured default instead.
+ *
+ * The empty-`selectedModel` case is the one the second copy got wrong: the flag
+ * can say "explicit" while the value is gone (a sticky pick the catalog no
+ * longer offers), and an absent value is an omitted model whatever the flag
+ * says.
+ */
+export function codexModelIsExplicit(
+  session:
+    | {
+        codexModelExplicit?: boolean
+        isHistorical?: boolean
+        selectedModel: string
+        status: { sessionId: string | null }
+      }
+    | undefined,
+  sticky: string | undefined,
+  codexModels: ReadonlyArray<{ value: string }>,
+  /** `engines/codex.json#codexConfig.defaultModel`, '' when unset (Slice 5b). */
+  configuredDefault: string = ''
+): boolean {
+  // Welcome screen: no session holds the pick yet, so answer for the one
+  // `createNewSession` is about to seed — it marks a sticky model explicit, and
+  // drops it only when a codex catalog exists that no longer lists it. A
+  // CONFIGURED default is the next rung of the same ladder (ADR-059: naming it
+  // in settings is as explicit as picking it in the picker), and the store
+  // seeds it in exactly this order.
+  if (!session) {
+    const candidate = sticky || configuredDefault
+    return (
+      !!candidate &&
+      (codexModels.length === 0 || codexModels.some((model) => model.value === candidate))
+    )
+  }
+  if (!session.selectedModel) return false
+  return !!(session.codexModelExplicit || session.isHistorical || session.status.sessionId)
+}
+
+/**
+ * The configured native tier to send with a FRESH Codex spawn, or undefined.
+ *
+ * PAIRED with the model. The Default-models pane offers only the tiers the
+ * configured default model publishes, so `codexConfig.defaultEffort` is a
+ * statement about THAT model: a session the user steered onto another model
+ * (a sticky pick) runs that model's own default tier, because sending the
+ * configured one would make `CodexSession.validateEffort` refuse the start for a
+ * mismatch the user never chose. With no default model configured the tier came
+ * from the union, so it goes when the catalog says the session's model publishes
+ * it, and when the model is Codex's own (not explicit, unknown here) — where a
+ * mismatch is the loud thread-start failure ADR-059 wants, not a silent drop.
+ */
+export function codexDefaultEffortFor(
+  defaults: {
+    codexDefaultModel: string
+    codexDefaultModelConfigured: boolean
+    codexDefaultEffort: string
+  },
+  model: string | undefined,
+  codexModels: ReadonlyArray<{
+    value: string
+    nativeEffortOptions?: ReadonlyArray<{ value: string }>
+  }>
+): string | undefined {
+  const effort = defaults.codexDefaultEffort
+  if (!effort) return undefined
+  if (defaults.codexDefaultModelConfigured)
+    return model === defaults.codexDefaultModel ? effort : undefined
+  if (!model) return effort
+  const options = codexModels.find((m) => m.value === model)?.nativeEffortOptions
+  if (!options || options.length === 0) return effort
+  return options.some((option) => option.value === effort) ? effort : undefined
+}
 
 const ACCEPTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
 const ACCEPTED_FILE_TYPES = [...ACCEPTED_IMAGE_TYPES, 'application/pdf']
@@ -180,7 +264,14 @@ export function InputBox(): React.JSX.Element {
   const models = useMemo(
     () =>
       availableModels.map((m) => {
-        const shortName = m.description?.split('·')[0]?.trim() || m.displayName
+        // claude/opencode/pi discovery all emit "Name · detail" descriptions, so
+        // the head of the split is the name. Codex's native catalog puts a
+        // marketing sentence there instead ("Our most capable model for …"),
+        // which splits to the whole sentence — use its display name directly.
+        const shortName =
+          m.engineId === 'codex'
+            ? m.displayName
+            : m.description?.split('·')[0]?.trim() || m.displayName
         return { ...m, shortName }
       }),
     [availableModels]
@@ -194,6 +285,7 @@ export function InputBox(): React.JSX.Element {
   // once initialization starts. Historical sessions are committed by definition.
   const startedSessionId = useActiveSession((s) => s.status.sessionId)
   const isHistorical = useActiveSession((s) => s.isHistorical)
+  const codexModelExplicit = useActiveSession((s) => s.codexModelExplicit)
   const sessionEngineId = useActiveSession((s) => s.selectedEngineId)
   // On welcome, the picker controls the engine that createNewSession will seed.
   // Once a session exists, it always reflects that session's own engine instead.
@@ -233,6 +325,30 @@ export function InputBox(): React.JSX.Element {
     }
     const exact = sameEngine.find((m) => m.value === selectedModelValue)
     if (exact) return exact
+    if (engine === 'codex') {
+      // Welcome screen, no sticky pick: the CONFIGURED default is what
+      // `createNewSession` will seed, so the pill must name it rather than the
+      // catalog's first row (which the spawn would not carry).
+      if (!activeSessionId && engineDefaults.codexDefaultModelConfigured) {
+        const configured = sameEngine.find((mm) => mm.value === engineDefaults.codexDefaultModel)
+        if (configured) return configured
+      }
+      if (
+        activeSessionId &&
+        (codexModelExplicit || isHistorical || startedSessionId) &&
+        selectedModelValue
+      ) {
+        return sameEngine.length > 0
+          ? { ...unset, displayName: 'Model unavailable', shortName: 'Model unavailable' }
+          : {
+              ...unset,
+              value: selectedModelValue,
+              displayName: selectedModelValue,
+              shortName: selectedModelValue
+            }
+      }
+      return sameEngine[0] ?? unset
+    }
     if (engine === 'opencode' || engine === 'pi') {
       // The SAME resolver the store seeds sessions with, so the pill shows what
       // will actually spawn. `null` = the user's configured default is gone:
@@ -267,7 +383,49 @@ export function InputBox(): React.JSX.Element {
     selectedModelValue,
     engineDefaults,
     lastSelectedModelByEngine,
-    activeSessionId
+    activeSessionId,
+    codexModelExplicit,
+    isHistorical,
+    startedSessionId
+  ])
+  const stickyCodexModel = lastSelectedModelByEngine.codex
+  // The exact four fields `resolveSessionSdkOptions` reads off the store, so
+  // the pill and the spawn ask `codexModelIsExplicit` the same question.
+  const activeCodexSession = useMemo(
+    () =>
+      activeSessionId
+        ? {
+            codexModelExplicit,
+            isHistorical,
+            selectedModel: selectedModelValue,
+            status: { sessionId: startedSessionId }
+          }
+        : undefined,
+    [activeSessionId, codexModelExplicit, isHistorical, selectedModelValue, startedSessionId]
+  )
+
+  // Pre-spawn sign-in hint (ADR-068 §3, Slice 6). A session that has not
+  // reached a backend is the one moment a missing credential is still cheap to
+  // fix; once it spawns, the reactive AuthRequiredRow owns the problem. A fork
+  // carries seeded messages before its first send, hence the message gate.
+  const messageCount = useActiveSession((s) => s.messages.length)
+  const providerAuth = useSessionStore((s) => s.providerAuth)
+  const signInHint = useMemo(() => {
+    if (startedSessionId || isHistorical || messageCount > 0) return null
+    const resolved = signInProviderFor(effectiveEngineId, selectedModel.vendorId, providerAuth)
+    if (!resolved || resolved.state !== 'unauthenticated') return null
+    return {
+      providerId: resolved.providerId,
+      engineLabel: engineMeta(effectiveEngineId).label,
+      providerLabel: SIGN_IN_PROVIDER_LABEL[resolved.providerId]
+    }
+  }, [
+    startedSessionId,
+    isHistorical,
+    messageCount,
+    effectiveEngineId,
+    selectedModel.vendorId,
+    providerAuth
   ])
 
   const statusLine = useActiveSession((s) => s.statusLine)
@@ -339,12 +497,33 @@ export function InputBox(): React.JSX.Element {
    * unsupported user choice against the current model's capabilities.
    */
   function resolveSessionSdkOptions(routingId: string): {
-    effort: EffortLevel
-    thinkingMode: ThinkingMode
+    effort?: string
+    thinkingMode?: ThinkingMode
+    model?: string
   } {
     const state = useSessionStore.getState()
     const session = state.sessions[routingId]
     const engineId = session?.selectedEngineId ?? 'claude'
+    if (engineId === 'codex') {
+      const model = codexModelIsExplicit(
+        session,
+        state.lastSelectedModelByEngine.codex,
+        codexCatalogOf(state.availableModels),
+        state.codexDefaultModel
+      )
+        ? session?.selectedModel
+        : undefined
+      // The configured NATIVE tier seeds a session that has no thread yet, and
+      // only when it is paired with the session's model (`codexDefaultEffortFor`).
+      // A resume must not carry it: `CodexSession.start` folds an explicit
+      // effort OVER the thread's remembered one, so re-sending the default
+      // would silently undo a live `thread/settings/update` the user made.
+      const fresh = !session?.status.sessionId && !session?.isHistorical
+      const effort = fresh
+        ? codexDefaultEffortFor(state, model, codexCatalogOf(state.availableModels))
+        : undefined
+      return { model, ...(effort ? { effort } : {}) }
+    }
     const modelInfo = state.availableModels.find(
       (m) => m.value === session?.selectedModel && (m.engineId ?? 'claude') === engineId
     )
@@ -356,6 +535,7 @@ export function InputBox(): React.JSX.Element {
     const desiredEffort: EffortLevel =
       session?.effort ?? userDefault ?? modelDefaultEffort(modelInfo)
     return {
+      model: session?.selectedModel,
       effort: modelResolveEffort(modelInfo, desiredEffort) ?? desiredEffort,
       thinkingMode: modelResolveThinkingMode(modelInfo, desiredThinking)
     }
@@ -372,8 +552,22 @@ export function InputBox(): React.JSX.Element {
    * alias is a real value and never trips this.
    */
   function assertModelResolved(routingId: string): void {
-    const session = useSessionStore.getState().sessions[routingId]
+    const state = useSessionStore.getState()
+    const session = state.sessions[routingId]
     const engineId = session?.selectedEngineId ?? 'claude'
+    // Codex without an explicit model is a SUPPORTED spawn (the pill says
+    // "Native default" and Codex uses its own configured model), so the
+    // engine-default guard below must not fire on it.
+    if (
+      engineId === 'codex' &&
+      !codexModelIsExplicit(
+        session,
+        state.lastSelectedModelByEngine.codex,
+        codexCatalogOf(state.availableModels),
+        state.codexDefaultModel
+      )
+    )
+      return
     if (engineId === 'claude' || session?.selectedModel) return
     throw new Error(
       `No model selected for this ${engineId} session — the configured default model is no longer available. Pick one in the model picker.`
@@ -401,14 +595,17 @@ export function InputBox(): React.JSX.Element {
             opts.effort,
             fork.sourceSessionId,
             session?.permissionMode,
-            session?.selectedModel,
+            opts.model,
             opts.thinkingMode,
             fork.anchorUuid,
             true,
             session?.selectedEngineId
           )
         } else {
-          const isHistorical = session && session.messages.length > 0
+          const isHistorical =
+            session?.selectedEngineId === 'codex'
+              ? !!(session.status.sessionId || session.isHistorical)
+              : session && session.messages.length > 0
           // For opencode sessions, always pass the routingId as resumeSessionId so
           // OpencodeSession can resume a prior session even when messages are empty
           // (history is replayed from the server, not preloaded into the store).
@@ -422,7 +619,7 @@ export function InputBox(): React.JSX.Element {
             opts.effort,
             resumeId,
             session?.permissionMode,
-            session?.selectedModel,
+            opts.model,
             opts.thinkingMode,
             undefined,
             undefined,
@@ -451,14 +648,17 @@ export function InputBox(): React.JSX.Element {
           opts.effort,
           fork.sourceSessionId,
           session?.permissionMode,
-          session?.selectedModel,
+          opts.model,
           opts.thinkingMode,
           fork.anchorUuid,
           true,
           session?.selectedEngineId
         )
       } else {
-        const isHistorical = session && session.messages.length > 0 && !session.sdkActive
+        const isHistorical =
+          session?.selectedEngineId === 'codex'
+            ? !!(session.status.sessionId || session.isHistorical)
+            : session && session.messages.length > 0 && !session.sdkActive
         const resumeId = isHistorical ? activeSessionId : undefined
         await window.api.createSession(
           activeSessionId,
@@ -466,7 +666,7 @@ export function InputBox(): React.JSX.Element {
           opts.effort,
           resumeId,
           session?.permissionMode,
-          session?.selectedModel,
+          opts.model,
           opts.thinkingMode,
           undefined,
           undefined,
@@ -556,16 +756,25 @@ export function InputBox(): React.JSX.Element {
             await doSend(action.prompt, action.attachments)
           }
         } catch (err) {
-          useSessionStore.getState().addError(sessionId, `Failed to send message: ${err}`)
+          useSessionStore
+            .getState()
+            .addError(resolveRekeyed(sessionId), `Failed to send message: ${err}`)
           return
         }
+        // The engine can report its stable session id WHILE the send is in
+        // flight — Codex rekeys on `thread/start`, which lands well before
+        // `turn/start` resolves this await — and the rekey retires `sessionId`
+        // out from under us. Follow the move first, or the guard below compares
+        // the new active id against a dead one, the textarea never clears, and
+        // the attachment reset lands on an id nothing holds any more.
+        const settledId = resolveRekeyed(sessionId)
         // Only clear the textarea if the user is still on this session; always
         // clear the attachments of the session the send targeted.
-        if (useSessionStore.getState().activeSessionId === sessionId) {
+        if (useSessionStore.getState().activeSessionId === settledId) {
           setText('')
           if (textareaRef.current) textareaRef.current.style.height = 'auto'
         }
-        setDraftAttachments(sessionId, [])
+        setDraftAttachments(settledId, [])
         return
       }
     }
@@ -733,6 +942,11 @@ export function InputBox(): React.JSX.Element {
     [activeSessionId, setSelectedModel, setThinkingMode, setEffort]
   )
 
+  // Engine-native reasoning tiers, published by the live session's capabilities
+  // (Codex reads them off its own model catalog). Absent for Claude/opencode/pi,
+  // which use the fixed EffortLevel ladder derived from the selected model.
+  const nativeEffortOptions = capabilities.reasoning.nativeEffort?.options
+
   // Effort and thinking mode are read at sdkQuery start time, so restart the
   // session (with resume) to apply changes mid-conversation.
   const restartSdkSession = useCallback(async () => {
@@ -747,7 +961,7 @@ export function InputBox(): React.JSX.Element {
       opts.effort,
       activeSessionId,
       session?.permissionMode,
-      session?.selectedModel,
+      opts.model,
       opts.thinkingMode,
       undefined,
       undefined,
@@ -757,11 +971,19 @@ export function InputBox(): React.JSX.Element {
   }, [activeSessionId, sdkActive, markSdkActive])
 
   const handleSelectEffort = useCallback(
-    async (level: EffortLevel) => {
-      setEffort(level)
+    async (level: string) => {
+      // An engine with NATIVE effort tiers applies them live over IPC (Codex's
+      // `thread/settings/update`), and the acknowledged value arrives back on
+      // `session:status` — no local optimistic write and no respawn. Claude and
+      // opencode have no live setter, hence the cancel/recreate below.
+      if (nativeEffortOptions) {
+        if (activeSessionId) await window.api.setEffort(activeSessionId, level)
+        return
+      }
+      setEffort(level as EffortLevel)
       await restartSdkSession()
     },
-    [setEffort, restartSdkSession]
+    [activeSessionId, nativeEffortOptions, setEffort, restartSdkSession]
   )
 
   const handleSelectReasoningVariant = useCallback(
@@ -781,6 +1003,69 @@ export function InputBox(): React.JSX.Element {
     },
     [setThinkingMode, restartSdkSession]
   )
+
+  // -------------------------------------------------------------------------
+  // The per-session ChatGPT account pin (ADR-068 §2)
+  // -------------------------------------------------------------------------
+  //
+  // Read once on mount and again whenever the menu opens, so an account added
+  // or removed in Settings since this bar mounted is offered (or gone) without
+  // the input bar knowing anything about the settings surface.
+  const providerAccounts = useSessionStore((s) => s.providerAccounts)
+  const loadProviderAccounts = useSessionStore((s) => s.loadProviderAccounts)
+  useEffect(() => {
+    void loadProviderAccounts()
+  }, [loadProviderAccounts])
+
+  // Three conditions, all of them honest refusals rather than cosmetic gates:
+  // the ENGINE must be able to run one session on another account, the provider
+  // must have per-session accounts turned on, and there must be a second account
+  // to switch to. `providerAccounts === null` means "not read yet", which is a
+  // fourth reason to stay hidden — guessing would flash a picker and then take
+  // it away.
+  const showAccountPicker =
+    capabilities.auth.perSessionAccount &&
+    providerAccounts?.perSession === true &&
+    providerAccounts.accounts.length > 1
+  const accountChoices = useMemo(
+    () =>
+      (providerAccounts?.accounts ?? []).map(({ id, email, planType }) => ({
+        id,
+        ...(email ? { email } : {}),
+        ...(planType ? { planType } : {})
+      })),
+    [providerAccounts]
+  )
+  const handleSelectAccount = useCallback(
+    async (accountId: string | null) => {
+      if (!activeSessionId) return
+      try {
+        await window.api.setSessionAccount(activeSessionId, accountId)
+      } catch (error) {
+        // Codex can REFUSE the re-injection (a managed workspace policy, or a
+        // token it will not parse), and the native message is the only thing the
+        // user can act on. It goes where `session:error` goes — an error row on
+        // this session — rather than dying as an unhandled rejection in the
+        // console, which is all it did before. Both surfaces reach this one
+        // handler: the desktop `AccountPicker` and the mobile sheet's account
+        // page are both wired to `onSelectAccount`.
+        useSessionStore
+          .getState()
+          .addError(
+            activeSessionId,
+            error instanceof Error
+              ? error.message
+              : 'The ChatGPT account for this session could not be changed'
+          )
+      }
+    },
+    [activeSessionId]
+  )
+  const handleAddAccount = useCallback(() => {
+    window.dispatchEvent(
+      new CustomEvent('open-settings', { detail: { page: 'models', group: 'providers' } })
+    )
+  }, [])
 
   const handleOpenSandboxSettings = useCallback(() => {
     window.dispatchEvent(
@@ -825,8 +1110,12 @@ export function InputBox(): React.JSX.Element {
         : !activeSessionId || !cwd
           ? 'Select a folder to get started'
           : isRunning
-            ? 'Type to queue a message...'
-            : 'Ask Claude anything, / for commands'
+            ? capabilities.queue
+              ? 'Type to queue a message...'
+              : 'Wait for this turn, or stop it to send another message'
+            : effectiveEngineId === 'codex'
+              ? 'Ask Codex anything'
+              : 'Ask Claude anything, / for commands'
 
   const textClassName =
     isVoiceActive && voiceInterimTranscript
@@ -853,9 +1142,17 @@ export function InputBox(): React.JSX.Element {
   // Effective display values: show the user's explicit pick when set,
   // otherwise fall back to the current model's default so new sessions
   // present the right tier (e.g. xhigh on Opus 4.7, high on Sonnet 4.6).
-  const effectiveEffort = useMemo<EffortLevel>(
-    () => effort ?? modelDefaultEffort(selectedModel),
-    [effort, selectedModel]
+  const effectiveEffort = useMemo<string>(
+    () =>
+      nativeEffortOptions
+        ? // The engine's ACKNOWLEDGED tier first — it is the live thread's
+          // truth. Before any turn acknowledges one, the selected model's OWN
+          // catalog default (`nativeDefaultEffort`, from model-discovery), never
+          // the first catalog row: that row is just the lowest tier the catalog
+          // happens to list, so it claimed a tier the engine never said.
+          (status.codex?.reasoningEffort ?? selectedModel.nativeDefaultEffort ?? '')
+        : (effort ?? modelDefaultEffort(selectedModel)),
+    [effort, selectedModel, nativeEffortOptions, status.codex?.reasoningEffort]
   )
   const effectiveThinking = useMemo<ThinkingMode>(
     () => thinkingMode ?? modelDefaultThinkingMode(selectedModel),
@@ -888,24 +1185,47 @@ export function InputBox(): React.JSX.Element {
       filteredFileMentionEntries={filteredFileMentionEntries}
       attachedFiles={attachedFiles}
       models={pickerModels}
-      selectedModel={selectedModel}
+      selectedModel={
+        effectiveEngineId === 'codex' &&
+        !codexModelIsExplicit(
+          activeCodexSession,
+          stickyCodexModel,
+          pickerModels,
+          engineDefaults.codexDefaultModel
+        )
+          ? {
+              ...selectedModel,
+              displayName: 'Native configured model',
+              shortName: 'Native default'
+            }
+          : selectedModel
+      }
       selectedEngineId={effectiveEngineId}
       engineLocked={engineLocked}
       showEnginePicker={!engineLocked}
       effort={effectiveEffort}
-      effortSupported={effortCap != null}
+      effortSupported={nativeEffortOptions != null || effortCap != null}
       allowedEffortLevels={allowedEffortLevels}
+      nativeEffortOptions={nativeEffortOptions}
+      showAccountPicker={showAccountPicker}
+      accounts={accountChoices}
+      activeAccountId={providerAccounts?.activeId ?? null}
+      pinnedAccountId={status.codex?.pinnedAccountId ?? null}
+      onSelectAccount={handleSelectAccount}
+      onAddAccount={handleAddAccount}
+      onAccountMenuOpen={loadProviderAccounts}
       thinkingMode={effectiveThinking}
       adaptiveSupported={adaptiveSupported}
-      showThinkingPicker={thinkingCap != null}
+      showThinkingPicker={effectiveEngineId !== 'codex' && thinkingCap != null}
       showModelPicker={true}
-      showCostInStatusLine={billingType !== 'free'}
+      showCostInStatusLine={effectiveEngineId !== 'codex' && billingType !== 'free'}
       showContextMeter={capabilities.contextWindow > 0}
       visionEnabled={capabilities.vision}
       sandboxEnabled={sandboxEnabled}
       voiceEnabled={voiceEnabled && capabilities.voice}
       voiceState={voiceState}
       statusLine={statusLine}
+      signInHint={signInHint}
       onSend={handleSend}
       onCancel={handleCancel}
       onInput={handleInput}

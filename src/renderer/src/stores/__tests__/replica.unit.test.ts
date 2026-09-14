@@ -31,9 +31,11 @@ import {
   seedWatchedSession,
   evictLocalSessions,
   dropLocalSessions,
-  onReplicaApplied
+  onReplicaApplied,
+  resolveRekeyed,
+  isLocallyCreated
 } from '../replica'
-import { seed, emitSync, resetReplicaSeam } from '@test/helpers/replica-seed'
+import { seed, seedSession, emitSync, resetReplicaSeam } from '@test/helpers/replica-seed'
 import { toSnapshot } from '../../../../core/shared/sync/state'
 import { makeAssistantMessage, makeSessionStatus } from '@test/factories/messages'
 
@@ -200,6 +202,53 @@ describe('rekey', () => {
     expect(store().sessions['sdk-1'].draftText).toBe('keep me')
     expect(store().sessions['sdk-1'].messages).toHaveLength(1)
     expect(store().activeSessionId).toBe('sdk-1')
+  })
+
+  it('remembers where a retired id went', () => {
+    // The move is the only record that the old id ever named this session, and it
+    // is erased in the same tick. A caller holding the pre-rekey id across an
+    // await (InputBox's send) has nothing else to ask.
+    seed.created('old', { cwd: '/p' })
+    seed.rekey('old', 'sdk-1')
+    expect(resolveRekeyed('old')).toBe('sdk-1')
+  })
+
+  it('resolves an id it has no rekey for to itself', () => {
+    expect(resolveRekeyed('never-moved')).toBe('never-moved')
+  })
+
+  it('carries the local-creation marker even when persisting the registry throws', () => {
+    // The persistence reaches disk through `window.api.saveSessionConfig` and can
+    // fail; the in-memory bookkeeping must not be a casualty. A still-private
+    // session that loses its marker stops being droppable by the empty-session
+    // cleanup, so an abandoned scratch session is stranded in the sidebar.
+    ;(globalThis as unknown as { window: { api: unknown } }).window = {
+      api: {
+        saveSessionConfig: () => {
+          throw new Error('disk full')
+        }
+      }
+    } as never
+    seedSession('local-only', { cwd: '/p' })
+    expect(isLocallyCreated('local-only')).toBe(true)
+
+    try {
+      seed.rekey('local-only', 'sdk-1')
+    } catch {
+      // The throw is the point — the fold and the bookkeeping still have to stand.
+    }
+
+    expect(isLocallyCreated('sdk-1')).toBe(true)
+    expect(isLocallyCreated('local-only')).toBe(false)
+    expect(resolveRekeyed('local-only')).toBe('sdk-1')
+  })
+
+  it('follows a chain of rekeys to the current id', () => {
+    seed.created('a', { cwd: '/p' })
+    seed.rekey('a', 'b')
+    seed.rekey('b', 'c')
+    expect(resolveRekeyed('a')).toBe('c')
+    expect(resolveRekeyed('b')).toBe('c')
   })
 })
 

@@ -1,16 +1,17 @@
 /**
- * AuthBanner's platform branch (ADR-057 / S4-UI).
+ * AuthBanner's platform behaviour after ADR-068 §3.
  *
- * The banner is the chat-side entry to the Claude sign-in. On DESKTOP nothing
- * about it may change: the host opens its own browser and the banner shows
- * "Waiting for browser authorization…" with no paste field anywhere. On WEB the
- * host opens nothing, so `signIn()` comes back carrying `manualUrl` and the
- * banner expands into the shared paste-back flow, whose submit goes through the
- * store's EXISTING `submitOAuthCode` — one flow state, not two.
+ * This file used to pin the banner's OWN paste-back branch (ADR-057 / S4-UI):
+ * on web the banner expanded into the two-step form, on desktop it showed the
+ * loopback wait. Slice 3 moved every flow into `SignInDialog`, so the property
+ * worth pinning inverted — the banner must now look the SAME on both hosts and
+ * must never mount flow UI at all. The paste-back behaviour those cases guarded
+ * did not disappear; it moved, and `auth/__tests__/SignInDialog.component.test.tsx`
+ * pins it there, per host, for both providers.
  *
- * These are the platform pins: delete the `platform === 'web'` branch and the
- * "not on desktop" tests still pass while the "on web" ones fail, and vice
- * versa, so both directions are actually held.
+ * Keeping the file (rather than deleting it with the branch) is deliberate: the
+ * hazard it was written for — a sign-in growing a second home — is exactly what
+ * a future edit to this component would look like.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
@@ -40,103 +41,62 @@ function installApi(platform: string, over: Record<string, unknown> = {}): void 
 beforeEach(() => {
   useSessionStore.setState({
     authState: null,
+    signInDialog: null,
     // The banner only renders when the probe says we are signed out.
     vendorAuth: { anthropic: { authState: 'unauthenticated', billingType: 'unknown' } }
   })
 })
 afterEach(cleanup)
 
-describe('AuthBanner on web — the paste-back flow', () => {
-  it('expands into the code-variant flow after Log in, carrying manualUrl to step 1', async () => {
-    installApi('web')
+describe.each(['web', 'darwin'])('AuthBanner on %s — one line, no flow', (platform) => {
+  it('Sign in only opens the dialog; it never starts or renders a flow', async () => {
+    installApi(platform)
     render(<AuthBanner />)
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('AuthBanner.login'))
+    })
+
+    expect(useSessionStore.getState().signInDialog).toEqual({
+      providerId: 'anthropic',
+      mode: 'reauth'
+    })
+    // The DRIVER is the dialog's to call, not the banner's.
+    expect(window.api.signIn).not.toHaveBeenCalled()
     expect(screen.queryByTestId('OAuthPasteBackFlow')).toBeNull()
-
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('AuthBanner.login'))
-    })
-
-    const flow = screen.getByTestId('OAuthPasteBackFlow')
-    // Claude shows the code ON its page, so no failed-redirect language here.
-    expect(flow).toHaveAttribute('data-variant', 'code')
-    fireEvent.click(screen.getByTestId('OAuthPasteBackFlow.open'))
-    expect(window.open).toHaveBeenCalledWith(MANUAL_URL, '_blank', 'noopener,noreferrer')
+    expect(screen.getByTestId('AuthBanner').querySelector('input')).toBeNull()
   })
 
-  it('step 2 drives the store’s existing submitOAuthCode, verbatim', async () => {
-    installApi('web')
+  it('a flow someone dismissed the dialog on stays visible here, with Cancel only', async () => {
+    installApi(platform)
     render(<AuthBanner />)
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('AuthBanner.login'))
-    })
-    fireEvent.change(screen.getByTestId('OAuthPasteBackFlow.input'), {
-      target: { value: ' code-from-claude-ai ' }
-    })
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('OAuthPasteBackFlow.submit'))
-    })
-    expect(window.api.submitOAuthCode).toHaveBeenCalledTimes(1)
-    expect(window.api.submitOAuthCode).toHaveBeenCalledWith('code-from-claude-ai')
-  })
+    act(() =>
+      useSessionStore
+        .getState()
+        .setAuthState({ status: 'authorizing', account: null, error: null, manualUrl: MANUAL_URL })
+    )
 
-  it('a failed submit takes the paste field DOWN and shows the classified outcome', async () => {
-    installApi('web', {
-      submitOAuthCode: vi.fn(async () => ({
-        status: 'error',
-        account: null,
-        error: 'Invalid state - potential CSRF attack'
-      }))
-    })
-    render(<AuthBanner />)
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('AuthBanner.login'))
-    })
-    fireEvent.change(screen.getByTestId('OAuthPasteBackFlow.input'), { target: { value: 'x' } })
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('OAuthPasteBackFlow.submit'))
-    })
-    // The host tore the flow down, so "start again from step 1" means the
-    // Log in button — not a stale field over a dead flow.
-    expect(screen.queryByTestId('OAuthPasteBackFlow')).toBeNull()
-    expect(screen.getByTestId('OAuthOutcomeNotice')).toHaveAttribute('data-kind', 'state-mismatch')
-    expect(screen.getByTestId('AuthBanner.login')).toBeTruthy()
-  })
-
-  it('a rejected sign-in invoke does not strand the banner on "authorizing"', async () => {
-    installApi('web', {
-      signIn: vi.fn(async () => {
-        throw new Error('capability denied')
-      })
-    })
-    render(<AuthBanner />)
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('AuthBanner.login'))
-    })
-    expect(useSessionStore.getState().authState?.status).toBe('error')
-    expect(screen.getByTestId('OAuthOutcomeNotice')).toHaveTextContent('capability denied')
-  })
-})
-
-describe('AuthBanner on desktop — unchanged (platform pin)', () => {
-  it('shows the legacy waiting state and NEVER mounts the paste flow', async () => {
-    installApi('darwin')
-    render(<AuthBanner />)
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('AuthBanner.login'))
-    })
-    expect(screen.queryByTestId('OAuthPasteBackFlow')).toBeNull()
-    expect(screen.getByTestId('AuthBanner')).toHaveTextContent('Waiting for browser authorization…')
+    expect(screen.getByTestId('AuthBanner')).toHaveTextContent('Signing in')
     expect(screen.getByTestId('AuthBanner.cancel')).toBeTruthy()
+    expect(screen.queryByTestId('OAuthPasteBackFlow')).toBeNull()
+    // Neither the URL nor an outcome row: the dialog owns both.
+    expect(screen.getByTestId('AuthBanner').textContent).not.toContain('claude.ai')
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('AuthBanner.cancel'))
+    })
+    expect(window.api.cancelSignIn).toHaveBeenCalledTimes(1)
   })
 
-  it('renders no outcome row on desktop either — its copy is web-only', async () => {
-    installApi('darwin')
+  it('renders no outcome row for a failed sign-in either', async () => {
+    installApi(platform)
     render(<AuthBanner />)
-    act(() => {
+    act(() =>
       useSessionStore
         .getState()
         .setAuthState({ status: 'error', account: null, error: 'Invalid state' })
-    })
+    )
     expect(screen.queryByTestId('OAuthOutcomeNotice')).toBeNull()
+    expect(screen.getByTestId('AuthBanner.login')).toBeTruthy()
   })
 })

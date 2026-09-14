@@ -232,12 +232,78 @@ export const ANTHROPIC_MODEL_PRICING: ReadonlyArray<{ match: string; pricing: Mo
 
 // ---------------------------------------------------------------------------
 // OpenAI pricing (best-effort, flagship models)
-// Cache fields use 0.5× input for cache read; OpenAI does not have a separate
-// cache-write cost (writes are billed as standard input). We set cacheWrite
-// and cacheWrite1h equal to inputPerMTok as the closest equivalent.
+// For models OLDER than the 5.6 line, cache fields use 0.5× input for cache read
+// and OpenAI has no separate cache-write cost (writes are billed as standard
+// input), so cacheWrite/cacheWrite1h are set equal to inputPerMTok. The 5.6/6
+// line DOES publish a cache-write rate (1.25× input) and its own cached-input
+// rate (0.1× input) — those entries carry the published numbers verbatim.
 // ---------------------------------------------------------------------------
 
 const OPENAI_PRICING: PricingEntry[] = [
+  // ── The models Codex's own catalog offers (ADR-066) ─────────────────────────
+  //
+  // Sources, both fetched 2026-09-13 and in agreement to the cent:
+  //   1. developers.openai.com/api/docs/pricing — the standard-tier rows
+  //      (Model | Input | Cached input | Cache writes | Output), per MTok:
+  //        gpt-6-astra   $10.00 | $1.00 | $12.50 | $50.00
+  //        gpt-5.6-sol    $4.00 | $0.40 |  $5.00 | $20.00
+  //        gpt-5.6-terra  $2.00 | $0.20 |  $2.50 | $12.00
+  //        gpt-5.6-luna   $0.20 | $0.02 |  $0.25 |  $1.20
+  //        gpt-5.2        $1.75 | $0.175|      — | $14.00
+  //   2. models.dev/api.json, provider `openai` — the same figures as
+  //      cost.input / cache_read / cache_write / output (this is the table
+  //      opencode's own pricing comes from, so the two engines agree).
+  //
+  // The >200k-context tier (2× input, and 1.5× output on the 5.6/6 line) and the
+  // priority/batch tiers are NOT modelled: nothing on the wire says which tier a
+  // turn billed at, and guessing one would be worse than the base rate. Codex's
+  // hidden models (`gpt-daybreak-*`, `codex-auto-review`) have no public price
+  // and are deliberately absent, so the lookup returns null for them instead of
+  // a fabricated number.
+  {
+    vendorId: 'openai',
+    match: 'gpt-6-astra',
+    pricing: {
+      inputPerMTok: 10,
+      outputPerMTok: 50,
+      cacheWritePerMTok: 12.5,
+      cacheWrite1hPerMTok: 12.5,
+      cacheReadPerMTok: 1
+    }
+  },
+  {
+    vendorId: 'openai',
+    match: 'gpt-5.6-sol',
+    pricing: {
+      inputPerMTok: 4,
+      outputPerMTok: 20,
+      cacheWritePerMTok: 5,
+      cacheWrite1hPerMTok: 5,
+      cacheReadPerMTok: 0.4
+    }
+  },
+  {
+    vendorId: 'openai',
+    match: 'gpt-5.6-terra',
+    pricing: {
+      inputPerMTok: 2,
+      outputPerMTok: 12,
+      cacheWritePerMTok: 2.5,
+      cacheWrite1hPerMTok: 2.5,
+      cacheReadPerMTok: 0.2
+    }
+  },
+  {
+    vendorId: 'openai',
+    match: 'gpt-5.6-luna',
+    pricing: {
+      inputPerMTok: 0.2,
+      outputPerMTok: 1.2,
+      cacheWritePerMTok: 0.25,
+      cacheWrite1hPerMTok: 0.25,
+      cacheReadPerMTok: 0.02
+    }
+  },
   // GPT-5.x — source: developers.openai.com/api/docs/pricing, fetched 2026-07.
   // Order matters: substring matching means '-pro'/'-mini'/'-nano' variants MUST
   // precede their base entry (e.g. 'gpt-5.4-mini' before 'gpt-5.4'), mirroring the
@@ -245,7 +311,7 @@ const OPENAI_PRICING: PricingEntry[] = [
   // intentionally have NO entries here and fall through to substring-match their
   // base model — a notional estimate only (OpenAI's priority-tier multiplier is
   // 2.5×, but the opencode model id ↔ tier mapping is unconfirmed, so we don't
-  // guess a separate rate). gpt-5.2 is left unpriced — no authoritative source found.
+  // guess a separate rate).
   {
     vendorId: 'openai',
     match: 'gpt-5.5-pro',
@@ -318,6 +384,19 @@ const OPENAI_PRICING: PricingEntry[] = [
   {
     vendorId: 'openai',
     match: 'gpt-5.3-codex',
+    pricing: {
+      inputPerMTok: 1.75,
+      outputPerMTok: 14,
+      cacheWritePerMTok: 1.75,
+      cacheWrite1hPerMTok: 1.75,
+      cacheReadPerMTok: 0.175
+    }
+  },
+  // gpt-5.2 — still listed by Codex's catalog, and priced by both sources above
+  // ($1.75 / $0.175 cached / $14.00); no cache-write rate is published for it.
+  {
+    vendorId: 'openai',
+    match: 'gpt-5.2',
     pricing: {
       inputPerMTok: 1.75,
       outputPerMTok: 14,

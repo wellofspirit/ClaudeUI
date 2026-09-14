@@ -3,6 +3,8 @@
 **Status:** Superseded by [ADR-019](adr-019_opencode-engine-backend.md) (opencode engine backend)
 **Date:** 2026-06-17
 
+**Current replacement:** [ADR-066](adr-066_codex-fourth-engine.md) plans Codex as a fourth engine. This ADR remains historical and superseded; its old paths, auth choice, and shared permission mappings are not the new implementation contract.
+
 > Superseded: ClaudeUI pivots its second engine from Codex to opencode (a meta-harness that subsumes
 > OpenAI models). The Codex backend is removed (recoverable from `codex-sup` git history) and demoted
 > to a dormant fallback should OpenAI ever de-support opencode. See ADR-019.

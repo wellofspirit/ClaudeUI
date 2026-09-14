@@ -8,7 +8,7 @@ import type {
   EngineId,
   PermissionMode
 } from '../../../../../shared/types'
-import { useSessionStore } from '../../../stores/session-store'
+import { useSessionStore, type SignInProviderId } from '../../../stores/session-store'
 import { SlashCommandMenu } from '../SlashCommandMenu'
 import { FileMentionMenu } from '../FileMentionMenu'
 import { FileAttachmentBar } from '../FileAttachmentBar'
@@ -19,9 +19,12 @@ import {
   EffortPicker,
   ThinkingPicker,
   ReasoningPicker,
+  AccountPicker,
+  type AccountChoice,
   type ModelDisplay
 } from '../../shared/InlinePickers'
 import { MobileConfigSheet } from './MobileConfigSheet'
+import { formatCostOrUnknown } from '../../../utils/cost'
 
 export type { ModelDisplay }
 
@@ -94,8 +97,26 @@ export interface InputBoxViewProps {
   engineLocked: boolean
   showEnginePicker: boolean
   effort: string
+  /** Engine-native effort tiers (Codex's model catalog) in place of the fixed Claude ladder. */
+  nativeEffortOptions?: ReadonlyArray<{ value: string; description: string }>
   effortSupported: boolean
   allowedEffortLevels: readonly EffortLevel[]
+  /**
+   * The per-session ChatGPT account picker (ADR-068 §2). Shown only when the
+   * engine declares `auth.perSessionAccount`, the provider's Per-session
+   * accounts toggle is on, AND at least two accounts are stored — a picker with
+   * one option is a control that cannot be used.
+   */
+  showAccountPicker?: boolean
+  accounts?: readonly AccountChoice[]
+  /** The globally ACTIVE account, described under "Follow active account". */
+  activeAccountId?: string | null
+  /** This session's pin, or null when it follows the active account. */
+  pinnedAccountId?: string | null
+  onSelectAccount?: (accountId: string | null) => void
+  onAddAccount?: () => void
+  /** Re-read the account list (the picker calls it as its menu opens). */
+  onAccountMenuOpen?: () => void
   thinkingMode: ThinkingMode
   adaptiveSupported: boolean
   /** Show/hide the thinking-mode picker. Gated on capabilities.reasoning.thinking. */
@@ -112,6 +133,15 @@ export interface InputBoxViewProps {
   voiceEnabled: boolean
   voiceState: VoiceState
   statusLine: StatusLineData | null
+  /**
+   * The pre-spawn sign-in hint (ADR-068 §3, Slice 6), or null. Composed by
+   * InputBox — the view only renders it.
+   */
+  signInHint?: {
+    providerId: SignInProviderId
+    engineLabel: string
+    providerLabel: string
+  } | null
 
   // Callbacks
   onSend: () => void
@@ -127,7 +157,7 @@ export interface InputBoxViewProps {
   onSelectMode?: (mode: PermissionMode) => void
   onSelectModel: (value: string) => void
   onSelectEngine: (engineId: EngineId) => void
-  onSelectEffort: (level: EffortLevel) => void
+  onSelectEffort: (level: string) => void
   onSelectThinking: (mode: ThinkingMode) => void
   /** Available reasoning variant keys for the selected opencode model. Empty = hide picker. */
   reasoningVariants?: string[]
@@ -170,6 +200,7 @@ function StatusLine({
   // the main-computed value stays reactive without duplicating window logic here.
   return (
     <div
+      data-testid="InputBox.statusLine"
       className={`text-[10px] text-text-muted ${ALIGN_CLASS[align]} pt-1.5 select-none truncate`}
     >
       {interpolateTemplate(template, data)}
@@ -182,6 +213,53 @@ const ALIGN_CLASS = {
   center: 'text-center',
   right: 'text-right px-4'
 } as const
+
+// ---------------------------------------------------------------------------
+// SignInHint (pre-spawn only — reads openSignIn itself, like StatusLine)
+// ---------------------------------------------------------------------------
+
+/**
+ * One compact row above the composer, on a session that has not spawned yet,
+ * when the engine it would spawn on has no usable credential (ADR-068 §3,
+ * Slice 6; the mockup's welcome-tile "Sign in instead of Start", relocated to
+ * the composer because the real app has no engine tiles).
+ *
+ * It does NOT disable Send. ADR-030's rule is about advertising capabilities
+ * that do not work, not about blocking the user: sending anyway still produces
+ * the reactive auth-required row, which is the honest outcome and the one that
+ * carries the prompt through a retry.
+ */
+function SignInHint({
+  providerId,
+  engineLabel,
+  providerLabel
+}: {
+  providerId: SignInProviderId
+  engineLabel: string
+  providerLabel: string
+}): React.JSX.Element {
+  const openSignIn = useSessionStore((s) => s.openSignIn)
+  return (
+    <div
+      data-testid="InputBox.signInHint"
+      data-id={providerId}
+      className="mb-1.5 px-3 py-1.5 flex items-center gap-2 rounded-lg border border-warning/40 bg-bg-secondary animate-fade-in"
+    >
+      <span className="flex-1 text-[11px] text-text-secondary truncate">
+        {engineLabel} needs a {providerLabel} sign-in.
+      </span>
+      <button
+        type="button"
+        data-testid="InputBox.signInHint.action"
+        data-id={providerId}
+        onClick={() => openSignIn({ providerId, mode: 'reauth' })}
+        className="text-[11px] font-medium text-accent hover:underline cursor-pointer shrink-0"
+      >
+        Sign in
+      </button>
+    </div>
+  )
+}
 
 // ---------------------------------------------------------------------------
 // Sub-components — each receives props from InputBoxView
@@ -409,24 +487,23 @@ function formatDuration(ms: number): string {
   return `${min}m ${sec}s`
 }
 
-function formatCost(usd: number): string {
-  if (usd < 0.01) return '$' + usd.toFixed(4)
-  return '$' + usd.toFixed(2)
-}
-
 function interpolateTemplate(template: string, data: StatusLineData): string {
-  return template
-    .replace(/\{in\}/g, formatTokens(data.totalInputTokens))
-    .replace(/\{out\}/g, formatTokens(data.totalOutputTokens))
-    .replace(/\{cached\}/g, formatTokens(data.cachedTokens))
-    .replace(/\{total\}/g, formatTokens(data.totalTokens))
-    .replace(/\{cost\}/g, formatCost(data.totalCostUsd))
-    .replace(/\{used\}/g, data.usedPercentage !== null ? String(data.usedPercentage) : '–')
-    .replace(
-      /\{remaining\}/g,
-      data.usedPercentage !== null ? String(100 - data.usedPercentage) : '–'
-    )
-    .replace(/\{duration\}/g, formatDuration(data.totalDurationMs))
+  return (
+    template
+      .replace(/\{in\}/g, formatTokens(data.totalInputTokens))
+      .replace(/\{out\}/g, formatTokens(data.totalOutputTokens))
+      .replace(/\{cached\}/g, formatTokens(data.cachedTokens))
+      .replace(/\{total\}/g, formatTokens(data.totalTokens))
+      // null = unpriced/unknown, which renders as the word rather than a
+      // fabricated "$0.00" (see SessionStatus.totalCostUsd).
+      .replace(/\{cost\}/g, formatCostOrUnknown(data.totalCostUsd))
+      .replace(/\{used\}/g, data.usedPercentage !== null ? String(data.usedPercentage) : '–')
+      .replace(
+        /\{remaining\}/g,
+        data.usedPercentage !== null ? String(100 - data.usedPercentage) : '–'
+      )
+      .replace(/\{duration\}/g, formatDuration(data.totalDurationMs))
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -487,6 +564,13 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
       className="shrink-0"
     >
       <div className={`${isMobile ? 'max-w-full' : 'max-w-[740px]'} mx-auto`}>
+        {props.signInHint && (
+          <SignInHint
+            providerId={props.signInHint.providerId}
+            engineLabel={props.signInHint.engineLabel}
+            providerLabel={props.signInHint.providerLabel}
+          />
+        )}
         <div
           className={`group relative rounded-2xl bg-bg-input transition-colors ${
             permissionMode === 'acceptEdits'
@@ -587,6 +671,14 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                   effort={props.effort}
                   effortSupported={props.effortSupported}
                   allowedEffortLevels={props.allowedEffortLevels}
+                  nativeEffortOptions={props.nativeEffortOptions}
+                  showAccountPicker={props.showAccountPicker ?? false}
+                  accounts={props.accounts ?? []}
+                  activeAccountId={props.activeAccountId ?? null}
+                  pinnedAccountId={props.pinnedAccountId ?? null}
+                  onSelectAccount={props.onSelectAccount ?? (() => {})}
+                  onAddAccount={props.onAddAccount ?? (() => {})}
+                  onAccountMenuOpen={props.onAccountMenuOpen}
                   onSelectMode={props.onSelectMode ?? (() => {})}
                   onSelectEngine={props.onSelectEngine}
                   onSelectModel={props.onSelectModel}
@@ -627,9 +719,20 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                   <EffortPicker
                     effort={props.effort}
                     allowedEffortLevels={props.allowedEffortLevels}
+                    nativeOptions={props.nativeEffortOptions}
                     supported={props.effortSupported}
                     onSelectEffort={props.onSelectEffort}
                   />
+                  {props.showAccountPicker && (
+                    <AccountPicker
+                      accounts={props.accounts ?? []}
+                      activeAccountId={props.activeAccountId ?? null}
+                      pinned={props.pinnedAccountId ?? null}
+                      onSelectAccount={props.onSelectAccount ?? (() => {})}
+                      onAddAccount={props.onAddAccount ?? (() => {})}
+                      onOpen={props.onAccountMenuOpen}
+                    />
+                  )}
                 </>
               )}
               <SandboxPill

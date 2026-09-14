@@ -13,10 +13,12 @@
  *      missing division puts the menu 15% of the window below its trigger.
  *   2. THE FLIP. `placement` is honoured unless that side cannot fit the menu
  *      and the other side is roomier.
- *   3. SCROLL CLOSES IT. A fixed menu is measured once and cannot follow its
- *      anchor, so a scroll anywhere outside must close it — while scrolling the
- *      menu's own option list must not. The listeners must also be gone the
- *      moment the menu closes.
+ *   3. SCROLL FOLLOWS, IT DOES NOT CLOSE. A scroll outside the menu re-measures
+ *      so the fixed menu tracks its anchor, and closes only once the anchor has
+ *      left the viewport entirely — closing on any scroll killed a menu whose
+ *      own opening click had scrolled a half-visible trigger into view.
+ *      Scrolling the menu's own option list must do neither. The listeners must
+ *      also be gone the moment the menu closes.
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest'
@@ -70,6 +72,13 @@ function setViewport(width: number, height: number): void {
 /** The hook's latest return, captured out of the harness's render. */
 let latest: AnchoredMenu | null = null
 
+/**
+ * Where the anchor sits NOW — what a scroll moves it to. The harness re-stubs
+ * the node from this on every render, so the re-measure a scroll triggers reads
+ * the moved box instead of the one the harness mounted with.
+ */
+let anchorNow: Box | null = null
+
 interface HarnessProps {
   open: boolean
   placement: 'up' | 'down'
@@ -98,7 +107,7 @@ function Harness(props: HarnessProps): React.JSX.Element {
         data-testid="anchor"
         ref={(el) => {
           anchorRef.current = el
-          if (el) stubLayout(el, anchor, scale)
+          if (el) stubLayout(el, anchorNow ?? anchor, scale)
         }}
       />
       {open && (
@@ -138,6 +147,12 @@ function renderHook(props: Partial<HarnessProps> = {}): {
   return { onClose, close: () => rerender(<Harness {...all} open={false} />) }
 }
 
+/** Move the anchor the way a scroll would, before dispatching the scroll. */
+function moveAnchor(box: Box, scale = 1): void {
+  anchorNow = box
+  stubLayout(document.querySelector('[data-testid="anchor"]') as HTMLElement, box, scale)
+}
+
 function scrollOn(testid: string): void {
   // Scroll does not bubble — the hook listens in the CAPTURE phase, which sees
   // the event on its way down to the target.
@@ -147,6 +162,7 @@ function scrollOn(testid: string): void {
 afterEach(() => {
   cleanup()
   latest = null
+  anchorNow = null
   setViewport(1024, 768)
 })
 
@@ -239,23 +255,69 @@ describe('useAnchoredMenu', () => {
     expect(latest!.side).toBe('up')
   })
 
-  it('closes on an outside scroll but not on a scroll inside the menu', () => {
+  it('follows the anchor on an outside scroll instead of closing', () => {
     const { onClose } = renderHook()
-    scrollOn('inside')
+    expect(latest!.style.top).toBe(ANCHOR.top + ANCHOR.height + 4)
+    // The very click that opened the menu scrolled the half-visible trigger
+    // into view: the anchor moves AFTER the opening measurement.
+    act(() => {
+      moveAnchor({ ...ANCHOR, top: 40 })
+      scrollOn('outside')
+    })
     expect(onClose).not.toHaveBeenCalled()
-    scrollOn('menu')
-    expect(onClose).not.toHaveBeenCalled()
+    expect(latest!.style.position).toBe('fixed')
+    expect(latest!.style.top).toBe(40 + ANCHOR.height + 4)
+  })
 
-    scrollOn('outside')
-    expect(onClose).toHaveBeenCalledTimes(1)
+  it('closes once the anchor has scrolled out of the viewport', () => {
+    const above = renderHook()
+    act(() => {
+      moveAnchor({ ...ANCHOR, top: -40 }) // bottom = -12: entirely above the window
+      scrollOn('outside')
+    })
+    expect(above.onClose).toHaveBeenCalledTimes(1)
+    cleanup()
+    anchorNow = null
+
+    const below = renderHook()
+    act(() => {
+      moveAnchor({ ...ANCHOR, top: 800 }) // top past the bottom of a 768px window
+      scrollOn('outside')
+    })
+    expect(below.onClose).toHaveBeenCalledTimes(1)
+    cleanup()
+    anchorNow = null
+
+    const right = renderHook()
+    act(() => {
+      moveAnchor({ ...ANCHOR, left: 1100 }) // left past the edge of a 1024px window
+      scrollOn('outside')
+    })
+    expect(right.onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('neither closes nor re-measures on a scroll inside the menu', () => {
+    const { onClose } = renderHook()
+    const top = latest!.style.top
+    act(() => {
+      moveAnchor({ ...ANCHOR, top: 400 })
+      scrollOn('inside')
+      scrollOn('menu')
+    })
+    expect(onClose).not.toHaveBeenCalled()
+    expect(latest!.style.top).toBe(top)
   })
 
   it('drops its listeners the moment the menu closes', () => {
     const { onClose, close } = renderHook()
     act(close)
     expect(latest).toBeNull()
-    scrollOn('outside')
-    window.dispatchEvent(new Event('resize'))
+    act(() => {
+      // Off screen: a live listener WOULD close on this one.
+      moveAnchor({ ...ANCHOR, top: -40 })
+      scrollOn('outside')
+      window.dispatchEvent(new Event('resize'))
+    })
     expect(onClose).not.toHaveBeenCalled()
   })
 })

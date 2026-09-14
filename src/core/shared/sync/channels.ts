@@ -306,11 +306,11 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: false,
     why: 'Same as session:error — no snapshot field.'
   },
-  'session:vendor-auth-required': {
+  'session:auth-required': {
     cls: 'replicated',
     ring: true,
-    canonical: false,
-    why: 'Rings and fans out; no snapshot field (the card is re-derived from the next turn).'
+    canonical: true,
+    why: 'ADR-068 §4: the session remembers which provider/account was rejected until the next turn starts, so a client that reconnects mid-outage still knows a sign-in is owed. Carried on PerSessionSnapshot as `authRequired`; it replaced `session:vendor-auth-required` in slice 3.'
   },
   'session:auth-source': {
     cls: 'replicated',
@@ -402,6 +402,12 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     ring: true,
     canonical: false,
     why: 'Block analytics. Fans out today; no snapshot field.'
+  },
+  'usage:chatgpt-limits-changed': {
+    cls: 'replicated',
+    ring: true,
+    canonical: false,
+    why: 'ADR-068 §2: per-account ChatGPT rate limits moved — a bare nudge with NO payload, because the map is read through `usage:chatgpt-limits` and a fan-out carrying it would be a second copy of state the query already owns. No snapshot field, like the two usage channels above it.'
   },
 
   // -------------------------------------------------------------------------

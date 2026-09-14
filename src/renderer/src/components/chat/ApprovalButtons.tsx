@@ -14,6 +14,7 @@
  */
 
 import { useState, useEffect } from 'react'
+import { CodexApprovalCard } from './CodexApprovalCard'
 import type {
   PendingApproval,
   PermissionSuggestion,
@@ -52,6 +53,9 @@ export function ApprovalButtons({
   }, [approval.suggestions])
 
   const hasSuggestions = showSuggestions && (approval.suggestions?.length ?? 0) > 0
+  // Only a native QUESTION still needs the engine-specific card; commands and
+  // file changes come through the shared gate and render here (ADR-066).
+  if (approval.codex?.questions) return <CodexApprovalCard approval={approval} />
   const hasReason = showSuggestions && !!approval.decisionReason
 
   const handleDecision = async (decision: 'allow' | 'deny'): Promise<void> => {
@@ -61,6 +65,40 @@ export function ApprovalButtons({
         : undefined
     await onApproval(decision, selected?.length ? selected : undefined)
   }
+
+  // A guardian denial Codex already answered (ADR-067). The action is not
+  // pending — nothing is waiting on this click — so the exits are "leave it
+  // denied" and "tell Codex to allow that one action", and there is no standing
+  // rule to offer: under `auto` a ClaudeUI allow rule is never consulted.
+  if (approval.codex?.guardianOverride)
+    return (
+      <>
+        {approval.decisionReason && (
+          <div className="border-t border-warning/20 px-3 py-2">
+            <p className="text-[11px] text-text-muted/70 leading-relaxed">
+              {approval.decisionReason}
+            </p>
+          </div>
+        )}
+        <div data-testid={testid ?? 'ApprovalButtons'} className="flex border-t border-warning/20">
+          <button
+            data-testid="ApprovalButtons.dismiss"
+            onClick={() => handleDecision('deny')}
+            className="flex-1 h-8 text-[12px] font-medium text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer"
+          >
+            Dismiss
+          </button>
+          <div className="w-px bg-warning/20" />
+          <button
+            data-testid="ApprovalButtons.approveAnyway"
+            onClick={() => handleDecision('allow')}
+            className="flex-1 h-8 text-[12px] font-medium text-warning hover:bg-warning/5 transition-colors cursor-pointer"
+          >
+            Approve anyway
+          </button>
+        </div>
+      </>
+    )
 
   return (
     <>

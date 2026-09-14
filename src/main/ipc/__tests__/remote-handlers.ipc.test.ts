@@ -19,6 +19,23 @@ import * as os from 'os'
 import * as path from 'path'
 import type { WsInvokeRequest } from '../../../shared/remote-protocol'
 
+vi.mock('../../../core/codex/codex-locate', () => ({ codexBinaryAvailable: () => false }))
+vi.mock('../../../core/codex/model-discovery', () => ({
+  discoverCodexModels: vi.fn(async () => [])
+}))
+vi.mock('../../../core/codex/history', () => ({
+  listCodexSessions: vi.fn(async () => []),
+  loadCodexHistory: vi.fn()
+}))
+vi.mock('../../../core/auth/CodexAuthProvider', () => ({
+  codexAuthProvider: {
+    status: vi.fn(async () => ({ available: false, authenticated: false, authKind: null })),
+    loginStart: vi.fn(),
+    loginStatus: vi.fn(() => ({ status: 'idle' })),
+    loginCancel: vi.fn()
+  }
+}))
+
 // ---------------------------------------------------------------------------
 // Mocks for every service remote-handlers.ts imports.
 // ---------------------------------------------------------------------------
@@ -239,6 +256,18 @@ vi.mock('../../../core/services/logger', () => ({
   }
 }))
 
+// A SPY over the REAL prepareAndCreateSession: the null-normalisation guard
+// below asserts on the args object the remote handler hands across the
+// transport boundary, while every other `session:create` test in this file
+// keeps exercising the real shared implementation underneath.
+const createSessionSpy = vi.hoisted(() => ({ prepareAndCreateSession: vi.fn() }))
+
+vi.mock('../../../core/ipc/create-session', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../core/ipc/create-session')>()
+  createSessionSpy.prepareAndCreateSession.mockImplementation(actual.prepareAndCreateSession)
+  return { ...actual, prepareAndCreateSession: createSessionSpy.prepareAndCreateSession }
+})
+
 // Import AFTER mocks.
 import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
 import {
@@ -269,6 +298,8 @@ import { setModelEnv } from '../../../core/sdk/model-env'
 import { usageFetcher } from '../../../core/services/usage-fetcher'
 import { blockUsageService } from '../../../core/services/block-usage'
 import { logger } from '../../../core/services/logger'
+import { query } from '../../../core/sdk'
+import { discoverCodexModels } from '../../../core/codex/model-discovery'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -402,6 +433,25 @@ describe('registerRemoteHandlers', () => {
     gitWatchRegistry.releaseConnection(remoteConn.connectionId)
     clearSyncSubscribersForTests()
     vi.clearAllMocks()
+  })
+
+  it('still discovers Codex when the unrelated Claude catalog fails', async () => {
+    vi.mocked(query).mockImplementationOnce(() => {
+      throw new Error('Claude unavailable')
+    })
+    const native = {
+      engineId: 'codex' as const,
+      vendorId: 'openai',
+      vendorName: 'Native OpenAI',
+      models: [
+        { value: 'native', displayName: 'Native', description: '', engineId: 'codex' as const }
+      ]
+    }
+    vi.mocked(discoverCodexModels).mockResolvedValueOnce([native])
+    const groups = await dispatcher.handle(makeRequest('session:get-engine-models'), remoteConn)
+    expect(groups).toEqual(
+      expect.arrayContaining([native, expect.objectContaining({ engineId: 'claude', models: [] })])
+    )
   })
 
   it("routes 'xeng:'-prefixed approval responses to the cross-engine dispatcher (ADR-033)", async () => {
@@ -1062,6 +1112,83 @@ describe('registerRemoteHandlers', () => {
       expect(sessionManagerStub.create.mock.calls[0][3].model).toBe(resolvedModel)
     })
 
+    // The web client marshals `invoke` args as JSON, so an OMITTED optional
+    // argument arrives as an explicit `null` (Electron IPC preserves
+    // `undefined`, which is why the desktop never hit this). `null` is not
+    // "unset" to the code downstream: CodexSession.validateEffort treats only
+    // `undefined` as "no effort" and threw
+    // "Codex reasoning effort is unavailable for the selected model" on every
+    // fresh Codex session created from the web client.
+    it('normalises null optional args to undefined before prepareAndCreateSession (GUARD — fails pre-fix)', async () => {
+      await dispatcher.handle(
+        makeRequest(
+          'session:create',
+          'rid-nulls',
+          '/tmp/proj',
+          null, // effort
+          null, // resumeSessionId
+          null, // permissionMode
+          null, // model
+          null, // thinkingMode
+          null, // resumeSessionAt
+          null, // forkSession
+          null // engineId
+        ),
+        remoteConn
+      )
+
+      expect(createSessionSpy.prepareAndCreateSession).toHaveBeenCalledTimes(1)
+      const args = createSessionSpy.prepareAndCreateSession.mock.calls[0][2]
+      for (const key of [
+        'effort',
+        'resumeSessionId',
+        'permissionMode',
+        'model',
+        'thinkingMode',
+        'resumeSessionAt',
+        'forkSession',
+        'engineId'
+      ] as const) {
+        expect(args[key], `${key} must be undefined, not null`).toBeUndefined()
+      }
+      // Required args are untouched.
+      expect(args.routingId).toBe('rid-nulls')
+      expect(args.cwd).toBe('/tmp/proj')
+    })
+
+    it('passes real optional values through unchanged', async () => {
+      await dispatcher.handle(
+        makeRequest(
+          'session:create',
+          'rid-values',
+          '/tmp/proj',
+          'high',
+          'resume-1',
+          'plan',
+          'opencode/luna',
+          'think',
+          'anchor-1',
+          false,
+          'opencode'
+        ),
+        remoteConn
+      )
+
+      expect(createSessionSpy.prepareAndCreateSession.mock.calls[0][2]).toMatchObject({
+        routingId: 'rid-values',
+        cwd: '/tmp/proj',
+        effort: 'high',
+        resumeSessionId: 'resume-1',
+        permissionMode: 'plan',
+        model: 'opencode/luna',
+        thinkingMode: 'think',
+        resumeSessionAt: 'anchor-1',
+        // `false` is a real value, not "unset" — `?? undefined` must not eat it.
+        forkSession: false,
+        engineId: 'opencode'
+      })
+    })
+
     it('broadcasts session:created to the main window (remote notifies desktop)', async () => {
       await dispatcher.handle(
         makeRequest('session:create', 'rid-broadcast', '/tmp/proj'),
@@ -1618,6 +1745,77 @@ const S4_VENDOR_CREDENTIAL_CHANNELS = [
 const PROVIDER_REGISTRY_CHANNELS = ['provider-registry:list'] as const
 
 /**
+ * ADR-068 §2 — the ChatGPT vault's ACCOUNTS.
+ *
+ * Four channels, declared in the same shared module for the same reason as the
+ * line above: the phone manages the subscription the desktop does, and one
+ * declaration is what stops the two surfaces disagreeing. All `config`, so a
+ * base connection reaches them — a vendor subscription is engine configuration
+ * (ADR-056), and switching which account the host bills is exactly the kind of
+ * thing the everything-remote ruling covers.
+ *
+ * Token-free by construction, pinned in
+ * `main/ipc/__tests__/provider-account-commands.test.ts`: `list` returns ids,
+ * emails, plan names and expiries, and the three mutations return nothing.
+ * ADDING an account is not here — that is the existing `vendor-auth:oauth-*`
+ * pair, which already completes remotely via paste-back.
+ */
+const PROVIDER_ACCOUNT_CHANNELS = [
+  'provider-account:list',
+  'provider-account:remove',
+  'provider-account:set-per-session',
+  'provider-account:switch'
+] as const
+
+/**
+ * ADR-068 §2 — the per-session ChatGPT PIN and the per-account usage it makes
+ * readable. The EIGHTH deliberate widening, and the narrowest since the provider
+ * rows: both declare `config`, so a base connection reaches them, and both are
+ * engine CONFIGURATION rather than a security surface (ADR-056).
+ *
+ * `session:set-account` is `session-config`, the same capability as
+ * `session:set-model` and `session:set-effort` beside it: choosing which stored
+ * subscription a session bills is a run-configuration choice a phone must be
+ * able to make, and the handler refuses on an engine whose
+ * `capabilities.auth.perSessionAccount` is false rather than silently doing
+ * nothing.
+ *
+ * `usage:chatgpt-limits` is a `query` joining the four `usage:*` channels the
+ * phone already reaches. Token-free by construction: percentages, reset times,
+ * the email the account list already carries, and nothing else.
+ */
+const CODEX_ACCOUNT_PIN_CHANNELS = ['session:set-account', 'usage:chatgpt-limits'] as const
+
+/**
+ * ADR-068 §3 (Slice 7) — device-code sign-in for ChatGPT.
+ *
+ * Its own line rather than a 23rd entry in {@link S4_VENDOR_CREDENTIAL_CHANNELS}
+ * for the same reason `provider-registry:list` got one: that const is the record
+ * of one dated sweep, and this is a NEW channel declared in the same shared
+ * module. It exists FOR the remote client — paste-back can complete a ChatGPT
+ * sign-in from any browser, but copying a dead page's address bar on a phone is
+ * the step device code removes.
+ *
+ * A `config` command plus a `config` query, so a base connection reaches both (a
+ * vendor subscription is engine configuration — ADR-056). Token-free by
+ * construction and pinned in
+ * `main/ipc/__tests__/vendor-device-code-commands.test.ts`: the start carries
+ * exactly `verificationUrl` / `userCode` / `expiresAt`, the status carries a
+ * state and at most the host's own error message, and the `device_auth_id` the
+ * host polls with never leaves the host.
+ *
+ * TWO channels because the WAIT cannot be one long invoke: `web/connection.ts`
+ * rejects any invoke that outlives `INVOKE_TIMEOUT_MS` (30 s) and a device code
+ * lives for fifteen minutes. The host owns the wait; the client polls the query.
+ * That is also what makes a mid-wait reconnect free — the outcome is on the host,
+ * not in a promise attached to a dead socket.
+ */
+const CHATGPT_DEVICE_CODE_CHANNELS = [
+  'vendor-auth:device-code-start',
+  'vendor-auth:device-code-status'
+] as const
+
+/**
  * The redacted status READ (owner ruling, 2026-08-28) — the one `remote:*`
  * channel with a remote registration, and the SIXTH deliberate widening.
  *
@@ -1694,8 +1892,24 @@ describe('remote surface parity (phase 1 port)', () => {
         ...TRUST_LIST_CHANNELS,
         ...S4_VENDOR_CREDENTIAL_CHANNELS,
         ...PROVIDER_REGISTRY_CHANNELS,
+        ...PROVIDER_ACCOUNT_CHANNELS,
+        ...CODEX_ACCOUNT_PIN_CHANNELS,
+        ...CHATGPT_DEVICE_CODE_CHANNELS,
         ...REMOTE_VIEW_CHANNELS,
-        ...IDE_CHANNELS
+        ...IDE_CHANNELS,
+        // ADR-068 §1: the three `codex:login-*` channels are gone with the
+        // native device-code UI; the vault owns the ChatGPT identity and
+        // `provider-account:*` is how a remote client reads it.
+        'codex:auth-status',
+        // ADR-068 §6 (Slice 5a): the Codex engine page writes `config.toml`
+        // through the app-server, and a remote client edits settings exactly as
+        // the desktop one does.
+        'codex-config:read',
+        'codex-config:write',
+        'codex:recompile-rules',
+        'session:codex-approval',
+        // Read-only: what deleting a Codex session would remove (slice G).
+        'session:codex-delete-plan'
       ].sort()
     )
   })

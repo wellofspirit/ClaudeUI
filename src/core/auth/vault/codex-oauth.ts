@@ -56,10 +56,12 @@ export interface PkceCodes {
 /** Claims this module reads off the id_token (preferred) / access_token (fallback) JWT. */
 export interface JwtClaims {
   chatgpt_account_id?: string
+  chatgpt_plan_type?: string
   organizations?: Array<{ id: string }>
   email?: string
   'https://api.openai.com/auth'?: {
     chatgpt_account_id?: string
+    chatgpt_plan_type?: string
   }
 }
 
@@ -89,6 +91,12 @@ export interface VaultCredential {
   expires: number
   accountId?: string
   email?: string
+  /**
+   * The ChatGPT subscription tier off the JWT (`chatgpt_plan_type`). Carried so
+   * an account row can say which plan it is, and so Codex's injected-token login
+   * can forward `chatgptPlanType` (ADR-068 §1) without re-parsing the JWT.
+   */
+  planType?: string
 }
 
 /** What AuthVault needs from a login flow — CodexLoginFlow implements this; tests can fake it. */
@@ -219,6 +227,10 @@ function accountIdFromClaims(claims: JwtClaims): string | undefined {
   )
 }
 
+function planTypeFromClaims(claims: JwtClaims): string | undefined {
+  return claims['https://api.openai.com/auth']?.chatgpt_plan_type || claims.chatgpt_plan_type
+}
+
 /** id_token preferred, access_token fallback; claim priority: chatgpt_account_id → the auth-namespace claim → organizations[0].id. */
 export function extractAccountId(tokens: {
   id_token?: string
@@ -232,6 +244,23 @@ export function extractAccountId(tokens: {
   if (tokens.access_token) {
     const claims = parseJwtClaims(tokens.access_token)
     return claims ? accountIdFromClaims(claims) : undefined
+  }
+  return undefined
+}
+
+/** Same id_token-preferred/access_token-fallback priority as extractAccountId, for `chatgpt_plan_type`. */
+export function extractPlanType(tokens: {
+  id_token?: string
+  access_token?: string
+}): string | undefined {
+  if (tokens.id_token) {
+    const claims = parseJwtClaims(tokens.id_token)
+    const planType = claims && planTypeFromClaims(claims)
+    if (planType) return planType
+  }
+  if (tokens.access_token) {
+    const claims = parseJwtClaims(tokens.access_token)
+    return claims ? planTypeFromClaims(claims) : undefined
   }
   return undefined
 }
@@ -358,7 +387,7 @@ export async function refreshAccessToken(
 export function buildVaultCredential(
   tokens: TokenResponse,
   now: () => number,
-  prior?: { accountId?: string; email?: string }
+  prior?: { accountId?: string; email?: string; planType?: string }
 ): VaultCredential {
   const cred: VaultCredential = {
     type: 'oauth',
@@ -368,8 +397,10 @@ export function buildVaultCredential(
   }
   const accountId = extractAccountId(tokens) ?? prior?.accountId
   const email = extractEmail(tokens) ?? prior?.email
+  const planType = extractPlanType(tokens) ?? prior?.planType
   if (accountId) cred.accountId = accountId
   if (email) cred.email = email
+  if (planType) cred.planType = planType
   return cred
 }
 

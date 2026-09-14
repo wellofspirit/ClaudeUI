@@ -49,6 +49,9 @@ import { vscodeWebService, type VscodeWebService } from '../services/vscode-web-
 import { hostConnection } from '../ipc/command-registry'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
+import { armCodexRulesSync, syncCodexRulesFile } from '../codex/rules-sync'
+import { scanCodexLineage } from '../codex/history'
+import { refreshCanonicalDirectories } from '../services/sync-seed'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import { sharedProviderService } from '../shared-providers'
 import { logger } from '../services/logger'
@@ -152,6 +155,45 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // The host's own post-session wiring — see the module header for why this is
   // one ordered hook rather than several options.
   afterSessionGraph?.(sessionManager)
+
+  // Recompile the user's Bash permission rules into `$CODEX_HOME/rules/
+  // claudeui.rules` (see `codex/rules-sync.ts`). Here rather than in either
+  // host's entrypoint because BOTH deployments must do it, and after the
+  // session graph because that is where the settings the compiler reads are
+  // already resolved. Synchronous and cheap — one stat, one read, a hash
+  // compare — and it swallows its own failures, so boot cannot be blocked by a
+  // rule file. `armCodexRulesSync` is what permits the OTHER two triggers
+  // (a permission save, a Codex spawn prep) to touch the user's own
+  // `$CODEX_HOME` at all — see that module's `defaultHomeArmed`.
+  armCodexRulesSync()
+  syncCodexRulesFile()
+
+  // Learn what every Codex thread is a branch OF, once per launch, alongside the
+  // Claude session scan the line above sits next to (`registerSessionIpc` seeds
+  // canonical and starts the directory walk; this hangs off that same moment).
+  //
+  // Detached and best-effort: it spawns an app-server, lists the threads and
+  // reads the metadata of the ones whose lineage the cache (db v17) does not
+  // already know — a handful on the first launch, usually none on the next — so
+  // it must never be on boot's critical path, and a machine with no Codex
+  // installed returns immediately. What it buys is a delete plan that is a
+  // synchronous cache read instead of a sweep of every Codex session
+  // (`codex/history.ts` `scanCodexLineage`). The refresh runs only when the scan
+  // actually learned something, because that is when a branch may have appeared
+  // in — or fallen out of — the sidebar's listing.
+  void (async () => {
+    try {
+      const { read, learned } = await scanCodexLineage()
+      if (read || learned)
+        logger.info('main', `Codex lineage scan: ${read} thread(s) read, ${learned} learned`)
+      if (learned) await refreshCanonicalDirectories()
+    } catch (err) {
+      logger.warn(
+        'main',
+        `Codex lineage scan failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+  })()
 
   // Reconcile central credentials first, then materialize all shared-provider
   // routes. Both are best-effort and must never block app startup.

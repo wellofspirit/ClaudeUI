@@ -226,4 +226,67 @@ describe('DiffViewer', () => {
       expect(container).toBeInTheDocument()
     })
   })
+  /**
+   * The exact strings `src/core/codex/event-mapper.ts` builds for a native
+   * `fileChange` — the parser has to accept them, or the card reads "No changes"
+   * (which is what it did while the mapper passed Codex's raw file content
+   * through as the patch). Kept as literals so a change on either side has to be
+   * made on both.
+   */
+  describe('Codex file-change patches', () => {
+    it('renders a wrapped add as a pure add, not "No changes"', () => {
+      const patch = [
+        '--- /dev/null',
+        '+++ b/new.ts',
+        '@@ -0,0 +1,2 @@',
+        '+const a = 1',
+        '+export default a'
+      ].join('\n')
+      render(<DiffViewer patch={patch} fileName="new.ts" />)
+
+      expect(screen.queryByText('No changes')).not.toBeInTheDocument()
+      // Syntax highlighting splits a line into token spans, so assert on the
+      // concatenated text rather than on one element.
+      expect(document.body.textContent).toContain('const a = 1')
+      expect(document.body.textContent).toContain('export default a')
+      expect(document.querySelector('.diff-pure-add')).toBeInTheDocument()
+    })
+
+    it('keeps the no-newline marker out of the rendered lines', () => {
+      const patch = [
+        '--- /dev/null',
+        '+++ b/new.ts',
+        '@@ -0,0 +1,1 @@',
+        '+only line',
+        '\\ No newline at end of file'
+      ].join('\n')
+      render(<DiffViewer patch={patch} fileName="new.ts" />)
+
+      expect(screen.getByText('only line')).toBeInTheDocument()
+      expect(screen.queryByText(/No newline at end of file/)).not.toBeInTheDocument()
+    })
+
+    it('renders a wrapped delete as a pure deletion', () => {
+      const patch = ['--- a/gone.ts', '+++ /dev/null', '@@ -1,2 +0,0 @@', '-a', '-b'].join('\n')
+      render(<DiffViewer patch={patch} fileName="gone.ts" />)
+
+      expect(screen.queryByText('No changes')).not.toBeInTheDocument()
+      expect(document.querySelector('.diff-pure-del')).toBeInTheDocument()
+    })
+
+    it('gives an empty add a hunk, so it is not reported as "No changes"', () => {
+      const patch = ['--- /dev/null', '+++ b/empty.ts', '@@ -0,0 +0,0 @@'].join('\n')
+      render(<DiffViewer patch={patch} fileName="empty.ts" />)
+
+      expect(screen.queryByText('No changes')).not.toBeInTheDocument()
+      expect(document.querySelector('.diff-pure-add')).toBeInTheDocument()
+    })
+
+    it('shows the pre-fix shape (raw file content) as "No changes"', () => {
+      // Why the mapper has to wrap at all — this is what it used to emit.
+      render(<DiffViewer patch={'const a = 1\nexport default a\n'} fileName="new.ts" />)
+
+      expect(screen.getByText('No changes')).toBeInTheDocument()
+    })
+  })
 })

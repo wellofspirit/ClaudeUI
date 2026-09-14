@@ -7,6 +7,7 @@ import { ErrorBoundary } from './components/ErrorBoundary'
 import { hydrateConfigFromDisk } from './stores/session-store'
 import { startReplica, hydrateReplica } from './stores/replica'
 import { startDesktopSync } from './sync/desktop-transport'
+import { installVerifierHooks } from './utils/verifier-hooks'
 
 // Global error handlers — forward uncaught renderer errors to the main process log file
 window.onerror = (message, source, lineno, colno, error): void => {
@@ -37,6 +38,12 @@ startReplica()
 startDesktopSync((snapshot, isResync) => {
   hydrateReplica(snapshot, isResync)
 })
+
+// Real-app harness hooks — a no-op unless this launch opted in (see
+// `src/shared/verifier-hooks.ts`). Installed after `startReplica()` so the handle
+// can never hand out a canonical state whose fold has not been wired, and before
+// render so a `page.evaluate` racing the first paint still finds it.
+installVerifierHooks()
 
 // Hydrate persisted config from ~/.claude/ui/config.json, then render
 hydrateConfigFromDisk().finally(() => {

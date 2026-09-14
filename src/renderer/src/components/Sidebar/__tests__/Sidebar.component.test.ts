@@ -448,6 +448,50 @@ describe('Sidebar FC', () => {
     expect(deleteCalls[0][2]).toBe(PROJECT_KEY)
   })
 
+  /**
+   * Codex only (ADR-066 slice G). Deleting a Codex session deletes every branch
+   * cut from it — the binary refuses to delete a thread a fork still references
+   * — so the confirmation asks main what the delete would actually remove. The
+   * answer is advisory: main recomputes it when the delete runs.
+   */
+  it('fetches the Codex delete plan for the confirmation, and only for Codex', async () => {
+    const planCalls: unknown[][] = []
+    app.bridge.ipcMain.handle('session:codex-delete-plan' as any, async (...args) => {
+      planCalls.push(args)
+      return {
+        nodes: [
+          { threadId: 'cx-root', title: 'Root', live: false, depth: 0 },
+          { threadId: 'cx-fork', title: 'Branch', live: true, depth: 1 }
+        ],
+        order: ['cx-fork', 'cx-root']
+      }
+    })
+
+    await act(async () => {
+      await renderFC()
+    })
+
+    // A Claude session asks for nothing.
+    await act(async () => {
+      viewProps.onDeleteSession(makeSessionInfo('claude-sess'))
+    })
+    expect(planCalls).toHaveLength(0)
+    expect(viewProps.deletePlan).toBeNull()
+
+    await act(async () => {
+      viewProps.onDeleteSession({ ...makeSessionInfo('cx-root'), engineId: 'codex' })
+    })
+    expect(planCalls).toHaveLength(1)
+    expect(planCalls[0][1]).toBe('cx-root')
+    expect(viewProps.deletePlan?.order).toEqual(['cx-fork', 'cx-root'])
+
+    // Closing the dialog drops the plan; the next target must not inherit it.
+    await act(async () => {
+      viewProps.onCancelDelete()
+    })
+    expect(viewProps.deletePlan).toBeNull()
+  })
+
   it('deleting one session keeps the OTHER engine’s sessions (no Claude-only clobber)', async () => {
     // Regression, now enforced a layer down: confirmDelete used to refresh with
     // listDirectories() alone (Claude only), overwriting the merged list and

@@ -1,4 +1,8 @@
 import * as fs from 'fs'
+import { codexBinaryAvailable } from '../codex/codex-locate'
+import { discoverCodexModels } from '../codex/model-discovery'
+import { codexCommands } from './codex-commands'
+import { readSessionHistory as loadSessionHistory, historyFor } from '../services/engine-history'
 import * as os from 'os'
 import * as path from 'path'
 import { RemoteDispatcher } from '../services/remote-dispatcher'
@@ -6,11 +10,9 @@ import { STREAM_WATCH_COMMAND } from './stream-watch'
 import { GIT_WATCH_COMMAND } from './git-watch'
 import { SessionManager } from '../services/session-manager'
 import {
-  loadSessionHistory,
   loadSubagentHistory,
   buildSubagentFileMap,
-  loadBackgroundOutput,
-  resolveForkAnchor
+  loadBackgroundOutput
 } from '../services/session-history'
 import { isPathInside, assertSafePathSegment } from '../services/path-containment'
 import { gitServiceManager } from '../services/git-service'
@@ -45,6 +47,7 @@ import {
 import { loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
 import { scanCustomCommands } from '../services/custom-command-scanner'
 import { usageFetcher } from '../services/usage-fetcher'
+import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
 import { blockUsageService } from '../services/block-usage'
 import type {
   ApprovalDecision,
@@ -55,7 +58,7 @@ import type {
 } from '../../shared/types'
 import { getSdkExecutableOpts } from '../services/claude-session'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
-import { dispatchedUsageSummary } from '../services/db'
+import { dispatchedUsageSummary, getSessionMeta } from '../services/db'
 import { emitEvent } from '../services/sync-host'
 import { listAllDirectories } from '../services/sync-seed'
 import { getHostWindow } from '../services/host-window'
@@ -109,6 +112,7 @@ import {
   askSideQuestion,
   setPermissionMode,
   setEffort,
+  setAccount,
   setThinkingMode,
   setModel,
   setReasoningVariant,
@@ -125,6 +129,7 @@ import {
   listPlaces,
   deleteSession,
   deleteProject,
+  codexDeletePlanFor,
   clearConversation
 } from './handlers-core'
 
@@ -149,6 +154,33 @@ import {
  */
 function handleRemote(reg: Omit<CommandRegistration, 'transport'>): void {
   registerCommand({ ...reg, transport: 'remote' })
+}
+
+/**
+ * Normalise an OMITTED optional argument back to `undefined`.
+ *
+ * The web client marshals `invoke` arguments as JSON, and a JSON array cannot
+ * carry a hole: an argument the caller left out arrives here as an explicit
+ * `null`. Electron IPC preserves `undefined`, which is why only the remote
+ * transport ever sees this. `null` is not "unset" to the shared code behind
+ * these handlers — several places distinguish unset with `=== undefined`
+ * (`CodexSession.validateEffort` threw "Codex reasoning effort is unavailable
+ * for the selected model" on every fresh web-client Codex session because of
+ * exactly this), and the rest declare the parameter `?: T`, which `null` does
+ * not satisfy. So every optional argument is put back through here at the
+ * transport boundary rather than teaching each service to accept two spellings
+ * of "nothing".
+ *
+ * Deliberately NOT applied where `null` is a MEANINGFUL value the caller sent
+ * on purpose — `session:set-account`, `session:set-reasoning-variant`,
+ * `usage:set-account-filter`, `webauthn:rename` all declare `T | null` and mean
+ * "clear it" by it — nor where the parameter is only tested for truthiness and
+ * `null` already reads as the omitted case (`session:stop-task`'s `isDispatch`,
+ * `usage:chatgpt-limits`' `refresh`, `terminal:create`'s `index`, which the
+ * terminal service already types `number | null`).
+ */
+function opt<T>(value: T | null | undefined): T | undefined {
+  return value ?? undefined
 }
 
 /**
@@ -342,26 +374,29 @@ export function registerRemoteHandlers(
     handler: async (
       routingId: string,
       cwd: string,
-      effort?: string,
-      resumeSessionId?: string,
-      permissionMode?: string,
-      model?: string,
-      thinkingMode?: string,
-      resumeSessionAt?: string,
-      forkSession?: boolean,
-      engineId?: EngineId
+      effort?: string | null,
+      resumeSessionId?: string | null,
+      permissionMode?: string | null,
+      model?: string | null,
+      thinkingMode?: string | null,
+      resumeSessionAt?: string | null,
+      forkSession?: boolean | null,
+      engineId?: EngineId | null
     ) => {
+      // Every optional argument through `opt` — see its doc comment. `effort`
+      // is the one that broke in the field; the rest are the same shape and
+      // reach the same `!== undefined` / `?: T` consumers.
       await prepareAndCreateSession(manager, getHostWindow(), {
         routingId,
         cwd,
-        effort,
-        resumeSessionId,
-        permissionMode,
-        model,
-        thinkingMode,
-        resumeSessionAt,
-        forkSession,
-        engineId
+        effort: opt(effort),
+        resumeSessionId: opt(resumeSessionId),
+        permissionMode: opt(permissionMode),
+        model: opt(model),
+        thinkingMode: opt(thinkingMode),
+        resumeSessionAt: opt(resumeSessionAt),
+        forkSession: opt(forkSession),
+        engineId: opt(engineId)
       })
     }
   })
@@ -391,7 +426,7 @@ export function registerRemoteHandlers(
       engineId: EngineId,
       messageIndex: number
     ) => {
-      return await resolveForkAnchor(sessionId, cwd, messageId, engineId, messageIndex)
+      return await historyFor(engineId).forkAnchor(sessionId, cwd, messageId, messageIndex)
     }
   })
 
@@ -403,8 +438,8 @@ export function registerRemoteHandlers(
     handler: async (
       routingId: string,
       prompt: string,
-      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-    ) => sendPrompt(manager, routingId, prompt, attachments)
+      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }> | null
+    ) => sendPrompt(manager, routingId, prompt, opt(attachments))
   })
 
   handleRemote({
@@ -551,6 +586,18 @@ export function registerRemoteHandlers(
     handler: async (routingId: string, effort: string) => setEffort(manager, routingId, effort)
   })
 
+  // ADR-068 §2 — the per-session vendor account pin. `session-config` like the
+  // two above: choosing which stored subscription a session bills is session
+  // configuration, and the phone manages the same accounts the desktop does.
+  handleRemote({
+    channel: 'session:set-account',
+    capability: 'session-config',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, accountId: string | null) =>
+      setAccount(manager, routingId, accountId)
+  })
+
   handleRemote({
     channel: 'session:set-thinking-mode',
     capability: 'session-config',
@@ -587,7 +634,7 @@ export function registerRemoteHandlers(
     capability: 'config',
     kind: 'query',
     handler: async (): Promise<EngineModelGroup[]> => {
-      const claudeModels = (await claudeSupportedModels()).map((m) => ({
+      const claudeModels = (await claudeSupportedModels().catch(() => [])).map((m) => ({
         ...m,
         engineId: 'claude' as const,
         vendorId: 'anthropic'
@@ -600,7 +647,12 @@ export function registerRemoteHandlers(
       }
       const opencodeGroups = await discoverOpencodeModels()
       const piGroups = await discoverPiModels()
-      return [claudeGroup, ...opencodeGroups, ...piGroups]
+      return [
+        claudeGroup,
+        ...opencodeGroups,
+        ...piGroups,
+        ...(await discoverCodexModels().catch(() => []))
+      ]
     }
   })
 
@@ -718,8 +770,13 @@ export function registerRemoteHandlers(
     capability: 'fs-read',
     kind: 'query',
     sessionIdArg: 0,
-    handler: async (routingId: string, sessionId: string, projectKey: string, cwd?: string) => {
-      watchSession(routingId, sessionId, projectKey, cwd)
+    handler: async (
+      routingId: string,
+      sessionId: string,
+      projectKey: string,
+      cwd?: string | null
+    ) => {
+      watchSession(routingId, sessionId, projectKey, opt(cwd))
     }
   })
   handleRemote({
@@ -738,6 +795,8 @@ export function registerRemoteHandlers(
     capability: 'config',
     kind: 'command',
     handler: async (sessionId: string, projectKey: string, title: string) => {
+      if (getSessionMeta(sessionId)?.engineId === 'codex')
+        throw new Error('Codex titles must not be written to Claude transcript files')
       // LOW-RW3: reachable by any token-holding remote client. Without this,
       // projectKey='../..' + a crafted sessionId appends attacker-controlled
       // JSON to an arbitrary *.jsonl on the host. Mirrors the desktop handler
@@ -774,8 +833,8 @@ export function registerRemoteHandlers(
     channel: 'session:load-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string, projectKey: string, resumeSessionAt?: string) => {
-      return await loadSessionHistory(sessionId, projectKey, resumeSessionAt)
+    handler: async (sessionId: string, projectKey: string, resumeSessionAt?: string | null) => {
+      return await loadSessionHistory(sessionId, projectKey, opt(resumeSessionAt))
     }
   })
 
@@ -801,8 +860,8 @@ export function registerRemoteHandlers(
     channel: 'session:load-background-output',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (projectKey: string, taskId: string, outputFile?: string) => {
-      return loadBackgroundOutput(projectKey, taskId, outputFile)
+    handler: async (projectKey: string, taskId: string, outputFile?: string | null) => {
+      return loadBackgroundOutput(projectKey, taskId, opt(outputFile))
     }
   })
 
@@ -813,8 +872,8 @@ export function registerRemoteHandlers(
     channel: 'session:delete-session',
     capability: 'chat',
     kind: 'command',
-    handler: async (sessionId: string, projectKey: string, engineId?: EngineId) => {
-      await deleteSession(manager, sessionId, projectKey, engineId)
+    handler: async (sessionId: string, projectKey: string, engineId?: EngineId | null) => {
+      await deleteSession(manager, sessionId, projectKey, opt(engineId))
     }
   })
 
@@ -823,8 +882,8 @@ export function registerRemoteHandlers(
     capability: 'chat',
     kind: 'command',
     sessionIdArg: 0,
-    handler: async (routingId: string, permissionMode?: string) => {
-      await clearConversation(manager, routingId, permissionMode)
+    handler: async (routingId: string, permissionMode?: string | null) => {
+      await clearConversation(manager, routingId, opt(permissionMode))
     }
   })
 
@@ -835,6 +894,15 @@ export function registerRemoteHandlers(
     handler: async (projectKey: string) => {
       await deleteProject(manager, projectKey)
     }
+  })
+
+  // The desktop twin in session.ipc.ts carries the reasoning; the two must
+  // agree on capability and kind or the registry throws.
+  handleRemote({
+    channel: 'session:codex-delete-plan',
+    capability: 'chat',
+    kind: 'query',
+    handler: async (threadId: string) => codexDeletePlanFor(manager, threadId)
   })
 
   // -------------------------------------------------------------------------
@@ -909,15 +977,15 @@ export function registerRemoteHandlers(
     channel: 'claude:load-permissions',
     capability: 'config',
     kind: 'query',
-    handler: async (scope: string, cwd?: string) =>
-      loadClaudePermissions(scope as 'user' | 'project' | 'local', cwd)
+    handler: async (scope: string, cwd?: string | null) =>
+      loadClaudePermissions(scope as 'user' | 'project' | 'local', opt(cwd))
   })
   handleRemote({
     channel: 'claude:save-permissions',
     capability: 'config',
     kind: 'command',
-    handler: async (scope: string, permissions: ClaudePermissions, cwd?: string) =>
-      savePermissionsAndNotify(manager, scope as PermissionScope, permissions, cwd)
+    handler: async (scope: string, permissions: ClaudePermissions, cwd?: string | null) =>
+      savePermissionsAndNotify(manager, scope as PermissionScope, permissions, opt(cwd))
   })
   handleRemote({
     channel: 'claude:workspace-trust',
@@ -945,8 +1013,8 @@ export function registerRemoteHandlers(
     channel: 'mcp:load-servers',
     capability: 'config',
     kind: 'query',
-    handler: async (scope: string, cwd?: string) =>
-      loadMcpServers(scope as 'user' | 'project' | 'local', cwd)
+    handler: async (scope: string, cwd?: string | null) =>
+      loadMcpServers(scope as 'user' | 'project' | 'local', opt(cwd))
   })
   handleRemote({
     channel: 'mcp:read-disabled',
@@ -1002,6 +1070,21 @@ export function registerRemoteHandlers(
     kind: 'query',
     handler: async () => {
       return blockUsageService.getData() ?? (await blockUsageService.recalculate())
+    }
+  })
+
+  /**
+   * ADR-068 §2 — per-account ChatGPT subscription limits. Read-only and
+   * token-free (percentages and reset times), and it TRIGGERS the read: rate
+   * limits are fetched when somebody looks at them, never on a timer.
+   */
+  handleRemote({
+    channel: 'usage:chatgpt-limits',
+    capability: 'config',
+    kind: 'query',
+    handler: async (refresh?: boolean) => {
+      if (refresh) await chatgptRateLimits.refresh()
+      return chatgptRateLimits.snapshot()
     }
   })
 
@@ -1157,7 +1240,8 @@ export function registerRemoteHandlers(
     handler: async (engineId: EngineId): Promise<boolean> => {
       if (engineId === 'opencode') return opencodeServerManager.isBinaryAvailable()
       if (engineId === 'pi') return piBinaryAvailable()
-      return true
+      if (engineId === 'codex') return codexBinaryAvailable()
+      return engineId === 'claude'
     }
   })
   handleRemote({
@@ -1387,8 +1471,8 @@ export function registerRemoteHandlers(
     kind: 'command',
     sessionIdArg: 0,
     withConnection: true,
-    handler: async (connection: CommandConnection, routingId: string, language?: string) =>
-      remoteVoice.start(manager, connection, routingId, language)
+    handler: async (connection: CommandConnection, routingId: string, language?: string | null) =>
+      remoteVoice.start(manager, connection, routingId, opt(language))
   })
 
   handleRemote({
@@ -1638,6 +1722,7 @@ export function registerRemoteHandlers(
   for (const cmd of authCommands(resolvedAuthDeps)) {
     handleRemote(cmd)
   }
+  for (const command of codexCommands(manager)) handleRemote(command)
 
   logger.info('remote-handlers', `Registered ${dispatcher.channels().length} remote handlers`)
 }

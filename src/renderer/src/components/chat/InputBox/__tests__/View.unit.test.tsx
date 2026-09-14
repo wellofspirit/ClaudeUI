@@ -29,7 +29,7 @@ function openPickerDropdown(triggerTitle: string) {
   return within(dropdown as HTMLElement)
 }
 import { InputBoxView, type InputBoxViewProps, type ModelDisplay } from '../View'
-import { useSessionStore } from '../../../../stores/session-store'
+import { bootstrapPermissionMode, useSessionStore } from '../../../../stores/session-store'
 
 const baseModel: ModelDisplay = {
   value: 'claude-opus-4-7',
@@ -94,6 +94,59 @@ function makeProps(overrides: Partial<InputBoxViewProps> = {}): InputBoxViewProp
     ...overrides
   }
 }
+
+describe('Codex under the shared permission model', () => {
+  it('follows the global autonomy default, auto included', () => {
+    for (const defaultPermissionMode of ['auto', 'acceptEdits', 'plan'] as const) {
+      expect(
+        bootstrapPermissionMode({ ...useSessionStore.getState(), defaultPermissionMode }, 'codex')
+      ).toBe(defaultPermissionMode)
+    }
+  })
+  it.each([false, true])(
+    'shows the shared mode tab and no native policy pill, mobile=%s',
+    (isMobile) => {
+      render(
+        <InputBoxView
+          {...makeProps({
+            isMobile,
+            selectedEngineId: 'codex',
+            permissionMode: 'auto',
+            showModePicker: true
+          })}
+        />
+      )
+      expect(screen.queryByTestId('CodexPolicyPill')).not.toBeInTheDocument()
+      if (!isMobile) expect(screen.getByText('Auto ⏵⏵')).toBeInTheDocument()
+      else expect(screen.getByTestId('MobileConfigSheet.trigger')).toBeInTheDocument()
+    }
+  )
+  it('offers the engine-native effort tiers in place of the Claude ladder', () => {
+    const onSelectEffort = vi.fn()
+    render(
+      <InputBoxView
+        {...makeProps({
+          onSelectEffort,
+          selectedEngineId: 'codex',
+          effort: 'high',
+          effortSupported: true,
+          allowedEffortLevels: [],
+          nativeEffortOptions: [
+            { value: 'high', description: 'High' },
+            { value: 'ultra', description: 'Native ultra' }
+          ]
+        })}
+      />
+    )
+    const dropdown = openPickerDropdown('Effort level')
+    expect(dropdown.getByRole('button', { name: /ultra/ })).not.toBeDisabled()
+    expect(dropdown.getByRole('button', { name: /Native ultra/ })).toBeInTheDocument()
+    // The fixed Claude ladder is gone, not merged in.
+    expect(dropdown.queryByRole('button', { name: /^xhigh$/i })).not.toBeInTheDocument()
+    fireEvent.click(dropdown.getByRole('button', { name: /ultra/ }))
+    expect(onSelectEffort).toHaveBeenCalledWith('ultra')
+  })
+})
 
 beforeEach(() => {
   // The View renders a StatusLine sub-component that reads from the store.
@@ -376,5 +429,99 @@ describe('VoiceButton — hold-to-talk on touch (phase 5 S3)', () => {
     const { button, onVoiceStop } = renderVoice({ voiceState: 'recording' })
     fireEvent.mouseLeave(button)
     expect(onVoiceStop).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Status-line {cost} placeholder. `StatusLineData.totalCostUsd` is nullable:
+// null = the engine could not price the session, and printing "$0.00" for it
+// would read as "this turn was free".
+// ---------------------------------------------------------------------------
+
+describe('StatusLine — {cost} placeholder', () => {
+  function renderWithCost(totalCostUsd: number | null) {
+    useSessionStore.setState((s) => ({
+      settings: { ...s.settings, statusLineTemplate: 'Cost: {cost}' }
+    }))
+    render(
+      <InputBoxView
+        {...makeProps({
+          statusLine: {
+            totalCostUsd,
+            totalDurationMs: 0,
+            totalApiDurationMs: 0,
+            totalInputTokens: 0,
+            totalOutputTokens: 0,
+            cachedTokens: 0,
+            totalTokens: 0,
+            contextWindowSize: 0,
+            usedPercentage: null,
+            remainingPercentage: null
+          }
+        })}
+      />
+    )
+    return screen.getByTestId('InputBox.statusLine')
+  }
+
+  it('renders the unknown placeholder for a null cost, not a dollar figure', () => {
+    const line = renderWithCost(null)
+    expect(line).toHaveTextContent('Cost: unknown')
+    expect(line.textContent).not.toContain('$')
+  })
+
+  it('renders a real $0.0000 for a known-zero cost', () => {
+    expect(renderWithCost(0)).toHaveTextContent('Cost: $0.0000')
+  })
+
+  it('renders a priced figure unchanged', () => {
+    expect(renderWithCost(1.5)).toHaveTextContent('Cost: $1.50')
+  })
+})
+
+/**
+ * The composer's pre-spawn sign-in hint (ADR-068 §3, Slice 6). The VIEW only
+ * renders what InputBox composed; the pre-spawn gating itself is guarded in
+ * InputBox.component.test.ts.
+ */
+describe('InputBoxView — sign-in hint', () => {
+  beforeEach(() => {
+    useSessionStore.setState({ signInDialog: null })
+  })
+
+  it('renders nothing when there is no hint', () => {
+    render(<InputBoxView {...makeProps()} />)
+    expect(screen.queryByTestId('InputBox.signInHint')).toBeNull()
+  })
+
+  it('names the engine and the provider, and opens the dialog in reauth mode', () => {
+    render(
+      <InputBoxView
+        {...makeProps({
+          signInHint: { providerId: 'chatgpt', engineLabel: 'Codex', providerLabel: 'ChatGPT' }
+        })}
+      />
+    )
+    const hint = screen.getByTestId('InputBox.signInHint')
+    expect(hint).toHaveAttribute('data-id', 'chatgpt')
+    expect(hint).toHaveTextContent('Codex needs a ChatGPT sign-in.')
+
+    fireEvent.click(screen.getByTestId('InputBox.signInHint.action'))
+    expect(useSessionStore.getState().signInDialog).toEqual({
+      providerId: 'chatgpt',
+      mode: 'reauth'
+    })
+  })
+
+  it('never disables Send — sending anyway is the honest path (ADR-030)', () => {
+    render(
+      <InputBoxView
+        {...makeProps({
+          text: 'hello',
+          signInHint: { providerId: 'anthropic', engineLabel: 'Claude', providerLabel: 'Anthropic' }
+        })}
+      />
+    )
+    expect(screen.getByTestId('InputBox.send')).not.toBeDisabled()
   })
 })

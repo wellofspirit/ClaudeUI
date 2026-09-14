@@ -3,6 +3,14 @@ import { useShallow } from 'zustand/react/shallow'
 import { VOICE_LANGUAGES } from '../../../shared/types'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import type { EffortLevel } from '../../../shared/model-capabilities'
+import type { SharedProviderAccountList } from '../../../shared/shared-provider'
+import type { ProviderRegistrySnapshot } from '../../../shared/provider-registry'
+import {
+  anthropicAuthState,
+  chatgptAuthFromRegistry,
+  UNKNOWN_PROVIDER_AUTH,
+  type ProviderAuthView
+} from '../utils/sign-in-provider'
 import {
   DEFAULT_AUTONOMY_MODE,
   PERMISSION_TO_AUTONOMY,
@@ -51,7 +59,8 @@ import type {
   EngineId,
   ModelRef,
   EngineConfig,
-  FileAttachment
+  FileAttachment,
+  ChatgptRateLimits
 } from '../../../shared/types'
 /**
  * The replica owns every SEALED slice of this store (see `sealed-fields.ts`).
@@ -139,11 +148,13 @@ export function resolveOpencodeModel(models: ModelInfo[], preferred?: string): s
  */
 function perEngineDefaultModel(
   engineId: EngineId,
-  opencodeDefaultModel: string,
-  piDefaultModel: string
+  defaults: EngineDefaultModels
 ): string | undefined {
-  if (engineId === 'opencode') return opencodeDefaultModel
-  if (engineId === 'pi') return piDefaultModel
+  if (engineId === 'opencode') return defaults.opencodeDefaultModel
+  if (engineId === 'pi') return defaults.piDefaultModel
+  // Codex's is the empty string when nothing is configured, and
+  // `defaultModelValue` turns that back into '' — "say nothing on the wire".
+  if (engineId === 'codex') return defaults.codexDefaultModel
   return undefined
 }
 
@@ -161,6 +172,13 @@ export interface EngineDefaultModels {
   opencodeDefaultModelConfigured: boolean
   piDefaultModel: string
   piDefaultModelConfigured: boolean
+  /**
+   * `engines/codex.json#codexConfig.defaultModel`, or '' when unset. Unlike the
+   * other two there is NO fallback constant behind it: blank means ClaudeUI
+   * names no model on `turn/start` and Codex's own layers decide (ADR-068 §6).
+   */
+  codexDefaultModel: string
+  codexDefaultModelConfigured: boolean
 }
 
 /** Narrow a store snapshot to the default-model inputs. */
@@ -169,12 +187,16 @@ export function engineDefaultModels(state: {
   opencodeDefaultModelConfigured: boolean
   piDefaultModel: string
   piDefaultModelConfigured: boolean
+  codexDefaultModel: string
+  codexDefaultModelConfigured: boolean
 }): EngineDefaultModels {
   return {
     opencodeDefaultModel: state.opencodeDefaultModel,
     opencodeDefaultModelConfigured: state.opencodeDefaultModelConfigured,
     piDefaultModel: state.piDefaultModel,
-    piDefaultModelConfigured: state.piDefaultModelConfigured
+    piDefaultModelConfigured: state.piDefaultModelConfigured,
+    codexDefaultModel: state.codexDefaultModel,
+    codexDefaultModelConfigured: state.codexDefaultModelConfigured
   }
 }
 
@@ -200,6 +222,27 @@ export function resolveEngineDefaultModel(
   models: ModelInfo[],
   defaults: EngineDefaultModels
 ): string | null {
+  if (engineId === 'codex') {
+    const codex = models.filter((model) => isModelForEngine(model, 'codex'))
+    // An EMPTY catalog keeps answering null whether or not a default is
+    // configured — unlike opencode and pi, Codex has its own diagnosis for that
+    // state (a broken install, or a ChatGPT credential the API refused) and
+    // `reportStaleDefaultModel` probes the vendor to tell them apart. Letting a
+    // configured value through here would swallow that banner.
+    if (codex.length === 0) return null
+    // From here it is the opencode/pi rule: a CONFIGURED default the catalog no
+    // longer lists resolves to null — the picker stays unset and banners the
+    // name — never to a substitute whose capabilities differ (ADR-059).
+    if (defaults.codexDefaultModelConfigured) {
+      return codex.some((model) => model.value === defaults.codexDefaultModel)
+        ? defaults.codexDefaultModel
+        : null
+    }
+    // Nothing configured: the catalog head, which the session then omits from
+    // `turn/start` (`codexModelExplicit` stays false) so Codex's own configured
+    // model actually runs. The value exists only so the picker has a row.
+    return codex[0].value
+  }
   if (engineId === 'opencode') {
     const oc = models.filter((model) => isModelForEngine(model, 'opencode'))
     if (defaults.opencodeDefaultModelConfigured && oc.length > 0) {
@@ -228,8 +271,59 @@ export function resolveEngineDefaultModel(
   return engineMeta(engineId).defaultModelValue()
 }
 
+/**
+ * The Codex-discovery banner when the identity Codex runs under is what was
+ * refused (ADR-068 §4).
+ *
+ * A distinct STRING rather than a flag, because a session's errors are a list of
+ * strings in the store and on the wire; `FloatingError` matches this one to
+ * attach the Sign in action. The generic hint below stays for every other cause
+ * — a missing binary, a native model/provider misconfiguration — because those
+ * are not fixed by signing in and must not be told to.
+ */
+export const CODEX_SIGN_IN_REQUIRED_ERROR =
+  'ChatGPT rejected the credential Codex runs under, so no Codex models could be read. Sign in again to continue.'
+
+/**
+ * Banner the missing default model, asking WHY first when the answer changes the
+ * advice.
+ *
+ * Every engine but Codex is answered synchronously from the configured value.
+ * An empty CODEX catalog is the one case with two causes that need opposite
+ * advice — a broken installation, or the vault's ChatGPT credential being
+ * refused — and only `vendorAuthProbe('codex')` can tell them apart
+ * (`CodexAuthProvider` reports `unauthenticated` when the stored account cannot
+ * read the catalog). A probe that fails or says nothing keeps the generic hint:
+ * an unanswered question is not evidence.
+ */
+function reportStaleDefaultModel(routingId: string, engineId: EngineId, model: string): void {
+  const generic = staleDefaultModelMessage(engineId, model)
+  const addError = (text: string): void => useSessionStore.getState().addError(routingId, text)
+  if (engineId !== 'codex' || model) return addError(generic)
+  void window.api
+    .vendorAuthProbe('codex')
+    .then((probe) =>
+      addError(
+        probe.openai?.authState === 'unauthenticated' ? CODEX_SIGN_IN_REQUIRED_ERROR : generic
+      )
+    )
+    .catch(() => addError(generic))
+}
+
 /** The configured-but-missing default model for `engineId`, for error copy. */
-function configuredDefaultModelOf(engineId: EngineId, defaults: EngineDefaultModels): string {
+function configuredDefaultModelOf(
+  engineId: EngineId,
+  defaults: EngineDefaultModels,
+  models: ModelInfo[]
+): string {
+  // Codex answers '' for the EMPTY-catalog failure, which is what tells
+  // `reportStaleDefaultModel` to probe the vendor and choose between "check the
+  // installation" and "sign in again". A configured model the catalog reported
+  // WITHOUT is a different failure with different advice, so it is named.
+  if (engineId === 'codex') {
+    const hasCatalog = models.some((model) => isModelForEngine(model, 'codex'))
+    return hasCatalog && defaults.codexDefaultModelConfigured ? defaults.codexDefaultModel : ''
+  }
   return engineId === 'pi' ? defaults.piDefaultModel : defaults.opencodeDefaultModel
 }
 
@@ -239,6 +333,8 @@ function configuredDefaultModelOf(engineId: EngineId, defaults: EngineDefaultMod
  * found" is what made the silent substitute look preferable in the first place.
  */
 export function staleDefaultModelMessage(engineId: EngineId, model: string): string {
+  if (engineId === 'codex' && !model)
+    return 'No Codex models were discovered. Check installation and native account/model settings.'
   return (
     `The configured ${engineMeta(engineId).label} default model "${model}" is no longer available. ` +
     `Pick a model in the picker, or change the default in Settings → Engines → ${engineMeta(engineId).label}.`
@@ -435,6 +531,7 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     loadedEngineConfig,
     opencodeSettings,
     piEngineConfig,
+    codexEngineConfig,
     userPermissions
   ] = await Promise.all([
     window.api.loadSettings(),
@@ -448,6 +545,9 @@ export async function hydrateConfigFromDisk(): Promise<void> {
       .catch((): import('../../../shared/types').OpencodeConfigSettings => ({})),
     window.api
       .loadEngineConfig('pi')
+      .catch((): import('../../../shared/types').EngineConfig => ({})),
+    window.api
+      .loadEngineConfig('codex')
       .catch((): import('../../../shared/types').EngineConfig => ({})),
     // `permissions.defaultMode` (user scope) seeds the mode of sessions created
     // in this app run. Remote-registered channel, so the web client hydrates
@@ -532,8 +632,20 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     // while the model exists and must diverge the moment it does not.
     opencodeDefaultModelConfigured: !!opencodeSettings?.model,
     piDefaultModel: piEngineConfig?.piConfig?.defaultModel || PI_DEFAULT_MODEL,
-    piDefaultModelConfigured: !!piEngineConfig?.piConfig?.defaultModel
+    piDefaultModelConfigured: !!piEngineConfig?.piConfig?.defaultModel,
+    // No builtin fallback for Codex: blank stays blank, which is what makes the
+    // native `model` win (ADR-068 §6).
+    codexDefaultModel: codexEngineConfig?.codexConfig?.defaultModel || '',
+    codexDefaultModelConfigured: !!codexEngineConfig?.codexConfig?.defaultModel,
+    codexDefaultEffort: codexEngineConfig?.codexConfig?.defaultEffort || ''
   })
+  // Who is signed in, for the picker/composer entry points (ADR-068 §3). NOT in
+  // the Promise.all above: `provider-registry:list` is a slow read (it can start
+  // an opencode server to enumerate its catalog) and nothing else on this path
+  // waits for it — the surfaces render `'unknown'`, i.e. exactly as before, until
+  // it lands.
+  void useSessionStore.getState().refreshProviderAuth()
+
   // Replicated app-level state goes through the replica (SyncCore phase 4c), which
   // projects it into the store. Not a competing source of truth: the HOST seeds
   // canonical from these same files at the same point in boot
@@ -693,6 +805,7 @@ export interface PerSessionState {
    *  in session A can never be sent from B, and is restored on return to A. */
   draftAttachments: FileAttachment[]
   selectedModel: string
+  codexModelExplicit?: boolean
   /** Engine chosen at session-creation time. Immutable after the session spawns. */
   selectedEngineId: EngineId
   // Worktree state
@@ -728,8 +841,11 @@ export interface PerSessionState {
   btwQuestion: string | null
   btwResponse: string | null
   btwLoading: boolean
-  // Vendor auth required (opencode ProviderAuthError)
-  vendorAuthRequired: { vendorId: string; message: string } | null
+  /**
+   * The sign-in this session owes (ADR-068 §4) — SEALED: `session:auth-required`
+   * folds into it and a running turn clears it, both in the reducer.
+   */
+  authRequired: { providerId: string; accountId?: string } | null
 }
 
 /** Exported so the replica can build a store entry for a session it learns of first. */
@@ -805,7 +921,7 @@ export const EMPTY_SESSION_STATE: PerSessionState = {
   btwQuestion: null,
   btwResponse: null,
   btwLoading: false,
-  vendorAuthRequired: null
+  authRequired: null
 }
 
 /**
@@ -887,6 +1003,32 @@ function setCapped<K, V>(map: Map<K, V>, key: K, value: V, cap: number): void {
  * state) — it's control-flow bookkeeping, never rendered.
  */
 let vendorOAuthFlowToken = 0
+
+/**
+ * How often the device-code flow asks the host how it is going (ADR-068 §3,
+ * Slice 7). The WAIT cannot be one long invoke: `web/connection.ts` rejects any
+ * invoke that outlives `INVOKE_TIMEOUT_MS` (30 s) and a device code lives for
+ * fifteen minutes, on the one client that uses this flow. Three seconds is well
+ * inside Codex's own default poll cadence and costs a `config` query each time.
+ */
+export const DEVICE_CODE_POLL_MS = 3000
+
+/** Plain delay between status polls. */
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * The ONE post-success tail every remote ChatGPT completion runs — the paste-back
+ * submit and the Slice 7 device-code wait. Clearing the flow retires the panel;
+ * the registry read is what makes the picker and the composer hint (Slice 6) stop
+ * claiming the provider is signed out. Fire-and-forget, like `closeSignIn`'s own
+ * call: the read is advisory and must never delay the dialog's done state.
+ */
+function finishVendorOAuthSuccess(): void {
+  useSessionStore.getState().setVendorOAuth(null)
+  void useSessionStore.getState().refreshProviderAuth()
+}
 
 /**
  * Global git status cache keyed by cwd.
@@ -993,12 +1135,21 @@ function coldSessionIds(
 export interface VendorOAuthState {
   engineId: string
   vendorId: string
-  stage: 'waiting' | 'error' | 'paste'
+  stage: 'waiting' | 'error' | 'paste' | 'device-code'
   instructions: string
   /** Authorize URL — `paste` stage only (the client opens it, not the host). */
   url?: string
   /** Index into the vendor's auth options, needed by `vendor-auth:oauth-callback`. */
   method?: number
+  /**
+   * `device-code` stage only (ADR-068 §3, Slice 7): the page the user opens on
+   * any device, the code they type there, and when the host stops polling. The
+   * user code is display material — no token, and no `device_auth_id`, ever
+   * reaches the renderer.
+   */
+  verificationUrl?: string
+  userCode?: string
+  expiresAt?: number
   /**
    * Verbatim backend message — `error` stage only, and only for flows that
    * reached it through S4-UI's paths (the legacy desktop `auto` failure sets no
@@ -1006,6 +1157,25 @@ export interface VendorOAuthState {
    */
   error?: string
 }
+
+/**
+ * What the sign-in dialog is open ON (ADR-068 §3).
+ *
+ * `mode` is the ENTRY's intent, not a stage: `reauth` opens the chooser on the
+ * account that failed, `switch` opens it to pick a different stored one, `add`
+ * skips the chooser and starts a new sign-in. `retry` carries the prompt whose
+ * turn the rejection killed, so the done state can offer to re-send it.
+ */
+export interface SignInRequest {
+  providerId: SignInProviderId
+  mode: 'reauth' | 'add' | 'switch'
+  /** The stored account the entry point blames, when it knows one. */
+  accountId?: string
+  retry?: { routingId: string; prompt: string }
+}
+
+/** The two providers ClaudeUI can actually drive a sign-in for. */
+export type SignInProviderId = 'anthropic' | 'chatgpt'
 
 export interface SessionState {
   // Multi-session
@@ -1045,6 +1215,16 @@ export interface SessionState {
   piDefaultModel: string
   /** The pi twin of {@link opencodeDefaultModelConfigured}. */
   piDefaultModelConfigured: boolean
+  /** Configurable Codex default model (engines/codex.json `codexConfig.defaultModel`,
+   *  ADR-068 §6). '' = say nothing on `turn/start` and let Codex's own layers decide. */
+  codexDefaultModel: string
+  /** The Codex twin of {@link opencodeDefaultModelConfigured}. There is no builtin
+   *  constant behind it, so this is simply "the key is non-empty". */
+  codexDefaultModelConfigured: boolean
+  /** Configurable Codex reasoning tier (engines/codex.json `codexConfig.defaultEffort`).
+   *  A NATIVE tier value from the model catalog, not an {@link EffortLevel}; '' = the
+   *  model's own default. */
+  codexDefaultEffort: string
   /** `settings.defaultAutonomyMode` mapped to a renderer PermissionMode. A
    *  SESSION-BOOTSTRAP concern only: it seeds the mode of sessions created from
    *  here on. Running sessions keep the mode they were spawned with (cli.js
@@ -1069,6 +1249,15 @@ export interface SessionState {
   customCommands: SlashCommandInfo[]
   sdkSkillNames: string[]
   accountUsage: AccountUsage | null
+  /**
+   * The ChatGPT vault's stored accounts and the per-session policy over them
+   * (ADR-068 §2), as `provider-account:list` answers. Null until first read —
+   * the account picker is hidden while it is, which is the honest state: nothing
+   * yet knows whether there is more than one account to choose from.
+   */
+  providerAccounts: SharedProviderAccountList | null
+  /** Per-account ChatGPT rate limits, read on demand (`usage:chatgpt-limits`). */
+  chatgptLimits: ChatgptRateLimits | null
   blockUsage: BlockUsageData | null
   /** Native OAuth login-flow state (ADR-014). Null until first event/status. */
   authState: AuthFlowState | null
@@ -1078,10 +1267,33 @@ export interface SessionState {
   authSource: string | null
   /** Vendor auth map from the engine auth probe (Phase 4). Null until first probe. */
   vendorAuth: VendorAuthMap | null
+  /**
+   * The renderer's ONE view of "who is signed in" (ADR-068 §3, Slice 6), for the
+   * entry points that must not offer a sign-in nobody can complete: the model
+   * picker's dimmed groups and the composer's pre-spawn hint.
+   *
+   * TWO writers, disjoint keys. `anthropic` is derived by {@link SessionState.setVendorAuth}
+   * from the engine auth probe — the only production writer of `vendorAuth` —
+   * and `chatgpt`/`chatgptRoutes` by {@link SessionState.refreshProviderAuth}
+   * from `provider-registry:list`. Both start `'unknown'`, which renders exactly
+   * as the app did before this existed: an unprobed host is not a signed-out one.
+   */
+  providerAuth: ProviderAuthView
   /** Multi-account state (ADR-015). Null until first load/event. */
   accountsState: AccountsState | null
   /** Global vendor OAuth flow state (auto/loopback OAuth in progress). */
   vendorOAuth: VendorOAuthState | null
+  /**
+   * What the ONE sign-in dialog is open on (ADR-068 §3), or null when it is
+   * closed. Deliberately NOT a third flow state: the flows themselves stay on
+   * `authState` (Anthropic) and `vendorOAuth` (ChatGPT), and the dialog is a
+   * view over them — dismissing it leaves a running flow running.
+   *
+   * Named `signInDialog` rather than the spec's `signIn` because the store
+   * already has a `signIn()` ACTION (the Anthropic driver the dialog calls) and
+   * one flat object cannot hold both.
+   */
+  signInDialog: SignInRequest | null
   activeView: ActiveView
   /** Bumped when a surface with no native folder dialog (the web client's
    *  sidebar double-click) asks the welcome screen to open its host-backed
@@ -1126,6 +1338,8 @@ export interface SessionState {
   setOpencodeDefaultModel: (model: string) => void
   /** Update the configurable pi default model (mirrors piConfig.defaultModel, M3). */
   setPiDefaultModel: (model: string) => void
+  /** Update the configurable Codex session defaults (mirrors codexConfig, ADR-068 §6). */
+  setCodexDefaults: (defaults: { model?: string; effort?: string }) => void
   /** Mirror a Settings-dialog `permissions.defaultMode` write so sessions created
    *  later in THIS app run pick it up without a restart. */
   setDefaultPermissionMode: (mode: PermissionMode) => void
@@ -1267,10 +1481,24 @@ export interface SessionState {
   closeGitPanel: (routingId: string) => void
   // Account usage
   setAccountUsage: (data: AccountUsage) => void
+  /** Re-read the ChatGPT account list. Safe to call repeatedly; failures leave the slice alone. */
+  loadProviderAccounts: () => Promise<void>
+  /** Re-read the per-account rate limits; `refresh` asks the host to fetch first. */
+  loadChatgptLimits: (refresh?: boolean) => Promise<void>
   // Native OAuth (ADR-014)
   setAuthState: (data: AuthFlowState) => void
   setAuthSource: (source: string) => void
   setVendorAuth: (map: VendorAuthMap) => void
+  /**
+   * Re-read the provider registry into {@link SessionState.providerAuth}. Safe
+   * to call repeatedly and never throws: a failed read leaves ChatGPT
+   * `'unknown'` rather than claiming the user is signed out.
+   *
+   * `snapshot` short-circuits the read for a caller that has just made it —
+   * `provider-registry:list` can start an opencode server to enumerate its
+   * catalog, so the settings list must not pay for it twice per write.
+   */
+  refreshProviderAuth: (snapshot?: ProviderRegistrySnapshot) => Promise<void>
   setAccountsState: (data: AccountsState) => void
   /** Mark every session SDK-inactive so the next send respawns cli.js (ADR-015). */
   respawnAllSessions: () => void
@@ -1279,8 +1507,17 @@ export interface SessionState {
   cancelSignIn: () => Promise<void>
   setVendorOAuth(state: VendorOAuthState | null): void
   cancelVendorOAuth(): void
-  setVendorAuthRequired(routingId: string, data: { vendorId: string; message: string } | null): void
-  clearVendorAuthRequired(routingId: string): void
+  /** Open the one sign-in dialog. Replaces whatever it was open on. */
+  openSignIn(request: SignInRequest): void
+  /** Close it. The flow underneath keeps running — see {@link SessionState.signInDialog}. */
+  closeSignIn(): void
+  /**
+   * Dismiss the owed sign-in for one session. The FIELD is sealed, so this goes
+   * through the replica's sanctioned local write rather than a second writer:
+   * dismissing is a per-client act (the other client may still want the row),
+   * and the reducer's own clear — a turn that runs again — is unaffected.
+   */
+  clearAuthRequired(routingId: string): void
   authorizeVendorOAuth(
     engineId: EngineId,
     vendorId: string
@@ -1297,6 +1534,17 @@ export interface SessionState {
    * stage it consumes is never set on desktop.
    */
   submitVendorOAuthCode(pasted: string): Promise<{ ok: boolean; error?: string }>
+  /**
+   * The remote ChatGPT DEFAULT (ADR-068 §3, Slice 7): ask the host for a device
+   * code, park the flow at `device-code` so the panel can render it, then POLL
+   * the host for the outcome. Resolves `ok` only once the credential is stored.
+   */
+  authorizeVendorDeviceCode(
+    engineId: EngineId,
+    vendorId: string,
+    /** Poll cadence; defaults to {@link DEVICE_CODE_POLL_MS}. A test seam — the suite passes 0. */
+    pollIntervalMs?: number
+  ): Promise<{ ok: boolean; error?: string }>
   /** Respawn the session's cli.js process (so it re-reads freshly-stored
    *  credentials) and resend a prompt. Used by the post-login Retry. */
   retrySend: (routingId: string, prompt: string) => Promise<void>
@@ -1362,6 +1610,9 @@ export const useSessionStore = create<SessionState>((set) => ({
   opencodeDefaultModelConfigured: false,
   piDefaultModel: PI_DEFAULT_MODEL,
   piDefaultModelConfigured: false,
+  codexDefaultModel: '',
+  codexDefaultModelConfigured: false,
+  codexDefaultEffort: '',
   // Pre-hydration seed only. `hydrate()` overwrites this from
   // `settings.defaultAutonomyMode` before any session can be created; 'default'
   // is the conservative placeholder for the window in between.
@@ -1375,11 +1626,15 @@ export const useSessionStore = create<SessionState>((set) => ({
   customCommands: [],
   sdkSkillNames: [],
   accountUsage: null,
+  providerAccounts: null,
+  chatgptLimits: null,
   authState: null,
   authSource: null,
   vendorAuth: null,
+  providerAuth: UNKNOWN_PROVIDER_AUTH,
   accountsState: null,
   vendorOAuth: null,
+  signInDialog: null,
   blockUsage: null,
   activeView: { type: 'chat' } as ActiveView,
   welcomeBrowseToken: 0,
@@ -1480,8 +1735,16 @@ export const useSessionStore = create<SessionState>((set) => ({
       let defaultModel = stickyAvailable
         ? (sticky as string)
         : resolveEngineDefaultModel(engineId, state.availableModels, defaults)
+      if (engineId === 'codex' && sticky) {
+        const hasCatalog = state.availableModels.some((model) => model.engineId === 'codex')
+        defaultModel = hasCatalog && !stickyAvailable ? null : sticky
+      }
       const staleDefault =
-        defaultModel === null ? configuredDefaultModelOf(engineId, defaults) : null
+        defaultModel === null
+          ? engineId === 'codex' && sticky
+            ? sticky
+            : configuredDefaultModelOf(engineId, defaults, state.availableModels)
+          : null
       if (
         engineId === 'opencode' &&
         !resolveOpencodeModel(state.availableModels, state.opencodeDefaultModel)
@@ -1515,6 +1778,17 @@ export const useSessionStore = create<SessionState>((set) => ({
           permissionMode: bootstrapPermissionMode(state, engineId),
           selectedEngineId: engineId,
           selectedModel: seededModel,
+          // A CONFIGURED default is an explicit choice as much as a sticky pick
+          // is (ADR-059): both name a model the user chose, and both must ride
+          // `turn/start` rather than letting Codex's own layers decide. Gated on
+          // a resolved value so an orphaned default (seededModel '') does not
+          // claim to be explicit about nothing.
+          ...(engineId === 'codex'
+            ? {
+                codexModelExplicit:
+                  !!seededModel && (!!sticky || defaults.codexDefaultModelConfigured)
+              }
+            : {}),
           // Seed status.engineId/capabilities to match so they're correct before spawn
           status: {
             ...EMPTY_SESSION_STATE.status,
@@ -1530,11 +1804,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         { create: true }
       )
       // After the session exists — `addError` writes through `updateSession`.
-      if (staleDefault) {
-        useSessionStore
-          .getState()
-          .addError(routingId, staleDefaultModelMessage(engineId, staleDefault))
-      }
+      if (staleDefault) reportStaleDefaultModel(routingId, engineId, staleDefault)
       patchLocalApp({ recentSessionIds, sessionEngines })
       saveSessionConfig(state, { recentSessionIds, sessionEngines })
       if (switchTo) {
@@ -1619,6 +1889,18 @@ export const useSessionStore = create<SessionState>((set) => ({
       selectedEngineId: engineId,
       selectedModel: model,
       reasoningVariant: null,
+      // Switching TO codex lands on whatever `resolveEngineDefaultModel` just
+      // returned; that is an explicit pick only when the user CONFIGURED it.
+      ...(engineId === 'codex'
+        ? { codexModelExplicit: !!model && defaults.codexDefaultModelConfigured }
+        : {}),
+      // Engine-neutral: a mode the TARGET engine cannot offer would otherwise
+      // survive the switch and show a pill the Shift+Tab cycle skips over.
+      permissionMode:
+        session.permissionMode === 'auto' &&
+        !autoModeAvailableForEngine(engineId, state.availableModels)
+          ? 'default'
+          : session.permissionMode,
       status: {
         ...session.status,
         engineId,
@@ -1626,12 +1908,11 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     })
     if (resolved === null) {
-      useSessionStore
-        .getState()
-        .addError(
-          id,
-          staleDefaultModelMessage(engineId, configuredDefaultModelOf(engineId, defaults))
-        )
+      reportStaleDefaultModel(
+        id,
+        engineId,
+        configuredDefaultModelOf(engineId, defaults, state.availableModels)
+      )
     }
     patchLocalApp({ sessionEngines })
     saveSessionConfig(state, { sessionEngines })
@@ -1645,6 +1926,15 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   setPiDefaultModel: (model) =>
     set({ piDefaultModel: model || PI_DEFAULT_MODEL, piDefaultModelConfigured: !!model }),
+
+  // One action for both keys, because the settings pane writes them into one
+  // `codexConfig` block and a partial update must not reset the other half.
+  setCodexDefaults: ({ model, effort }) =>
+    set((state) => ({
+      codexDefaultModel: model ?? state.codexDefaultModel,
+      codexDefaultModelConfigured: (model ?? state.codexDefaultModel) !== '',
+      codexDefaultEffort: effort ?? state.codexDefaultEffort
+    })),
 
   setDefaultPermissionMode: (mode) => set({ defaultPermissionMode: mode }),
 
@@ -1688,7 +1978,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       const selectedModel =
         persistedModel ??
         engineMeta(persistedEngineId).defaultModelValue(
-          perEngineDefaultModel(persistedEngineId, state.opencodeDefaultModel, state.piDefaultModel)
+          perEngineDefaultModel(persistedEngineId, engineDefaultModels(state))
         )
       // Engine identity for the LOCAL historical-load path (gpt#3): the restored
       // engine must also drive status.engineId + capabilities, otherwise a pi /
@@ -2412,6 +2702,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     // Always reset reasoningVariant on model change — different models have different variants.
     patchLocalSession(id, {
       selectedModel: model,
+      ...(targetEngine === 'codex' ? { codexModelExplicit: true } : {}),
       reasoningVariant: null,
       ...(reseedCapabilities && session
         ? {
@@ -2435,11 +2726,47 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   setAccountUsage: (data) => set({ accountUsage: data }),
 
+  // ADR-068 §2. Both are plain READS of host-owned state — the store never
+  // derives either, and a failure leaves the previous answer in place rather
+  // than blanking a picker or a usage block mid-use.
+  loadProviderAccounts: async () => {
+    try {
+      set({ providerAccounts: await window.api.listProviderAccounts('chatgpt') })
+    } catch {
+      /* the host has no vault yet, or the read failed — keep what we have */
+    }
+  },
+  loadChatgptLimits: async (refresh = false) => {
+    try {
+      set({ chatgptLimits: await window.api.fetchChatgptLimits(refresh) })
+    } catch {
+      /* same posture as above */
+    }
+  },
+
   // Native OAuth (ADR-014). signIn/submit return the "authorizing"/result
   // snapshot synchronously; the terminal transition arrives via onAuthState.
   setAuthState: (data) => set({ authState: data }),
   setAuthSource: (source) => set({ authSource: source }),
-  setVendorAuth: (map) => set({ vendorAuth: map }),
+  setVendorAuth: (map) =>
+    set((s) => ({
+      vendorAuth: map,
+      providerAuth: { ...s.providerAuth, anthropic: anthropicAuthState(map) }
+    })),
+  refreshProviderAuth: async (snapshot) => {
+    // The registry publishes no change event, so every caller is a moment the
+    // answer can have changed: boot, the sign-in dialog closing, and each
+    // settings write that re-lists it.
+    let resolved: ProviderRegistrySnapshot | null = snapshot ?? null
+    if (!resolved) {
+      try {
+        resolved = await window.api.listProviderRegistry()
+      } catch {
+        /* No vault, no host, or the read failed — 'unknown', never 'signed out'. */
+      }
+    }
+    set((s) => ({ providerAuth: { ...s.providerAuth, ...chatgptAuthFromRegistry(resolved) } }))
+  },
   setAccountsState: (data) => set({ accountsState: data }),
   respawnAllSessions: () => {
     for (const id of Object.keys(useSessionStore.getState().sessions)) {
@@ -2472,6 +2799,14 @@ export const useSessionStore = create<SessionState>((set) => ({
     }))
   },
   setVendorOAuth: (state) => set({ vendorOAuth: state }),
+  openSignIn: (request) => set({ signInDialog: request }),
+  closeSignIn: () => {
+    set({ signInDialog: null })
+    // The dialog's OUTCOME is what changes the answer, and it has no completion
+    // event of its own — closing it is the one moment every path (done,
+    // cancelled, dismissed mid-flow) passes through.
+    void useSessionStore.getState().refreshProviderAuth()
+  },
   cancelVendorOAuth: () => {
     // Invalidate any in-flight `auto` flow so its late-resolving callback can't
     // re-set vendorOAuth after the user cancelled (SHOULD-FIX 4).
@@ -2483,14 +2818,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     if (engineId) void window.api.vendorAuthOauthCancel(engineId).catch(() => {})
     set({ vendorOAuth: null })
   },
-  setVendorAuthRequired: (routingId, data) =>
-    set((s) => ({
-      sessions: updateSession(s.sessions, routingId, () => ({ vendorAuthRequired: data }))
-    })),
-  clearVendorAuthRequired: (routingId) =>
-    set((s) => ({
-      sessions: updateSession(s.sessions, routingId, () => ({ vendorAuthRequired: null }))
-    })),
+  clearAuthRequired: (routingId) => patchLocalSession(routingId, { authRequired: null }),
   authorizeVendorOAuth: async (engineId, vendorId) => {
     try {
       const allOptions = await window.api.vendorAuthListOptions(engineId)
@@ -2581,6 +2909,65 @@ export const useSessionStore = create<SessionState>((set) => ({
       return { ok: false, error: message }
     }
   },
+  authorizeVendorDeviceCode: async (engineId, vendorId, pollIntervalMs = DEVICE_CODE_POLL_MS) => {
+    // Claim the flow token BEFORE the first await: Cancel bumps it, and every
+    // post-await state-set below bails when it moved — the same guard the
+    // loopback `auto` path uses, and what makes "a second start cancels the
+    // first" hold on the renderer side too.
+    const token = ++vendorOAuthFlowToken
+    const superseded = (): boolean => vendorOAuthFlowToken !== token
+    const flowError = (msg: string): { ok: false; error: string } => {
+      useSessionStore
+        .getState()
+        .setVendorOAuth({ engineId, vendorId, stage: 'error', instructions: '', error: msg })
+      return { ok: false, error: msg }
+    }
+    try {
+      // The start ALSO starts the host-side wait. This path deliberately never
+      // calls `vendorAuthOauthCallback`: that invoke would be rejected after
+      // thirty seconds by `web/connection.ts`'s INVOKE_TIMEOUT_MS, on the one
+      // client that uses device code, and a dropped socket would lose it.
+      const started = await window.api.vendorAuthDeviceCodeStart(engineId, vendorId)
+      if (superseded()) return { ok: false }
+      useSessionStore.getState().setVendorOAuth({
+        engineId,
+        vendorId,
+        stage: 'device-code',
+        instructions: '',
+        verificationUrl: started.verificationUrl,
+        userCode: started.userCode,
+        expiresAt: started.expiresAt
+      })
+
+      // Poll the host until it has an answer. The HOST bounds this loop — its
+      // flow enforces the fifteen-minute cap and reports `error` when it lapses
+      // — so there is no second deadline here to drift from that one.
+      for (;;) {
+        await wait(pollIntervalMs)
+        if (superseded()) return { ok: false }
+        const status = await window.api.vendorAuthDeviceCodeStatus(engineId)
+        if (superseded()) return { ok: false }
+        if (status.state === 'pending') continue
+        // `cancelled` covers both "the user pressed Cancel" and "no flow is
+        // live": nothing to report either way, and the panel belongs to whoever
+        // cancelled it.
+        if (status.state === 'cancelled') return { ok: false }
+        if (status.state === 'error') {
+          return flowError(status.error ?? 'The sign-in did not complete. Start again.')
+        }
+        finishVendorOAuthSuccess()
+        return { ok: true }
+      }
+    } catch (err) {
+      // A cancel is not a failure to report: either this flow was superseded
+      // (Cancel bumped the token) or the host threw its own cancellation while
+      // the renderer was still waiting. Both leave the panel to whoever cancelled.
+      if (superseded()) return { ok: false }
+      const messageText = errorText(err)
+      if (/cancelled/i.test(messageText)) return { ok: false }
+      return flowError(messageText)
+    }
+  },
   submitVendorOAuthCode: async (pasted) => {
     const flow = useSessionStore.getState().vendorOAuth
     if (!flow || flow.stage !== 'paste' || flow.method === undefined) {
@@ -2611,7 +2998,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         pasted
       )
       if (!ok) return fail('The vendor rejected that sign-in. Start again from step 1.')
-      useSessionStore.getState().setVendorOAuth(null)
+      finishVendorOAuthSuccess()
       return { ok: true }
     } catch (err) {
       return fail(errorText(err))
@@ -2697,8 +3084,10 @@ export const useSessionStore = create<SessionState>((set) => ({
         draftAttachments: [],
         planReview: null,
         mockupDir: null,
-        mockupTitle: null,
-        vendorAuthRequired: null
+        mockupTitle: null
+        // `authRequired` is NOT reset here: it is sealed now, and the reducer's
+        // own `session:conversation-cleared` branch blanks it with the rest of
+        // the fresh session, for every client rather than only this one.
       }))
     }))
   },

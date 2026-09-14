@@ -64,6 +64,17 @@ export interface CanonicalSessionState {
   sdkActive: boolean
   selectedEngineId: EngineId
   selectedModel: string
+  /** A catalog preview is not an explicit native model override. */
+  codexModelExplicit?: boolean
+  /**
+   * The credential this session needs was rejected and could not be renewed
+   * (ADR-068 §4), cleared the moment a turn starts running again.
+   *
+   * ON the wire since slice 3 (`PerSessionSnapshot.authRequired`): the row that
+   * renders it is engine-neutral, so a client that reconnects mid-outage has to
+   * learn the owed sign-in from the snapshot as well as from the ringed event.
+   */
+  authRequired: { providerId: string; accountId?: string } | null
   /**
    * Core-internal, never serialized: has this session's transcript been seeded
    * from its on-disk history yet? The shadow comparator masks unseeded sessions,
@@ -136,6 +147,7 @@ export function emptySession(routingId: string, cwd = ''): CanonicalSessionState
     sdkActive: false,
     selectedEngineId: 'claude',
     selectedModel: 'default',
+    authRequired: null,
     seeded: false
   }
 }
@@ -217,6 +229,8 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
       sdkActive: s.sdkActive ?? false,
       selectedEngineId: s.selectedEngineId ?? 'claude',
       selectedModel: s.selectedModel ?? 'default',
+      ...(s.codexModelExplicit !== undefined ? { codexModelExplicit: s.codexModelExplicit } : {}),
+      authRequired: s.authRequired ?? null,
       seeded: true
     }
   }
@@ -275,7 +289,9 @@ export function toSnapshot(state: CanonicalState, seq: number): FullStateSnapsho
       sdkSkillNames: state.sdkSkillNames,
       sdkActive: s.sdkActive,
       selectedEngineId: s.selectedEngineId,
-      selectedModel: s.selectedModel
+      selectedModel: s.selectedModel,
+      authRequired: s.authRequired,
+      ...(s.codexModelExplicit !== undefined ? { codexModelExplicit: s.codexModelExplicit } : {})
     }
   }
   return {

@@ -13,7 +13,8 @@
  *
  * Targets mirror the package.json scripts: build, build:mac, build:win,
  * build:linux, build:unpack, build:web, ensure-cli, update-cli,
- * ensure-opencode, update-opencode, ensure-pi, update-pi.
+ * ensure-opencode, update-opencode, ensure-pi, update-pi, ensure-codex,
+ * update-codex.
  */
 
 import { spawn } from 'node:child_process'
@@ -38,7 +39,9 @@ if (args.includes('-h') || args.includes('--help')) {
         'ensure-opencode',
         'update-opencode',
         'ensure-pi',
-        'update-pi'
+        'update-pi',
+        'ensure-codex',
+        'update-codex'
       ].join(', ')
   )
   process.exit(0)
@@ -110,18 +113,32 @@ const ensurePi = (update) => [
   }
 ]
 
+// ensure-codex.mjs rejects unknown flags and prints a single result line either
+// way, so it takes no --quiet. A host without a reviewed digest manifest (today:
+// everything but macOS arm64, Windows x64 and Linux x64/arm64) exits 0 with a
+// skip line; real failures still exit non-zero and stop the build like any other
+// step.
+const ensureCodex = (update) => [
+  {
+    label: 'ensure-codex',
+    steps: [['node', ['scripts/ensure-codex.mjs', ...(update ? ['--force'] : [])]]]
+  }
+]
+
 const TARGETS = {
   build: [
     ...typecheck,
     ...ensureCli(false),
     ...ensureOpencode(false),
     ...ensurePi(false),
+    ...ensureCodex(false),
     ...electronViteBuild
   ],
   'build:mac': [
     ...ensureCli(false),
     ...ensureOpencode(false),
     ...ensurePi(false),
+    ...ensureCodex(false),
     ...electronViteBuild,
     ...webBuild,
     {
@@ -156,6 +173,7 @@ const TARGETS = {
     ...ensureCli(false),
     ...ensureOpencode(false),
     ...ensurePi(false),
+    ...ensureCodex(false),
     ...electronViteBuild,
     ...webBuild,
     {
@@ -167,6 +185,7 @@ const TARGETS = {
     ...ensureCli(false),
     ...ensureOpencode(false),
     ...ensurePi(false),
+    ...ensureCodex(false),
     ...electronViteBuild,
     ...webBuild,
     {
@@ -179,6 +198,7 @@ const TARGETS = {
     ...ensureCli(false),
     ...ensureOpencode(false),
     ...ensurePi(false),
+    ...ensureCodex(false),
     ...electronViteBuild,
     ...webBuild,
     {
@@ -192,7 +212,9 @@ const TARGETS = {
   'ensure-opencode': [...ensureOpencode(false)],
   'update-opencode': [...ensureOpencode(true)],
   'ensure-pi': [...ensurePi(false)],
-  'update-pi': [...ensurePi(true)]
+  'update-pi': [...ensurePi(true)],
+  'ensure-codex': [...ensureCodex(false)],
+  'update-codex': [...ensureCodex(true)]
 }
 
 const stages = TARGETS[target]

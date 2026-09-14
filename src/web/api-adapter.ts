@@ -59,7 +59,21 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
   }
 
   const api: ClaudeAPI = {
+    codexApproval: (id, requestId, decision) =>
+      unwrap('session:codex-approval', id, requestId, decision),
+    codexAuthStatus: () => unwrap('codex:auth-status'),
+    readCodexConfig: () => unwrap('codex-config:read'),
+    writeCodexConfig: (edits, expectedVersion) =>
+      unwrap('codex-config:write', edits, expectedVersion),
+    recompileCodexRules: () => unwrap('codex:recompile-rules'),
+    codexDeletePlan: (threadId) => unwrap('session:codex-delete-plan', threadId),
     platform: 'web',
+    // Never on the web client. The verifier hooks are a LOCAL harness affordance
+    // (`scripts/app-shot.mjs` driving the real Electron app); a browser reaching
+    // the app over the remote transport is not that, and publishing the store on
+    // `window` there would hand a shared page's scripts every transcript. Hard
+    // literal, not a plumbed flag — there is no version of this that is true.
+    verifierHooks: false,
 
     // Desktop-only: return null or no-op on web
     pickFolder: async () => {
@@ -258,6 +272,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('session:set-model', routingId, model) as Promise<void>,
     setEffort: (routingId, effort) =>
       connection.invoke('session:set-effort', routingId, effort) as Promise<void>,
+    setSessionAccount: (routingId, accountId) =>
+      connection.invoke('session:set-account', routingId, accountId) as Promise<void>,
     setThinkingMode: (routingId, mode) =>
       connection.invoke('session:set-thinking-mode', routingId, mode) as Promise<void>,
     setReasoningVariant: (routingId, variant) =>
@@ -299,6 +315,15 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // in `core/ipc/auth-commands.ts`), so it unwraps like the writes below and
     // unlike the three older reads under it.
     listProviderRegistry: () => unwrap('provider-registry:list'),
+    // The subscription accounts (ADR-068 §2) — safeHandler-wrapped host-side in
+    // the same shared module, so they unwrap like the registry above.
+    listProviderAccounts: (providerId) => unwrap('provider-account:list', providerId),
+    switchProviderAccount: (providerId, accountId) =>
+      unwrap('provider-account:switch', providerId, accountId),
+    removeProviderAccount: (providerId, accountId) =>
+      unwrap('provider-account:remove', providerId, accountId),
+    setProviderAccountsPerSession: (providerId, enabled) =>
+      unwrap('provider-account:set-per-session', providerId, enabled),
     listSharedProviders: () =>
       connection.invoke('shared-provider:list') as ReturnType<ClaudeAPI['listSharedProviders']>,
     getSharedProviderStatuses: () =>
@@ -580,6 +605,10 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // Usage
     fetchAccountUsage: () =>
       connection.invoke('usage:fetch') as ReturnType<ClaudeAPI['fetchAccountUsage']>,
+    fetchChatgptLimits: (refresh) =>
+      connection.invoke('usage:chatgpt-limits', refresh ?? false) as ReturnType<
+        ClaudeAPI['fetchChatgptLimits']
+      >,
     fetchBlockUsage: () =>
       connection.invoke('usage:fetch-block') as ReturnType<ClaudeAPI['fetchBlockUsage']>,
     setUsageAccountFilter: (account) =>
@@ -977,6 +1006,9 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       unwrap('vendor-auth:set-key', engineId, vendorId, key),
     vendorAuthOauthAuthorize: (engineId, vendorId, method, inputs) =>
       unwrap('vendor-auth:oauth-authorize', engineId, vendorId, method, inputs),
+    vendorAuthDeviceCodeStart: (engineId, vendorId) =>
+      unwrap('vendor-auth:device-code-start', engineId, vendorId),
+    vendorAuthDeviceCodeStatus: (engineId) => unwrap('vendor-auth:device-code-status', engineId),
     vendorAuthOauthCallback: (engineId, vendorId, method, code) =>
       unwrap('vendor-auth:oauth-callback', engineId, vendorId, method, code),
     vendorAuthRemove: (engineId, vendorId) => unwrap('vendor-auth:remove', engineId, vendorId),

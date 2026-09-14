@@ -117,8 +117,18 @@ export function SettingsPanel(): React.JSX.Element {
       setSettingsTarget(settingsTargetFromEvent(event))
       setDialogOpen(true)
     }
+    // A link OUT of settings (the Codex page's "Open MCP servers ›") must close
+    // this dialog, or the surface it opens renders behind it.
+    const leave = (): void => {
+      setDialogOpen(false)
+      setSettingsTarget(undefined)
+    }
     window.addEventListener('open-settings', handler)
-    return () => window.removeEventListener('open-settings', handler)
+    window.addEventListener('open-mcp-servers', leave)
+    return () => {
+      window.removeEventListener('open-settings', handler)
+      window.removeEventListener('open-mcp-servers', leave)
+    }
   }, [isMobile])
 
   /**

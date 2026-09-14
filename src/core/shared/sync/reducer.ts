@@ -447,7 +447,8 @@ export function applyEvent(
             // fields mean "explicitly picked" (`null` = unset). See the emit site.
             permissionMode: data?.permissionMode ?? base.permissionMode,
             selectedEngineId: data?.engineId ?? base.selectedEngineId,
-            selectedModel: data?.model ?? base.selectedModel,
+            selectedModel: data?.model ?? (data?.engineId === 'codex' ? '' : base.selectedModel),
+            ...(data?.engineId === 'codex' ? { codexModelExplicit: data.model !== undefined } : {}),
             sdkActive: true,
             // A resumed session's transcript arrives via seedSession (a query);
             // a fresh one has nothing to seed, so it is already complete.
@@ -616,7 +617,14 @@ export function applyEvent(
       if (!session) return state
       let next = state
 
-      const idx = session.messages.findIndex((m) => m.id === message.id)
+      const idx = session.messages.findIndex(
+        (m) =>
+          m.id === message.id ||
+          (session.selectedEngineId === 'codex' &&
+            message.role === 'user' &&
+            m.role === 'user' &&
+            m.id === message.replacesMessageId)
+      )
       // `content` is defensive: engine adapters and older cached clients have
       // shipped partial messages, and canonical state must degrade rather than
       // throw (SyncCore fences the apply, but a no-op beats a fenced throw).
@@ -882,9 +890,36 @@ export function applyEvent(
       }
       next = withSession(next, id, (s) => ({
         status,
+        // A turn that is running again is the proof the credential works, so the
+        // owed sign-in is cleared HERE rather than on the auth event's own
+        // schedule (ADR-068 §4). `disconnected` returns above and must not
+        // clear it: the reason the process died may be exactly this.
+        ...(status.state === 'running' ? { authRequired: null } : {}),
+        ...(status.engineId === 'codex' && status.model
+          ? {
+              selectedModel: status.codex?.overrides?.model ?? status.model.modelId,
+              selectedEngineId: 'codex',
+              ...(status.codex?.overrides?.model ? { codexModelExplicit: true } : {})
+            }
+          : {}),
         ...(status.cwd && status.cwd !== s.cwd ? { cwd: status.cwd } : {}),
         ...(sealing ? { streamingThinking: '' } : {})
       }))
+
+      if (status.engineId === 'codex' && status.model)
+        next = {
+          ...next,
+          sessionEngines: {
+            ...next.sessionEngines,
+            [id]: {
+              engineId: 'codex',
+              model: {
+                ...status.model,
+                modelId: status.codex?.overrides?.model ?? status.model.modelId
+              }
+            }
+          }
+        }
 
       if (status.state === 'idle') next = clearForegroundSubagentBuffers(next, id, aux)
 
@@ -901,6 +936,20 @@ export function applyEvent(
       const routingId = routingIdOf(event)
       if (!routingId) return state
       return withSession(state, routingId, dismissCompletedTodos)
+    }
+
+    case 'session:auth-required': {
+      const routingId = routingIdOf(event)
+      const data = arg<{ providerId?: string; accountId?: string }>(event, 1)
+      if (!routingId || !data?.providerId || !state.sessions[routingId]) return state
+      const providerId = data.providerId
+      const accountId = data.accountId
+      return withSession(state, routingId, () => ({
+        authRequired: {
+          providerId,
+          ...(typeof accountId === 'string' && accountId ? { accountId } : {})
+        }
+      }))
     }
 
     // -----------------------------------------------------------------------

@@ -61,6 +61,17 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
 
   return {
     platform: process.platform,
+    // The jsdom harness is not the real-app harness: nothing here reads
+    // `window.__claudeuiVerifier`, and tests reach the store directly.
+    verifierHooks: false,
+    codexApproval: (id, requestId, decision) =>
+      unwrap('session:codex-approval', id, requestId, decision),
+    codexAuthStatus: () => unwrap('codex:auth-status'),
+    readCodexConfig: () => unwrap('codex-config:read'),
+    writeCodexConfig: (edits, expectedVersion) =>
+      unwrap('codex-config:write', edits, expectedVersion),
+    recompileCodexRules: () => unwrap('codex:recompile-rules'),
+    codexDeletePlan: (threadId) => unwrap('session:codex-delete-plan', threadId),
     pickFolder: () => ipcRenderer.invoke('session:pick-folder'),
     createSession: (
       routingId,
@@ -69,7 +80,10 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       resumeSessionId?,
       permissionMode?,
       model?,
-      thinkingMode?
+      thinkingMode?,
+      resumeSessionAt?,
+      forkSession?,
+      engineId?
     ) =>
       ipcRenderer.invoke(
         'session:create',
@@ -79,10 +93,20 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
         resumeSessionId,
         permissionMode,
         model,
-        thinkingMode
+        thinkingMode,
+        resumeSessionAt,
+        forkSession,
+        engineId
       ),
-    resolveForkAnchor: (sessionId, cwd, messageId) =>
-      ipcRenderer.invoke('session:resolve-fork-anchor', sessionId, cwd, messageId),
+    resolveForkAnchor: (sessionId, cwd, messageId, engineId, messageIndex) =>
+      ipcRenderer.invoke(
+        'session:resolve-fork-anchor',
+        sessionId,
+        cwd,
+        messageId,
+        engineId,
+        messageIndex
+      ),
     loadOpencodeHistory: (sessionId) =>
       ipcRenderer.invoke('session:load-opencode-history', sessionId),
     listPiSessionsGlobal: () => ipcRenderer.invoke('session:list-pi'),
@@ -149,6 +173,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('session:set-permission-mode', routingId, mode),
     setModel: (routingId, model) => ipcRenderer.invoke('session:set-model', routingId, model),
     setEffort: (routingId, effort) => ipcRenderer.invoke('session:set-effort', routingId, effort),
+    setSessionAccount: (routingId, accountId) =>
+      ipcRenderer.invoke('session:set-account', routingId, accountId),
     setThinkingMode: (routingId, mode) =>
       ipcRenderer.invoke('session:set-thinking-mode', routingId, mode),
     setReasoningVariant: (routingId, variant) =>
@@ -251,6 +277,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     loadSkillDetails: (cwd) => ipcRenderer.invoke('config:load-skill-details', cwd),
 
     fetchAccountUsage: () => ipcRenderer.invoke('usage:fetch'),
+    fetchChatgptLimits: (refresh) => ipcRenderer.invoke('usage:chatgpt-limits', refresh ?? false),
     fetchBlockUsage: () => ipcRenderer.invoke('usage:fetch-block'),
     setUsageAccountFilter: async () => {},
     refreshPrices: async () => ({ count: 0, refreshedAt: Date.now() }),
@@ -307,6 +334,12 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     vendorAuthListKeys: async () => ({}),
     vendorAuthSetKey: async () => {},
     vendorAuthOauthAuthorize: async () => {
+      throw new Error('Vendor auth not available in tests')
+    },
+    vendorAuthDeviceCodeStart: async () => {
+      throw new Error('Vendor auth not available in tests')
+    },
+    vendorAuthDeviceCodeStatus: async () => {
       throw new Error('Vendor auth not available in tests')
     },
     vendorAuthOauthCallback: async () => {
@@ -389,6 +422,13 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
 
     getVersionInfo: () => ipcRenderer.invoke('app:version-info'),
     listProviderRegistry: () => unwrap('provider-registry:list'),
+    listProviderAccounts: (providerId) => unwrap('provider-account:list', providerId),
+    switchProviderAccount: (providerId, accountId) =>
+      unwrap('provider-account:switch', providerId, accountId),
+    removeProviderAccount: (providerId, accountId) =>
+      unwrap('provider-account:remove', providerId, accountId),
+    setProviderAccountsPerSession: (providerId, enabled) =>
+      unwrap('provider-account:set-per-session', providerId, enabled),
     listSharedProviders: () => unwrap('shared-provider:list'),
     getSharedProviderStatuses: () => unwrap('shared-provider:statuses'),
     listSharedProviderModels: (id) => unwrap('shared-provider:models', id),

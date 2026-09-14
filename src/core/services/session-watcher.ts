@@ -4,6 +4,7 @@ import * as os from 'os'
 import { emitEvent, syncCore } from './sync-host'
 import { loadSessionHistory } from './session-history'
 import { logger } from './logger'
+import { getSessionMeta } from './db'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 
@@ -48,6 +49,9 @@ export function watchSession(
   projectKey: string,
   cwd?: string
 ): void {
+  const engineId = getSessionMeta(sessionId)?.engineId
+  if (engineId && engineId !== 'claude')
+    throw new Error('Transcript file watching is supported only for Claude sessions')
   // Already watching this routingId
   if (watchers.has(routingId)) return
 

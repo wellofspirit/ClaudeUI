@@ -26,6 +26,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, act, within } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { ProviderList } from '../ProviderList'
+import { useSessionStore } from '../../../stores/session-store'
 import type {
   ProviderEntry,
   ProviderRegistrySnapshot
@@ -324,6 +325,46 @@ describe('the list', () => {
       'connected'
     )
     expect(screen.queryByTestId('VendorOAuthFlow')).not.toBeInTheDocument()
+  })
+
+  it('keeps the sign-in control once accounts exist, as "Add another account" (ADR-068 §2)', async () => {
+    // The Manage sheet's "+ Add account" hands over to THIS row. Hiding the flow
+    // the moment the first account lands made adding a second one impossible:
+    // one account already makes the row `connected`.
+    snapshot = {
+      ...snapshot,
+      entries: [
+        {
+          ...chatgptRow,
+          credential: 'connected' as const,
+          accounts: {
+            activeId: 'acc-1',
+            perSession: false,
+            list: [{ id: 'acc-1', email: 'daniel@example.com' }, { id: 'acc-2' }]
+          }
+        },
+        piXai
+      ]
+    }
+    await openAddSheet()
+    const row = screen
+      .getAllByTestId('ProviderAddSheet.subscription')
+      .find((el) => el.dataset.id === 'chatgpt')!
+    // Still connected, and the chip counts what is already there.
+    expect(within(row).getByTestId('ProviderAddSheet.credential')).toHaveAttribute(
+      'data-id',
+      'connected'
+    )
+    expect(within(row).getByTestId('ProviderAddSheet.credential')).toHaveTextContent('2 accounts')
+    // ADR-068 §3: a button that opens the ONE dialog, never a flow of its own.
+    expect(screen.queryByTestId('VendorOAuthFlow')).not.toBeInTheDocument()
+    const button = screen.getByTestId('ProviderAddSheet.chatgptSignIn')
+    expect(button).toHaveTextContent('Add another account')
+    fireEvent.click(button)
+    expect(useSessionStore.getState().signInDialog).toEqual({
+      providerId: 'chatgpt',
+      mode: 'add'
+    })
   })
 })
 

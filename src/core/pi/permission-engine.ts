@@ -427,6 +427,31 @@ function resolveAbsoluteMatchPath(rawPath: string, cwd: string | undefined): str
   return normalizeAbsolute(cwd ? toAbsolutePath(rawPath, cwd) : rawPath)
 }
 
+const MCP_RULE_PREFIX = 'mcp__'
+
+/**
+ * Claude's MCP rule vocabulary, the one tier of the ladder whose rules are not
+ * `Tool(specifier)` at all: `mcp__<server>` names every tool on one server and
+ * `mcp__<server>__<tool>` names one tool, and neither takes a specifier. The
+ * rule string IS the tool name the engine is asked about, so these are matched
+ * against the NAME rather than through {@link CLAUDE_TOOL_TO_KIND} (which lists
+ * only the seven tools with a pi analogue, and so made every `mcp__…` rule a
+ * user wrote inert in every tier).
+ *
+ * Codex gates its MCP tool approvals through this ladder under exactly these
+ * names (ADR-067 / `codex/mcp-elicitation.ts`), including the server-only name
+ * the gate falls back to when the elicitation does not name a tool; pi's own
+ * `mcp__*` tool calls now honour the same rules, which they never did before.
+ */
+function mcpRuleMatches(parsed: { tool: string; specifier?: string }, toolName: string): boolean {
+  // `Tool()` / `Tool(*)` already collapsed to a bare rule in parseClaudeRule; a
+  // rule that still carries a specifier is asking for something Claude's MCP
+  // syntax cannot express, and inventing a meaning for it here would either
+  // over- or under-grant. It matches nothing, exactly as it did before.
+  if (parsed.specifier !== undefined) return false
+  return toolName === parsed.tool || toolName.startsWith(`${parsed.tool}__`)
+}
+
 /**
  * Does a single Claude rule string match this pi tool_call? Bare tool rules
  * (no specifier) match unconditionally for the mapped kind. Bash specifiers
@@ -446,11 +471,13 @@ function resolveAbsoluteMatchPath(rawPath: string, cwd: string | undefined): str
 function ruleMatchesTool(
   rule: string,
   kind: ToolKind,
+  toolName: string,
   input: Record<string, unknown>,
   cwd: string | undefined
 ): boolean {
   const parsed = parseClaudeRule(rule)
   if (!parsed) return false
+  if (parsed.tool.startsWith(MCP_RULE_PREFIX)) return mcpRuleMatches(parsed, toolName)
   const mappedKind = CLAUDE_TOOL_TO_KIND[parsed.tool]
   if (!mappedKind || mappedKind !== kind) return false
 
@@ -882,7 +909,7 @@ export function decideWithSource(
 ): PermissionVerdict {
   const kind = piToolKind(toolName)
   const match = (rules: readonly string[]): string | undefined =>
-    rules.find((r) => ruleMatchesTool(r, kind, input, ctx.cwd))
+    rules.find((r) => ruleMatchesTool(r, kind, toolName, input, ctx.cwd))
 
   const denyRule = match(ctx.rules.deny)
   if (denyRule !== undefined) return { decision: 'deny', source: 'deny-rule', rule: denyRule }
