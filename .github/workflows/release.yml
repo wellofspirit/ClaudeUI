@@ -134,6 +134,19 @@ jobs:
           path: .cache/claude-cli
           key: ${{ runner.os }}-claude-cli-src-${{ steps.cli-version.outputs.version }}
 
+      - name: Read codex CLI version
+        id: codex-version
+        shell: bash
+        run: echo "version=$(node -p "require('./package.json').codexCliVersion")" >> "$GITHUB_OUTPUT"
+
+      # No restore-keys: `cacheValid` rehashes every pinned payload, so a partial
+      # hit from another pin is a guaranteed re-download rather than a saving.
+      - name: Cache codex CLI binaries
+        uses: actions/cache@v6
+        with:
+          path: vendor/codex-cli
+          key: ${{ runner.os }}-${{ runner.arch }}-codex-cli-${{ steps.codex-version.outputs.version }}
+
       - name: Cache Electron binaries
         uses: actions/cache@v6
         with:
@@ -245,8 +258,10 @@ jobs:
   # are unnecessary here). The tarball is runnable
   # as shipped: the compiled executable resolves its app path to the directory
   # holding `out/web`, and every engine looks up `vendor/<engine>-cli` under
-  # that same root — so the linux opencode + pi binaries that `bun install`'s
-  # postinstall vendors on this runner ride along. `vendor/claude-cli` does NOT:
+  # that same root — so the linux opencode, pi and codex binaries that `bun
+  # install`'s postinstall vendors on this runner ride along (Codex additionally
+  # needs a system `bwrap` on the deployment box for its sandbox; see
+  # docs/architecture/codex.md). `vendor/claude-cli` does NOT:
   # rebundle-cli is a documented clean skip for ELF (bun's ELF standalone layout
   # is unimplemented), so there is no patched linux bun-claude and the Claude
   # engine is desktop-only for now — fail-closed rather than silently unpatched.
@@ -293,6 +308,19 @@ jobs:
           # restored onto the arm runner would be extracted as if native.
           key: ${{ runner.os }}-${{ runner.arch }}-claude-cli-src-${{ steps.cli-version.outputs.version }}
 
+      - name: Read codex CLI version
+        id: codex-version
+        shell: bash
+        run: echo "version=$(node -p "require('./package.json').codexCliVersion")" >> "$GITHUB_OUTPUT"
+
+      # No restore-keys: `cacheValid` rehashes every pinned payload, so a partial
+      # hit from another pin is a guaranteed re-download rather than a saving.
+      - name: Cache codex CLI binaries
+        uses: actions/cache@v6
+        with:
+          path: vendor/codex-cli
+          key: ${{ runner.os }}-${{ runner.arch }}-codex-cli-${{ steps.codex-version.outputs.version }}
+
       # postinstall downloads the Electron binary even though this job never
       # runs it; the os-only restore key hits ci.yml's ubuntu gates cache (the
       # store's files are arch-named, so cross-arch restore is additive).
@@ -331,6 +359,7 @@ jobs:
           mkdir "$STAGE/vendor"
           cp -r vendor/opencode-cli "$STAGE/vendor/opencode-cli"
           cp -r vendor/pi-cli "$STAGE/vendor/pi-cli"
+          cp -r vendor/codex-cli "$STAGE/vendor/codex-cli"
           tar -czf "$STAGE.tar.gz" "$STAGE"
 
       - name: Upload artifact
@@ -358,8 +387,10 @@ jobs:
           name: ClaudeUI ${{ needs.version.outputs.tag }}
           body: |
             The `claudeui-server-*-linux-{x64,arm64}.tar.gz` artifacts are the headless
-            server. Each ships with the opencode and pi engines; the Claude Code engine is
-            desktop-only for now (no patched linux binary exists yet).
+            server. Each ships with the opencode, pi and Codex engines; the Claude Code
+            engine is desktop-only for now (no patched linux binary exists yet).
+            Codex's sandbox needs a system `bwrap` — install your distro's
+            `bubblewrap` package, or sandboxed Codex commands fail.
 
             ## Changes
 

@@ -37,7 +37,7 @@ spawnPrepRegistry.register('pi', piSpawnPrep)
 engineRegistry.register('codex', (routingId, win, cwd, opts) => {
   if (!codexBinaryAvailable())
     throw new Error(
-      'Codex is not installed for this platform; run ensure-codex on a supported host (macOS arm64, Windows x64)'
+      'Codex is not installed for this platform; run ensure-codex on a supported host (macOS arm64, Windows x64, Linux x64, Linux arm64)'
     )
   // The composition root for ADR-068 §1: every session ClaudeUI starts runs as
   // the vault's ACTIVE ChatGPT account. One hook per session — it remembers

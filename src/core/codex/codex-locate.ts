@@ -8,13 +8,49 @@ import { getAppPath } from '../host'
  * `scripts/codex-digests.json#hosts` — a test asserts the two stay in parity, and
  * that manifest is the place a new host is added first.
  */
-export const CODEX_SUPPORTED_HOSTS: ReadonlySet<string> = new Set(['darwin-arm64', 'win32-x64'])
+export const CODEX_SUPPORTED_HOSTS: ReadonlySet<string> = new Set([
+  'darwin-arm64',
+  'win32-x64',
+  'linux-x64',
+  'linux-arm64'
+])
 
 export function codexHostSupported(
   platform: string = process.platform,
   arch: string = process.arch
 ): boolean {
   return CODEX_SUPPORTED_HOSTS.has(`${platform}-${arch}`)
+}
+
+/**
+ * The Linux sandbox is bubblewrap. Codex prefers a system `bwrap` on PATH
+ * (`codex-rs/sandboxing/src/bwrap.rs::find_system_bwrap_in_path`, a `which`-style
+ * walk), then one beside its own executable, and with neither it panics
+ * `bubblewrap is unavailable` on the FIRST sandboxed command. The release does
+ * publish a `bwrap` asset, but by decision (M5-L, 2026-09-14) ClaudeUI treats it
+ * as a distro package rather than a manifest member, so the only thing we owe the
+ * operator is to say so at boot rather than at the first failed command.
+ *
+ * Pure by construction — platform, environment and the "is this an executable
+ * file" question are all arguments — so the whole rule is unit-testable without
+ * touching a filesystem. `null` means nothing to say.
+ */
+export function codexLinuxSandboxWarning(
+  platform: string,
+  env: NodeJS.ProcessEnv,
+  isExecutableFile: (path: string) => boolean
+): string | null {
+  if (platform !== 'linux') return null
+  const entries = (env.PATH ?? '').split(':').filter((entry) => entry !== '')
+  // A PATH entry is a directory to look INSIDE, exactly as `which` does; an entry
+  // that is itself named `bwrap` is not the executable.
+  if (entries.some((entry) => isExecutableFile(join(entry, 'bwrap')))) return null
+  return (
+    'Codex sandboxed commands need bubblewrap: no `bwrap` on PATH. Install the ' +
+    'bubblewrap package (apt, dnf, apk or pacman) and restart; until then every ' +
+    'Codex command that runs inside the sandbox fails, while commands you approve ' +
+    'still run.'
+  )
 }
 
 /**

@@ -18,18 +18,21 @@ latest. `scripts/codex-digests.json` pins the release archives, extracted binari
 source commit and Apache-2.0 license. It is a per-host map: `hosts.<platform>-<arch>`
 (Node's own names) carries the install names and digests for one host, and
 `hostManifest()` flattens the entry into the record written to `version.json`.
-macOS arm64 and Windows x64 are pinned. Windows uses the `.exe.tar.gz` assets —
-single-member ustar archives the same extractor handles — and installs `.exe`
-names, which is what Codex looks for when it resolves its code-mode host. Linux
-and Windows arm64 are not pinned: release names and digests alone do not
-establish provisioning readiness, so acquisition skips there with one line.
+macOS arm64, Windows x64 and Linux x64/arm64 are pinned. Windows uses the
+`.exe.tar.gz` assets — single-member ustar archives the same extractor handles —
+and installs `.exe` names, which is what Codex looks for when it resolves its
+code-mode host; Linux uses the statically linked `-unknown-linux-musl` assets and
+installs the plain POSIX names. Windows arm64 is not pinned: release names and
+digests alone do not establish provisioning readiness, so acquisition skips there
+with one line.
 
 The release ships two assets per host that must be installed together:
 `codex-aarch64-apple-darwin.tar.gz` with
-`codex-code-mode-host-aarch64-apple-darwin.tar.gz` on macOS arm64, and
+`codex-code-mode-host-aarch64-apple-darwin.tar.gz` on macOS arm64,
 `codex-x86_64-pc-windows-msvc.exe.tar.gz` with
-`codex-code-mode-host-x86_64-pc-windows-msvc.exe.tar.gz` on Windows x64. Real
-catalog models are
+`codex-code-mode-host-x86_64-pc-windows-msvc.exe.tar.gz` on Windows x64, and
+`codex-{x86_64,aarch64}-unknown-linux-musl.tar.gz` with the matching
+`codex-code-mode-host-*` on Linux. Real catalog models are
 `tool_mode: code_mode_only` and run every tool through the separate
 `codex-code-mode-host` executable, which Codex resolves from the directory of its
 own binary (`install-context::code_mode_host_program_from_exe`; the `code_mode_host`
@@ -112,12 +115,22 @@ bun run test:unit src/core/codex
 CODEX_INTEGRATION=1 bun run test:integration src/integration/codex
 bun run typecheck
 bunx eslint scripts/ensure-codex.mjs scripts/generate-codex-protocol.mjs src/core/codex src/integration/codex
+# Linux x64/arm64, where no CI job runs the binary (see docs/architecture/codex.md):
+scripts/docker/codex-linux-verify.sh --arch x64
+scripts/docker/codex-linux-verify.sh --arch arm64
 ```
 
-The real-binary test is gated and macOS arm64 only. It uses the production client,
-copies the installed verified binary into a disposable directory and wraps test
-spawns with `sandbox-exec`. The outer profile blocks user-data reads and outbound
-network except the fixture's localhost port. HOME/CODEX_HOME are isolated, auth
+The real-binary tests are gated on `CODEX_INTEGRATION=1` plus a host the manifest
+covers. Four of them (`codex-injection`, `codex-mcp-override`,
+`codex-mcp-approval`, `codex-config-write`) share that gate through
+`src/integration/codex/integration-host.ts` and run on every reviewed host; the
+other eight remain macOS arm64 only, because their containment is `sandbox-exec`
+itself and two of them assert macOS's `/bin/zsh -lc` command wrapper. Each test
+uses the production client and copies the installed verified binary into a
+disposable directory. On macOS test spawns are wrapped with `sandbox-exec`, whose
+outer profile blocks user-data reads and outbound network except the fixture's
+localhost port; on Windows and Linux the child runs unwrapped and the isolation is
+the fixture's own replacement environment. HOME/CODEX_HOME are isolated, auth
 storage is file-based, and discovery/telemetry/update features are disabled. No
 login, refresh, real credentials or model service are used. The test asserts a
 dynamic result reaches the mock provider, owning-turn interrupt aborts its

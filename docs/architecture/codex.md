@@ -37,15 +37,60 @@ unchanged. Escaped process groups and PTY descendants are not solved by this
 foundation. Windows x64 runtime evidence as of 2026-09-13: acquisition, `codex.exe --version`, app-server
 spawn and initialize, `account/read` and catalog discovery through the settings pane, the real `execpolicy check`
 parser in the unit suite, `check-codex-protocol` (byte-identical generated types), and no orphaned process after the
-harness quit. A signed-in turn and the Windows sandbox path are not yet exercised; Linux runtime evidence is still required.
+harness quit. A signed-in turn and the Windows sandbox path are not yet exercised. Linux evidence is in the Linux section below.
 
-`scripts/ensure-codex.mjs` acquires the reviewed 0.154.0 binaries for every host in `scripts/codex-digests.json#hosts` — macOS arm64 and Windows x64, the latter installing `codex.exe` and `codex-code-mode-host.exe`; since `e5bf09b6` it runs from `postinstall` and from every packaging target in `scripts/build.mjs`, and `electron-builder.yml` ships `vendor/codex-cli` (both members) as `Resources/codex-cli`. On a host the manifest does not cover (Linux and Windows arm64 today) it skips with one line and exits 0, and the engine gates itself off. Generated
+`scripts/ensure-codex.mjs` acquires the reviewed 0.154.0 binaries for every host in `scripts/codex-digests.json#hosts` — macOS arm64, Windows x64 (installing `codex.exe` and `codex-code-mode-host.exe`) and Linux x64/arm64 (the statically linked musl assets); since `e5bf09b6` it runs from `postinstall` and from every packaging target in `scripts/build.mjs`, and `electron-builder.yml` ships `vendor/codex-cli` (both members) as `Resources/codex-cli`. On a host the manifest does not cover (Windows arm64 today) it skips with one line and exits 0, and the engine gates itself off. Generated
 initialize types are exact CLI output; envelopes are derived from the pinned
 CLI's JSON schema because its TypeScript generator omits them. M1b adds typed
 method maps over this generic transport without claiming runtime payload-schema validation.
 [Regeneration and tests](../protocol-codex/README.md) describe the local fixture
 and the remaining platform and release gates. M1a itself changed no UI or other
 engine behavior.
+
+### Linux
+
+Linux x64 and arm64 are reviewed hosts: `scripts/codex-digests.json#hosts` pins the
+statically linked `-unknown-linux-musl` `codex` and `codex-code-mode-host`,
+`CODEX_SUPPORTED_HOSTS` offers the engine, and CI caches `vendor/codex-cli` per
+`runner.arch`. The Linux ARTIFACT is the headless server tarball, not a desktop
+build: `claudeui-server-*-linux-{x64,arm64}.tar.gz` now carries
+`vendor/codex-cli` beside `vendor/opencode-cli` and `vendor/pi-cli`, which
+resolves because the compiled executable's app path is the directory holding
+`out/web` and `locateCodexBinary()` reads `<appPath>/vendor/codex-cli/codex`. No
+Linux desktop build ships, so `electron-builder.yml` needed no change.
+
+**bubblewrap is a system dependency, deliberately not a manifest member.** Codex's
+Linux sandbox is `bwrap`: it prefers a system one on `PATH`
+(`codex-rs/sandboxing/src/bwrap.rs::find_system_bwrap_in_path`, a `which`-style
+walk), then one beside its own executable, and with neither it panics
+`bubblewrap is unavailable` on the first sandboxed command
+(`linux-sandbox/src/launcher.rs`). Landlock survives only behind the hidden
+`--use-legacy-landlock` flag. Install it from the distro: `apt install bubblewrap`
+(Debian/Ubuntu), `dnf install bubblewrap` (Fedora/RHEL), `apk add bubblewrap`
+(Alpine), `pacman -S bubblewrap` (Arch). `claudeui-server` checks for it once at
+boot — `codexLinuxSandboxWarning()` in `codex-locate.ts`, called only when a Codex
+install is actually present — and logs one `warn` naming the package when it is
+missing; commands the operator approves still run, only sandboxed ones fail.
+
+Two environments break `bwrap` even when it is installed, both because it needs an
+unprivileged user namespace: **Ubuntu 24.04+**, whose AppArmor restriction on
+unprivileged user namespaces produces `No permissions to create a new namespace`,
+and **Docker**, whose default seccomp profile blocks the same call (the verify
+script below runs with `seccomp=unconfined`, `apparmor=unconfined` and
+`SYS_ADMIN` for exactly that reason). Neither is a ClaudeUI bug and neither has a
+workaround in our code.
+
+Linux x64/arm64 runtime evidence as of 2026-09-14, in Debian bookworm containers on both arches (x64 under Rosetta): acquisition downloads and digest-verifies both members and reports a cache hit on rerun; `CLAUDEUI_CODEX_FAKE_HOST=linux/ia32` still skips; `check-codex-protocol` matches the vendored binary (generated types byte-identical to the macOS output); `locateCodexBinary()` resolves the installed pair at the manifest digests; `build:web` + `build:server:compile` produce a booting executable, and the release job's tarball layout resolves `vendor/codex-cli`; the four shared Codex integration suites (15 tests) pass against the real binary on both arches; the boot warning fires only when `bwrap` is off `PATH`. A signed-in turn and a sandboxed command driven through a real session are NOT yet exercised on Linux. The other eight integration suites stay macOS-only: an exploratory arm64 run with their containment made conditional passed `codex-app-server`, `codex-lifecycle`, `codex-delete`, `codex-dispatch-target` and `codex-interrupted-tool`, but `codex-policy-probe`, `codex-auto-review-probe` and `codex-rules-sync` assert macOS specifics (the `/bin/zsh -lc` wrapper — Linux uses `/bin/bash -lc` — and seatbelt nesting), so nothing was switched.
+
+Verification runs in a container, because no CI job hosts a Linux desktop:
+`scripts/docker/codex-linux-verify.sh --arch x64|arm64` builds
+`scripts/docker/codex-linux.Dockerfile` (Node 24.15.0 on bookworm, pinned bun,
+bubblewrap), bind-mounts the checkout READ-ONLY, copies it to `/work` by
+`git ls-files --cached --others --exclude-standard`, installs, and runs the
+typecheck, `check-codex-protocol` and the Codex integration suites with
+`CODEX_INTEGRATION=1`. `--no-bwrap` builds the same image without bubblewrap to
+watch the boot warning fire. The host's `node_modules` and `vendor` are never
+touched.
 
 ## Process and identity ownership
 

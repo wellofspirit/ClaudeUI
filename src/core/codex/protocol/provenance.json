@@ -3,7 +3,9 @@
   "sourceCommit": "6b9826e3aa83b1a5947db50f4332cb9c65f1b340",
   "codexBinaries": {
     "darwin-arm64": "4f85982624b3898c8991cb80c0981b2aa71070e3537046c9a95950318a95afcc",
-    "win32-x64": "be96b992178b1e467c225800da0d65f2c86d5eba1ef0b14632f65db381cbdfde"
+    "win32-x64": "be96b992178b1e467c225800da0d65f2c86d5eba1ef0b14632f65db381cbdfde",
+    "linux-x64": "3188814c35471432d4123203e0eb38e5bddc60226e3d7ddf0e59e649ea140022",
+    "linux-arm64": "9b7c1c7abdc26fc3c4f47c77656a8e9121def5483dbae830ef1ee561758448a9"
   },
   "command": "app-server generate-ts --experimental",
   "envelopeCommand": "app-server generate-json-schema --experimental",

@@ -16,6 +16,7 @@ import { CodexClient, CodexInjectionError } from '../../core/codex/CodexClient'
 import { codexAuthHook, type CodexAuthSource } from '../../core/codex/codex-auth-hook'
 import { setHostPaths } from '../../core/host'
 import provenance from '../../core/codex/protocol/provenance.json'
+import { codexIntegrationEnabled } from './integration-host'
 
 /**
  * Slice 2a guard 8 — ChatGPT token INJECTION against the pinned binary
@@ -36,12 +37,12 @@ import provenance from '../../core/codex/protocol/provenance.json'
  */
 /**
  * macOS wraps the binary in a seatbelt profile that allows only the fixture
- * port. Windows has no equivalent, so there the child runs unwrapped and the
- * isolation is the fixture's own: a replacement environment (no real
- * `USERPROFILE`, a temp `CODEX_HOME`), a config whose only provider is the
- * localhost fixture, and every network feature off. The Windows x64 binary is
- * pinned and shipped (`scripts/codex-digests.json`), so this is the one Codex
- * integration that runs on both supported hosts.
+ * port. Windows and Linux have no equivalent we use here, so there the child runs
+ * unwrapped and the isolation is the fixture's own: a replacement environment (no
+ * real `USERPROFILE`/`HOME`, a temp `CODEX_HOME`), a config whose only provider is
+ * the localhost fixture, and every network feature off. Windows x64 and Linux
+ * x64/arm64 are pinned and shipped (`scripts/codex-digests.json`), so this suite
+ * runs on every reviewed host (`integration-host.ts`).
  */
 const containment = vi.hoisted(() => ({ profile: '', pids: [] as number[] }))
 vi.mock('node:child_process', async (importOriginal) => {
@@ -63,10 +64,7 @@ vi.mock('node:child_process', async (importOriginal) => {
   }
 })
 
-const enabled =
-  process.env.CODEX_INTEGRATION === '1' &&
-  ((process.platform === 'darwin' && process.arch === 'arm64') ||
-    (process.platform === 'win32' && process.arch === 'x64'))
+const enabled = codexIntegrationEnabled
 
 const WORKSPACE = 'ws-fixture-0001'
 const EMAIL = 'fixture-owner@example.test'

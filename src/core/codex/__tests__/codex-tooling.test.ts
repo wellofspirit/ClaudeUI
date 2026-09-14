@@ -93,19 +93,21 @@ it('rejects truncation, trailing members, oversized payloads, corrupt headers an
   ).toThrow()
 })
 it('rejects unsupported platforms instead of selecting a likely asset', () => {
-  expect(() => assertPin('linux', 'arm64')).toThrow()
-  expect(() => assertPin('linux', 'x64')).toThrow()
+  expect(() => assertPin('linux', 'ia32')).toThrow()
   expect(() => assertPin('win32', 'arm64')).toThrow()
   expect(() => assertPin('darwin', 'x64')).toThrow()
   expect(() => assertPin('darwin', 'arm64')).not.toThrow()
   expect(() => assertPin('win32', 'x64')).not.toThrow()
+  expect(() => assertPin('linux', 'x64')).not.toThrow()
+  expect(() => assertPin('linux', 'arm64')).not.toThrow()
 })
 it('separates the host check (a skip) from the pin check (a failure everywhere)', () => {
   expect(hostSupported('darwin', 'arm64')).toBe(true)
   expect(hostSupported('win32', 'x64')).toBe(true)
+  expect(hostSupported('linux', 'x64')).toBe(true)
+  expect(hostSupported('linux', 'arm64')).toBe(true)
   expect(hostSupported('darwin', 'x64')).toBe(false)
-  expect(hostSupported('linux', 'arm64')).toBe(false)
-  expect(hostSupported('linux', 'x64')).toBe(false)
+  expect(hostSupported('linux', 'ia32')).toBe(false)
   expect(hostSupported('win32', 'arm64')).toBe(false)
   // The pinned version is reviewed in-tree, so this passes on every host; only a
   // package.json/manifest disagreement makes it throw.
@@ -124,14 +126,23 @@ it('treats malformed/missing metadata and modified payload as cache misses', () 
 // per host, and Windows carries the `.exe` suffix in both.
 const INSTALL_NAMES: Record<string, string[]> = {
   'darwin-arm64': ['codex', 'codex-code-mode-host'],
-  'win32-x64': ['codex.exe', 'codex-code-mode-host.exe']
+  'win32-x64': ['codex.exe', 'codex-code-mode-host.exe'],
+  'linux-x64': ['codex', 'codex-code-mode-host'],
+  'linux-arm64': ['codex', 'codex-code-mode-host']
 }
 const MEMBER_PATTERNS: Record<string, RegExp> = {
   'darwin-arm64': /^codex(-code-mode-host)?-aarch64-apple-darwin$/,
-  'win32-x64': /^codex(-code-mode-host)?-x86_64-pc-windows-msvc\.exe$/
+  'win32-x64': /^codex(-code-mode-host)?-x86_64-pc-windows-msvc\.exe$/,
+  'linux-x64': /^codex(-code-mode-host)?-x86_64-unknown-linux-musl$/,
+  'linux-arm64': /^codex(-code-mode-host)?-aarch64-unknown-linux-musl$/
 }
 it('pins both release assets a code-mode-only catalog needs, for every reviewed host', () => {
-  expect(Object.keys(manifest.hosts)).toStrictEqual(['darwin-arm64', 'win32-x64'])
+  expect(Object.keys(manifest.hosts)).toStrictEqual([
+    'darwin-arm64',
+    'win32-x64',
+    'linux-x64',
+    'linux-arm64'
+  ])
   for (const key of Object.keys(manifest.hosts)) {
     const [platform, arch] = key.split('-')
     const host = hostManifest(platform, arch)
@@ -162,7 +173,7 @@ it('pins both release assets a code-mode-only catalog needs, for every reviewed 
       })
     }
   }
-  expect(hostManifest('linux', 'x64')).toBeNull()
+  expect(hostManifest('linux', 'ia32')).toBeNull()
 })
 // The DRY seam: acquisition installs a host only if the manifest names it, and the
 // runtime gate offers the engine only if this set names it. They must agree.
@@ -171,11 +182,13 @@ it('keeps the runtime host gate in parity with the acquisition manifest', () => 
 })
 // Provenance must name every host's `codex`, not just the one that ran the
 // generator: the output is a pure function of the source commit, so `--check` has
-// to reach the same verdict on macOS and on Windows.
+// to reach the same verdict on every reviewed host.
 it('records the codex payload digest of every reviewed host in provenance', () => {
   expect(codexBinaryDigests()).toStrictEqual({
     'darwin-arm64': manifest.hosts['darwin-arm64'].binaries.codex.binarySha256,
-    'win32-x64': manifest.hosts['win32-x64'].binaries['codex.exe'].binarySha256
+    'win32-x64': manifest.hosts['win32-x64'].binaries['codex.exe'].binarySha256,
+    'linux-x64': manifest.hosts['linux-x64'].binaries.codex.binarySha256,
+    'linux-arm64': manifest.hosts['linux-arm64'].binaries.codex.binarySha256
   })
   // The checked-in file is what a regeneration would emit for this pin.
   expect(provenance.codexBinaries).toStrictEqual(codexBinaryDigests())

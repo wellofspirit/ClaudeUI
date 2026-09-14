@@ -48,6 +48,7 @@
 // Electron's main process never hit this because it is not bundled this way.
 import 'reflect-metadata'
 import { codexAuthProvider } from '../core/auth/CodexAuthProvider'
+import { codexBinaryAvailable, codexLinuxSandboxWarning } from '../core/codex/codex-locate'
 import { requireServerEngineAuth } from './engine-auth'
 import * as fs from 'fs'
 import * as path from 'path'
@@ -341,6 +342,27 @@ async function main(): Promise<void> {
     'server',
     `claudeui-server listening on port ${status.port} (sqlite: ${isBun() ? 'bun:sqlite' : 'node:sqlite'})`
   )
+
+  // Linux ships Codex but not its sandbox: `bwrap` is a distro package, and
+  // without it the FIRST sandboxed command panics with no explanation an operator
+  // could act on. Said once here, where a headless box's only UI is its log, and
+  // only when Codex is actually installed — on every other host, and on a Linux
+  // box with bubblewrap present, this is silent. The desktop does not call it: no
+  // Linux desktop build ships.
+  // `statSync`, not `lstatSync`: Codex's own lookup follows symlinks (`which`
+  // semantics), and distros that install `bwrap` as a link would otherwise be
+  // told it is missing.
+  const sandboxWarning = codexBinaryAvailable()
+    ? codexLinuxSandboxWarning(process.platform, process.env, (candidate) => {
+        try {
+          const entry = fs.statSync(candidate)
+          return entry.isFile() && (entry.mode & 0o111) !== 0
+        } catch {
+          return false
+        }
+      })
+    : null
+  if (sandboxWarning !== null) logger.warn('server', sandboxWarning)
 
   // Graceful shutdown. `stop()` is fire-and-forget by design (see host-anchor),
   // so the exit is not gated on peers that may never close their sockets.

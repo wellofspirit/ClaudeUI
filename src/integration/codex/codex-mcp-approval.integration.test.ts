@@ -17,6 +17,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { CodexClient } from '../../core/codex/CodexClient'
 import { setHostPaths } from '../../core/host'
 import provenance from '../../core/codex/protocol/provenance.json'
+import { codexIntegrationEnabled } from './integration-host'
 import type { JsonValue } from '../../core/codex/protocol/serde_json/JsonValue'
 import {
   MCP_ELICITATION_ACCEPT,
@@ -49,10 +50,10 @@ import recorded from '../../core/codex/__tests__/fixtures/mcp-tool-approval-elic
 /**
  * macOS wraps the binary in a seatbelt profile that allows only the fixture
  * port; the stub's marker file lives under the profile's one writable subpath.
- * Windows has no equivalent, so there the child runs unwrapped and the isolation
- * is the fixture's own: a replacement environment (no real `USERPROFILE`, a temp
- * `CODEX_HOME`), a config whose only provider is the localhost fixture, and
- * every network feature off.
+ * Windows and Linux have no equivalent we use here, so there the child runs
+ * unwrapped and the isolation is the fixture's own: a replacement environment (no
+ * real `USERPROFILE`/`HOME`, a temp `CODEX_HOME`), a config whose only provider is
+ * the localhost fixture, and every network feature off.
  */
 const containment = vi.hoisted(() => ({ profile: '', pids: [] as number[] }))
 vi.mock('node:child_process', async (importOriginal) => {
@@ -74,10 +75,7 @@ vi.mock('node:child_process', async (importOriginal) => {
   }
 })
 
-const enabled =
-  process.env.CODEX_INTEGRATION === '1' &&
-  ((process.platform === 'darwin' && process.arch === 'arm64') ||
-    (process.platform === 'win32' && process.arch === 'x64'))
+const enabled = codexIntegrationEnabled
 
 const SERVER_NAME = 'verify-stub'
 const TOOL_NAME = 'ping'

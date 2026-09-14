@@ -32,9 +32,14 @@ for (const host of Object.values(manifest.hosts)) {
 const MAX_ARCHIVE = 128 * 1024 * 1024
 // Windows x64 `codex.exe` unpacks to 298 MB, so the cap is well above the 256 MB
 // that fits macOS arm64; the archives themselves stay under MAX_ARCHIVE (99.5 MB
-// is the largest pinned one).
+// is the largest pinned one, the linux-x64 `codex`).
 const MAX_PAYLOAD = 512 * 1024 * 1024
-const HOST_LABELS = { 'darwin-arm64': 'macOS arm64', 'win32-x64': 'Windows x64' }
+const HOST_LABELS = {
+  'darwin-arm64': 'macOS arm64',
+  'win32-x64': 'Windows x64',
+  'linux-x64': 'Linux x64',
+  'linux-arm64': 'Linux arm64'
+}
 const hostLabel = (key) => HOST_LABELS[key] ?? key
 const supportedHostLabels = () => Object.keys(manifest.hosts).map(hostLabel).join(', ')
 

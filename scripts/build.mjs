@@ -115,8 +115,9 @@ const ensurePi = (update) => [
 
 // ensure-codex.mjs rejects unknown flags and prints a single result line either
 // way, so it takes no --quiet. A host without a reviewed digest manifest (today:
-// everything but macOS arm64 and Windows x64) exits 0 with a skip line; real
-// failures still exit non-zero and stop the build like any other step.
+// everything but macOS arm64, Windows x64 and Linux x64/arm64) exits 0 with a
+// skip line; real failures still exit non-zero and stop the build like any other
+// step.
 const ensureCodex = (update) => [
   {
     label: 'ensure-codex',
