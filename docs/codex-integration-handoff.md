@@ -17,8 +17,8 @@ a54776e7 feat(auth): Slice 3 — SignInDialog for Anthropic + ChatGPT, one sessi
 c3c32850 feat(codex): Slice 4b — MCP tool approvals via mcpServer/elicitation/request through the shared permission engine
 463b060b docs(codex): handoff for the ADR-068 arc
 3be8e0b2 feat(codex): Slice 5a — config.toml through the app-server; the Engines › Codex page
-<next>   feat(codex): Slice 5b — Codex on Default models, Dispatch, the judge and Permissions; engines/codex.json defaults
-<next>   docs(adr): ADR-068 Implemented, as built
+7e9c05a5 feat(codex): Slice 5b — Codex on Default models, Dispatch, the judge and Permissions; engines/codex.json defaults
+60656d54 docs(adr): ADR-068 Implemented — as-built section for the eight landed slices
 ```
 
 Every one of these was reviewed line by line by the main model, gated (typecheck, lint, full `bun run test`, `CODEX_INTEGRATION=1 bun run test:integration`, `check-codex-protocol` where the protocol changed), and driven in the real Electron app before commit. Live evidence that exists: a real signed-in Codex turn under an injected vault token (the first on Windows), the account picker pinning a session to a second account on a live process, the sign-in dialog opened from the bad-token discovery banner, the real app-server spawning a `.mcp.json` stub and the model calling its tool after the approval card was allowed.
