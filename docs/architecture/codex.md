@@ -59,6 +59,13 @@ resolves because the compiled executable's app path is the directory holding
 `out/web` and `locateCodexBinary()` reads `<appPath>/vendor/codex-cli/codex`. No
 Linux desktop build ships, so `electron-builder.yml` needed no change.
 
+Linux is no longer the only headless host. Since 2026-09-14 the desktop `build`
+matrix also stages a server archive — `claudeui-server-*-mac-arm64.zip` and
+`claudeui-server-*-win-x64.zip`, with `vendor/claude-cli` alongside the other
+three engines (ADR-061's 2026-09-14 amendment). Codex behaves identically there:
+same locator, same app path. Only the sandbox differs, and `bwrap` is a Linux
+concern alone — the note below applies to the tarballs, not the zips.
+
 **bubblewrap is a system dependency, deliberately not a manifest member.** Codex's
 Linux sandbox is `bwrap`: it prefers a system one on `PATH`
 (`codex-rs/sandboxing/src/bwrap.rs::find_system_bwrap_in_path`, a `which`-style

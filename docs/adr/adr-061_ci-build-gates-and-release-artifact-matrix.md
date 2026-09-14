@@ -1,7 +1,9 @@
 # ADR-061 — CI build gates and the release artifact matrix
 
 **Status:** Accepted (2026-08-25) — implemented at `452318d` (gates + x64 artifact) and
-`0e96475` (arm64 matrix) on `pre-release`.
+`0e96475` (arm64 matrix) on `pre-release`. **Amended 2026-09-14** — mac-arm64 and
+win-x64 `claudeui-server` zips; see the amendment section, which supersedes the
+artifact matrix.
 **Relates to:** ADR-006 (the rebundled bun-claude binary — the mechanism whose linux gap
 this ADR takes a position on), ADR-058 (the `claudeui-server` artifacts this ADR ships),
 ADR-056 (the headless admission model those artifacts serve).
@@ -116,6 +118,68 @@ never needs the flag: the ubuntu runner compiles its own platform.
 | win-x64     | released zip       | — (build from source)                |
 | linux-x64   | —                  | released tar.gz (opencode + pi)      |
 | linux-arm64 | —                  | released tar.gz (opencode + pi)      |
+
+Superseded by the 2026-09-14 amendment below; kept as the state this ADR decided.
+
+## Amendment — 2026-09-14: server zips for mac-arm64 and win-x64
+
+Two things changed after this ADR was written. Codex joined the engine set and the
+linux tarballs gained `vendor/codex-cli` (`e86e758a`). And the "no mac/windows server
+executables" line under _Deliberately not done_ — "each is one matrix entry away when
+wanted" — came due: the useful headless host is whatever box the operator already
+has, which is often a Mac or a Windows machine, and building the server from source
+there means reproducing `ensure-cli`/`ensure-opencode`/`ensure-pi`/`ensure-codex`
+by hand.
+
+**Ruling (Daniel, 2026-09-14).** macOS ships one server artifact, arm64 only, as a
+zip. Windows ships one, x64 only, as a zip. Linux keeps its two `tar.gz` legs
+unchanged. No ARM Windows, no x64 mac, no code-signing of the server binary.
+
+The two new legs are **steps appended to the existing desktop `build` matrix job**,
+not a second matrix. By the time they run, that job has already installed
+dependencies (whose postinstall vendored all four engines), built `out/web`, and
+packaged and uploaded the desktop zip — so a server artifact costs one host-native
+`build:server:compile` (which carries `verify:sqlite`), a stage directory and an
+archive, with no extra runner, no extra checkout and no extra `bun install`. The
+matrix entries gained a `server_name` so the archive name lives in one place.
+
+`zip`/`Compress-Archive` rather than `tar.gz` because those are the tools these two
+hosts already use for the desktop artifact. On mac the executable bit rides in the
+zip entry's unix mode, which `unzip` and Finder restore and Python's `zipfile` drops
+— the release notes say so. On Windows there is no executable bit to lose.
+
+**The Claude engine ships in these two, and only these two.** §3 above stands for the
+linux tarballs exactly as written — no linux `bun-claude` can exist yet — but it was
+never a statement about mac or windows: `rebundle-cli.mjs` produces a patched
+`bun-claude[.exe]` on both, which is why the desktop app has a Claude engine at all.
+It resolves from the staged layout for the same reason every other engine does:
+`resolveAppPath()` (`src/server/main.ts`) settles a compiled executable on the
+directory holding `out/web` — the stage root — and `locateBunClaude()`
+(`src/core/sdk/locate.ts`) reads `<appPath>/vendor/claude-cli/bun-claude[.exe]`
+whenever the app path is not an `app.asar` path, which a server's never is.
+
+What does NOT come with it is a Claude sign-in. The headless server wires
+`setHostAuth(null)` on purpose (`installHostAdapters()` in `src/server/main.ts`),
+so `accountState()` and `buildClaudeAccountRef()` return null — the multi-account
+machinery is desktop-only and `resolveActiveAccountId()` degrades to null, which is
+single-account mode. cli.js then reads the deployment box's own credential store,
+the same one `claude` itself uses. Nothing in the spawn path gates on the host auth
+seam, so the engine runs; only the account shown in session status is absent. The
+release notes state this rather than implying the zip is self-contained.
+
+### The artifact matrix, amended
+
+| Platform    | Desktop (Electron) | Headless (`claudeui-server`)                               |
+| ----------- | ------------------ | ---------------------------------------------------------- |
+| mac-arm64   | released zip       | released zip (opencode + pi + Codex + Claude Code)         |
+| win-x64     | released zip       | released zip (opencode + pi + Codex + Claude Code)         |
+| linux-x64   | —                  | released tar.gz (opencode + pi + Codex; bubblewrap needed) |
+| linux-arm64 | —                  | released tar.gz (opencode + pi + Codex; bubblewrap needed) |
+
+Consequence, on top of those below: the mirrored-workflow tax grows again — five more
+steps in each of the two files, still kept in sync by hand. A YAML parse of both plus
+a diff proving the only divergence is the pre-existing release-note wording is the
+check that replaces a test here; there is no unit test for a workflow.
 
 ## Consequences
 

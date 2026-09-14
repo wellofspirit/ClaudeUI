@@ -77,6 +77,7 @@ jobs:
             platform: mac
             zip_name: ClaudeUI-${{ needs.version.outputs.version }}-mac-arm64.zip
             build_dir: dist/mac-arm64
+            server_name: claudeui-server-${{ needs.version.outputs.version }}-mac-arm64
           # Pinned to windows-2022: windows-latest migrated to Windows Server
           # 2025 which ships only Visual Studio 2026. node-gyp (11.x, bundled via
           # electron-builder install-app-deps) hard-codes its supported VS years
@@ -87,6 +88,7 @@ jobs:
             platform: win
             zip_name: ClaudeUI-${{ needs.version.outputs.version }}-win-x64.zip
             build_dir: dist/win-unpacked
+            server_name: claudeui-server-${{ needs.version.outputs.version }}-win-x64
 
     runs-on: ${{ matrix.os }}
 
@@ -253,6 +255,78 @@ jobs:
           name: ${{ matrix.zip_name }}
           path: ${{ matrix.zip_name }}
 
+      # The headless `claudeui-server` for THIS host, compiled from the same tree
+      # and the same `out/web` bundle the desktop package above already produced
+      # (`build:server:compile` only checks that bundle exists; `verify:sqlite`
+      # runs inside it). Host-native, no `--target`: bun cannot extract a foreign
+      # runtime from a Windows host (ADR-061 §4) and neither leg needs one.
+      #
+      # Unlike the linux legs below, these two DO carry `vendor/claude-cli`. The
+      # rebundled `bun-claude` exists on mac and windows (ADR-006), and
+      # `locateBunClaude()` reads `<appPath>/vendor/claude-cli/bun-claude[.exe]`
+      # off the very app path `resolveAppPath()` (src/server/main.ts) settles on
+      # for a compiled executable — the directory holding `out/web`, i.e. the
+      # stage root — so the staged layout is runnable as shipped, exactly like
+      # the other three engines. What the server does NOT carry is a Claude
+      # sign-in: `setHostAuth(null)` leaves that seam empty, so cli.js uses the
+      # deployment box's own credentials.
+      - name: Build server executable (macOS)
+        if: matrix.platform == 'mac'
+        run: |
+          bun run build:server:compile
+          ./dist/server-bin/claudeui-server --help > /dev/null
+
+      # zip, not tar.gz: it matches the desktop artifact for these hosts and is
+      # the same tool the desktop step uses. `-y` keeps symlinks as links, and
+      # the unix mode bits ride in the zip entries, so `unzip`/Finder restore the
+      # executable bit — Python's `zipfile` does not, which the release note says.
+      - name: Assemble server zip (macOS)
+        if: matrix.platform == 'mac'
+        run: |
+          STAGE="${{ matrix.server_name }}"
+          mkdir "$STAGE"
+          cp -r dist/server-bin/. "$STAGE/"
+          mkdir "$STAGE/vendor"
+          cp -r vendor/claude-cli "$STAGE/vendor/claude-cli"
+          cp -r vendor/opencode-cli "$STAGE/vendor/opencode-cli"
+          cp -r vendor/pi-cli "$STAGE/vendor/pi-cli"
+          cp -r vendor/codex-cli "$STAGE/vendor/codex-cli"
+          zip -r -y "$STAGE.zip" "$STAGE"
+
+      # pwsh does not abort on a non-zero NATIVE exit code, and only the last
+      # command's code reaches the runner — so each one is checked explicitly.
+      - name: Build server executable (Windows)
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          bun run build:server:compile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\dist\server-bin\claudeui-server.exe --help > $null
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # `Compress-Archive`, the same tool as the desktop windows step. Copying a
+      # directory onto a path that does not exist yet creates it as the copy, so
+      # the stage root needs no separate mkdir; the archive keeps that root
+      # folder, mirroring the linux tarballs.
+      - name: Assemble server zip (Windows)
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          $stage = "${{ matrix.server_name }}"
+          Copy-Item -Recurse -Path dist/server-bin -Destination $stage
+          New-Item -ItemType Directory -Path "$stage/vendor" | Out-Null
+          Copy-Item -Recurse -Path vendor/claude-cli -Destination "$stage/vendor/claude-cli"
+          Copy-Item -Recurse -Path vendor/opencode-cli -Destination "$stage/vendor/opencode-cli"
+          Copy-Item -Recurse -Path vendor/pi-cli -Destination "$stage/vendor/pi-cli"
+          Copy-Item -Recurse -Path vendor/codex-cli -Destination "$stage/vendor/codex-cli"
+          Compress-Archive -Path $stage -DestinationPath "$stage.zip"
+
+      - name: Upload server artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.server_name }}.zip
+          path: ${{ matrix.server_name }}.zip
+
   # Headless `claudeui-server` for linux x64 + arm64, each compiled host-natively
   # (arm64 hosted runners are free for public repos; bun cross-targets exist but
   # are unnecessary here). The tarball is runnable
@@ -264,7 +338,9 @@ jobs:
   # docs/architecture/codex.md). `vendor/claude-cli` does NOT:
   # rebundle-cli is a documented clean skip for ELF (bun's ELF standalone layout
   # is unimplemented), so there is no patched linux bun-claude and the Claude
-  # engine is desktop-only for now — fail-closed rather than silently unpatched.
+  # engine is missing from the LINUX artifact specifically — fail-closed rather
+  # than silently unpatched. The mac and windows server zips assembled in the
+  # `build` job above DO ship it, because those hosts can rebundle.
   server:
     name: Linux server build (${{ matrix.arch }})
     needs: version
@@ -386,11 +462,16 @@ jobs:
           tag_name: ${{ needs.version.outputs.tag }}
           name: ClaudeUI ${{ needs.version.outputs.tag }}
           body: |
-            The `claudeui-server-*-linux-{x64,arm64}.tar.gz` artifacts are the headless
-            server. Each ships with the opencode, pi and Codex engines; the Claude Code
-            engine is desktop-only for now (no patched linux binary exists yet).
-            Codex's sandbox needs a system `bwrap` — install your distro's
+            The `claudeui-server-*` artifacts are the headless server: linux x64 and
+            arm64 as `.tar.gz`, macOS arm64 and Windows x64 as `.zip`. All four ship the
+            opencode, pi and Codex engines. The mac and Windows zips also ship the Claude
+            Code engine — the patched `bun-claude` builds on those hosts, and no linux
+            one exists yet — and it signs in with whatever `claude` credentials already
+            exist on that machine; the server manages no Claude account of its own.
+            On linux, Codex's sandbox needs a system `bwrap` — install your distro's
             `bubblewrap` package, or sandboxed Codex commands fail.
+            Unpack the mac zip with `unzip` or Finder so the executable bits survive
+            (Python's `zipfile` drops them).
 
             ## Changes
 
