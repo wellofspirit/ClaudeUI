@@ -2,13 +2,13 @@
 
 ## Resume here (ADR-068 arc — 2026-09-14)
 
-**Start with `docs/adr/adr-068_chatgpt-identity-vault-owned-codex-injection.md` and `docs/codex-accounts-spec.md`.** The spec is the source of truth for this arc: every slice has a kickoff, and every landed slice has a "Landed …" paragraph recording the as-built deviations. Slices 1–7 are landed; ADR-068 is Implemented. Next: a push when Daniel asks, then the deferred items listed under "Open items". The older "Resume here" below is the pre-ADR-068 state and stays as history.
+**Start with `docs/adr/adr-068_chatgpt-identity-vault-owned-codex-injection.md` and `docs/codex-accounts-spec.md`.** The spec is the source of truth for this arc: every slice has a kickoff, and every landed slice has a "Landed …" paragraph recording the as-built deviations. Slices 1–7 are landed; ADR-068 is Implemented. PR #37 (`codex-integration → pre-release`) is open as of 2026-09-14; pushes to this branch carry standing authorization. Next: the merge checklist below, then the deferred items listed under "Open items". The older "Resume here" below is the pre-ADR-068 state and stays as history.
 
-### Before this branch merges into `pre-release` (state on 2026-09-14, HEAD `75c92402`, everything pushed)
+### Before this branch merges into `pre-release` (state on 2026-09-14, HEAD `922644bf`, everything pushed, PR #37 open)
 
 Everything planned for the branch is built, reviewed line by line, gated and driven. What still stands between it and a merge:
 
-1. **No PR exists.** Nothing on this branch has run through CI's macOS and Linux runners (ADR-061 gates). Open `codex-integration → pre-release` to get that signal; the unit and component suites are expected to pass there, but that is an assumption until the PR shows it.
+1. **PR #37 is open** (`codex-integration → pre-release`, opened 2026-09-14). Read its CI signal: nothing on this branch had run through the macOS and Linux runners (ADR-061 gates) before it; the unit and component suites are expected to pass there, but that is an assumption until the PR shows it. Note `pre-release` carries `785d07b2` (Claude Code 2.1.268) that this branch does not; merge base is `43a93ac7`.
 2. **macOS legs of the four new real-binary integration tests: DONE 2026-09-14** on macOS arm64 at HEAD `06407a88` (`codex-injection` 5/5, `codex-mcp-override` 3/3, `codex-mcp-approval` 2/2, `codex-config-write` 5/5, each run alone). The whole `src/integration/codex` directory was then run once as a regression: 70/71, the one failure being `codex-policy-probe`'s `untrusted` matrix under twelve parallel app-servers (no artefact landed, i.e. the approvals were not answered inside the step window); it passed 13/13 alone. `~/.codex/rules/claudeui.rules` and `~/.claude/ui/auth-vault.json` kept their pre-run mtimes.
 3. **Linux: DONE 2026-09-14 (M5-L, spec `codex-integration-spec.md` §M5-L).** `linux-x64` and `linux-arm64` are pinned in the manifest, the runtime gate offers the engine, the headless server tarball ships `vendor/codex-cli`, CI caches it per `runner.arch`, and the four ADR-068 suites run on Linux through the shared gate in `src/integration/codex/integration-host.ts`. bubblewrap (`bwrap`) is a documented system dependency with a boot warning from `claudeui-server`, not a manifest member (Daniel's ruling). Verification recipe: `scripts/docker/codex-linux-verify.sh --arch x64|arm64` (Debian bookworm on colima, Rosetta for x64; needs the relaxed seccomp/AppArmor/`SYS_ADMIN` profile the script sets, because bwrap creates a user namespace). Real-account evidence landed the same day (M5-L Landed paragraph): a signed-in Luna turn from the web client against the compiled Linux server, `ls` inside the bubblewrap sandbox under Auto, and the approval path in default mode. Daniel's untracked `docs/headless-server.md` still lists the server's engines as claude/opencode/pi; it is his file and was left alone.
 4. **Windows residuals**: the sandbox path and process-tree cleanup under load are unverified.
@@ -18,7 +18,7 @@ Everything planned for the branch is built, reviewed line by line, gated and dri
 
 Deferred by ruling and NOT merge blockers: the roadmap items (mappers + harness survey, volatile stream, metering in the usage revamp, grandchildren), the follow-ups (pi auth event, pi PKCE fallback on port 1455 headless, the dialog's post-Cancel state), project-scope deny rules under Auto (leave it).
 
-### What is committed (all local on `codex-integration`, oldest first; all pushed as of 2026-09-14)
+### What is committed (on `codex-integration`, oldest first; all pushed as of 2026-09-14)
 
 ```text
 e23d5f93 docs(codex): ADR-068 + spec (vault-owned ChatGPT identity, Codex by token injection, accounts, one sign-in dialog)
@@ -33,6 +33,21 @@ c3c32850 feat(codex): Slice 4b — MCP tool approvals via mcpServer/elicitation/
 3be8e0b2 feat(codex): Slice 5a — config.toml through the app-server; the Engines › Codex page
 7e9c05a5 feat(codex): Slice 5b — Codex on Default models, Dispatch, the judge and Permissions; engines/codex.json defaults
 60656d54 docs(adr): ADR-068 Implemented — as-built section for the eight landed slices
+07d32700 docs(codex): handoff — Slice 5b and ADR-068 commit hashes
+81b6b457 fix(settings): anchored menus follow their trigger on scroll instead of closing
+ba5ef172 fix(settings): pi default-model pane shares the one engines/pi.json object
+4d2f032c docs(codex): handoff — both post-arc settings fixes landed; standing push authorization
+b5bb25cc docs(codex): record the post-arc rulings — project-scope rules stay user-only, Linux is the owner's, entry points next
+f0a471f9 docs(codex): handoff formatting
+015616ad docs(codex): Slice 6 kickoff (sign-in entry points) and the post-integration roadmap order
+05a20303 feat(auth): Slice 6 — sign-in entry points on the model picker and the composer
+8deed714 docs(adr): ADR-068 as built — Slice 6 entry points landed
+1adbbe23 docs(codex): Slice 7 kickoff (device-code sign-in on remote clients); follow-ups for pi auth event and macOS legs
+75c92402 feat(auth): Slice 7 — device-code sign-in for ChatGPT on remote clients
+06407a88 docs(codex): handoff — the before-merge checklist for codex-integration
+187f2c51 docs(codex): record the green macOS legs of the ADR-068 integration tests
+e86e758a build(codex): pin and ship the Linux x64/arm64 binaries; bubblewrap as a system dependency
+922644bf fix(remote): normalise JSON-null optional arguments at the remote transport boundary
 ```
 
 Every one of these was reviewed line by line by the main model, gated (typecheck, lint, full `bun run test`, `CODEX_INTEGRATION=1 bun run test:integration`, `check-codex-protocol` where the protocol changed), and driven in the real Electron app before commit. Live evidence that exists: a real signed-in Codex turn under an injected vault token (the first on Windows), the account picker pinning a session to a second account on a live process, the sign-in dialog opened from the bad-token discovery banner, the real app-server spawning a `.mcp.json` stub and the model calling its tool after the approval card was allowed.
