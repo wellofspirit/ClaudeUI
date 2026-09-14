@@ -157,6 +157,33 @@ function handleRemote(reg: Omit<CommandRegistration, 'transport'>): void {
 }
 
 /**
+ * Normalise an OMITTED optional argument back to `undefined`.
+ *
+ * The web client marshals `invoke` arguments as JSON, and a JSON array cannot
+ * carry a hole: an argument the caller left out arrives here as an explicit
+ * `null`. Electron IPC preserves `undefined`, which is why only the remote
+ * transport ever sees this. `null` is not "unset" to the shared code behind
+ * these handlers — several places distinguish unset with `=== undefined`
+ * (`CodexSession.validateEffort` threw "Codex reasoning effort is unavailable
+ * for the selected model" on every fresh web-client Codex session because of
+ * exactly this), and the rest declare the parameter `?: T`, which `null` does
+ * not satisfy. So every optional argument is put back through here at the
+ * transport boundary rather than teaching each service to accept two spellings
+ * of "nothing".
+ *
+ * Deliberately NOT applied where `null` is a MEANINGFUL value the caller sent
+ * on purpose — `session:set-account`, `session:set-reasoning-variant`,
+ * `usage:set-account-filter`, `webauthn:rename` all declare `T | null` and mean
+ * "clear it" by it — nor where the parameter is only tested for truthiness and
+ * `null` already reads as the omitted case (`session:stop-task`'s `isDispatch`,
+ * `usage:chatgpt-limits`' `refresh`, `terminal:create`'s `index`, which the
+ * terminal service already types `number | null`).
+ */
+function opt<T>(value: T | null | undefined): T | undefined {
+  return value ?? undefined
+}
+
+/**
  * True once registerRemoteHandlers has run. `registerRemoteVersionInfo` is
  * called later in the app bootstrap and must stay a no-op when the remote
  * surface was never set up (it was previously gated on the captured dispatcher).
@@ -347,26 +374,29 @@ export function registerRemoteHandlers(
     handler: async (
       routingId: string,
       cwd: string,
-      effort?: string,
-      resumeSessionId?: string,
-      permissionMode?: string,
-      model?: string,
-      thinkingMode?: string,
-      resumeSessionAt?: string,
-      forkSession?: boolean,
-      engineId?: EngineId
+      effort?: string | null,
+      resumeSessionId?: string | null,
+      permissionMode?: string | null,
+      model?: string | null,
+      thinkingMode?: string | null,
+      resumeSessionAt?: string | null,
+      forkSession?: boolean | null,
+      engineId?: EngineId | null
     ) => {
+      // Every optional argument through `opt` — see its doc comment. `effort`
+      // is the one that broke in the field; the rest are the same shape and
+      // reach the same `!== undefined` / `?: T` consumers.
       await prepareAndCreateSession(manager, getHostWindow(), {
         routingId,
         cwd,
-        effort,
-        resumeSessionId,
-        permissionMode,
-        model,
-        thinkingMode,
-        resumeSessionAt,
-        forkSession,
-        engineId
+        effort: opt(effort),
+        resumeSessionId: opt(resumeSessionId),
+        permissionMode: opt(permissionMode),
+        model: opt(model),
+        thinkingMode: opt(thinkingMode),
+        resumeSessionAt: opt(resumeSessionAt),
+        forkSession: opt(forkSession),
+        engineId: opt(engineId)
       })
     }
   })
@@ -408,8 +438,8 @@ export function registerRemoteHandlers(
     handler: async (
       routingId: string,
       prompt: string,
-      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }>
-    ) => sendPrompt(manager, routingId, prompt, attachments)
+      attachments?: Array<{ mediaType: string; base64Data: string; fileName?: string }> | null
+    ) => sendPrompt(manager, routingId, prompt, opt(attachments))
   })
 
   handleRemote({
@@ -740,8 +770,13 @@ export function registerRemoteHandlers(
     capability: 'fs-read',
     kind: 'query',
     sessionIdArg: 0,
-    handler: async (routingId: string, sessionId: string, projectKey: string, cwd?: string) => {
-      watchSession(routingId, sessionId, projectKey, cwd)
+    handler: async (
+      routingId: string,
+      sessionId: string,
+      projectKey: string,
+      cwd?: string | null
+    ) => {
+      watchSession(routingId, sessionId, projectKey, opt(cwd))
     }
   })
   handleRemote({
@@ -798,8 +833,8 @@ export function registerRemoteHandlers(
     channel: 'session:load-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string, projectKey: string, resumeSessionAt?: string) => {
-      return await loadSessionHistory(sessionId, projectKey, resumeSessionAt)
+    handler: async (sessionId: string, projectKey: string, resumeSessionAt?: string | null) => {
+      return await loadSessionHistory(sessionId, projectKey, opt(resumeSessionAt))
     }
   })
 
@@ -825,8 +860,8 @@ export function registerRemoteHandlers(
     channel: 'session:load-background-output',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (projectKey: string, taskId: string, outputFile?: string) => {
-      return loadBackgroundOutput(projectKey, taskId, outputFile)
+    handler: async (projectKey: string, taskId: string, outputFile?: string | null) => {
+      return loadBackgroundOutput(projectKey, taskId, opt(outputFile))
     }
   })
 
@@ -837,8 +872,8 @@ export function registerRemoteHandlers(
     channel: 'session:delete-session',
     capability: 'chat',
     kind: 'command',
-    handler: async (sessionId: string, projectKey: string, engineId?: EngineId) => {
-      await deleteSession(manager, sessionId, projectKey, engineId)
+    handler: async (sessionId: string, projectKey: string, engineId?: EngineId | null) => {
+      await deleteSession(manager, sessionId, projectKey, opt(engineId))
     }
   })
 
@@ -847,8 +882,8 @@ export function registerRemoteHandlers(
     capability: 'chat',
     kind: 'command',
     sessionIdArg: 0,
-    handler: async (routingId: string, permissionMode?: string) => {
-      await clearConversation(manager, routingId, permissionMode)
+    handler: async (routingId: string, permissionMode?: string | null) => {
+      await clearConversation(manager, routingId, opt(permissionMode))
     }
   })
 
@@ -942,15 +977,15 @@ export function registerRemoteHandlers(
     channel: 'claude:load-permissions',
     capability: 'config',
     kind: 'query',
-    handler: async (scope: string, cwd?: string) =>
-      loadClaudePermissions(scope as 'user' | 'project' | 'local', cwd)
+    handler: async (scope: string, cwd?: string | null) =>
+      loadClaudePermissions(scope as 'user' | 'project' | 'local', opt(cwd))
   })
   handleRemote({
     channel: 'claude:save-permissions',
     capability: 'config',
     kind: 'command',
-    handler: async (scope: string, permissions: ClaudePermissions, cwd?: string) =>
-      savePermissionsAndNotify(manager, scope as PermissionScope, permissions, cwd)
+    handler: async (scope: string, permissions: ClaudePermissions, cwd?: string | null) =>
+      savePermissionsAndNotify(manager, scope as PermissionScope, permissions, opt(cwd))
   })
   handleRemote({
     channel: 'claude:workspace-trust',
@@ -978,8 +1013,8 @@ export function registerRemoteHandlers(
     channel: 'mcp:load-servers',
     capability: 'config',
     kind: 'query',
-    handler: async (scope: string, cwd?: string) =>
-      loadMcpServers(scope as 'user' | 'project' | 'local', cwd)
+    handler: async (scope: string, cwd?: string | null) =>
+      loadMcpServers(scope as 'user' | 'project' | 'local', opt(cwd))
   })
   handleRemote({
     channel: 'mcp:read-disabled',
@@ -1436,8 +1471,8 @@ export function registerRemoteHandlers(
     kind: 'command',
     sessionIdArg: 0,
     withConnection: true,
-    handler: async (connection: CommandConnection, routingId: string, language?: string) =>
-      remoteVoice.start(manager, connection, routingId, language)
+    handler: async (connection: CommandConnection, routingId: string, language?: string | null) =>
+      remoteVoice.start(manager, connection, routingId, opt(language))
   })
 
   handleRemote({

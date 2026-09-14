@@ -256,6 +256,18 @@ vi.mock('../../../core/services/logger', () => ({
   }
 }))
 
+// A SPY over the REAL prepareAndCreateSession: the null-normalisation guard
+// below asserts on the args object the remote handler hands across the
+// transport boundary, while every other `session:create` test in this file
+// keeps exercising the real shared implementation underneath.
+const createSessionSpy = vi.hoisted(() => ({ prepareAndCreateSession: vi.fn() }))
+
+vi.mock('../../../core/ipc/create-session', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../core/ipc/create-session')>()
+  createSessionSpy.prepareAndCreateSession.mockImplementation(actual.prepareAndCreateSession)
+  return { ...actual, prepareAndCreateSession: createSessionSpy.prepareAndCreateSession }
+})
+
 // Import AFTER mocks.
 import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
 import {
@@ -1098,6 +1110,83 @@ describe('registerRemoteHandlers', () => {
         .mock.results[0].value
       // manager.create's 4th positional arg (index 3) is the EngineSpawnOptions object.
       expect(sessionManagerStub.create.mock.calls[0][3].model).toBe(resolvedModel)
+    })
+
+    // The web client marshals `invoke` args as JSON, so an OMITTED optional
+    // argument arrives as an explicit `null` (Electron IPC preserves
+    // `undefined`, which is why the desktop never hit this). `null` is not
+    // "unset" to the code downstream: CodexSession.validateEffort treats only
+    // `undefined` as "no effort" and threw
+    // "Codex reasoning effort is unavailable for the selected model" on every
+    // fresh Codex session created from the web client.
+    it('normalises null optional args to undefined before prepareAndCreateSession (GUARD — fails pre-fix)', async () => {
+      await dispatcher.handle(
+        makeRequest(
+          'session:create',
+          'rid-nulls',
+          '/tmp/proj',
+          null, // effort
+          null, // resumeSessionId
+          null, // permissionMode
+          null, // model
+          null, // thinkingMode
+          null, // resumeSessionAt
+          null, // forkSession
+          null // engineId
+        ),
+        remoteConn
+      )
+
+      expect(createSessionSpy.prepareAndCreateSession).toHaveBeenCalledTimes(1)
+      const args = createSessionSpy.prepareAndCreateSession.mock.calls[0][2]
+      for (const key of [
+        'effort',
+        'resumeSessionId',
+        'permissionMode',
+        'model',
+        'thinkingMode',
+        'resumeSessionAt',
+        'forkSession',
+        'engineId'
+      ] as const) {
+        expect(args[key], `${key} must be undefined, not null`).toBeUndefined()
+      }
+      // Required args are untouched.
+      expect(args.routingId).toBe('rid-nulls')
+      expect(args.cwd).toBe('/tmp/proj')
+    })
+
+    it('passes real optional values through unchanged', async () => {
+      await dispatcher.handle(
+        makeRequest(
+          'session:create',
+          'rid-values',
+          '/tmp/proj',
+          'high',
+          'resume-1',
+          'plan',
+          'opencode/luna',
+          'think',
+          'anchor-1',
+          false,
+          'opencode'
+        ),
+        remoteConn
+      )
+
+      expect(createSessionSpy.prepareAndCreateSession.mock.calls[0][2]).toMatchObject({
+        routingId: 'rid-values',
+        cwd: '/tmp/proj',
+        effort: 'high',
+        resumeSessionId: 'resume-1',
+        permissionMode: 'plan',
+        model: 'opencode/luna',
+        thinkingMode: 'think',
+        resumeSessionAt: 'anchor-1',
+        // `false` is a real value, not "unset" — `?? undefined` must not eat it.
+        forkSession: false,
+        engineId: 'opencode'
+      })
     })
 
     it('broadcasts session:created to the main window (remote notifies desktop)', async () => {
