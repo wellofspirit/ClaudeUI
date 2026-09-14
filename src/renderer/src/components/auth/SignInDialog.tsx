@@ -149,6 +149,7 @@ function SignInDialogBody({ request }: { request: SignInRequest }): React.JSX.El
   const [flowMode, setFlowMode] = useState<'reauth' | 'add'>('reauth')
   /** null while the account read is in flight — the chooser must not flash empty. */
   const [accounts, setAccounts] = useState<AccountRow[] | null>(null)
+  const [canAdd, setCanAdd] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
@@ -158,22 +159,46 @@ function SignInDialogBody({ request }: { request: SignInRequest }): React.JSX.El
 
   useEscapeLayer(closeSignIn)
 
-  const readAccounts = useCallback(async (): Promise<AccountRow[]> => {
+  /**
+   * The stored accounts, plus whether there is anything to CHOOSE between.
+   *
+   * The two answers are separate on purpose (F3). "No rows" used to mean both
+   * "start the flow, there is nothing to pick" and "this host has no account",
+   * and Anthropic with multi-account off is the case where they disagree: one
+   * credential is signed in, but there is no alternative to switch to. It
+   * auto-starts like an empty list AND names its account like a full one, so the
+   * chooser the user lands on after Cancel tells the truth either way.
+   */
+  const readAccounts = useCallback(async (): Promise<{
+    rows: AccountRow[]
+    autoStart: boolean
+    /** Whether "Add another account" is offered. False for Anthropic with
+     *  multi-account OFF: `addAccount()` would silently switch the host to
+     *  file-based multi-account, a Settings decision, not a side effect of
+     *  cancelling a sign-in. */
+    canAdd: boolean
+  }> => {
     if (providerId === 'anthropic') {
       const state = await window.api.getAccounts()
       setAccountsState(state)
-      // Multi-account off means ONE credential and nothing to choose between;
-      // the chooser would be a list of one with no alternative.
-      if (!state.enabled) return []
-      return state.accounts.map((account) => ({
+      const rows = state.accounts.map((account) => ({
         id: account.id,
         label: account.email || 'Account',
         description: account.subscriptionType ?? undefined,
         active: account.id === state.activeId
       }))
+      if (!state.enabled) {
+        // Multi-account off means ONE credential and nothing to choose between;
+        // the chooser would be a list of one with no alternative. Report that
+        // one — the active row, or the only one on file — rather than an empty
+        // list that would read as "nobody is signed in".
+        const one = rows.find((row) => row.active) ?? rows[0]
+        return { rows: one ? [{ ...one, active: true }] : [], autoStart: true, canAdd: false }
+      }
+      return { rows, autoStart: rows.length === 0, canAdd: true }
     }
     const list = await window.api.listProviderAccounts(CHATGPT_ID)
-    return list.accounts.map((account) => ({
+    const rows = list.accounts.map((account) => ({
       id: account.id,
       label: account.email || 'Account',
       description:
@@ -182,6 +207,7 @@ function SignInDialogBody({ request }: { request: SignInRequest }): React.JSX.El
           .join(' · ') || undefined,
       active: account.id === list.activeId
     }))
+    return { rows, autoStart: rows.length === 0, canAdd: true }
   }, [providerId, setAccountsState])
 
   /** Everything the done state reports, read AFTER the credential was written. */
@@ -273,18 +299,30 @@ function SignInDialogBody({ request }: { request: SignInRequest }): React.JSX.El
     ]
   )
 
+  /**
+   * Start the flow when the chooser has nothing to offer — the open-time skip,
+   * and the one button an EMPTY chooser shows. One helper rather than two copies
+   * of the condition, because the two modes are different calls for Anthropic:
+   * `add` goes through `addAccount()` (a SECOND credential), `reauth` through
+   * `signIn()`, and an empty list has nothing to add alongside.
+   */
+  const startWithoutChoosing = useCallback(
+    (): Promise<void> => start(request.mode === 'add' ? 'add' : 'reauth'),
+    [start, request.mode]
+  )
+
   // Open: read the accounts, then decide whether there is anything to choose
   // between. `add` never has anything to choose; neither does a provider with no
-  // stored account, so both go straight to the flow.
+  // stored account (or Anthropic with multi-account off), so both go straight to
+  // the flow.
   useEffect(() => {
     let cancelled = false
     void readAccounts()
-      .then((rows) => {
+      .then(({ rows, autoStart, canAdd }) => {
         if (cancelled) return
         setAccounts(rows)
-        if (request.mode === 'add' || rows.length === 0) {
-          void start(request.mode === 'add' ? 'add' : 'reauth')
-        }
+        setCanAdd(canAdd)
+        if (request.mode === 'add' || autoStart) void startWithoutChoosing()
       })
       .catch((e: unknown) => {
         if (cancelled) return
@@ -326,9 +364,15 @@ function SignInDialogBody({ request }: { request: SignInRequest }): React.JSX.El
   const cancelFlow = (): void => {
     if (providerId === 'anthropic') void cancelSignIn()
     else cancelVendorOAuth()
-    // Back to the chooser when there is one; otherwise the flow panel is all
-    // this dialog has, and the user closes it.
-    if (accounts && accounts.length > 0) setStage('choose')
+    // ALWAYS back to the chooser (F3, owner ruling 2026-09-14). Staying on the
+    // flow panel left a cancelled sign-in still showing its pre-code look —
+    // "Requesting a code…" for a request nobody is making — and the chooser is
+    // perfectly able to say that no account is signed in.
+    setStage('choose')
+    // The cancelled start is still parked in its poll/await and will not clear
+    // this for another cadence, which would leave the chooser's own buttons
+    // disabled; nothing is running as far as the user is concerned.
+    setBusy(false)
   }
 
   const retryPrompt = (): void => {
@@ -427,6 +471,9 @@ function SignInDialogBody({ request }: { request: SignInRequest }): React.JSX.El
   )
 
   // ── Body ─────────────────────────────────────────────────────────────────
+  /** The account read has SETTLED on nothing — the chooser has to say so. */
+  const isEmptyList = accounts !== null && accounts.length === 0
+
   const body =
     stage === 'done' ? (
       <div data-testid={`${DIALOG}.done`} className="space-y-3">
@@ -461,6 +508,18 @@ function SignInDialogBody({ request }: { request: SignInRequest }): React.JSX.El
       </div>
     ) : (
       <SheetGroup testid={`${DIALOG}.group`} id="accounts" label="Accounts">
+        {/* `accounts === null` is the read still in flight, NOT an empty list —
+            claiming "no account is signed in" before the answer arrives would be
+            a guess, and the wrong one on most hosts. */}
+        {/* With multi-account off the Anthropic credential lives in the system
+            store and is invisible to this list, so "no account" would be a
+            claim the dialog cannot make; the Sign in row alone is honest. */}
+        {isEmptyList && canAdd && (
+          <SettingRow
+            testid={`${DIALOG}.empty`}
+            description={`No ${PROVIDER_NAME[providerId]} account is signed in on this host.`}
+          />
+        )}
         {(accounts ?? []).map((account) => (
           <SettingRow
             key={account.id}
@@ -493,19 +552,31 @@ function SignInDialogBody({ request }: { request: SignInRequest }): React.JSX.El
             )}
           </SettingRow>
         ))}
-        <SettingRow
-          testid={`${DIALOG}.addRow`}
-          description={`Signs in to another ${PROVIDER_NAME[providerId]} account and adds it to the list.`}
-        >
-          <Button
-            variant="tinted"
-            testid={`${DIALOG}.addAccount`}
-            disabled={busy}
-            onClick={() => void start('add')}
+        {(canAdd || isEmptyList) && (
+          <SettingRow
+            testid={`${DIALOG}.addRow`}
+            description={
+              !canAdd
+                ? `Signs in to ${PROVIDER_NAME[providerId]} in the browser.`
+                : isEmptyList
+                  ? `Signs in to a ${PROVIDER_NAME[providerId]} account and adds it to the list.`
+                  : `Signs in to another ${PROVIDER_NAME[providerId]} account and adds it to the list.`
+            }
           >
-            Add another account
-          </Button>
-        </SettingRow>
+            <Button
+              variant="tinted"
+              testid={`${DIALOG}.addAccount`}
+              disabled={busy}
+              // With nothing on the list this is the SAME start the dialog would
+              // have run on open — `add` would send Anthropic through
+              // `addAccount()`, which adds a second credential to a host that has
+              // none.
+              onClick={() => void (isEmptyList ? startWithoutChoosing() : start('add'))}
+            >
+              {isEmptyList ? 'Sign in' : 'Add another account'}
+            </Button>
+          </SettingRow>
+        )}
       </SheetGroup>
     )
 

@@ -420,3 +420,100 @@ describe('SignInDialog — on a phone (390px)', () => {
     expect(screen.getByTestId('SignInDialog.close')).toBeTruthy()
   })
 })
+
+// ── Cancel when there was nothing to choose between (F3) ────────────────────
+//
+// The dialog skips the chooser whenever the list has nothing to offer — no
+// stored account at all, or Anthropic with multi-account off — and that used to
+// leave Cancel with nowhere to go: the stage stayed on `flow`, so a cancelled
+// sign-in kept rendering a panel that was asking the user to wait for a code
+// nobody was requesting. Cancel now always lands on the chooser, and the chooser
+// answers for an empty list.
+describe('SignInDialog — Cancel with nothing to choose between', () => {
+  const NO_CHATGPT_ACCOUNTS = { activeId: null, perSession: true, accounts: [] }
+
+  it('web ChatGPT with no account: Cancel returns to a chooser that says so', async () => {
+    installApi('web', { listProviderAccounts: vi.fn(async () => NO_CHATGPT_ACCOUNTS) })
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+    // No rows, so the device flow starts on its own — unchanged.
+    expect(window.api.vendorAuthDeviceCodeStart).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('DeviceCodeFlow.code')).toHaveTextContent('ABCD-1234')
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('DeviceCodeFlow.cancel'))
+    })
+    expect(window.api.vendorAuthOauthCancel).toHaveBeenCalledWith('pi')
+    // The cancelled panel is gone, pre-code look and all.
+    expect(screen.queryByTestId('DeviceCodeFlow')).toBeNull()
+    expect(screen.queryByText('Requesting a code…')).toBeNull()
+    expect(screen.getByTestId('SignInDialog.empty')).toHaveTextContent(
+      'No ChatGPT account is signed in on this host.'
+    )
+    expect(screen.getByTestId('SignInDialog.addAccount')).toHaveTextContent('Sign in')
+  })
+
+  it('web ChatGPT with no account: the empty chooser’s Sign in starts the flow again', async () => {
+    installApi('web', { listProviderAccounts: vi.fn(async () => NO_CHATGPT_ACCOUNTS) })
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('DeviceCodeFlow.cancel'))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.addAccount'))
+    })
+    expect(window.api.vendorAuthDeviceCodeStart).toHaveBeenCalledTimes(2)
+    expect(screen.getByTestId('DeviceCodeFlow.code')).toHaveTextContent('ABCD-1234')
+    expect(screen.queryByTestId('SignInDialog.empty')).toBeNull()
+  })
+
+  it('Anthropic with multi-account off: Cancel shows the one account, not an empty list', async () => {
+    installApi('darwin', {
+      getAccounts: vi.fn(async () => ({
+        ...CLAUDE_ACCOUNTS,
+        enabled: false,
+        accounts: [CLAUDE_ACCOUNTS.accounts[0]]
+      }))
+    })
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    // Nothing to choose between, so the flow still starts without the chooser.
+    expect(window.api.signIn).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('SignInDialog.waiting')).toBeTruthy()
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.cancel'))
+    })
+    expect(window.api.cancelSignIn).toHaveBeenCalledTimes(1)
+    // One credential IS signed in — the chooser must name it rather than claim
+    // the host has none.
+    expect(screen.queryByTestId('SignInDialog.empty')).toBeNull()
+    const rows = screen.getAllByTestId('SignInDialog.account')
+    expect(rows.map((el) => el.getAttribute('data-id'))).toEqual(['a1'])
+    expect(rows[0]).toHaveTextContent('one@example.com')
+    expect(screen.getByTestId('SignInDialog.reauth')).toHaveAttribute('data-id', 'a1')
+    // No add row: `addAccount()` would flip the host to multi-account, which
+    // is a Settings decision, not a side effect of cancelling a sign-in.
+    expect(screen.queryByTestId('SignInDialog.addRow')).toBeNull()
+  })
+
+  it('Anthropic with multi-account off and no listed account: Cancel offers Sign in without claiming no account exists', async () => {
+    installApi('darwin', {
+      getAccounts: vi.fn(async () => ({ ...CLAUDE_ACCOUNTS, enabled: false, accounts: [] }))
+    })
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    expect(window.api.signIn).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.cancel'))
+    })
+    // The keychain credential is invisible to this list, so the dialog must
+    // not say "no account is signed in"; it just offers to sign in again.
+    expect(screen.queryByTestId('SignInDialog.empty')).toBeNull()
+    expect(screen.queryByTestId('SignInDialog.account')).toBeNull()
+    expect(screen.getByTestId('SignInDialog.addAccount')).toHaveTextContent('Sign in')
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.addAccount'))
+    })
+    // The reauth path (signIn), never addAccount.
+    expect(window.api.signIn).toHaveBeenCalledTimes(2)
+    expect(window.api.addAccount).not.toHaveBeenCalled()
+  })
+})
