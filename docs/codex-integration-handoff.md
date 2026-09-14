@@ -9,7 +9,7 @@
 Everything planned for the branch is built, reviewed line by line, gated and driven. What still stands between it and a merge:
 
 1. **No PR exists.** Nothing on this branch has run through CI's macOS and Linux runners (ADR-061 gates). Open `codex-integration → pre-release` to get that signal; the unit and component suites are expected to pass there, but that is an assumption until the PR shows it.
-2. **macOS legs of the four new real-binary integration tests** (`codex-injection`, `codex-mcp-override`, `codex-mcp-approval`, `codex-config-write`) have never run. They are gated by `CODEX_INTEGRATION=1`, so CI will not run them; run them on a Mac.
+2. **macOS legs of the four new real-binary integration tests: DONE 2026-09-14** on macOS arm64 at HEAD `06407a88` (`codex-injection` 5/5, `codex-mcp-override` 3/3, `codex-mcp-approval` 2/2, `codex-config-write` 5/5, each run alone). The whole `src/integration/codex` directory was then run once as a regression: 70/71, the one failure being `codex-policy-probe`'s `untrusted` matrix under twelve parallel app-servers (no artefact landed, i.e. the approvals were not answered inside the step window); it passed 13/13 alone. `~/.codex/rules/claudeui.rules` and `~/.claude/ui/auth-vault.json` kept their pre-run mtimes.
 3. **Linux**: no digest manifest, acquisition skips, Codex is unavailable there by design. Daniel takes it on a Mac with Linux emulation (ruling above).
 4. **Windows residuals**: the sandbox path and process-tree cleanup under load are unverified.
 5. **Real-account evidence for the newest slices** — Daniel's, because each spends the real account: one Codex turn started on a configured default model (Slice 5b; the wire is pinned by test up to `session:create`), and one real device-code sign-in completed from a phone (Slice 7; everything up to the code being shown is proven live, nothing was completed).
@@ -91,12 +91,12 @@ Device-code sign-in for ChatGPT on remote clients, reviewed over three rounds. T
 - **Headless-server device code: DONE** (Slice 7). Remaining on that surface: pi's PKCE fallback binds port 1455 on the server box for its timeout (two concurrent fallbacks would collide); the dialog's post-Cancel state with no stored account.
 
 - **pi raises no `session:auth-required`.** pi's wire has no distinguishable auth error today, so a rejected ChatGPT credential on pi surfaces as a generic turn failure rather than the Slice 3 row. Needs a pi wire probe (`docs/protocol-pi/`, `vendor/pi-cli/docs/`) to find or request a typed signal before the row can be wired.
-- **macOS legs of the four new integration tests** (`codex-injection`, `codex-mcp-override`, `codex-mcp-approval`, `codex-config-write`) have only run on Windows x64; run them on a Mac with `CODEX_INTEGRATION=1`.
+- **macOS legs of the four new integration tests: DONE 2026-09-14** (see the before-merge checklist, item 2). The policy probe's `untrusted` matrix is load-sensitive when the whole directory runs in parallel; rerun it alone before blaming a diff.
 - `mockup.html` (the owner's visual reference for the arc) was removed from the repo root on 2026-09-14 at Daniel's request; the spec's Landed paragraphs describe what was built from it.
 
 ### Open items after Slice 5
 
-pi has no distinguishable auth error (no `session:auth-required` from it); Codex→Codex dispatch is refused so the "caller pin reaches the target" wiring is dormant; headless-server device code is designed but not built; the macOS legs of the new integration tests have not run; the Rename → Orrery arc is untouched by this work.
+pi has no distinguishable auth error (no `session:auth-required` from it); Codex→Codex dispatch is refused so the "caller pin reaches the target" wiring is dormant; headless-server device code landed as Slice 7; the macOS legs of the new integration tests ran green on 2026-09-14; the Rename → Orrery arc is untouched by this work.
 
 ## Resume here (pre-ADR-068 — historical)
 
