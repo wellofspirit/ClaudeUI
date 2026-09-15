@@ -1,4 +1,4 @@
-import { createServer } from 'node:http'
+import type { Server } from 'node:http'
 import { WebSocketServer } from 'ws'
 import {
   copyFileSync,
@@ -28,6 +28,14 @@ import { setHostPaths } from '../../core/host'
 import { crossEngineDispatcher } from '../../core/services/cross-engine-dispatcher'
 import type { PendingApproval } from '../../shared/types'
 import provenance from '../../core/codex/protocol/provenance.json'
+import {
+  FIXTURE_API_KEY,
+  FIXTURE_AUTHORIZATION,
+  FIXTURE_COMPLETED,
+  fixtureAssistantMessage,
+  startFixtureProvider,
+  writeFixtureCodexHome
+} from './fixture-provider'
 
 // Wrap only test spawns. Production exposes neither a command override nor a PATH fallback.
 const containment = vi.hoisted(() => ({ profile: '', pids: [] as number[] }))
@@ -115,7 +123,7 @@ let typedClient: CodexClient | undefined
 let service: CodexService | undefined
 let session: CodexSession | undefined
 let directory: string | undefined
-let server: ReturnType<typeof createServer> | undefined
+let server: Server | undefined
 let websocket: WebSocketServer | undefined
 afterEach(async () => {
   coreEvents.mockClear()
@@ -239,219 +247,162 @@ async function setupFixture(
       rationale: 'Isolated fixture allow'
     })
   }
-  const completed = {
-    type: 'response.completed',
-    response: {
-      id: 'resp-fixture',
-      usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 }
-    }
-  }
-  server = createServer((req, res) => {
-    let body = ''
-    const bodyTimeout = setTimeout(() => req.destroy(), 15000)
-    req.on('close', () => clearTimeout(bodyTimeout))
-    req.on('data', (chunk) => {
-      body += chunk
-      if (body.length > 4_000_000) req.destroy()
-    })
-    req.on('error', () => {})
-    req.on('end', () => {
-      clearTimeout(bodyTimeout)
-      const expectedAuth = nativeSession ? 'Bearer codex-fixture-not-a-real-key' : undefined
-      if (
-        req.method !== 'POST' ||
-        req.url !== '/v1/responses' ||
-        req.headers.authorization !== expectedAuth
-      ) {
-        errors.push(
-          `unexpected provider request: ${req.method} ${req.url}; auth matched: ${req.headers.authorization === expectedAuth}`
-        )
-        res.writeHead(400).end()
-        return
-      }
-      try {
-        requests.push(JSON.parse(body))
-      } catch {
-        errors.push('invalid provider JSON')
-        res.writeHead(400).end()
-        return
-      }
-      const call = !plainResponse && requests.length !== 2
-      const item = call
+  if (nativeSession) websocket = new WebSocketServer({ noServer: true, maxPayload: 4_000_000 })
+  // The provider itself is shared with `scripts/codex-fixture-provider.mjs`
+  // (`fixture-provider.ts`); what stays here is only what THIS suite scripts on
+  // top of it — the tool call every non-plain probe expects, and the WebSocket
+  // wire the native-session probes speak instead of HTTP streaming.
+  const fixture = await startFixtureProvider({
+    requests,
+    errors,
+    authorization: nativeSession ? FIXTURE_AUTHORIZATION : undefined,
+    script: ({ requests: seen }) =>
+      !plainResponse && seen.length !== 2
         ? {
             type: 'function_call',
-            call_id: `call-${requests.length}`,
+            call_id: `call-${seen.length}`,
             name: 'fixture_echo',
             arguments: '{"value":"synthetic"}'
           }
-        : {
-            type: 'message',
-            id: 'msg-fixture',
-            role: 'assistant',
-            content: [{ type: 'output_text', text: 'fixture complete' }]
-          }
-      const events = [
-        { type: 'response.created', response: { id: 'resp-fixture' } },
-        { type: 'response.output_item.done', item },
-        completed
-      ]
-      res.writeHead(200, { 'Content-Type': 'text/event-stream', Connection: 'close' })
-      res.end(
-        events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('')
-      )
-    })
-  })
-  if (nativeSession) {
-    websocket = new WebSocketServer({ noServer: true, maxPayload: 4_000_000 })
-    server.on('upgrade', (req, socket, head) => {
-      if (
-        req.url !== '/v1/responses' ||
-        req.headers.authorization !== 'Bearer codex-fixture-not-a-real-key'
-      ) {
-        errors.push('unexpected websocket upgrade')
-        socket.destroy()
-        return
-      }
-      websocket!.handleUpgrade(req, socket, head, (connection) => {
-        connection.on('message', (data) => {
-          const request = JSON.parse(data.toString()) as Record<string, unknown>
-          requests.push(request)
-          // The reviewer is a SECOND model session on the SAME provider, so its
-          // calls interleave with the agent's; the step index must count only
-          // the agent's or the scripted command never fires.
-          const guardian = isGuardianRequest(request)
-          const agentTurns = requests.filter(
-            (entry) => !isGuardianRequest(entry) && entry.generate !== false
-          ).length
-          // Native agents (slice F): the CHILD is a separate thread on this same
-          // provider, so the root's own step index must count only the root's
-          // requests — and the child must be answered too, or its turn never
-          // ends and nothing reaches the parent's card.
-          const body = JSON.stringify(request)
-          const root = body.includes(ROOT_TURN_MARKER)
-          const rootTurns = requests.filter(
-            (entry) =>
-              !isGuardianRequest(entry) &&
-              entry.generate !== false &&
-              JSON.stringify(entry).includes(ROOT_TURN_MARKER)
-          ).length
-          // The child id the core handed back as `spawn_agent`'s output, read
-          // out of the root's own next request. JSON-in-JSON, so the quotes may
-          // be escaped.
-          const spawned = /agent_id\\?"\s*:\s*\\?"([0-9a-fA-F-]{8,})/.exec(body)?.[1]
-          // The CHILD's own step index, counted the same way as the root's but
-          // over the requests the root marker is absent from. Only needed when
-          // `nativeCommand` scripts a command on the child rather than the root.
-          const childTurns = requests.filter(
-            (entry) =>
-              !isGuardianRequest(entry) &&
-              entry.generate !== false &&
-              !JSON.stringify(entry).includes(ROOT_TURN_MARKER)
-          ).length
-          const nativeAgentItem =
-            nativeAgent && request.generate !== false && !guardian
-              ? !root
-                ? nativeCommand && childTurns === 1
-                  ? {
-                      type: 'function_call',
-                      call_id: 'fixture-child-command',
-                      name: 'exec_command',
-                      arguments: JSON.stringify({
-                        cmd: `printf fixture-approved > "${cwd}/approval.txt"`,
-                        sandbox_permissions: 'require_escalated',
-                        justification: 'Isolated fixture write inside the test directory'
-                      })
-                    }
-                  : {
-                      type: 'message',
-                      id: 'msg-child',
-                      role: 'assistant',
-                      content: [{ type: 'output_text', text: 'fixture child complete' }]
-                    }
-                : rootTurns === 1
-                  ? {
-                      type: 'function_call',
-                      call_id: 'fixture-spawn',
-                      name: 'spawn_agent',
-                      namespace: nativeAgent === 'v2' ? 'collaboration' : 'multi_agent_v1',
-                      arguments: JSON.stringify(
-                        nativeAgent === 'v2'
+        : fixtureAssistantMessage(),
+    ...(nativeSession
+      ? {
+          onUpgrade: (req, socket, head) => {
+            if (
+              req.url !== '/v1/responses' ||
+              req.headers.authorization !== FIXTURE_AUTHORIZATION
+            ) {
+              errors.push('unexpected websocket upgrade')
+              socket.destroy()
+              return
+            }
+            websocket!.handleUpgrade(req, socket, head, (connection) => {
+              connection.on('message', (data) => {
+                const request = JSON.parse(data.toString()) as Record<string, unknown>
+                requests.push(request)
+                // The reviewer is a SECOND model session on the SAME provider, so its
+                // calls interleave with the agent's; the step index must count only
+                // the agent's or the scripted command never fires.
+                const guardian = isGuardianRequest(request)
+                const agentTurns = requests.filter(
+                  (entry) => !isGuardianRequest(entry) && entry.generate !== false
+                ).length
+                // Native agents (slice F): the CHILD is a separate thread on this same
+                // provider, so the root's own step index must count only the root's
+                // requests — and the child must be answered too, or its turn never
+                // ends and nothing reaches the parent's card.
+                const body = JSON.stringify(request)
+                const root = body.includes(ROOT_TURN_MARKER)
+                const rootTurns = requests.filter(
+                  (entry) =>
+                    !isGuardianRequest(entry) &&
+                    entry.generate !== false &&
+                    JSON.stringify(entry).includes(ROOT_TURN_MARKER)
+                ).length
+                // The child id the core handed back as `spawn_agent`'s output, read
+                // out of the root's own next request. JSON-in-JSON, so the quotes may
+                // be escaped.
+                const spawned = /agent_id\\?"\s*:\s*\\?"([0-9a-fA-F-]{8,})/.exec(body)?.[1]
+                // The CHILD's own step index, counted the same way as the root's but
+                // over the requests the root marker is absent from. Only needed when
+                // `nativeCommand` scripts a command on the child rather than the root.
+                const childTurns = requests.filter(
+                  (entry) =>
+                    !isGuardianRequest(entry) &&
+                    entry.generate !== false &&
+                    !JSON.stringify(entry).includes(ROOT_TURN_MARKER)
+                ).length
+                const nativeAgentItem =
+                  nativeAgent && request.generate !== false && !guardian
+                    ? !root
+                      ? nativeCommand && childTurns === 1
+                        ? {
+                            type: 'function_call',
+                            call_id: 'fixture-child-command',
+                            name: 'exec_command',
+                            arguments: JSON.stringify({
+                              cmd: `printf fixture-approved > "${cwd}/approval.txt"`,
+                              sandbox_permissions: 'require_escalated',
+                              justification: 'Isolated fixture write inside the test directory'
+                            })
+                          }
+                        : fixtureAssistantMessage('fixture child complete', 'msg-child')
+                      : rootTurns === 1
+                        ? {
+                            type: 'function_call',
+                            call_id: 'fixture-spawn',
+                            name: 'spawn_agent',
+                            namespace: nativeAgent === 'v2' ? 'collaboration' : 'multi_agent_v1',
+                            arguments: JSON.stringify(
+                              nativeAgent === 'v2'
+                                ? {
+                                    task_name: 'fixture_child',
+                                    message: CHILD_TASK_PROMPT,
+                                    // Without this the child FORKS the root's history
+                                    // and the marker below stops telling them apart —
+                                    // and the child would answer the root's prompt
+                                    // rather than its own task.
+                                    fork_turns: 'none'
+                                  }
+                                : { message: CHILD_TASK_PROMPT }
+                            )
+                          }
+                        : rootTurns === 2 && (nativeAgent === 'v2' || spawned)
                           ? {
-                              task_name: 'fixture_child',
-                              message: CHILD_TASK_PROMPT,
-                              // Without this the child FORKS the root's history
-                              // and the marker below stops telling them apart —
-                              // and the child would answer the root's prompt
-                              // rather than its own task.
-                              fork_turns: 'none'
+                              type: 'function_call',
+                              call_id: 'fixture-wait',
+                              name: 'wait_agent',
+                              namespace: nativeAgent === 'v2' ? 'collaboration' : 'multi_agent_v1',
+                              arguments: JSON.stringify(
+                                // v2's `wait_agent` waits for inter-agent ACTIVITY and
+                                // names no targets; v1's waits for the agents it is
+                                // given to reach a final status.
+                                nativeAgent === 'v2'
+                                  ? { timeout_ms: 30000 }
+                                  : { targets: [spawned], timeout_ms: 30000 }
+                              )
                             }
-                          : { message: CHILD_TASK_PROMPT }
-                      )
-                    }
-                  : rootTurns === 2 && (nativeAgent === 'v2' || spawned)
-                    ? {
-                        type: 'function_call',
-                        call_id: 'fixture-wait',
-                        name: 'wait_agent',
-                        namespace: nativeAgent === 'v2' ? 'collaboration' : 'multi_agent_v1',
-                        arguments: JSON.stringify(
-                          // v2's `wait_agent` waits for inter-agent ACTIVITY and
-                          // names no targets; v1's waits for the agents it is
-                          // given to reach a final status.
-                          nativeAgent === 'v2'
-                            ? { timeout_ms: 30000 }
-                            : { targets: [spawned], timeout_ms: 30000 }
-                        )
-                      }
+                          : undefined
                     : undefined
-              : undefined
-          for (const event of [
-            { type: 'response.created', response: { id: 'resp-fixture' } },
-            {
-              type: 'response.output_item.done',
-              item: guardian
-                ? {
-                    type: 'message',
-                    id: 'msg-guardian',
-                    role: 'assistant',
-                    content: [{ type: 'output_text', text: verdict.current }]
-                  }
-                : nativeAgentItem
-                  ? nativeAgentItem
-                  : nativeCommand && request.generate !== false && agentTurns === 1
-                    ? {
-                        type: 'function_call',
-                        call_id: 'fixture-command',
-                        name: 'exec_command',
-                        arguments: JSON.stringify({
-                          cmd: `printf fixture-approved > "${cwd}/approval.txt"`,
-                          sandbox_permissions: 'require_escalated',
-                          justification: 'Isolated fixture write inside the test directory'
-                        })
-                      }
-                    : scripted && request.generate !== false && agentTurns === 1
-                      ? {
-                          type: 'function_call',
-                          call_id: `fixture-${scripted.name}`,
-                          name: scripted.name,
-                          arguments: JSON.stringify(scripted.arguments)
-                        }
-                      : {
-                          type: 'message',
-                          id: 'msg-fixture',
-                          role: 'assistant',
-                          content: [{ type: 'output_text', text: 'fixture complete' }]
-                        }
-            },
-            completed
-          ])
-            connection.send(JSON.stringify(event))
-        })
-      })
-    })
-  }
-  await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve))
-  const port = (server.address() as { port: number }).port
+                for (const event of [
+                  { type: 'response.created', response: { id: 'resp-fixture' } },
+                  {
+                    type: 'response.output_item.done',
+                    item: guardian
+                      ? fixtureAssistantMessage(verdict.current, 'msg-guardian')
+                      : nativeAgentItem
+                        ? nativeAgentItem
+                        : nativeCommand && request.generate !== false && agentTurns === 1
+                          ? {
+                              type: 'function_call',
+                              call_id: 'fixture-command',
+                              name: 'exec_command',
+                              arguments: JSON.stringify({
+                                cmd: `printf fixture-approved > "${cwd}/approval.txt"`,
+                                sandbox_permissions: 'require_escalated',
+                                justification: 'Isolated fixture write inside the test directory'
+                              })
+                            }
+                          : scripted && request.generate !== false && agentTurns === 1
+                            ? {
+                                type: 'function_call',
+                                call_id: `fixture-${scripted.name}`,
+                                name: scripted.name,
+                                arguments: JSON.stringify(scripted.arguments)
+                              }
+                            : fixtureAssistantMessage()
+                  },
+                  FIXTURE_COMPLETED
+                ])
+                  connection.send(JSON.stringify(event))
+              })
+            })
+          }
+        }
+      : {})
+  })
+  server = fixture.server
+  const port = fixture.port
   containment.profile = join(directory, 'isolation.sb')
   writeFileSync(
     containment.profile,
@@ -465,52 +416,20 @@ async function setupFixture(
 (allow network-outbound (remote ip "localhost:${port}"))
 `
   )
-  writeFileSync(
-    join(codexHome, 'config.toml'),
+  writeFixtureCodexHome(codexHome, {
+    port,
     // `multi_agent_v1` vs `multi_agent_v2` is chosen by the MODEL, not by the
     // `multi_agent_v2` feature flag: `Config::multi_agent_version_for_model`
     // consults the catalog entry's own `multi_agent_version` before falling
     // back to the features, and the default (`gpt-6-astra`) declares v2. Pin
     // the one catalogued model that declares v1 so this probe exercises the
     // `collabAgentToolCall` surface it is about.
-    `${nativeAgent === 'v1' ? 'model = "gpt-5.6-luna"' : nativeSession ? '' : 'model = "mock-model"'}
-model_provider = "${nativeSession ? 'openai' : 'fixture'}"
-${nativeSession ? `openai_base_url = "http://127.0.0.1:${port}/v1"` : ''}
-approval_policy = "on-request"
-approvals_reviewer = "${autoReview ? 'auto_review' : 'user'}"
-sandbox_mode = "read-only"
-cli_auth_credentials_store = "file"
-check_for_update_on_startup = false
-web_search = "disabled"
-[model_providers.fixture]
-name = "Isolated localhost fixture"
-base_url = "http://127.0.0.1:${port}/v1"
-wire_api = "responses"
-requires_openai_auth = false
-supports_websockets = false
-request_max_retries = 0
-stream_max_retries = 0
-stream_idle_timeout_ms = 15000
-[analytics]
-enabled = false
-[feedback]
-enabled = false
-[otel]
-exporter = "none"
-[features]
-apps = false
-plugins = false
-remote_plugin = false
-browser_use = false
-computer_use = false
-shell_snapshot = false
-`
-  )
-  if (nativeSession)
-    writeFileSync(
-      join(codexHome, 'auth.json'),
-      JSON.stringify({ OPENAI_API_KEY: 'codex-fixture-not-a-real-key' })
-    )
+    model: nativeAgent === 'v1' ? 'gpt-5.6-luna' : nativeSession ? null : 'mock-model',
+    provider: nativeSession ? 'openai' : 'fixture',
+    openaiBaseUrl: nativeSession ? `http://127.0.0.1:${port}/v1` : null,
+    approvalsReviewer: autoReview ? 'auto_review' : 'user',
+    apiKey: nativeSession ? FIXTURE_API_KEY : null
+  })
   return {
     cwd,
     home,
