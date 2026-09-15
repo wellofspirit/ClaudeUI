@@ -46,6 +46,15 @@ The 2026-09-13 ruling weighed 52 MB of idle memory per session against the redes
 - **P3** Writer lock: a thread started and left idle in a live host — is `thread/delete` from a second process refused (lock held for the process lifetime) or accepted (lock released when idle)? Is there a wire method that unloads a thread without exiting the process?
 - **P4** Graceful close: ending stdin on a host with an idle thread and with a running turn — exit code, time to exit, and whether the sqlite files are closed cleanly (a following start on the same home must not fail its state-runtime init).
 
+## Probe answers (H0, 2026-09-15, codex 0.154.0 on Windows x64; suite `src/integration/codex/codex-host-probes.integration.test.ts`)
+
+- **P1 — confirmed.** Three threads on one stdio connection with concurrent turns: every approval request carries its own `threadId` and `turnId`, answering one completes exactly that thread's turn, nothing crosses threads, no transport limit trips.
+- **P2 — confirmed, better than assumed.** After a force-killed host, `thread/resume` on a fresh host reopens the thread and the interrupted turn is present with `status: "interrupted"` in both `thread/resume` and `thread/read`; a fresh turn runs. A `disconnected` session's dead turn is renderable, not a hole.
+- **P3 — the lock is process-scoped and nothing unloads a thread.** A second process's `thread/delete` is refused (`-32600`) while the host holds the thread, idle or not; `thread/unsubscribe` exists on the binary (absent from ClaudeUI's generated method map) but only detaches the connection's subscription and does not release the lock.
+- **P5 — the holder can delete its own thread.** From the same connection, `thread/delete` of an idle loaded thread is accepted and the id is gone from `thread/list`, `thread/read` and `thread/resume`; of a thread with a running turn it is accepted and interrupts (the turn still ends with a `turn/completed` envelope whose `turn.status` is `interrupted`, so readers must consult the status, not the method name); of a source with a loaded fork it is refused from the holder too, because the refusal comes from the rollout reference index, so the leaf-first subtree walk of `delete.ts` stays. **Rule for decision 3:** a delete is issued on the host that holds the thread when one does, else on any host; no recycle, no second process.
+- **P4 — confirmed and cheaper than designed.** Ending stdin exits the server with code 0 in 13 ms with an idle thread and 29 ms with a running turn (it does not wait for the turn), and a host started immediately afterwards on the same home initialises cleanly. The graceful close needs no interrupt-first step and never spends `killGraceMs` on a healthy host; the tree kill stays as the fallback only.
+- Shape correction: `thread/list` answers `{ data, nextCursor, backwardsCursor }`.
+
 ## As built
 
 _(filled per slice by the spec's Landed paragraphs)_
