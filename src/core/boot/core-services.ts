@@ -50,6 +50,7 @@ import { hostConnection } from '../ipc/command-registry'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
 import { armCodexRulesSync, syncCodexRulesFile } from '../codex/rules-sync'
+import { followCodexActiveAccount } from '../codex/codex-account-switch'
 import { scanCodexLineage } from '../codex/history'
 import { refreshCanonicalDirectories } from '../services/sync-seed'
 import { credentialSync } from '../auth/vault/CredentialSync'
@@ -155,6 +156,31 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // The host's own post-session wiring — see the module header for why this is
   // one ordered hook rather than several options.
   afterSessionGraph?.(sessionManager)
+
+  // ACTIVE-account switch -> the Codex sessions that follow it (ADR-069 §4).
+  // Here rather than in `register-auth-providers.ts` (which wires the two engine
+  // FEED targets) for two reasons: the session graph is what this needs and it
+  // exists only at this point, and `claudeui-server` never imports that
+  // registrar, so a headless host would silently keep every follower on the old
+  // account's host. `configure()` is additive, so this adds the hook without
+  // disturbing the feed targets the desktop registrar has already wired.
+  //
+  // Reads the active id back from the vault rather than taking it as an
+  // argument: the hook fires for a switch AND for the removal of the active
+  // account (which promotes another), and the status is the one answer that is
+  // right for both.
+  credentialSync.configure({
+    onActiveAccountChanged: async () => {
+      const activeId = await credentialSync
+        .getStatus()
+        .then((status) => status.activeId)
+        .catch(() => undefined)
+      // An unreadable vault is not a licence to guess: `null` here would read as
+      // "no account is active" and move every follower off its host for nothing.
+      if (activeId === undefined) return
+      await followCodexActiveAccount(sessionManager, activeId)
+    }
+  })
 
   // Recompile the user's Bash permission rules into `$CODEX_HOME/rules/
   // claudeui.rules` (see `codex/rules-sync.ts`). Here rather than in either

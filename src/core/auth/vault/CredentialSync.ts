@@ -32,8 +32,9 @@
  * This service refreshes EVERY stored account on its own timer (a background
  * account's refresh token dies on its own clock), but vends only the ACTIVE one
  * to pi and opencode, whose auth stores hold a single Codex entry each. Switching
- * re-vends both and rings `onActiveAccountChanged` so the boot seam can recycle
- * opencode (ADR-047) without this module importing it. Reconcile-on-start and the
+ * re-vends both and rings `onActiveAccountChanged` so the boot seam can move the
+ * sessions that follow the active account off the Codex host they were on
+ * (ADR-069 §4) without this module importing a session. Reconcile-on-start and the
  * fs-watch adoption still operate on the ACTIVE account alone: an engine store
  * holds the credential WE vended, so a rotation found there belongs to that
  * account and to no other. A `VaultLike` with no account methods is driven
@@ -173,8 +174,10 @@ export interface CredentialSyncDeps {
   getEnabledRoutes?: () => CodexEnabledRoutes
   /**
    * Rung AFTER the active account changed and both engine stores were re-fed.
-   * The boot seam wires opencode's `recycleAll()` into it (ADR-047) without this
-   * module importing opencode; the default is a no-op.
+   * The boot seam wires it (`core/boot/core-services.ts`) without this module
+   * importing a session or an engine; the default is a no-op. Codex's hosts are
+   * the one consumer today (ADR-069 §4) — opencode recycles from its own auth
+   * provider's mutation points instead (ADR-047).
    */
   onActiveAccountChanged?: () => void | Promise<void>
 }
@@ -300,15 +303,24 @@ export class CredentialSync {
     this.onActiveAccountChanged = deps.onActiveAccountChanged ?? ((): void => {})
   }
 
-  /** Wire the two engine feed targets in from the composition root (register-auth-providers.ts). Safe to call more than once (e.g. hot-reload). */
+  /**
+   * Wire the engine feed targets and the account-switch hook in from the
+   * composition roots. Safe to call more than once (e.g. hot-reload), and
+   * ADDITIVE: every field is optional and an absent one leaves what is already
+   * wired alone, because the wiring comes from two places — the desktop's
+   * provider registrar supplies the two feed targets (`register-auth-providers
+   * .ts`, which is the only module that may import both those providers and
+   * this one), while the Electron-free boot seam supplies the switch hook,
+   * which needs the session graph.
+   */
   configure(targets: {
-    pi: CodexFeedTarget
-    opencode: CodexFeedTarget
+    pi?: CodexFeedTarget
+    opencode?: CodexFeedTarget
     getEnabledRoutes?: () => CodexEnabledRoutes
     onActiveAccountChanged?: () => void | Promise<void>
   }): void {
-    this.piTarget = targets.pi
-    this.opencodeTarget = targets.opencode
+    if (targets.pi) this.piTarget = targets.pi
+    if (targets.opencode) this.opencodeTarget = targets.opencode
     if (targets.getEnabledRoutes) {
       this.getEnabledRoutes = targets.getEnabledRoutes
       this.hasConfiguredRoutePolicy = true
@@ -594,8 +606,9 @@ export class CredentialSync {
 
   /**
    * Make `id` the active account: vend it to both engines, then ring the hook so
-   * the boot seam can recycle opencode (ADR-047). Running Codex sessions keep the
-   * token they started with — switching affects NEW sessions (ADR-068 §2).
+   * the boot seam can act on the switch (ADR-069 §4 — every Codex session that
+   * FOLLOWS the active account leaves the host it was on and continues on the
+   * new account's at its next prompt; a pinned session is untouched).
    */
   async switchActiveAccount(id: string): Promise<void> {
     if (!this.vault.setActiveAccount || !this.vault.listAccounts) {

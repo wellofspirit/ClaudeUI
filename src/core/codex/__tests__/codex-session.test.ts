@@ -3,6 +3,7 @@ import { CodexSession } from '../CodexSession'
 import { CodexHostRegistry, type CodexHostClient } from '../CodexHost'
 import { codexAuthHook, type CodexAuthHook, type CodexAuthSource } from '../codex-auth-hook'
 import { CodexTransportError, type CodexClientOptions } from '../CodexAppServerClient'
+import { followCodexActiveAccount } from '../codex-account-switch'
 import type { EngineSpawnOptions } from '../../providers/ISession'
 import type { QueuedItem } from '../../../shared/types'
 import { applyEvent } from '../../shared/sync/reducer'
@@ -3304,57 +3305,64 @@ describe('Codex sessions under an injected ChatGPT account', () => {
 // Slice 2b guards 2-5 — the per-session ChatGPT pin (ADR-068 §2)
 // ---------------------------------------------------------------------------
 
-describe('the per-session ChatGPT account pin', () => {
-  /** Two stored accounts, no vault, no network, no token that could be real. */
-  function twoAccounts(): CodexAuthSource {
-    const accounts = [
-      { id: 'acct-a', workspace: 'ws-a', plan: 'pro' },
-      { id: 'acct-b', workspace: 'ws-b', plan: 'plus' }
-    ]
-    return {
-      injectionTokenFor: vi.fn(async (accountId: string | null) => {
-        const account = accountId === null ? accounts[0] : accounts.find((a) => a.id === accountId)
-        if (!account) return null
-        return {
-          accessToken: `fake-${account.id}`,
-          chatgptAccountId: account.workspace,
-          chatgptPlanType: account.plan,
-          vaultAccountId: account.id
-        }
-      }),
-      getStatus: vi.fn(async () => ({
-        accounts: accounts.map((a) => ({ id: a.id, accountId: a.workspace }))
-      }))
-    }
+// The fabricated two-account vault and the status readers the pin, the switch
+// and the writer-lock guards below all share (ADR-068 §2, ADR-069 §4).
+/** Two stored accounts, no vault, no network, no token that could be real. */
+function twoAccounts(): CodexAuthSource {
+  const accounts = [
+    { id: 'acct-a', workspace: 'ws-a', plan: 'pro' },
+    { id: 'acct-b', workspace: 'ws-b', plan: 'plus' }
+  ]
+  return {
+    injectionTokenFor: vi.fn(async (accountId: string | null) => {
+      const account = accountId === null ? accounts[0] : accounts.find((a) => a.id === accountId)
+      if (!account) return null
+      return {
+        accessToken: `fake-${account.id}`,
+        chatgptAccountId: account.workspace,
+        chatgptPlanType: account.plan,
+        vaultAccountId: account.id
+      }
+    }),
+    getStatus: vi.fn(async () => ({
+      accounts: accounts.map((a) => ({ id: a.id, accountId: a.workspace }))
+    }))
   }
-  /**
-   * Answers `account/read` with the email that belongs to the injected token.
-   *
-   * The id comes from the HOST's hook now (ADR-069 §1: one identity per
-   * process), which is what makes a pin observable at all — the session's own
-   * hook never injects.
-   */
-  function emailPerAccount(
-    request: ReturnType<typeof fixture>['request'],
-    injectedAccountId: () => string | null
-  ): void {
-    const base = request.getMockImplementation()!
-    request.mockImplementation((async (method: string, params?: unknown) =>
-      method === 'account/read'
-        ? { account: { type: 'chatgpt', email: `${injectedAccountId()}@example.test` } }
-        : base(method, params)) as typeof base)
-  }
-  const statuses = (): Array<Record<string, unknown>> =>
-    events.mock.calls
-      .filter(([channel]) => channel === 'session:status')
-      .map((call) => (call[1] as [string, Record<string, unknown>])[1])
-  const pinOf = (status: Record<string, unknown>): string | null =>
-    (status.codex as { pinnedAccountId: string | null }).pinnedAccountId
-  const errors = (): string[] =>
-    events.mock.calls
-      .filter(([channel]) => channel === 'session:error')
-      .map((call) => (call[1] as [string, string])[1])
+}
+/**
+ * Answers `account/read` with the email that belongs to the injected token.
+ *
+ * The id comes from the HOST's hook now (ADR-069 §1: one identity per
+ * process), which is what makes a pin observable at all — the session's own
+ * hook never injects.
+ */
+function emailPerAccount(
+  request: ReturnType<typeof fixture>['request'],
+  injectedAccountId: () => string | null
+): void {
+  const base = request.getMockImplementation()!
+  request.mockImplementation((async (method: string, params?: unknown) =>
+    method === 'account/read'
+      ? { account: { type: 'chatgpt', email: `${injectedAccountId()}@example.test` } }
+      : base(method, params)) as typeof base)
+}
+const statuses = (): Array<Record<string, unknown>> =>
+  events.mock.calls
+    .filter(([channel]) => channel === 'session:status')
+    .map((call) => (call[1] as [string, Record<string, unknown>])[1])
+const pinOf = (status: Record<string, unknown>): string | null =>
+  (status.codex as { pinnedAccountId: string | null }).pinnedAccountId
+const errors = (): string[] =>
+  events.mock.calls
+    .filter(([channel]) => channel === 'session:error')
+    .map((call) => (call[1] as [string, string])[1])
+/** Every `session:warning` text a session emitted, oldest first. */
+const warnings = (): string[] =>
+  events.mock.calls
+    .filter(([channel]) => channel === 'session:warning')
+    .map((call) => (call[1] as [string, string])[1])
 
+describe('the per-session ChatGPT account pin', () => {
   it('moves an idle session onto the pinned account host and takes its thread along', async () => {
     const source = twoAccounts()
     const hook = codexAuthHook({ source })
@@ -3485,12 +3493,13 @@ describe('the per-session ChatGPT account pin', () => {
     expect(pinOf(last)).toBe(null)
   })
 
-  it('refuses a re-pin while ANOTHER session is on the host, and writes nothing', async () => {
-    // One process holds one identity, so this session's thread has to LEAVE the
-    // host — and its writer lock is only released when that process exits or
-    // unloads the thread a minute later. Closing a host another session is
-    // working on to make one pin land is not a trade anyone would choose
-    // (migrating it with the pin is ADR-069 §4's recycle, which is H3).
+  it('re-pins off a SHARED host, waiting out the writer lock the old one still holds', async () => {
+    // Until H3 this was refused outright: one process holds one identity, so the
+    // thread has to leave the host, and its writer lock is released only when
+    // that process exits or unloads the thread — which closing the host would
+    // have forced, taking the other session's turn with it. ADR-069 §4 waits
+    // instead: the shared host keeps running and the resume on the target host
+    // rides the bounded retry.
     const source = twoAccounts()
     const first = fixture({}, codexAuthHook({ source }), source)
     emailPerAccount(first.request, first.injectedAccountId)
@@ -3504,16 +3513,46 @@ describe('the per-session ChatGPT account pin', () => {
     await second.session.run(null)
     expect(second.session.getSessionId()).toBe('other-root')
     expect(first.started).toHaveLength(1)
+    // The one fake app-server answers both hosts, so it goes back to answering
+    // for `root` — the thread that is actually moving.
+    first.response.thread.id = 'root'
 
-    await expect(first.session.setAccount('acct-b')).rejects.toThrow(
-      "Another session is using this account's Codex process"
-    )
+    // What the binary does while the vacated host still has `root` loaded:
+    // `-32600 thread <id> already has an active writer`, twice, then it unloads.
+    const base = first.request.getMockImplementation()!
+    let refusals = 2
+    first.request.mockImplementation((async (method: string, params?: unknown) => {
+      if (method === 'thread/resume' && refusals > 0) {
+        refusals--
+        throw new CodexTransportError('rpc-error--32600')
+      }
+      return base(method, params)
+    }) as typeof base)
 
-    // Nothing persisted, nothing moved, and the user was told why.
-    expect(overrides.get('root')).toEqual({})
-    expect(pinOf(statuses().at(-1)!)).toBe(null)
-    expect(errors().at(-1)).toContain("Another session is using this account's Codex process")
-    expect(first.request.mock.calls.map(([method]) => method)).not.toContain('thread/unsubscribe')
+    vi.useFakeTimers()
+    try {
+      const move = first.session.setAccount('acct-b')
+      // Two waits of two seconds, plus the awaits between them.
+      await vi.advanceTimersByTimeAsync(5000)
+      await move
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(refusals).toBe(0)
+    // Said once for the whole wait, not once per attempt.
+    expect(warnings()).toEqual(['Waiting for the previous Codex process to release this thread'])
+    expect(errors()).toEqual([])
+    expect(pinOf(statuses().at(-1)!)).toBe('acct-b')
+    expect(overrides.get('root')).toEqual({ accountId: 'acct-b' })
+    // The host that was shared was NOT closed for the pin: the other session is
+    // still on it and still working.
+    expect(first.registry.size).toBe(2)
+    // Session two is answered by the host's own client — the FIRST fixture's, since
+    // that is the one the shared host was built with.
+    first.request.mockClear()
+    await second.session.run('hello')
+    expect(first.request.mock.calls.map(([method]) => method)).toContain('turn/start')
   })
 
   it('moves the thread when only READ leases share the host, and closes the one it left', async () => {
@@ -3714,6 +3753,186 @@ describe('the per-session ChatGPT account pin', () => {
 })
 
 // ---------------------------------------------------------------------------
+// H3 — the ACTIVE-account switch and the writer lock (ADR-069 §4)
+// ---------------------------------------------------------------------------
+
+describe('an ACTIVE ChatGPT account switch', () => {
+  /** The statuses one session emitted, found by the thread id they carry. */
+  const statusesOf = (threadId: string): Array<Record<string, unknown>> =>
+    statuses().filter((status) => status.sessionId === threadId)
+
+  it('moves only the sessions that FOLLOW the active account, and reports no error', async () => {
+    const source = twoAccounts()
+    const follower = fixture({}, codexAuthHook({ source }), source)
+    emailPerAccount(follower.request, follower.injectedAccountId)
+    await follower.session.run(null)
+    // A session PINNED to the account that is about to stop being active shares
+    // the follower's host (the registry resolves both to `acct:acct-a`), which is
+    // the case worth guarding: the switch must move one of them and not the other.
+    follower.response.thread.id = 'pinned-root'
+    const pinned = fixture({}, codexAuthHook({ source }), source, follower.registry)
+    await pinned.session.run(null)
+    await pinned.session.setAccount('acct-a')
+    expect(follower.started).toHaveLength(1)
+    follower.response.thread.id = 'root'
+
+    await followCodexActiveAccount(
+      { forEach: (fn) => [follower.session, pinned.session].forEach(fn) },
+      'acct-b'
+    )
+
+    // The follower left its host and says so with a STATUS — a switch is the
+    // user's own act, so there is no error to report (ADR-045's contract).
+    expect(statusesOf('root').at(-1)!.state).toBe('disconnected')
+    expect(errors()).toEqual([])
+    // The pinned session is untouched: same host, still idle, still working.
+    expect(statusesOf('pinned-root').at(-1)!.state).toBe('idle')
+    expect(follower.registry.size).toBe(1)
+    follower.request.mockClear()
+    await pinned.session.run('hello')
+    expect(follower.request.mock.calls.map(([method]) => method)).toContain('turn/start')
+  })
+
+  it('closes the host a follower was alone on', async () => {
+    const source = twoAccounts()
+    const { session, registry, client } = fixture({}, codexAuthHook({ source }), source)
+    await session.run(null)
+    expect(registry.size).toBe(1)
+
+    await followCodexActiveAccount({ forEach: (fn) => fn(session) }, 'acct-b')
+
+    // Nothing is left on it, and its process is what holds the thread's writer
+    // lock — so it goes now rather than at the idle deadline, which is what lets
+    // the next prompt resume on the new account's host without waiting.
+    expect(registry.size).toBe(0)
+    expect(client.dispose).toHaveBeenCalled()
+    expect(statuses().at(-1)!.state).toBe('disconnected')
+    expect(errors()).toEqual([])
+  })
+
+  it('leaves a session alone when the new active account is the one it already runs on', async () => {
+    const source = twoAccounts()
+    const { session, registry, request } = fixture({}, codexAuthHook({ source }), source)
+    await session.run(null)
+    request.mockClear()
+
+    await followCodexActiveAccount({ forEach: (fn) => fn(session) }, 'acct-a')
+
+    expect(registry.size).toBe(1)
+    expect(request.mock.calls.map(([method]) => method)).not.toContain('thread/unsubscribe')
+    expect(statuses().at(-1)!.state).toBe('idle')
+  })
+})
+
+describe('resuming a thread the previous host still holds', () => {
+  /**
+   * A session on `acct-a`'s host holding `root`, whose app-server refuses the
+   * next `refusals.left` resumes: the writer lock the retry exists for belongs
+   * to a process that is still running, which is exactly what an account switch
+   * and a re-pin off a shared host leave behind.
+   */
+  function holderAndResume(refusals: { left: number }) {
+    const source = twoAccounts()
+    const holder = fixture({}, codexAuthHook({ source }), source)
+    const base = holder.request.getMockImplementation()!
+    holder.request.mockImplementation((async (method: string, params?: unknown) => {
+      if (method === 'thread/resume' && refusals.left > 0) {
+        refusals.left--
+        // What the app-server answers a SECOND process: `-32600 thread <id>
+        // already has an active writer` (upstream `thread_resume.rs`).
+        throw new CodexTransportError('rpc-error--32600')
+      }
+      return base(method, params)
+    }) as typeof base)
+    return { source, holder }
+  }
+
+  it('retries until the lock is released, and warns exactly once', async () => {
+    const refusals = { left: 2 }
+    const { source, holder } = holderAndResume(refusals)
+    await holder.session.run(null)
+    // The resumed session is pinned to the OTHER account, so it asks for a
+    // second host — the shape a switch and a re-pin both produce.
+    overrides.set('root', { accountId: 'acct-b' })
+    const resumed = fixture(
+      { resumeSessionId: 'root' },
+      codexAuthHook({ source }),
+      source,
+      holder.registry
+    )
+
+    vi.useFakeTimers()
+    try {
+      const started = resumed.session.run(null)
+      await vi.advanceTimersByTimeAsync(5000)
+      await started
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(refusals.left).toBe(0)
+    expect(resumed.session.getSessionId()).toBe('root')
+    expect(warnings()).toEqual(['Waiting for the previous Codex process to release this thread'])
+    expect(errors()).toEqual([])
+    // The wait reads as a busy session, not a stuck one.
+    expect(statuses().some((status) => status.state === 'running')).toBe(true)
+  })
+
+  it('gives up after the window with the transport error', async () => {
+    const refusals = { left: Number.POSITIVE_INFINITY }
+    const { source, holder } = holderAndResume(refusals)
+    await holder.session.run(null)
+    overrides.set('root', { accountId: 'acct-b' })
+    const resumed = fixture(
+      { resumeSessionId: 'root' },
+      codexAuthHook({ source }),
+      source,
+      holder.registry
+    )
+
+    vi.useFakeTimers()
+    try {
+      const started = resumed.session.run(null)
+      const settled = expect(started).rejects.toThrow('rpc-error--32600')
+      // Past the 75-second window.
+      await vi.advanceTimersByTimeAsync(80_000)
+      await settled
+    } finally {
+      vi.useRealTimers()
+    }
+
+    // Bounded BOTH ways: it kept asking across the window (one attempt every two
+    // seconds over seventy-five) and then stopped rather than hanging on a lock
+    // that is never coming back.
+    const attempts = holder.request.mock.calls.filter(
+      ([method]) => method === 'thread/resume'
+    ).length
+    expect(attempts).toBeGreaterThan(30)
+    expect(attempts).toBeLessThan(50)
+    expect(errors().at(-1)).toContain('rpc-error--32600')
+  })
+
+  it('fails a refusal no live host explains at once', async () => {
+    // Same `-32600`, nothing loaded anywhere: a thread that is gone, a home that
+    // moved, another app-server on the machine. Nothing here can say the wait
+    // would be bounded, so it is not waited (ADR-069's cross-process note).
+    const source = twoAccounts()
+    const resumed = fixture({ resumeSessionId: 'gone' }, codexAuthHook({ source }), source)
+    const base = resumed.request.getMockImplementation()!
+    resumed.request.mockImplementation((async (method: string, params?: unknown) => {
+      if (method === 'thread/resume') throw new CodexTransportError('rpc-error--32600')
+      return base(method, params)
+    }) as typeof base)
+
+    await expect(resumed.session.run(null)).rejects.toThrow('rpc-error--32600')
+    expect(warnings()).toEqual([])
+    expect(
+      resumed.request.mock.calls.filter(([method]) => method === 'thread/resume')
+    ).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Slice 2b guard 7 (live half) — `account/rateLimits/updated` (ADR-068 §2)
 // ---------------------------------------------------------------------------
 
@@ -3786,11 +4005,6 @@ describe('Codex inherits the shared MCP list', () => {
     docs: { command: 'node', args: ['docs-server.js'] },
     search: { url: 'https://example.test/mcp' }
   }
-  /** Every `session:warning` text this session emitted, oldest first. */
-  const warnings = (): string[] =>
-    events.mock.calls
-      .filter(([channel]) => channel === 'session:warning')
-      .map((call) => (call[1] as [string, string])[1])
 
   it('sends the collected servers as config.mcp_servers on thread/start', async () => {
     mcp.servers = inherited
@@ -3874,11 +4088,6 @@ describe('Codex MCP tool approvals', () => {
   const ACCEPT = { action: 'accept', content: {} }
   const DECLINE = { action: 'decline', content: null }
   const TOOL = 'mcp__verify-stub__ping'
-  /** Every `session:warning` text this session emitted, oldest first. */
-  const warnings = (): string[] =>
-    events.mock.calls
-      .filter(([channel]) => channel === 'session:warning')
-      .map((call) => (call[1] as [string, string])[1])
   const errors = (): string[] =>
     events.mock.calls
       .filter(([channel]) => channel === 'session:error')

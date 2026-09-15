@@ -188,6 +188,18 @@ export interface ISession {
   getAutonomyMode?(): string
 
   /**
+   * The provider-wide ACTIVE account changed to `activeAccountId` (null = none).
+   *
+   * Optional: only an engine whose sessions share ONE process per account has
+   * anything to do here. Codex implements it (ADR-069 §4) — a session that
+   * follows the active account leaves the host it was on and continues on the
+   * new account's at its next prompt, while a pinned session is untouched.
+   * opencode recycles its servers through its own auth provider instead
+   * (ADR-047), and Claude and pi carry their credential per process.
+   */
+  followActiveAccount?(activeAccountId: string | null): Promise<void>
+
+  /**
    * Ask a one-off question outside the main conversation history (the `/btw`
    * command). Returns the assistant's answer, or null if the engine does not
    * support the capability or encounters an error.

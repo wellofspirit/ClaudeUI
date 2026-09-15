@@ -18,12 +18,14 @@
  * second native login is refused while external auth is active (ADR-068 §1). So
  * the unit of sharing is a process per home AND account, never per home alone.
  *
- * ## What this slice (H2) does and does not do
+ * ## What runs on a host
  *
- * Reads AND sessions run on hosts: a session is a thread here (ADR-069 §2), and
+ * Reads AND sessions: a session is a thread here (ADR-069 §2), and
  * {@link CodexHost.attach} hands it a per-thread connection whose notifications
- * and server requests are demultiplexed by `threadId`. What is still out: a host
- * is not recycled when the ACTIVE account changes (ADR-069 §4), which is H3.
+ * and server requests are demultiplexed by `threadId`. Since H3 an ACTIVE-account
+ * switch moves every session that FOLLOWS the active account off the host it was
+ * on (`CodexSession.followActiveAccount`), which closes that host when nothing
+ * pinned is left on it (ADR-069 §4).
  */
 import { homedir } from 'node:os'
 import {
@@ -274,6 +276,23 @@ type Held = { method: string; params: unknown; at: number }
  */
 export interface CodexHostSource {
   acquire(options?: CodexHostAcquireOptions): Promise<CodexHostHandle>
+  /**
+   * Is some LIVE host on the home `env` selects still holding `threadId`?
+   *
+   * The one question a caller that was REFUSED can ask: a `thread/resume` from
+   * another process is answered `-32600 thread <id> already has an active
+   * writer` while the process that opened it still has it loaded, and the
+   * binary's own text is not something to match on. A holder we can see is the
+   * refusal's explanation and says the wait is bounded — the binary unloads a
+   * thread about a minute after its last subscriber leaves — so
+   * {@link CodexSession}'s resume rides a retry only while this answers true
+   * (ADR-069 §4, H3).
+   *
+   * Optional so the structural fakes in the unit suites need not implement it;
+   * absent reads as "nobody we know of holds it", which fails a refused resume
+   * at once rather than waiting on a lock nothing here can explain.
+   */
+  holdsThread?(threadId: string, env?: NodeJS.ProcessEnv): boolean
 }
 
 /** What a host drives. `CodexClient` satisfies it; a unit test fakes it. */
@@ -881,6 +900,14 @@ export class CodexHostRegistry {
     for (const host of this.hosts.values())
       if (host.homeKey === homeKey && host.holds(threadId)) return host
     return undefined
+  }
+
+  /**
+   * {@link CodexHostSource.holdsThread} — {@link holderFor} keyed the way a
+   * caller that only knows its own `env` can ask it.
+   */
+  holdsThread(threadId: string, env?: NodeJS.ProcessEnv): boolean {
+    return this.holderFor(codexHomeKey(codexHomeForEnv(env)), threadId) !== undefined
   }
 
   private async resolveAccount(identity: CodexHostIdentity | undefined): Promise<string> {

@@ -107,7 +107,14 @@ vi.mock('../../services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: { dispatch: vi.fn() }
 }))
 vi.mock('../../auth/vault/CredentialSync', () => ({
-  credentialSync: { start: vi.fn(async () => {}) }
+  // `configure` is how the boot seam wires the ACTIVE-account switch onto the
+  // Codex hosts (ADR-069 §4); `getStatus` is what that hook reads the new active
+  // id back from. Both stubbed here because this suite is about the RULE file.
+  credentialSync: {
+    start: vi.fn(async () => {}),
+    configure: vi.fn(),
+    getStatus: vi.fn(async () => ({ activeId: null, accounts: [] }))
+  }
 }))
 vi.mock('../../shared-providers', () => ({
   sharedProviderService: { syncAll: vi.fn(async () => {}) }

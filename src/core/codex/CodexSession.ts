@@ -39,10 +39,12 @@ import {
   PLAN_MODE_DENY_REASON
 } from '../pi/permission-engine'
 import { persistAllowSuggestions } from '../opencode/permission-compiler'
+import type { CodexMethods } from './protocol/methods'
 import type { ThreadSettings } from './protocol/v2/ThreadSettings'
 import type { ThreadTokenUsage } from './protocol/v2/ThreadTokenUsage'
 import type { TokenUsageBreakdown } from './protocol/v2/TokenUsageBreakdown'
 import { resolveCodexCapabilities } from '../../shared/model-capabilities'
+import { logger } from '../services/logger'
 import { CodexTransportError, type CodexClientOptions } from './CodexAppServerClient'
 import {
   codexHostRegistry,
@@ -104,19 +106,56 @@ import {
   registerCodexFork
 } from '../services/db'
 
+/** Log source for this file's few diagnostic lines — the host's, since what
+ *  they describe is which process this session is a thread on. */
+const LOG_SOURCE = 'CodexHost'
+
 const record = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value)
 
 /**
- * Why a re-pin can be refused outright (ADR-069 §2, H2 Landed).
+ * What a pin that could not be applied says when the failure carried no message
+ * of its own.
  *
- * One process holds one ChatGPT identity, so moving this session's thread to
- * another account means leaving this host — and the thread's writer lock is only
- * released when that process exits or unloads the thread a minute after its last
- * subscriber leaves. With another session on the host, closing it to free the
- * lock would take that session down for this one's pin.
+ * Until H3 this was a refusal in its own right: a re-pin off a host another
+ * session shared was rejected up front, because the thread's writer lock is only
+ * released when the process holding it exits or unloads the thread, and closing
+ * a host for one pin would take the other session's turn with it. H3 lifts that
+ * — the move now leaves the shared host running and WAITS for the lock through
+ * {@link CodexSession.resumeThread}'s bounded retry (ADR-069 §4) — so what is
+ * left here is the fallback text for a target host that could not be started at
+ * all and threw something with no message.
  */
 const PIN_BLOCKED = "Another session is using this account's Codex process; re-pin after it closes."
+
+/**
+ * The transport code a `thread/resume` refused by ANOTHER process's writer lock
+ * arrives as: JSON-RPC `-32600`, which `CodexAppServerClient` surfaces as
+ * `rpc-error-<code>` (hence the two dashes).
+ *
+ * The binary's own text — `thread <id> already has an active writer`
+ * (upstream's `app-server/tests/suite/v2/thread_resume.rs`) — is deliberately
+ * NOT matched: it is not a contract, and `-32600` is the app-server's generic
+ * invalid-request code. What separates the refusal worth waiting for from the
+ * ones worth failing on is whether a host WE know of still holds the thread —
+ * see {@link CodexSession.lockedByLiveHost}.
+ */
+const RESUME_LOCK_REFUSAL = 'rpc-error--32600'
+
+/**
+ * How a session whose thread is still locked waits for it (ADR-069 §4).
+ *
+ * The binary unloads a thread — and releases its writer lock — about 60 seconds
+ * (`thread_unload_delay`) after its last subscriber leaves, so the window is
+ * that plus margin, and the poll is slow enough to cost nothing. Both bounded:
+ * a wait that outlives the window fails with the transport's own error rather
+ * than hanging on a lock that is never coming back.
+ */
+const RESUME_LOCK_RETRY_MS = 2_000
+const RESUME_LOCK_WINDOW_MS = 75_000
+
+/** Said ONCE per resume, on the first retry — not per attempt. */
+const RESUME_LOCK_NOTICE = 'Waiting for the previous Codex process to release this thread'
 
 /**
  * Host knobs plus the ChatGPT identity this session runs as.
@@ -922,10 +961,7 @@ export class CodexSession extends BaseSession {
           // ordinary history path.
           await this.wire.request('thread/fork', { ...params, ...branch, excludeTurns: true })
         : this.options.resumeSessionId
-          ? await this.wire.request('thread/resume', {
-              ...params,
-              threadId: this.options.resumeSessionId
-            })
+          ? await this.resumeThread({ ...params, threadId: this.options.resumeSessionId })
           : await this.wire.request('thread/start', {
               ...params,
               allowProviderModelFallback: false,
@@ -1107,17 +1143,73 @@ export class CodexSession extends BaseSession {
    * every other session on it too. The thread's own history is on disk, and a
    * resume is what carries it across — the same move a `disconnected` session
    * makes on its next prompt.
+   *
+   * The host it LEFT may still be running (another session is on it), in which
+   * case that process holds this thread's writer lock until it unloads the
+   * thread — so the resume here rides {@link resumeThread}'s bounded wait rather
+   * than failing, which is what lets a re-pin off a shared host land at all
+   * (ADR-069 §4; until H3 it was refused up front).
    */
   private async takeThread(accountId: string | null): Promise<void> {
     await this.attachHost(accountId)
     if (!this.threadId) return
-    const response = await this.wire.request('thread/resume', {
+    const response = await this.resumeThread({
       ...this.threadParams(),
       threadId: this.threadId
     })
     if (response.thread.id !== this.threadId)
       throw new Error('Codex resumed a different native thread')
     this.wire.claim(this.threadId)
+  }
+
+  /**
+   * `thread/resume`, waiting out the writer lock of a process that has not let
+   * go yet (ADR-069 §4).
+   *
+   * A thread stays LOADED — and locked — in the process that opened it until
+   * that process exits or the binary unloads the thread, about a minute after
+   * its last subscriber leaves; every other process's `thread/resume` is
+   * refused `-32600` meanwhile. That refusal is a NORMAL step in two moves this
+   * design makes on purpose: an active-account switch (the follower leaves a
+   * host that other sessions keep alive) and a re-pin off a shared host. So it
+   * is waited out — {@link RESUME_LOCK_WINDOW_MS}, polled every
+   * {@link RESUME_LOCK_RETRY_MS} — instead of failing the resume.
+   *
+   * Waited out ONLY while a host this process knows about still holds the
+   * thread: that is the refusal's explanation, it says the wait is bounded, and
+   * it is what separates this case from every other `-32600` on the same method
+   * (a thread that is gone, a home that moved), which still fails at once. A
+   * lock held by some OTHER app-server on the machine is out of scope by
+   * ADR-069's own note on cross-process races, and fails immediately here.
+   */
+  private async resumeThread(
+    params: CodexMethods['thread/resume']['params']
+  ): Promise<CodexMethods['thread/resume']['result']> {
+    const deadline = Date.now() + RESUME_LOCK_WINDOW_MS
+    let waiting = false
+    for (;;) {
+      try {
+        return await this.wire.request('thread/resume', params)
+      } catch (error) {
+        if (this.closed || Date.now() >= deadline || !this.lockedByLiveHost(error, params.threadId))
+          throw error
+        if (!waiting) {
+          waiting = true
+          // Once per resume, not per attempt: the wait is one event, and the
+          // status is what makes the session read as busy rather than stuck.
+          this.send('session:warning', RESUME_LOCK_NOTICE)
+          this.status('running')
+        }
+        await new Promise((resolve) => setTimeout(resolve, RESUME_LOCK_RETRY_MS))
+        if (this.closed) throw error
+      }
+    }
+  }
+
+  /** Is this rejection the writer lock of a host still live in this process? */
+  private lockedByLiveHost(error: unknown, threadId: string): boolean {
+    if (!(error instanceof CodexTransportError) || error.code !== RESUME_LOCK_REFUSAL) return false
+    return this.hosts.holdsThread?.(threadId, this.hostTransport.env) ?? false
   }
 
   /**
@@ -1157,12 +1249,13 @@ export class CodexSession extends BaseSession {
     // after its last subscriber leaves), and a loaded thread's writer lock
     // refuses every other process's `thread/resume` (`-32600 already has an
     // active writer`, upstream's own `thread_resume.rs`). So the vacated host is
-    // closed now rather than left to idle — unless another OWNER is on it, which
-    // `applyPin` refuses before it gets this far. READ leases are deliberately
-    // not consulted: a read that loses its host fails once and the next one
-    // starts a fresh one, which is ADR-069 §5's designed behaviour, and waiting
-    // for the 30-second sidebar poll's lease to drop would make a re-pin fail at
-    // random.
+    // closed now rather than left to idle — unless another OWNER is on it, in
+    // which case it keeps running and the next resume WAITS the lock out
+    // (`resumeThread`), which is what H3 lifted the re-pin refusal onto. READ
+    // leases are deliberately not consulted: a read that loses its host fails
+    // once and the next one starts a fresh one, which is ADR-069 §5's designed
+    // behaviour, and waiting for the 30-second sidebar poll's lease to drop
+    // would make a re-pin fail at random.
     if (!connection.host.owners) connection.host.close('host-vacated')
   }
 
@@ -1340,28 +1433,26 @@ export class CodexSession extends BaseSession {
   }
 
   /**
-   * Acquire the host this pin wants and decide whether the thread may move.
+   * Acquire the host this pin wants, BEFORE anything is persisted or moved.
    *
-   * It may not while another SESSION is attached to the host being left: the
-   * thread's writer lock is released only when the process holding it exits or
-   * unloads the thread (about a minute after its last subscriber leaves), and
-   * closing a host other sessions are working on to make one pin land is not a
-   * trade anyone would choose. Migrating those sessions with it is ADR-069 §4's
-   * recycle, which is H3.
+   * Separate from {@link applyPin} because a host that cannot be started at all
+   * is the one failure that must leave no trace: the refusal reaches the user
+   * before the overrides row is written, so the picker never shows a pin the
+   * session does not run on.
+   *
+   * Until H3 this also REFUSED a move off a host another session shared, since
+   * the thread's writer lock outlives the move. It no longer does: the vacated
+   * host stays up for the other session and the resume on the target host waits
+   * the lock out ({@link resumeThread}), which is ADR-069 §4's recycle applied
+   * to one thread instead of all of them.
    */
   private async planPin(accountId: string | null): Promise<CodexHostHandle> {
-    const target = await this.hosts.acquire({
+    return this.hosts.acquire({
       ...this.hostTransport,
       cwd: this.cwd,
       label: 'session',
       identity: { accountId }
     })
-    const current = this.connection?.host
-    if (current && target.host !== current && current.owners > 1) {
-      target.release()
-      throw new Error(PIN_BLOCKED)
-    }
-    return target
   }
 
   /** Write the pin into the overrides row beside model and effort. */
@@ -1425,6 +1516,57 @@ export class CodexSession extends BaseSession {
     await this.readAccount()
     if (this.closed) return
     this.status(this.busy ? 'running' : 'idle')
+  }
+
+  /**
+   * The ACTIVE ChatGPT account changed: leave the host this session followed it
+   * onto (ADR-069 §4).
+   *
+   * Only sessions that FOLLOW active move. A session pinned to an account —
+   * including one pinned to the account that has just stopped being active —
+   * runs on that account's host and is not the user's subject here, so it is
+   * untouched, and the host keeps running for as long as it still has owners.
+   *
+   * The move is a DISCONNECT, not a migration: the thread is resumed on the new
+   * account's host by the session's next prompt, exactly as a Claude session
+   * continues after its process is replaced (ADR-045), and exactly as this
+   * session's own `disconnected` path already works. Resuming eagerly here would
+   * start a host for every open session the moment the user switched, and would
+   * do it while the thread's writer lock is still held by the host being left —
+   * the wait `resumeThread` exists for, which belongs on the prompt the user
+   * actually sends.
+   *
+   * No `session:error`: a switch is the user's own act, like a Stop. The status
+   * is the whole notification (ADR-045's renderer contract, unchanged).
+   */
+  async followActiveAccount(activeAccountId: string | null): Promise<void> {
+    // One line per switch per session, at debug, BEFORE the decision: which
+    // session, what it runs as, and what it was asked to follow. Every early
+    // return below is a legitimate "stay", so without this the difference
+    // between "the seam never fired" and "this session had nothing to do" is
+    // invisible in a live drive (the F9 lesson, applied to the switch).
+    logger.debug(
+      LOG_SOURCE,
+      `follow active: thread=${this.threadId ?? 'none'} pinned=${this.pinnedAccountId() ?? 'none'} ` +
+        `host=${this.hostAccountId ?? 'active'} injected=${this.injectedAccountId ?? 'none'} ` +
+        `active=${activeAccountId ?? 'none'} attached=${this.connection !== null} closed=${this.closed}`
+    )
+    // No connection = nothing to leave: a session that never started resolves
+    // the active account when it does, and one already `disconnected` resumes
+    // on it at its next prompt.
+    if (this.closed || !this.auth || !this.connection) return
+    // A pin is a deliberate choice of account; the active one moving is not
+    // news to it.
+    if (this.pinnedAccountId() !== null) return
+    // Already the host the switch wants — two accounts resolving to one process
+    // is exactly what the registry's key promises (a follower and a session
+    // pinned to the same id share it), so there is nothing to move.
+    if (this.injectedAccountId === activeAccountId) return
+    // Its children are on this process too, and nothing else would stop them:
+    // `leaveHost` interrupts the root's turn, `dispose()` normally does the rest.
+    this.interruptChildren()
+    await this.leaveHost()
+    this.disconnected()
   }
 
   /**
