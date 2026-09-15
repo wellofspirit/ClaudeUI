@@ -13,6 +13,8 @@ PR #37 (`codex-integration → pre-release`) merged on 2026-09-14 at `80d71efc`;
 
 ### Still open after this
 
+- **F4 + F5 landed 2026-09-15** (projection audit and the fixture stress loop; Landed paragraphs in `docs/codex-followups-spec.md`). Three follow-ups they surfaced: (a) `replica.ts`'s tap runs `persistRekeyedRegistry` BEFORE the post-apply observers, so a disk-write throw silently skips every observer for that event; (b) `CodexAppServerClient` discards the child's stderr, and on a fresh `CODEX_HOME` the first `codex app-server` spawn intermittently dies at start with no recorded reason (keep a stderr tail and attach it to `stdout-closed`); (c) the refactored `codex-app-server.integration.test.ts` is macOS-arm64-gated and needs one `CODEX_INTEGRATION=1` run there. The stress loop is `node scripts/codex-render-stress.mjs --load` after `bun run build`; it spends nothing.
+
 The pi typed auth error (`session:auth-required` on a rejected ChatGPT credential), the identifier scrub (Daniel's), the roadmap below (history mappers with the cross-harness survey → per-item volatile stream design → metering in the usage revamp → grandchildren), and the Orrery rename arc.
 
 ## Resume here (ADR-068 arc — 2026-09-14, historical)
