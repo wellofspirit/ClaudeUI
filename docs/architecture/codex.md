@@ -12,6 +12,30 @@ Caller-provided environment replaces inheritance; omission inherits the native
 runtime environment. Neither environment nor stderr nor raw protocol errors
 are logged. The transport itself does not own account or login policy.
 
+When the child dies the transport records it once. `fail()` with `stdout-closed`,
+`process-exited`, `process-closed` or `spawn-failed` emits a single `warn` line
+from source `CodexAppServerClient` carrying the failure code, the child's exit
+code and signal, its pid, whether the client had reached ready, and the session
+cwd. It waits up to a second for the `exit` that normally follows stdout's EOF —
+the boot-time deaths seen on fresh scratch homes on 2026-09-15 all rejected as
+`stdout-closed` before Node reported an exit code — and writes `exit=still
+running` when none arrives. `CodexTransportError` exposes the same `exitCode` and
+`exitSignal`, read through the client's one exit record so a rejection minted
+before the exit still answers correctly; `message` stays `Codex transport:
+<code>`. Ordinary closes log nothing: `disposed`, timeouts and `rpc-error-*` are
+not deaths.
+
+Stderr is still discarded unless `CLAUDEUI_CODEX_STDERR=1` is set on the app's
+environment. With it, the child's stderr is appended verbatim to
+`<log dir>/codex-stderr-<pid>.log` beside the daily logs (`getLogDir()` in
+`src/core/services/logger.ts`), opened on the first chunk, written synchronously
+so a dying child's last words survive, and closed when the pipe itself ends. While capture is armed, teardown does not destroy the stderr pipe (a destroyed readable discards what the child wrote and the parent has not read, and Node delivers `exit` before the pipes drain); it closes on its own once the child is gone. The warn line names
+that PATH and nothing else out of the child. Codex's stderr can carry key
+fragments, so the flag is off by default and its file is the only place stderr
+may land: never an error message, a `session:error`, or the main log. The
+credential boundary in [codex-integration-handoff.md](../codex-integration-handoff.md)
+covers the file itself.
+
 Outgoing RPC IDs are independent of native numeric/string server-request IDs.
 Pending work and write queues are bounded. Timeout errors identify potentially
 delivered requests, never trigger retry, and remove expired unsent writes.

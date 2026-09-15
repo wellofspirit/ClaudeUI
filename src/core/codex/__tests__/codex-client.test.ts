@@ -1,9 +1,16 @@
 // @vitest-environment node
 import { EventEmitter } from 'node:events'
+import { existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { CodexAppServerClient, type CodexClientOptions } from '../CodexAppServerClient'
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
+import {
+  CodexAppServerClient,
+  type CodexClientOptions,
+  type CodexTransportError
+} from '../CodexAppServerClient'
 import { CodexClient, CodexInjectionError } from '../CodexClient'
+import { getLogDir, logger } from '../../services/logger'
 import type { CodexAuthHook } from '../codex-auth-hook'
 import type { InitializeParams } from '../protocol/InitializeParams'
 
@@ -32,6 +39,7 @@ let version: Child
 let client: CodexAppServerClient
 let writes: Record<string, unknown>[]
 let disconnect: ReturnType<typeof vi.fn<(error: Error) => void>>
+let warn: MockInstance<typeof logger.warn>
 const ticks = async (): Promise<void> => {
   for (let i = 0; i < 8; i++) await Promise.resolve()
 }
@@ -58,6 +66,9 @@ beforeEach(() => {
   version = new Child()
   writes = []
   disconnect = vi.fn()
+  // Silenced as well as observed: a death line would otherwise print, and
+  // append to the shared vitest log dir, once per teardown in this file.
+  warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
   app.stdin.on('data', (chunk) => writes.push(JSON.parse(chunk.toString())))
   mocks.locate.mockReturnValue('/vendor/codex')
   mocks.spawn.mockReset().mockImplementation((command, args) => {
@@ -538,5 +549,166 @@ describe('ChatGPT token injection', () => {
     await started
     expect(auth.inject).toHaveBeenCalledOnce()
     expect(writes.map((write) => write.method)).toEqual(['initialize', 'initialized'])
+  })
+})
+
+/**
+ * F7 — why an app-server died, and the opt-in stderr file.
+ *
+ * The hygiene rule above (`never exposes RPC error message/data or stderr`) is
+ * the constraint these three live under: the death line may name the capture
+ * file's PATH and nothing else out of the child, and with the flag unset no
+ * file exists at all. The marker below stands in for the key fragment Codex's
+ * stderr can carry.
+ */
+describe('app-server death reporting', () => {
+  const MARKER = 'stderr-secret-token-f7'
+  const captureFile = (): string => join(getLogDir(), 'codex-stderr-45678.log')
+  /** The transport error a pending request rejected with. */
+  const rejection = (promise: Promise<unknown>): Promise<CodexTransportError> =>
+    promise.then(
+      () => {
+        throw new Error('expected the request to reject')
+      },
+      (error: CodexTransportError) => error
+    )
+  /**
+   * EOF on stdout, the way a dying app-server delivers it: BEFORE its `exit`
+   * (this is what makes the observed failure `stdout-closed` rather than
+   * `process-exited`). A stream's `end` event lands on the next macrotask, so
+   * eight promise ticks are not enough to see it.
+   */
+  const endStdout = async (): Promise<void> => {
+    app.stdout.end()
+    await vi.advanceTimersByTimeAsync(0)
+  }
+  /** No file under the log dir may hold the marker — not just the capture file. */
+  function assertNoFileHoldsMarker(): void {
+    const dir = getLogDir()
+    if (!existsSync(dir)) return
+    for (const name of readdirSync(dir)) {
+      const path = join(dir, name)
+      const info = statSync(path)
+      // A day's log is capped at 50 MB; skip anything that big rather than
+      // read it, the capture file would be tiny.
+      if (!info.isFile() || info.size > 4 * 1024 * 1024) continue
+      expect(readFileSync(path, 'utf-8')).not.toContain(MARKER)
+    }
+  }
+
+  it('reports the failure code, exit status, pid and readiness in one warn line', async () => {
+    await start()
+    const failed = rejection(client.request('never-answered'))
+    app.stderr.write(MARKER)
+    await endStdout()
+    // The client is already closed, but the exit code is what makes the line
+    // worth having, so the report waits for it.
+    expect(warn).not.toHaveBeenCalled()
+    app.emit('exit', 101, null)
+
+    const error = await failed
+    expect(error.code).toBe('stdout-closed')
+    expect(error.exitCode).toBe(101)
+    expect(error.exitSignal).toBeNull()
+    expect(warn).toHaveBeenCalledTimes(1)
+    const [source, line] = warn.mock.calls[0]
+    expect(source).toBe('CodexAppServerClient')
+    expect(line).toContain('stdout-closed')
+    expect(line).toContain('exit=101')
+    expect(line).toContain('pid=45678')
+    expect(line).toContain('ready=true')
+    expect(line).toContain('cwd=/isolated')
+    expect(line).not.toContain(MARKER)
+    expect(line).not.toContain('stderr=')
+  })
+
+  it('reports "still running" when the child outlives the grace, and only once', async () => {
+    await start()
+    app.stdout.emit('close')
+    expect(warn).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1001)
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0][1]).toContain('exit=still running')
+    app.emit('exit', 0, null)
+    app.emit('close', 0)
+    expect(warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('stays silent when the client closed the process itself', async () => {
+    await start()
+    client.dispose()
+    app.emit('exit', 0, null)
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('copies stderr to an opt-in file and puts only its path in the line', async () => {
+    const saved = process.env.CLAUDEUI_CODEX_STDERR
+    process.env.CLAUDEUI_CODEX_STDERR = '1'
+    rmSync(captureFile(), { force: true })
+    try {
+      await start()
+      app.stderr.write(`${MARKER}\n`)
+      await ticks()
+      expect(existsSync(captureFile())).toBe(true)
+      expect(readFileSync(captureFile(), 'utf-8')).toContain(MARKER)
+
+      await endStdout()
+      app.emit('exit', 1, null)
+      const line = warn.mock.calls[0][1]
+      expect(line).toContain(`stderr=${captureFile()}`)
+      expect(line).not.toContain(MARKER)
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDEUI_CODEX_STDERR
+      else process.env.CLAUDEUI_CODEX_STDERR = saved
+      rmSync(captureFile(), { force: true })
+    }
+  })
+
+  it('keeps capturing stderr that arrives after `exit`, until the stream itself ends', async () => {
+    // Node delivers `exit` before the stdio streams drain, and a crash message is
+    // exactly the chunk that lands in that window; closing the file on `exit`
+    // would drop the one line the flag exists to keep.
+    const saved = process.env.CLAUDEUI_CODEX_STDERR
+    process.env.CLAUDEUI_CODEX_STDERR = '1'
+    rmSync(captureFile(), { force: true })
+    try {
+      await start()
+      app.stderr.write('before-exit\n')
+      await ticks()
+      await endStdout()
+      app.emit('exit', 101, null)
+      app.stderr.write('after-exit-panic-line\n')
+      await vi.advanceTimersByTimeAsync(0)
+      app.stderr.end()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(readFileSync(captureFile(), 'utf-8')).toContain('after-exit-panic-line')
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDEUI_CODEX_STDERR
+      else process.env.CLAUDEUI_CODEX_STDERR = saved
+      rmSync(captureFile(), { force: true })
+    }
+  })
+
+  it('writes no file and leaks the stderr nowhere with the flag unset', async () => {
+    const saved = process.env.CLAUDEUI_CODEX_STDERR
+    delete process.env.CLAUDEUI_CODEX_STDERR
+    rmSync(captureFile(), { force: true })
+    try {
+      await start()
+      const failed = rejection(client.request('never-answered'))
+      app.stderr.write(MARKER)
+      await endStdout()
+      app.emit('exit', 2, null)
+      await failed
+
+      expect(existsSync(captureFile())).toBe(false)
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(MARKER)
+      expect(JSON.stringify(disconnect.mock.calls)).not.toContain(MARKER)
+      assertNoFileHoldsMarker()
+    } finally {
+      if (saved !== undefined) process.env.CLAUDEUI_CODEX_STDERR = saved
+    }
   })
 })

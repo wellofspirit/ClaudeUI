@@ -1,5 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { closeSync, mkdirSync, openSync, writeSync } from 'node:fs'
+import { join } from 'node:path'
 import { TextDecoder } from 'node:util'
+import { getLogDir, logger } from '../services/logger'
 import { killProcessTree } from '../services/process-tree'
 import { locateCodexBinary } from './codex-locate'
 import type { InitializeParams } from './protocol/InitializeParams'
@@ -7,6 +10,17 @@ import type { InitializeResponse } from './protocol/InitializeResponse'
 import type { RequestId } from './protocol/RequestId'
 import type { JSONRPCMessage } from './protocol/envelopes'
 import provenance from './protocol/provenance.json'
+
+/**
+ * What the OS said about the child, filled in by the `exit` handler. One record
+ * per client, shared BY REFERENCE with every error the client mints for that
+ * death — see `CodexTransportError.exitCode`.
+ */
+export type CodexChildExit = {
+  exited: boolean
+  code: number | null
+  signal: NodeJS.Signals | null
+}
 
 export class CodexTransportError extends Error {
   constructor(
@@ -41,11 +55,52 @@ export class CodexTransportError extends Error {
      * a short bare-ASCII-identifier string, so it can carry a variant NAME and
      * never a config value, a path or token material. Nothing logs it.
      */
-    public readonly nativeCode?: string
+    public readonly nativeCode?: string,
+    /**
+     * The owning client's exit record, absent for errors minted before a child
+     * existed. Held by reference rather than copied: the case worth debugging —
+     * an app-server that dies during startup — rejects on `stdout-closed`
+     * BEFORE Node delivers `exit`, so a snapshot taken here would read "no exit
+     * yet" every time. Payload-free by construction (a number and a signal
+     * name).
+     */
+    private readonly exit?: CodexChildExit
   ) {
     super(`Codex transport: ${code}`)
   }
+
+  /** The child's exit status, or undefined while it has not exited. */
+  get exitCode(): number | null | undefined {
+    return this.exit?.exited ? this.exit.code : undefined
+  }
+
+  /** The signal that killed the child, or undefined while it has not exited. */
+  get exitSignal(): NodeJS.Signals | null | undefined {
+    return this.exit?.exited ? this.exit.signal : undefined
+  }
 }
+
+/**
+ * Failure codes that mean the CHILD went away rather than the client closing a
+ * healthy connection. Only these are worth a log line; `disposed`, timeouts and
+ * `rpc-error-*` are ordinary operation.
+ */
+const DEATH_CODES = new Set(['stdout-closed', 'process-exited', 'process-closed', 'spawn-failed'])
+
+/**
+ * How long the death report waits for the child's `exit` before giving up and
+ * reporting "still running". Node routinely delivers stdout's EOF first, and an
+ * exit code is the single most useful field in the line.
+ */
+const EXIT_REPORT_GRACE_MS = 1000
+
+/**
+ * Opt-in, never on by default: with `CLAUDEUI_CODEX_STDERR=1` the child's
+ * stderr is copied to a file beside the main log. Codex's stderr can carry key
+ * fragments, so it reaches that file and nothing else — no error message, no
+ * `session:error`, no log line (the line names the PATH only).
+ */
+const STDERR_CAPTURE_ENV = 'CLAUDEUI_CODEX_STDERR'
 
 /**
  * The variant name inside a JSON-RPC `error.data`, or undefined.
@@ -110,6 +165,22 @@ export class CodexAppServerClient {
   private buffer = Buffer.alloc(0)
   private decoder = new TextDecoder('utf-8', { fatal: true })
   private stopVersion?: () => void
+  /** Mutated in place by the `exit` handler; read by every error it fathered. */
+  private readonly exit: CodexChildExit = { exited: false, code: null, signal: null }
+  /** `state` is already `closed` by the time the death is reported. */
+  private reachedReady = false
+  private reported = false
+  private stderrFd?: number
+  private stderrPath?: string
+  /** The capture file is closed, or was never openable — drop further chunks. */
+  private stderrDone = false
+  /**
+   * Capture was armed for this child. While it is, teardown must not destroy
+   * the stderr pipe: a destroyed readable discards what the dying child already
+   * wrote and the parent has not read yet, which is exactly the crash line the
+   * flag exists to keep. The pipe closes on its own once the child is gone.
+   */
+  private capturing = false
 
   constructor(private readonly options: CodexClientOptions) {}
 
@@ -129,7 +200,19 @@ export class CodexAppServerClient {
         windowsHide: true
       })
       this.child = child
-      child.stderr.resume()
+      // Discarded unless the capture flag is set: a `data` listener puts the
+      // stream in flowing mode, so it replaces `resume()` rather than joining it.
+      this.capturing = process.env[STDERR_CAPTURE_ENV] === '1'
+      if (this.capturing) {
+        child.stderr.on('data', (chunk: Buffer) => this.captureStderr(chunk))
+        // The file follows the STREAM, not the process: `exit` lands before the
+        // stdio pipes drain, and a crash message is exactly the chunk in that
+        // window. `close` covers a destroyed pipe as well as a drained one.
+        child.stderr.on('end', () => this.closeStderrFile())
+        child.stderr.on('close', () => this.closeStderrFile())
+      } else {
+        child.stderr.resume()
+      }
       child.stderr.on('error', () => this.fail('stderr-error'))
       child.stdin.on('error', () => this.fail('write-error'))
       child.stdout.on('error', () => this.fail('read-error'))
@@ -145,7 +228,10 @@ export class CodexAppServerClient {
       })
       child.stdout.on('close', () => this.fail('stdout-closed'))
       child.on('error', () => this.fail('spawn-failed'))
-      child.on('exit', () => {
+      child.on('exit', (code, signal) => {
+        this.exit.exited = true
+        this.exit.code = code
+        this.exit.signal = signal
         if (this.closedError) return
         // Node's exit precedes stdio closure. Only trailing responses/notifications
         // may be consumed now; inherited pipes must not retain the client forever.
@@ -170,6 +256,7 @@ export class CodexAppServerClient {
       if (this.closedError) throw this.closedError
       this.enqueue({ method: 'initialized' })
       this.state = 'ready'
+      this.reachedReady = true
       return result
     } catch (error) {
       this.fail(error instanceof CodexTransportError ? error.code : 'start-failed')
@@ -438,14 +525,14 @@ export class CodexAppServerClient {
   private fail(code: string): void {
     if (this.isClosed()) return
     const draining = this.state === 'draining'
-    this.closedError ??= new CodexTransportError(code)
+    this.closedError ??= new CodexTransportError(code, false, undefined, undefined, this.exit)
     code = this.closedError.code
     this.state = 'closed'
     clearTimeout(this.drainTimer)
     this.stopVersion?.()
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer)
-      pending.reject(new CodexTransportError(code, pending.sent))
+      pending.reject(new CodexTransportError(code, pending.sent, undefined, undefined, this.exit))
     }
     this.pending.clear()
     for (const id of this.incoming.keys()) this.abortIncoming(id)
@@ -458,13 +545,87 @@ export class CodexAppServerClient {
       // close locally even if a descendant cannot be found by tree cleanup.
       this.child.stdin.destroy()
       this.child.stdout.destroy()
-      this.child.stderr.destroy()
+      if (!this.capturing) this.child.stderr.destroy()
     }
     if (this.child) this.terminate(this.child)
+    if (DEATH_CODES.has(code)) this.reportDeath(code)
     try {
       this.options.onDisconnect?.(this.closedError)
     } catch {
       /* observer cannot break teardown */
+    }
+  }
+
+  /**
+   * One warn line per client, once, saying why the app-server went away. Waits
+   * for the child's `exit` (bounded) because the code arrives after the stdout
+   * EOF that closed the client. Carries no stderr, no stdout and no RPC
+   * payload — at most the PATH of the opt-in capture file.
+   */
+  private reportDeath(failure: string): void {
+    if (this.reported) return
+    this.reported = true
+    const child = this.child
+    if (!child || this.exit.exited) {
+      this.logDeath(failure)
+      return
+    }
+    let done = false
+    const emit = (): void => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      child.removeListener('exit', emit)
+      this.logDeath(failure)
+    }
+    const timer = setTimeout(emit, EXIT_REPORT_GRACE_MS)
+    timer.unref()
+    child.once('exit', emit)
+  }
+
+  private logDeath(failure: string): void {
+    const exit = this.exit.exited
+      ? `exit=${this.exit.code ?? 'null'} signal=${this.exit.signal ?? 'none'}`
+      : 'exit=still running'
+    logger.warn(
+      'CodexAppServerClient',
+      `app-server closed: ${failure} pid=${this.child?.pid ?? 'unknown'} ${exit} ` +
+        `ready=${this.reachedReady} cwd=${this.options.cwd}` +
+        (this.stderrPath ? ` stderr=${this.stderrPath}` : '')
+    )
+  }
+
+  /**
+   * Append one stderr chunk to the capture file, opening it on the first one.
+   * Synchronous on purpose: the flag exists to explain a child that dies, and a
+   * buffered stream loses exactly the tail that says why.
+   */
+  private captureStderr(chunk: Buffer): void {
+    if (this.stderrDone) return
+    try {
+      if (this.stderrFd === undefined) {
+        const dir = getLogDir()
+        mkdirSync(dir, { recursive: true })
+        const path = join(dir, `codex-stderr-${this.child?.pid ?? 'unknown'}.log`)
+        this.stderrFd = openSync(path, 'a')
+        this.stderrPath = path
+      }
+      writeSync(this.stderrFd, chunk)
+    } catch {
+      // A debugging aid must never take the transport down with it.
+      this.closeStderrFile()
+    }
+  }
+
+  private closeStderrFile(): void {
+    this.stderrDone = true
+    const fd = this.stderrFd
+    if (fd === undefined) return
+    this.stderrFd = undefined
+    try {
+      closeSync(fd)
+    } catch {
+      /* already gone */
     }
   }
 
@@ -475,7 +636,7 @@ export class CodexAppServerClient {
     }
     child.stdin.destroy()
     child.stdout.destroy()
-    child.stderr.destroy()
+    if (!this.capturing) child.stderr.destroy()
     const pid = child.pid
     if (pid === undefined) return
     const signal = (sig: NodeJS.Signals): void => {
