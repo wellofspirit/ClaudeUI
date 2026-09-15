@@ -18,13 +18,25 @@
  * answered, because a fixture that quietly tolerates an unexpected request turns
  * a wiring bug into a green test.
  */
-import { createServer, type IncomingMessage, type Server } from 'node:http'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Duplex } from 'node:stream'
 
 /** One `response.output_item.done` item — a message, a function call, whatever the script returns. */
 export type FixtureOutputItem = Record<string, unknown>
+
+/**
+ * Return this from a {@link FixtureProviderOptions.script} instead of an item to
+ * leave the request OPEN: the headers go out and nothing else, so the turn stays
+ * MID-FLIGHT until the child dies or the provider closes.
+ *
+ * It exists for the host probes (`codex-host-probes.integration.test.ts`), which
+ * have to kill a host, close its stdin, and delete its thread WHILE the model is
+ * still talking — states a turn that always answers can never reach. A symbol,
+ * not a string or a shape, so it can never collide with a real output item.
+ */
+export const FIXTURE_HOLD = Symbol('fixture-hold')
 
 /** What the {@link FixtureProviderOptions.script} sees for one accepted request. */
 export interface FixtureTurn {
@@ -92,7 +104,7 @@ export interface FixtureProviderOptions {
   /** Port. Default 0 (ephemeral) — read the real one off {@link FixtureProvider.port}. */
   port?: number
   /** Chooses the output item per turn. Default: one assistant text message. */
-  script?: (turn: FixtureTurn) => FixtureOutputItem
+  script?: (turn: FixtureTurn) => FixtureOutputItem | typeof FIXTURE_HOLD
   /**
    * Replaces the default `426 Upgrade Required` answer. The integration suite's
    * native-session probes speak the WebSocket wire and install their own; every
@@ -130,6 +142,8 @@ export async function startFixtureProvider(
     requests = [],
     errors = []
   } = options
+  /** Responses a {@link FIXTURE_HOLD} script left open, ended by {@link FixtureProvider.close}. */
+  const held = new Set<ServerResponse>()
   const server = createServer((req, res) => {
     let body = ''
     // A request that never ends would pin the server open past teardown; a body
@@ -164,7 +178,15 @@ export async function startFixtureProvider(
       }
       requests.push(request)
       res.writeHead(200, { 'Content-Type': 'text/event-stream', Connection: 'close' })
-      res.end(fixtureSseBody(fixtureResponseEvents(script({ request, requests }))))
+      const item = script({ request, requests })
+      if (item === FIXTURE_HOLD) {
+        // Headers only. The response is tracked so `close()` can end a hold the
+        // caller never released; a socket the child closed removes itself.
+        held.add(res)
+        res.on('close', () => held.delete(res))
+        return
+      }
+      res.end(fixtureSseBody(fixtureResponseEvents(item)))
     })
   })
   server.on(
@@ -185,6 +207,8 @@ export async function startFixtureProvider(
     errors,
     close: () =>
       new Promise<void>((resolve) => {
+        for (const response of held) response.destroy()
+        held.clear()
         server.closeAllConnections()
         server.close(() => resolve())
       })

@@ -26,6 +26,7 @@ import { join } from 'node:path'
 import {
   FIXTURE_API_KEY,
   FIXTURE_AUTHORIZATION,
+  FIXTURE_HOLD,
   fixtureAssistantMessage,
   renderFixtureConfigToml,
   startFixtureProvider,
@@ -235,6 +236,29 @@ describe('fixture provider', () => {
       'unexpected provider request: POST /v1/responses; auth matched: false',
       'unexpected provider request: POST /v1/models; auth matched: true'
     ])
+  })
+
+  it('holds a scripted request open, and close() ends it', async () => {
+    // The one HTTP behaviour the host probes need that a turn which always
+    // answers cannot produce: a request left MID-FLIGHT, so a host can be killed
+    // or closed while the model is still talking. Headers go out, the body never
+    // does, and `close()` is what finally ends it.
+    provider = await startFixtureProvider({ script: () => FIXTURE_HOLD })
+    const held = post(provider.port, '{}')
+    const raced = await Promise.race([
+      held.then(() => 'answered'),
+      new Promise((resolve) => setTimeout(() => resolve('held'), 300))
+    ])
+    expect(raced).toBe('held')
+    expect(provider.requests).toEqual([{}])
+    expect(provider.errors).toEqual([])
+    const closing = provider.close()
+    provider = undefined
+    await closing
+    // OBSERVED: `close()` DESTROYS the held response, so the caller sees the
+    // connection reset — the same thing a dead app-server's socket looks like,
+    // and never a scripted turn that quietly completed after the fact.
+    await expect(held).rejects.toMatchObject({ code: 'ECONNRESET' })
   })
 
   it('records a body that is not JSON instead of answering it', async () => {
