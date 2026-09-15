@@ -1,6 +1,7 @@
 # ADR-066: Codex as a fourth engine
 
 **Status:** Accepted integration direction, phase-1 scope, native-owned authentication including upstream concurrency behavior, and preservation of the user's native policy. M2 runtime/command/UI wiring and an M3 read/list baseline are implemented for independent review. Remaining M3-M5 work still blocks phase-1 release.
+**Superseded in part (2026-09-15):** the process model — one app-server per root session plus a separate service-client lifecycle — is replaced by one host per Codex home and account with sessions as threads and reads on the host, [ADR-069](adr-069_codex-host-per-home-and-account.md). Everything else here stands.
 **Date:** 2026-09-10
 **Supersedes:** [ADR-017](adr-017_codex-app-server-backend.md) as the current Codex design, and only ADR-019's dormant-Codex restriction.
 **Amends:** [ADR-022](adr-022_opencode-permission-mapping.md) and [ADR-050](adr-050_auto-mode-as-the-default-autonomy.md) for Codex only.
