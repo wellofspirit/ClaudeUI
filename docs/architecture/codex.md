@@ -37,7 +37,17 @@ unchanged. Escaped process groups and PTY descendants are not solved by this
 foundation. Windows x64 runtime evidence as of 2026-09-13: acquisition, `codex.exe --version`, app-server
 spawn and initialize, `account/read` and catalog discovery through the settings pane, the real `execpolicy check`
 parser in the unit suite, `check-codex-protocol` (byte-identical generated types), and no orphaned process after the
-harness quit. A signed-in turn and the Windows sandbox path are not yet exercised. Linux evidence is in the Linux section below.
+harness quit. Windows x64 evidence as of 2026-09-14, real signed-in turns on GPT-6-Astra in `D:\WorkPlace\codex-scratch`:
+there is no Windows sandbox in 0.154.0 (`experimental_windows_sandbox` and the elevated variant are stage Removed,
+`windows_sandbox_service` is UnderDevelopment and off; `capabilities.sandbox` reports false), so every command runs
+unsandboxed and the decision surface is the whole containment. In default mode (`untrusted`) a file write prompted and
+ran only after Allow. In Auto (`on-request`) BOTH the file write and a loopback `ping` produced a "Codex auto-review
+approved (risk: low)" row, which is what `exec_policy.rs` promises: with the sandbox backend disabled and a managed
+filesystem profile, `render_decision_for_unmatched_command_for_platform` returns `Prompt` for every unmatched command,
+and under `on-request` that prompt goes to the guardian. Expect more reviewer rows and slower Auto turns on Windows than
+on macOS or Linux. Process tree: with one session mid-`ping` and again with two sessions each mid-`ping` (two `codex.exe`,
+two `codex-code-mode-host.exe`, two `PING.EXE`, two Codex `pwsh.exe`), nothing survived five seconds after the app closed;
+the taskkill-first helper reaps the whole tree. Linux evidence is in the Linux section below.
 
 `scripts/ensure-codex.mjs` acquires the reviewed 0.154.0 binaries for every host in `scripts/codex-digests.json#hosts` — macOS arm64, Windows x64 (installing `codex.exe` and `codex-code-mode-host.exe`) and Linux x64/arm64 (the statically linked musl assets); since `e5bf09b6` it runs from `postinstall` and from every packaging target in `scripts/build.mjs`, and `electron-builder.yml` ships `vendor/codex-cli` (both members) as `Resources/codex-cli`. On a host the manifest does not cover (Windows arm64 today) it skips with one line and exits 0, and the engine gates itself off. Generated
 initialize types are exact CLI output; envelopes are derived from the pinned
