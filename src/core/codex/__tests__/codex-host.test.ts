@@ -2,8 +2,17 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { join, sep } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { CodexTransportError, type CodexClientOptions } from '../CodexAppServerClient'
-import { CodexHostRegistry, type CodexHostClient, type CodexHostDeps } from '../CodexHost'
+import {
+  CodexMethodNotFound,
+  CodexTransportError,
+  type CodexClientOptions
+} from '../CodexAppServerClient'
+import {
+  CodexHostRegistry,
+  type CodexHostClient,
+  type CodexHostDeps,
+  type CodexThreadOwner
+} from '../CodexHost'
 import type { CodexAuthHook } from '../codex-auth-hook'
 import type { InitializeParams } from '../protocol/InitializeParams'
 
@@ -38,9 +47,17 @@ class FakeClient implements CodexHostClient {
     await auth?.inject()
     return {}
   }
-  async request(method: string): Promise<never> {
+  readonly sent: Array<{ method: string; params: unknown }> = []
+  /** What the next `request` resolves with — a `thread/*` opener's response. */
+  reply: unknown = {}
+  async request(method: string, params?: unknown): Promise<never> {
     this.requests.push(method)
-    return {} as never
+    this.sent.push({ method, params })
+    return this.reply as never
+  }
+  readonly aborted: Array<[string, string]> = []
+  abortServerRequests(threadId: string, turnId: string): void {
+    this.aborted.push([threadId, turnId])
   }
   dispose(): void {
     this.disposeCalls++
@@ -48,6 +65,43 @@ class FakeClient implements CodexHostClient {
   /** What a dying app-server does to its owner. */
   die(code = 'stdout-closed'): void {
     this.options.onDisconnect?.(new CodexTransportError(code))
+  }
+  /** One server -> client notification, exactly as the transport delivers it. */
+  notify(method: string, params: unknown): void {
+    this.options.onNotification?.(method, params)
+  }
+  /** One server -> client REQUEST. Returns the promise the transport would answer with. */
+  ask(method: string, params: unknown): Promise<unknown> {
+    return this.options.onServerRequest!(method, params, {
+      id: 1,
+      signal: new AbortController().signal
+    })
+  }
+}
+
+/** A thread owner that records everything the host hands it. */
+function fakeOwner(): CodexThreadOwner & {
+  notifications: Array<[string, unknown]>
+  requests: Array<[string, unknown]>
+  disconnects: CodexTransportError[]
+  authRequired: Array<string | null>
+} {
+  const notifications: Array<[string, unknown]> = []
+  const requests: Array<[string, unknown]> = []
+  const disconnects: CodexTransportError[] = []
+  const authRequired: Array<string | null> = []
+  return {
+    notifications,
+    requests,
+    disconnects,
+    authRequired,
+    onNotification: (method, params) => void notifications.push([method, params]),
+    onServerRequest: async (method, params) => {
+      requests.push([method, params])
+      return { decision: 'accept' }
+    },
+    onDisconnect: (error) => void disconnects.push(error),
+    onAuthRequired: (accountId) => void authRequired.push(accountId)
   }
 }
 
@@ -253,16 +307,15 @@ describe('the idle rule', () => {
     expect(registry.size).toBe(0)
   })
 
-  it('keeps a retained host alive past the deadline, and lets go when it is released', async () => {
-    // H2's seam, tested here so the rule it depends on cannot rot: a REGISTERED
-    // session is what keeps a host alive, and nothing in H1 calls this yet.
+  it('keeps a host with an attached owner alive past the deadline, and lets go on detach', async () => {
+    // ADR-069 §2: a SESSION is what keeps a host alive; reads only keep it warm.
     const registry = build()
     const handle = await registry.acquire({ cwd: '/isolated' })
-    handle.host.retain()
+    const connection = handle.host.attach(fakeOwner())
     handle.release()
     await vi.advanceTimersByTimeAsync(IDLE_MS * 10)
     expect(FakeClient.instances[0].disposeCalls).toBe(0)
-    handle.host.release()
+    connection.detach()
     await vi.advanceTimersByTimeAsync(IDLE_MS)
     expect(FakeClient.instances[0].disposeCalls).toBe(1)
   })
@@ -390,5 +443,295 @@ describe('every product reader asks for the active account', () => {
       'src/core/codex/history.ts',
       'src/core/codex/model-discovery.ts'
     ])
+  })
+})
+
+/**
+ * ADR-069 §2 — the demultiplexer.
+ *
+ * One process, several threads, and the rule that decides who hears what: the
+ * owner that CLAIMED a `threadId` gets everything stamped with it, a payload
+ * with no `threadId` at all is account-level and reaches every owner, and a
+ * thread nobody claimed is dropped (notification) or refused (server request).
+ */
+describe('threads on a host', () => {
+  /**
+   * A started host plus a view of its fake process. Identity-bearing, because
+   * the refresh and the sign-in fan-out are the host HOOK's and a host that was
+   * asked for no identity has none.
+   */
+  async function host(registry = build()) {
+    const handle = await registry.acquire({ cwd: '/isolated', identity: { accountId: null } })
+    const codex = FakeClient.instances.at(-1)!
+    return { registry, handle, codex }
+  }
+
+  it('routes every notification to the owner that claimed its thread', async () => {
+    const { handle, codex } = await host()
+    const a = fakeOwner()
+    const b = fakeOwner()
+    const first = handle.host.attach(a)
+    const second = handle.host.attach(b)
+    handle.release()
+    first.claim('thread-a')
+    second.claim('thread-b')
+    codex.notify('turn/started', { threadId: 'thread-a', turn: { id: 't1' } })
+    codex.notify('turn/started', { threadId: 'thread-b', turn: { id: 't2' } })
+    expect(a.notifications).toEqual([
+      ['turn/started', { threadId: 'thread-a', turn: { id: 't1' } }]
+    ])
+    expect(b.notifications).toEqual([
+      ['turn/started', { threadId: 'thread-b', turn: { id: 't2' } }]
+    ])
+  })
+
+  it('fans a notification that carries no threadId out to every owner', async () => {
+    const { handle, codex } = await host()
+    const a = fakeOwner()
+    const b = fakeOwner()
+    handle.host.attach(a)
+    handle.host.attach(b)
+    handle.release()
+    // `account/rateLimits/updated` is the shape this rule exists for: it reports
+    // the whole PROCESS's subscription usage, so it belongs to every session on
+    // it (ADR-069 §8).
+    codex.notify('account/rateLimits/updated', { rateLimits: { primary: null } })
+    expect(a.notifications).toHaveLength(1)
+    expect(b.notifications).toHaveLength(1)
+  })
+
+  it('holds an unclaimed thread notification and replays it on claim', async () => {
+    const { handle, codex } = await host()
+    const owner = fakeOwner()
+    const connection = handle.host.attach(owner)
+    handle.release()
+    // A native child's first events routinely beat the spawn item that names it.
+    codex.notify('item/completed', { threadId: 'child', item: { id: 'm1' } })
+    expect(owner.notifications).toEqual([])
+    connection.claim('child')
+    expect(owner.notifications).toEqual([
+      ['item/completed', { threadId: 'child', item: { id: 'm1' } }]
+    ])
+  })
+
+  it('never delivers one thread to an owner that claimed a different one', async () => {
+    const { handle, codex } = await host()
+    const owner = fakeOwner()
+    const connection = handle.host.attach(owner)
+    handle.release()
+    connection.claim('root')
+    codex.notify('item/completed', { threadId: 'stranger', item: { id: 'm1' } })
+    connection.claim('other')
+    expect(owner.notifications).toEqual([])
+  })
+
+  it('drops a held thread the binary says it CLOSED', async () => {
+    const { handle, codex } = await host()
+    const owner = fakeOwner()
+    const connection = handle.host.attach(owner)
+    handle.release()
+    codex.notify('item/completed', { threadId: 'gone', item: { id: 'm1' } })
+    // A thread the app-server has unloaded can never be claimed by anyone, so
+    // what was held for it is dead weight — and would otherwise be replayed into
+    // whichever session next resumed that id.
+    codex.notify('thread/closed', { threadId: 'gone' })
+    connection.claim('gone')
+    expect(owner.notifications).toEqual([])
+  })
+
+  it('discards held notifications older than the replay window', async () => {
+    const { handle, codex } = await host()
+    const owner = fakeOwner()
+    const connection = handle.host.attach(owner)
+    handle.release()
+    codex.notify('item/completed', { threadId: 'child', item: { id: 'stale' } })
+    // A disposed session's trailing notifications must not surface minutes later
+    // in the session that resumes the thread.
+    await vi.advanceTimersByTimeAsync(31_000)
+    codex.notify('item/completed', { threadId: 'child', item: { id: 'fresh' } })
+    connection.claim('child')
+    expect(
+      owner.notifications.map(([, params]) => (params as { item: { id: string } }).item.id)
+    ).toEqual(['fresh'])
+  })
+
+  it('evicts the OLDEST held thread when the hold is full, rather than silencing new ones', async () => {
+    const { handle, codex } = await host()
+    const owner = fakeOwner()
+    const connection = handle.host.attach(owner)
+    handle.release()
+    // 200 leftovers from threads nobody will ever claim…
+    for (let index = 0; index < 200; index++)
+      codex.notify('item/completed', { threadId: `dead-${index}`, item: { id: `m${index}` } })
+    // …must not cost the child that arrives next its first notification.
+    codex.notify('item/completed', { threadId: 'child', item: { id: 'first' } })
+    connection.claim('child')
+    expect(owner.notifications).toHaveLength(1)
+    // The evicted bucket is the oldest one, and only that one.
+    connection.claim('dead-0')
+    expect(owner.notifications).toHaveLength(1)
+    connection.claim('dead-1')
+    expect(owner.notifications).toHaveLength(2)
+  })
+
+  it('refuses a second owner’s claim of a live thread instead of stealing it', async () => {
+    const { handle, codex } = await host()
+    const first = fakeOwner()
+    const second = fakeOwner()
+    handle.host.attach(first).claim('root')
+    const intruder = handle.host.attach(second)
+    handle.release()
+    expect(() => intruder.claim('root')).toThrow('already claimed')
+    // The turn's notifications still reach the owner that opened it.
+    codex.notify('turn/started', { threadId: 'root', turn: { id: 't1' } })
+    expect(first.notifications).toHaveLength(1)
+    expect(second.notifications).toEqual([])
+  })
+
+  it('holds a thread it OPENED even when nobody claimed it', async () => {
+    // `thread/start` answering is what takes the writer lock — not the claim.
+    // A session that threw between the two leaves the thread loaded here, and a
+    // delete has nowhere else to go (the walk lost its retry with ADR-069 §3).
+    const registry = build()
+    const handle = await registry.acquire({ cwd: '/isolated' })
+    const connection = handle.host.attach(fakeOwner())
+    handle.release()
+    FakeClient.instances[0].reply = { thread: { id: 'opened-not-claimed' } }
+    await connection.request('thread/start', { cwd: '/isolated' } as never)
+    expect(handle.host.holds('opened-not-claimed')).toBe(true)
+    expect(registry.holderFor(handle.host.homeKey, 'opened-not-claimed')).toBe(handle.host)
+  })
+
+  it('answers a server request for an unclaimed thread with method-not-found', async () => {
+    const { handle, codex } = await host()
+    const owner = fakeOwner()
+    handle.host.attach(owner).claim('root')
+    handle.release()
+    await expect(
+      codex.ask('item/commandExecution/requestApproval', { threadId: 'stranger', turnId: 't' })
+    ).rejects.toBeInstanceOf(CodexMethodNotFound)
+    expect(owner.requests).toEqual([])
+  })
+
+  it('routes a server request to the claiming owner and answers the refresh itself', async () => {
+    const { handle, codex } = await host()
+    const a = fakeOwner()
+    const b = fakeOwner()
+    handle.host.attach(a).claim('thread-a')
+    handle.host.attach(b).claim('thread-b')
+    handle.release()
+    await expect(
+      codex.ask('item/commandExecution/requestApproval', { threadId: 'thread-b', turnId: 't' })
+    ).resolves.toEqual({ decision: 'accept' })
+    expect(a.requests).toEqual([])
+    expect(b.requests).toHaveLength(1)
+    // The one server request that belongs to the PROCESS and to no thread.
+    await codex.ask('account/chatgptAuthTokens/refresh', {})
+    expect(hooks[0].onRefreshRequest).toHaveBeenCalledTimes(1)
+  })
+
+  it('unsubscribes every claimed thread when its owner detaches', async () => {
+    const { handle, codex } = await host()
+    const connection = handle.host.attach(fakeOwner())
+    handle.release()
+    connection.claim('root')
+    connection.claim('child')
+    connection.detach()
+    expect(codex.sent.filter((entry) => entry.method === 'thread/unsubscribe')).toEqual([
+      { method: 'thread/unsubscribe', params: { threadId: 'root' } },
+      { method: 'thread/unsubscribe', params: { threadId: 'child' } }
+    ])
+  })
+
+  it('tells every attached owner exactly once when the host dies', async () => {
+    const { registry, handle, codex } = await host()
+    const a = fakeOwner()
+    const b = fakeOwner()
+    handle.host.attach(a).claim('thread-a')
+    handle.host.attach(b).claim('thread-b')
+    handle.release()
+    codex.die()
+    codex.die('process-exited')
+    expect(a.disconnects.map((error) => error.code)).toEqual(['stdout-closed'])
+    expect(b.disconnects.map((error) => error.code)).toEqual(['stdout-closed'])
+    expect(registry.size).toBe(0)
+    // Nothing is routed afterwards, and no unsubscribe reaches a dead transport.
+    codex.notify('turn/started', { threadId: 'thread-a', turn: { id: 't1' } })
+    expect(a.notifications).toEqual([])
+    expect(codex.requests).not.toContain('thread/unsubscribe')
+  })
+
+  it('tells every attached owner when the registry closes the host on quit', async () => {
+    const { registry, handle } = await host()
+    const owner = fakeOwner()
+    handle.host.attach(owner)
+    handle.release()
+    registry.dispose()
+    expect(owner.disconnects.map((error) => error.code)).toEqual(['host-disposed'])
+  })
+
+  it('fans the vault sign-in failure out to every session on the host', async () => {
+    const { handle } = await host()
+    const a = fakeOwner()
+    const b = fakeOwner()
+    handle.host.attach(a)
+    handle.host.attach(b)
+    handle.release()
+    // The hook belongs to the PROCESS now (ADR-069 §8), so its one callback has
+    // to reach every session running on that credential.
+    hooks[0].onAuthRequired?.('acct-active')
+    expect(a.authRequired).toEqual(['acct-active'])
+    expect(b.authRequired).toEqual(['acct-active'])
+  })
+
+  it('gives every host start its own generation', async () => {
+    const registry = build()
+    const first = await registry.acquire({ cwd: '/isolated' })
+    const before = first.host.generation
+    FakeClient.instances[0].die()
+    const second = await registry.acquire({ cwd: '/isolated' })
+    expect(second.host.generation).toBe(before + 1)
+    second.release()
+  })
+
+  it('serves an acquire for a loaded thread from the host that holds it', async () => {
+    // ADR-069 §3 / probe P5: the writer lock is PROCESS-scoped, so a delete has
+    // to be issued on whichever host loaded the thread — which for a pinned
+    // session is not the active account's host at all.
+    const registry = build()
+    const pinned = await registry.acquire({ cwd: '/isolated', identity: { accountId: 'acct-b' } })
+    pinned.host.attach(fakeOwner()).claim('thread-on-b')
+    pinned.release()
+    const active = await registry.acquire({ cwd: '/isolated', identity: { accountId: null } })
+    active.release()
+    expect(registry.size).toBe(2)
+    const holder = await registry.acquire({
+      cwd: '/isolated',
+      identity: { accountId: null },
+      thread: 'thread-on-b',
+      label: 'delete'
+    })
+    expect(holder.host.key).toBe(pinned.host.key)
+    holder.release()
+    // A thread no live host has loaded falls back to the asked-for identity.
+    const fallback = await registry.acquire({
+      cwd: '/isolated',
+      identity: { accountId: null },
+      thread: 'thread-on-disk'
+    })
+    expect(fallback.host.key).toBe(active.host.key)
+    fallback.release()
+  })
+
+  it('stops holding a thread the binary says it unloaded', async () => {
+    const registry = build()
+    const handle = await registry.acquire({ cwd: '/isolated' })
+    handle.host.attach(fakeOwner()).claim('root')
+    handle.release()
+    expect(handle.host.holds('root')).toBe(true)
+    // `thread/closed` is the app-server saying it dropped an idle, unsubscribed
+    // thread (`thread_lifecycle.rs`) — its writer lock went with it.
+    FakeClient.instances[0].notify('thread/closed', { threadId: 'root' })
+    expect(handle.host.holds('root')).toBe(false)
   })
 })

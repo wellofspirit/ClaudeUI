@@ -12,12 +12,12 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import { afterEach, expect, it, vi } from 'vitest'
-import { CodexClient } from '../../core/codex/CodexClient'
+import { CodexHostRegistry } from '../../core/codex/CodexHost'
 import {
   CrossEngineDispatcher,
+  type AttachCodexTargetFn,
   type DispatchContext,
-  type DispatcherDeps,
-  type SpawnCodexTargetFn
+  type DispatcherDeps
 } from '../../core/services/cross-engine-dispatcher'
 import { setHostPaths } from '../../core/host'
 import provenance from '../../core/codex/protocol/provenance.json'
@@ -35,14 +35,15 @@ import type { DispatchedUsageRow } from '../../core/services/db'
  * ends one. The CALLER is the only fake — a plain `DispatchContext` object
  * standing in for whatever session would host `dispatch_agent`.
  *
- * `spawnCodexTarget` IS injected, for ONE reason: the target's child needs the
- * isolated `env` (an in-tmpdir CODEX_HOME + the fixture provider) that keeps
- * this test off the user's real Codex install and off the network. The
- * injected function forwards every option the dispatcher built — cwd, the
- * four server methods, and all three callbacks — VERBATIM, and adds only
- * `env`; the assertion below pins that, so the seam cannot quietly become a
- * stub. `CODEX_HOME` is set to a directory under the disposable tmpdir and
- * `~/.codex` is never read or written.
+ * `attachCodexTarget` IS injected, for ONE reason: the HOST the target's thread
+ * lives on needs the isolated `env` (an in-tmpdir CODEX_HOME + the fixture
+ * provider) that keeps this test off the user's real Codex install and off the
+ * network. The injected function forwards every option the dispatcher built —
+ * cwd, the label and all three owner callbacks — VERBATIM into a real
+ * `CodexHostRegistry.attach`, and adds only `env`; the assertion below pins
+ * that, so the seam cannot quietly become a stub. `CODEX_HOME` is set to a
+ * directory under the disposable tmpdir and `~/.codex` is never read or
+ * written, and no identity is asked for, so the vault is never touched.
  *
  * Gated: CODEX_INTEGRATION=1 on darwin/arm64 (the only platform with binary
  * provenance). Every spawn is wrapped in a deny-by-default seatbelt profile, so
@@ -75,6 +76,12 @@ const enabled =
 const ROUTING_ID = 'routing-codex-dispatch-target-integration'
 
 const dispatchers: CrossEngineDispatcher[] = []
+/**
+ * The hosts this file's targets are threads on (ADR-069 §7). Local, never the
+ * module singleton, and disposed after every test: a target's `detach` leaves
+ * the process running for whoever else is on it, which here is nobody.
+ */
+const hosts = new CodexHostRegistry()
 let directory: string | undefined
 let server: ReturnType<typeof createServer> | undefined
 const held: ServerResponse[] = []
@@ -83,6 +90,8 @@ afterEach(async () => {
   const survivors: number[] = []
   try {
     for (const dispatcher of dispatchers.splice(0)) dispatcher.disposeFor(ROUTING_ID)
+    // A target no longer owns a process: the HOST does, so this is what ends it.
+    hosts.dispose()
     for (const response of held.splice(0)) response.end()
     await new Promise((resolve) => setTimeout(resolve, 1200))
     for (const pid of containment.pids.splice(0)) {
@@ -275,13 +284,26 @@ shell_snapshot = false
 function makeDispatcher(
   env: NodeJS.ProcessEnv,
   usage: Array<Omit<DispatchedUsageRow, 'id'>>,
-  forwarded: Array<Parameters<SpawnCodexTargetFn>[0]>
+  forwarded: Array<Parameters<AttachCodexTargetFn>[0]>
 ): CrossEngineDispatcher {
-  const spawnCodexTarget: SpawnCodexTargetFn = async (opts) => {
+  const attachCodexTarget: AttachCodexTargetFn = async (opts) => {
     forwarded.push(opts)
     // Everything the dispatcher built is passed through untouched; only `env`
-    // is added, and only to keep the child off the real Codex install.
-    return new CodexClient({ ...opts, env, requestTimeoutMs: 30_000 })
+    // is added, and only to keep the host off the real Codex install. A LOCAL
+    // registry, never the module singleton: this file's hosts die with it.
+    const { cwd, label, identity, ...owner } = opts
+    const handle = await hosts.acquire({
+      cwd,
+      label,
+      env,
+      requestTimeoutMs: 30_000,
+      ...(identity ? { identity } : {})
+    })
+    try {
+      return handle.host.attach(owner)
+    } finally {
+      handle.release()
+    }
   }
   const deps: DispatcherDeps = {
     // The opencode-direction deps are structurally required but never invoked
@@ -301,7 +323,7 @@ function makeDispatcher(
     // No model/allowlist configured: the target resolves the fixture's own
     // config model, which is the ordinary no-config-needed path.
     loadEngineConfig: () => ({}),
-    spawnCodexTarget,
+    attachCodexTarget,
     dispatchTimeoutMs: 45_000,
     codexAbortSettleGraceMs: 5_000,
     // A no-op rather than the real better-sqlite3 insert: this vitest context
@@ -319,7 +341,7 @@ it.runIf(enabled)(
   async () => {
     const fixture = await setupFixture()
     const usage: Array<Omit<DispatchedUsageRow, 'id'>> = []
-    const forwarded: Array<Parameters<SpawnCodexTargetFn>[0]> = []
+    const forwarded: Array<Parameters<AttachCodexTargetFn>[0]> = []
     const dispatcher = makeDispatcher(fixture.env, usage, forwarded)
     const emitted: Array<{ channel: string; data: unknown }> = []
     const ctx: DispatchContext = {
@@ -345,12 +367,10 @@ it.runIf(enabled)(
     // The seam is a pass-through, not a stub.
     expect(forwarded).toHaveLength(1)
     expect(forwarded[0]!.cwd).toBe(fixture.cwd)
-    expect(forwarded[0]!.serverMethods).toEqual([
-      'item/commandExecution/requestApproval',
-      'item/fileChange/requestApproval',
-      'item/tool/requestUserInput',
-      'item/permissions/requestApproval'
-    ])
+    expect(forwarded[0]!.label).toBe('dispatch-target')
+    // No vault was consulted for this target's host (ADR-069 §7: the identity
+    // is the caller's, and this caller carries none).
+    expect(forwarded[0]!.identity).toBeUndefined()
 
     // The turn's text reached the caller's subagent channel too.
     expect(
@@ -399,7 +419,7 @@ it.runIf(enabled)(
   async () => {
     const fixture = await setupFixture()
     const usage: Array<Omit<DispatchedUsageRow, 'id'>> = []
-    const forwarded: Array<Parameters<SpawnCodexTargetFn>[0]> = []
+    const forwarded: Array<Parameters<AttachCodexTargetFn>[0]> = []
     const dispatcher = makeDispatcher(fixture.env, usage, forwarded)
     const ctx: DispatchContext = {
       fromEngine: 'claude',

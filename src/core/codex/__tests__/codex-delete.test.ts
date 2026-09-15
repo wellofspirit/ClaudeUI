@@ -189,49 +189,26 @@ describe('deleteCodexSubtree', () => {
     expect(db.deleteCodexFork.mock.calls.map((call) => call[0])).toEqual(['fork-a1'])
   })
 
-  it('retries a node it just stopped, because the writer lock outlives the stop', async () => {
-    // The native delete is refused while the holding PROCESS is still alive, and
-    // `cancel()` only starts its teardown (SIGTERM, SIGKILL a second later).
-    let refusals = 2
-    const service = {
-      deleteThread: vi.fn(async () => {
-        if (refusals-- > 0) throw new Error('Codex transport: rpc-error--32600')
-      }),
-      dispose: vi.fn()
-    } as unknown as CodexService
-    const slept: number[] = []
+  it('asks the binary ONCE for a node it just stopped — no stop-then-wait', async () => {
+    // Before ADR-069 the stop killed a PROCESS and the walk had to outwait its
+    // writer lock (3 s, 500 ms apart). A session is a thread on a shared host
+    // now: stopping it detaches, the thread stays loaded on that host, and the
+    // delete is issued THERE, where the holder may delete its own thread (probe
+    // P5). So a refusal is a real refusal, reported immediately.
+    const { service, attempts } = fakeService({ root: 'Codex transport: rpc-error--32600' })
     const plan = buildCodexDeletePlan('root', [], () => ({ title: null, live: true }))
-    await deleteCodexSubtree(plan, hooks().hooks, {
-      service,
-      sleep: async (ms) => void slept.push(ms),
-      retryWindowMs: 3000,
-      retryIntervalMs: 10
-    })
-    expect(service.deleteThread).toHaveBeenCalledTimes(3)
-    expect(slept).toEqual([10, 10])
+    await expect(deleteCodexSubtree(plan, hooks().hooks, { service })).rejects.toThrow(
+      /Codex refused to delete root/
+    )
+    expect(attempts).toEqual(['root'])
   })
 
   it('does not retry a node nothing of ours was holding', async () => {
     const { service, attempts } = fakeService({ root: 'Codex transport: rpc-error--32600' })
-    const sleep = vi.fn(async () => {})
     await expect(
-      deleteCodexSubtree(buildCodexDeletePlan('root', [], cold), hooks().hooks, { service, sleep })
+      deleteCodexSubtree(buildCodexDeletePlan('root', [], cold), hooks().hooks, { service })
     ).rejects.toThrow(/Codex refused to delete root/)
     expect(attempts).toEqual(['root'])
-    expect(sleep).not.toHaveBeenCalled()
-  })
-
-  it('gives up on a stopped node once the retry window closes', async () => {
-    const { service } = fakeService({ root: 'Codex transport: rpc-error--32600' })
-    const plan = buildCodexDeletePlan('root', [], () => ({ title: null, live: true }))
-    await expect(
-      deleteCodexSubtree(plan, hooks().hooks, {
-        service,
-        sleep: async () => {},
-        retryWindowMs: 0,
-        retryIntervalMs: 0
-      })
-    ).rejects.toThrow(/Codex refused to delete root/)
   })
 
   // -------------------------------------------------------------------------

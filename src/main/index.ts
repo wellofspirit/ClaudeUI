@@ -725,15 +725,16 @@ app.whenReady().then(() => {
       currentPluginManager?.stopAll()
       core?.automationManager.stopAll()
       credentialSync.stop()
-      // Every Codex app-server the reads share (ADR-069 §6): stdin EOF first, so
-      // the binary closes its sqlite state files itself, and the process tree is
-      // killed only if it outlives the grace. Bounded — nothing here waits on a
-      // child, and a parent that exits first closes the pipe, which is the same
-      // EOF. Sessions still own their own process until H2, hence the sweep below.
+      // Every Codex app-server (ADR-069 §6): stdin EOF first, so the binary
+      // closes its sqlite state files itself, and the process tree is killed
+      // only if it outlives the grace. Bounded — nothing here waits on a child,
+      // and a parent that exits first closes the pipe, which is the same EOF.
+      //
+      // This is the WHOLE Codex teardown since H2: a session is a thread on one
+      // of these hosts, so closing them ends every Codex turn and every Codex
+      // child thread this app started. Each attached session is told (ADR-069
+      // §5) and settles its own cards on the way out.
       codexHostRegistry.dispose()
-      core?.sessionManager.forEach((session) => {
-        if (session.engineId === 'codex') session.dispose()
-      })
       void core?.remoteServer.stop()
       // Stop the service session (lightweight CLI subprocess for usage polling)
       serviceSession.stop()

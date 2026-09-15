@@ -26,11 +26,15 @@ import type { CodexDeleteNode, CodexDeletePlan } from '../../shared/codex-types'
  * branched session is a SUBTREE delete, leaf-first, and that is the whole
  * shape of this module.
  *
- * It is also refused while any process holds the thread: the store takes a
+ * It is also refused while ANOTHER process holds the thread: the store takes a
  * per-thread lock FILE (`$CODEX_HOME/thread-writer-locks/<id>.lock`,
  * `writer_lock.rs`) and a second app-server gets
- * `thread <id> already has an active writer`. The lock is released when the
- * holding process exits, not when we ask it to — see {@link deleteCodexSubtree}.
+ * `thread <id> already has an active writer`. The HOLDER may delete its own
+ * loaded thread, idle or mid-turn (ADR-069 probe P5), so since ADR-069 §3 every
+ * delete is issued on the host that has the thread loaded — which is the host
+ * the session was running on, whatever account it follows. That is what retired
+ * the stop-then-wait this module used to need: stopping a session no longer ends
+ * a process, and there is no lock to wait out.
  *
  * Both refusals, and "no such thread", collapse to the SAME JSON-RPC `-32600`,
  * and the client keeps native payloads out of core, so a caller cannot tell
@@ -133,26 +137,6 @@ export function codexDeletePlan(
 }
 
 /**
- * How long the walk keeps retrying a refused delete of a thread it just
- * stopped, and how long it waits between tries.
- *
- * A ClaudeUI session's `cancel()` is synchronous — it flips the session closed
- * and emits `disconnected` in the same tick — but what the native delete needs
- * is the app-server PROCESS to be gone, because the writer lock is an OS file
- * lock held by that process. `CodexAppServerClient.terminate` sends `SIGTERM`
- * and escalates to `SIGKILL` after `killGraceMs` (1 s), so the lock can outlive
- * the stop by about that long. The window below covers the escalation with
- * margin; without it, deleting a live branch is a coin flip.
- *
- * This retry is for STOPPED nodes ONLY. A thread held by something ClaudeUI did
- * not start (another ClaudeUI window, a terminal `codex`) is refused on the
- * first try and stays refused, and retrying it would only delay the honest
- * error.
- */
-export const STOPPED_HOLDER_RETRY_MS = 3_000
-export const STOPPED_HOLDER_RETRY_INTERVAL_MS = 500
-
-/**
  * Refuse early when there is no app-server to ask.
  *
  * `locateCodexBinary`, not `codexBinaryAvailable`: the latter also demands the
@@ -208,9 +192,13 @@ export interface CodexDeleteHooks {
  * {@link CodexDeleteWalkOptions.replan}. Neither the service nor the clock is
  * injected in production.
  */
-export interface CodexDeleteWalkOptions extends Partial<CodexDeleteOptions>, CodexReadTuning {
-  retryWindowMs?: number
-  retryIntervalMs?: number
+export interface CodexDeleteWalkOptions
+  extends
+    Partial<CodexDeleteOptions>,
+    // `service` ALONE of the read tuning: the walk has no clock left to fake
+    // since the delete goes to the thread's holder and is accepted or refused on
+    // the first try (ADR-069 §3).
+    Pick<CodexReadTuning, 'service'> {
   /**
    * Re-learn lineage and rebuild the plan after a refusal, ONCE per walk.
    *
@@ -223,8 +211,6 @@ export interface CodexDeleteWalkOptions extends Partial<CodexDeleteOptions>, Cod
   replan?: () => Promise<CodexDeletePlan>
 }
 
-const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
-
 /** The name to put in front of a user: the sidebar title, else the raw thread id. */
 function label(node: CodexDeleteNode): string {
   return node.title ? `"${node.title}"` : node.threadId
@@ -236,7 +222,11 @@ function label(node: CodexDeleteNode): string {
  *
  * Per node, in this order: unwatch (a watcher must not fire for a file that is
  * disappearing), stop the holder if one is live, replicate the removal, then
- * ask the binary. A refusal ends the walk THERE — nothing after it is touched,
+ * ask the binary. Stopping is still first, and it is still what makes the
+ * delete legal — but only because it settles the session's cards and detaches
+ * it, not because it frees a lock: the thread stays loaded on the host, and the
+ * delete goes to that same host, which may delete what it holds (probe P5). A
+ * refusal ends the walk THERE — nothing after it is touched,
  * everything before it is already gone — and the thrown error says which node
  * refused and how much of the plan landed. The caller refreshes the sidebar
  * listing afterwards, which puts back the rows that survived: the lineage cache
@@ -262,7 +252,9 @@ function label(node: CodexDeleteNode): string {
  *
  * ONE service for the whole subtree. Since ADR-069 the reads share the home's
  * host rather than a process each, so this is no longer a spawn budget — it is
- * still one service so the whole walk speaks to one connection and one lease.
+ * still one service so the whole walk speaks to one lease per node. Which HOST
+ * answers is decided per thread by the registry: the one that has it loaded,
+ * else the active account's.
  *
  * Returns the threads it actually deleted, in the order it deleted them — which
  * a rescan can make LONGER than the plan it was handed, and which a project
@@ -277,9 +269,6 @@ export async function deleteCodexSubtree(
 ): Promise<string[]> {
   if (!plan.order.length) return []
   if (!options.service) assertCodexInstalled()
-  const sleep = options.sleep ?? wait
-  const retryWindow = options.retryWindowMs ?? STOPPED_HOLDER_RETRY_MS
-  const interval = options.retryIntervalMs ?? STOPPED_HOLDER_RETRY_INTERVAL_MS
   const service =
     options.service ??
     new CodexService({
@@ -303,25 +292,20 @@ export async function deleteCodexSubtree(
       hooks.unwatch(threadId)
       if (node.live) hooks.stop(threadId)
       hooks.removeSession(threadId)
-      // Only a thread WE just stopped gets a second chance; see the constants.
-      const deadline = node.live ? Date.now() + retryWindow : 0
       let refusal: Error | null = null
-      for (;;) {
-        try {
-          await service.deleteThread(threadId)
-          break
-        } catch (error) {
-          if (Date.now() >= deadline) {
-            const reason = error instanceof Error ? error.message : String(error)
-            refusal = new Error(
-              `Codex refused to delete ${label(node)} (${reason}). ` +
-                `${deleted.size} of ${current.order.length} threads were deleted; ` +
-                `${current.order.length - deleted.size} remain.`
-            )
-            break
-          }
-          await sleep(interval)
-        }
+      try {
+        // No retry, and none to write: the delete is issued on the host that
+        // holds the thread, and a holder's own delete is accepted immediately —
+        // idle or mid-turn (ADR-069 probe P5). Before the host model this had to
+        // outwait a dying process's writer lock for up to three seconds.
+        await service.deleteThread(threadId)
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error)
+        refusal = new Error(
+          `Codex refused to delete ${label(node)} (${reason}). ` +
+            `${deleted.size} of ${current.order.length} threads were deleted; ` +
+            `${current.order.length - deleted.size} remain.`
+        )
       }
       if (refusal) {
         const rebuilt =

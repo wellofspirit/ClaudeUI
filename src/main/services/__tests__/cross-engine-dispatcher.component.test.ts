@@ -54,12 +54,12 @@ import type {
   DispatchTargetClient,
   PiTargetSpawnOpts,
   PiTargetPrimitives,
-  CodexTargetSpawnOpts,
+  CodexTargetAttachOpts,
   SpawnClaudeQueryFn,
   SpawnPiTargetFn,
-  SpawnCodexTargetFn
+  AttachCodexTargetFn
 } from '../../../core/services/cross-engine-dispatcher'
-import type { CodexAuthHook } from '../../../core/codex/codex-auth-hook'
+import { CodexMethodNotFound } from '../../../core/codex/CodexAppServerClient'
 import type { QueryHandle, ResultMessage, SDKMessage, SdkToolExtra } from '../../../core/sdk'
 import type { StoredMessage } from '../../../core/opencode/protocol/types'
 import type { EngineConfig, EngineId } from '../../../shared/types'
@@ -3100,20 +3100,42 @@ describe('CrossEngineDispatcher — Codex-sourced dispatches', () => {
     expect(result.text).toBe('target answer')
   })
 
-  it('rejects codex→codex with the same-engine reason, not a target-engine one', async () => {
-    const { dispatcher } = makeHarness()
-    const result = await dispatcher.dispatch(
+  it('runs codex→codex — ADR-069 §7 lifted the same-engine guard for this engine alone', async () => {
+    // It was never a policy: a same-engine dispatch used to mean a SECOND
+    // app-server per dispatch. A target is one more `thread/start` on the
+    // caller's own host now, so the refusal has nothing left to protect — and
+    // it still stands for every other engine, which pays a whole server or CLI
+    // and has a native subagent of its own.
+    const target = makeFakeCodexTarget()
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+    const pending = dispatcher.dispatch(
       { engine: 'codex', prompt: 'x' },
-      makeCtx({ fromEngine: 'codex' })
+      makeCtx({ fromEngine: 'codex', fromRoutingId: 'routing-codex' })
     )
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('targets a different engine')
-    expect(result.text).toContain('"codex"')
+    await tick()
+    target.completeTurn({ text: 'target answer' })
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('target answer')
   })
+
+  it.each(['claude', 'opencode', 'pi'] as const)(
+    'still refuses %s→%s as same-engine work',
+    async (engine) => {
+      const { dispatcher } = makeHarness()
+      const result = await dispatcher.dispatch(
+        { engine, prompt: 'x' },
+        makeCtx({ fromEngine: engine })
+      )
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('targets a different engine')
+      expect(result.text).toContain(`"${engine}"`)
+    }
+  )
 
   it('no longer refuses a dispatch INTO codex as unimplemented — slice H gave it a target factory', async () => {
     const target = makeFakeCodexTarget()
-    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
     const pending = dispatcher.dispatch(
       { engine: 'codex', prompt: 'x' },
       makeCtx({ fromEngine: 'claude' })
@@ -5422,12 +5444,15 @@ describe('buildPiTargetChildEnv (ADR-033 M4c — recursion guard)', () => {
 // codex direction (ADR-033 slice H — claude/opencode/pi → codex)
 // ---------------------------------------------------------------------------
 
-/** Loose shape covering exactly what the dispatcher calls on a Codex target's client. */
+/**
+ * Loose shape covering exactly what the dispatcher calls on a Codex target's
+ * HOST CONNECTION (ADR-069 §7 — a target is a thread, not a process).
+ */
 interface FakeCodexClient {
-  start: ReturnType<typeof vi.fn>
   request: ReturnType<typeof vi.fn>
   abortServerRequests: ReturnType<typeof vi.fn>
-  dispose: ReturnType<typeof vi.fn>
+  claim: ReturnType<typeof vi.fn>
+  detach: ReturnType<typeof vi.fn>
 }
 
 type CodexRequestHandler = (
@@ -5499,16 +5524,17 @@ function codexUsage(over: Partial<Record<string, number>> = {}): Record<string, 
 }
 
 /**
- * Fake headless Codex target: a fake `CodexClient` (start/request/
- * abortServerRequests/dispose) whose canned responses cover the fixed
- * `start` → `config/read` → `model/list` → `thread/start` → `turn/start`
- * sequence `createCodexTarget`/`driveCodexTurn` issue.
+ * Fake Codex dispatch target: a fake host CONNECTION (request/
+ * abortServerRequests/claim/detach) whose canned responses cover the fixed
+ * `config/read` → `model/list` → `thread/start` → `turn/start` sequence
+ * `createCodexTarget`/`driveCodexTurn` issue.
  *
  * `notify()` feeds the SAME onNotification callback the dispatcher installs, so
  * `mapCodexItem`/`mapCodexDelta` and the whole item/dedupe/settle pipeline run
- * FOR REAL — only the process and its wire are faked (mirrors the pi fake's
- * "real event-mapper logic, fake transport" precedent). `serverRequest()`
- * drives the approval gate the same way the real app-server would.
+ * FOR REAL — only the host and its wire are faked (mirrors the pi fake's "real
+ * event-mapper logic, fake transport" precedent). `serverRequest()` drives the
+ * approval gate the same way the real app-server would; unlike the real host it
+ * does NOT demultiplex, so what the gate itself refuses stays visible here.
  */
 function makeFakeCodexTarget(
   overrides: {
@@ -5519,8 +5545,8 @@ function makeFakeCodexTarget(
     requestHandler?: CodexRequestHandler
   } = {}
 ): {
-  spawnCodexTarget: SpawnCodexTargetFn
-  spawnCalls: CodexTargetSpawnOpts[]
+  spawnCodexTarget: AttachCodexTargetFn
+  spawnCalls: CodexTargetAttachOpts[]
   client: FakeCodexClient
   requests: Array<{ method: string; params: Record<string, unknown> }>
   notify: (method: string, params: Record<string, unknown>) => void
@@ -5556,7 +5582,7 @@ function makeFakeCodexTarget(
   ]
   const requests: Array<{ method: string; params: Record<string, unknown> }> = []
   let onNotification: ((method: string, params: unknown) => void) | undefined
-  let onServerRequest: NonNullable<CodexTargetSpawnOpts['onServerRequest']> | undefined
+  let onServerRequest: CodexTargetAttachOpts['onServerRequest'] | undefined
   let onDisconnect: ((error: { code: string }) => void) | undefined
   let serverRequestSeq = 0
   let turnSeq = 0
@@ -5604,22 +5630,24 @@ function makeFakeCodexTarget(
   const handler = overrides.requestHandler ?? defaultHandler
 
   const client: FakeCodexClient = {
-    start: vi.fn(async () => ({})),
     request: vi.fn(async (method: string, params: Record<string, unknown>) => {
       requests.push({ method, params })
       return await handler(method, params ?? {})
     }),
     abortServerRequests: vi.fn(),
-    dispose: vi.fn(() => onDisconnect?.({ code: 'disposed' }))
+    claim: vi.fn(),
+    // Detaching does NOT kill anything: the host lives on for the other
+    // sessions and reads using it (ADR-069 §2).
+    detach: vi.fn()
   }
 
-  const spawnCalls: CodexTargetSpawnOpts[] = []
-  const spawnCodexTarget = vi.fn<SpawnCodexTargetFn>(async (opts) => {
+  const spawnCalls: CodexTargetAttachOpts[] = []
+  const spawnCodexTarget = vi.fn<AttachCodexTargetFn>(async (opts) => {
     spawnCalls.push(opts)
     onNotification = opts.onNotification
     onServerRequest = opts.onServerRequest
     onDisconnect = opts.onDisconnect as unknown as (error: { code: string }) => void
-    return client as unknown as Awaited<ReturnType<SpawnCodexTargetFn>>
+    return client as unknown as Awaited<ReturnType<AttachCodexTargetFn>>
   })
 
   const notify = (method: string, params: Record<string, unknown>): void => {
@@ -5687,7 +5715,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): the policy envelo
     "autonomy '%s' opens the thread with approvalPolicy '%s', sandbox '%s', reviewer '%s' — all three on thread/start, none per turn",
     async (mode, approvalPolicy, sandbox, approvalsReviewer) => {
       const target = makeFakeCodexTarget()
-      const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+      const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
       const pending = dispatcher.dispatch(
         { engine: 'codex', prompt: 'x' },
         makeCtx({ fromEngine: 'claude', autonomyMode: mode })
@@ -5715,7 +5743,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): the policy envelo
 
   it('inherits NO MCP servers — a headless target gets no config override (ADR-068 §5)', async () => {
     const target = makeFakeCodexTarget()
-    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
     const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, makeCtx())
     await tick()
     target.completeTurn()
@@ -5730,37 +5758,51 @@ describe('CrossEngineDispatcher — codex direction (slice H): the policy envelo
 
   it('offers NO dynamicTools and no item/tool/call server method — a target can neither dispatch nor run a hosted tool', async () => {
     const target = makeFakeCodexTarget()
-    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
     const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, makeCtx())
     await tick()
     target.completeTurn()
     await pending
 
     expect(target.threadStartParams()).not.toHaveProperty('dynamicTools')
-    expect(target.spawnCalls[0]!.serverMethods).toEqual([
-      'item/commandExecution/requestApproval',
-      'item/fileChange/requestApproval',
-      'item/tool/requestUserInput',
-      'item/permissions/requestApproval'
-    ])
-    expect(target.spawnCalls[0]!.serverMethods).not.toContain('item/tool/call')
+    // The transport used to refuse `item/tool/call` for the target, because the
+    // target owned the process and registered four methods on it. A target is a
+    // thread on a SHARED host now (ADR-069 §7), whose registered list is the
+    // union its owners need — so the scrub is the GATE's, with the same
+    // `-32601` an unregistered method earns.
+    await expect(
+      target.serverRequest('item/tool/call', {
+        threadId: CODEX_THREAD_ID,
+        turnId: CODEX_TURN_ID,
+        callId: 'c1',
+        tool: 'render_mermaid'
+      })
+    ).rejects.toBeInstanceOf(CodexMethodNotFound)
+    await expect(
+      target.serverRequest('mcpServer/elicitation/request', {
+        threadId: CODEX_THREAD_ID,
+        turnId: CODEX_TURN_ID
+      })
+    ).rejects.toBeInstanceOf(CodexMethodNotFound)
   })
 
-  it('identifies itself as claudeui_dispatch, never as a session', async () => {
+  it('labels its host acquire as a dispatch target and claims exactly its own thread', async () => {
     const target = makeFakeCodexTarget()
-    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
     const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, makeCtx())
     await tick()
     target.completeTurn()
     await pending
-    expect(target.client.start.mock.calls[0]![0]).toMatchObject({
-      clientInfo: { name: 'claudeui_dispatch' }
-    })
+    // The `clientInfo` that used to identify this target is the HOST's now: the
+    // target does not start a process, so what identifies it is the acquire
+    // label and the one thread it takes delivery of.
+    expect(target.spawnCalls[0]!.label).toBe('dispatch-target')
+    expect(target.client.claim.mock.calls).toEqual([[CODEX_THREAD_ID]])
   })
 
   it('the envelope is fixed at creation — a continuation with a DIFFERENT autonomyMode neither re-policies the thread nor moves the gate', async () => {
     const target = makeFakeCodexTarget()
-    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
     const first = dispatcher.dispatch(
       { engine: 'codex', prompt: 'one' },
       makeCtx({ fromEngine: 'claude', autonomyMode: 'auto' })
@@ -5801,7 +5843,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): the gate', () => 
   }> {
     const target = makeFakeCodexTarget()
     const { dispatcher } = makeCodexHarness({
-      spawnCodexTarget: target.spawnCodexTarget,
+      attachCodexTarget: target.spawnCodexTarget,
       ...overrides
     })
     const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: mode, toolUseId: 'toolu_dispatch_1' })
@@ -6050,7 +6092,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): the gate', () => 
 describe('CrossEngineDispatcher — codex direction (slice H): streaming, result, usage', () => {
   it("streams items, deltas and tool results to the caller's subagent channels under ctx.toolUseId", async () => {
     const target = makeFakeCodexTarget()
-    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_dispatch_1' })
     const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
     await tick()
@@ -6110,7 +6152,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): streaming, result
 
   it('drops notifications for a native CHILD thread — one dispatch is one card, and a grandchild has no home in it', async () => {
     const target = makeFakeCodexTarget()
-    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_dispatch_1' })
     const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
     await tick()
@@ -6128,7 +6170,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): streaming, result
     const recordDispatchedUsage = vi.fn()
     const target = makeFakeCodexTarget()
     const { dispatcher } = makeCodexHarness({
-      spawnCodexTarget: target.spawnCodexTarget,
+      attachCodexTarget: target.spawnCodexTarget,
       recordDispatchedUsage
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_dispatch_1' })
@@ -6193,7 +6235,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): streaming, result
       ]
     })
     const { dispatcher } = makeCodexHarness({
-      spawnCodexTarget: target.spawnCodexTarget,
+      attachCodexTarget: target.spawnCodexTarget,
       recordDispatchedUsage
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_dispatch_1' })
@@ -6216,7 +6258,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): streaming, result
 
   it('a turn/completed carrying an error is an isError result plus a "failed" notification', async () => {
     const target = makeFakeCodexTarget()
-    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_dispatch_1' })
     const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
     await tick()
@@ -6230,7 +6272,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): streaming, result
 
   it('a turn that produced no agent message returns the placeholder rather than empty text', async () => {
     const target = makeFakeCodexTarget()
-    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
     const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, makeCtx())
     await tick()
     target.completeTurn({ items: [] })
@@ -6240,7 +6282,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): streaming, result
 
   it('an app-server disconnect mid-turn settles the turn as an error instead of hanging it', async () => {
     const target = makeFakeCodexTarget()
-    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
     const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, makeCtx())
     await tick()
     target.disconnect('process-exited')
@@ -6253,7 +6295,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): streaming, result
 describe('CrossEngineDispatcher — codex direction (slice H): continuation, model, stop, dispose', () => {
   it('continuation: session_id reuses the live entry — no second thread/start, no second spawn', async () => {
     const target = makeFakeCodexTarget()
-    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
     const ctx = makeCtx({ fromEngine: 'claude' })
     const first = dispatcher.dispatch({ engine: 'codex', prompt: 'one' }, ctx)
     await tick()
@@ -6276,7 +6318,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
 
   it('continuation with an unknown sessionId is an isError — NEVER a thread/resume of a caller-named thread', async () => {
     const target = makeFakeCodexTarget()
-    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
     const result = await dispatcher.dispatch(
       { engine: 'codex', prompt: 'x', sessionId: 'someone-elses-thread' },
       makeCtx({ fromEngine: 'claude' })
@@ -6288,7 +6330,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
 
   it("continuation with another session's target → isError (scoped to fromRoutingId)", async () => {
     const target = makeFakeCodexTarget()
-    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
     const first = dispatcher.dispatch(
       { engine: 'codex', prompt: 'one' },
       makeCtx({ fromEngine: 'claude', fromRoutingId: 'routing-a' })
@@ -6307,7 +6349,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
 
   it('a busy target rejects a concurrent same-session_id dispatch without disturbing the running turn', async () => {
     const target = makeFakeCodexTarget()
-    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
     const ctx = makeCtx({ fromEngine: 'claude' })
     const first = dispatcher.dispatch({ engine: 'codex', prompt: 'one' }, ctx)
     await tick()
@@ -6333,7 +6375,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
   it('refuses an explicitly requested model outside the allowlist BEFORE spawning anything', async () => {
     const target = makeFakeCodexTarget()
     const { dispatcher } = makeCodexHarness({
-      spawnCodexTarget: target.spawnCodexTarget,
+      attachCodexTarget: target.spawnCodexTarget,
       dispatch: { allowedModels: ['gpt-5.6-luna'] }
     })
     const result = await dispatcher.dispatch(
@@ -6351,7 +6393,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
   it('refuses the CONFIG-resolved default too when it falls outside the allowlist, and never opens a thread', async () => {
     const target = makeFakeCodexTarget({ configModel: 'gpt-5.6-terra' })
     const { dispatcher } = makeCodexHarness({
-      spawnCodexTarget: target.spawnCodexTarget,
+      attachCodexTarget: target.spawnCodexTarget,
       dispatch: { allowedModels: ['gpt-5.6-luna'] }
     })
     const result = await dispatcher.dispatch(
@@ -6361,12 +6403,12 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
     expect(result.isError).toBe(true)
     expect(result.text).toContain('not in the user-configured allowlist for codex dispatch')
     expect(target.requests.some((entry) => entry.method === 'thread/start')).toBe(false)
-    expect(target.client.dispose).toHaveBeenCalled()
+    expect(target.client.detach).toHaveBeenCalled()
   })
 
   it('a model the native catalog does not carry is refused by selectCodexModel', async () => {
     const target = makeFakeCodexTarget()
-    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
     const result = await dispatcher.dispatch(
       { engine: 'codex', prompt: 'x', model: 'gpt-9-imaginary' },
       makeCtx({ fromEngine: 'claude' })
@@ -6378,7 +6420,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
   it('a non-openai provider is refused before a thread exists', async () => {
     const target = makeFakeCodexTarget()
     const { dispatcher } = makeCodexHarness({
-      spawnCodexTarget: makeFakeCodexTarget({
+      attachCodexTarget: makeFakeCodexTarget({
         requestHandler: (method) =>
           method === 'config/read'
             ? { config: { model: 'x', model_provider: 'azure' } }
@@ -6397,7 +6439,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
   it('stopDispatch interrupts the native turn, settles as stopped, and KEEPS the thread alive for continuation', async () => {
     const target = makeFakeCodexTarget()
     const { dispatcher } = makeCodexHarness({
-      spawnCodexTarget: target.spawnCodexTarget,
+      attachCodexTarget: target.spawnCodexTarget,
       codexAbortSettleGraceMs: 20
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stop_1' })
@@ -6414,7 +6456,8 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
       turnId: CODEX_TURN_ID
     })
     expect(target.client.abortServerRequests).toHaveBeenCalledWith(CODEX_THREAD_ID, CODEX_TURN_ID)
-    expect(target.client.dispose).not.toHaveBeenCalled()
+    // Turn-scoped: the thread (and the host under it) survive for a continuation.
+    expect(target.client.detach).not.toHaveBeenCalled()
     const notification = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')!
     expect((notification[1] as { status: string }).status).toBe('stopped')
 
@@ -6431,7 +6474,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
   it("a stopped turn's own late turn/completed cannot settle the NEXT turn (retired by id)", async () => {
     const target = makeFakeCodexTarget()
     const { dispatcher } = makeCodexHarness({
-      spawnCodexTarget: target.spawnCodexTarget,
+      attachCodexTarget: target.spawnCodexTarget,
       codexAbortSettleGraceMs: 20
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stop_2' })
@@ -6456,7 +6499,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
   it('a late approval request from an already stopped turn is refused, never forwarded', async () => {
     const target = makeFakeCodexTarget()
     const { dispatcher } = makeCodexHarness({
-      spawnCodexTarget: target.spawnCodexTarget,
+      attachCodexTarget: target.spawnCodexTarget,
       codexAbortSettleGraceMs: 20
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stop_3' })
@@ -6480,7 +6523,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
   it('a stop dismisses a forwarded approval still pending for that target', async () => {
     const target = makeFakeCodexTarget()
     const { dispatcher } = makeCodexHarness({
-      spawnCodexTarget: target.spawnCodexTarget,
+      attachCodexTarget: target.spawnCodexTarget,
       codexAbortSettleGraceMs: 20
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stop_4' })
@@ -6506,16 +6549,20 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
     expect(await decisionPromise).toEqual({ decision: 'decline' })
   })
 
-  it('disposeFor disposes the client, unregisters the target and settles a turn in flight', async () => {
+  it('disposeFor detaches the thread, unregisters the target and settles a turn in flight', async () => {
     const target = makeFakeCodexTarget()
-    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
     const ctx = makeCtx({ fromEngine: 'claude', fromRoutingId: 'routing-dispose' })
     const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
     await tick()
 
     dispatcher.disposeFor('routing-dispose')
     const result = await pending
-    expect(target.client.dispose).toHaveBeenCalledTimes(1)
+    // ADR-069 §7: the target leaves the host, it does not kill it — and because
+    // no process dies, the in-flight turn is settled explicitly (it used to ride
+    // out on the client's own `onDisconnect`) and interrupted on the wire.
+    expect(target.client.detach).toHaveBeenCalledTimes(1)
+    expect(target.requests.some((entry) => entry.method === 'turn/interrupt')).toBe(true)
     expect(result.isError).toBe(true)
 
     const dead = await dispatcher.dispatch(
@@ -6528,7 +6575,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
 
   it('disposeFor leaves ANOTHER session’s codex target alone', async () => {
     const a = makeFakeCodexTarget({ threadId: 'codex-thread-a' })
-    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: a.spawnCodexTarget })
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: a.spawnCodexTarget })
     const pending = dispatcher.dispatch(
       { engine: 'codex', prompt: 'x' },
       makeCtx({ fromEngine: 'claude', fromRoutingId: 'routing-a' })
@@ -6537,13 +6584,13 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
     a.completeTurn()
     await pending
     dispatcher.disposeFor('routing-other')
-    expect(a.client.dispose).not.toHaveBeenCalled()
+    expect(a.client.detach).not.toHaveBeenCalled()
   })
 
   it('the cumulative cost cap rejects a continuation once it is reached', async () => {
     const target = makeFakeCodexTarget()
     const { dispatcher } = makeCodexHarness({
-      spawnCodexTarget: target.spawnCodexTarget,
+      attachCodexTarget: target.spawnCodexTarget,
       dispatch: { maxCostUsd: 0.0000001 }
     })
     const ctx = makeCtx({ fromEngine: 'claude' })
@@ -6575,7 +6622,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
     const recordDispatchedUsage = vi.fn()
     const target = makeFakeCodexTarget()
     const { dispatcher } = makeCodexHarness({
-      spawnCodexTarget: target.spawnCodexTarget,
+      attachCodexTarget: target.spawnCodexTarget,
       dispatchTimeoutMs: 30,
       codexAbortSettleGraceMs: 10,
       recordDispatchedUsage
@@ -6612,27 +6659,15 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
  * would silently bill the active account (ADR-059's rule, applied to accounts).
  */
 describe('CrossEngineDispatcher — codex direction: the caller account (ADR-068 §2)', () => {
-  const hookFor = (accountId: string | null): CodexAuthHook => ({
-    inject: vi.fn(async () => null),
-    onRefreshRequest: vi.fn(),
-    requestAccount: vi.fn(),
-    hasAccount: vi.fn(async () => true),
-    injectedAccountId: accountId
-  })
-
   it.each([
     ['a caller pin', 'acct-b', 'acct-b'],
     ['an explicit follow-active', null, null],
     ['a caller that carries no account at all', undefined, null]
-  ])('asks the hook factory for %s', async (_label, chatgptAccountId, expected) => {
+  ])('asks for the host of %s', async (_label, chatgptAccountId, expected) => {
     const target = makeFakeCodexTarget()
-    const asked: Array<string | null> = []
     const { dispatcher } = makeCodexHarness({
-      spawnCodexTarget: target.spawnCodexTarget,
-      codexAuth: (accountId) => {
-        asked.push(accountId)
-        return hookFor(accountId)
-      }
+      attachCodexTarget: target.spawnCodexTarget,
+      codexVaultAccounts: true
     })
     const pending = dispatcher.dispatch(
       { engine: 'codex', prompt: 'x' },
@@ -6645,16 +6680,14 @@ describe('CrossEngineDispatcher — codex direction: the caller account (ADR-068
     target.completeTurn()
     await pending
 
-    expect(asked).toEqual([expected])
-    expect(target.client.start).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ injectedAccountId: expected })
-    )
+    // One identity per PROCESS (ADR-068 §1), so the account the caller bills is
+    // which HOST this thread lands on — asked for on the acquire itself.
+    expect(target.spawnCalls[0]!.identity).toEqual({ accountId: expected })
   })
 
-  it('injects nothing when no factory is wired — the hermetic default', async () => {
+  it('asks for no identity at all when the vault is not wired — the hermetic default', async () => {
     const target = makeFakeCodexTarget()
-    const { dispatcher } = makeCodexHarness({ spawnCodexTarget: target.spawnCodexTarget })
+    const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
     const pending = dispatcher.dispatch(
       { engine: 'codex', prompt: 'x' },
       makeCtx({ fromEngine: 'claude', chatgptAccountId: 'acct-b' })
@@ -6663,6 +6696,6 @@ describe('CrossEngineDispatcher — codex direction: the caller account (ADR-068
     target.completeTurn()
     await pending
 
-    expect(target.client.start).toHaveBeenCalledWith(expect.anything(), undefined)
+    expect(target.spawnCalls[0]!.identity).toBeUndefined()
   })
 })

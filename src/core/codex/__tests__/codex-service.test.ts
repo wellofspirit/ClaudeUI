@@ -41,6 +41,8 @@ const hosts = {
   entries: new Map<string, FakeHost>(),
   order: [] as string[],
   labels: [] as (string | undefined)[],
+  /** The `thread` each acquire asked to be served by its holder, if any. */
+  threads: [] as (string | undefined)[],
   /** Set to make the next acquire fail, the way a missing binary does. */
   failAcquire: null as Error | null,
   get(key: string): FakeHost {
@@ -52,6 +54,7 @@ const hosts = {
     this.entries.clear()
     this.order.length = 0
     this.labels.length = 0
+    this.threads.length = 0
     this.failAcquire = null
   }
 }
@@ -76,6 +79,7 @@ const registry: CodexHostSource = {
     host.acquires++
     host.live++
     hosts.labels.push(options.label)
+    hosts.threads.push(options.thread)
     let released = false
     const entry = host
     return {
@@ -532,5 +536,38 @@ describe('per-account ChatGPT rate limits', () => {
     const service = new CodexService(options)
     expect([...(await service.rateLimits(['acct-a'])).keys()]).toEqual([])
     expect(hosts.order).toEqual([])
+  })
+})
+
+/**
+ * ADR-069 §3 / probe P5 — a delete belongs to the HOLDER.
+ *
+ * The writer lock is process-scoped: every other app-server on the home answers
+ * `-32600 already has an active writer`, while the process that has the thread
+ * loaded may delete its own, idle or mid-turn. A session pinned to another
+ * account lives on that account's host, so "the active account's host" is not
+ * good enough — the acquire has to name the thread and let the registry find
+ * whoever holds it.
+ */
+describe('delete runs on the host that holds the thread', () => {
+  it('names the thread on the acquire so the holder serves it', async () => {
+    const service = new CodexService({ ...options, identity: { accountId: null }, label: 'delete' })
+    mocks.request.mockResolvedValue({})
+    await service.deleteThread('thread-42')
+    expect(hosts.threads).toEqual(['thread-42'])
+    expect(hosts.get('acct-active').requests).toEqual(['thread/delete'])
+    service.dispose()
+  })
+
+  it('leaves every other read on its own account host', async () => {
+    const service = new CodexService({
+      ...options,
+      identity: { accountId: null },
+      label: 'history'
+    })
+    mocks.request.mockResolvedValue({ data: [], nextCursor: null })
+    await service.listThreads({ cursor: null, limit: 10 })
+    expect(hosts.threads).toEqual([undefined])
+    service.dispose()
   })
 })

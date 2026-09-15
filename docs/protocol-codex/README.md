@@ -157,14 +157,20 @@ coverage simulates ordering only; it is not Windows provisioning/runtime evidenc
 
 ## M1b service and ownership
 
-`CodexService` is host-only and separate from any root `CodexClient`.
-Overlapping reads share one service process and handshake; duplicate pending
-account/catalog reads coalesce. The final reader disposes that process, so the
-next operation reloads native state. History only calls `thread/read` and
-`thread/list`; it never starts, resumes or forks threads. A later root adapter
-must own its separate client and take its durable ID from the generated
-`thread/start`, `thread/resume` or `thread/fork` response's `thread.id`. Service
-read results do not transfer ownership. No EngineId registration was added.
+`CodexService` is host-only and owns no process. Since
+[ADR-069](../adr/adr-069_codex-host-per-home-and-account.md) every read borrows
+the `CodexHost` for its Codex home and account (H1) and a ROOT ADAPTER borrows
+the same one (H2): a session is a THREAD on that host, not a client of its own,
+and its durable ID is still the generated `thread/start`, `thread/resume` or
+`thread/fork` response's `thread.id`. Overlapping reads therefore share one
+process and one handshake by construction; duplicate pending account/catalog
+reads still coalesce; the last reader drops its LEASE rather than ending a
+process, and the host is reaped by its own idle rule (or with the app). History
+only calls `thread/read` and `thread/list`; it never starts, resumes or forks
+threads. A `thread/delete` is issued on the host that HOLDS the thread — the
+writer lock is process-scoped and the holder may delete its own (ADR-069 probe
+P5). Service read results do not transfer ownership. No EngineId registration
+was added.
 
 Public host contracts:
 

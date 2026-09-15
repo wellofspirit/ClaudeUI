@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CodexSession } from '../CodexSession'
-import type { CodexClient } from '../CodexClient'
+import { CodexHostRegistry, type CodexHostClient } from '../CodexHost'
 import { codexAuthHook, type CodexAuthHook, type CodexAuthSource } from '../codex-auth-hook'
 import { CodexTransportError, type CodexClientOptions } from '../CodexAppServerClient'
 import type { EngineSpawnOptions } from '../../providers/ISession'
@@ -151,8 +151,31 @@ afterEach(() => {
   mcp.skipped = []
 })
 
-function fixture(opts: EngineSpawnOptions = {}, auth: CodexAuthHook | null = null) {
-  let callbacks!: CodexClientOptions
+/**
+ * One session on one HOST (ADR-069 §2).
+ *
+ * The session no longer owns a process, so the seam moved: the fixture builds a
+ * REAL {@link CodexHostRegistry} over a fake app-server, which means these tests
+ * drive the real demultiplexer — a notification reaches this session only if it
+ * claimed the thread, and the child hold that used to live in `CodexSession`
+ * lives in the host now.
+ *
+ * `source` is the vault behind BOTH hooks: the session's own (which only ever
+ * answers `hasAccount`) and the per-host one the registry builds (which is what
+ * actually injects). Absent, nothing reads a vault at all and the session runs
+ * on the uninjected host, exactly as the integration suites do.
+ */
+function fixture(
+  opts: EngineSpawnOptions = {},
+  auth: CodexAuthHook | null = null,
+  source?: CodexAuthSource,
+  /** Share another fixture's registry — two sessions on ONE set of hosts. */
+  shared?: CodexHostRegistry
+) {
+  /** Every host this registry started, newest last, with the options it got. */
+  const started: CodexClientOptions[] = []
+  /** The hook each host was built with, newest last. */
+  const hostHooks: CodexAuthHook[] = []
   const policy = {
     approvalPolicy: { granular: { rules: true } },
     approvalsReviewer: 'auto_review',
@@ -194,38 +217,65 @@ function fixture(opts: EngineSpawnOptions = {}, auth: CodexAuthHook | null = nul
     return {}
   })
   const controllers: AbortController[] = []
+  /**
+   * ONE fake app-server behind every host this fixture starts. Shared on
+   * purpose: what these tests assert is the WIRE, and a per-host mock would
+   * scatter one session's calls across several spies. The per-host difference
+   * that does matter — which identity the process was injected with — is in
+   * `hostHooks`.
+   */
   const client = {
-    // Mirrors the real `CodexClient.start`: the identity is taken BEFORE the
-    // caller is allowed to continue (ADR-068 §1).
+    // Mirrors the real `CodexClient.start`: the identity is taken BEFORE any
+    // other request may run (ADR-068 §1), and the login is observable on the
+    // wire so a test can assert where it lands.
     start: vi.fn(async (_params: unknown, hook?: CodexAuthHook | null) => {
-      await hook?.inject()
-      return {}
-    }),
-    // Mirrors `CodexClient.injectAccount`: re-point a LIVE process, which is one
-    // `account/login/start` on the same connection (ADR-068 §2). Kept observable
-    // through `request` so a test can assert it lands BEFORE `turn/start`.
-    injectAccount: vi.fn(async (hook: CodexAuthHook) => {
-      const token = await hook.inject()
+      const token = await hook?.inject()
       if (token) await request('account/login/start', { type: 'chatgptAuthTokens', ...token })
-      return token ?? null
+      return {}
     }),
     request,
     dispose: vi.fn(),
     abortServerRequests: vi.fn(() => controllers.forEach((controller) => controller.abort()))
   }
+  const registry =
+    shared ??
+    new CodexHostRegistry({
+      createClient: (options) => {
+        started.push(options)
+        return client as unknown as CodexHostClient
+      },
+      createHook: (accountId) => {
+        const hook = codexAuthHook({ accountId, ...(source ? { source } : {}) })
+        hostHooks.push(hook)
+        return hook
+      },
+      // The ACTIVE account is the fake vault's first, exactly as the registry
+      // resolves `{ accountId: null }` against the real one. No source at all
+      // means no active account, which is the uninjected host.
+      activeAccountId: async () =>
+        source ? ((await source.getStatus()).accounts[0]?.id ?? null) : null,
+      idleMs: 60_000
+    })
   const session = new CodexSession(
     'temporary',
     null,
     '/isolated',
     opts,
     { env: { HOME: '/isolated' }, auth },
-    (options) => {
-      callbacks = options
-      return client as unknown as CodexClient
-    }
+    registry
   )
   sessions.push(session)
-  const notify = (method: string, params: unknown) => callbacks.onNotification!(method, params)
+  /** The options of the host this session is on RIGHT NOW (a pin moves it). */
+  const callbacks = (): CodexClientOptions => started.at(-1)!
+  const notify = (method: string, params: unknown) => callbacks().onNotification!(method, params)
+  /** One server -> client request, through the host's demultiplexer. */
+  const serverRequest = (method: string, params: unknown, signal?: AbortSignal) =>
+    callbacks().onServerRequest!(method, params, {
+      id: controllers.length + 100,
+      signal: signal ?? new AbortController().signal
+    })
+  /** The vault account the host this session sits on was injected with. */
+  const injectedAccountId = (): string | null => hostHooks.at(-1)?.injectedAccountId ?? null
   const cards = () =>
     events.mock.calls.filter((call) => call[0] === 'session:approval-request').map((c) => c[1][1])
   /**
@@ -240,7 +290,7 @@ function fixture(opts: EngineSpawnOptions = {}, auth: CodexAuthHook | null = nul
     const before = cards().length
     const controller = new AbortController()
     controllers.push(controller)
-    const result = callbacks.onServerRequest!(
+    const result = callbacks().onServerRequest!(
       method,
       {
         threadId: 'root',
@@ -278,7 +328,7 @@ function fixture(opts: EngineSpawnOptions = {}, auth: CodexAuthHook | null = nul
   const dynamicCall = (params: Record<string, unknown> = {}) => {
     const controller = new AbortController()
     controllers.push(controller)
-    const result = callbacks.onServerRequest!(
+    const result = callbacks().onServerRequest!(
       'item/tool/call',
       {
         threadId: 'root',
@@ -305,7 +355,7 @@ function fixture(opts: EngineSpawnOptions = {}, auth: CodexAuthHook | null = nul
     const before = cards().length
     const controller = new AbortController()
     controllers.push(controller)
-    const result = callbacks.onServerRequest!(
+    const result = callbacks().onServerRequest!(
       'mcpServer/elicitation/request',
       { ...recordedElicitation, threadId: 'root', turnId: 'turn', ...params },
       { id: controllers.length, signal: controller.signal }
@@ -323,7 +373,12 @@ function fixture(opts: EngineSpawnOptions = {}, auth: CodexAuthHook | null = nul
     session,
     client,
     request,
+    registry,
+    started,
+    hostHooks,
+    injectedAccountId,
     notify,
+    serverRequest,
     approval,
     fileChange,
     dynamicCall,
@@ -433,14 +488,17 @@ describe('Codex first session', () => {
   })
 
   it('refuses a branch the binary rooted somewhere else', async () => {
-    const { session, forked, client } = fixture({
+    const { session, forked, client, registry } = fixture({
       resumeSessionId: 'root',
       resumeSessionAt: 'turn-1',
       forkSession: true
     })
     forked.thread.forkedFromId = 'someone-else'
     await expect(session.run(null)).rejects.toThrow('Codex forked a different native thread')
-    expect(client.dispose).toHaveBeenCalledOnce()
+    // ADR-069 §2: the session let the host go; it did NOT kill a process other
+    // sessions and every read share.
+    expect(client.dispose).not.toHaveBeenCalled()
+    expect(registry.size).toBe(1)
   })
 
   it('refuses the branch shapes Codex has no verb for', async () => {
@@ -463,7 +521,7 @@ describe('Codex first session', () => {
     const { session, response, client } = fixture({ resumeSessionId: 'root' })
     Object.assign(response.thread, { parentThreadId: 'parent' })
     await expect(session.run(null)).rejects.toThrow('owning root')
-    expect(client.dispose).toHaveBeenCalledOnce()
+    expect(client.dispose).not.toHaveBeenCalled()
   })
   it('stops pending initialization and fences its late failure from reused routing', async () => {
     const { session, client, request } = fixture()
@@ -476,8 +534,14 @@ describe('Codex first session', () => {
     )
     const running = session.run('hello')
     expect(session.willQueue).toBe(true)
+    // The host's own start is what is in flight here: since ADR-069 §2 a session
+    // does not spawn, it acquires, so the process handshake is one hop further
+    // away and this waits for it to have begun.
+    await vi.waitFor(() => expect(client.start).toHaveBeenCalled())
     await session.interrupt()
-    expect(client.dispose).toHaveBeenCalledOnce()
+    // The session is disconnected, and the app-server it never finished
+    // attaching to is untouched (ADR-069 §2).
+    expect(client.dispose).not.toHaveBeenCalled()
     expect(session.willQueue).toBe(false)
     events.mockClear()
     rejectStart(new Error('late initialization failure'))
@@ -486,7 +550,36 @@ describe('Codex first session', () => {
     expect(request.mock.calls.some(([method]) => method === 'turn/start')).toBe(false)
   })
 
-  it('never accepts a prior process generation approval after resume', async () => {
+  it('lets go of a host whose start finished after the session was disposed', async () => {
+    // The one await a stop cannot cancel: `disconnected()` detaches a connection
+    // that does not exist yet, so an attach landing afterwards would retain the
+    // host forever (only a detach releases it) and open a native thread nobody
+    // claims or unsubscribes.
+    const { session, client, request, registry } = fixture()
+    let releaseStart!: () => void
+    client.start.mockImplementationOnce(
+      () =>
+        new Promise<Record<string, never>>((resolve) => {
+          releaseStart = () => resolve({})
+        })
+    )
+    const starting = session.run(null)
+    await vi.waitFor(() => expect(client.start).toHaveBeenCalled())
+    session.dispose()
+    releaseStart()
+    await expect(starting).rejects.toThrow('disconnected')
+    // Nothing was opened on the host, and nothing holds it any more.
+    expect(request.mock.calls.map(([method]) => method)).not.toContain('thread/start')
+    const handle = await registry.acquire({ cwd: '/isolated' })
+    expect(handle.host.owners).toBe(0)
+    handle.release()
+  })
+
+  it('never accepts a prior HOST generation approval after resume', async () => {
+    // The scope moved with ADR-069 §2: the process is shared and outlives no
+    // resume, so an approval is minted against the HOST START it was raised on
+    // (each fixture builds its own registry, hence its own host). A card from
+    // the previous one is refused exactly as a previous process's was.
     const first = fixture()
     await first.session.run('hello')
     const stale = first.approval()
@@ -670,8 +763,8 @@ describe('Codex first session', () => {
       sandbox: 'workspace-write',
       approvalsReviewer: 'user'
     })
-    expect(callbacks.serverMethods).toContain('item/tool/call')
-    expect(callbacks.serverMethods).toContain('item/permissions/requestApproval')
+    expect(callbacks().serverMethods).toContain('item/tool/call')
+    expect(callbacks().serverMethods).toContain('item/permissions/requestApproval')
   })
 
   it('handles terminal notification before the turn/start response and ignores child output', async () => {
@@ -716,7 +809,10 @@ describe('Codex first session', () => {
     const { session, approval, notify, client } = fixture()
     await session.run('hello')
     const pending = approval()
-    await expect(approval({ threadId: 'child' }).result).rejects.toThrow('owning root')
+    // An unregistered child's thread is not claimed, so the HOST refuses it
+    // before this session ever sees it (ADR-069 §2) — the same `Method not
+    // found` an unregistered method earns, logged, never silently accepted.
+    await expect(approval({ threadId: 'child' }).result).rejects.toThrow('Method not found')
     notify('turn/completed', {
       threadId: 'root',
       turn: { id: 'turn', status: 'interrupted', items: [] }
@@ -730,31 +826,33 @@ describe('Codex first session', () => {
     expect(() => session.resolveApproval(pending.card.requestId, 'allow')).toThrow('Stale')
   })
 
-  it('disposes pending approvals and transport exactly once', async () => {
-    const { session, approval, client } = fixture()
+  it('settles pending approvals exactly once and leaves the shared host running', async () => {
+    const { session, approval, client, request } = fixture()
     await session.run('hello')
     const pending = approval()
     session.dispose()
     session.dispose()
     await expect(pending.result).rejects.toThrow('cancelled')
-    expect(client.dispose).toHaveBeenCalledOnce()
+    // ADR-069 §2: teardown is an interrupt and a detach. The process survives
+    // the session — killing it would take every other session on the account
+    // down with it.
+    expect(client.dispose).not.toHaveBeenCalled()
+    const methods = request.mock.calls.map(([method]) => method)
+    expect(methods.filter((method) => method === 'turn/interrupt')).toHaveLength(1)
+    expect(request).toHaveBeenCalledWith('thread/unsubscribe', { threadId: 'root' })
     expect(session.willQueue).toBe(false)
     await expect(session.run(null)).rejects.toThrow('disconnected')
   })
 
   it('denies permission-profile grants without a pending approval or arbitrary elevation', async () => {
-    const { session, callbacks } = fixture()
+    const { session, serverRequest } = fixture()
     await session.run('hello')
-    const result = await callbacks.onServerRequest!(
-      'item/permissions/requestApproval',
-      {
-        threadId: 'root',
-        turnId: 'turn',
-        itemId: 'grant',
-        permissions: { network: { enabled: true } }
-      },
-      { id: 99, signal: new AbortController().signal }
-    )
+    const result = await serverRequest('item/permissions/requestApproval', {
+      threadId: 'root',
+      turnId: 'turn',
+      itemId: 'grant',
+      permissions: { network: { enabled: true } }
+    })
     expect(result).toEqual({ permissions: {}, scope: 'turn' })
     expect(events.mock.calls.some(([channel]) => channel === 'session:approval-request')).toBe(
       false
@@ -772,7 +870,7 @@ describe('Codex first session', () => {
     }))
     await expect(session.run(null)).rejects.toThrow('only the native OpenAI')
     expect(request.mock.calls.some(([method]) => method === 'thread/start')).toBe(false)
-    expect(client.dispose).toHaveBeenCalledOnce()
+    expect(client.dispose).not.toHaveBeenCalled()
   })
 
   // ---------------------------------------------------------------------------
@@ -1975,7 +2073,7 @@ describe('Codex hosted tools', () => {
       const f = fixture()
       await f.session.run('hello')
       await inFlight(f)
-      f.callbacks.onDisconnect!(new CodexTransportError('closed'))
+      f.callbacks().onDisconnect!(new CodexTransportError('closed'))
       // A stop nobody asked for does not blame the user for it.
       expect(results()).toEqual([
         {
@@ -3098,8 +3196,8 @@ describe('Codex sessions under an injected ChatGPT account', () => {
       .map((call) => (call[1] as [string, Record<string, unknown>])[1])
 
   it('attributes the session to the VAULT account id, with the native email as its label', async () => {
-    const hook = codexAuthHook({ source: authSource('fake-access-jwt') })
-    const { session, request } = fixture({}, hook)
+    const source = authSource('fake-access-jwt')
+    const { session, request } = fixture({}, codexAuthHook({ source }), source)
     const fallback = request.getMockImplementation()!
     request.mockImplementation((async (method: string, params?: unknown) => {
       if (method === 'account/read')
@@ -3138,8 +3236,8 @@ describe('Codex sessions under an injected ChatGPT account', () => {
   })
 
   it('keeps today’s native derivation when nothing was injected', async () => {
-    const hook = codexAuthHook({ source: authSource(null) })
-    const { session, request } = fixture({}, hook)
+    const source = authSource(null)
+    const { session, request } = fixture({}, codexAuthHook({ source }), source)
     const base = request.getMockImplementation()!
     request.mockImplementation((async (method: string, params?: unknown) =>
       method === 'account/read'
@@ -3158,16 +3256,16 @@ describe('Codex sessions under an injected ChatGPT account', () => {
 
   it('answers the native refresh request, and asks for a sign-in when it cannot', async () => {
     const source = authSource('fake-access-jwt')
-    const hook = codexAuthHook({ source })
-    const { session, callbacks } = fixture({}, hook)
+    const { session, serverRequest } = fixture({}, codexAuthHook({ source }), source)
     await session.run(null)
 
+    // The HOST answers this one (ADR-069 §8) and fans its failure out to every
+    // session attached to it, which is what the sign-in notice below proves.
     const ask = (): Promise<unknown> =>
-      callbacks.onServerRequest!(
-        'account/chatgptAuthTokens/refresh',
-        { reason: 'unauthorized', previousAccountId: 'ws-fixture' },
-        { id: 99, signal: new AbortController().signal }
-      )
+      serverRequest('account/chatgptAuthTokens/refresh', {
+        reason: 'unauthorized',
+        previousAccountId: 'ws-fixture'
+      })
     await expect(ask()).resolves.toEqual({
       accessToken: 'fake-access-jwt',
       chatgptAccountId: 'ws-fixture',
@@ -3190,11 +3288,15 @@ describe('Codex sessions under an injected ChatGPT account', () => {
     ])
   })
 
-  it('registers the refresh method on the transport', () => {
+  it('registers the refresh method on the host that runs this session', async () => {
     // Without it the app-server's request is answered `-32601 Method not found`
     // and the turn is simply lost — nothing else refreshes an injected token.
-    const { callbacks } = fixture({}, codexAuthHook({ source: authSource('fake-access-jwt') }))
-    expect(callbacks.serverMethods).toContain('account/chatgptAuthTokens/refresh')
+    // The registration moved to the HOST with ADR-069 §2: one process, one
+    // identity, one hook to answer for it.
+    const source = authSource('fake-access-jwt')
+    const { session, callbacks } = fixture({}, codexAuthHook({ source }), source)
+    await session.run(null)
+    expect(callbacks().serverMethods).toContain('account/chatgptAuthTokens/refresh')
   })
 })
 
@@ -3225,15 +3327,21 @@ describe('the per-session ChatGPT account pin', () => {
       }))
     }
   }
-  /** Answers `account/read` with the email that belongs to the injected token. */
+  /**
+   * Answers `account/read` with the email that belongs to the injected token.
+   *
+   * The id comes from the HOST's hook now (ADR-069 §1: one identity per
+   * process), which is what makes a pin observable at all — the session's own
+   * hook never injects.
+   */
   function emailPerAccount(
     request: ReturnType<typeof fixture>['request'],
-    hook: { injectedAccountId: string | null }
+    injectedAccountId: () => string | null
   ): void {
     const base = request.getMockImplementation()!
     request.mockImplementation((async (method: string, params?: unknown) =>
       method === 'account/read'
-        ? { account: { type: 'chatgpt', email: `${hook.injectedAccountId}@example.test` } }
+        ? { account: { type: 'chatgpt', email: `${injectedAccountId()}@example.test` } }
         : base(method, params)) as typeof base)
   }
   const statuses = (): Array<Record<string, unknown>> =>
@@ -3247,17 +3355,22 @@ describe('the per-session ChatGPT account pin', () => {
       .filter(([channel]) => channel === 'session:error')
       .map((call) => (call[1] as [string, string])[1])
 
-  it('re-injects immediately on an idle session and moves both ids', async () => {
-    const hook = codexAuthHook({ source: twoAccounts() })
-    const { session, request, client } = fixture({}, hook)
-    emailPerAccount(request, hook)
+  it('moves an idle session onto the pinned account host and takes its thread along', async () => {
+    const source = twoAccounts()
+    const hook = codexAuthHook({ source })
+    const { session, request, started, injectedAccountId } = fixture({}, hook, source)
+    emailPerAccount(request, injectedAccountId)
     await session.run(null)
     expect(statuses().at(-1)!.account).toMatchObject({ accountId: 'acct-a' })
     expect(pinOf(statuses().at(-1)!)).toBe(null)
+    expect(started).toHaveLength(1)
+    request.mockClear()
 
     await session.setAccount('acct-b')
 
-    expect(client.injectAccount).toHaveBeenCalledTimes(1)
+    // ADR-069 §2: one process holds ONE ChatGPT identity, so the pin cannot
+    // re-point the host this session shares — the THREAD moves instead.
+    expect(started).toHaveLength(2)
     expect(request).toHaveBeenCalledWith('account/login/start', {
       type: 'chatgptAuthTokens',
       accessToken: 'fake-acct-b',
@@ -3265,6 +3378,11 @@ describe('the per-session ChatGPT account pin', () => {
       chatgptPlanType: 'plus',
       vaultAccountId: 'acct-b'
     })
+    // The thread left the old process — which is what eventually releases its
+    // writer lock — and was resumed on the new one.
+    const moved = request.mock.calls.map(([method]) => method)
+    expect(moved).toContain('thread/unsubscribe')
+    expect(moved.indexOf('thread/resume')).toBeGreaterThan(moved.indexOf('thread/unsubscribe'))
     const last = statuses().at(-1)!
     expect(last.account).toMatchObject({ accountId: 'acct-b', label: 'acct-b@example.test' })
     expect(pinOf(last)).toBe('acct-b')
@@ -3273,15 +3391,16 @@ describe('the per-session ChatGPT account pin', () => {
   })
 
   it('defers a pin taken mid-turn to the next turn, login BEFORE turn/start', async () => {
-    const hook = codexAuthHook({ source: twoAccounts() })
-    const { session, request, client, notify } = fixture({}, hook)
-    emailPerAccount(request, hook)
+    const source = twoAccounts()
+    const hook = codexAuthHook({ source })
+    const { session, request, notify, started, injectedAccountId } = fixture({}, hook, source)
+    emailPerAccount(request, injectedAccountId)
     await session.run('first')
     notify('turn/started', { threadId: 'root', turn: { id: 'turn' } })
 
     await session.setAccount('acct-b')
-    // Nothing re-pointed yet: the running turn keeps the identity it started on.
-    expect(client.injectAccount).not.toHaveBeenCalled()
+    // Nothing moved yet: the running turn keeps the identity it started on.
+    expect(started).toHaveLength(1)
     // …but the pin is already persisted and already visible to the picker.
     expect(overrides.get('root')).toEqual({ accountId: 'acct-b' })
     expect(pinOf(statuses().at(-1)!)).toBe('acct-b')
@@ -3293,6 +3412,7 @@ describe('the per-session ChatGPT account pin', () => {
     const methods = request.mock.calls.map(([method]) => method)
     expect(methods).toContain('account/login/start')
     expect(methods.indexOf('account/login/start')).toBeLessThan(methods.indexOf('turn/start'))
+    expect(methods.indexOf('thread/resume')).toBeLessThan(methods.indexOf('turn/start'))
     expect(statuses().at(-1)!.account).toMatchObject({ accountId: 'acct-b' })
   })
 
@@ -3301,14 +3421,15 @@ describe('the per-session ChatGPT account pin', () => {
     // rebuilds `this.overrides` from the saved row, so a pin written straight
     // into that object would be silently dropped on the way to the first turn —
     // the session would run on the ACTIVE account while the picker showed the pin.
-    const hook = codexAuthHook({ source: twoAccounts() })
-    const { session, request } = fixture({}, hook)
-    emailPerAccount(request, hook)
+    const source = twoAccounts()
+    const hook = codexAuthHook({ source })
+    const { session, request, injectedAccountId } = fixture({}, hook, source)
+    emailPerAccount(request, injectedAccountId)
 
     await session.setAccount('acct-b')
     await session.run(null)
 
-    expect(hook.injectedAccountId).toBe('acct-b')
+    expect(injectedAccountId()).toBe('acct-b')
     expect(overrides.get('root')).toEqual({ accountId: 'acct-b' })
     expect(pinOf(statuses().at(-1)!)).toBe('acct-b')
   })
@@ -3318,9 +3439,10 @@ describe('the per-session ChatGPT account pin', () => {
     // nothing emitted a status, so the picker kept reading "Active · …" after the
     // user had already chosen. `setCodexSettings` solves the identical pre-spawn
     // problem for model and effort by starting the process; the pin does the same.
-    const hook = codexAuthHook({ source: twoAccounts() })
-    const { session, request } = fixture({}, hook)
-    emailPerAccount(request, hook)
+    const source = twoAccounts()
+    const hook = codexAuthHook({ source })
+    const { session, request, injectedAccountId } = fixture({}, hook, source)
+    emailPerAccount(request, injectedAccountId)
 
     await session.setAccount('acct-b')
 
@@ -3333,8 +3455,9 @@ describe('the per-session ChatGPT account pin', () => {
   })
 
   it('refuses an unknown account id and writes nothing', async () => {
-    const hook = codexAuthHook({ source: twoAccounts() })
-    const { session, client } = fixture({}, hook)
+    const source = twoAccounts()
+    const hook = codexAuthHook({ source })
+    const { session, started } = fixture({}, hook, source)
     await session.run(null)
     expect(overrides.get('root')).toEqual({})
 
@@ -3342,13 +3465,15 @@ describe('the per-session ChatGPT account pin', () => {
       'That ChatGPT account is no longer stored in ClaudeUI'
     )
     expect(overrides.get('root')).toEqual({})
-    expect(client.injectAccount).not.toHaveBeenCalled()
+    // Refused before anything was written AND before a host for it was started.
+    expect(started).toHaveLength(1)
   })
 
   it('null clears the pin and re-injects the ACTIVE account', async () => {
-    const hook = codexAuthHook({ source: twoAccounts() })
-    const { session, request } = fixture({}, hook)
-    emailPerAccount(request, hook)
+    const source = twoAccounts()
+    const hook = codexAuthHook({ source })
+    const { session, request, injectedAccountId } = fixture({}, hook, source)
+    emailPerAccount(request, injectedAccountId)
     await session.run(null)
     await session.setAccount('acct-b')
 
@@ -3360,12 +3485,145 @@ describe('the per-session ChatGPT account pin', () => {
     expect(pinOf(last)).toBe(null)
   })
 
+  it('refuses a re-pin while ANOTHER session is on the host, and writes nothing', async () => {
+    // One process holds one identity, so this session's thread has to LEAVE the
+    // host — and its writer lock is only released when that process exits or
+    // unloads the thread a minute later. Closing a host another session is
+    // working on to make one pin land is not a trade anyone would choose
+    // (migrating it with the pin is ADR-069 §4's recycle, which is H3).
+    const source = twoAccounts()
+    const first = fixture({}, codexAuthHook({ source }), source)
+    emailPerAccount(first.request, first.injectedAccountId)
+    await first.session.run(null)
+    // The second session shares the registry, so it attaches to the host the
+    // first one started — and is answered by that host's client. Its thread has
+    // to be a different one: one live session per thread is the host's own
+    // invariant, enforced by `claim`.
+    first.response.thread.id = 'other-root'
+    const second = fixture({}, codexAuthHook({ source }), source, first.registry)
+    await second.session.run(null)
+    expect(second.session.getSessionId()).toBe('other-root')
+    expect(first.started).toHaveLength(1)
+
+    await expect(first.session.setAccount('acct-b')).rejects.toThrow(
+      "Another session is using this account's Codex process"
+    )
+
+    // Nothing persisted, nothing moved, and the user was told why.
+    expect(overrides.get('root')).toEqual({})
+    expect(pinOf(statuses().at(-1)!)).toBe(null)
+    expect(errors().at(-1)).toContain("Another session is using this account's Codex process")
+    expect(first.request.mock.calls.map(([method]) => method)).not.toContain('thread/unsubscribe')
+  })
+
+  it('moves the thread when only READ leases share the host, and closes the one it left', async () => {
+    // A read that loses its host fails once and the next one starts a fresh
+    // host (ADR-069 §5) — waiting for the 30-second sidebar poll's lease to drop
+    // would make a re-pin fail at random.
+    const source = twoAccounts()
+    const { session, request, registry, injectedAccountId } = fixture(
+      {},
+      codexAuthHook({ source }),
+      source
+    )
+    emailPerAccount(request, injectedAccountId)
+    await session.run(null)
+    // The SAME home the session's host keys on — `env` is what decides that.
+    const reader = await registry.acquire({
+      cwd: '/isolated',
+      env: { HOME: '/isolated' },
+      identity: { accountId: null }
+    })
+    const vacated = reader.host
+
+    await session.setAccount('acct-b')
+
+    expect(pinOf(statuses().at(-1)!)).toBe('acct-b')
+    expect(vacated.started).toBe(true)
+    // The host it left is closed, which is what releases the thread's lock; the
+    // read's own lease dies with it, as ADR-069 §5 says it should.
+    await expect(reader.request('account/read', { refreshToken: false })).rejects.toMatchObject({
+      code: 'host-vacated'
+    })
+    reader.release()
+  })
+
+  it('withdraws a card minted on the host it left when the thread moves', async () => {
+    // A guardian override deliberately OUTLIVES its turn — it only has to reach
+    // Codex before the model's next one — so it is the card a host move can
+    // strand. Its id carries the OLD host generation and the
+    // `thread/approveGuardianDeniedAction` it would send belongs to the
+    // connection that is gone, so answering it after the move would inject an
+    // approval into a review nobody is waiting for.
+    const declined = {
+      threadId: 'root',
+      turnId: 'turn',
+      item: {
+        id: 'esc',
+        type: 'commandExecution',
+        command: "/bin/zsh -lc 'rm -rf x'",
+        cwd: '/isolated',
+        status: 'declined',
+        exitCode: null,
+        aggregatedOutput: 'This action was rejected due to unacceptable risk.'
+      }
+    }
+    const review = {
+      threadId: 'root',
+      turnId: 'turn',
+      startedAtMs: 1,
+      completedAtMs: 2,
+      reviewId: 'review-1',
+      targetItemId: 'esc',
+      decisionSource: 'agent',
+      review: { status: 'denied', riskLevel: 'critical', rationale: 'fixture deny' },
+      action: {
+        type: 'command',
+        source: 'shell',
+        command: "/bin/zsh -lc 'rm -rf x'",
+        cwd: '/isolated'
+      }
+    }
+    const overrides_ = (): Array<{ requestId: string }> =>
+      events.mock.calls
+        .filter(([channel]) => channel === 'session:approval-request')
+        .map((call) => (call[1] as [string, { codex?: { guardianOverride?: boolean } }])[1])
+        .filter((card) => card.codex?.guardianOverride) as Array<{ requestId: string }>
+
+    const source = twoAccounts()
+    const f = fixture({ permissionMode: 'auto' }, codexAuthHook({ source }), source)
+    emailPerAccount(f.request, f.injectedAccountId)
+    await f.session.run('hello')
+    f.notify('item/started', declined)
+    f.notify('item/completed', declined)
+    f.notify('item/autoApprovalReview/completed', review)
+    f.notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn', status: 'completed', items: [] }
+    })
+    expect(overrides_()).toHaveLength(1)
+    const stranded = overrides_()[0]!.requestId
+
+    await f.session.setAccount('acct-b')
+
+    const withdrawn = events.mock.calls
+      .filter(([channel]) => channel === 'session:approval-dismiss')
+      .map((call) => (call[1] as [string, { requestId: string }])[1].requestId)
+    expect(withdrawn).toContain(stranded)
+    expect(() => f.session.resolveApproval(stranded, 'allow')).toThrow('Stale or unknown')
+  })
+
   // Guard 3 — a resume whose pinned account was removed.
   it('resumes onto the ACTIVE account when the pin is gone, once, and clears it', async () => {
     overrides.set('root', { accountId: 'acct-gone', model: 'native' })
-    const hook = codexAuthHook({ source: twoAccounts() })
-    const { session, request } = fixture({ resumeSessionId: 'root' }, hook)
-    emailPerAccount(request, hook)
+    const source = twoAccounts()
+    const hook = codexAuthHook({ source })
+    const { session, request, injectedAccountId } = fixture(
+      { resumeSessionId: 'root' },
+      hook,
+      source
+    )
+    emailPerAccount(request, injectedAccountId)
 
     await session.run(null)
 
@@ -3379,9 +3637,14 @@ describe('the per-session ChatGPT account pin', () => {
 
   it('resumes onto the pinned account when it still exists, silently', async () => {
     overrides.set('root', { accountId: 'acct-b' })
-    const hook = codexAuthHook({ source: twoAccounts() })
-    const { session, request } = fixture({ resumeSessionId: 'root' }, hook)
-    emailPerAccount(request, hook)
+    const source = twoAccounts()
+    const hook = codexAuthHook({ source })
+    const { session, request, injectedAccountId } = fixture(
+      { resumeSessionId: 'root' },
+      hook,
+      source
+    )
+    emailPerAccount(request, injectedAccountId)
 
     await session.run(null)
 
@@ -3392,29 +3655,37 @@ describe('the per-session ChatGPT account pin', () => {
 
   // Guard 4 — a fork inherits the pin through the existing overrides copy.
   it('a fork inherits the pin with no new code', async () => {
-    const hook = codexAuthHook({ source: twoAccounts() })
-    const first = fixture({}, hook)
-    emailPerAccount(first.request, hook)
+    const source = twoAccounts()
+    const hook = codexAuthHook({ source })
+    const first = fixture({}, hook, source)
+    emailPerAccount(first.request, first.injectedAccountId)
     await first.session.run(null)
     await first.session.setAccount('acct-b')
     first.session.dispose()
 
-    const forkHook = codexAuthHook({ source: twoAccounts() })
+    const forkSource = twoAccounts()
+    const forkHook = codexAuthHook({ source: forkSource })
     const forked = fixture(
       { resumeSessionId: 'root', resumeSessionAt: 'turn', forkSession: true },
-      forkHook
+      forkHook,
+      forkSource
     )
-    emailPerAccount(forked.request, forkHook)
+    emailPerAccount(forked.request, forked.injectedAccountId)
     await forked.session.run(null)
 
     expect(forked.session.getSessionId()).toBe('fork')
     expect(overrides.get('fork')).toEqual({ accountId: 'acct-b' })
-    expect(forkHook.injectedAccountId).toBe('acct-b')
+    expect(forked.injectedAccountId()).toBe('acct-b')
   })
 
   // Guard 5 (caller half) — a dispatch runs on the caller's subscription.
   it('hands a dispatch target the caller pin, and null when it follows active', async () => {
-    const unpinned = fixture({ permissionMode: 'full' }, codexAuthHook({ source: twoAccounts() }))
+    const unpinnedSource = twoAccounts()
+    const unpinned = fixture(
+      { permissionMode: 'full' },
+      codexAuthHook({ source: unpinnedSource }),
+      unpinnedSource
+    )
     await unpinned.session.run('hello')
     await unpinned.dynamicCall({
       tool: 'dispatch_agent',
@@ -3424,9 +3695,10 @@ describe('the per-session ChatGPT account pin', () => {
     expect(dispatcher.dispatch.mock.calls.at(-1)![1]).toMatchObject({ chatgptAccountId: null })
     unpinned.session.dispose()
 
-    const hook = codexAuthHook({ source: twoAccounts() })
-    const pinned = fixture({ permissionMode: 'full' }, hook)
-    emailPerAccount(pinned.request, hook)
+    const source = twoAccounts()
+    const hook = codexAuthHook({ source })
+    const pinned = fixture({ permissionMode: 'full' }, hook, source)
+    emailPerAccount(pinned.request, pinned.injectedAccountId)
     await pinned.session.run(null)
     await pinned.session.setAccount('acct-b')
     await pinned.session.run('hello')
@@ -3466,8 +3738,8 @@ describe('a live session forwards its ChatGPT rate limits', () => {
   }
 
   it('records the push under the account this process was injected with', async () => {
-    const hook = codexAuthHook({ source: oneAccount() })
-    const { session, request, notify } = fixture({}, hook)
+    const source = oneAccount()
+    const { session, request, notify } = fixture({}, codexAuthHook({ source }), source)
     const base = request.getMockImplementation()!
     request.mockImplementation((async (method: string, params?: unknown) =>
       method === 'account/read'
@@ -3485,13 +3757,11 @@ describe('a live session forwards its ChatGPT rate limits', () => {
   })
 
   it('records nothing when the process runs on Codex’s own login', async () => {
-    const hook = codexAuthHook({
-      source: {
-        injectionTokenFor: vi.fn(async () => null),
-        getStatus: vi.fn(async () => ({ accounts: [] }))
-      }
-    })
-    const { session, notify } = fixture({}, hook)
+    const source: CodexAuthSource = {
+      injectionTokenFor: vi.fn(async () => null),
+      getStatus: vi.fn(async () => ({ accounts: [] }))
+    }
+    const { session, notify } = fixture({}, codexAuthHook({ source }), source)
     await session.run(null)
 
     notify('account/rateLimits/updated', { rateLimits: snapshot })
@@ -3618,8 +3888,9 @@ describe('Codex MCP tool approvals', () => {
     const { session, callbacks } = fixture()
     await session.run(null)
     // Not registered = "Method not found" = a silent rejection of every MCP tool
-    // call. This is the whole slice in one assertion.
-    expect(callbacks.serverMethods).toContain('mcpServer/elicitation/request')
+    // call. This is the whole slice in one assertion — and since ADR-069 §2 the
+    // registration is the HOST's, whose list is the union its owners need.
+    expect(callbacks().serverMethods).toContain('mcpServer/elicitation/request')
   })
 
   it('declines on a user deny rule and says which rule denied it', async () => {
@@ -3783,9 +4054,11 @@ describe('Codex MCP tool approvals', () => {
     await expect(elicitation({ turnId: 'other' }).result).rejects.toThrow(
       'no live owning root turn'
     )
-    await expect(elicitation({ threadId: 'stranger' }).result).rejects.toThrow(
-      'no live owning root turn'
-    )
+    // A FOREIGN THREAD never reaches this session at all since ADR-069 §2: the
+    // host answers for a thread nobody claimed, with the same `Method not found`
+    // an unregistered method earns — visible on the wire, never silently
+    // accepted.
+    await expect(elicitation({ threadId: 'stranger' }).result).rejects.toThrow('Method not found')
   })
 
   it('takes the running turn when the app-server could not correlate one', async () => {

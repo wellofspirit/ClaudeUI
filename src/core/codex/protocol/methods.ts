@@ -21,6 +21,7 @@ export interface CodexMethods {
   "thread/archive": { params: import("./v2/ThreadArchiveParams").ThreadArchiveParams; result: import("./v2/ThreadArchiveResponse").ThreadArchiveResponse };
   "thread/turns/list": { params: import("./v2/ThreadTurnsListParams").ThreadTurnsListParams; result: import("./v2/ThreadTurnsListResponse").ThreadTurnsListResponse };
   "thread/items/list": { params: import("./v2/ThreadItemsListParams").ThreadItemsListParams; result: import("./v2/ThreadItemsListResponse").ThreadItemsListResponse };
+  "thread/unsubscribe": { params: import("./v2/ThreadUnsubscribeParams").ThreadUnsubscribeParams; result: import("./v2/ThreadUnsubscribeResponse").ThreadUnsubscribeResponse };
   "turn/start": { params: import("./v2/TurnStartParams").TurnStartParams; result: import("./v2/TurnStartResponse").TurnStartResponse };
   "turn/steer": { params: import("./v2/TurnSteerParams").TurnSteerParams; result: import("./v2/TurnSteerResponse").TurnSteerResponse };
   "turn/interrupt": { params: import("./v2/TurnInterruptParams").TurnInterruptParams; result: import("./v2/TurnInterruptResponse").TurnInterruptResponse };

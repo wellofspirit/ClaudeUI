@@ -19,11 +19,13 @@
  *    `.return()`-kills-the-process hazard noted on `driveClaudeTurn`).
  *  - claude/opencode → pi (M4c): one headless `pi --mode rpc` child per
  *    target plus its own loopback PiBridgeHost approval gate.
- *  - claude/opencode/pi → CODEX (slice H): one headless `codex app-server`
- *    child per target (`CodexClient`), one `thread/start`-created thread, and
- *    ClaudeUI's own permission engine answering the native approval requests
- *    that thread raises. Codex is a target AND (slice E) a source; the
- *    same-engine guard still refuses codex → codex.
+ *  - anything → CODEX (slice H, re-shaped by ADR-069 §7): one
+ *    `thread/start`-created thread on the CALLER's host — no child of its own —
+ *    with ClaudeUI's own permission engine answering the native approval
+ *    requests that thread raises. Codex is a target AND (slice E) a source, and
+ *    codex → codex is now allowed: it is one more thread on the process the
+ *    caller already runs on, so the same-engine guard it used to hit has
+ *    nothing left to protect. The guard stands for the other three.
  *
  * All failures come back as `isError` tool text — nothing throws across the
  * MCP boundary.
@@ -79,9 +81,14 @@ import type {
 // slice E), which is exactly why the mode->policy table and the turn-input
 // mapping live in `codex-turn-policy.ts` rather than being exported from
 // CodexSession.ts — importing that module here would be a require-cycle.
-import { CodexClient } from '../codex/CodexClient'
-import type { CodexClientOptions, CodexTransportError } from '../codex/CodexAppServerClient'
-import { codexAuthHook, type CodexAuthHook } from '../codex/codex-auth-hook'
+import { CodexMethodNotFound, type CodexTransportError } from '../codex/CodexAppServerClient'
+import {
+  codexHostRegistry,
+  type CodexHostIdentity,
+  type CodexHostSource,
+  type CodexThreadConnection,
+  type CodexThreadOwner
+} from '../codex/CodexHost'
 import { codexBinaryAvailable } from '../codex/codex-locate'
 import { codexModePolicy, codexTurnInput } from '../codex/codex-turn-policy'
 import { assertCodexProvider, selectCodexModel } from '../codex/model-selection'
@@ -344,13 +351,16 @@ export type SpawnPiTargetFn = (opts: PiTargetSpawnOpts) => Promise<PiTargetPrimi
  * (ADR-033 slice H) — the same approval surface `CodexSession` handles, MINUS
  * `item/tool/call`.
  *
- * That omission is half the recursion scrub, and it is enforced by the
- * TRANSPORT rather than by policy: `CodexAppServerClient.serverRequest`
- * answers any method absent from this list with JSON-RPC `-32601 Method not
- * found` and never reaches the handler at all. The other half is `thread/start`
- * being sent with NO `dynamicTools`, so the target has neither `dispatch_agent`
- * nor a hosted tool to call in the first place — belt (no tool offered) and
- * braces (no route to run one if it somehow were).
+ * That omission is half the recursion scrub. Until ADR-069 the TRANSPORT
+ * enforced it — the target owned its own process and registered only these four
+ * methods, so `item/tool/call` was answered `-32601` before any handler ran. A
+ * target is a thread on a SHARED host now, and the host's registered list is the
+ * union its owners need, so this list is enforced by
+ * `gateCodexTargetRequest` instead, which answers anything outside it with the
+ * very same `-32601`. The other half is `thread/start` being sent with NO
+ * `dynamicTools`, so the target has neither `dispatch_agent` nor a hosted tool
+ * to call in the first place — belt (no tool offered) and braces (no route to
+ * run one if it somehow were).
  */
 const CODEX_TARGET_SERVER_METHODS = [
   'item/commandExecution/requestApproval',
@@ -360,35 +370,45 @@ const CODEX_TARGET_SERVER_METHODS = [
 ] as const
 
 /**
- * What `defaultSpawnCodexTarget` is handed — exactly the `CodexClient` options
- * the dispatcher owns. `env` is deliberately NOT in the pick: the real target
- * inherits `process.env` like every other Codex client, and only the
- * integration test's injected spawn function adds one (to point a real binary
- * at an isolated CODEX_HOME + fixture provider). NEVER set CODEX_HOME here.
+ * What `defaultAttachCodexTarget` is handed: where the thread lives, who it
+ * belongs to, and which ChatGPT identity its host runs as.
+ *
+ * No `env` and no `serverMethods`. The host owns both — it inherits
+ * `process.env` like every other Codex process (the integration test points a
+ * real binary at an isolated CODEX_HOME through its own injected attach
+ * function; NEVER set CODEX_HOME here), and its registered server-method list is
+ * the union of what its owners answer.
  */
-export type CodexTargetSpawnOpts = Pick<
-  CodexClientOptions,
-  'cwd' | 'label' | 'serverMethods' | 'onNotification' | 'onServerRequest' | 'onDisconnect'
->
+export type CodexTargetAttachOpts = {
+  cwd: string
+  label: string
+  /** Absent = never read the vault (the hermetic default). */
+  identity?: CodexHostIdentity
+} & CodexThreadOwner
 
 /**
- * Spawns a headless Codex dispatch target's client. Injectable so the unit
- * suite drives a target without the real binary (mirrors `SpawnClaudeQueryFn`/
- * `SpawnPiTargetFn`) and so the integration test can inject an isolated env.
+ * Puts a dispatch target's thread on a host (ADR-069 §7). Injectable so the
+ * unit suite drives a target without the real binary (mirrors
+ * `SpawnClaudeQueryFn`/`SpawnPiTargetFn`) and so the integration test can point
+ * it at an isolated home.
  */
-export type SpawnCodexTargetFn = (opts: CodexTargetSpawnOpts) => Promise<CodexClient>
-
-/** The real one: one `codex app-server` child per target, nothing else. */
-const defaultSpawnCodexTarget: SpawnCodexTargetFn = async (opts) => new CodexClient(opts)
+export type AttachCodexTargetFn = (opts: CodexTargetAttachOpts) => Promise<CodexThreadConnection>
 
 /**
- * How a dispatch target gets its ChatGPT identity (ADR-068 §1): a FACTORY, one
- * hook per target, because a hook remembers which account its process was
- * injected with. Absent by default — a dispatcher built without it injects
- * nothing and never reads the vault, which is what keeps the real-binary target
- * integration hermetic; the singleton below supplies the real one.
+ * The real one: the caller's host (its pin, else the active account), one more
+ * thread on it. The read lease is dropped immediately — `attach` is what holds
+ * the host for as long as the target lives.
  */
-export type CodexAuthHookFactory = (accountId: string | null) => CodexAuthHook
+const defaultAttachCodexTarget =
+  (registry: CodexHostSource): AttachCodexTargetFn =>
+  async ({ cwd, label, identity, ...owner }) => {
+    const handle = await registry.acquire({ cwd, label, ...(identity ? { identity } : {}) })
+    try {
+      return handle.host.attach(owner)
+    } finally {
+      handle.release()
+    }
+  }
 
 export interface DispatcherDeps {
   serverManager: {
@@ -401,10 +421,17 @@ export interface DispatcherDeps {
   spawnClaudeQuery?: SpawnClaudeQueryFn
   /** Defaults to the real PiRpcClient + PiBridgeHost construction (ADR-033 M4c). */
   spawnPiTarget?: SpawnPiTargetFn
-  /** Defaults to the real `new CodexClient(...)` (ADR-033 slice H). */
-  spawnCodexTarget?: SpawnCodexTargetFn
-  /** Defaults to none — no ChatGPT token is injected into dispatch targets. */
-  codexAuth?: CodexAuthHookFactory
+  /** Defaults to a thread on the caller's host (ADR-033 slice H, ADR-069 §7). */
+  attachCodexTarget?: AttachCodexTargetFn
+  /**
+   * Do Codex dispatch targets run under a VAULT ChatGPT account (ADR-068 §1/§2)?
+   *
+   * False by default — a dispatcher built without it asks its hosts for NO
+   * identity and never reads the vault, which is what keeps the real-binary
+   * target integration hermetic. The singleton below turns it on, and the
+   * account asked for is then the caller's pin, else the active one.
+   */
+  codexVaultAccounts?: boolean
   maxConcurrent?: number
   /**
    * Absolute per-turn cap for the CLAUDE and PI directions. The opencode
@@ -903,10 +930,11 @@ type PiTurnOutcome =
 /**
  * A live Codex dispatch target (ADR-033 slice H).
  *
- * Process-shaped like pi (ONE headless `codex app-server` child per target,
- * alive across turns, a single ambient notification callback rather than an
- * iterable), so there is no `driveClaudeTurn`-style pull loop and no
- * `.return()`-kills-the-process hazard. Three things make it NOT pi:
+ * Shaped like pi (alive across turns, a single ambient notification callback
+ * rather than an iterable), so there is no `driveClaudeTurn`-style pull loop and
+ * no `.return()`-kills-the-process hazard — but since ADR-069 §7 it owns no
+ * process at all: it is one more thread on the CALLER's host. Three things make
+ * it NOT pi:
  *
  *  - EVENTS CARRY THEIR TURN ID. pi's wire has no per-event turn correlation,
  *    which is why `PiTargetEntry` needs `settled`'s RACE NOTE and a grace
@@ -934,7 +962,8 @@ interface CodexTargetEntry {
   sessionId: string | null
   fromRoutingId: string
   cwd: string
-  client: CodexClient
+  /** This target's view of the host it is a thread on (ADR-069 §2). */
+  connection: CodexThreadConnection
   /** Latest dispatching context — used to forward approvals/stream events mid-turn. */
   ctx: DispatchContext
   /**
@@ -1480,8 +1509,8 @@ export class CrossEngineDispatcher {
   private readonly sseReconnectDelayMs: number
   private readonly spawnClaudeQuery: SpawnClaudeQueryFn
   private readonly spawnPiTarget: SpawnPiTargetFn
-  private readonly spawnCodexTarget: SpawnCodexTargetFn
-  private readonly codexAuth: CodexAuthHookFactory | undefined
+  private readonly attachCodexTarget: AttachCodexTargetFn
+  private readonly codexVaultAccounts: boolean
   private readonly recordDispatchedUsage: (row: Omit<DispatchedUsageRow, 'id'>) => void
 
   /** Keyed by target session id (opencode session id, or Claude session UUID). */
@@ -1526,8 +1555,8 @@ export class CrossEngineDispatcher {
     this.sseReconnectDelayMs = deps.sseReconnectDelayMs ?? SSE_RECONNECT_DELAY_MS
     this.spawnClaudeQuery = deps.spawnClaudeQuery ?? defaultSpawnClaudeQuery
     this.spawnPiTarget = deps.spawnPiTarget ?? defaultSpawnPiTarget
-    this.spawnCodexTarget = deps.spawnCodexTarget ?? defaultSpawnCodexTarget
-    this.codexAuth = deps.codexAuth
+    this.attachCodexTarget = deps.attachCodexTarget ?? defaultAttachCodexTarget(codexHostRegistry)
+    this.codexVaultAccounts = deps.codexVaultAccounts ?? false
     this.now = deps.now ?? Date.now
     this.recordDispatchedUsage = deps.recordDispatchedUsage ?? insertDispatchedUsage
   }
@@ -1626,7 +1655,12 @@ export class CrossEngineDispatcher {
 
   private async dispatchInner(req: DispatchRequest, ctx: DispatchContext): Promise<DispatchResult> {
     // ── Guards ────────────────────────────────────────────────────────────
-    if (req.engine === ctx.fromEngine) {
+    // ADR-069 §7 lifts this for CODEX alone: a codex → codex dispatch is one more
+    // `thread/start` on the process the caller is already running on, which is
+    // what the guard existed to prevent when it meant a second app-server per
+    // dispatch. Every other engine still pays a whole server or CLI for a
+    // same-engine target and still has a native subagent of its own.
+    if (req.engine === ctx.fromEngine && req.engine !== 'codex') {
       return errorResult(
         `dispatch_agent targets a different engine — this session already runs on "${ctx.fromEngine}". ` +
           'Use your own tools (or a native subagent) for same-engine work.'
@@ -1773,16 +1807,25 @@ export class CrossEngineDispatcher {
         entry.client.dispose()
         entry.bridgeHost.dispose()
       } else {
-        // codex (slice H): killing the child is the whole teardown — the
-        // approval gate IS the transport's server-request channel, so there is
-        // no separate host to dispose, and the native thread is left on disk
-        // (a dispatch target's thread is an ordinary Codex thread; deleting it
-        // is the user's call, not a disposal side effect).
+        // codex (slice H, ADR-069 §7): a target is a THREAD on the caller's
+        // host, so teardown is an interrupt and a detach — never a kill, which
+        // would take every other session on that account down with it. The
+        // native thread is left on disk (a dispatch target's thread is an
+        // ordinary Codex thread; deleting it is the user's call, not a disposal
+        // side effect) and unsubscribed, which is what lets the binary unload it
+        // and release its writer lock.
         //
-        // A turn still in flight is settled by `dispose()` itself: it runs
-        // `fail('disposed')`, which invokes the `onDisconnect` the entry was
-        // created with, and THAT settles `entry.settled`. Nothing extra here.
-        entry.client.dispose()
+        // A turn still in flight has to be settled HERE: the process no longer
+        // dies, so no `onDisconnect` will do it, and the dispatch would hold its
+        // `activeDispatches` slot until the watchdog fired.
+        if (entry.sessionId && entry.turnId)
+          void entry.connection
+            .request('turn/interrupt', { threadId: entry.sessionId, turnId: entry.turnId })
+            .catch(() => {})
+        entry.connection.detach()
+        const settle = entry.settled
+        entry.settled = null
+        settle?.({ kind: 'error', message: 'the dispatching session was disposed' })
       }
     }
   }
@@ -4226,9 +4269,9 @@ export class CrossEngineDispatcher {
     const turnId = entry.turnId ?? (await this.withinCodexGrace(entry.turnStarted)) ?? null
     if (turnId && entry.sessionId) {
       entry.endedTurns.add(turnId)
-      entry.client.abortServerRequests(entry.sessionId, turnId)
+      entry.connection.abortServerRequests(entry.sessionId, turnId)
       await this.withinCodexGrace(
-        entry.client
+        entry.connection
           .request('turn/interrupt', { threadId: entry.sessionId, turnId })
           .then(() => undefined)
           .catch(() => undefined)
@@ -4321,10 +4364,11 @@ export class CrossEngineDispatcher {
       sessionId: null,
       fromRoutingId: ctx.fromRoutingId,
       cwd: ctx.cwd,
-      // Filled in below, once spawnCodexTarget resolves. The notification and
-      // gate closures capture `entry` BY REFERENCE (mirrors createPiTarget), so
-      // building them first is safe: nothing can arrive before the child is up.
-      client: undefined as unknown as CodexClient,
+      // Filled in below, once the attach resolves. The notification and gate
+      // closures capture `entry` BY REFERENCE (mirrors createPiTarget), so
+      // building them first is safe: nothing is routed to this owner before it
+      // claims a thread anyway.
+      connection: undefined as unknown as CodexThreadConnection,
       ctx,
       autonomyMode: ctx.autonomyMode,
       model: '',
@@ -4345,16 +4389,19 @@ export class CrossEngineDispatcher {
       turnStartedAtMs: 0
     }
 
-    entry.client = await this.spawnCodexTarget({
+    // A dispatch target bills the same subscription the caller runs on: the
+    // caller's PIN when it has one, the ACTIVE account otherwise (ADR-068 §2).
+    // Which is also which HOST it lands on, since a host IS one identity.
+    entry.connection = await this.attachCodexTarget({
       cwd: ctx.cwd,
       label: 'dispatch-target',
-      serverMethods: CODEX_TARGET_SERVER_METHODS,
+      ...(this.codexVaultAccounts ? { identity: { accountId: ctx.chatgptAccountId ?? null } } : {}),
       onNotification: (method, params) => this.handleCodexTargetNotification(entry, method, params),
       onServerRequest: (method, params, context) =>
         this.gateCodexTargetRequest(entry, method, params, context),
       onDisconnect: (error: CodexTransportError) => {
         // If a turn is in flight, nothing else will ever settle it — mirrors
-        // the pi target's onExit. Also the path `disposeFor` relies on.
+        // the pi target's onExit.
         const settle = entry.settled
         entry.settled = null
         settle?.({ kind: 'error', message: `codex target disconnected (${error.code})` })
@@ -4362,17 +4409,7 @@ export class CrossEngineDispatcher {
     })
 
     try {
-      // A headless target is still one of "every app-server ClaudeUI starts"
-      // (ADR-068 §1), and it must bill the same subscription the caller runs on:
-      // the caller's PIN when it has one, the ACTIVE account otherwise (§2).
-      await entry.client.start(
-        {
-          clientInfo: { name: 'claudeui_dispatch', title: 'Codex dispatch target', version: '1' },
-          capabilities: { experimentalApi: true, requestAttestation: false }
-        },
-        this.codexAuth?.(ctx.chatgptAccountId ?? null)
-      )
-      const { config } = await entry.client.request('config/read', {
+      const { config } = await entry.connection.request('config/read', {
         cwd: ctx.cwd,
         includeLayers: false
       })
@@ -4382,7 +4419,7 @@ export class CrossEngineDispatcher {
       let cursor: string | null = null
       for (let page = 0; ; page++) {
         if (page === CODEX_CATALOG_PAGE_LIMIT) throw new Error('Codex catalog page limit')
-        const result = await entry.client.request('model/list', {
+        const result = await entry.connection.request('model/list', {
           cursor,
           limit: 100,
           includeHidden: false
@@ -4408,7 +4445,7 @@ export class CrossEngineDispatcher {
       if (denial) throw new Error(denial)
 
       const policy = codexModePolicy(entry.autonomyMode)
-      const response = await entry.client.request('thread/start', {
+      const response = await entry.connection.request('thread/start', {
         cwd: ctx.cwd,
         model,
         approvalPolicy: policy.approvalPolicy,
@@ -4423,10 +4460,13 @@ export class CrossEngineDispatcher {
         throw new Error('Codex opened a dispatch target as a native child thread')
       entry.model = response.model
       entry.sessionId = response.thread.id
+      // Everything stamped with this thread id is this target's from here on,
+      // and nothing else is (ADR-069 §2).
+      entry.connection.claim(entry.sessionId)
       this.targets.set(entry.sessionId, entry)
     } catch (err) {
       if (entry.sessionId) this.targets.delete(entry.sessionId)
-      entry.client.dispose()
+      entry.connection.detach()
       throw err instanceof Error ? err : new Error(String(err))
     }
 
@@ -4463,7 +4503,7 @@ export class CrossEngineDispatcher {
       entry.turnStarted = new Promise<string | null>((r) => {
         announceTurnId = r
       })
-      entry.client
+      entry.connection
         .request('turn/start', {
           threadId: entry.sessionId!,
           clientUserMessageId: uuidv4(),
@@ -4690,6 +4730,16 @@ export class CrossEngineDispatcher {
     value: unknown,
     context: { id: unknown; signal: AbortSignal }
   ): Promise<unknown> {
+    if (
+      !CODEX_TARGET_SERVER_METHODS.includes(method as (typeof CODEX_TARGET_SERVER_METHODS)[number])
+    )
+      // The transport used to refuse this for us (the target's own process
+      // registered these four methods and nothing else). On a shared host the
+      // registered list is the union its owners need, so the scrub is made here
+      // — with the SAME `-32601` an unregistered method earns, which is what
+      // `item/tool/call` must keep getting: a dispatch target has no hosted
+      // tools and no `dispatch_agent`.
+      return Promise.reject(new CodexMethodNotFound())
     if (entry.draining) return Promise.resolve(codexRefusal(method))
     if (
       !entry.sessionId ||
@@ -4844,5 +4894,5 @@ export const crossEngineDispatcher = new CrossEngineDispatcher({
   serverManager: opencodeServerManager,
   makeClient: (baseUrl, authHeader) => new OpencodeClient(baseUrl, authHeader),
   loadEngineConfig,
-  codexAuth: (accountId) => codexAuthHook({ accountId })
+  codexVaultAccounts: true
 })

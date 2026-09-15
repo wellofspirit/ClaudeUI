@@ -43,15 +43,27 @@ export const methods = {
     'ThreadApproveGuardianDeniedActionResponse'
   ],
   ...Object.fromEntries(
-    ['Start', 'Read', 'Resume', 'Fork', 'List', 'Delete', 'Archive', 'TurnsList', 'ItemsList'].map(
-      (name) => [
-        `thread/${name
-          .replace(/List$/, '/list')
-          .replace(/^./, (c) => c.toLowerCase())
-          .replace(/^\/list$/, 'list')}`,
-        [`Thread${name}Params`, `Thread${name}Response`]
-      ]
-    )
+    [
+      'Start',
+      'Read',
+      'Resume',
+      'Fork',
+      'List',
+      'Delete',
+      'Archive',
+      'TurnsList',
+      'ItemsList',
+      // ADR-069 §2: a host keeps a thread's firehose only while an owner claims
+      // it. Detaching unsubscribes, which also lets the binary unload the thread
+      // and release its writer lock (`thread_lifecycle.rs`, 60 s by default).
+      'Unsubscribe'
+    ].map((name) => [
+      `thread/${name
+        .replace(/List$/, '/list')
+        .replace(/^./, (c) => c.toLowerCase())
+        .replace(/^\/list$/, 'list')}`,
+      [`Thread${name}Params`, `Thread${name}Response`]
+    ])
   ),
   ...Object.fromEntries(
     ['Start', 'Steer', 'Interrupt'].map((name) => [

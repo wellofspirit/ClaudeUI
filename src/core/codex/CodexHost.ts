@@ -18,21 +18,26 @@
  * second native login is refused while external auth is active (ADR-068 §1). So
  * the unit of sharing is a process per home AND account, never per home alone.
  *
- * ## What this slice (H1) does and does not do
+ * ## What this slice (H2) does and does not do
  *
- * Reads run on hosts. Sessions still own their own `CodexAppServerClient`
- * ({@link CodexHost.retain} is the empty seam H2 will call). Nothing here routes
- * notifications by `threadId`, recycles a host on an account switch, or resumes
- * a thread: those are ADR-069 decisions 2, 4 and 7, and they are H2/H3.
+ * Reads AND sessions run on hosts: a session is a thread here (ADR-069 §2), and
+ * {@link CodexHost.attach} hands it a per-thread connection whose notifications
+ * and server requests are demultiplexed by `threadId`. What is still out: a host
+ * is not recycled when the ACTIVE account changes (ADR-069 §4), which is H3.
  */
 import { homedir } from 'node:os'
-import { CodexTransportError, type CodexClientOptions } from './CodexAppServerClient'
+import {
+  CodexMethodNotFound,
+  CodexTransportError,
+  type CodexClientOptions
+} from './CodexAppServerClient'
 import { CodexClient } from './CodexClient'
 import { codexAuthHook, type CodexAuthHook } from './codex-auth-hook'
 import { codexHomeForEnv, codexHomeKey } from './codex-home'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import { logger } from '../services/logger'
 import type { InitializeParams } from './protocol/InitializeParams'
+import type { RequestId } from './protocol/RequestId'
 import type { CodexMethods } from './protocol/methods'
 
 const LOG_SOURCE = 'CodexHost'
@@ -64,8 +69,58 @@ export const CODEX_HOST_LABEL = 'host'
  */
 const NATIVE = 'native'
 
-/** The one server request a host answers: the vault refills an expired token. */
-const SERVER_METHODS = ['account/chatgptAuthTokens/refresh'] as const
+/**
+ * Every server request a host takes delivery of.
+ *
+ * The UNION of what its attached owners need, because the transport gates on
+ * this list before any routing happens: a method absent here is answered
+ * `-32601` by `CodexAppServerClient` itself and never reaches the demultiplexer.
+ * The refresh is the host's own (ADR-069 §8); the rest belong to whichever owner
+ * claimed the request's thread, and a dispatch TARGET's narrower surface
+ * (`CODEX_TARGET_SERVER_METHODS`, no `item/tool/call`) is enforced by that owner
+ * rather than by the transport now that it shares a process with sessions.
+ */
+const SERVER_METHODS = [
+  'account/chatgptAuthTokens/refresh',
+  'item/commandExecution/requestApproval',
+  'item/fileChange/requestApproval',
+  'item/tool/requestUserInput',
+  'item/permissions/requestApproval',
+  'item/tool/call',
+  'mcpServer/elicitation/request'
+] as const
+
+/**
+ * How many notifications from threads NOBODY has claimed yet are held, and for
+ * how long they are worth replaying.
+ *
+ * A native child thread's first notifications routinely beat the spawning
+ * `item/completed` that names it, and under one shared process the host is the
+ * only place that can hold them: the owner they belong to is not known until it
+ * claims the thread. Held here, replayed on
+ * {@link CodexThreadConnection.claim}.
+ *
+ * Both bounds exist because nothing else prunes a bucket nobody ever claims. A
+ * disposed session's trailing `turn/completed` would otherwise sit here until
+ * the process ended and then be replayed — minutes or hours later — into
+ * whatever session next resumed that thread, and a few hundred such leftovers
+ * would saturate the cap and silence the hold for every real child after them.
+ * So: a bucket older than {@link HOLD_TTL_MS} is discarded rather than replayed,
+ * a thread the binary says it CLOSED loses its bucket immediately, and a full
+ * hold evicts its oldest bucket instead of refusing the new notification — the
+ * newest child is the one with a claim still coming.
+ */
+const HOLD_LIMIT = 200
+const HOLD_TTL_MS = 30_000
+
+/**
+ * Bumped on every host START, so an approval or a one-shot hosted call minted
+ * on one process is refused after a resume onto another — the rule that used to
+ * be `CodexSession`'s per-object `generation` (ADR-069 §2). Module-level because
+ * a host object starts exactly once: the registry replaces a dead host rather
+ * than restarting it, and a per-instance counter would always read 1.
+ */
+let generations = 0
 
 const initializeParams: InitializeParams = {
   clientInfo: { name: 'claudeui_host', title: 'Codex host', version: '1' },
@@ -95,6 +150,22 @@ export interface CodexHostIdentity {
 export interface CodexHostAcquireOptions {
   /** Absent = never read the vault. See {@link CodexHostIdentity}. */
   identity?: CodexHostIdentity
+  /**
+   * Serve this acquire from the host that has LOADED `thread`, whatever account
+   * that host runs as (ADR-069 §3, probe P5).
+   *
+   * The writer lock a loaded thread takes is PROCESS-scoped: every other
+   * app-server on the home is refused `-32600` for `thread/delete` and
+   * `thread/resume` alike ("thread <id> already has an active writer"), while
+   * the holder may delete its own. So a delete has to be issued on the holder,
+   * and the holder is whichever host last loaded the thread — not necessarily
+   * the active account's, since a session pinned to another account lives on
+   * that account's host.
+   *
+   * Falls back to {@link identity} when no live host holds it (the thread is on
+   * disk and unloaded, which every host can delete).
+   */
+  thread?: string
   /**
    * The child's working directory. Only the FIRST acquirer of a host sets it:
    * home-scoped reads (`thread/list`, `thread/read`, `model/list`) do not depend
@@ -126,10 +197,83 @@ export interface CodexHostHandle {
   ): Promise<CodexMethods[M]['result']>
   /** The vault account this host's process was injected with, or null. */
   readonly injectedAccountId: string | null
-  /** The host itself, so a SESSION can {@link CodexHost.retain} it (H2). */
+  /** The host itself, so a SESSION can {@link CodexHost.attach} to it. */
   readonly host: CodexHost
   /** Idempotent. */
   release(): void
+}
+
+/** The context a server request reaches a thread owner with. */
+export type CodexServerRequestContext = { id: RequestId; signal: AbortSignal }
+
+/**
+ * What a THREAD on a host is driven by: a session (ADR-069 §2) or a dispatch
+ * target (§7). Exactly the three transport callbacks each of them used to pass
+ * to its own `CodexClient`, plus the one signal that used to reach it through a
+ * hook it owned alone.
+ */
+export interface CodexThreadOwner {
+  onNotification(method: string, params: unknown): void
+  onServerRequest(
+    method: string,
+    params: unknown,
+    context: CodexServerRequestContext
+  ): Promise<unknown>
+  /** The host went away (ADR-069 §5). Rung at most once per attachment. */
+  onDisconnect(error: CodexTransportError): void
+  /** The vault cannot refresh this host's ChatGPT token (ADR-069 §8). */
+  onAuthRequired?(accountId: string | null): void
+}
+
+/** One owner's view of its host. Every method is a no-op after {@link detach}. */
+export interface CodexThreadConnection {
+  request<M extends keyof CodexMethods>(
+    method: M,
+    params: CodexMethods[M]['params']
+  ): Promise<CodexMethods[M]['result']>
+  /** Cancel the parked server requests of one ended turn. */
+  abortServerRequests(threadId: string, turnId: string): void
+  /**
+   * Take delivery of everything stamped with `threadId` — the owner's own
+   * thread, and every child thread it binds. Recent held notifications for a
+   * thread nobody had claimed yet are replayed SYNCHRONOUSLY here; stale ones
+   * (see {@link HOLD_TTL_MS}) are discarded rather than delivered to a session
+   * that was not running when they arrived.
+   *
+   * THROWS if another owner already holds the thread: one live session per
+   * thread is an invariant, not a race to win.
+   */
+  claim(threadId: string): void
+  /**
+   * Leave the host: unsubscribe every claimed thread (so a thread this owner
+   * abandoned stops sending, and the binary can unload it and release its
+   * writer lock) and release the host's retain. Idempotent.
+   */
+  detach(): void
+  /** The vault account the host's process was injected with, or null. */
+  readonly injectedAccountId: string | null
+  /** This host's start generation — see {@link generations}. */
+  readonly generation: number
+  readonly host: CodexHost
+}
+
+/** One attached owner and the threads it has claimed. */
+type Attachment = {
+  owner: CodexThreadOwner
+  claims: Set<string>
+  detached: boolean
+}
+
+/** One notification for a thread no owner has claimed yet. */
+type Held = { method: string; params: unknown; at: number }
+
+/**
+ * The slice of {@link CodexHostRegistry} a caller needs. Structural so a unit
+ * test can hand a session, a service or the dispatcher a fake registry with no
+ * binary and no vault behind it.
+ */
+export interface CodexHostSource {
+  acquire(options?: CodexHostAcquireOptions): Promise<CodexHostHandle>
 }
 
 /** What a host drives. `CodexClient` satisfies it; a unit test fakes it. */
@@ -139,6 +283,8 @@ export interface CodexHostClient {
     method: M,
     params: CodexMethods[M]['params']
   ): Promise<CodexMethods[M]['result']>
+  /** Absent on a fake that never parks server requests. */
+  abortServerRequests?(threadId: string, turnId: string): void
   dispose(): void
 }
 
@@ -182,8 +328,28 @@ export class CodexHost {
   private ready?: Promise<void>
   private hook: CodexAuthHook | null = null
   private handles = 0
-  /** Registered SESSIONS (H2). A host with one never idles out. */
+  /** Attached OWNERS (ADR-069 §2). A host with one never idles out. */
   private retained = 0
+  /** Every attached owner, in attach order. */
+  private readonly attachments = new Set<Attachment>()
+  /** Who takes delivery of each claimed thread — the demultiplexer's table. */
+  private readonly claims = new Map<string, Attachment>()
+  /**
+   * Every thread this PROCESS has loaded and not seen closed: what the writer
+   * lock actually follows. Filled from the `thread/start` / `thread/resume` /
+   * `thread/fork` RESPONSES rather than from {@link claim}, because the lock is
+   * taken when the thread opens, not when an owner takes delivery of it — a
+   * session that threw in between still left one here. Survives `detach` on
+   * purpose: the binary keeps a thread loaded (and locked) until it unloads it
+   * about a minute after its last subscriber leaves, so a delete issued in
+   * between still has to come here.
+   */
+  private readonly loaded = new Set<string>()
+  /** Unclaimed threads' notifications, by thread id — see {@link HOLD_LIMIT}. */
+  private readonly held = new Map<string, Held[]>()
+  private heldCount = 0
+  /** This host's start generation; 0 until the process is up. */
+  private gen = 0
   private closedError?: CodexTransportError
   private idleTimer?: ReturnType<typeof setTimeout>
   /**
@@ -200,6 +366,8 @@ export class CodexHost {
 
   constructor(
     readonly key: string,
+    /** The normalised Codex home this host's process runs against. */
+    readonly homeKey: string,
     private readonly identity: CodexHostIdentity | undefined,
     private readonly options: Pick<
       CodexClientOptions,
@@ -218,6 +386,27 @@ export class CodexHost {
   /** Test/diagnostic view: is a process running behind this host? */
   get started(): boolean {
     return this.client !== undefined
+  }
+
+  /** Which host START this is, process-wide. See {@link generations}. */
+  get generation(): number {
+    return this.gen
+  }
+
+  /**
+   * How many THREAD OWNERS are attached — sessions and dispatch targets, never
+   * reads. What decides whether a host may be closed to free its threads' writer
+   * locks (`CodexSession.leaveHost`): a read that loses its host fails once and
+   * the next one starts a fresh one (ADR-069 §5), while an owner would lose a
+   * live turn.
+   */
+  get owners(): number {
+    return this.attachments.size
+  }
+
+  /** Has this process loaded `threadId` (and therefore its writer lock)? */
+  holds(threadId: string): boolean {
+    return this.loaded.has(threadId)
   }
 
   /**
@@ -252,21 +441,136 @@ export class CodexHost {
   }
 
   /**
-   * Keep this host alive regardless of reads — the seam ADR-069 decision 2 will
-   * call when a SESSION registers its thread. Unused in H1 (sessions still own
-   * their own process), and deliberately trivial: the idle rule is the only
-   * thing a registration has to change here.
+   * Put one thread owner on this host (ADR-069 §2).
+   *
+   * The owner gets a connection, the host gets a user that keeps it alive
+   * regardless of reads: an owner is not a read — it may hold the host
+   * indefinitely — so the idle deadline the last read left behind is dropped
+   * rather than resumed.
+   *
+   * Nothing is routed to it until it {@link CodexThreadConnection.claim}s a
+   * thread, except the account-level notifications that carry no `threadId` at
+   * all, which every attached owner sees.
    */
-  retain(): void {
+  attach(owner: CodexThreadOwner): CodexThreadConnection {
+    if (this.closedError) throw this.closedError
+    const attachment: Attachment = { owner, claims: new Set(), detached: false }
+    this.attachments.add(attachment)
     this.retained++
     this.cancelIdle()
-    // A session is not a read: it may hold the host indefinitely, so the
-    // deadline the last read left behind is dropped rather than resumed.
     this.idleDeadline = undefined
+    return this.connection(attachment)
   }
 
-  /** Counterpart of {@link retain}. The last session leaving starts the idle wait. */
-  release(): void {
+  /**
+   * Which requests OPEN a thread in this process — and so take its writer lock.
+   *
+   * Sniffed on the way out rather than learned from {@link claim}, because the
+   * lock follows the PROCESS: a thread whose `thread/start` answered and whose
+   * owner then threw before claiming it is still loaded here, and a delete
+   * routed anywhere else would be refused with nothing left to retry (`delete.ts`
+   * dropped its retry when the holder became knowable).
+   */
+  private static readonly OPENERS = new Set(['thread/start', 'thread/resume', 'thread/fork'])
+
+  /** Remember a thread this process just opened. */
+  private opened(result: unknown): void {
+    if (typeof result !== 'object' || result === null) return
+    const thread = (result as { thread?: unknown }).thread
+    if (typeof thread !== 'object' || thread === null) return
+    const id = (thread as { id?: unknown }).id
+    if (typeof id === 'string' && id) this.loaded.add(id)
+  }
+
+  private connection(attachment: Attachment): CodexThreadConnection {
+    // Live getters through the connection's own `host`, never a snapshot: a
+    // token refresh can move the injected account under a long-lived session
+    // (`codex-auth-hook.ts`), and an owner that remembered the old one would
+    // attribute its usage to it. Same shape as {@link handle}.
+    const connection: CodexThreadConnection = {
+      host: this,
+      get injectedAccountId(): string | null {
+        return connection.host.injectedAccountId
+      },
+      get generation(): number {
+        return connection.host.generation
+      },
+      request: <M extends keyof CodexMethods>(
+        method: M,
+        params: CodexMethods[M]['params']
+      ): Promise<CodexMethods[M]['result']> => {
+        if (attachment.detached) return Promise.reject(new CodexTransportError('detached'))
+        if (this.closedError) return Promise.reject(this.closedError)
+        const sent = this.client!.request(method, params)
+        if (!CodexHost.OPENERS.has(method)) return sent
+        return sent.then((result) => {
+          this.opened(result)
+          return result
+        })
+      },
+      abortServerRequests: (threadId: string, turnId: string): void => {
+        if (attachment.detached || this.closedError) return
+        this.client?.abortServerRequests?.(threadId, turnId)
+      },
+      claim: (threadId: string): void => this.claim(attachment, threadId),
+      detach: (): void => this.detach(attachment)
+    }
+    return connection
+  }
+
+  private claim(attachment: Attachment, threadId: string): void {
+    if (attachment.detached) return
+    const current = this.claims.get(threadId)
+    // REFUSED, not stolen. One live session per thread is the session manager's
+    // invariant and a second claim means something upstream is wrong; taking the
+    // thread would silently move a running turn's approvals to another owner.
+    // An owner that legitimately re-takes a thread (a re-pin's resume) detaches
+    // first, and detaching frees the claim.
+    if (current && current !== attachment)
+      throw new Error(`Codex thread ${threadId} is already claimed on this host`)
+    this.claims.set(threadId, attachment)
+    attachment.claims.add(threadId)
+    this.loaded.add(threadId)
+    const held = this.held.get(threadId)
+    if (!held) return
+    this.forget(threadId)
+    const fresh = Date.now() - HOLD_TTL_MS
+    for (const entry of held)
+      if (entry.at >= fresh) this.deliver(attachment, entry.method, entry.params)
+  }
+
+  /** Drop one thread's held notifications, if it has any. */
+  private forget(threadId: string): void {
+    const held = this.held.get(threadId)
+    if (!held) return
+    this.held.delete(threadId)
+    this.heldCount -= held.length
+  }
+
+  /**
+   * One owner leaves.
+   *
+   * Every thread it claimed is unsubscribed on the wire: that is what stops the
+   * firehose for a thread the binary keeps LOADED, and — because a thread with
+   * no subscribers is unloaded once it has been idle for `thread_unload_delay`
+   * (60 s by default, `app-server/src/request_processors/thread_lifecycle.rs`)
+   * — it is also what eventually releases the thread's writer lock. Best effort:
+   * a host that is already gone has nothing to tell.
+   */
+  private detach(attachment: Attachment): void {
+    if (attachment.detached) return
+    attachment.detached = true
+    this.attachments.delete(attachment)
+    for (const threadId of attachment.claims) {
+      if (this.claims.get(threadId) === attachment) this.claims.delete(threadId)
+      if (!this.closedError)
+        void this.client?.request('thread/unsubscribe', { threadId }).catch(() => {})
+    }
+    attachment.claims.clear()
+    if (this.attachments.size === 0) {
+      this.held.clear()
+      this.heldCount = 0
+    }
     if (this.retained === 0) return
     this.retained--
     this.armIdle()
@@ -281,20 +585,152 @@ export class CodexHost {
     // `dispose()` ends stdin and only kills after the grace (F7/ADR-069 §6), and
     // its failure code is `disposed`, so this never writes a death line.
     this.client?.dispose()
+    // ADR-069 §5: a host closing IS the opencode server's death for every
+    // session on it. Said AFTER the dispose, so an owner that reacts by asking
+    // for a new host cannot be handed this one.
+    this.notifyClosed(this.closedError)
   }
 
   private async startClient(): Promise<void> {
     const hook = this.identity ? this.deps.createHook(this.identity.accountId) : null
     this.hook = hook
+    if (hook)
+      // One hook per PROCESS, so the sign-in notice cannot be owned by one
+      // session any more: every owner on this host runs on the credential that
+      // just failed to refresh (ADR-069 §8).
+      hook.onAuthRequired = (accountId): void => {
+        for (const attachment of [...this.attachments]) attachment.owner.onAuthRequired?.(accountId)
+      }
     const client = this.deps.createClient({
       ...this.options,
       label: CODEX_HOST_LABEL,
       serverMethods: SERVER_METHODS,
-      ...(hook ? { onServerRequest: (_method, params) => hook.onRefreshRequest(params) } : {}),
+      onNotification: (method, params) => this.notification(method, params),
+      onServerRequest: (method, params, context) => this.serverRequest(method, params, context),
       onDisconnect: (error) => this.onDisconnect(error)
     })
     this.client = client
+    this.gen = ++generations
     await client.start(initializeParams, hook)
+  }
+
+  /** The `threadId` a wire payload is stamped with, or undefined. */
+  private static threadOf(params: unknown): string | undefined {
+    if (typeof params !== 'object' || params === null || Array.isArray(params)) return undefined
+    const threadId = (params as { threadId?: unknown }).threadId
+    return typeof threadId === 'string' ? threadId : undefined
+  }
+
+  /**
+   * The demultiplexer, notification half (ADR-069 §2).
+   *
+   * A notification with no `threadId` — `account/rateLimits/updated`,
+   * `account/updated` — is ACCOUNT-level: it belongs to the identity this whole
+   * process runs as, so every attached owner sees it. One with a `threadId` goes
+   * to the owner that claimed it; one for a thread nobody has claimed is HELD
+   * (a child's first events routinely beat the item that names it) and replayed
+   * when someone claims it, or dropped once the hold is full.
+   */
+  private notification(method: string, params: unknown): void {
+    if (this.closedError) return
+    const threadId = CodexHost.threadOf(params)
+    if (threadId === undefined) {
+      for (const attachment of [...this.attachments]) this.deliver(attachment, method, params)
+      return
+    }
+    // The binary unloaded the thread: its writer lock is gone with it, so this
+    // host is no longer the holder a delete has to be issued on — and anything
+    // held for it can never be claimed by anyone, so it goes too. The
+    // notification itself is delivered to a current claimant and otherwise
+    // dropped: holding the news of a close would replay it into whichever
+    // session next resumes that id.
+    if (method === 'thread/closed') {
+      this.loaded.delete(threadId)
+      this.forget(threadId)
+      const claimant = this.claims.get(threadId)
+      if (claimant) this.deliver(claimant, method, params)
+      return
+    }
+    const owner = this.claims.get(threadId)
+    if (owner) return this.deliver(owner, method, params)
+    if (this.attachments.size === 0) return
+    if (this.heldCount >= HOLD_LIMIT) this.evictOldestHold()
+    const held = this.held.get(threadId) ?? []
+    held.push({ method, params, at: Date.now() })
+    this.held.set(threadId, held)
+    this.heldCount++
+  }
+
+  /**
+   * Make room in a full hold by dropping the thread whose oldest entry is
+   * oldest. The newest bucket is the one whose claim is still plausibly coming.
+   */
+  private evictOldestHold(): void {
+    let oldest: { threadId: string; at: number } | undefined
+    for (const [threadId, held] of this.held) {
+      const at = held[0]?.at ?? 0
+      if (!oldest || at < oldest.at) oldest = { threadId, at }
+    }
+    if (oldest) this.forget(oldest.threadId)
+  }
+
+  private deliver(attachment: Attachment, method: string, params: unknown): void {
+    if (attachment.detached) return
+    try {
+      attachment.owner.onNotification(method, params)
+    } catch {
+      // One owner throwing is a BUG, and a loud one — but it must not cost the
+      // others their notification, and it must never take the transport's frame
+      // reader down (which would kill the whole host over one bad handler).
+      logger.warn(LOG_SOURCE, `owner threw on ${method} key=${this.key}`)
+    }
+  }
+
+  /**
+   * The demultiplexer, server-request half.
+   *
+   * `account/chatgptAuthTokens/refresh` carries no thread and is the host's own
+   * (ADR-069 §8). Everything else is a question about ONE thread and is answered
+   * by the owner that claimed it. A request for a thread nobody claimed is
+   * answered `-32601`, exactly as an unregistered method would be, and logged:
+   * an approval that no client can answer must be visible, never silently
+   * accepted.
+   */
+  private serverRequest(
+    method: string,
+    params: unknown,
+    context: CodexServerRequestContext
+  ): Promise<unknown> {
+    if (method === 'account/chatgptAuthTokens/refresh') {
+      if (!this.hook)
+        return Promise.reject(new Error('This Codex host holds no ClaudeUI-managed credential'))
+      return this.hook.onRefreshRequest(params)
+    }
+    const threadId = CodexHost.threadOf(params)
+    const attachment = threadId === undefined ? undefined : this.claims.get(threadId)
+    if (!attachment) {
+      logger.debug(LOG_SOURCE, `unclaimed thread request refused: ${method} key=${this.key}`)
+      return Promise.reject(new CodexMethodNotFound())
+    }
+    return attachment.owner.onServerRequest(method, params, context)
+  }
+
+  /** Tell every attached owner this host is gone, exactly once each. */
+  private notifyClosed(error: CodexTransportError): void {
+    for (const attachment of [...this.attachments]) {
+      attachment.detached = true
+      this.attachments.delete(attachment)
+      try {
+        attachment.owner.onDisconnect(error)
+      } catch {
+        /* one owner's teardown cannot break the next one's */
+      }
+    }
+    this.claims.clear()
+    this.loaded.clear()
+    this.held.clear()
+    this.heldCount = 0
+    this.retained = 0
   }
 
   /**
@@ -308,6 +744,7 @@ export class CodexHost {
     this.closedError = error
     this.cancelIdle()
     this.onClosed(this)
+    this.notifyClosed(error)
   }
 
   private handle(): CodexHostHandle {
@@ -404,12 +841,19 @@ export class CodexHostRegistry {
    * when there is no account to inject.
    */
   async acquire(options: CodexHostAcquireOptions = {}): Promise<CodexHostHandle> {
+    const homeKey = codexHomeKey(codexHomeForEnv(options.env))
+    // The holder first, when one was asked for: which ACCOUNT the process runs
+    // as is irrelevant to a thread that is already loaded somewhere, and
+    // resolving the vault's active account here would pick the wrong process.
+    const holder = options.thread ? this.holderFor(homeKey, options.thread) : undefined
+    if (holder) return holder.acquire(options.label)
     const account = await this.resolveAccount(options.identity)
-    const key = `${codexHomeKey(codexHomeForEnv(options.env))}|${account}`
+    const key = `${homeKey}|${account}`
     let host = this.hosts.get(key)
     if (!host) {
       host = new CodexHost(
         key,
+        homeKey,
         account === NATIVE ? undefined : { accountId: account.slice('acct:'.length) },
         {
           cwd: options.cwd ?? homedir(),
@@ -427,6 +871,16 @@ export class CodexHostRegistry {
       this.hosts.set(key, host)
     }
     return host.acquire(options.label)
+  }
+
+  /**
+   * The live host on this home that has `threadId` loaded, if any — the one
+   * process whose `thread/delete` the binary will not refuse (probe P5).
+   */
+  holderFor(homeKey: string, threadId: string): CodexHost | undefined {
+    for (const host of this.hosts.values())
+      if (host.homeKey === homeKey && host.holds(threadId)) return host
+    return undefined
   }
 
   private async resolveAccount(identity: CodexHostIdentity | undefined): Promise<string> {

@@ -43,11 +43,18 @@ import type { ThreadSettings } from './protocol/v2/ThreadSettings'
 import type { ThreadTokenUsage } from './protocol/v2/ThreadTokenUsage'
 import type { TokenUsageBreakdown } from './protocol/v2/TokenUsageBreakdown'
 import { resolveCodexCapabilities } from '../../shared/model-capabilities'
-import { CodexClient } from './CodexClient'
 import { CodexTransportError, type CodexClientOptions } from './CodexAppServerClient'
+import {
+  codexHostRegistry,
+  type CodexHostHandle,
+  type CodexHostSource,
+  type CodexServerRequestContext,
+  type CodexThreadConnection,
+  type CodexThreadOwner
+} from './CodexHost'
 import { CODEX_AUTH_PROVIDER_ID, type CodexAuthHook } from './codex-auth-hook'
 import { chatgptRateLimits } from './chatgpt-rate-limits'
-import { collectClaudeMcpForCodex } from './codex-mcp-bridge'
+import { collectClaudeMcpForCodex, type CodexMcpServerEntry } from './codex-mcp-bridge'
 import {
   MCP_ELICITATION_ACCEPT,
   MCP_ELICITATION_DECLINE,
@@ -97,35 +104,31 @@ import {
   registerCodexFork
 } from '../services/db'
 
-const serverMethods = [
-  // ADR-068 §1. The app-server asks US for a fresh ChatGPT token after a 401 and
-  // waits 10 s; nothing else refreshes an injected credential, so a session that
-  // did not register this method would simply lose the turn.
-  'account/chatgptAuthTokens/refresh',
-  'item/commandExecution/requestApproval',
-  'item/fileChange/requestApproval',
-  'item/tool/requestUserInput',
-  'item/permissions/requestApproval',
-  // ClaudeUI's own hosted tools, offered on `thread/start` and called back here
-  // (codex-hosted-tools.ts). Not an approval — it is the tool RUN itself.
-  'item/tool/call',
-  // The ONLY gate an MCP tool call has (Slice 4b): Codex asks for MCP approval
-  // as a form ELICITATION, and reads anything but `accept` — the `Method not
-  // found` of an unregistered method included — as "user rejected MCP tool
-  // call". See `mcp-elicitation.ts`.
-  'mcpServer/elicitation/request'
-] as const
 const record = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value)
 
 /**
- * Transport knobs plus the ChatGPT identity this session runs as.
+ * Why a re-pin can be refused outright (ADR-069 §2, H2 Landed).
  *
- * `auth` is deliberately absent by default: a session built without one injects
- * nothing and never reads the vault, which is what lets the real-binary
- * integration suite drive sessions against a scripted localhost provider with no
- * access to a developer's credentials. `register-engines.ts` is the composition
- * root that supplies the real hook.
+ * One process holds one ChatGPT identity, so moving this session's thread to
+ * another account means leaving this host — and the thread's writer lock is only
+ * released when that process exits or unloads the thread a minute after its last
+ * subscriber leaves. With another session on the host, closing it to free the
+ * lock would take that session down for this one's pin.
+ */
+const PIN_BLOCKED = "Another session is using this account's Codex process; re-pin after it closes."
+
+/**
+ * Host knobs plus the ChatGPT identity this session runs as.
+ *
+ * `auth` is deliberately absent by default: a session built without one asks for
+ * a host with NO identity (ADR-069 §1's `native` bucket), which injects nothing
+ * and never reads the vault — that is what lets the real-binary integration
+ * suite drive sessions against a scripted localhost provider with no access to a
+ * developer's credentials. `register-engines.ts` is the composition root that
+ * supplies the real hook. Since ADR-069 the hook does not travel to the process:
+ * the HOST owns injection and the refresh, and this one answers only the vault
+ * questions a pin has to ask ({@link CodexAuthHook.hasAccount}).
  */
 export type CodexSessionTransport = Pick<
   CodexClientOptions,
@@ -361,19 +364,6 @@ type CodexChild = {
   state: CollabAgentStatus
 }
 
-/** One notification for a thread that is not yet known to be a child. */
-type HeldChildNotification = { method: string; value: Record<string, unknown> }
-
-/**
- * How many notifications from not-yet-known threads are held while a turn is
- * running. A spawn's `item/completed` (which carries `receiverThreadIds`) can
- * lose the race against the child's first notification, so a short hold is the
- * difference between a complete child transcript and a truncated one. The cap
- * is what keeps a misbehaving or unrelated thread from growing this without
- * bound; the hold is dropped wholesale when the turn ends.
- */
-const CHILD_HOLD_LIMIT = 200
-
 /** Agent states that end a child's card, mapped onto the neutral task status. */
 const CHILD_TERMINAL_STATUS: Record<string, TaskNotification['status']> = {
   completed: 'completed',
@@ -439,12 +429,33 @@ function hostedContentItems(result: ToolResultContent): DynamicToolCallOutputCon
   })
 }
 
-/** One root owns one one-shot client. No native queue or child adoption. */
+/**
+ * One root is one THREAD on its account's host (ADR-069 §2). No process of its
+ * own, no native queue, no child adoption.
+ */
 export class CodexSession extends BaseSession {
   readonly engineId = 'codex' as const
   readonly capabilities = resolveCodexCapabilities()
-  private readonly client: CodexClient
-  private readonly generation = randomUUID()
+  /** Where this session's registry leases come from. The singleton in production. */
+  private readonly hosts: CodexHostSource
+  /** The env/timeout knobs every `acquire` for this session carries. */
+  private readonly hostTransport: Omit<CodexSessionTransport, 'auth'>
+  /** This session's view of its host, or null before `start()` / after teardown. */
+  private connection: CodexThreadConnection | null = null
+  /**
+   * The vault account this session ASKED its host for (null = follow active),
+   * as opposed to {@link injectedAccountId}, which is what the host's process
+   * actually holds. Kept so a failed re-pin can go back to the host it left.
+   */
+  private hostAccountId: string | null = null
+  /**
+   * The HOST generation this session's parked approvals and one-shot hosted
+   * calls are scoped to (ADR-069 §2). It used to be a per-session UUID standing
+   * in for "this process"; the process is now shared and outlives no resume, so
+   * the honest scope is the host start — an answer minted on the previous one is
+   * refused after a host death exactly as a previous process's was.
+   */
+  private generation = 0
   private starting?: Promise<void>
   private closed = false
   private busy = false
@@ -497,7 +508,7 @@ export class CodexSession extends BaseSession {
   private guardianOverrides = new Map<string, GuardianOverride>()
   /** Denials whose declined item has not been mapped yet, by that item's id. */
   private heldDenials = new Map<string, ItemGuardianApprovalReviewCompletedNotification>()
-  /** Hosted-tool `callId`s already executed this process generation — one shot each. */
+  /** Hosted-tool `callId`s already executed by THIS session object — one shot each. */
   private hostedCalls = new Set<string>()
   /**
    * Cross-engine dispatches currently awaiting `crossEngineDispatcher.dispatch`,
@@ -514,11 +525,14 @@ export class CodexSession extends BaseSession {
   private ambiguousSteers = new Map<string, AmbiguousSteer>()
   /** Serializes queue boundaries — see {@link queueBoundary}. */
   private flushChain: Promise<void> = Promise.resolve()
+  /**
+   * The inherited Claude MCP table this thread was opened with (ADR-068 §5),
+   * read ONCE in `start()` and replayed by {@link threadParams} so a resume onto
+   * another host reopens the thread with the same servers.
+   */
+  private mcpServers?: Record<string, CodexMcpServerEntry>
   /** Native child threads by their own thread id (ADR-066 slice F). */
   private children = new Map<string, CodexChild>()
-  /** Notifications from threads not yet bound to a card, by thread id. */
-  private childHold = new Map<string, HeldChildNotification[]>()
-  private heldChildCount = 0
   /** One "nested agents are not rendered" error per session, not per spawn. */
   private nestedAgentWarned = false
   /** The root's own last token totals — the base every child's usage adds to. */
@@ -530,31 +544,31 @@ export class CodexSession extends BaseSession {
     this.send('session:bash-output', { toolUseId, output })
   )
 
+  /**
+   * What the host delivers to this thread. A plain object rather than methods on
+   * the class so the routing stays private: nothing outside this file can push a
+   * notification, an approval or a disconnect into a session.
+   */
+  private readonly owner: CodexThreadOwner = {
+    onNotification: (method, params) => this.notification(method, params),
+    onServerRequest: (method, params, context) => this.serverRequest(method, params, context),
+    onDisconnect: (error) => this.disconnected(error),
+    onAuthRequired: (accountId) => this.authRequired(accountId)
+  }
+
   constructor(
     routingId: string,
     win: HostWindowHandle | null,
     cwd: string,
     private readonly options: EngineSpawnOptions = {},
     transport: CodexSessionTransport = {},
-    createClient: (options: CodexClientOptions) => CodexClient = (options) =>
-      new CodexClient(options)
+    hosts: CodexHostSource = codexHostRegistry
   ) {
     super(routingId, win, cwd)
-    const { auth = null, ...clientTransport } = transport
+    const { auth = null, ...hostTransport } = transport
     this.auth = auth
-    if (this.auth) {
-      this.auth.onAuthRequired = (accountId) => {
-        if (this.closed) return
-        this.send('session:auth-required', {
-          providerId: CODEX_AUTH_PROVIDER_ID,
-          ...(accountId ? { accountId } : {})
-        })
-        this.send(
-          'session:error',
-          'ChatGPT sign-in expired; sign in again from Settings › Models & providers'
-        )
-      }
-    }
+    this.hosts = hosts
+    this.hostTransport = hostTransport
     // ADR-030/ADR-033: the STATIC flag says this engine can HOST dispatch_agent;
     // the honest per-session value additionally requires a target engine to
     // exist. ANDed once here (rather than behind a getter, as pi does) because
@@ -564,22 +578,49 @@ export class CodexSession extends BaseSession {
     this.model = options.model
     this.effort = options.effort
     this.permissionMode = options.permissionMode ?? 'default'
-    this.client = createClient({
-      ...clientTransport,
-      cwd,
-      label: 'session',
-      serverMethods,
-      onNotification: (method, params) => this.notification(method, params),
-      onServerRequest: (method, params, context) =>
-        method === 'account/chatgptAuthTokens/refresh'
-          ? this.refreshInjectedToken(params)
-          : method === 'item/tool/call'
-            ? this.hostedToolCall(params, context)
-            : method === 'mcpServer/elicitation/request'
-              ? this.mcpElicitation(params, context)
-              : this.requestApproval(method, params, context),
-      onDisconnect: (error) => this.disconnected(error)
+  }
+
+  /**
+   * The live connection, or a throw. Every caller is already inside a flow that
+   * surfaces an error (a turn, a settings write, a pin), and a session with no
+   * connection is a session that has not started or has been torn down — the
+   * same state `this.closed` describes.
+   */
+  private get wire(): CodexThreadConnection {
+    if (!this.connection) throw new Error('Codex session is disconnected')
+    return this.connection
+  }
+
+  /** The server requests this thread answers. The refresh is the host's own. */
+  private serverRequest(
+    method: string,
+    params: unknown,
+    context: CodexServerRequestContext
+  ): Promise<unknown> {
+    return method === 'item/tool/call'
+      ? this.hostedToolCall(params, context)
+      : method === 'mcpServer/elicitation/request'
+        ? this.mcpElicitation(params, context)
+        : this.requestApproval(method, params, context)
+  }
+
+  /**
+   * The vault cannot refresh this host's ChatGPT credential (ADR-068 §1).
+   *
+   * Rung by the HOST, once per attached session, because the hook belongs to the
+   * process now: every session on it runs on the credential that just failed
+   * (ADR-069 §8), so every one of them has to say so.
+   */
+  private authRequired(accountId: string | null): void {
+    if (this.closed) return
+    this.send('session:auth-required', {
+      providerId: CODEX_AUTH_PROVIDER_ID,
+      ...(accountId ? { accountId } : {})
     })
+    this.send(
+      'session:error',
+      'ChatGPT sign-in expired; sign in again from Settings › Models & providers'
+    )
   }
 
   get willQueue(): boolean {
@@ -615,7 +656,7 @@ export class CodexSession extends BaseSession {
     const turnId = this.turnId
     if (this.busy && turnId) {
       try {
-        await this.client.request('turn/steer', {
+        await this.wire.request('turn/steer', {
           threadId: this.threadId,
           expectedTurnId: turnId,
           clientUserMessageId,
@@ -704,7 +745,7 @@ export class CodexSession extends BaseSession {
     let cursor: string | null = null
     for (let page = 0; page < 20; page++) {
       if (this.closed || !this.threadId) return false
-      const result = await this.client.request('thread/items/list', {
+      const result = await this.wire.request('thread/items/list', {
         threadId: this.threadId,
         turnId,
         cursor,
@@ -761,7 +802,7 @@ export class CodexSession extends BaseSession {
       // under the account the user picked.
       await this.applyPendingPin()
       if (this.closed) throw new Error('Codex session is disconnected')
-      const result = await this.client.request('turn/start', {
+      const result = await this.wire.request('turn/start', {
         threadId: this.threadId!,
         clientUserMessageId,
         input: codexTurnInput(prompt, attachments),
@@ -819,47 +860,26 @@ export class CodexSession extends BaseSession {
         this.pendingAccountId = undefined
       }
       await this.resolveSavedPin()
-      await this.client.start(
-        {
-          clientInfo: { name: 'claudeui_session', title: 'Codex session', version: '1' },
-          capabilities: { experimentalApi: true, requestAttestation: false }
-        },
-        this.auth
-      )
-      // Null when nothing was injected: the process runs on Codex's own login and
-      // the account below is derived from `account/read` exactly as before.
-      this.injectedAccountId = this.auth?.injectedAccountId ?? null
-      const { config } = await this.client.request('config/read', {
+      // The host is already injected with this identity when `attach` returns
+      // (ADR-068 §1's "nothing can send a turn under the previous one", now a
+      // property of the PROCESS rather than of this session's own handshake), so
+      // every request below — the config read, the catalog, the thread — runs as
+      // the account the user picked.
+      await this.attachHost(this.pinnedAccountId())
+      // Every other await in `start()` is followed by a closed check; this one
+      // is where a stop landing during the spawn arrives.
+      if (this.closed) return
+      const { config } = await this.wire.request('config/read', {
         cwd: this.cwd,
         includeLayers: false
       })
       assertCodexProvider(config.model_provider)
-      const account = (await this.client.request('account/read', { refreshToken: false })).account
-      if (this.injectedAccountId) {
-        // An injected process IS the vault's subscription, whatever `account/read`
-        // makes of the token: the email it reports is parsed from the very JWT we
-        // sent. `accountId` is the VAULT account id, which is what usage rows and
-        // (slice 2b) the per-session pin attribute to.
-        this.account = {
-          engineId: 'codex',
-          vendorId: 'openai',
-          authState: 'authenticated',
-          billingType: 'subscription',
-          ...(account?.type === 'chatgpt' && account.email ? { label: account.email } : {}),
-          accountId: this.injectedAccountId
-        }
-      } else if (account?.type === 'chatgpt' || account?.type === 'apiKey')
-        this.account = {
-          engineId: 'codex',
-          vendorId: 'openai',
-          authState: 'authenticated',
-          billingType: account.type === 'chatgpt' ? 'subscription' : 'apiKey'
-        }
+      await this.readAccount()
       const cursors = new Set<string>()
       let cursor: string | null = null
       for (let page = 0; ; page++) {
         if (page === 100) throw new Error('Codex catalog page limit')
-        const result = await this.client.request('model/list', {
+        const result = await this.wire.request('model/list', {
           cursor,
           limit: 100,
           includeHidden: false
@@ -875,10 +895,6 @@ export class CodexSession extends BaseSession {
           ? undefined
           : selectCodexModel(this.catalog, config.model, this.model)
       this.validateEffort(this.effort)
-      // The thread BASELINE must agree with the per-turn override, so a turn
-      // that somehow starts without one (native queue, a future steer path)
-      // still runs under this mode's policy rather than the user's config.
-      const { approvalPolicy, sandbox, approvalsReviewer } = this.modePolicy()
       // The shared Claude MCP list, translated into Codex's own `mcp_servers`
       // shape and delivered as the per-thread override (ADR-068 §5). It rides on
       // `params`, so start, resume and fork cannot drift apart. Read ONCE, here:
@@ -887,6 +903,7 @@ export class CodexSession extends BaseSession {
       // `config.toml` (probed against 0.154.0), so native entries — including the
       // OAuth servers Claude's shape cannot express — keep working alongside.
       const inheritedMcp = collectClaudeMcpForCodex(this.cwd)
+      this.mcpServers = inheritedMcp.servers
       if (inheritedMcp.skipped.length > 0)
         // `start()` runs at most once per session (`this.starting` latches it),
         // so this is the one warning ADR-068 §5 asks for.
@@ -894,18 +911,7 @@ export class CodexSession extends BaseSession {
           'session:warning',
           `SSE MCP servers are not supported by Codex: ${inheritedMcp.skipped.join(', ')}`
         )
-      const params = {
-        cwd: this.cwd,
-        ...(this.model !== undefined ? { model: this.model } : {}),
-        approvalPolicy,
-        sandbox,
-        approvalsReviewer,
-        // Absent, not empty: an empty table is still an override, and the
-        // no-MCP user must reach the binary exactly as before this slice.
-        ...(Object.keys(inheritedMcp.servers).length > 0
-          ? { config: { mcp_servers: inheritedMcp.servers } }
-          : {})
-      }
+      const params = this.threadParams()
       const response = branch
         ? // Copies the source THROUGH `lastTurnId` into a NEW thread and leaves
           // the source untouched. No `dynamicTools` field and none needed: the
@@ -914,13 +920,13 @@ export class CodexSession extends BaseSession {
           // `get_dynamic_tools`, arm `Forked`). `excludeTurns` keeps the reply
           // metadata-only; the branch's transcript is read back through the
           // ordinary history path.
-          await this.client.request('thread/fork', { ...params, ...branch, excludeTurns: true })
+          await this.wire.request('thread/fork', { ...params, ...branch, excludeTurns: true })
         : this.options.resumeSessionId
-          ? await this.client.request('thread/resume', {
+          ? await this.wire.request('thread/resume', {
               ...params,
               threadId: this.options.resumeSessionId
             })
-          : await this.client.request('thread/start', {
+          : await this.wire.request('thread/start', {
               ...params,
               allowProviderModelFallback: false,
               historyMode: 'paginated',
@@ -950,6 +956,11 @@ export class CodexSession extends BaseSession {
       if (this.model !== undefined && response.model !== this.model)
         throw new Error('Codex silently changed the requested model')
       this.threadId = response.thread.id
+      // From here on this session takes delivery of everything stamped with the
+      // thread id — and of nothing else (ADR-069 §2). Held notifications from a
+      // child that started before its spawn item landed are replayed as each
+      // child is claimed, in `registerChild`.
+      this.wire.claim(this.threadId)
       this.model = response.model
       this.effectiveModel = response.model
       this.capabilities.vision =
@@ -974,7 +985,7 @@ export class CodexSession extends BaseSession {
       if (branch) registerCodexFork(this.threadId, branch.threadId)
       this.status('idle')
       if (this.effort !== undefined)
-        await this.client.request('thread/settings/update', {
+        await this.wire.request('thread/settings/update', {
           threadId: this.threadId,
           effort: this.effort
         })
@@ -987,6 +998,172 @@ export class CodexSession extends BaseSession {
       }
       throw error
     }
+  }
+
+  /**
+   * The per-thread envelope every `thread/start`, `thread/resume` and
+   * `thread/fork` carries.
+   *
+   * Rebuilt per call from the CURRENT mode and model rather than captured at
+   * start, because a re-pin resumes the thread on another host and must not
+   * reopen it under the policy or the model it had when it first opened
+   * (`setPermissionMode` and `thread/settings/update` both move these).
+   */
+  private threadParams(): {
+    cwd: string
+    model?: string
+    approvalPolicy: CodexModePolicy['approvalPolicy']
+    sandbox: CodexModePolicy['sandbox']
+    approvalsReviewer: CodexModePolicy['approvalsReviewer']
+    config?: { mcp_servers: Record<string, CodexMcpServerEntry> }
+  } {
+    // The thread BASELINE must agree with the per-turn override, so a turn that
+    // somehow starts without one (native queue, a future steer path) still runs
+    // under this mode's policy rather than the user's config.
+    const { approvalPolicy, sandbox, approvalsReviewer } = this.modePolicy()
+    return {
+      cwd: this.cwd,
+      ...(this.model !== undefined ? { model: this.model } : {}),
+      approvalPolicy,
+      sandbox,
+      approvalsReviewer,
+      // Absent, not empty: an empty table is still an override, and the no-MCP
+      // user must reach the binary exactly as before ADR-068 §5.
+      ...(this.mcpServers && Object.keys(this.mcpServers).length > 0
+        ? { config: { mcp_servers: this.mcpServers } }
+        : {})
+    }
+  }
+
+  /**
+   * Attach to the host for one ChatGPT identity (ADR-069 §1/§2).
+   *
+   * The LEASE is dropped immediately: `attach` retains the host for as long as
+   * this session is on it, and holding a read lease as well would only mean two
+   * counters saying the same thing. A session with no auth hook asks for no
+   * identity at all, which is the uninjected host and the one path that never
+   * reads the vault.
+   */
+  private async attachHost(accountId: string | null): Promise<void> {
+    const handle = await this.hosts.acquire({
+      ...this.hostTransport,
+      cwd: this.cwd,
+      label: 'session',
+      ...(this.auth ? { identity: { accountId } } : {})
+    })
+    // A host start is the one await in this session's life that outlives a
+    // `dispose()` with nothing to cancel it: `disconnected()` detaches a
+    // connection that does not exist yet, and attaching afterwards would retain
+    // the host for a session nobody can reach — forever, since only a detach
+    // ever releases it — and let `start()` go on to open a native thread that is
+    // never claimed and never unsubscribed.
+    if (this.closed) {
+      handle.release()
+      throw new Error('Codex session is disconnected')
+    }
+    try {
+      this.connection = handle.host.attach(this.owner)
+    } finally {
+      handle.release()
+    }
+    this.hostAccountId = accountId
+    this.generation = this.connection.generation
+    // Null when nothing was injected: the process runs on Codex's own login and
+    // the account is derived from `account/read` exactly as before ADR-069.
+    this.injectedAccountId = this.connection.injectedAccountId
+  }
+
+  /** Whose subscription this session bills, for the status line and usage rows. */
+  private async readAccount(): Promise<void> {
+    const account = (await this.wire.request('account/read', { refreshToken: false })).account
+    if (this.closed) return
+    if (this.injectedAccountId) {
+      // An injected process IS the vault's subscription, whatever `account/read`
+      // makes of the token: the email it reports is parsed from the very JWT we
+      // sent. `accountId` is the VAULT account id, which is what usage rows and
+      // the per-session pin attribute to.
+      this.account = {
+        engineId: 'codex',
+        vendorId: 'openai',
+        authState: 'authenticated',
+        billingType: 'subscription',
+        ...(account?.type === 'chatgpt' && account.email ? { label: account.email } : {}),
+        accountId: this.injectedAccountId
+      }
+    } else if (account?.type === 'chatgpt' || account?.type === 'apiKey')
+      this.account = {
+        engineId: 'codex',
+        vendorId: 'openai',
+        authState: 'authenticated',
+        billingType: account.type === 'chatgpt' ? 'subscription' : 'apiKey'
+      }
+  }
+
+  /**
+   * Put this session's EXISTING thread on the host for `accountId`.
+   *
+   * `thread/resume` rather than a re-injection: one process holds one ChatGPT
+   * identity (ADR-068 §1) and it is shared now, so re-pointing it would move
+   * every other session on it too. The thread's own history is on disk, and a
+   * resume is what carries it across — the same move a `disconnected` session
+   * makes on its next prompt.
+   */
+  private async takeThread(accountId: string | null): Promise<void> {
+    await this.attachHost(accountId)
+    if (!this.threadId) return
+    const response = await this.wire.request('thread/resume', {
+      ...this.threadParams(),
+      threadId: this.threadId
+    })
+    if (response.thread.id !== this.threadId)
+      throw new Error('Codex resumed a different native thread')
+    this.wire.claim(this.threadId)
+  }
+
+  /**
+   * Leave the host this session is on, interrupting anything still running.
+   *
+   * A thread stays LOADED in the process that opened it until the binary unloads
+   * it (60 s after its last subscriber leaves,
+   * `app-server/src/request_processors/thread_lifecycle.rs`), and a loaded
+   * thread's writer lock is what refuses every other process's `thread/resume`
+   * with `-32600 already has an active writer` (upstream's own
+   * `thread_resume.rs` test). So a host this session has just vacated and that
+   * nobody else is using is closed HERE rather than left to idle out: its lock
+   * is exactly what would refuse the resume on the next host.
+   */
+  private async leaveHost(): Promise<void> {
+    const connection = this.connection
+    if (!connection) return
+    const turnId = this.turnId
+    if (this.threadId && turnId)
+      await connection
+        .request('turn/interrupt', { threadId: this.threadId, turnId })
+        .catch(() => {})
+    // Everything scoped to the host being left goes with it. A parked approval,
+    // a guardian override and an outstanding hosted call all carry ids minted
+    // under the OLD host generation, and the server requests behind them died
+    // with the connection — answering one against the new host would apply a
+    // human's verdict to a review nobody is waiting for any more. Same duties
+    // `disconnected()` performs, for the same reason, one host earlier.
+    this.failUnresolvedHostedCalls(INTERRUPTED_HOSTED_TOOL, turnId)
+    for (const pending of [...this.pending.values()]) pending.settle()
+    this.clearGuardianOverrides()
+    this.heldDenials.clear()
+    this.connection = null
+    this.turnId = null
+    connection.detach()
+    // The thread stays LOADED in that process until the binary unloads it (60 s
+    // after its last subscriber leaves), and a loaded thread's writer lock
+    // refuses every other process's `thread/resume` (`-32600 already has an
+    // active writer`, upstream's own `thread_resume.rs`). So the vacated host is
+    // closed now rather than left to idle — unless another OWNER is on it, which
+    // `applyPin` refuses before it gets this far. READ leases are deliberately
+    // not consulted: a read that loses its host fails once and the next one
+    // starts a fresh one, which is ADR-069 §5's designed behaviour, and waiting
+    // for the 30-second sidebar poll's lease to drop would make a re-pin fail at
+    // random.
+    if (!connection.host.owners) connection.host.close('host-vacated')
   }
 
   private effortOptions(): Array<{ value: string; description: string }> {
@@ -1049,7 +1226,7 @@ export class CodexSession extends BaseSession {
     this.clearInactivityTimer()
     this.status('running')
     try {
-      await this.client.request('thread/settings/update', {
+      await this.wire.request('thread/settings/update', {
         threadId: this.threadId!,
         ...settings
       })
@@ -1136,14 +1313,55 @@ export class CodexSession extends BaseSession {
     }
     await this.starting
     if (this.closed) throw new Error('Codex session is disconnected')
-    await this.persistPin(accountId)
     if (this.busy || this.sending) {
+      // The move happens at the next turn boundary, where `applyPendingPin`
+      // makes the same refusal check — by then another session may have come or
+      // gone, so asking now would answer for the wrong moment.
+      await this.persistPin(accountId)
       this.pendingAccountId = accountId
       this.status('running')
       return
     }
+    // Refused BEFORE anything is written: a pin that cannot be applied must not
+    // be left in the overrides row, where it would say the session runs on an
+    // account it does not.
+    const target = await this.planPin(accountId).catch((error: unknown) => {
+      this.send('session:error', error instanceof Error ? error.message : PIN_BLOCKED)
+      throw error
+    })
+    try {
+      await this.persistPin(accountId)
+    } catch (error) {
+      target.release()
+      throw error
+    }
     this.pendingAccountId = undefined
-    await this.applyPin(accountId)
+    await this.applyPin(accountId, target)
+  }
+
+  /**
+   * Acquire the host this pin wants and decide whether the thread may move.
+   *
+   * It may not while another SESSION is attached to the host being left: the
+   * thread's writer lock is released only when the process holding it exits or
+   * unloads the thread (about a minute after its last subscriber leaves), and
+   * closing a host other sessions are working on to make one pin land is not a
+   * trade anyone would choose. Migrating those sessions with it is ADR-069 §4's
+   * recycle, which is H3.
+   */
+  private async planPin(accountId: string | null): Promise<CodexHostHandle> {
+    const target = await this.hosts.acquire({
+      ...this.hostTransport,
+      cwd: this.cwd,
+      label: 'session',
+      identity: { accountId }
+    })
+    const current = this.connection?.host
+    if (current && target.host !== current && current.owners > 1) {
+      target.release()
+      throw new Error(PIN_BLOCKED)
+    }
+    return target
   }
 
   /** Write the pin into the overrides row beside model and effort. */
@@ -1158,27 +1376,54 @@ export class CodexSession extends BaseSession {
   }
 
   /**
-   * Re-point the live process and refresh the attribution. A native refusal
-   * (a managed workspace policy) propagates with its own message and leaves the
-   * process on the identity it already had — never a silent substitution.
+   * Move this session onto the host for `accountId` and refresh the attribution
+   * (ADR-069 §2/§4).
+   *
+   * Before ADR-069 this was one `account/login/start` on the session's OWN
+   * process. A host is shared, so re-pointing its identity would move every
+   * other session on it: the move is now the THREAD's — interrupt, leave the old
+   * host, resume on the target's.
+   *
+   * Two hosts can be the same process (a session that follows the active account
+   * and one pinned to that same id land on one host), and that case must not
+   * churn a thread at all, so the target is acquired FIRST and compared.
+   *
+   * A refusal — a managed workspace policy, or a thread the previous host still
+   * holds the writer lock for — propagates with its own message after this
+   * session has been put back on the host it came from: never a silent
+   * substitution, and never a session left with no host at all. A move that
+   * cannot be made at all is refused by {@link planPin} before anything moves.
    */
-  private async applyPin(accountId: string | null): Promise<void> {
-    this.auth!.requestAccount(accountId)
-    const token = await this.client.injectAccount(this.auth!)
-    this.injectedAccountId = token?.vaultAccountId ?? null
+  private async applyPin(accountId: string | null, planned?: CodexHostHandle): Promise<void> {
+    if (!this.auth) return
+    const previous = this.hostAccountId
+    // `setAccount` has already planned (and refused) an idle move; the turn
+    // boundary has not, so it plans here and its refusal reaches the user
+    // through `applyPendingPin`'s own `session:error`.
+    const target = planned ?? (await this.planPin(accountId))
+    const sameHost = this.connection?.host === target.host
+    target.release()
+    if (sameHost) {
+      this.hostAccountId = accountId
+      this.injectedAccountId = this.connection!.injectedAccountId
+      await this.readAccount()
+      if (this.closed) return
+      this.status(this.busy ? 'running' : 'idle')
+      return
+    }
+    await this.leaveHost()
+    try {
+      await this.takeThread(accountId)
+    } catch (error) {
+      this.connection?.detach()
+      this.connection = null
+      await this.takeThread(previous).catch(() =>
+        this.disconnected(new CodexTransportError('host-move-failed'))
+      )
+      throw error
+    }
+    await this.readAccount()
     if (this.closed) return
-    const account = (await this.client.request('account/read', { refreshToken: false })).account
-    if (this.closed) return
-    this.account = this.injectedAccountId
-      ? {
-          engineId: 'codex',
-          vendorId: 'openai',
-          authState: 'authenticated',
-          billingType: 'subscription',
-          ...(account?.type === 'chatgpt' && account.email ? { label: account.email } : {}),
-          accountId: this.injectedAccountId
-        }
-      : this.account
     this.status(this.busy ? 'running' : 'idle')
   }
 
@@ -1217,16 +1462,9 @@ export class CodexSession extends BaseSession {
    */
   private async resolveSavedPin(): Promise<void> {
     const pin = this.overrides.accountId
-    if (!this.auth || typeof pin !== 'string') {
-      this.auth?.requestAccount(this.pinnedAccountId())
-      return
-    }
-    if (await this.auth.hasAccount(pin).catch(() => true)) {
-      this.auth.requestAccount(pin)
-      return
-    }
+    if (!this.auth || typeof pin !== 'string') return
+    if (await this.auth.hasAccount(pin).catch(() => true)) return
     delete this.overrides.accountId
-    this.auth.requestAccount(null)
     this.send(
       'session:error',
       'The pinned ChatGPT account was removed; this session now follows the active account.'
@@ -1278,7 +1516,7 @@ export class CodexSession extends BaseSession {
     if (this.threadId && this.turnId && !this.closed)
       try {
         this.interruptRequested = false
-        await this.client.request('turn/interrupt', {
+        await this.wire.request('turn/interrupt', {
           threadId: this.threadId,
           turnId: this.turnId
         })
@@ -1291,10 +1529,24 @@ export class CodexSession extends BaseSession {
   cancel(): void {
     this.dispose()
   }
+  /**
+   * Tear this session down. The PROCESS survives it (ADR-069 §2): what used to
+   * be a kill is now an interrupt and a detach.
+   *
+   * The interrupt goes first and is fire-and-forget — `dispose()` is synchronous
+   * on every caller's side and a turn left running on a shared host would keep
+   * spending on a thread nobody is watching. Its children go the same way: the
+   * app-server used to take them down with the process, and nothing else will.
+   */
   dispose(): void {
     if (this.closed) return
+    const connection = this.connection
+    const threadId = this.threadId
+    const turnId = this.turnId
+    if (connection && threadId && turnId)
+      void connection.request('turn/interrupt', { threadId, turnId }).catch(() => {})
+    this.interruptChildren()
     this.disconnected()
-    this.client.dispose()
   }
 
   private disconnected(error?: CodexTransportError): void {
@@ -1315,14 +1567,13 @@ export class CodexSession extends BaseSession {
     // connection gets a result, not a spinner. A teardown is the user's own
     // Stop / close; a transport error is not, and says so.
     this.failUnresolvedHostedCalls(error ? STOPPED_HOSTED_TOOL : INTERRUPTED_HOSTED_TOOL, turnId)
-    // The process that hosted them is going, so every child goes with it: the
-    // app-server owns every spawned thread in-process, and killing it kills
-    // them. Say so on each open card rather than leaving a spinner forever.
+    // Nothing is watching them any more: `dispose()` has already interrupted
+    // each one and detaching drops their notifications, and a host death took
+    // the whole process. Say so on each open card rather than leaving a spinner
+    // forever.
     for (const [childThreadId, child] of this.children)
       this.finishChild(childThreadId, child, 'stopped')
     this.children.clear()
-    this.childHold.clear()
-    this.heldChildCount = 0
     for (const pending of [...this.pending.values()]) pending.settle()
     this.clearGuardianOverrides()
     // Nothing can consume a dispatch result any more: stop the turns, then
@@ -1334,7 +1585,16 @@ export class CodexSession extends BaseSession {
     // Nothing held can ever run now: the engine that would have taken it is
     // gone. Say so (ADR-053) rather than leaving items pending forever.
     this.recallQueuedOnEngineLoss()
-    if (error && error.code !== 'disposed') this.send('session:error', error.message)
+    // `disposed` is this session's own teardown; `host-disposed` is app quit
+    // closing every host (`codexHostRegistry.dispose()`), which is the same
+    // thing one level up. Neither is news the user needs; every other code is a
+    // host that went away under a live session (ADR-045/ADR-069 §5).
+    if (error && error.code !== 'disposed' && error.code !== 'host-disposed')
+      this.send('session:error', error.message)
+    // Last, so the unsubscribes ride out after the cards are settled and after
+    // `closed` is set: a notification racing this cannot reopen anything.
+    this.connection?.detach()
+    this.connection = null
     this.status('disconnected')
   }
 
@@ -1345,8 +1605,10 @@ export class CodexSession extends BaseSession {
       const turnId = child.turnId
       if (!turnId) continue
       child.turnId = null
-      void this.client
-        .request('turn/interrupt', { threadId: childThreadId, turnId })
+      // `connection?`, not `wire`: this runs on the teardown path too, where a
+      // session that never finished starting has no connection to throw about.
+      void this.connection
+        ?.request('turn/interrupt', { threadId: childThreadId, turnId })
         .catch(() => {})
     }
   }
@@ -1409,10 +1671,10 @@ export class CodexSession extends BaseSession {
       return
     }
     if (!this.threadId) return
-    // Every thread this process creates is attached to this one connection, so
-    // a foreign `threadId` is either one of this root's own children or nothing
-    // to do with us. Children route into the subagent channels; the rest are
-    // still dropped, exactly as before.
+    // A foreign `threadId` reaching this session is one of its own CHILDREN: the
+    // host routes a thread only to the owner that claimed it, and `registerChild`
+    // is the only other place this session claims one (ADR-069 §2). A stranger's
+    // thread never arrives at all.
     if (value.threadId !== this.threadId) return this.childNotification(method, value)
     if (method === 'turn/started' && record(value.turn) && typeof value.turn.id === 'string') {
       if (this.endedTurns.has(value.turn.id)) return
@@ -1638,21 +1900,19 @@ export class CodexSession extends BaseSession {
    * `thread/fork` and detached review alone, never for a spawned agent
    * (`ServerNotification::ThreadStarted` has exactly three emit sites in
    * `app-server/src/request_processors/`). The child is already running by
-   * then, so anything it said in between is HELD and replayed on registration,
-   * the same shape the guardian denials use.
+   * then, so anything it said in between is held BY THE HOST and replayed the
+   * moment `registerChild` claims the thread — the hold moved there with
+   * ADR-069 §2, because on a shared process the host is the only layer that can
+   * see a notification for a thread no session has claimed yet.
+   *
+   * What reaches here is therefore always a thread this session claimed: its own
+   * children. A stranger's is dropped by the demultiplexer and never arrives.
    */
   private childNotification(method: string, value: Record<string, unknown>): void {
     const threadId = value.threadId
     if (typeof threadId !== 'string' || !this.threadId) return
     const child = this.children.get(threadId)
-    if (child) return this.routeChild(child, threadId, method, value)
-    // Hold only inside a live turn. Outside one there is no spawn in flight
-    // that could bind this thread, so holding would just be a leak.
-    if (!this.busy || this.heldChildCount >= CHILD_HOLD_LIMIT) return
-    const held = this.childHold.get(threadId) ?? []
-    held.push({ method, value })
-    this.childHold.set(threadId, held)
-    this.heldChildCount++
+    if (child) this.routeChild(child, threadId, method, value)
   }
 
   /** Bind one spawned thread to the card its transcript belongs under. */
@@ -1670,10 +1930,10 @@ export class CodexSession extends BaseSession {
       state: 'pendingInit'
     }
     this.children.set(childThreadId, child)
-    const held = this.childHold.get(childThreadId) ?? []
-    this.heldChildCount -= held.length
-    this.childHold.delete(childThreadId)
-    for (const entry of held) this.routeChild(child, childThreadId, entry.method, entry.value)
+    // Registered BEFORE the claim: the host replays what it held for this thread
+    // synchronously, and every one of those notifications routes through
+    // `childNotification`, which has to find the child already bound.
+    this.connection?.claim(childThreadId)
   }
 
   /** One known child's notification, on the engine-neutral subagent channels. */
@@ -1695,7 +1955,7 @@ export class CodexSession extends BaseSession {
       for (const item of turn.items ?? []) this.childItem(child, childThreadId, turn.id, item, true)
       if (child.turnId === turn.id) child.turnId = null
       // Nothing can answer a question from a turn that ended.
-      this.client.abortServerRequests(childThreadId, turn.id)
+      this.connection?.abortServerRequests(childThreadId, turn.id)
       for (const pending of [...this.pending.values()])
         if (pending.turnId === turn.id) pending.settle()
       // What this child will report on the next `wait` card, in the same
@@ -2008,7 +2268,7 @@ export class CodexSession extends BaseSession {
         turn.id
       )
     this.endedTurns.add(turn.id)
-    this.client.abortServerRequests(this.threadId, turn.id)
+    this.connection?.abortServerRequests(this.threadId, turn.id)
     for (const pending of [...this.pending.values()]) {
       if (pending.turnId === turn.id) pending.settle()
     }
@@ -2032,10 +2292,6 @@ export class CodexSession extends BaseSession {
       this.status('idle')
       this.resetInactivityTimer()
     }
-    // Nothing still unbound can ever be bound: a spawn's `item/completed` is
-    // what binds a child, and this turn's items are final.
-    this.childHold.clear()
-    this.heldChildCount = 0
     // Turn end is the other boundary, and the only place an ambiguous steer can
     // be settled: the turn's history is now final.
     this.queueBoundary(turn.id)
@@ -2448,24 +2704,6 @@ export class CodexSession extends BaseSession {
   }
 
   /**
-   * Answer `account/chatgptAuthTokens/refresh` (ADR-068 §1).
-   *
-   * Codex sends this after a 401, waits ten seconds, and abandons the turn if
-   * nothing comes back — so the hook answers from the vault's CACHED token
-   * unless it has genuinely expired. A rejection here becomes the transport's
-   * fixed JSON-RPC error (never our message: Codex refuses to log it because it
-   * "may contain a token"), and the hook's `onAuthRequired` has already put the
-   * one-line sign-in notice on the session.
-   *
-   * With no hook there is nothing to answer with: the process is running on
-   * Codex's own login, whose refresh Codex owns.
-   */
-  private async refreshInjectedToken(params: unknown): Promise<unknown> {
-    if (!this.auth) throw new Error('This Codex session holds no ClaudeUI-managed credential')
-    return this.auth.onRefreshRequest(params)
-  }
-
-  /**
    * Answer `mcpServer/elicitation/request` — the one gate an MCP tool call has
    * on this wire (Slice 4b, ADR-067's "Codex executes; ClaudeUI decides").
    *
@@ -2828,7 +3066,7 @@ export class CodexSession extends BaseSession {
       throw new Error('Stale or unoffered Codex approval decision')
     this.dismissGuardianOverride(requestId)
     if (decision !== 'allow' || !this.threadId) return
-    void this.client
+    void this.wire
       .request('thread/approveGuardianDeniedAction', {
         threadId: this.threadId,
         event: override.event

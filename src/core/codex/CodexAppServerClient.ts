@@ -93,6 +93,25 @@ export class CodexTransportError extends Error {
 }
 
 /**
+ * A handler saying "this connection does not serve that request" — answered on
+ * the wire with the SAME `-32601 Method not found` an unregistered method earns
+ * (see {@link CodexAppServerClient.serverRequest}), rather than the generic
+ * `-32603 Handler failed` every other rejection produces.
+ *
+ * One caller: the host's demultiplexer, when a server request names a thread no
+ * attached owner has claimed (ADR-069 §2). It must not be accepted silently —
+ * an approval nobody can answer has to look, to Codex, exactly like an approval
+ * method the client never registered, which is a shape the binary already
+ * handles (`fallback_response`, and "user rejected" for an MCP elicitation).
+ */
+export class CodexMethodNotFound extends Error {
+  constructor(message = 'Method not found') {
+    super(message)
+    this.name = 'CodexMethodNotFound'
+  }
+}
+
+/**
  * Failure codes that mean the CHILD went away rather than the client closing a
  * healthy connection. Only these are worth a log line; `disposed`, timeouts and
  * `rpc-error-*` are ordinary operation.
@@ -617,7 +636,14 @@ export class CodexAppServerClient {
       })
       .then(
         (result) => this.reply(id, request, { id, result: result ?? null }),
-        () => this.reply(id, request, { id, error: { code: -32603, message: 'Handler failed' } })
+        (error: unknown) =>
+          this.reply(
+            id,
+            request,
+            error instanceof CodexMethodNotFound
+              ? { id, error: { code: -32601, message: 'Method not found' } }
+              : { id, error: { code: -32603, message: 'Handler failed' } }
+          )
       )
   }
 

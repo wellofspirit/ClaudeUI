@@ -2,9 +2,9 @@ import { CodexClient } from './CodexClient'
 import { CodexTransportError, type CodexClientOptions } from './CodexAppServerClient'
 import {
   codexHostRegistry,
-  type CodexHostAcquireOptions,
   type CodexHostHandle,
-  type CodexHostIdentity
+  type CodexHostIdentity,
+  type CodexHostSource
 } from './CodexHost'
 import type { Account } from './protocol/v2/Account'
 import type { Config } from './protocol/v2/Config'
@@ -53,10 +53,9 @@ const initialize = {
   capabilities: { experimentalApi: true, requestAttestation: false }
 }
 
-/** The slice of {@link CodexHostRegistry} a service needs. A test fakes it. */
-export interface CodexHostSource {
-  acquire(options?: CodexHostAcquireOptions): Promise<CodexHostHandle>
-}
+// The registry slice a service asks for lives with the registry (ADR-069 §2:
+// sessions and the dispatch target ask for the same thing).
+export type { CodexHostSource }
 
 /**
  * What a service is built with. `identity` is the ChatGPT account its reads run
@@ -118,10 +117,11 @@ export class CodexService {
   }
 
   /** One lease on this service's host. The caller must `release()` it. */
-  private async acquire(identity = this.identity): Promise<CodexHostHandle> {
+  private async acquire(identity = this.identity, thread?: string): Promise<CodexHostHandle> {
     const handle = await this.registry.acquire({
       ...this.options,
-      ...(identity ? { identity } : {})
+      ...(identity ? { identity } : {}),
+      ...(thread ? { thread } : {})
     })
     if (this.disposed) {
       handle.release()
@@ -136,11 +136,15 @@ export class CodexService {
     handle.release()
   }
 
-  private async read<T>(operation: (host: CodexHostHandle) => Promise<T>): Promise<T> {
+  private async read<T>(
+    operation: (host: CodexHostHandle) => Promise<T>,
+    /** Run on the host that has this thread loaded, if one does (ADR-069 §3). */
+    thread?: string
+  ): Promise<T> {
     if (this.disposed) throw new CodexTransportError('disposed')
     let handle: CodexHostHandle | undefined
     try {
-      handle = await this.acquire()
+      handle = await this.acquire(this.identity, thread)
       return await operation(handle)
     } catch (error) {
       // Never propagate native payloads, config values or caller-supplied error
@@ -346,13 +350,19 @@ export class CodexService {
   }
 
   /**
-   * Native permanent deletion. Callers must stop the owning root process first;
-   * this service never resumes or owns the thread it deletes.
+   * Native permanent deletion, issued on the host that HOLDS the thread when one
+   * does (ADR-069 §3, probe P5).
+   *
+   * The writer lock is process-scoped: any other app-server on the home is
+   * refused `-32600`, while the holder may delete its own loaded thread, idle or
+   * mid-turn. So this never resumes or owns the thread — it borrows the process
+   * that already has it. With none, any host will do: an unloaded thread is a
+   * file on disk.
    */
   deleteThread(threadId: string): Promise<void> {
     return this.read(async (host) => {
       await host.request('thread/delete', { threadId })
-    })
+    }, threadId)
   }
 
   /** Native archive: hidden from the default listing, native data retained. */
