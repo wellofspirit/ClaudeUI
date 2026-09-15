@@ -1,6 +1,21 @@
 # Codex integration handoff
 
-## Resume here (ADR-068 arc — 2026-09-14)
+## Resume here (post-merge — 2026-09-15)
+
+PR #37 (`codex-integration → pre-release`) merged on 2026-09-14 at `80d71efc`; version 3.2.0. Follow-ups now land directly on `pre-release` (Daniel switched the checkout himself). F1 (server zips for macOS arm64 and Windows x64), F2 (no port 1455 bind for a headless PKCE sign-in) and F3 (SignInDialog after Cancel) landed and are pushed; kickoffs and Landed paragraphs are in `docs/codex-followups-spec.md`. The Build & Pre-Release run on `271f894d` is green and v3.2.0-pre.1 carries all six assets, so the new server legs are proven in CI. The merge commit's own run had failed only on the Windows `Run tests` step, fixed by `bfce2c7c`. Pushes to `pre-release` still need an explicit ask.
+
+### Rulings 2026-09-15
+
+- **`--disable-auth` web-client dead-end: ignore.** No `off` route for the browser client; the flag stays as documented for local tooling.
+- **Render loss: instrument, then stress.** Kickoffs F4 (projection audit at every turn end, warnings through the log relay, verifier snapshot fields) and F5 (a fixture-provider stress loop through the real app with no real spend) in `docs/codex-followups-spec.md`. This replaces the 2026-09-13 "track only" ruling.
+- **Same-engine dispatch stays refused for Codex.** Codex's native children cover it and already render as subagent transcripts. Daniel's reasoning: same-engine dispatch is only worth having where the native subagent path cannot pick a model per task. opencode and probably pi need an agent configured with a fixed model up front, so lifting the guard for opencode → opencode (and possibly pi → pi) is a candidate for later, not Codex → Codex. The ADR-068 "caller pin reaches the target" plumbing stays as is.
+- **Archive stays unused; interrupted hosted-tool calls stay absent from cold history.** Both confirmed as ruled on 2026-09-13.
+
+### Still open after this
+
+The pi typed auth error (`session:auth-required` on a rejected ChatGPT credential), the identifier scrub (Daniel's), the roadmap below (history mappers with the cross-harness survey → per-item volatile stream design → metering in the usage revamp → grandchildren), and the Orrery rename arc.
+
+## Resume here (ADR-068 arc — 2026-09-14, historical)
 
 **Start with `docs/adr/adr-068_chatgpt-identity-vault-owned-codex-injection.md` and `docs/codex-accounts-spec.md`.** The spec is the source of truth for this arc: every slice has a kickoff, and every landed slice has a "Landed …" paragraph recording the as-built deviations. Slices 1–7 are landed; ADR-068 is Implemented. PR #37 (`codex-integration → pre-release`) is open as of 2026-09-14; pushes to this branch carry standing authorization. Next: the merge checklist below, then the deferred items listed under "Open items". The older "Resume here" below is the pre-ADR-068 state and stays as history.
 
