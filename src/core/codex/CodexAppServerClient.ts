@@ -65,7 +65,18 @@ export class CodexTransportError extends Error {
      * yet" every time. Payload-free by construction (a number and a signal
      * name).
      */
-    private readonly exit?: CodexChildExit
+    private readonly exit?: CodexChildExit,
+    /**
+     * Which call site built the client that minted this error — `session`,
+     * `auth-probe`, `lineage-scan` — for the callers that log their own line
+     * rather than reading the transport's. `unlabelled` when the site named
+     * none; undefined on the errors `CodexService` and friends mint outside a
+     * transport.
+     *
+     * Payload-free by construction: {@link callerLabel} admits only a short
+     * bare identifier, so no path, account or user text can ride out here.
+     */
+    public readonly label?: string
   ) {
     super(`Codex transport: ${code}`)
   }
@@ -139,6 +150,25 @@ function hasCodexStateDb(home: string): boolean {
 }
 
 /**
+ * What a caller label may look like: a short bare identifier the CALL SITE
+ * chose, never anything derived from the user's machine or input.
+ *
+ * Narrow on purpose, like {@link nativeErrorCode}. The label is logged, and the
+ * transport's standing rule is that nothing with a path, an account, a token or
+ * user text reaches the main log. A value outside this shape is dropped rather
+ * than printed, so the rule holds even if a future call site passes the wrong
+ * thing.
+ */
+const LABEL_PATTERN = /^[a-z][a-z0-9-]{0,31}$/
+
+/** What an unnamed (or unprintable) caller reads as. Never throws. */
+const UNLABELLED = 'unlabelled'
+
+function callerLabel(label: string | undefined): string {
+  return label !== undefined && LABEL_PATTERN.test(label) ? label : UNLABELLED
+}
+
+/**
  * The variant name inside a JSON-RPC `error.data`, or undefined.
  *
  * Deliberately narrow: one known key, a string of at most 64 characters drawn
@@ -154,6 +184,15 @@ function nativeErrorCode(error: Record<string, unknown>): string | undefined {
 }
 export interface CodexClientOptions {
   cwd: string
+  /**
+   * Who is starting this app-server, as a bare identifier the call site picks
+   * (`session`, `auth-probe`, `rate-limits`, `discovery`, `lineage-scan`, …).
+   * About ten sites build a client and every one of their children looks alike
+   * in the log, so the spawn and death lines carry this to turn "an app-server
+   * died" into "the auth probe's app-server died". Never a path, an account or
+   * anything typed by the user — see {@link LABEL_PATTERN}.
+   */
+  label?: string
   /** Replaces inheritance when supplied; never merged with process.env. */
   env?: NodeJS.ProcessEnv
   requestTimeoutMs?: number
@@ -225,12 +264,39 @@ export class CodexAppServerClient {
 
   constructor(private readonly options: CodexClientOptions) {}
 
+  /** The call site's name for this client, or `unlabelled`. Safe to log. */
+  private get label(): string {
+    return callerLabel(this.options.label)
+  }
+
+  /**
+   * Every error this client mints, stamped with its caller label. Only that
+   * field is added: `message` and the payload-free arguments are unchanged, so
+   * nothing a caller reads today moves.
+   */
+  private error(
+    code: string,
+    ambiguousDelivery = false,
+    nativeMessage?: string,
+    nativeCode?: string,
+    exit?: CodexChildExit
+  ): CodexTransportError {
+    return new CodexTransportError(
+      code,
+      ambiguousDelivery,
+      nativeMessage,
+      nativeCode,
+      exit,
+      this.label
+    )
+  }
+
   async start(params: InitializeParams): Promise<InitializeResponse> {
-    if (this.state !== 'new') throw new CodexTransportError('one-shot-client')
+    if (this.state !== 'new') throw this.error('one-shot-client')
     this.state = 'starting'
     try {
       const binary = locateCodexBinary()
-      if (!binary) throw new CodexTransportError('binary-unavailable')
+      if (!binary) throw this.error('binary-unavailable')
       await this.checkVersion(binary)
       if (this.closedError) throw this.closedError
       await this.awaitFirstRun()
@@ -242,6 +308,14 @@ export class CodexAppServerClient {
         windowsHide: true
       })
       this.child = child
+      // One line per app-server this process starts, off unless asked for
+      // (`CLAUDE_UI_LOG=CodexAppServerClient`). It is what makes a later death
+      // line attributable to a caller and a moment, and it carries nothing a
+      // warn line would not: a label, a pid and the working directory.
+      logger.debug(
+        'CodexAppServerClient',
+        `app-server spawned: ${this.label} pid=${child.pid ?? 'unknown'} cwd=${this.options.cwd}`
+      )
       // Discarded unless the capture flag is set: a `data` listener puts the
       // stream in flowing mode, so it replaces `resume()` rather than joining it.
       this.capturing = process.env[STDERR_CAPTURE_ENV] === '1'
@@ -277,7 +351,7 @@ export class CodexAppServerClient {
         if (this.closedError) return
         // Node's exit precedes stdio closure. Only trailing responses/notifications
         // may be consumed now; inherited pipes must not retain the client forever.
-        this.closedError = new CodexTransportError('process-exited')
+        this.closedError = this.error('process-exited')
         this.state = 'draining'
         this.drainTimer = setTimeout(() => this.fail('process-exited'), 1000)
         for (const pending of this.pending.values()) clearTimeout(pending.timer)
@@ -296,7 +370,7 @@ export class CodexAppServerClient {
           (k) => typeof result[k] === 'string'
         )
       ) {
-        throw new CodexTransportError('invalid-initialize')
+        throw this.error('invalid-initialize')
       }
       if (this.closedError) throw this.closedError
       this.enqueue({ method: 'initialized' })
@@ -305,13 +379,13 @@ export class CodexAppServerClient {
       return result
     } catch (error) {
       this.fail(error instanceof CodexTransportError ? error.code : 'start-failed')
-      throw error instanceof CodexTransportError ? error : new CodexTransportError('start-failed')
+      throw error instanceof CodexTransportError ? error : this.error('start-failed')
     }
   }
 
   request<T = unknown>(method: string, params?: unknown): Promise<T> {
     if (this.state !== 'ready' || method === 'initialize' || method === 'initialized')
-      return Promise.reject(new CodexTransportError('not-ready'))
+      return Promise.reject(this.error('not-ready'))
     return this.sendRequest<T>(method, params)
   }
 
@@ -351,7 +425,7 @@ export class CodexAppServerClient {
         // teardown mid-probe already carries the real reason (`disposed`,
         // `spawn-failed`, …). Minting `version-check-failed` here would
         // overwrite it and tell `start()`'s caller the wrong thing.
-        else reject(this.closedError ?? new CodexTransportError('version-check-failed'))
+        else reject(this.closedError ?? this.error('version-check-failed'))
       }
       const timer = setTimeout(() => finish(false), this.options.requestTimeoutMs ?? 15000)
       this.stopVersion = () => finish(false)
@@ -372,7 +446,7 @@ export class CodexAppServerClient {
 
   private sendRequest<T>(method: string, params: unknown): Promise<T> {
     if (this.pending.size >= (this.options.maxPendingRequests ?? 128))
-      return Promise.reject(new CodexTransportError('request-limit'))
+      return Promise.reject(this.error('request-limit'))
     const id = this.nextId++
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -380,7 +454,7 @@ export class CodexAppServerClient {
         if (!request) return
         this.pending.delete(id)
         this.removeQueued(id)
-        reject(new CodexTransportError('request-timeout', request.sent))
+        reject(this.error('request-timeout', request.sent))
       }, this.options.requestTimeoutMs ?? 30000)
       this.pending.set(id, {
         resolve: resolve as (value: unknown) => void,
@@ -393,7 +467,7 @@ export class CodexAppServerClient {
       } catch {
         clearTimeout(timer)
         this.pending.delete(id)
-        reject(new CodexTransportError('queue-limit-or-serialization'))
+        reject(this.error('queue-limit-or-serialization'))
       }
     })
   }
@@ -407,7 +481,7 @@ export class CodexAppServerClient {
       this.queuedBytes + bytes > (this.options.maxQueuedBytes ?? 8 * 1024 * 1024) ||
       this.queue.length >= 256
     ) {
-      throw new CodexTransportError('queue-limit')
+      throw this.error('queue-limit')
     }
     this.queue.push({ text, bytes, id, serverId })
     this.queuedBytes += bytes
@@ -499,7 +573,7 @@ export class CodexAppServerClient {
         clearTimeout(request.timer)
         if ('error' in message)
           request.reject(
-            new CodexTransportError(
+            this.error(
               `rpc-error-${(message.error as { code: number }).code}`,
               false,
               (message.error as { message: string }).message,
@@ -570,7 +644,7 @@ export class CodexAppServerClient {
   private fail(code: string): void {
     if (this.isClosed()) return
     const draining = this.state === 'draining'
-    this.closedError ??= new CodexTransportError(code, false, undefined, undefined, this.exit)
+    this.closedError ??= this.error(code, false, undefined, undefined, this.exit)
     code = this.closedError.code
     this.state = 'closed'
     clearTimeout(this.drainTimer)
@@ -579,7 +653,7 @@ export class CodexAppServerClient {
     this.releaseFirstRun()
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer)
-      pending.reject(new CodexTransportError(code, pending.sent, undefined, undefined, this.exit))
+      pending.reject(this.error(code, pending.sent, undefined, undefined, this.exit))
     }
     this.pending.clear()
     for (const id of this.incoming.keys()) this.abortIncoming(id)
@@ -683,7 +757,7 @@ export class CodexAppServerClient {
       : 'exit=still running'
     logger.warn(
       'CodexAppServerClient',
-      `app-server closed: ${failure} pid=${this.child?.pid ?? 'unknown'} ${exit} ` +
+      `app-server closed: ${failure} label=${this.label} pid=${this.child?.pid ?? 'unknown'} ${exit} ` +
         `ready=${this.reachedReady} cwd=${this.options.cwd}` +
         (this.stderrPath ? ` stderr=${this.stderrPath}` : '')
     )

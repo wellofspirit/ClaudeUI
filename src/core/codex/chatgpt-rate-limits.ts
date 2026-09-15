@@ -201,7 +201,11 @@ export const chatgptRateLimits = new ChatgptRateLimitStore({
     // One service, one process, disposed as soon as the sweep ends. Built here
     // rather than held as a singleton because a read is rare (panel open or
     // Refresh) and an idle app-server child is not worth keeping alive.
-    const service = new CodexService({ cwd: homedir(), auth: codexAuthHook() })
+    const service = new CodexService({
+      cwd: homedir(),
+      auth: codexAuthHook(),
+      label: 'rate-limits'
+    })
     try {
       return await service.rateLimits(accountIds)
     } finally {

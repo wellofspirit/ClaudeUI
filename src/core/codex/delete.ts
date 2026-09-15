@@ -184,7 +184,7 @@ export async function deleteCodexThread(
   options: CodexDeleteOptions = { cwd: homedir() }
 ): Promise<void> {
   assertCodexInstalled()
-  const service = new CodexService(options)
+  const service = new CodexService({ ...options, label: 'delete' })
   try {
     await service.deleteThread(threadId)
   } finally {
@@ -280,7 +280,8 @@ export async function deleteCodexSubtree(
   const retryWindow = options.retryWindowMs ?? STOPPED_HOLDER_RETRY_MS
   const interval = options.retryIntervalMs ?? STOPPED_HOLDER_RETRY_INTERVAL_MS
   const service =
-    options.service ?? new CodexService({ cwd: options.cwd ?? homedir(), env: options.env })
+    options.service ??
+    new CodexService({ cwd: options.cwd ?? homedir(), env: options.env, label: 'delete' })
   const deleted = new Set<string>()
   const remaining = (candidate: CodexDeletePlan): string[] =>
     candidate.order.filter((threadId) => !deleted.has(threadId))

@@ -73,7 +73,7 @@ function build(deps: CodexConfigDeps): {
       // not resolve a project `.codex/` layer between a working directory and a
       // repo root — that layer is not ours to write and would change what
       // `effective` shows depending on which session happened to be open.
-      new CodexService({ cwd: homedir() })
+      new CodexService({ cwd: homedir(), label: 'config' })
   return { service }
 }
 

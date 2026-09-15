@@ -57,7 +57,7 @@ const initialize = {
  */
 export type CodexServiceOptions = Pick<
   CodexClientOptions,
-  'cwd' | 'env' | 'requestTimeoutMs' | 'killGraceMs'
+  'cwd' | 'env' | 'requestTimeoutMs' | 'killGraceMs' | 'label'
 > & { auth?: CodexAuthHook | null }
 
 /** Host-only, bounded read clients. Never starts/resumes/forks a thread or owns a root. */
@@ -71,7 +71,7 @@ export class CodexService {
 
   private readonly options: Pick<
     CodexClientOptions,
-    'cwd' | 'env' | 'requestTimeoutMs' | 'killGraceMs'
+    'cwd' | 'env' | 'requestTimeoutMs' | 'killGraceMs' | 'label'
   >
   private readonly auth: CodexAuthHook | null
 

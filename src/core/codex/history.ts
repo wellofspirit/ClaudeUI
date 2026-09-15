@@ -251,7 +251,7 @@ export async function scanCodexLineage(
   mode: CodexScanMode = 'changed'
 ): Promise<CodexLineageScan> {
   if (!tuning.service && !locateCodexBinary()) return { read: 0, learned: 0 }
-  const service = tuning.service ?? new CodexService(options)
+  const service = tuning.service ?? new CodexService({ ...options, label: 'lineage-scan' })
   try {
     return await refreshCodexLineage(service, await service.listAllThreads(), mode, tuning)
   } finally {
@@ -326,7 +326,7 @@ export async function listCodexSessions(
   tuning: CodexReadTuning = {}
 ): Promise<SessionInfo[]> {
   if (!codexBinaryAvailable()) return []
-  const service = tuning.service ?? new CodexService(options)
+  const service = tuning.service ?? new CodexService({ ...options, label: 'history-list' })
   try {
     const listed = await service.listAllThreads()
     const sessions = listed.filter(listable).map(adoptThread)
@@ -368,7 +368,7 @@ export async function resolveCodexForkAnchor(
 ): Promise<ForkAnchorResult> {
   const turnId = codexTurnId(messageId)
   if (!turnId) return { anchorUuid: null, reason: 'not-a-codex-message' }
-  const service = new CodexService(options)
+  const service = new CodexService({ ...options, label: 'history-read' })
   try {
     const thread = await service.history(threadId)
     const turn = thread.turns.find((entry) => entry.id === turnId)
@@ -412,7 +412,7 @@ export async function loadCodexHistory(
   options: CodexReadOptions = { cwd: homedir() },
   throughTurnId?: string
 ): Promise<SessionHistoryResult> {
-  const service = new CodexService(options)
+  const service = new CodexService({ ...options, label: 'history-read' })
   /** Child thread id → the parent `collabAgentToolCall` tool_use it renders under. */
   const childCards = new Map<string, string>()
   try {

@@ -58,6 +58,7 @@ let client: CodexAppServerClient
 let writes: Record<string, unknown>[]
 let disconnect: ReturnType<typeof vi.fn<(error: Error) => void>>
 let warn: MockInstance<typeof logger.warn>
+let debug: MockInstance<typeof logger.debug>
 const ticks = async (): Promise<void> => {
   for (let i = 0; i < 8; i++) await Promise.resolve()
 }
@@ -101,6 +102,9 @@ beforeEach(() => {
   // Silenced as well as observed: a death line would otherwise print, and
   // append to the shared vitest log dir, once per teardown in this file.
   warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+  // The spawn line is a debug line; silenced for the same reason, and observed
+  // by the caller-label guards below.
+  debug = vi.spyOn(logger, 'debug').mockImplementation(() => {})
   app.stdin.on('data', (chunk) => writes.push(JSON.parse(chunk.toString())))
   mocks.locate.mockReturnValue('/vendor/codex')
   mocks.spawn.mockReset().mockImplementation((command, args) => {
@@ -917,5 +921,75 @@ describe('first app-server on a Codex home with no state database', () => {
     answerInitialize(apps[1])
     await expect(first.ready).resolves.toBeTruthy()
     await expect(second.ready).resolves.toBeTruthy()
+  })
+})
+
+/**
+ * F9. About ten call sites build a client, and every app-server they start
+ * looks alike in the log. Each one names itself, so a death line says WHOSE
+ * app-server died.
+ */
+describe('caller label on every app-server spawn', () => {
+  /** The transport error a pending request rejected with. */
+  const rejection = (promise: Promise<unknown>): Promise<CodexTransportError> =>
+    promise.then(
+      () => {
+        throw new Error('expected the request to reject')
+      },
+      (error: CodexTransportError) => error
+    )
+  /**
+   * Kill the child the way a dying app-server does — EOF on stdout, then the
+   * exit the death line waits for — and hand back the rejected transport error.
+   */
+  const die = async (): Promise<CodexTransportError> => {
+    const failed = rejection(client.request('never-answered'))
+    app.stdout.end()
+    await vi.advanceTimersByTimeAsync(0)
+    app.emit('exit', 1, null)
+    return failed
+  }
+  const spawnLines = (): string[] =>
+    debug.mock.calls
+      .filter(
+        ([source, line]) =>
+          source === 'CodexAppServerClient' && line.startsWith('app-server spawned:')
+      )
+      .map(([, line]) => line)
+
+  it('logs one spawn line per start, naming the caller', async () => {
+    await start({ label: 'auth-probe' })
+    expect(spawnLines()).toEqual(['app-server spawned: auth-probe pid=45678 cwd=/isolated'])
+  })
+
+  it('names the caller in the death line and on the transport error', async () => {
+    await start({ label: 'lineage-scan' })
+    const error = await die()
+    expect(error.label).toBe('lineage-scan')
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0][1]).toContain('label=lineage-scan')
+  })
+
+  it('reads unlabelled on the death line and the error when the site named nobody', async () => {
+    await start()
+    const error = await die()
+    expect(error.label).toBe('unlabelled')
+    expect(warn.mock.calls[0][1]).toContain('label=unlabelled')
+  })
+
+  it('reads unlabelled on the spawn line when the site named nobody', async () => {
+    await start()
+    expect(spawnLines()).toEqual(['app-server spawned: unlabelled pid=45678 cwd=/isolated'])
+  })
+
+  it('drops a label that is not a bare identifier rather than logging it', async () => {
+    // The label reaches the log, so it may never carry a path, an account or
+    // anything else the user typed — whatever a future call site passes.
+    await start({ label: '/Users/someone/.codex' })
+    expect(spawnLines()).toEqual(['app-server spawned: unlabelled pid=45678 cwd=/isolated'])
+    const error = await die()
+    expect(error.label).toBe('unlabelled')
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('someone')
+    expect(JSON.stringify(debug.mock.calls)).not.toContain('someone')
   })
 })

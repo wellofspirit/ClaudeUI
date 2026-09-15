@@ -20,7 +20,11 @@ import { credentialSync } from './vault/CredentialSync'
  */
 export class CodexAuthProvider implements EngineAuthProvider {
   constructor(
-    private readonly service = new CodexService({ cwd: homedir(), auth: codexAuthHook() }),
+    private readonly service = new CodexService({
+      cwd: homedir(),
+      auth: codexAuthHook(),
+      label: 'auth-probe'
+    }),
     private readonly vault: Pick<typeof credentialSync, 'getStatus'> = credentialSync
   ) {}
 

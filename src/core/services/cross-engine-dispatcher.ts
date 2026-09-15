@@ -368,7 +368,7 @@ const CODEX_TARGET_SERVER_METHODS = [
  */
 export type CodexTargetSpawnOpts = Pick<
   CodexClientOptions,
-  'cwd' | 'serverMethods' | 'onNotification' | 'onServerRequest' | 'onDisconnect'
+  'cwd' | 'label' | 'serverMethods' | 'onNotification' | 'onServerRequest' | 'onDisconnect'
 >
 
 /**
@@ -4347,6 +4347,7 @@ export class CrossEngineDispatcher {
 
     entry.client = await this.spawnCodexTarget({
       cwd: ctx.cwd,
+      label: 'dispatch-target',
       serverMethods: CODEX_TARGET_SERVER_METHODS,
       onNotification: (method, params) => this.handleCodexTargetNotification(entry, method, params),
       onServerRequest: (method, params, context) =>

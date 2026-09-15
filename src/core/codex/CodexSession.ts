@@ -567,6 +567,7 @@ export class CodexSession extends BaseSession {
     this.client = createClient({
       ...clientTransport,
       cwd,
+      label: 'session',
       serverMethods,
       onNotification: (method, params) => this.notification(method, params),
       onServerRequest: (method, params, context) =>
