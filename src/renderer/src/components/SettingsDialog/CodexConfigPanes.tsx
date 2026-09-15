@@ -629,7 +629,15 @@ export function CodexSandboxSection(): React.JSX.Element {
         testid={`${PANE}.explain`}
         dataId="sandbox"
         dimmed
-        description="These tune Codex's workspace-write sandbox. Which sandbox a turn runs under is the session's permission mode, not a setting here."
+        description={
+          "These tune Codex's workspace-write sandbox. Which sandbox a turn runs under is the session's permission mode, not a setting here." +
+          // Verified live on 2026-09-14 (docs/architecture/codex.md, transport
+          // section): 0.154.0 has no Windows sandbox, so exec_policy prompts for
+          // every command and Auto routes each prompt to Codex's reviewer.
+          (windows
+            ? ' On Windows this Codex version ships no sandbox: commands run unsandboxed, and Auto sends every command through Codex’s reviewer instead.'
+            : '')
+        }
       />
       <BoolRow
         api={api}

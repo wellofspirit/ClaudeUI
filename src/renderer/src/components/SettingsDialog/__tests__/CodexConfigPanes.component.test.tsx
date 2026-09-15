@@ -525,6 +525,15 @@ describe('the shared config object', () => {
 
 // ── 6: Windows-only rows ────────────────────────────────────────────────────
 
+/** The dimmed explain row of a section, by its data-id. */
+function explainFor(dataId: string): HTMLElement {
+  const row = screen
+    .getAllByTestId('CodexConfigPane.explain')
+    .find((el) => el.getAttribute('data-id') === dataId)
+  expect(row, `no CodexConfigPane.explain for ${dataId}`).toBeTruthy()
+  return row as HTMLElement
+}
+
 describe('platform gating', () => {
   it('hides the Windows sandbox rows off Windows and shows them on it', async () => {
     await renderPane(<CodexSandboxSection />)
@@ -533,6 +542,8 @@ describe('platform gating', () => {
         .getAllByTestId('CodexConfigPane.row')
         .some((row) => row.getAttribute('data-id') === 'windows.sandbox')
     ).toBe(false)
+    // Off Windows the explain row makes no no-sandbox claim.
+    expect(explainFor('sandbox').textContent).not.toMatch(/ships no sandbox/)
 
     cleanup()
     resetCodexConfigStore()
@@ -540,6 +551,11 @@ describe('platform gating', () => {
     await renderPane(<CodexSandboxSection />)
     expect(rowFor('windows.sandbox')).toBeTruthy()
     expect(toggleFor('windows.sandbox_private_desktop')).toBeTruthy()
+    // On Windows it says what a live turn shows: no sandbox, Auto goes through
+    // Codex's reviewer for every command (docs/architecture/codex.md).
+    expect(explainFor('sandbox').textContent).toMatch(
+      /ships no sandbox: commands run unsandboxed, and Auto sends every command through Codex’s reviewer/
+    )
   })
 })
 
