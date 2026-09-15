@@ -47,13 +47,13 @@ import {
   statSync,
   writeFileSync
 } from 'node:fs'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { ClaudePermissions } from '../../shared/types'
 import type { CodexRulesStatus } from '../../shared/codex-types'
 import { parseClaudeRule } from '../opencode/permission-compiler'
 import { loadClaudePermissions } from '../services/claude-settings'
 import { logger } from '../services/logger'
+import { resolveCodexHome } from './codex-home'
 import { codexBinaryAvailable } from './codex-locate'
 import { splitShellWords } from './command-text'
 
@@ -241,12 +241,9 @@ export function armCodexRulesSync(): void {
   defaultHomeArmed = true
 }
 
-/** `$CODEX_HOME` when set and non-empty, else `~/.codex` — Codex's own rule
- *  (`codex-rs/utils/home-dir/src/lib.rs` `find_codex_home`). */
-export function resolveCodexHome(): string {
-  const fromEnv = process.env.CODEX_HOME
-  return fromEnv && fromEnv.length > 0 ? fromEnv : join(homedir(), '.codex')
-}
+/** Defined in `codex-home.ts` (the transport needs it without this module's
+ *  compiler dependencies); re-exported here for this module's existing callers. */
+export { resolveCodexHome }
 
 /** The `# source-hash:` recorded in an existing file, or null. */
 function recordedHash(path: string): string | null {

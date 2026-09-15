@@ -1,9 +1,27 @@
 // @vitest-environment node
 import { EventEmitter } from 'node:events'
-import { existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type MockInstance
+} from 'vitest'
 import {
   CodexAppServerClient,
   type CodexClientOptions,
@@ -58,7 +76,21 @@ async function start(options: Partial<CodexClientOptions> = {}): Promise<void> {
   await promise
   expect(writes[1]).toEqual({ method: 'initialized' })
 }
+/**
+ * Every client resolves a Codex home, because the first-run gate reads that
+ * directory before it spawns. Point the whole file at a scratch home that
+ * already holds a state database: no test touches the developer's real
+ * `~/.codex`, and no test outside the gate's own block takes the gate.
+ */
+const initialisedHome = mkdtempSync(join(tmpdir(), 'codex-client-home-'))
+writeFileSync(join(initialisedHome, 'state_5.sqlite'), '')
+const savedCodexHome = process.env.CODEX_HOME
+afterAll(() => {
+  rmSync(initialisedHome, { recursive: true, force: true })
+})
+
 beforeEach(() => {
+  process.env.CODEX_HOME = initialisedHome
   vi.stubGlobal('process', { ...process, platform: 'darwin' })
   vi.useFakeTimers()
   vi.spyOn(process, 'kill').mockImplementation(() => true)
@@ -77,6 +109,8 @@ beforeEach(() => {
   })
 })
 afterEach(() => {
+  if (savedCodexHome === undefined) delete process.env.CODEX_HOME
+  else process.env.CODEX_HOME = savedCodexHome
   client?.dispose()
   vi.runOnlyPendingTimers()
   vi.useRealTimers()
@@ -710,5 +744,178 @@ describe('app-server death reporting', () => {
     } finally {
       if (saved !== undefined) process.env.CLAUDEUI_CODEX_STDERR = saved
     }
+  })
+})
+
+/**
+ * F8. Codex creates its sqlite state runtime on the FIRST app-server start in a
+ * home; a second one racing it exits 1 (`failed to initialize sqlite state
+ * runtime under <home>`). ClaudeUI's boot starts three within milliseconds, so
+ * the transport serialises the first start per home.
+ */
+describe('first app-server on a Codex home with no state database', () => {
+  const homes: string[] = []
+  const clients: CodexAppServerClient[] = []
+  let apps: Child[]
+  let versions: Child[]
+
+  const makeHome = (initialised: boolean): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'codex-first-run-'))
+    homes.push(dir)
+    // The versioned state database an initialised home holds — its presence is
+    // the whole signal, its content is never read.
+    if (initialised) writeFileSync(join(dir, 'state_5.sqlite'), '')
+    return dir
+  }
+
+  /**
+   * Start a client on `home` and answer its `codex --version` probe, which
+   * `start()` spawns synchronously, before it consults the gate.
+   */
+  const startOn = (home: string): { client: CodexAppServerClient; ready: Promise<unknown> } => {
+    const client = new CodexAppServerClient({ cwd: '/isolated', env: { CODEX_HOME: home } })
+    clients.push(client)
+    const ready = client.start(init)
+    // Teardown rejects whatever is still pending; that must not surface as an
+    // unhandled rejection in a test that never awaited it.
+    ready.catch(() => {})
+    const probe = versions[versions.length - 1]
+    probe.stdout.write('codex-cli 0.154.0\n')
+    probe.emit('close', 0)
+    return { client, ready }
+  }
+
+  const answerInitialize = (child: Child): void => {
+    child.stdout.write(JSON.stringify({ id: 0, result: initialized }) + '\n')
+  }
+
+  beforeEach(() => {
+    apps = []
+    versions = []
+    // One fresh child per spawn: these tests run several app-servers at once.
+    mocks.spawn.mockReset().mockImplementation((command: string, args: string[]) => {
+      if (command === 'taskkill') return new Child()
+      const child = new Child()
+      if (args[0] === '--version') versions.push(child)
+      else apps.push(child)
+      return child
+    })
+  })
+
+  afterEach(() => {
+    for (const each of clients) each.dispose()
+    clients.length = 0
+    for (const dir of homes) rmSync(dir, { recursive: true, force: true })
+    homes.length = 0
+  })
+
+  it('holds the second start until the first has answered initialize', async () => {
+    const home = makeHome(false)
+    const first = startOn(home)
+    const second = startOn(home)
+    await ticks()
+    expect(apps).toHaveLength(1)
+
+    answerInitialize(apps[0])
+    await expect(first.ready).resolves.toMatchObject({ codexHome: '/isolated' })
+    await ticks()
+    expect(apps).toHaveLength(2)
+    answerInitialize(apps[1])
+    await expect(second.ready).resolves.toMatchObject({ codexHome: '/isolated' })
+  })
+
+  it('spawns both at once on a home that already holds a state database', async () => {
+    const home = makeHome(true)
+    const first = startOn(home)
+    const second = startOn(home)
+    await ticks()
+    expect(apps).toHaveLength(2)
+    answerInitialize(apps[0])
+    answerInitialize(apps[1])
+    await expect(first.ready).resolves.toBeTruthy()
+    await expect(second.ready).resolves.toBeTruthy()
+  })
+
+  it('lets the next start through when the holder dies before initialize', async () => {
+    const home = makeHome(false)
+    const first = startOn(home)
+    const second = startOn(home)
+    await ticks()
+    expect(apps).toHaveLength(1)
+
+    apps[0].stdout.end()
+    await vi.advanceTimersByTimeAsync(0)
+    await expect(first.ready).rejects.toMatchObject({ code: 'stdout-closed' })
+    await ticks()
+    expect(apps).toHaveLength(2)
+    answerInitialize(apps[1])
+    await expect(second.ready).resolves.toBeTruthy()
+  })
+
+  it('lets the next start through when the holder is disposed before initialize', async () => {
+    const home = makeHome(false)
+    const first = startOn(home)
+    await ticks()
+    expect(apps).toHaveLength(1)
+    first.client.dispose()
+    await expect(first.ready).rejects.toMatchObject({ code: 'disposed' })
+
+    const second = startOn(home)
+    await ticks()
+    expect(apps).toHaveLength(2)
+    answerInitialize(apps[1])
+    await expect(second.ready).resolves.toBeTruthy()
+  })
+
+  it('rejects a waiting client that is disposed, without ever spawning it', async () => {
+    const home = makeHome(false)
+    const first = startOn(home)
+    const second = startOn(home)
+    await ticks()
+    expect(apps).toHaveLength(1)
+
+    second.client.dispose()
+    await expect(second.ready).rejects.toMatchObject({ code: 'disposed' })
+    // Not even after the holder releases the gate.
+    answerInitialize(apps[0])
+    await expect(first.ready).resolves.toBeTruthy()
+    await ticks()
+    expect(apps).toHaveLength(1)
+  })
+
+  it('hands the gate to ONE waiter when the holder dies, so the waiters do not race each other', async () => {
+    // Three boot-time starts, the holder dies before initialize: the home is
+    // still uninitialised, so letting both waiters through at once would
+    // recreate exactly the race the gate exists to remove.
+    const home = makeHome(false)
+    const first = startOn(home)
+    const second = startOn(home)
+    const third = startOn(home)
+    await ticks()
+    expect(apps).toHaveLength(1)
+
+    apps[0].stdout.end()
+    await vi.advanceTimersByTimeAsync(0)
+    await expect(first.ready).rejects.toMatchObject({ code: 'stdout-closed' })
+    await ticks()
+    expect(apps).toHaveLength(2)
+
+    answerInitialize(apps[1])
+    await ticks()
+    expect(apps).toHaveLength(3)
+    answerInitialize(apps[2])
+    await expect(second.ready).resolves.toBeTruthy()
+    await expect(third.ready).resolves.toBeTruthy()
+  })
+
+  it('never makes one home wait on another', async () => {
+    const first = startOn(makeHome(false))
+    const second = startOn(makeHome(false))
+    await ticks()
+    expect(apps).toHaveLength(2)
+    answerInitialize(apps[0])
+    answerInitialize(apps[1])
+    await expect(first.ready).resolves.toBeTruthy()
+    await expect(second.ready).resolves.toBeTruthy()
   })
 })

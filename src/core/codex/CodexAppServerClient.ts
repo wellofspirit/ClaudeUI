@@ -1,9 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { closeSync, mkdirSync, openSync, writeSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, readdirSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
 import { TextDecoder } from 'node:util'
 import { getLogDir, logger } from '../services/logger'
 import { killProcessTree } from '../services/process-tree'
+import { codexHomeForEnv, codexHomeKey } from './codex-home'
 import { locateCodexBinary } from './codex-locate'
 import type { InitializeParams } from './protocol/InitializeParams'
 import type { InitializeResponse } from './protocol/InitializeResponse'
@@ -103,6 +104,41 @@ const EXIT_REPORT_GRACE_MS = 1000
 const STDERR_CAPTURE_ENV = 'CLAUDEUI_CODEX_STDERR'
 
 /**
+ * Codex builds its sqlite state runtime the first time an app-server starts in a
+ * home. Two app-servers racing on a home that has none of those databases yet
+ * end with the loser exiting 1 (`failed to initialize sqlite state runtime under
+ * <home>`, `app-server/src/lib.rs`), and ClaudeUI's boot starts three within
+ * milliseconds — the catalog discovery, the lineage scan and the auth probe. So
+ * the FIRST start per home is serialised: while it is in flight every other
+ * start on the same home waits here, keyed by the normalised home path. One
+ * process per home per ClaudeUI run pays for this; an already-initialised home
+ * pays one `readdirSync`. Module-level on purpose — the racing clients are
+ * separate instances with no shared owner.
+ *
+ * Known limit (2026-09-15, captured live): the same failure can also hit an
+ * initialised home when an app-server starts while a short-lived sibling (the
+ * auth probe's native read) is shutting down a few hundred milliseconds after
+ * it started. Widening this gate to every start made that collision
+ * deterministic (the waiter is released exactly when the sibling has answered
+ * `initialize` and is about to exit), so the gate stays first-run only; the
+ * second shape is an open item in `docs/codex-followups-spec.md` (F8 Landed).
+ */
+const firstRunGate = new Map<string, Promise<void>>()
+
+/** The versioned state databases Codex writes into a home (`state_5.sqlite` in
+ *  0.154; `codex-rs/cli/src/state_db_recovery.rs`). A home with one has been
+ *  initialised and cannot lose the first-run race. */
+function hasCodexStateDb(home: string): boolean {
+  try {
+    return readdirSync(home).some((name) => /^state_.+\.sqlite$/.test(name))
+  } catch {
+    // Missing or unreadable: treated as empty, and never created here. A home
+    // Codex has not written to is exactly the case the gate exists for.
+    return false
+  }
+}
+
+/**
  * The variant name inside a JSON-RPC `error.data`, or undefined.
  *
  * Deliberately narrow: one known key, a string of at most 64 characters drawn
@@ -165,6 +201,11 @@ export class CodexAppServerClient {
   private buffer = Buffer.alloc(0)
   private decoder = new TextDecoder('utf-8', { fatal: true })
   private stopVersion?: () => void
+  /** Set while this client waits on another's first run; `fail()` trips it so a
+   *  disposal does not sit out the holder's whole startup. */
+  private stopWaiting?: () => void
+  /** Set only while this client HOLDS the first-run gate for its home. */
+  private firstRunRelease?: () => void
   /** Mutated in place by the `exit` handler; read by every error it fathered. */
   private readonly exit: CodexChildExit = { exited: false, code: null, signal: null }
   /** `state` is already `closed` by the time the death is reported. */
@@ -192,6 +233,7 @@ export class CodexAppServerClient {
       if (!binary) throw new CodexTransportError('binary-unavailable')
       await this.checkVersion(binary)
       if (this.closedError) throw this.closedError
+      await this.awaitFirstRun()
       const child = spawn(binary, ['app-server', '--listen', 'stdio://'], {
         cwd: this.options.cwd,
         env: this.options.env ?? process.env,
@@ -245,6 +287,9 @@ export class CodexAppServerClient {
       })
       child.on('close', () => this.fail('process-closed'))
       const result = await this.sendRequest<InitializeResponse>('initialize', params)
+      // The state databases exist now: whatever this client does with the
+      // answer, the next start on this home cannot lose the race.
+      this.releaseFirstRun()
       if (
         !record(result) ||
         !['userAgent', 'codexHome', 'platformFamily', 'platformOs'].every(
@@ -530,6 +575,8 @@ export class CodexAppServerClient {
     this.state = 'closed'
     clearTimeout(this.drainTimer)
     this.stopVersion?.()
+    this.stopWaiting?.()
+    this.releaseFirstRun()
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer)
       pending.reject(new CodexTransportError(code, pending.sent, undefined, undefined, this.exit))
@@ -554,6 +601,53 @@ export class CodexAppServerClient {
     } catch {
       /* observer cannot break teardown */
     }
+  }
+
+  /**
+   * Serialise the first app-server per Codex home — see {@link firstRunGate}.
+   *
+   * Either this client becomes the holder (nobody holds the gate and the home
+   * has no state database) and releases it once `initialize` has answered or
+   * `fail()` runs, or it waits out the holder and re-checks: a holder that
+   * lived created the databases, so the check passes; one that died left the
+   * home uninitialised, so the first waiter to re-check becomes the next holder.
+   */
+  private async awaitFirstRun(): Promise<void> {
+    const home = codexHomeForEnv(this.options.env)
+    const key = codexHomeKey(home)
+    // A loop, not one wait: a holder that died left the home uninitialised, and
+    // its waiters would otherwise all spawn at once and recreate the race. After
+    // each wait a waiter re-checks; whoever runs first becomes the next holder
+    // and the rest wait on it. Bounded by the number of waiters.
+    for (;;) {
+      const held = firstRunGate.get(key)
+      if (!held) break
+      // `held` only ever resolves. `stopWaiting` is the `stopVersion` pattern:
+      // a dispose while waiting must not sit here for the holder's timeout.
+      await Promise.race([held, new Promise<void>((resolve) => (this.stopWaiting = resolve))])
+      this.stopWaiting = undefined
+      if (this.closedError) throw this.closedError
+    }
+    if (hasCodexStateDb(home)) return
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    firstRunGate.set(key, gate)
+    this.firstRunRelease = (): void => {
+      if (firstRunGate.get(key) === gate) firstRunGate.delete(key)
+      release()
+    }
+  }
+
+  /**
+   * Hand the first-run gate on, if this client holds it. Idempotent, and called
+   * from both ends of `start()`: the ready path releases it explicitly and every
+   * other exit — a rejected initialize, a thrown error, a dead child, `dispose()`
+   * — goes through `fail()`, which releases it too.
+   */
+  private releaseFirstRun(): void {
+    const release = this.firstRunRelease
+    this.firstRunRelease = undefined
+    release?.()
   }
 
   /**
