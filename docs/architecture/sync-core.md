@@ -332,6 +332,16 @@ evidence, and it exists because two of twenty real-turn drives lost a reply with
 nobody watching. `VerifierSnapshot` carries the same two facts (`resyncCount`,
 per-session `endsWithUser`) so a harness loop can assert them without parsing logs.
 
+**A failed rekey persist costs the write, not the observers (F6, 2026-09-15).** The
+tap's last line before the observer loop is `persistRekeyedRegistry`, the one step
+that reaches disk (`window.api.saveSessionConfig`); it now runs in its own
+try/catch that relays a single `logRelay('warn', 'Replica', …)` and falls through,
+because `SyncClient` fences the whole tap and a throw there used to skip every
+observer for that event — including the audit above. The order is unchanged (the
+in-memory forwarding record and the local-creation marker first, the write next, the
+observers last): an observer may read the persisted registry on a later event, so the
+write must still be ATTEMPTED before them.
+
 **One thing 4c's delivery change fixed that was not on anyone's list.** `VoiceClient` was
 raising the REPLICATED `voice:error` through a targeted `webContents.send` on a computed
 channel, which the funnel guard's channel-literal scan could not see. Under uniform

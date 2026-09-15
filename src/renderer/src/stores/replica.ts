@@ -168,8 +168,24 @@ export function startReplica(): () => void {
       // (`window.api.saveSessionConfig`) and can throw. The forwarding record is
       // what an in-flight send needs, and the marker is what lets the cleanup drop
       // a still-private session — losing either because `sessions.json` could not
-      // be written is the worse failure.
-      if (rekey) persistRekeyedRegistry(rekey.newId)
+      // be written is the worse failure. It stays ahead of the observers (an
+      // observer may read the persisted registry on a later event, so the write
+      // should have been ATTEMPTED first) but inside its own fence: `SyncClient`
+      // fences the whole tap, so before this a failed write skipped every observer
+      // for that event — notification sounds, attention marks, the historical
+      // transcript load, the projection audit.
+      if (rekey) {
+        try {
+          persistRekeyedRegistry(rekey.newId)
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err)
+          window.api?.logRelay?.(
+            'warn',
+            'Replica',
+            `rekey to ${rekey.newId}: persisting the session registry failed: ${reason}`
+          )
+        }
+      }
     }
     for (const observer of observers) {
       try {

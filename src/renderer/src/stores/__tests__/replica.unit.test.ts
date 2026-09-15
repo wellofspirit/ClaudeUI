@@ -21,7 +21,7 @@
  *    undone by the very next projection.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useSessionStore } from '../session-store'
 import {
   getReplicaState,
@@ -187,6 +187,24 @@ describe('post-apply observers', () => {
   })
 })
 
+/**
+ * Fake a `window.api` whose registry write fails, and hand back its log relay.
+ * The rekey tap's last line reaches disk through `saveSessionConfig`, so this is
+ * the only seam a renderer test has for "the persist threw".
+ */
+function failingPersist(): ReturnType<typeof vi.fn> {
+  const logRelay = vi.fn()
+  ;(globalThis as unknown as { window: { api: unknown } }).window = {
+    api: {
+      logRelay,
+      saveSessionConfig: () => {
+        throw new Error('disk full')
+      }
+    }
+  } as never
+  return logRelay
+}
+
 describe('rekey', () => {
   it('carries the view state to the new id and leaves no ghost', () => {
     seed.created('old', { cwd: '/p' })
@@ -221,26 +239,54 @@ describe('rekey', () => {
     // The persistence reaches disk through `window.api.saveSessionConfig` and can
     // fail; the in-memory bookkeeping must not be a casualty. A still-private
     // session that loses its marker stops being droppable by the empty-session
-    // cleanup, so an abandoned scratch session is stranded in the sidebar.
-    ;(globalThis as unknown as { window: { api: unknown } }).window = {
-      api: {
-        saveSessionConfig: () => {
-          throw new Error('disk full')
-        }
-      }
-    } as never
+    // cleanup, so an abandoned scratch session is stranded in the sidebar. The
+    // failed write is absorbed in the tap, so the fold itself does not throw —
+    // which is what leaves the observers below it reachable (see the next case).
+    failingPersist()
     seedSession('local-only', { cwd: '/p' })
     expect(isLocallyCreated('local-only')).toBe(true)
 
-    try {
-      seed.rekey('local-only', 'sdk-1')
-    } catch {
-      // The throw is the point — the fold and the bookkeeping still have to stand.
-    }
+    expect(() => seed.rekey('local-only', 'sdk-1')).not.toThrow()
 
     expect(isLocallyCreated('sdk-1')).toBe(true)
     expect(isLocallyCreated('local-only')).toBe(false)
     expect(resolveRekeyed('local-only')).toBe('sdk-1')
+  })
+
+  it('still runs the post-apply observers when persisting the registry throws', () => {
+    // The persist is deliberately LAST in the tap, after every in-memory line —
+    // but a throw there used to take the observer loop with it, because
+    // `SyncClient` fences the whole tap. The observers are the side-effect halves
+    // of the old handlers: notification sounds, attention marks, the historical
+    // transcript load, the F4 projection audit. A `sessions.json` write that fails
+    // must cost the write, not the turn's side effects.
+    failingPersist()
+    const seen: Array<[string, unknown[]]> = []
+    onReplicaApplied((channel, args) => seen.push([channel, args]))
+    seedSession('local-only', { cwd: '/p' })
+
+    seed.rekey('local-only', 'sdk-1')
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0][0]).toBe('session:status')
+    expect(seen[0][1][0]).toBe('local-only')
+  })
+
+  it('relays one warn line when the rekey persist throws', () => {
+    // Swallowing the failure silently would trade a skipped observer for an
+    // invisible one; the line names the new id and the underlying error so a log
+    // reader can tell a full disk from a missing bridge.
+    const logRelay = failingPersist()
+    seedSession('local-only', { cwd: '/p' })
+
+    seed.rekey('local-only', 'sdk-1')
+
+    expect(logRelay).toHaveBeenCalledTimes(1)
+    const [level, source, message] = logRelay.mock.calls[0] as [string, string, string]
+    expect(level).toBe('warn')
+    expect(source).toBe('Replica')
+    expect(message).toContain('sdk-1')
+    expect(message).toContain('disk full')
   })
 
   it('follows a chain of rekeys to the current id', () => {
