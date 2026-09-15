@@ -3,7 +3,6 @@ import { homedir } from 'node:os'
 import type { EngineModelGroup } from '../../shared/types'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import { CodexService } from './CodexService'
-import { codexAuthHook } from './codex-auth-hook'
 import { codexBinaryAvailable, locateCodexBinary } from './codex-locate'
 import { assertCodexProvider } from './model-selection'
 
@@ -88,8 +87,13 @@ export async function discoverCodexModels(
 
 async function runDiscovery(): Promise<EngineModelGroup[]> {
   // Discovery runs under the vault's ChatGPT account (ADR-068 §1): the catalog a
-  // subscription can see is a property of the identity asking for it.
-  const service = new CodexService({ cwd: homedir(), auth: codexAuthHook(), label: 'discovery' })
+  // subscription can see is a property of the identity asking for it. Under
+  // ADR-069 that account's HOST answers, so a discovery no longer spawns.
+  const service = new CodexService({
+    cwd: homedir(),
+    identity: { accountId: null },
+    label: 'discovery'
+  })
   try {
     const [catalog, config] = await Promise.all([service.models(), service.effectiveConfig()])
     assertCodexProvider(config.model_provider)

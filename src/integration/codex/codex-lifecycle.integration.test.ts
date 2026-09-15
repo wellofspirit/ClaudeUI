@@ -16,6 +16,7 @@ import {
   CodexAppServerClient,
   type CodexClientOptions
 } from '../../core/codex/CodexAppServerClient'
+import { codexHostRegistry } from '../../core/codex/CodexHost'
 import { CodexService } from '../../core/codex/CodexService'
 import { setHostPaths } from '../../core/host'
 import provenance from '../../core/codex/protocol/provenance.json'
@@ -72,6 +73,12 @@ afterEach(async () => {
   try {
     for (const client of clients.splice(0)) client.dispose()
     for (const service of services.splice(0)) service.dispose()
+    // ADR-069: a `CodexService` owns no process any more — it holds LEASES on
+    // the hosts in `codexHostRegistry`, and a host outlives the service that
+    // borrowed it (five idle minutes by default). Nothing but this ends the
+    // app-server inside the survivor check below, and a host left running would
+    // also keep the temp home's writer lock past the end of the test.
+    codexHostRegistry.dispose()
     await new Promise((resolve) => setTimeout(resolve, 1200))
     for (const pid of containment.pids.splice(0)) {
       let alive = false

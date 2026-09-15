@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CodexClientOptions } from '../CodexAppServerClient'
 import { CodexTransportError } from '../CodexAppServerClient'
-import { CodexService } from '../CodexService'
+import { CodexService, type CodexHostSource } from '../CodexService'
 import { CodexClient } from '../CodexClient'
-import type { CodexAuthHook } from '../codex-auth-hook'
+import type { CodexHost, CodexHostAcquireOptions, CodexHostHandle } from '../CodexHost'
 
 const mocks = vi.hoisted(() => ({
   clients: [] as {
@@ -14,6 +14,9 @@ const mocks = vi.hoisted(() => ({
   request: vi.fn(),
   start: vi.fn()
 }))
+// Only `startLogin` still builds a client of its own (ADR-069 §3: a login must
+// run on a process nothing has injected). Every READ goes through the fake host
+// registry below.
 vi.mock('../CodexClient', () => ({
   CodexClient: class {
     constructor(public options: CodexClientOptions) {
@@ -21,25 +24,86 @@ vi.mock('../CodexClient', () => ({
     }
     request = vi.fn((method, params) => mocks.request(method, params))
     start = vi.fn(() => mocks.start())
-    // Mirrors the real `CodexClient.injectAccount` (ADR-068 §2): re-point a LIVE
-    // process with one `account/login/start`, observable through `request`.
-    injectAccount = vi.fn(async (auth: { inject: () => Promise<unknown> }) => {
-      const token = (await auth.inject()) as { accessToken: string } | null
-      if (!token) return null
-      await mocks.request('account/login/start', { type: 'chatgptAuthTokens', ...token })
-      return token
-    })
     dispose = vi.fn()
   }
 }))
+
+/**
+ * A fake {@link CodexHostRegistry}: one entry per account key, so a test can
+ * assert what the service SHARES and what it does not.
+ *
+ * The contract the old one-client-per-read assertions pinned has moved here:
+ * a read no longer owns a process, it borrows the host for its home and account
+ * and gives the lease back. `live` is what a `finally` must return to zero.
+ */
+type FakeHost = { key: string; acquires: number; live: number; requests: string[] }
+const hosts = {
+  entries: new Map<string, FakeHost>(),
+  order: [] as string[],
+  labels: [] as (string | undefined)[],
+  /** Set to make the next acquire fail, the way a missing binary does. */
+  failAcquire: null as Error | null,
+  get(key: string): FakeHost {
+    const host = this.entries.get(key)
+    if (!host) throw new Error(`no host for ${key}`)
+    return host
+  },
+  reset(): void {
+    this.entries.clear()
+    this.order.length = 0
+    this.labels.length = 0
+    this.failAcquire = null
+  }
+}
+/**
+ * The registry's key rule, standing in for the real one: an absent identity is
+ * the uninjected host, and `{ accountId: null }` is the ACTIVE account, which the
+ * real registry resolves to a concrete vault id at acquire time (or to `native`
+ * when the vault holds none).
+ */
+const hostKey = (options: CodexHostAcquireOptions): string =>
+  options.identity ? (options.identity.accountId ?? 'acct-active') : 'native'
+const registry: CodexHostSource = {
+  acquire: async (options: CodexHostAcquireOptions = {}) => {
+    if (hosts.failAcquire) throw hosts.failAcquire
+    const key = hostKey(options)
+    let host = hosts.entries.get(key)
+    if (!host) {
+      host = { key, acquires: 0, live: 0, requests: [] }
+      hosts.entries.set(key, host)
+      hosts.order.push(key)
+    }
+    host.acquires++
+    host.live++
+    hosts.labels.push(options.label)
+    let released = false
+    const entry = host
+    return {
+      host: undefined as unknown as CodexHost,
+      // A host the vault could not inject reports no identity — `acct-gone`
+      // stands in for that, exactly as it does in the real hook.
+      injectedAccountId: key === 'native' || key === 'acct-gone' ? null : key,
+      request: (method: string, params: unknown) => {
+        entry.requests.push(method)
+        return mocks.request(method, params)
+      },
+      release: () => {
+        if (released) return
+        released = true
+        entry.live--
+      }
+    } as unknown as CodexHostHandle
+  }
+}
 
 afterEach(() => {
   vi.useRealTimers()
   mocks.clients.length = 0
   mocks.request.mockReset()
   mocks.start.mockReset()
+  hosts.reset()
 })
-const options = { cwd: '/isolated' }
+const options = { cwd: '/isolated', registry }
 const notify = (loginId: string | null, success = true) =>
   mocks.clients.at(-1)!.options.onNotification?.('account/login/completed', {
     loginId,
@@ -88,7 +152,9 @@ describe('read service ownership', () => {
       },
       '/home/u'
     )
-    expect(mocks.clients).toHaveLength(1)
+    // One host, ONE lease: both requests belong to a single `read()` operation.
+    expect(hosts.order).toEqual(['native'])
+    expect(hosts.get('native').acquires).toBe(1)
     expect(mocks.request.mock.calls.map(([method]) => method)).toEqual([
       'config/batchWrite',
       'config/read'
@@ -99,7 +165,7 @@ describe('read service ownership', () => {
     })
     expect(result.write.version).toBe('v2')
     expect(result.read.layers).toEqual([])
-    expect(mocks.clients[0].dispose).toHaveBeenCalledOnce()
+    expect(hosts.get('native').live).toBe(0)
   })
 
   it('never reads back a write the binary refused', async () => {
@@ -132,10 +198,13 @@ describe('read service ownership', () => {
     const account = service.accountStatus()
     const catalog = service.models()
     await account
-    expect(mocks.clients[0].dispose).not.toHaveBeenCalled()
+    // One host serves both reads; the settled one gives its lease back and the
+    // host stays warm for the one still in flight (ADR-069 §3).
+    expect(hosts.order).toEqual(['native'])
+    expect(hosts.get('native').live).toBe(1)
     complete({ data: [], nextCursor: null })
     await catalog
-    expect(mocks.clients[0].dispose).toHaveBeenCalledOnce()
+    expect(hosts.get('native').live).toBe(0)
   })
   it('coalesces status only while pending, uses refresh false and strips account metadata', async () => {
     mocks.request.mockResolvedValue({
@@ -152,9 +221,11 @@ describe('read service ownership', () => {
       requiresLogin: false
     })
     expect(mocks.request).toHaveBeenCalledExactlyOnceWith('account/read', { refreshToken: false })
-    expect(mocks.clients[0].dispose).toHaveBeenCalledOnce()
+    expect(hosts.get('native').live).toBe(0)
     await service.accountStatus()
-    expect(mocks.clients).toHaveLength(2)
+    // A second read is a second LEASE, never a second process.
+    expect(hosts.order).toEqual(['native'])
+    expect(hosts.get('native').acquires).toBe(2)
     service.dispose()
   })
 
@@ -175,13 +246,15 @@ describe('read service ownership', () => {
     expect(status).toMatchObject({ authenticated: false, requiresLogin: false })
     expect(models).toEqual([])
     expect(history.thread.id).toBe('root-native')
-    expect(mocks.clients).toHaveLength(1)
+    expect(hosts.order).toEqual(['native'])
+    expect(hosts.get('native').acquires).toBe(3)
     expect(mocks.request.mock.calls.map((call) => call[0]).sort()).toEqual([
       'account/read',
       'model/list',
       'thread/read'
     ])
-    expect(mocks.clients.every((client) => client.dispose.mock.calls.length === 1)).toBe(true)
+    // Every lease is handed back, or the host could never idle out.
+    expect(hosts.get('native').live).toBe(0)
   })
 
   it('preserves paginated native effort metadata and an undiscovered explicit model', async () => {
@@ -221,7 +294,7 @@ describe('read service ownership', () => {
     expect(mocks.request).toHaveBeenCalledTimes(2)
     mocks.request.mockRejectedValue(new Error('synthetic-secret'))
     expect(await service.accountStatus()).toEqual({ available: false, failure: 'native-error' })
-    mocks.start.mockRejectedValue(new CodexTransportError('binary-unavailable'))
+    hosts.failAcquire = new CodexTransportError('binary-unavailable')
     expect(await service.accountStatus()).toEqual({ available: false, failure: 'unavailable' })
   })
 
@@ -391,12 +464,16 @@ function typedContract(client: CodexClient): void {
 void typedContract
 
 /**
- * Slice 2b guard 7 (pull half) — per-account rate limits through ONE app-server
- * (ADR-068 §2).
+ * Slice 2b guard 7 (pull half) — per-account rate limits, ONE HOST PER ACCOUNT
+ * (ADR-068 §2 through ADR-069 §1).
  *
- * The whole point of the list-taking signature: `read()` releases its client the
- * moment the last user drops, so one call per account would be one child process
- * per account. Here the re-injection and the read share a single operation.
+ * The old shape was one process re-injected account by account, because
+ * `read()` released its client the moment the last user dropped and one call per
+ * account would have been one child per account. A host per account removes the
+ * constraint and the re-injection with it: each account's process is already
+ * running as that account, so the sweep is one read per host and NOTHING sends
+ * `account/login/start` — which is what kept a stale identity from ever billing
+ * the wrong subscription.
  */
 describe('per-account ChatGPT rate limits', () => {
   const snapshot = (usedPercent: number) => ({
@@ -405,46 +482,17 @@ describe('per-account ChatGPT rate limits', () => {
       secondary: null
     }
   })
-  /** A hook over two accounts. No vault, no network, no token that could be real. */
-  function hook(): CodexAuthHook & { asked: Array<string | null> } {
-    const asked: Array<string | null> = []
-    let requested: string | null = null
-    let injected: string | null = null
-    return {
-      asked,
-      get injectedAccountId() {
-        return injected
-      },
-      requestAccount: (accountId: string | null) => {
-        requested = accountId
-      },
-      hasAccount: async () => true,
-      onRefreshRequest: vi.fn(),
-      inject: async () => {
-        asked.push(requested)
-        if (requested === 'acct-gone') return null
-        injected = requested ?? 'acct-a'
-        return {
-          accessToken: `fake-${injected}`,
-          chatgptAccountId: `ws-${injected}`,
-          chatgptPlanType: 'pro',
-          vaultAccountId: injected
-        }
-      }
-    } as CodexAuthHook & { asked: Array<string | null> }
-  }
 
-  it('re-injects each account in turn and reads its limits, on one process', async () => {
+  it('reads each account on its OWN host and never re-injects across them', async () => {
     let percent = 10
     mocks.request.mockImplementation(async (method: string) =>
       method === 'account/rateLimits/read' ? snapshot((percent += 10)) : {}
     )
-    const auth = hook()
-    const service = new CodexService({ ...options, auth })
+    const service = new CodexService({ ...options, identity: { accountId: null } })
 
     const limits = await service.rateLimits(['acct-a', 'acct-b'])
 
-    expect(auth.asked).toEqual(['acct-a', 'acct-b'])
+    expect(hosts.order).toEqual(['acct-a', 'acct-b'])
     expect([...limits.keys()]).toEqual(['acct-a', 'acct-b'])
     // The WHOLE response comes back — a credits-based plan hides its figures in
     // `rateLimitsByLimitId`, so the transport must not pre-pick a bucket.
@@ -453,30 +501,36 @@ describe('per-account ChatGPT rate limits', () => {
       windowDurationMins: 300,
       resetsAt: 1_735_693_200
     })
-    // One app-server for the whole sweep, and the login precedes each read.
-    expect(mocks.clients).toHaveLength(1)
+    // One read per host, and NOT ONE login: the identity is the process's own.
+    expect(hosts.get('acct-a').requests).toEqual(['account/rateLimits/read'])
+    expect(hosts.get('acct-b').requests).toEqual(['account/rateLimits/read'])
     expect(mocks.request.mock.calls.map(([method]) => method)).toEqual([
-      'account/login/start',
       'account/rateLimits/read',
-      'account/login/start',
       'account/rateLimits/read'
     ])
+    expect(hosts.get('acct-a').live).toBe(0)
+    expect(hosts.get('acct-b').live).toBe(0)
   })
 
-  it('skips an account the vault cannot produce a token for', async () => {
+  it('skips an account whose host the vault could not inject', async () => {
     mocks.request.mockImplementation(async (method: string) =>
       method === 'account/rateLimits/read' ? snapshot(55) : {}
     )
-    const service = new CodexService({ ...options, auth: hook() })
+    const service = new CodexService({ ...options, identity: { accountId: null } })
 
     const limits = await service.rateLimits(['acct-gone', 'acct-a'])
 
+    // The host exists and was asked for, but it is running as nobody, so its
+    // figures are not this account's and it is never read.
+    expect(hosts.order).toEqual(['acct-gone', 'acct-a'])
+    expect(hosts.get('acct-gone').requests).toEqual([])
     expect([...limits.keys()]).toEqual(['acct-a'])
+    expect(hosts.get('acct-gone').live).toBe(0)
   })
 
-  it('reads nothing at all without a hook — a service with no identity injects none', async () => {
+  it('reads nothing at all without an identity — and acquires no host', async () => {
     const service = new CodexService(options)
     expect([...(await service.rateLimits(['acct-a'])).keys()]).toEqual([])
-    expect(mocks.clients).toHaveLength(0)
+    expect(hosts.order).toEqual([])
   })
 })

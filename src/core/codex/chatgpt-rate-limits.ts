@@ -5,8 +5,8 @@
  * on either of them:
  *
  *  - a PULL, `CodexService.rateLimits`, driven by the sidebar usage panel
- *    opening or refreshing. One app-server answers for every stored account in
- *    turn (re-injecting between reads), never a process per account;
+ *    opening or refreshing. Each stored account's own HOST answers for it
+ *    (ADR-069 §1), so nothing re-injects across accounts and nothing spawns;
  *  - a PUSH, `account/rateLimits/updated`, which every live Codex session
  *    forwards under the account it was injected with.
  *
@@ -21,7 +21,6 @@
 import { homedir } from 'node:os'
 import type { ChatgptAccountLimits, ChatgptRateLimits, RateWindow } from '../../shared/types'
 import { CodexService } from './CodexService'
-import { codexAuthHook } from './codex-auth-hook'
 import { codexBinaryAvailable } from './codex-locate'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import type { GetAccountRateLimitsResponse } from './protocol/v2/GetAccountRateLimitsResponse'
@@ -92,10 +91,9 @@ export interface ChatgptRateLimitDeps {
   /** The vault's stored accounts, token-free (`credentialSync.getStatus()`). */
   accounts: () => Promise<ChatgptLimitAccount[]>
   /**
-   * One app-server, one read per account, sequential re-injection. Answers the
-   * WHOLE `account/rateLimits/read` response: choosing which bucket of it to
-   * believe is this module's job ({@link pickRateLimitSnapshot}), not the
-   * transport's.
+   * One read per account, each on that account's own host. Answers the WHOLE
+   * `account/rateLimits/read` response: choosing which bucket of it to believe
+   * is this module's job ({@link pickRateLimitSnapshot}), not the transport's.
    */
   read: (accountIds: ReadonlyArray<string>) => Promise<Map<string, GetAccountRateLimitsResponse>>
   /** Tells clients the map moved. No payload: they re-query. */
@@ -198,12 +196,13 @@ export const chatgptRateLimits = new ChatgptRateLimitStore({
   },
   read: async (accountIds) => {
     if (!codexBinaryAvailable()) return new Map()
-    // One service, one process, disposed as soon as the sweep ends. Built here
-    // rather than held as a singleton because a read is rare (panel open or
-    // Refresh) and an idle app-server child is not worth keeping alive.
+    // A facade, not a process: the service is built per sweep and disposed with
+    // it, and all it holds are LEASES on the per-account hosts (ADR-069 §1).
+    // `{ accountId: null }` is only the default identity — `rateLimits` acquires
+    // one host per id in the list.
     const service = new CodexService({
       cwd: homedir(),
-      auth: codexAuthHook(),
+      identity: { accountId: null },
       label: 'rate-limits'
     })
     try {

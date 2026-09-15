@@ -668,7 +668,10 @@ export class CodexAppServerClient {
       this.child.stdout.destroy()
       if (!this.capturing) this.child.stderr.destroy()
     }
-    if (this.child) this.terminate(this.child)
+    // A close WE initiated ends stdin and lets the app-server shut itself down;
+    // every other path is already a dead or dying child, so it goes straight to
+    // the kill. See {@link stopChild}.
+    if (this.child) this.stopChild(this.child, code === 'disposed')
     if (DEATH_CODES.has(code)) this.reportDeath(code)
     try {
       this.options.onDisconnect?.(this.closedError)
@@ -795,6 +798,53 @@ export class CodexAppServerClient {
     } catch {
       /* already gone */
     }
+  }
+
+  /**
+   * End the child, gracefully when this client is the one closing it
+   * (ADR-069 §6).
+   *
+   * Codex's stdio transport exits on `stdio_connection_closed` — EOF on ITS
+   * stdin — on every platform (`app-server/src/lib.rs`), and that is the only
+   * shutdown that lets it close its sqlite state files itself. A `taskkill /F`
+   * never does, which is one half of the "failed to initialize sqlite state
+   * runtime" class F7/F8 chased: the next app-server on that home inherits
+   * whatever the killed one left behind.
+   *
+   * The process-tree guarantee is unchanged, because the grace is bounded:
+   * `killGraceMs` after the EOF, or the moment the child exits, {@link terminate}
+   * runs exactly as before — `taskkill /T /F` on Windows, SIGTERM then SIGKILL
+   * on the process GROUP on POSIX — so a child that ignores EOF, or one whose
+   * own descendants outlive it, is still reaped.
+   *
+   * A child that is already gone (or whose stdin is), and every non-graceful
+   * failure, skips the wait entirely: there is nothing to ask politely.
+   */
+  private stopChild(child: ChildProcessWithoutNullStreams, graceful: boolean): void {
+    if (
+      !graceful ||
+      this.exit.exited ||
+      child.stdin.destroyed ||
+      child.stdin.writableEnded ||
+      child.pid === undefined
+    ) {
+      this.terminate(child)
+      return
+    }
+    try {
+      child.stdin.end()
+    } catch {
+      this.terminate(child)
+      return
+    }
+    const kill = (): void => {
+      clearTimeout(timer)
+      child.removeListener('exit', kill)
+      this.terminate(child)
+    }
+    const timer = setTimeout(kill, this.options.killGraceMs ?? 1000)
+    timer.unref?.()
+    child.once('exit', kill)
   }
 
   private terminate(child: ChildProcessWithoutNullStreams): void {

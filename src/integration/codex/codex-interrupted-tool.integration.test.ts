@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import { afterAll, afterEach, expect, it, vi } from 'vitest'
+import { codexHostRegistry } from '../../core/codex/CodexHost'
 import { CodexService } from '../../core/codex/CodexService'
 import { CodexSession } from '../../core/codex/CodexSession'
 import { loadCodexHistory } from '../../core/codex/history'
@@ -159,6 +160,12 @@ afterEach(async () => {
   const survivors: number[] = []
   try {
     service?.dispose()
+    // ADR-069: a `CodexService` owns no process any more — it holds LEASES on
+    // the hosts in `codexHostRegistry`, and a host outlives the service that
+    // borrowed it (five idle minutes by default). Nothing but this ends the
+    // app-server inside the survivor check below, and a host left running would
+    // also keep the temp home's writer lock past the end of the test.
+    codexHostRegistry.dispose()
     session?.dispose()
     session = undefined
     service = undefined

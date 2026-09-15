@@ -26,14 +26,18 @@
  *    array values round-trip verbatim; removing a nested leaf leaves the
  *    now-empty table behind, so `modified` is computed per LEAF.
  *
- * ## No identity, deliberately
+ * ## On the active account's host
  *
- * The service built here is constructed WITHOUT a `CodexAuthHook`. Reading and
- * writing a local config file is not an act of the ChatGPT account, so injecting
- * one would add a vault read — and, near an expiry, a network refresh — to every
- * open of the settings page for no gain. `CodexService` treats an absent hook as
- * "inject nothing and never touch the vault" (ADR-068 §1), which is exactly the
- * posture wanted here.
+ * The service is built with `identity: { accountId: null }` — the active vault
+ * account — like every other reader (ADR-069 §3). Reading and writing a local
+ * config file is not an act of the ChatGPT account, and before the host model
+ * this service deliberately carried no identity so that opening the settings page
+ * never cost a vault read. That reasoning does not survive the move: the host is
+ * ALREADY running and already injected, so asking for the uninjected one would
+ * start a SECOND app-server on the home purely to avoid an identity nothing here
+ * uses. One host per home is worth more than that, and `config/read` and
+ * `config/batchWrite` answer identically either way — they are per-`cwd` file
+ * operations with no account in them.
  */
 
 import { homedir } from 'node:os'
@@ -73,7 +77,7 @@ function build(deps: CodexConfigDeps): {
       // not resolve a project `.codex/` layer between a working directory and a
       // repo root — that layer is not ours to write and would change what
       // `effective` shows depending on which session happened to be open.
-      new CodexService({ cwd: homedir(), label: 'config' })
+      new CodexService({ cwd: homedir(), identity: { accountId: null }, label: 'config' })
   return { service }
 }
 

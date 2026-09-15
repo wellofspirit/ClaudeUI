@@ -398,15 +398,72 @@ describe('Codex JSONL client', () => {
     expect(process.kill).toHaveBeenCalledWith(-45678, 'SIGKILL')
   })
 
-  it('uses Windows taskkill ordering without killing the root first', async () => {
-    vi.stubGlobal('process', { ...process, platform: 'win32' })
-    await start()
-    mocks.spawn.mockClear()
-    client.dispose()
-    expect(mocks.spawn).toHaveBeenCalledWith('taskkill', ['/pid', '45678', '/T', '/F'], {
-      stdio: 'ignore'
+  /**
+   * ADR-069 §6 — a close WE initiate asks first and kills second.
+   *
+   * Codex's stdio transport exits on EOF on its own stdin
+   * (`stdio_connection_closed`, `app-server/src/lib.rs`), and that is the only
+   * shutdown that lets it close its sqlite state files itself; a `taskkill /F`
+   * leaves them for the next app-server on that home to trip over, which is one
+   * half of the "failed to initialize sqlite state runtime" class F7/F8 chased.
+   * The tree guarantee is unchanged because the grace is bounded — these three
+   * pin both halves.
+   */
+  describe('graceful close', () => {
+    it.each(['darwin', 'win32'])('ends stdin before any kill on %s', async (platform) => {
+      vi.stubGlobal('process', { ...process, platform })
+      await start({ killGraceMs: 100 })
+      const ended = vi.spyOn(app.stdin, 'end')
+      vi.mocked(process.kill).mockClear()
+      mocks.spawn.mockClear()
+
+      client.dispose()
+
+      expect(ended).toHaveBeenCalledOnce()
+      expect(process.kill).not.toHaveBeenCalled()
+      expect(mocks.spawn).not.toHaveBeenCalled()
+      expect(app.kill).not.toHaveBeenCalled()
     })
-    expect(app.kill).not.toHaveBeenCalled()
+
+    it.each(['darwin', 'win32'])(
+      'kills a child that ignores the EOF once the grace runs out on %s',
+      async (platform) => {
+        vi.stubGlobal('process', { ...process, platform })
+        await start({ killGraceMs: 100 })
+        vi.mocked(process.kill).mockClear()
+        mocks.spawn.mockClear()
+
+        client.dispose()
+        await vi.advanceTimersByTimeAsync(99)
+        expect(process.kill).not.toHaveBeenCalled()
+        expect(mocks.spawn).not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(1)
+
+        if (platform === 'win32') {
+          expect(mocks.spawn).toHaveBeenCalledWith('taskkill', ['/pid', '45678', '/T', '/F'], {
+            stdio: 'ignore'
+          })
+          expect(app.kill).not.toHaveBeenCalled()
+        } else {
+          expect(process.kill).toHaveBeenCalledWith(-45678, 'SIGTERM')
+          await vi.advanceTimersByTimeAsync(101)
+          expect(process.kill).toHaveBeenCalledWith(-45678, 'SIGKILL')
+        }
+      }
+    )
+
+    it('reaps the tree the moment a gracefully closed child exits', async () => {
+      // The root going away is not proof its descendants did, so today's tree
+      // kill still runs — just at the exit rather than after the whole grace.
+      await start({ killGraceMs: 100 })
+      vi.mocked(process.kill).mockClear()
+      client.dispose()
+      expect(process.kill).not.toHaveBeenCalled()
+      app.emit('exit', 0, null)
+      expect(process.kill).toHaveBeenCalledWith(-45678, 'SIGTERM')
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(warn).not.toHaveBeenCalled()
+    })
   })
 
   it('bounds queued bytes without closing otherwise healthy transport', async () => {
@@ -675,7 +732,13 @@ describe('app-server death reporting', () => {
   it('stays silent when the client closed the process itself', async () => {
     await start()
     client.dispose()
+    // The graceful close ends stdin, so the child's own EOF and exit follow —
+    // and `stdout-closed` IS a death code. A disposal must still not report one
+    // (ADR-069 §6): the client already knows why the process went away.
+    app.stdout.end()
+    await vi.advanceTimersByTimeAsync(0)
     app.emit('exit', 0, null)
+    app.emit('close', 0)
     await vi.advanceTimersByTimeAsync(2000)
     expect(warn).not.toHaveBeenCalled()
   })

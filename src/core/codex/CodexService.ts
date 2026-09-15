@@ -1,6 +1,11 @@
 import { CodexClient } from './CodexClient'
 import { CodexTransportError, type CodexClientOptions } from './CodexAppServerClient'
-import type { CodexAuthHook } from './codex-auth-hook'
+import {
+  codexHostRegistry,
+  type CodexHostAcquireOptions,
+  type CodexHostHandle,
+  type CodexHostIdentity
+} from './CodexHost'
 import type { Account } from './protocol/v2/Account'
 import type { Config } from './protocol/v2/Config'
 import type { ConfigBatchWriteParams } from './protocol/v2/ConfigBatchWriteParams'
@@ -48,23 +53,39 @@ const initialize = {
   capabilities: { experimentalApi: true, requestAttestation: false }
 }
 
+/** The slice of {@link CodexHostRegistry} a service needs. A test fakes it. */
+export interface CodexHostSource {
+  acquire(options?: CodexHostAcquireOptions): Promise<CodexHostHandle>
+}
+
 /**
- * What a service is built with. `auth` is the ChatGPT identity its READ clients
- * run as (ADR-068 §1) and is deliberately absent by default — a service built
- * without one injects nothing and never reads the vault, which keeps the
- * real-binary integration suite away from a developer's credentials. The
- * production read paths (`CodexAuthProvider`, model discovery) supply it.
+ * What a service is built with. `identity` is the ChatGPT account its reads run
+ * as (ADR-068 §1, ADR-069 §1) and is deliberately absent by default — a service
+ * built without one runs on the UNINJECTED host for the home and never reads the
+ * vault, which keeps the real-binary integration suite away from a developer's
+ * credentials and keeps the config page off the vault's refresh path. The
+ * production identity-bearing paths (`CodexAuthProvider`, model discovery, rate
+ * limits) pass `{ accountId: null }` — the active account.
  */
 export type CodexServiceOptions = Pick<
   CodexClientOptions,
   'cwd' | 'env' | 'requestTimeoutMs' | 'killGraceMs' | 'label'
-> & { auth?: CodexAuthHook | null }
+> & { identity?: CodexHostIdentity; registry?: CodexHostSource }
 
-/** Host-only, bounded read clients. Never starts/resumes/forks a thread or owns a root. */
+/**
+ * A facade over Codex HOSTS (ADR-069 §3). Never starts/resumes/forks a thread or
+ * owns a root.
+ *
+ * Every read borrows the one app-server for its home and account for the length
+ * of the read and gives it back; nothing here owns a process any more. The one
+ * exception is {@link CodexService.startLogin}, which keeps a dedicated client
+ * by design: while external auth is active the native login paths are refused
+ * outright, so a login must run on a process nothing has injected.
+ */
 export class CodexService {
   private disposed = false
   private clients = new Set<CodexClient>()
-  private reads?: { client: CodexClient; ready: Promise<unknown>; users: number }
+  private handles = new Set<CodexHostHandle>()
   private statusRead?: Promise<CodexAccountStatus>
   private catalogRead?: Promise<Model[]>
   private login?: { cancel: () => void }
@@ -73,12 +94,14 @@ export class CodexService {
     CodexClientOptions,
     'cwd' | 'env' | 'requestTimeoutMs' | 'killGraceMs' | 'label'
   >
-  private readonly auth: CodexAuthHook | null
+  private readonly identity: CodexHostIdentity | undefined
+  private readonly registry: CodexHostSource
 
   constructor(options: CodexServiceOptions) {
-    const { auth = null, ...transport } = options
+    const { identity, registry, ...transport } = options
     this.options = transport
-    this.auth = auth
+    this.identity = identity
+    this.registry = registry ?? codexHostRegistry
   }
 
   private client(
@@ -94,17 +117,31 @@ export class CodexService {
     if (this.clients.delete(client)) client.dispose()
   }
 
-  private async read<T>(operation: (client: CodexClient) => Promise<T>): Promise<T> {
-    if (this.disposed) throw new CodexTransportError('disposed')
-    if (!this.reads) {
-      const client = this.client()
-      this.reads = { client, ready: client.start(initialize, this.auth), users: 0 }
+  /** One lease on this service's host. The caller must `release()` it. */
+  private async acquire(identity = this.identity): Promise<CodexHostHandle> {
+    const handle = await this.registry.acquire({
+      ...this.options,
+      ...(identity ? { identity } : {})
+    })
+    if (this.disposed) {
+      handle.release()
+      throw new CodexTransportError('disposed')
     }
-    const reads = this.reads
-    reads.users++
+    this.handles.add(handle)
+    return handle
+  }
+
+  private forget(handle: CodexHostHandle): void {
+    this.handles.delete(handle)
+    handle.release()
+  }
+
+  private async read<T>(operation: (host: CodexHostHandle) => Promise<T>): Promise<T> {
+    if (this.disposed) throw new CodexTransportError('disposed')
+    let handle: CodexHostHandle | undefined
     try {
-      await reads.ready
-      return await operation(reads.client)
+      handle = await this.acquire()
+      return await operation(handle)
     } catch (error) {
       // Never propagate native payloads, config values or caller-supplied error
       // messages — which is why a non-transport throw is collapsed to one opaque
@@ -117,17 +154,14 @@ export class CodexService {
       if (error instanceof CodexTransportError) throw error
       throw new CodexTransportError('service-read-failed')
     } finally {
-      if (--reads.users === 0) {
-        this.reads = undefined
-        this.release(reads.client)
-      }
+      if (handle) this.forget(handle)
     }
   }
 
   accountStatus(): Promise<CodexAccountStatus> {
     if (this.statusRead) return this.statusRead
-    this.statusRead = this.read(async (client) => {
-      const result = await client.request('account/read', { refreshToken: false })
+    this.statusRead = this.read(async (host) => {
+      const result = await host.request('account/read', { refreshToken: false })
       const authKind = result.account?.type ?? null
       if (
         typeof result.requiresOpenaiAuth !== 'boolean' ||
@@ -157,12 +191,12 @@ export class CodexService {
 
   models(): Promise<Model[]> {
     if (this.catalogRead) return this.catalogRead
-    this.catalogRead = this.read(async (client) => {
+    this.catalogRead = this.read(async (host) => {
       const models: Model[] = []
       const cursors = new Set<string>()
       let cursor: string | null = null
       for (let page = 0; page < 100; page++) {
-        const result = await client.request('model/list', {
+        const result = await host.request('model/list', {
           cursor,
           limit: 100,
           includeHidden: false
@@ -202,8 +236,8 @@ export class CodexService {
    * product snapshot is `codex-config.ts`'s job, not the transport's.
    */
   readConfigLayers(cwd?: string): Promise<ConfigReadResponse> {
-    return this.read((client) =>
-      client.request('config/read', { includeLayers: true, cwd: cwd ?? this.options.cwd })
+    return this.read((host) =>
+      host.request('config/read', { includeLayers: true, cwd: cwd ?? this.options.cwd })
     )
   }
 
@@ -230,9 +264,9 @@ export class CodexService {
     params: ConfigBatchWriteParams,
     cwd?: string
   ): Promise<{ write: ConfigWriteResponse; read: ConfigReadResponse }> {
-    return this.read(async (client) => ({
-      write: await client.request('config/batchWrite', params),
-      read: await client.request('config/read', {
+    return this.read(async (host) => ({
+      write: await host.request('config/batchWrite', params),
+      read: await host.request('config/read', {
         includeLayers: true,
         cwd: cwd ?? this.options.cwd
       })
@@ -240,8 +274,8 @@ export class CodexService {
   }
 
   effectiveConfig(): Promise<CodexEffectiveConfig> {
-    return this.read(async (client) => {
-      const { config } = await client.request('config/read', {
+    return this.read(async (host) => {
+      const { config } = await host.request('config/read', {
         includeLayers: false,
         cwd: this.options.cwd
       })
@@ -258,20 +292,23 @@ export class CodexService {
   }
 
   /**
-   * Per-account ChatGPT rate limits (ADR-068 §2), read through ONE app-server.
+   * Per-account ChatGPT rate limits (ADR-068 §2), one HOST per account
+   * (ADR-069 §1).
    *
-   * The signature takes the whole LIST rather than one account because the
-   * constraint is the process, not the call: `read()` disposes its client the
-   * moment the last user drops, so N single-account calls would be N app-server
-   * children. Here the re-injection and the read both happen inside one
-   * operation — `account/login/start {chatgptAuthTokens}` is legal while
-   * external auth is active, so the same process answers for every account in
-   * turn, sequentially.
+   * Before the host model this re-injected each account in turn on ONE process
+   * (`account/login/start {chatgptAuthTokens}` is legal while external auth is
+   * active), because `read()` disposed its client the moment the last user
+   * dropped and N calls would have been N children. That is exactly what a host
+   * per account removes: each account's process is already injected with it and
+   * stays warm, so the sweep is one `account/rateLimits/read` per host and
+   * NOTHING re-injects across accounts. The list-taking signature survives
+   * because the sweep is still one unit of work to the caller.
    *
    * `null` in the list means the ACTIVE account. An account the vault cannot
    * produce a token for, or one whose read the binary refuses, is simply absent
    * from the result: a missing subscription is reported as "unavailable", never
-   * as another account's numbers.
+   * as another account's numbers — which is why the map is keyed by the id the
+   * HOST was actually injected with, never by the id that was asked for.
    *
    * The WHOLE response is handed back, not a picked snapshot: a credits-based
    * plan answers with empty windows at the top level and the real figures in
@@ -282,26 +319,30 @@ export class CodexService {
     accountIds: ReadonlyArray<string | null>
   ): Promise<Map<string, GetAccountRateLimitsResponse>> {
     const out = new Map<string, GetAccountRateLimitsResponse>()
-    if (!this.auth || accountIds.length === 0) return out
-    const auth = this.auth
-    await this.read(async (client) => {
-      for (const accountId of accountIds) {
-        auth.requestAccount(accountId)
-        const token = await client.injectAccount(auth).catch(() => null)
-        if (!token) continue
-        const result = await client.request('account/rateLimits/read', {}).catch(() => null)
-        if (result) out.set(token.vaultAccountId, result)
+    if (this.disposed || !this.identity || accountIds.length === 0) return out
+    for (const accountId of accountIds) {
+      const handle = await this.acquire({ accountId }).catch(() => null)
+      if (!handle) continue
+      try {
+        const injected = handle.injectedAccountId
+        // No token, no numbers: a host the vault could not inject is running as
+        // somebody else, and its figures are not this account's.
+        if (!injected) continue
+        const result = await handle.request('account/rateLimits/read', {}).catch(() => null)
+        if (result) out.set(injected, result)
+      } finally {
+        this.forget(handle)
       }
-    })
+    }
     return out
   }
 
   readThread(params: ThreadReadParams) {
-    return this.read((client) => client.request('thread/read', params))
+    return this.read((host) => host.request('thread/read', params))
   }
 
   listThreads(params: ThreadListParams) {
-    return this.read((client) => client.request('thread/list', params))
+    return this.read((host) => host.request('thread/list', params))
   }
 
   /**
@@ -309,25 +350,25 @@ export class CodexService {
    * this service never resumes or owns the thread it deletes.
    */
   deleteThread(threadId: string): Promise<void> {
-    return this.read(async (client) => {
-      await client.request('thread/delete', { threadId })
+    return this.read(async (host) => {
+      await host.request('thread/delete', { threadId })
     })
   }
 
   /** Native archive: hidden from the default listing, native data retained. */
   archiveThread(threadId: string): Promise<void> {
-    return this.read(async (client) => {
-      await client.request('thread/archive', { threadId })
+    return this.read(async (host) => {
+      await host.request('thread/archive', { threadId })
     })
   }
 
   listAllThreads(): Promise<Thread[]> {
-    return this.read(async (client) => {
+    return this.read(async (host) => {
       const threads: Thread[] = []
       const cursors = new Set<string>()
       let cursor: string | null = null
       for (let page = 0; page < 1000; page++) {
-        const result = await client.request('thread/list', { cursor, limit: 100, archived: false })
+        const result = await host.request('thread/list', { cursor, limit: 100, archived: false })
         threads.push(...result.data)
         if (!result.nextCursor) return threads
         if (cursors.has(result.nextCursor)) throw new Error('Repeated native session cursor')
@@ -339,15 +380,15 @@ export class CodexService {
   }
 
   history(threadId: string) {
-    return this.read(async (client) => {
-      const { thread } = await client.request('thread/read', { threadId, includeTurns: false })
+    return this.read(async (host) => {
+      const { thread } = await host.request('thread/read', { threadId, includeTurns: false })
       if (thread.historyMode !== 'paginated')
-        return (await client.request('thread/read', { threadId, includeTurns: true })).thread
+        return (await host.request('thread/read', { threadId, includeTurns: true })).thread
       const turns: Turn[] = []
       const cursors = new Set<string>()
       let cursor: string | null = null
       for (let page = 0; page < 1000; page++) {
-        const result = await client.request('thread/turns/list', {
+        const result = await host.request('thread/turns/list', {
           threadId,
           cursor,
           limit: 100,
@@ -472,5 +513,9 @@ export class CodexService {
     this.disposed = true
     this.login?.cancel()
     for (const client of this.clients) this.release(client)
+    // Leases, not processes: a host outlives every service that borrowed it and
+    // is reaped by its own idle rule (or by `codexHostRegistry.dispose()` on
+    // quit). Dropping them here is what lets that rule start counting.
+    for (const handle of [...this.handles]) this.forget(handle)
   }
 }

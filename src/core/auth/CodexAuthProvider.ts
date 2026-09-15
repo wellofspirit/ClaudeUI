@@ -3,7 +3,6 @@ import type { EngineAuthProvider } from './EngineAuthProvider'
 import type { VendorAuthMap } from '../../shared/types'
 import type { CodexAuthStatus } from '../../shared/codex-types'
 import { CodexService } from '../codex/CodexService'
-import { codexAuthHook } from '../codex/codex-auth-hook'
 import { codexBinaryAvailable } from '../codex/codex-locate'
 import { credentialSync } from './vault/CredentialSync'
 
@@ -22,7 +21,10 @@ export class CodexAuthProvider implements EngineAuthProvider {
   constructor(
     private readonly service = new CodexService({
       cwd: homedir(),
-      auth: codexAuthHook(),
+      // The ACTIVE vault account: the probe has to describe the identity every
+      // Codex process actually runs as. Under ADR-069 that is a lease on the
+      // active account's host, not a process of its own.
+      identity: { accountId: null },
       label: 'auth-probe'
     }),
     private readonly vault: Pick<typeof credentialSync, 'getStatus'> = credentialSync

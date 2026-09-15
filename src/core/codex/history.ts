@@ -59,15 +59,16 @@ const THREAD_UNRESOLVABLE = 'rpc-error--32600'
 
 /**
  * How long to wait before asking a second time whether a refused id is really
- * gone. Long enough to be a genuinely separate attempt (the first one's client
- * has been released by then, so the confirmation runs on its own process),
- * short enough that a sidebar refresh does not visibly stall.
+ * gone. Long enough to be a genuinely separate attempt (the first pass's lease
+ * on the host has been released by then, so the confirmation is a fresh request
+ * rather than one of the four that raced), short enough that a sidebar refresh
+ * does not visibly stall.
  */
 export const REFUSAL_CONFIRM_MS = 750
 
 /** Test seams for the read path: a pre-made service, and the clock. */
 export interface CodexReadTuning {
-  /** Use this service instead of spawning one. Never disposed by the callee. */
+  /** Use this service instead of building one. Never disposed by the callee. */
   service?: CodexService
   confirmDelayMs?: number
   sleep?: (ms: number) => Promise<void>
@@ -101,8 +102,8 @@ async function readOne(service: CodexService, threadId: string): Promise<ForkRea
  * pause: only a refusal that survives that counts as "gone for good", and every
  * classification is logged so the next such event is diagnosable. The second
  * pass is sequential and unhurried on purpose — the first pass is four
- * concurrent reads against a just-spawned process, which is the exact shape
- * that produced the false refusals this rule exists for.
+ * concurrent reads against a possibly just-started app-server, which is the
+ * exact shape that produced the false refusals this rule exists for.
  */
 async function readThreads(
   service: CodexService,
@@ -251,7 +252,9 @@ export async function scanCodexLineage(
   mode: CodexScanMode = 'changed'
 ): Promise<CodexLineageScan> {
   if (!tuning.service && !locateCodexBinary()) return { read: 0, learned: 0 }
-  const service = tuning.service ?? new CodexService({ ...options, label: 'lineage-scan' })
+  const service =
+    tuning.service ??
+    new CodexService({ ...options, identity: { accountId: null }, label: 'lineage-scan' })
   try {
     return await refreshCodexLineage(service, await service.listAllThreads(), mode, tuning)
   } finally {
@@ -326,7 +329,9 @@ export async function listCodexSessions(
   tuning: CodexReadTuning = {}
 ): Promise<SessionInfo[]> {
   if (!codexBinaryAvailable()) return []
-  const service = tuning.service ?? new CodexService({ ...options, label: 'history-list' })
+  const service =
+    tuning.service ??
+    new CodexService({ ...options, identity: { accountId: null }, label: 'history-list' })
   try {
     const listed = await service.listAllThreads()
     const sessions = listed.filter(listable).map(adoptThread)
@@ -368,7 +373,11 @@ export async function resolveCodexForkAnchor(
 ): Promise<ForkAnchorResult> {
   const turnId = codexTurnId(messageId)
   if (!turnId) return { anchorUuid: null, reason: 'not-a-codex-message' }
-  const service = new CodexService({ ...options, label: 'history-read' })
+  const service = new CodexService({
+    ...options,
+    identity: { accountId: null },
+    label: 'history-read'
+  })
   try {
     const thread = await service.history(threadId)
     const turn = thread.turns.find((entry) => entry.id === turnId)
@@ -412,7 +421,11 @@ export async function loadCodexHistory(
   options: CodexReadOptions = { cwd: homedir() },
   throughTurnId?: string
 ): Promise<SessionHistoryResult> {
-  const service = new CodexService({ ...options, label: 'history-read' })
+  const service = new CodexService({
+    ...options,
+    identity: { accountId: null },
+    label: 'history-read'
+  })
   /** Child thread id → the parent `collabAgentToolCall` tool_use it renders under. */
   const childCards = new Map<string, string>()
   try {

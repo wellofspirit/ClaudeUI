@@ -9,7 +9,7 @@ import {
   crashReporter,
   dialog
 } from 'electron'
-import { codexAuthProvider } from '../core/auth/CodexAuthProvider'
+import { codexHostRegistry } from '../core/codex/CodexHost'
 import { join } from 'path'
 import { pathToFileURL } from 'url'
 import { execFileSync } from 'child_process'
@@ -725,7 +725,12 @@ app.whenReady().then(() => {
       currentPluginManager?.stopAll()
       core?.automationManager.stopAll()
       credentialSync.stop()
-      codexAuthProvider.dispose()
+      // Every Codex app-server the reads share (ADR-069 §6): stdin EOF first, so
+      // the binary closes its sqlite state files itself, and the process tree is
+      // killed only if it outlives the grace. Bounded — nothing here waits on a
+      // child, and a parent that exits first closes the pipe, which is the same
+      // EOF. Sessions still own their own process until H2, hence the sweep below.
+      codexHostRegistry.dispose()
       core?.sessionManager.forEach((session) => {
         if (session.engineId === 'codex') session.dispose()
       })

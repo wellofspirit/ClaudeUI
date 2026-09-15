@@ -184,7 +184,7 @@ export async function deleteCodexThread(
   options: CodexDeleteOptions = { cwd: homedir() }
 ): Promise<void> {
   assertCodexInstalled()
-  const service = new CodexService({ ...options, label: 'delete' })
+  const service = new CodexService({ ...options, identity: { accountId: null }, label: 'delete' })
   try {
     await service.deleteThread(threadId)
   } finally {
@@ -260,8 +260,9 @@ function label(node: CodexDeleteNode): string {
  * something else — a holder ClaudeUI cannot stop, a thread that is already gone
  * — and the original error is thrown as it always was.
  *
- * ONE service for the whole subtree: each `CodexService` read spawns an
- * app-server process, and a three-node plan does not need three of them.
+ * ONE service for the whole subtree. Since ADR-069 the reads share the home's
+ * host rather than a process each, so this is no longer a spawn budget — it is
+ * still one service so the whole walk speaks to one connection and one lease.
  *
  * Returns the threads it actually deleted, in the order it deleted them — which
  * a rescan can make LONGER than the plan it was handed, and which a project
@@ -281,7 +282,12 @@ export async function deleteCodexSubtree(
   const interval = options.retryIntervalMs ?? STOPPED_HOLDER_RETRY_INTERVAL_MS
   const service =
     options.service ??
-    new CodexService({ cwd: options.cwd ?? homedir(), env: options.env, label: 'delete' })
+    new CodexService({
+      cwd: options.cwd ?? homedir(),
+      env: options.env,
+      identity: { accountId: null },
+      label: 'delete'
+    })
   const deleted = new Set<string>()
   const remaining = (candidate: CodexDeletePlan): string[] =>
     candidate.order.filter((threadId) => !deleted.has(threadId))
