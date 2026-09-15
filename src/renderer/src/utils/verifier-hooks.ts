@@ -20,6 +20,8 @@
 
 import { useSessionStore } from '../stores/session-store'
 import { getReplicaState } from '../stores/replica'
+import { getSyncResyncCount } from '../../../core/shared/sync/client-registry'
+import { countMessageRoles, endsWithUserMessage } from './projection-audit'
 
 /** One session's line in {@link VerifierSnapshot} — store side. */
 export interface VerifierSessionSummary {
@@ -32,6 +34,13 @@ export interface VerifierSessionSummary {
   roles: Record<string, number>
   /** `status.state`: idle | running | error | disconnected. */
   state: string
+  /**
+   * Does the transcript end on a USER message — the render-loss symptom, so a
+   * harness loop can assert it without parsing `ProjectionAudit` log lines. The
+   * raw predicate, deliberately: the exclusions `projection-audit.ts` applies
+   * before it WARNS are its judgement, not a fact about the transcript.
+   */
+  endsWithUser: boolean
 }
 
 /** The JSON-safe summary `--state` prints. Deliberately small: a full store dump
@@ -51,6 +60,12 @@ export interface VerifierSnapshot {
     activeSessionId: string | null
     sessions: Array<{ id: string; messageCount: number }>
   }
+  /**
+   * How many resyncs this client has asked for (monotonic, 0 before a transport
+   * exists). A resync REPLACES canonical, so a count that moved across a turn is
+   * the first thing to check when a transcript came back short.
+   */
+  resyncCount: number
 }
 
 export interface VerifierHandle {
@@ -59,12 +74,6 @@ export interface VerifierHandle {
   /** The replica's current `CanonicalState`. */
   canonical: typeof getReplicaState
   snapshot: () => VerifierSnapshot
-}
-
-function countRoles(messages: ReadonlyArray<{ role: string }>): Record<string, number> {
-  const roles: Record<string, number> = {}
-  for (const m of messages) roles[m.role] = (roles[m.role] ?? 0) + 1
-  return roles
 }
 
 /** Build the summary. Exported for tests; production calls it through the handle. */
@@ -76,8 +85,9 @@ export function buildVerifierSnapshot(): VerifierSnapshot {
     sessions: Object.entries(store.sessions).map(([id, s]) => ({
       id,
       messageCount: s.messages.length,
-      roles: countRoles(s.messages),
-      state: s.status.state
+      roles: countMessageRoles(s.messages),
+      state: s.status.state,
+      endsWithUser: endsWithUserMessage(s.messages)
     })),
     canonical: {
       activeSessionId: canonical.activeSessionId,
@@ -85,7 +95,8 @@ export function buildVerifierSnapshot(): VerifierSnapshot {
         id,
         messageCount: s.messages.length
       }))
-    }
+    },
+    resyncCount: getSyncResyncCount()
   }
 }
 

@@ -94,6 +94,19 @@ export function getSyncClient(): SyncClient | null {
 }
 
 /**
+ * How many resyncs the installed client has asked for — monotonic, see
+ * {@link SyncClient.getResyncCount}.
+ *
+ * Lives here rather than on the client because the renderer has no handle on the
+ * client (the transport installs it and keeps it to itself); the render-loss
+ * detector needs the number and nothing else. `0` before a transport has run is
+ * the honest answer: a client that does not exist has requested nothing.
+ */
+export function getSyncResyncCount(): number {
+  return client?.getResyncCount() ?? 0
+}
+
+/**
  * Subscribe to a replicated / volatile channel. Returns the unsubscribe.
  *
  * Typed by {@link SyncEventMap}, which is where the ~45 `ClaudeAPI.onFoo`

@@ -365,13 +365,20 @@ function RemoteApp(): React.JSX.Element {
     // isResync=true from the second sync-full onward — see hasHydratedRef.
     const isResync = hasHydratedRef.current
     hasHydratedRef.current = true
-    import('@renderer/stores/replica').then(({ startReplica, hydrateReplica }) => {
+    Promise.all([
+      import('@renderer/stores/replica'),
+      import('@renderer/utils/projection-audit')
+    ]).then(([{ startReplica, hydrateReplica }, { startProjectionAudit }]) => {
       // The store module is imported lazily here (the App chunk is what pulls it
       // in), so the tap cannot be installed at page load like the desktop's is —
       // it goes in now, before the first snapshot is folded. Events that arrived
       // in the meantime are still buffered behind the readiness gate, which
       // `AppContent` opens only once App has mounted.
       startReplica()
+      // The render-loss detector (F4) — idempotent, like `startReplica`, because
+      // this path runs on every `sync-full`. A phone is where a lost reply is
+      // hardest to notice and hardest to reproduce, so it audits here too.
+      startProjectionAudit()
       hydrateReplica(snapshot, isResync)
       setReady(true)
     })

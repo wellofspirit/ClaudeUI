@@ -311,6 +311,27 @@ Zustand in one `set()`. Consequences:
   checks real state), and persists through the ordinary `config:sessions-changed`
   save.
 
+**The projection audits itself at every turn end (F4, 2026-09-15).**
+`renderer/src/utils/projection-audit.ts` registers a post-apply observer (never a
+second event tap) and, `PROJECTION_AUDIT_DELAY_MS` after each `session:status`
+that reaches `idle` or `error` — coalesced per session, cancelled by a later
+`running` — compares the store against the replica's canonical. Four findings:
+**`projection`** (the by-reference invariant broken: `store.sessions[id].messages
+!== canonical.sessions[id].messages`, or a canonical session with no store entry),
+**`retired`** (a store key `resolveRekeyed` says was retired, i.e. a rekey whose
+view carry-over failed), **`emptyTurn`** (an idle transcript ending on the user —
+the render-loss symptom itself, whichever layer lost the reply; excluded when a
+queued prompt is held, an approval is open, or a streaming buffer is unsealed) and
+**`resyncs`** (`SyncClient.getResyncCount()`, monotonic, moved during the turn:
+`applyFullState` REPLACES canonical, so it is the one routine event that can
+explain a transcript the renderer no longer has). Any finding emits ONE
+`logRelay('warn', 'ProjectionAudit', <json>)`; a clean turn emits nothing, because
+a per-turn info line would bury the one that matters. It never mutates, never
+triggers a resync and never throws into the fold — a cure would destroy the
+evidence, and it exists because two of twenty real-turn drives lost a reply with
+nobody watching. `VerifierSnapshot` carries the same two facts (`resyncCount`,
+per-session `endsWithUser`) so a harness loop can assert them without parsing logs.
+
 **One thing 4c's delivery change fixed that was not on anyone's list.** `VoiceClient` was
 raising the REPLICATED `voice:error` through a targeted `webContents.send` on a computed
 channel, which the funnel guard's channel-literal scan could not see. Under uniform

@@ -37,7 +37,12 @@ const storeMocks = vi.hoisted(() => ({ refreshProviderAuth: vi.fn(async () => {}
 vi.mock('@renderer/App', () => ({ default: () => <div data-testid="FakeApp">app</div> }))
 vi.mock('@renderer/stores/replica', () => ({
   startReplica: () => {},
-  hydrateReplica: () => {}
+  hydrateReplica: () => {},
+  // The render-loss detector starts beside the replica on this path and observes
+  // it through the post-apply seam, so the mock has to offer one.
+  onReplicaApplied: () => () => {},
+  getReplicaState: () => ({ sessions: {} }),
+  resolveRekeyed: (id: string) => id
 }))
 vi.mock('@renderer/stores/session-store', () => ({
   useSessionStore: { getState: () => ({ refreshProviderAuth: storeMocks.refreshProviderAuth }) }

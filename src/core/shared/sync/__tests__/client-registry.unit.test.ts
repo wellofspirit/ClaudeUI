@@ -18,6 +18,7 @@ import {
   getSyncClient,
   onSyncEvent,
   markSyncReady,
+  getSyncResyncCount,
   resetSyncClientForTests
 } from '../client-registry'
 
@@ -113,5 +114,17 @@ describe('client registry', () => {
     expect(cb).not.toHaveBeenCalled()
     first.receiveEvent({ seq: 1, channel: 'session:message', args: ['rid'] })
     expect(cb).toHaveBeenCalledTimes(1)
+  })
+
+  // The renderer reads the resync counter through the registry, not through a
+  // client handle it has no way to reach — and must get an honest 0, never a
+  // crash, before the transport has installed one.
+  it('answers 0 for the resync count before a client exists, then the installed count', () => {
+    expect(getSyncResyncCount()).toBe(0)
+    const c = client()
+    setSyncClient(c)
+    c.applyFullState({ seq: 5 } as never, 'epoch-A', 5)
+    c.receiveEvent({ seq: 9, channel: 'session:message', args: ['rid'] })
+    expect(getSyncResyncCount()).toBe(1)
   })
 })

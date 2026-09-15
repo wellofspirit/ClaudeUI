@@ -32,7 +32,12 @@ import type { RemoteAuthMethod } from '../../shared/remote-protocol'
 vi.mock('@renderer/App', () => ({ default: () => <div data-testid="FakeApp">app</div> }))
 vi.mock('@renderer/stores/replica', () => ({
   startReplica: () => {},
-  hydrateReplica: () => {}
+  hydrateReplica: () => {},
+  // The render-loss detector starts beside the replica on this path and observes
+  // it through the post-apply seam, so the mock has to offer one.
+  onReplicaApplied: () => () => {},
+  getReplicaState: () => ({ sessions: {} }),
+  resolveRekeyed: (id: string) => id
 }))
 
 /** The scripted socket the client transport talks to. */

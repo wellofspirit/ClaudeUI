@@ -69,6 +69,8 @@ export class SyncClient {
   /** Pre-ready (and mid-flush) events, kept in seq order. */
   private readonly buffer: SyncEvent[] = []
   private lastSeq = 0
+  /** See {@link getResyncCount}. */
+  private resyncCount = 0
   private epoch?: string
   private ready = false
   private draining = false
@@ -185,6 +187,21 @@ export class SyncClient {
   /** Event-log epoch the cursor belongs to; the transport echoes it on `sync`. */
   getEpoch(): string | undefined {
     return this.epoch
+  }
+
+  /**
+   * How many resyncs this client has ASKED for, ever.
+   *
+   * Monotonic for the client's lifetime — the answering {@link applyFullState}
+   * does not reset it, and neither does a reconnect. A resync REPLACES canonical
+   * wholesale, which makes it the one routine event that can explain a
+   * transcript the renderer no longer has; the render-loss detector
+   * (`renderer/src/utils/projection-audit.ts`) reads this at turn start and at
+   * turn end and reports the DIFFERENCE, a question a per-connection counter
+   * could not answer.
+   */
+  getResyncCount(): number {
+    return this.resyncCount
   }
 
   /** A live event frame. */
@@ -304,7 +321,7 @@ export class SyncClient {
     if (gapCheck && this.lastSeq > 0 && event.seq > this.lastSeq + 1) {
       // Something was missed. Do NOT apply this event as if it were contiguous:
       // acking it would strand the missing range forever.
-      this.requestResync()
+      this.triggerResync()
       return
     }
     this.dispatch(event)
@@ -334,7 +351,7 @@ export class SyncClient {
           // pruned the oldest entries. Drop the rest and let the catchup
           // redeliver from the cursor; dispatching across it would ack the hole.
           this.buffer.length = 0
-          this.requestResync()
+          this.triggerResync()
           return
         }
         this.dispatch(event)
@@ -342,6 +359,16 @@ export class SyncClient {
     } finally {
       this.draining = false
     }
+  }
+
+  /**
+   * The ONE way a resync is asked for, so {@link getResyncCount} cannot drift
+   * from the transport's actual behaviour: a second call site added later gets
+   * counted whether or not its author knew the counter existed.
+   */
+  private triggerResync(): void {
+    this.resyncCount++
+    this.requestResync()
   }
 
   private dispatch(event: SyncEvent): void {

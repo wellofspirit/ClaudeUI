@@ -365,3 +365,52 @@ describe('SyncClient — the volatile lane (phase 5)', () => {
     expect(dispatched).toEqual([['session:bash-output', 'rid-1', { output: 'hi' }]])
   })
 })
+
+/**
+ * The resync counter (F4). A resync REPLACES canonical wholesale, so it is the
+ * one event in a client's life that can explain a transcript the renderer no
+ * longer has — and until now nothing counted them. Monotonic on purpose: the
+ * projection audit reads it twice (turn start, turn end) and asks whether it
+ * moved, which a counter that reset per connection could not answer.
+ */
+describe('SyncClient — resync counter', () => {
+  it('counts a post-ready gap', () => {
+    const { client, requestResync } = makeClient()
+    client.applyFullState(snapshot(5), 'epoch-A', 5)
+    client.markReady()
+    expect(client.getResyncCount()).toBe(0)
+
+    client.receiveEvent(ev(8, 'x', 'jumped'))
+
+    expect(client.getResyncCount()).toBe(1)
+    expect(requestResync).toHaveBeenCalledTimes(1)
+  })
+
+  it('counts a hole found at flush time (the drain path)', () => {
+    const { client } = makeClient({ bufferLimit: 2 })
+    client.applyFullState(snapshot(10), 'epoch-A', 10)
+
+    // 11 is pruned when 13 lands, so the flush finds a hole at 12.
+    client.receiveEvent(ev(11, 'x', 'eleven'))
+    client.receiveEvent(ev(12, 'x', 'twelve'))
+    client.receiveEvent(ev(13, 'x', 'thirteen'))
+    client.markReady()
+
+    expect(client.getResyncCount()).toBe(1)
+  })
+
+  it('never goes down, and does not move on a clean stream', () => {
+    const { client } = makeClient()
+    client.applyFullState(snapshot(5), 'epoch-A', 5)
+    client.markReady()
+
+    client.receiveEvent(ev(8, 'x', 'jumped'))
+    // The answering snapshot is what a resync looks like on the wire: it must
+    // not zero the count, or "did a resync happen during this turn?" is
+    // unanswerable exactly when the answer is yes.
+    client.applyFullState(snapshot(8), 'epoch-A', 8)
+    client.receiveEvent(ev(9, 'x', 'contiguous'))
+
+    expect(client.getResyncCount()).toBe(1)
+  })
+})

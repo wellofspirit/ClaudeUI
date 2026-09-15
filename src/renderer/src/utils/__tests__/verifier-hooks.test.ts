@@ -85,12 +85,41 @@ describe('buildVerifierSnapshot', () => {
         id: 'sess-a',
         messageCount: 4,
         roles: { user: 1, assistant: 2, system: 1 },
-        state: 'running'
+        state: 'running',
+        endsWithUser: false
       }
     ])
     // Canonical is the replica's, untouched by a direct store write — which is
     // precisely the disagreement the snapshot exists to make visible.
     expect(snap.canonical.sessions).toEqual([])
     expect(() => JSON.stringify(snap)).not.toThrow()
+  })
+
+  // The render-loss symptom, readable without parsing a log line: a harness loop
+  // asserts `endsWithUser` per session and `resyncCount` for the client.
+  it('flags a transcript that ends on the user, and carries the resync count', () => {
+    useSessionStore.setState({
+      activeSessionId: 'sess-a',
+      sessions: {
+        'sess-a': {
+          ...EMPTY_SESSION_STATE,
+          messages: [msg('m1', 'user'), msg('m2', 'assistant'), msg('m3', 'user')]
+        }
+      }
+    })
+
+    const snap = buildVerifierSnapshot()
+    expect(snap.sessions[0].endsWithUser).toBe(true)
+    // No transport in a unit test, so the registry has no client to ask — the
+    // honest answer is 0, not a throw.
+    expect(snap.resyncCount).toBe(0)
+  })
+
+  it('does not flag an empty transcript as ending on the user', () => {
+    useSessionStore.setState({
+      activeSessionId: 'sess-a',
+      sessions: { 'sess-a': { ...EMPTY_SESSION_STATE } }
+    })
+    expect(buildVerifierSnapshot().sessions[0].endsWithUser).toBe(false)
   })
 })
