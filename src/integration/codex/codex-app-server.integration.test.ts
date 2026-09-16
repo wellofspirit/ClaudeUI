@@ -19,6 +19,7 @@ import { CodexClient } from '../../core/codex/CodexClient'
 import { codexHostRegistry } from '../../core/codex/CodexHost'
 import { CodexService } from '../../core/codex/CodexService'
 import { CodexSession } from '../../core/codex/CodexSession'
+import { CLAUDEUI_DISABLED_FEATURES } from '../../core/codex/codex-features'
 import {
   listCodexSessions,
   loadCodexHistory,
@@ -612,7 +613,10 @@ it.skipIf(!enabled)(
         model: resumedModel,
         approvalPolicy: 'untrusted',
         sandbox: 'workspace-write',
-        approvalsReviewer: 'user'
+        approvalsReviewer: 'user',
+        // F17: every ClaudeUI thread envelope carries the desktop-app feature
+        // override; this fixture home has no desktop entries, so only that.
+        config: { features: CLAUDEUI_DISABLED_FEATURES }
       })
       expect(inheritedStatus.codex.overrides).toEqual({ model: resumedModel })
       expect(inheritedStatus.codex).not.toHaveProperty('approvalPolicy')

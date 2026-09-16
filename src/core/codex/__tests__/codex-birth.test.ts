@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { afterEach, expect, it, vi } from 'vitest'
 import type { CodexClientOptions } from '../CodexAppServerClient'
+import { CLAUDEUI_DISABLED_FEATURES } from '../codex-features'
 import { SessionManager } from '../../services/session-manager'
 import { prepareAndCreateSession } from '../../ipc/create-session'
 import { emitEvent, syncCore } from '../../services/sync-host'
@@ -140,7 +141,10 @@ it('birth, identity acknowledgement, native commands and reconnect agree without
     historyMode: 'paginated',
     // The hosted UI tools are declared at creation (codex-hosted-tools.ts);
     // their contents are asserted in codex-session.test.ts.
-    dynamicTools: expect.any(Array)
+    dynamicTools: expect.any(Array),
+    // F17: the desktop-app suppression, on every ClaudeUI thread. This fake
+    // config has no desktop entries, so only the feature flags ride along.
+    config: { features: CLAUDEUI_DISABLED_FEATURES }
   })
   const snapshot = syncCore.getSnapshot()
   expect(snapshot.sessions.root.messages).toHaveLength(1)

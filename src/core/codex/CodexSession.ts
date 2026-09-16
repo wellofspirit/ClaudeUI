@@ -57,6 +57,8 @@ import {
 import { CODEX_AUTH_PROVIDER_ID, type CodexAuthHook } from './codex-auth-hook'
 import { chatgptRateLimits } from './chatgpt-rate-limits'
 import { collectClaudeMcpForCodex, type CodexMcpServerEntry } from './codex-mcp-bridge'
+import { CLAUDEUI_DISABLED_FEATURES } from './codex-features'
+import { desktopAppEntries, type CodexDesktopEntries } from './codex-desktop-entries'
 import {
   MCP_ELICITATION_ACCEPT,
   MCP_ELICITATION_DECLINE,
@@ -570,6 +572,13 @@ export class CodexSession extends BaseSession {
    * another host reopens the thread with the same servers.
    */
   private mcpServers?: Record<string, CodexMcpServerEntry>
+  /**
+   * The Codex DESKTOP APP's own entries in the user's config (F17), read ONCE in
+   * `start()` off the `config/read` this session already makes, and replayed by
+   * {@link threadParams} so start, resume and fork suppress the same set. Empty
+   * until then, and empty forever for a user who does not run the desktop app.
+   */
+  private desktopEntries: CodexDesktopEntries = { mcpServers: [], plugins: [] }
   /** Native child threads by their own thread id (ADR-066 slice F). */
   private children = new Map<string, CodexChild>()
   /** One "nested agents are not rendered" error per session, not per spawn. */
@@ -913,6 +922,26 @@ export class CodexSession extends BaseSession {
         includeLayers: false
       })
       assertCodexProvider(config.model_provider)
+      // F17. The Codex desktop app shares `~/.codex` with the CLI and writes its
+      // own MCP servers and `openai-bundled` plugins into the user's
+      // `config.toml`; nothing in the binary gates those on which client opened
+      // the thread, so an app-server ClaudeUI started loads them all — which is
+      // how a ClaudeUI turn came to reach for "the ChatGPT in-app browser". They
+      // are suppressed per thread by {@link threadParams}, and the set is derived
+      // from what the config ACTUALLY holds because an `enabled: false` overlay
+      // on an absent server would create one with no transport and fail config
+      // load. Read HERE, off the EFFECTIVE config this session already asks the
+      // host for: one read per session start, no second app-server, and under
+      // ADR-069 the host is already up and already injected.
+      this.desktopEntries = desktopAppEntries(config)
+      if (this.desktopEntries.mcpServers.length > 0 || this.desktopEntries.plugins.length > 0)
+        // One line per spawn, so a drive log says what a thread was opened
+        // without rather than leaving it to be inferred from an absence.
+        logger.info(
+          LOG_SOURCE,
+          `desktop entries disabled: mcp_servers=${this.desktopEntries.mcpServers.join(',') || 'none'} ` +
+            `plugins=${this.desktopEntries.plugins.join(',') || 'none'}`
+        )
       await this.readAccount()
       const cursors = new Set<string>()
       let cursor: string | null = null
@@ -1051,23 +1080,53 @@ export class CodexSession extends BaseSession {
     approvalPolicy: CodexModePolicy['approvalPolicy']
     sandbox: CodexModePolicy['sandbox']
     approvalsReviewer: CodexModePolicy['approvalsReviewer']
-    config?: { mcp_servers: Record<string, CodexMcpServerEntry> }
+    config: {
+      mcp_servers?: Record<string, CodexMcpServerEntry | { enabled: false }>
+      plugins?: Record<string, { enabled: false }>
+      features: typeof CLAUDEUI_DISABLED_FEATURES
+    }
   } {
     // The thread BASELINE must agree with the per-turn override, so a turn that
     // somehow starts without one (native queue, a future steer path) still runs
     // under this mode's policy rather than the user's config.
     const { approvalPolicy, sandbox, approvalsReviewer } = this.modePolicy()
+    // The Claude-inherited servers and the desktop app's disabled ones share one
+    // table, because they are one `mcp_servers` override. A name in BOTH keeps
+    // its transport and gains `enabled: false`: replacing the entry outright
+    // would send a server with no command at all, which fails config load —
+    // exactly the failure a blind override causes on a user who has no such
+    // table (`codex-desktop-entries.ts`).
+    const mcpServers: Record<string, CodexMcpServerEntry | { enabled: false }> = {
+      ...(this.mcpServers ?? {})
+    }
+    for (const name of this.desktopEntries.mcpServers)
+      mcpServers[name] = { ...(mcpServers[name] ?? {}), enabled: false }
     return {
       cwd: this.cwd,
       ...(this.model !== undefined ? { model: this.model } : {}),
       approvalPolicy,
       sandbox,
       approvalsReviewer,
-      // Absent, not empty: an empty table is still an override, and the no-MCP
-      // user must reach the binary exactly as before ADR-068 §5.
-      ...(this.mcpServers && Object.keys(this.mcpServers).length > 0
-        ? { config: { mcp_servers: this.mcpServers } }
-        : {})
+      config: {
+        // Absent, not empty: an empty table is still an override, and a user
+        // with neither an inherited server nor a desktop one must reach the
+        // binary exactly as before (ADR-068 §5 — the rule is about these KEYS;
+        // `config` itself is now always sent, because the feature override below
+        // is unconditional).
+        ...(Object.keys(mcpServers).length > 0 ? { mcp_servers: mcpServers } : {}),
+        ...(this.desktopEntries.plugins.length > 0
+          ? {
+              plugins: Object.fromEntries(
+                this.desktopEntries.plugins.map((id) => [id, { enabled: false } as const])
+              )
+            }
+          : {}),
+        // Every ClaudeUI thread, every time. The nine desktop-app flags default
+        // to ON in the binary and describe surfaces ClaudeUI does not have; see
+        // `codex-features.ts` for what they are and what switching them off
+        // does not cost.
+        features: CLAUDEUI_DISABLED_FEATURES
+      }
     }
   }
 

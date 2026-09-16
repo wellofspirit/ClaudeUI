@@ -159,6 +159,40 @@ shell_snapshot = false
     expect(renderFixtureConfigToml({ port: 41999, model: 'mock-model' })).toBe(fixtureVariant)
   })
 
+  it('omits the whole [features] table on request, so the binary keeps its defaults', () => {
+    // F17's probe is the only caller: every one of the nine desktop-app flags
+    // ships `default_enabled: true`, so a home that declares nothing is the one
+    // way to see what a stock `~/.codex` gives a thread. The rest of the file
+    // must be untouched — the fixture provider, the disabled network features
+    // and the file credential store are what keep the child isolated.
+    const defaults = renderFixtureConfigToml({
+      port: 41999,
+      model: 'mock-model',
+      features: 'binary-defaults'
+    })
+    expect(defaults).toBe(fixtureVariant.slice(0, fixtureVariant.indexOf('[features]')))
+    expect(defaults).not.toContain('[features]')
+    expect(defaults).toContain('web_search = "disabled"')
+  })
+
+  it('appends extra TOML verbatim at the very end', () => {
+    const extra = '[shell_environment_policy]\ninherit = "all"\n'
+    expect(renderFixtureConfigToml({ port: 41999, model: 'mock-model', extraToml: extra })).toBe(
+      `${fixtureVariant}${extra}`
+    )
+  })
+
+  it('renders exactly the feature keys it is given, in order', () => {
+    const toml = renderFixtureConfigToml({
+      port: 41999,
+      model: 'mock-model',
+      features: { browser_use: false, apps: true }
+    })
+    expect(toml.slice(toml.indexOf('[features]'))).toBe(
+      '[features]\nbrowser_use = false\napps = true\n'
+    )
+  })
+
   it('renders the native-session variant byte for byte', () => {
     // The `nativeSession` branch: no model line (the catalog default), the
     // built-in `openai` provider, and its base URL pointed at the fixture.

@@ -358,6 +358,45 @@ export interface FixtureConfigOptions {
    *    ordinary failure — without it nothing would ever ask the host to refresh.
    */
   chatgpt?: boolean
+  /**
+   * What `[features]` the fixture home declares.
+   *
+   *  - `'fixture'` (default) — the block every existing probe has always run
+   *    under: `apps`, `plugins`, `remote_plugin`, `browser_use`, `computer_use`
+   *    and `shell_snapshot` all `false`, so nothing in the child reaches for an
+   *    app connector, a plugin registry or a browser.
+   *  - `'binary-defaults'` — NO `[features]` table at all, so every flag keeps
+   *    the `default_enabled` its `FeatureSpec` carries
+   *    (`codex-rs/features/src/lib.rs`). The one way to observe what the pinned
+   *    binary does on a stock home; used by `codex-desktop-entries` and nothing
+   *    else, because a probe that starts from our own overrides can only ever
+   *    re-measure them.
+   *  - a record — exactly those keys, in the given order, and nothing else.
+   */
+  features?: 'fixture' | 'binary-defaults' | Record<string, boolean>
+  /**
+   * TOML appended verbatim to the end of the file, for tables the options above
+   * do not model.
+   *
+   * It exists for `codex-desktop-entries.integration.test.ts`, which has to
+   * reproduce a DESKTOP-APP home — `[mcp_servers.node_repl]`,
+   * `[marketplaces.openai-bundled]`, `[plugins."browser@openai-bundled"]` and
+   * the `[shell_environment_policy]` its stub server needs to boot. Modelling
+   * four one-off tables as options would put that one probe's shape into every
+   * other suite's config type; appended text keeps it where it belongs. It lands
+   * AFTER `[features]`, so the caller must open its own table header first.
+   */
+  extraToml?: string
+}
+
+/** The `[features]` block every fixture home has carried since the first probe. */
+export const FIXTURE_FEATURES: Readonly<Record<string, boolean>> = {
+  apps: false,
+  plugins: false,
+  remote_plugin: false,
+  browser_use: false,
+  computer_use: false,
+  shell_snapshot: false
 }
 
 /**
@@ -377,8 +416,12 @@ export function renderFixtureConfigToml(options: FixtureConfigOptions): string {
     provider = 'fixture',
     openaiBaseUrl = null,
     approvalsReviewer = 'user',
-    chatgpt = false
+    chatgpt = false,
+    features = 'fixture',
+    extraToml = ''
   } = options
+  const featureKeys =
+    features === 'binary-defaults' ? null : features === 'fixture' ? FIXTURE_FEATURES : features
   return `${model ? `model = "${model}"` : ''}
 model_provider = "${provider}"
 ${openaiBaseUrl ? `openai_base_url = "${openaiBaseUrl}"` : ''}
@@ -403,14 +446,14 @@ enabled = false
 enabled = false
 [otel]
 exporter = "none"
-[features]
-apps = false
-plugins = false
-remote_plugin = false
-browser_use = false
-computer_use = false
-shell_snapshot = false
-`
+${
+  featureKeys
+    ? `[features]
+${Object.entries(featureKeys)
+  .map(([key, value]) => `${key} = ${value}`)
+  .join('\n')}\n`
+    : ''
+}${extraToml}`
 }
 
 /** Write `config.toml` (always) and `auth.json` (when an API key is given) into a `CODEX_HOME`. */

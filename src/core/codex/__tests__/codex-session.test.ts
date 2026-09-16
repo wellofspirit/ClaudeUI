@@ -4,6 +4,8 @@ import { CodexHostRegistry, type CodexHostClient } from '../CodexHost'
 import { codexAuthHook, type CodexAuthHook, type CodexAuthSource } from '../codex-auth-hook'
 import { CodexTransportError, type CodexClientOptions } from '../CodexAppServerClient'
 import { followCodexActiveAccount } from '../codex-account-switch'
+import { CLAUDEUI_DISABLED_FEATURES } from '../codex-features'
+import { logger } from '../../services/logger'
 import type { EngineSpawnOptions } from '../../providers/ISession'
 import type { QueuedItem } from '../../../shared/types'
 import { applyEvent } from '../../shared/sync/reducer'
@@ -54,6 +56,13 @@ const mcp = vi.hoisted(() => ({
   servers: {} as Record<string, unknown>,
   skipped: [] as string[]
 }))
+/**
+ * What the USER's own `config.toml` holds beyond the two keys `start()` reads
+ * for the model — the tables F17's desktop-entry detection looks at. Merged into
+ * the fake `config/read` answer, empty by default so every other case measures a
+ * config with nothing of the desktop app in it.
+ */
+const userConfig = vi.hoisted(() => ({ extra: {} as Record<string, unknown> }))
 vi.mock('../codex-mcp-bridge', () => ({
   collectClaudeMcpForCodex: vi.fn(() => ({ servers: mcp.servers, skipped: mcp.skipped }))
 }))
@@ -150,6 +159,7 @@ afterEach(() => {
   rules.ask = []
   mcp.servers = {}
   mcp.skipped = []
+  userConfig.extra = {}
 })
 
 /**
@@ -198,7 +208,8 @@ function fixture(
   /** What `thread/items/list` answers a steer reconciliation with. */
   const listed = { current: [] as unknown[] }
   const request = vi.fn(async (method: string, _params?: unknown) => {
-    if (method === 'config/read') return { config: { model: 'native', model_provider: 'openai' } }
+    if (method === 'config/read')
+      return { config: { model: 'native', model_provider: 'openai', ...userConfig.extra } }
     if (method === 'turn/steer') return { turnId: 'turn' }
     if (method === 'thread/items/list')
       return { data: listed.current, nextCursor: null, backwardsCursor: null }
@@ -415,7 +426,8 @@ describe('Codex first session', () => {
       model: 'native',
       approvalPolicy: 'untrusted',
       sandbox: 'workspace-write',
-      approvalsReviewer: 'user'
+      approvalsReviewer: 'user',
+      config: { features: CLAUDEUI_DISABLED_FEATURES }
     })
     expect(resumed.request).toHaveBeenCalledWith('thread/settings/update', {
       threadId: 'root',
@@ -437,7 +449,8 @@ describe('Codex first session', () => {
       threadId: 'root',
       approvalPolicy: 'untrusted',
       sandbox: 'workspace-write',
-      approvalsReviewer: 'user'
+      approvalsReviewer: 'user',
+      config: { features: CLAUDEUI_DISABLED_FEATURES }
     })
     expect(request).toHaveBeenCalledWith('thread/settings/update', {
       threadId: 'root',
@@ -464,7 +477,8 @@ describe('Codex first session', () => {
       excludeTurns: true,
       approvalPolicy: 'untrusted',
       sandbox: 'workspace-write',
-      approvalsReviewer: 'user'
+      approvalsReviewer: 'user',
+      config: { features: CLAUDEUI_DISABLED_FEATURES }
     })
     expect(request).not.toHaveBeenCalledWith('thread/resume', expect.anything())
     expect(session.getSessionId()).toBe('fork')
@@ -727,7 +741,9 @@ describe('Codex first session', () => {
       historyMode: 'paginated',
       // The hosted tools ride along on creation — their contents are asserted
       // in the 'Codex hosted tools' describe below.
-      dynamicTools: expect.any(Array)
+      dynamicTools: expect.any(Array),
+      // F17: the desktop-app feature flags, off on every ClaudeUI thread.
+      config: { features: CLAUDEUI_DISABLED_FEATURES }
     })
     expect(session.getSessionId()).toBe('root')
     expect(events).toHaveBeenCalledWith('session:status', [
@@ -762,7 +778,8 @@ describe('Codex first session', () => {
       threadId: 'root',
       approvalPolicy: 'untrusted',
       sandbox: 'workspace-write',
-      approvalsReviewer: 'user'
+      approvalsReviewer: 'user',
+      config: { features: CLAUDEUI_DISABLED_FEATURES }
     })
     expect(callbacks().serverMethods).toContain('item/tool/call')
     expect(callbacks().serverMethods).toContain('item/permissions/requestApproval')
@@ -4012,7 +4029,9 @@ describe('Codex inherits the shared MCP list', () => {
     await session.run(null)
     expect(request).toHaveBeenCalledWith(
       'thread/start',
-      expect.objectContaining({ config: { mcp_servers: inherited } })
+      expect.objectContaining({
+        config: { mcp_servers: inherited, features: CLAUDEUI_DISABLED_FEATURES }
+      })
     )
   })
 
@@ -4022,7 +4041,9 @@ describe('Codex inherits the shared MCP list', () => {
     await session.run(null)
     expect(request).toHaveBeenCalledWith(
       'thread/resume',
-      expect.objectContaining({ config: { mcp_servers: inherited } })
+      expect.objectContaining({
+        config: { mcp_servers: inherited, features: CLAUDEUI_DISABLED_FEATURES }
+      })
     )
   })
 
@@ -4036,20 +4057,25 @@ describe('Codex inherits the shared MCP list', () => {
     await session.run(null)
     expect(request).toHaveBeenCalledWith(
       'thread/fork',
-      expect.objectContaining({ config: { mcp_servers: inherited } })
+      expect.objectContaining({
+        config: { mcp_servers: inherited, features: CLAUDEUI_DISABLED_FEATURES }
+      })
     )
   })
 
-  it('sends NO config key at all when nothing is inherited', async () => {
+  it('sends NO mcp_servers key at all when nothing is inherited', async () => {
     const { session, request } = fixture()
     await session.run(null)
-    const params = request.mock.calls.find(([method]) => method === 'thread/start')?.[1] as Record<
-      string,
-      unknown
-    >
-    // `config: {}` is not the same as absent: an empty override is still an
+    const config = (
+      request.mock.calls.find(([method]) => method === 'thread/start')?.[1] as {
+        config?: Record<string, unknown>
+      }
+    ).config
+    // `mcp_servers: {}` is not the same as absent: an empty override is still an
     // override, and this is the path every user without a `.mcp.json` takes.
-    expect(params).not.toHaveProperty('config')
+    // `config` itself IS present now — F17 puts the desktop-app feature override
+    // on every thread — which is why this asserts the KEY and not the envelope.
+    expect(config).not.toHaveProperty('mcp_servers')
   })
 
   it('warns ONCE, naming the SSE servers Codex has no transport for', async () => {
@@ -4067,6 +4093,197 @@ describe('Codex inherits the shared MCP list', () => {
     const { session } = fixture()
     await session.run(null)
     expect(warnings()).toEqual([])
+  })
+})
+
+/**
+ * F17 — the Codex desktop app's plugins, MCP servers and feature flags are off
+ * on EVERY ClaudeUI thread.
+ *
+ * The override rides the same per-thread `config` envelope the inherited MCP
+ * list does, so what is asserted here is the WIRE: start, resume (both the cold
+ * one and the re-pin's `takeThread`) and fork each carry the same `config`. What
+ * the override does to the BINARY — that the desktop plugin's text and its MCP
+ * server's tools really leave the provider request, that no tool is otherwise
+ * lost, and that the user's `config.toml` is untouched — cannot be asserted
+ * against a fake app-server and lives in
+ * `src/integration/codex/codex-desktop-entries.integration.test.ts`.
+ */
+describe('Codex turns the desktop-app features off on every thread', () => {
+  const configOf = (
+    request: ReturnType<typeof fixture>['request'],
+    method: string
+  ): Record<string, unknown> | undefined =>
+    (
+      request.mock.calls.find(([name]) => name === method)?.[1] as
+        { config?: Record<string, unknown> } | undefined
+    )?.config
+
+  it('sends config.features on thread/start', async () => {
+    const { session, request } = fixture()
+    await session.run(null)
+    expect(configOf(request, 'thread/start')?.features).toEqual(CLAUDEUI_DISABLED_FEATURES)
+  })
+
+  it('sends config.features on thread/resume', async () => {
+    const { session, request } = fixture({ resumeSessionId: 'root' })
+    await session.run(null)
+    expect(configOf(request, 'thread/resume')?.features).toEqual(CLAUDEUI_DISABLED_FEATURES)
+  })
+
+  it('sends config.features on thread/fork', async () => {
+    const { session, request } = fixture({
+      resumeSessionId: 'root',
+      resumeSessionAt: 'turn-1',
+      forkSession: true
+    })
+    await session.run(null)
+    expect(configOf(request, 'thread/fork')?.features).toEqual(CLAUDEUI_DISABLED_FEATURES)
+  })
+
+  it('sends config.features on the thread/resume a re-pin takes the thread with', async () => {
+    const source = twoAccounts()
+    const { session, request, injectedAccountId } = fixture({}, codexAuthHook({ source }), source)
+    emailPerAccount(request, injectedAccountId)
+    await session.run(null)
+    request.mockClear()
+
+    await session.setAccount('acct-b')
+
+    // `takeThread` is its own `threadParams()` call site: a session that moves
+    // hosts must not land on the new one with the desktop features back on.
+    expect(configOf(request, 'thread/resume')?.features).toEqual(CLAUDEUI_DISABLED_FEATURES)
+  })
+
+  it('carries the MCP override and the features in ONE config object', async () => {
+    mcp.servers = { docs: { command: 'node', args: ['docs-server.js'] } }
+    const { session, request } = fixture()
+    await session.run(null)
+    expect(configOf(request, 'thread/start')).toEqual({
+      mcp_servers: mcp.servers,
+      features: CLAUDEUI_DISABLED_FEATURES
+    })
+  })
+
+  it('sends the features and NOTHING else when no MCP server is inherited', async () => {
+    const { session, request } = fixture()
+    await session.run(null)
+    // The no-MCP user's whole `config` override, exactly (ADR-068 §5's rule is
+    // about the `mcp_servers` KEY, which is still absent here).
+    expect(Object.keys(configOf(request, 'thread/start')!)).toEqual(['features'])
+  })
+
+  /**
+   * The desktop app's own entries, as it writes them into the shared `~/.codex`
+   * that the app-server ClaudeUI started will otherwise load in full.
+   */
+  const desktop = {
+    mcp_servers: {
+      node_repl: { command: '/Applications/Codex.app/Contents/Resources/bin/node-repl' },
+      cua_repl: { command: '/Applications/Codex.app/Contents/Resources/bin/cua-repl' },
+      mine: { command: 'node', args: ['mine.js'] }
+    },
+    plugins: {
+      'browser@openai-bundled': { enabled: true },
+      'documents@openai-primary-runtime': { enabled: true }
+    }
+  }
+
+  it('disables the desktop app`s MCP servers and bundled plugins, and nothing else', async () => {
+    userConfig.extra = desktop
+    const { session, request } = fixture()
+    await session.run(null)
+    expect(configOf(request, 'thread/start')).toEqual({
+      // Only the two detected servers, each as a single `enabled` key: the merge
+      // is per key, so the user's `command` survives on their side of it and
+      // `mine` is never named at all.
+      mcp_servers: { node_repl: { enabled: false }, cua_repl: { enabled: false } },
+      plugins: { 'browser@openai-bundled': { enabled: false } },
+      features: CLAUDEUI_DISABLED_FEATURES
+    })
+  })
+
+  it('sends the same suppression on resume and on fork', async () => {
+    userConfig.extra = desktop
+    const resumed = fixture({ resumeSessionId: 'root' })
+    await resumed.session.run(null)
+    const forked = fixture({
+      resumeSessionId: 'root',
+      resumeSessionAt: 'turn-1',
+      forkSession: true
+    })
+    await forked.session.run(null)
+    const expected = {
+      mcp_servers: { node_repl: { enabled: false }, cua_repl: { enabled: false } },
+      plugins: { 'browser@openai-bundled': { enabled: false } },
+      features: CLAUDEUI_DISABLED_FEATURES
+    }
+    expect(configOf(resumed.request, 'thread/resume')).toEqual(expected)
+    expect(configOf(forked.request, 'thread/fork')).toEqual(expected)
+  })
+
+  it('merges the suppression with the inherited Claude servers without losing either', async () => {
+    userConfig.extra = desktop
+    mcp.servers = { docs: { command: 'node', args: ['docs-server.js'] } }
+    const { session, request } = fixture()
+    await session.run(null)
+    expect(configOf(request, 'thread/start')?.mcp_servers).toEqual({
+      docs: { command: 'node', args: ['docs-server.js'] },
+      node_repl: { enabled: false },
+      cua_repl: { enabled: false }
+    })
+  })
+
+  it('keeps the transport when a disabled name collides with an inherited server', async () => {
+    // `{ node_repl: { enabled: false } }` REPLACING the translated entry would
+    // send a server table with no transport, which fails config load outright —
+    // the same failure a blind override causes on a user who has no such table.
+    userConfig.extra = { mcp_servers: { node_repl: { command: '/Applications/X.app/Contents/x' } } }
+    mcp.servers = { node_repl: { command: 'node', args: ['mine.js'] } }
+    const { session, request } = fixture()
+    await session.run(null)
+    expect(configOf(request, 'thread/start')?.mcp_servers).toEqual({
+      node_repl: { command: 'node', args: ['mine.js'], enabled: false }
+    })
+  })
+
+  it('sends NO plugins key and no disabled servers for a user without the desktop app', async () => {
+    userConfig.extra = {
+      mcp_servers: { docs: { command: 'node', args: ['docs-server.js'] } },
+      plugins: { 'documents@openai-primary-runtime': { enabled: true } }
+    }
+    const { session, request } = fixture()
+    await session.run(null)
+    // Absent, not empty (ADR-068 §5): an empty `plugins` table is still an
+    // override, and `mcp_servers: { node_repl: { enabled: false } }` on a user
+    // who has no such table would CREATE a transport-less server.
+    expect(Object.keys(configOf(request, 'thread/start')!)).toEqual(['features'])
+  })
+
+  /** The `desktop entries disabled:` lines logged since this was last cleared. */
+  const disabledLines = (): string[] =>
+    vi
+      .mocked(logger.info)
+      .mock.calls.map(([, message]) => message)
+      .filter((message) => message.startsWith('desktop entries disabled'))
+
+  it('logs what it disabled, once per spawn', async () => {
+    userConfig.extra = desktop
+    // The logger is a module mock shared by the whole file, so the earlier cases
+    // in this describe have already written their own lines into it.
+    vi.mocked(logger.info).mockClear()
+    const { session } = fixture()
+    await session.run(null)
+    expect(disabledLines()).toEqual([
+      'desktop entries disabled: mcp_servers=cua_repl,node_repl plugins=browser@openai-bundled'
+    ])
+  })
+
+  it('says nothing when there was nothing to disable', async () => {
+    vi.mocked(logger.info).mockClear()
+    const { session } = fixture()
+    await session.run(null)
+    expect(disabledLines()).toEqual([])
   })
 })
 
