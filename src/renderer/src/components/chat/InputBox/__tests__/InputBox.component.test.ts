@@ -20,7 +20,7 @@ import { createElement } from 'react'
 import { useSessionStore } from '../../../../stores/session-store'
 import { resetFactoryCounter } from '@test/factories/messages'
 import type { InputBoxViewProps } from '../View'
-import type { QueuedItem } from '../../../../../../shared/types'
+import type { ModelInfo, QueuedItem } from '../../../../../../shared/types'
 import { InputBox } from '../InputBox'
 import { resolveCodexCapabilities } from '../../../../../../shared/model-capabilities'
 import { seed, mirrorStoreIntoReplica, resetReplicaSeam } from '@test/helpers/replica-seed'
@@ -1348,6 +1348,162 @@ describe('InputBox FC — rendered', () => {
     mirrorStoreIntoReplica()
     renderFC()
     expect(viewProps.effort).toBe('low')
+  })
+  // -------------------------------------------------------------------------
+  // F11 — a native tier picked BEFORE the session spawns
+  // -------------------------------------------------------------------------
+
+  const CODEX_TIERS = [
+    { value: 'minimal', description: 'Minimal' },
+    { value: 'low', description: 'Low' },
+    { value: 'medium', description: 'Medium' },
+    { value: 'high', description: 'High' },
+    { value: 'xhigh', description: 'Extra high' }
+  ]
+
+  const astraRow = {
+    value: 'gpt-6-astra',
+    displayName: 'GPT-6-Astra',
+    description: '',
+    engineId: 'codex' as const,
+    nativeEffortOptions: CODEX_TIERS,
+    nativeDefaultEffort: 'medium'
+  }
+
+  /** Publishes only two of astra's five tiers. */
+  const miniRow = {
+    value: 'gpt-6-astra-mini',
+    displayName: 'GPT-6-Astra-mini',
+    description: '',
+    engineId: 'codex' as const,
+    nativeEffortOptions: [
+      { value: 'low', description: 'Low' },
+      { value: 'high', description: 'High' }
+    ],
+    nativeDefaultEffort: 'low'
+  }
+
+  /** A codex session with a catalog row but no backend thread yet. */
+  function freshCodexSession(model = 'gpt-6-astra', models: ModelInfo[] = [astraRow]): void {
+    const row = models.find((m) => m.value === model)
+    // The FC re-fetches the catalog on mount; without this the harness's empty
+    // claude-only group would wipe `availableModels` mid-test and the codex
+    // catalog row (the tiers this slice is about) would vanish.
+    app.bridge.ipcMain.handle('session:get-engine-models', () => [
+      { engineId: 'codex', vendorId: 'openai', vendorName: 'OpenAI', models }
+    ])
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedEngineId: 'codex',
+          selectedModel: model,
+          codexModelExplicit: true,
+          sdkActive: false,
+          isHistorical: false,
+          status: {
+            ...state.sessions[FC_ROUTE].status,
+            sessionId: null,
+            engineId: 'codex',
+            capabilities: resolveCodexCapabilities(row)
+          }
+        }
+      },
+      availableModels: models
+    }))
+    mirrorStoreIntoReplica()
+  }
+
+  async function sendFC(): Promise<void> {
+    await act(async () => {
+      useSessionStore.getState().setDraftText('go')
+    })
+    await act(async () => {
+      await viewProps.onSend()
+    })
+  }
+
+  it('carries a native tier picked BEFORE the spawn into session:create', async () => {
+    // Pre-spawn there is no thread for `session:set-effort` to update: the main
+    // handler finds no live session and drops the pick silently, so the pill
+    // stayed on the model's catalog default and the spawn carried nothing.
+    freshCodexSession()
+    renderFC()
+    expect(viewProps.effort).toBe('medium')
+    await act(async () => {
+      await viewProps.onSelectEffort('high')
+    })
+    expect(viewProps.effort).toBe('high')
+    expect(ipcCalls['session:set-effort']).toBeUndefined()
+    await sendFC()
+    expect(ipcCalls['session:create'][0][2]).toBe('high')
+  })
+
+  it('lets a pre-spawn pick beat the configured default for the same model', async () => {
+    useSessionStore.setState({
+      codexDefaultModel: 'gpt-6-astra',
+      codexDefaultModelConfigured: true,
+      codexDefaultEffort: 'xhigh'
+    })
+    freshCodexSession()
+    renderFC()
+    await act(async () => {
+      await viewProps.onSelectEffort('minimal')
+    })
+    await sendFC()
+    expect(ipcCalls['session:create'][0][2]).toBe('minimal')
+  })
+
+  it('drops a stored tier the selected model does not publish and spawns with the configured default', async () => {
+    // A tier off another engine's ladder (a persisted config, or a session
+    // switched onto codex): the catalog row never published it, so
+    // `CodexSession.validateEffort` would refuse the thread start.
+    useSessionStore.setState({
+      codexDefaultModel: 'gpt-6-astra',
+      codexDefaultModelConfigured: true,
+      codexDefaultEffort: 'xhigh'
+    })
+    freshCodexSession()
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], effort: 'max' }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    await sendFC()
+    expect(ipcCalls['session:create'][0][2]).toBe('xhigh')
+  })
+
+  it('coerces a pre-spawn pick against the model the user switches to', async () => {
+    freshCodexSession('gpt-6-astra', [astraRow, miniRow])
+    renderFC()
+    // `high` is published by both rows — the switch must keep it.
+    await act(async () => {
+      await viewProps.onSelectEffort('high')
+    })
+    await act(async () => {
+      viewProps.onSelectModel('gpt-6-astra-mini')
+    })
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('high')
+    expect(viewProps.effort).toBe('high')
+    // `minimal` is astra-only: switching to the mini row must clear it rather
+    // than carry a tier the new model never published into the spawn.
+    await act(async () => {
+      viewProps.onSelectModel('gpt-6-astra')
+    })
+    await act(async () => {
+      await viewProps.onSelectEffort('minimal')
+    })
+    await act(async () => {
+      viewProps.onSelectModel('gpt-6-astra-mini')
+    })
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBeNull()
+    expect(viewProps.effort).toBe('low')
+    await sendFC()
+    expect(ipcCalls['session:create'][0][2]).toBeUndefined()
   })
 
   it('derives capability props from selectedModel: sonnet-4-5 → no adaptive, no effort', () => {

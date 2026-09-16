@@ -1449,10 +1449,9 @@ export interface SessionState {
    * rejects corrects itself instead of being optimistically shown and reverted.
    */
   changePermissionMode: (routingId: string, next: PermissionMode) => void
-  setEffort: (
-    effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null,
-    routingId?: string
-  ) => void
+  /** Canonical `effort` is `string | null` (sync/state.ts): engine-native
+   *  ladders (Codex's `minimal`…`xhigh`) are not the Claude five. */
+  setEffort: (effort: string | null, routingId?: string) => void
   setThinkingMode: (mode: 'adaptive' | 'enabled' | 'disabled' | null, routingId?: string) => void
   setReasoningVariant: (variant: string | null, routingId?: string) => void
   setDraftText: (text: string) => void
