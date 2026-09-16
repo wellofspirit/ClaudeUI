@@ -7,14 +7,15 @@
  * its models reach the picker (MODELS IN THE PICKER). Everything is built from
  * the row vocabulary — the sheet invents no control of its own.
  *
- * ON A SUBSCRIPTION THE FIRST QUESTION IS PLURAL (ADR-068 §2). The vault holds N
- * ChatGPT accounts with one ACTIVE, so the Credential group becomes ACCOUNTS: a
- * radio per account (switching re-vends the credential to every enabled engine),
- * a Remove per account, "+ Add account" in the header — which is the EXISTING
- * sign-in, handed to the Add sheet, not a second flow — and, once there are two,
- * the per-session pinning toggle. Disconnect then means the whole SET, so it
- * moves to the footer and says so. A row with no account list falls back to the
- * single-credential rows: an empty Accounts card would read as "no subscription".
+ * ON A SUBSCRIPTION THE FIRST QUESTION IS PLURAL (ADR-068 §2), AND IT IS
+ * ANSWERED SOMEWHERE ELSE (F14). The vault holds N ChatGPT accounts with one
+ * ACTIVE; every provider's stored accounts are managed on Models & providers ›
+ * Accounts, beside Anthropic's, so the Credential group becomes ONE LINK row
+ * naming the count and pointing there. Two homes for one list is what that move
+ * removed. Disconnect still means the whole SET — it is a provider action, not
+ * an account one — so it stays in this sheet's footer. A row with no account
+ * list falls back to the single-credential rows: an empty Accounts card would
+ * read as "no subscription".
  *
  * IT OWNS NO STATE OF RECORD. Every action routes to an EXISTING writer, and
  * after each write the sheet asks its parent to re-read `provider-registry:list`
@@ -92,6 +93,7 @@ import {
   type CurationSort
 } from './ModelCurationList'
 import { SheetFrame, SheetGroup } from './SheetFrame'
+import type { SettingsTarget } from './settings-target'
 import { ProviderForm, normalizeProviderDraft } from './ProviderForm'
 import { VendorOAuthFlow } from './VendorOAuthFlow'
 import { OpencodeProviderConfigModal } from './OpencodeProviders'
@@ -100,8 +102,11 @@ import { PiProviderModal } from './PiCustomProviders'
 /** Testid namespace (ADR-027 tier 1/2). */
 const SHEET = 'ProviderSheet'
 
-/** The row order of the ENABLED FOR group — claude first, as on the board. */
-const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi']
+/**
+ * The row order of the ENABLED FOR group — claude first, as on the board, and
+ * codex last because it is not a route at all (see {@link codexRow}).
+ */
+const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi', 'codex']
 
 // ── Shared atoms (the list imports these; the direction is list → sheet) ──────
 
@@ -253,6 +258,13 @@ export interface ProviderSheetProps {
   entry: ProviderEntry
   /** The registry's one degraded case — no opencode binary (owner ruling 2). */
   opencodeInstalled: boolean
+  /**
+   * The render context's navigator, threaded through the list (F14): the
+   * Accounts row links to Models & providers › Accounts, where every provider's
+   * stored accounts live. Absent means the link renders as plain text rather
+   * than a dead button.
+   */
+  navigate?: (target: SettingsTarget) => void
   onClose: () => void
   /**
    * Re-read `provider-registry:list`. Resolves once the parent has the fresh
@@ -264,6 +276,7 @@ export interface ProviderSheetProps {
 export function ProviderSheet({
   entry,
   opencodeInstalled,
+  navigate,
   onClose,
   onWrote
 }: ProviderSheetProps): React.JSX.Element {
@@ -475,95 +488,6 @@ export function ProviderSheet({
     isShared && definition?.kind === 'subscription' && entry.accounts?.list.length
       ? entry.accounts
       : undefined
-
-  /** Plan and a shortened workspace id — what tells two accounts of one person apart. */
-  function accountDescription(account: { planType?: string; accountId?: string }): string {
-    const workspace = account.accountId
-      ? `Workspace ${account.accountId.length > 14 ? `${account.accountId.slice(0, 14)}…` : account.accountId}`
-      : undefined
-    return [account.planType, workspace].filter(Boolean).join(' · ')
-  }
-
-  /**
-   * One row per account, the active one selected and tinted.
-   *
-   * Switching is a WRITE, not a selection: the vault re-vends the new credential
-   * to every enabled engine, so the radio commits immediately and the row is
-   * re-read from the registry afterwards like every other action on this sheet.
-   */
-  function accountRows(list: NonNullable<typeof accounts>): React.ReactNode {
-    return (
-      <>
-        {list.list.map((account) => {
-          const active = account.id === list.activeId
-          const armed = confirming === `account:${account.id}`
-          return (
-            <SettingRow
-              key={account.id}
-              as="label"
-              testid={`${SHEET}.account`}
-              dataId={account.id}
-              label={account.email || 'Account'}
-              description={accountDescription(account)}
-              className={active ? 'bg-accent/5' : 'hover:bg-bg-hover/40'}
-              leading={
-                <input
-                  type="radio"
-                  name={`${SHEET}-account`}
-                  value={account.id}
-                  checked={active}
-                  disabled={busy}
-                  onChange={() => {
-                    // Already active: re-vending the credential we are already on
-                    // would recycle opencode for nothing.
-                    if (active) return
-                    void run(() => window.api.switchProviderAccount(entry.id, account.id))
-                  }}
-                  className="appearance-none w-4 h-4 shrink-0 rounded-full border-[1.5px] border-border-bright bg-transparent checked:border-accent checked:bg-accent checked:shadow-[inset_0_0_0_3.5px_var(--color-bg-secondary)] cursor-pointer"
-                />
-              }
-            >
-              <Button
-                variant="danger"
-                testid={`${SHEET}.accountRemove`}
-                dataId={account.id}
-                disabled={busy}
-                onClick={() =>
-                  confirmThen(`account:${account.id}`, () =>
-                    window.api.removeProviderAccount(entry.id, account.id)
-                  )
-                }
-              >
-                {armed ? 'Remove?' : 'Remove'}
-              </Button>
-            </SettingRow>
-          )
-        })}
-        {/* One account is not a choice to make per session, so the toggle that
-            configures that choice is not shown until there are two. */}
-        {list.list.length > 1 && (
-          <SettingRow
-            testid={`${SHEET}.perSession`}
-            label="Per-session accounts"
-            description="Let a session pin one account instead of following the active one. New sessions only."
-          >
-            <button
-              type="button"
-              data-testid={`${SHEET}.perSessionToggle`}
-              aria-pressed={list.perSession}
-              disabled={busy}
-              onClick={() =>
-                void run(() => window.api.setProviderAccountsPerSession(entry.id, !list.perSession))
-              }
-              className="cursor-default disabled:opacity-40"
-            >
-              <ToggleSwitch checked={list.perSession} />
-            </button>
-          </SettingRow>
-        )}
-      </>
-    )
-  }
 
   function credentialRows(): React.JSX.Element {
     if (isShared && !shared.resolved) {
@@ -821,7 +745,26 @@ export function ProviderSheet({
     )
   }
 
+  /**
+   * Codex, which is not a route (ADR-068 §1). The vault injects the ACTIVE
+   * ChatGPT account into every app-server ClaudeUI starts, so there is nothing
+   * here to enable or disable — a toggle would promise a switch the vault does
+   * not have. The row exists to SAY that, and to point at the one place the
+   * account is chosen.
+   */
+  function codexRow(): React.JSX.Element {
+    return (
+      <SettingRow
+        testid={`${SHEET}.engine`}
+        dataId="codex"
+        label="Codex"
+        description="Codex always uses the active ChatGPT account. Pin a different one per session from the Accounts page."
+      />
+    )
+  }
+
   const engineRow = (engine: EngineId): React.JSX.Element => {
+    if (engine === 'codex') return codexRow()
     if (engine === 'claude') {
       // Always off, always disabled: Claude Code talks to Anthropic's endpoint
       // and nothing else, so this row exists to SAY so rather than to be used.
@@ -1118,22 +1061,28 @@ export function ProviderSheet({
         }
       >
         {accounts ? (
-          <SheetGroup
-            testid={`${SHEET}.group`}
-            id="accounts"
-            label="Accounts"
-            trailing={
+          <SheetGroup testid={`${SHEET}.group`} id="accounts" label="Accounts">
+            {/* The rows live on Models & providers › Accounts (F14), beside
+                Anthropic's — one page for every provider's accounts, rather
+                than one list on a page and another inside a sheet. */}
+            <SettingRow
+              testid={`${SHEET}.accountsLink`}
+              label={`${accounts.list.length} account${accounts.list.length === 1 ? '' : 's'} · managed on Accounts`}
+              description="Switching, removing and per-session pinning all live on the Accounts page."
+            >
               <Button
                 variant="link"
-                testid={`${SHEET}.addAccount`}
-                disabled={busy}
-                onClick={() => openSignIn({ providerId: 'chatgpt', mode: 'add' })}
+                testid={`${SHEET}.manageAccounts`}
+                disabled={!navigate}
+                onClick={() => {
+                  // Close first: the jump lands on the page BEHIND this sheet.
+                  onClose()
+                  navigate?.({ page: 'models', group: 'accounts' })
+                }}
               >
-                + Add account
+                Accounts ›
               </Button>
-            }
-          >
-            {accountRows(accounts)}
+            </SettingRow>
           </SheetGroup>
         ) : (
           <SheetGroup testid={`${SHEET}.group`} id="credential" label="Credential">
@@ -1160,7 +1109,12 @@ export function ProviderSheet({
             ) : undefined
           }
         >
-          {ENGINE_ORDER.map((engine) => (
+          {/* Codex is filtered rather than rendered as null: the group card
+              draws its separators with `divide-y`, so an empty wrapper would
+              leave a stray rule under the last real row. */}
+          {ENGINE_ORDER.filter(
+            (engine) => engine !== 'codex' || entry.engines.codex !== undefined
+          ).map((engine) => (
             <div key={engine}>{engineRow(engine)}</div>
           ))}
           {defaultModelRows()}

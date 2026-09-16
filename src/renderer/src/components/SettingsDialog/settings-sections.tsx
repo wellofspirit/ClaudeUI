@@ -55,6 +55,8 @@ import {
   RemoteServerSection
 } from './RemoteServerSettings'
 import { ProviderList } from './ProviderList'
+import { CredentialChip } from './ProviderSheet'
+import { ChatgptAccountsSetting } from './ChatgptAccountsSetting'
 import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
 import { useEngineInstalled, useOpencodeInstalled, usePiInstalled } from './use-engine-installed'
 import { useDispatchConfig, useDispatchModels, useEngineConfigObject } from './use-engine-config'
@@ -397,16 +399,30 @@ function ModelEffortRow({
 // ── Accounts (multi-account support, ADR-015) ────────────────────────
 
 /**
- * The account list. Switching and removing are writes this pane owns; ADDING is
- * a sign-in, and since ADR-068 §3 every sign-in runs in `SignInDialog` — the
- * paste panel and the outcome notice that used to live here are gone, along
- * with the second copy of the flow they implemented. `addAccount()` itself is
- * unchanged; the dialog is simply the thing that calls it now.
+ * The ANTHROPIC half of Models & providers › Accounts. Its ChatGPT neighbour is
+ * `ChatgptAccountsSetting`; since F14 both providers' stored accounts live on
+ * this one page, so this pane grew a provider heading (name + credential badge +
+ * "+ Add account") and states its own switch RULE.
+ *
+ * The rule is stated per provider because the two are NOT the same: switching a
+ * Claude account respawns every running session on it (ADR-015), while a
+ * running Codex session keeps the account it started with (ADR-068 §2).
+ * Unifying them is a separate decision, so the page says what each one does
+ * rather than implying one behaviour for both.
+ *
+ * Switching and removing are writes this pane owns; ADDING is a sign-in, and
+ * since ADR-068 §3 every sign-in runs in `SignInDialog` — the paste panel and
+ * the outcome notice that used to live here are gone, along with the second copy
+ * of the flow they implemented. `addAccount()` itself is unchanged; the dialog
+ * is simply the thing that calls it now.
  */
 function AccountsSetting(): React.JSX.Element {
   const accounts = useSessionStore((s) => s.accountsState)
   const setAccounts = useSessionStore((s) => s.setAccountsState)
   const openSignIn = useSessionStore((s) => s.openSignIn)
+  // The credential badge's word comes from the same read model the provider
+  // list badges from, so the two surfaces cannot disagree about one provider.
+  const registry = useSessionStore((s) => s.providerRegistry)
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
@@ -415,6 +431,7 @@ function AccountsSetting(): React.JSX.Element {
 
   const enabled = accounts?.enabled ?? false
   const isMac = window.api.platform === 'darwin'
+  const entry = registry?.entries.find((candidate) => candidate.id === 'anthropic')
 
   const run = async (fn: () => Promise<AccountsState>): Promise<void> => {
     setBusy(true)
@@ -427,6 +444,28 @@ function AccountsSetting(): React.JSX.Element {
 
   return (
     <div data-testid="AccountsSetting" className="divide-y divide-border/55">
+      <SettingRow
+        testid="AccountsSetting.heading"
+        label="Anthropic"
+        labelBadge={
+          entry ? (
+            <CredentialChip credential={entry.credential} testid="AccountsSetting.credential" />
+          ) : undefined
+        }
+        description="The Claude subscription every Claude session runs under."
+      >
+        {enabled && (
+          <Button
+            testid="AccountsSetting.addAccount"
+            variant="tinted"
+            disabled={busy}
+            onClick={() => openSignIn({ providerId: 'anthropic', mode: 'add' })}
+          >
+            + Add account
+          </Button>
+        )}
+      </SettingRow>
+
       <SettingsToggle
         testid="AccountsSetting.multiAccount"
         label="Multiple accounts"
@@ -488,19 +527,12 @@ function AccountsSetting(): React.JSX.Element {
         })}
 
       {enabled && (
+        // ADR-015's switch semantics, stated where the switch happens — and
+        // deliberately not the same sentence the ChatGPT card carries.
         <SettingRow
-          testid="AccountsSetting.addRow"
-          description="Signs in to another Claude subscription and adds it to the list."
-        >
-          <Button
-            testid="AccountsSetting.addAccount"
-            variant="tinted"
-            disabled={busy}
-            onClick={() => openSignIn({ providerId: 'anthropic', mode: 'add' })}
-          >
-            + Add account
-          </Button>
-        </SettingRow>
+          testid="AccountsSetting.switchRule"
+          description="Switching restarts every running Claude session on the new account; sessions resume where they were."
+        />
       )}
     </div>
   )
@@ -2654,11 +2686,22 @@ export const SECTIONS: Section[] = [
       </svg>
     ),
     items: [
+      // One page for every provider's accounts (F14), in rail order: Anthropic
+      // first, ChatGPT second. Each group states its OWN switch rule — they are
+      // not the same rule (ADR-015 vs ADR-068 §2).
       {
         key: 'multiAccount',
-        label: 'Multiple account support',
-        keywords: 'account login subscription switch multi keychain credentials sign in',
+        label: 'Anthropic accounts',
+        keywords:
+          'anthropic claude account login subscription switch multi keychain credentials sign in',
         render: () => <AccountsSetting />
+      },
+      {
+        key: 'chatgptAccounts',
+        label: 'ChatGPT accounts',
+        keywords:
+          'chatgpt openai codex account login subscription switch active workspace organisation organization per-session pin credentials sign in',
+        render: () => <ChatgptAccountsSetting />
       }
     ]
   },

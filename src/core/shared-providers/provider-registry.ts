@@ -304,10 +304,17 @@ function sharedEntry(
   // The vault's account list belongs to the provider whose vault it is. Today
   // that is ChatGPT's; a second subscription provider would bring its own source
   // rather than borrow this one.
-  const accounts =
+  const chatgptSubscription =
     definition.id === CHATGPT_PROVIDER_ID && definition.kind === 'subscription'
-      ? (sources.chatgptAccounts ?? undefined)
-      : undefined
+  const accounts = chatgptSubscription ? (sources.chatgptAccounts ?? undefined) : undefined
+  // Codex is not a ROUTE — it is fed by vault injection (ADR-068 §1), so it can
+  // never appear in `HARNESSES` and the loop above will never produce it. Say it
+  // here instead: without the chip the row lists `opencode · pi` and reads as
+  // "this subscription is not available to Codex", which is the opposite of the
+  // truth. `enabled` is whether there is an ACTIVE account, because that is the
+  // one Codex is injected with; a stored-but-inactive account reaches no
+  // process.
+  if (chatgptSubscription) engines.codex = { enabled: accounts?.activeId != null }
   return {
     id: definition.id,
     name: definition.name,

@@ -38,7 +38,10 @@ const chatgpt: ProviderEntry = {
   credential: 'connected',
   engines: {
     pi: { enabled: true, modelCount: 4, native: true },
-    opencode: { enabled: true, modelCount: 6, native: true }
+    opencode: { enabled: true, modelCount: 6, native: true },
+    // The registry projects Codex onto the ChatGPT row since F14: it is fed by
+    // vault injection and follows the ACTIVE account.
+    codex: { enabled: true }
   },
   detail: 'ChatGPT subscription · shared with pi and opencode'
 }
@@ -150,15 +153,41 @@ describe('the rows', () => {
     expect(badge).toHaveAttribute('data-id', 'connected')
   })
 
-  it('chips the engines the provider is configured for, claude → opencode → pi', async () => {
+  it('chips the engines the provider is configured for, claude → opencode → pi → codex', async () => {
+    // Codex is fed by vault injection, not by a shared route (ADR-068 §1), so
+    // the chip has to be LAST in the order and present on the ChatGPT row —
+    // without it the row reads as "this subscription is not available to Codex".
     await renderList()
     const chips = (id: string): string[] =>
       within(row(id))
         .getAllByTestId('ProviderList.engine')
         .map((el) => el.dataset.id!)
     expect(chips('anthropic')).toEqual(['claude'])
-    expect(chips('chatgpt')).toEqual(['opencode', 'pi'])
+    expect(chips('chatgpt')).toEqual(['opencode', 'pi', 'codex'])
     expect(chips('pi:ollama')).toEqual(['pi'])
+  })
+
+  it('dims the Codex chip when no ChatGPT account is active (F14)', async () => {
+    snapshot = {
+      entries: [
+        {
+          ...chatgpt,
+          engines: {
+            opencode: { enabled: true },
+            pi: { enabled: true },
+            codex: { enabled: false }
+          }
+        }
+      ],
+      opencodeInstalled: true
+    }
+    await renderList()
+    const codex = within(row('chatgpt'))
+      .getAllByTestId('ProviderList.engine')
+      .find((el) => el.dataset.id === 'codex')!
+    expect(codex).toHaveTextContent('Codex')
+    expect(codex).toHaveAttribute('data-enabled', 'false')
+    expect(codex.className).toContain('opacity-50')
   })
 
   it('dims the chip of an engine the provider does not currently reach', async () => {
@@ -213,7 +242,9 @@ describe('the rows', () => {
       within(row('chatgpt'))
         .getAllByTestId('ProviderList.engine')
         .map((el) => el.dataset.id)
-    ).toEqual(['pi'])
+      // Codex does not go through opencode, so a missing opencode binary says
+      // nothing about it.
+    ).toEqual(['pi', 'codex'])
   })
 
   it('keeps the card readable when the registry read fails', async () => {
@@ -298,7 +329,11 @@ describe('the store’s provider-auth view', () => {
     expect(useSessionStore.getState().providerAuth.chatgpt).toBe('authenticated')
     expect(useSessionStore.getState().providerAuth.chatgptRoutes).toEqual({
       pi: true,
-      opencode: true
+      opencode: true,
+      // Not a route at all — but it is in `engines`, and the view projects
+      // whatever the registry put there. Only pi/opencode are read back
+      // (`signInProviderFor`), so the extra key gates nothing.
+      codex: true
     })
   })
 
@@ -373,11 +408,13 @@ describe('a sign-in completed from the sheet', () => {
         screen.getAllByTestId('ProviderList.manage').find((el) => el.dataset.id === 'chatgpt')!
       )
     })
-    expect(screen.getAllByTestId('ProviderSheet.account')).toHaveLength(1)
+    // Since F14 the sheet's Accounts card is one link row, and its COUNT is
+    // what goes stale — the rows themselves moved to the Accounts page.
+    expect(screen.getByTestId('ProviderSheet.accountsLink')).toHaveTextContent('1 account')
 
-    // "+ Add account" opens the shared dialog — no sheet write happens here.
+    // The dialog is opened from the Accounts page now; no sheet write happens.
     await act(async () => {
-      fireEvent.click(screen.getByTestId('ProviderSheet.addAccount'))
+      useSessionStore.getState().openSignIn({ providerId: 'chatgpt', mode: 'add' })
     })
     expect(useSessionStore.getState().signInDialog).toEqual({
       providerId: 'chatgpt',
@@ -390,10 +427,7 @@ describe('a sign-in completed from the sheet', () => {
       useSessionStore.getState().closeSignIn()
     })
     await vi.waitFor(() =>
-      expect(screen.getAllByTestId('ProviderSheet.account').map((el) => el.dataset.id)).toEqual([
-        'acc-1',
-        'acc-2'
-      ])
+      expect(screen.getByTestId('ProviderSheet.accountsLink')).toHaveTextContent('2 accounts')
     )
   })
 })

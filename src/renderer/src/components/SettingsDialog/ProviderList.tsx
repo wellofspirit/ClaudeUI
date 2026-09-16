@@ -23,10 +23,11 @@
  * lives, land on these rows. Only the ERROR is local: keeping the previous rows
  * on a failed re-read is this card's own behaviour.
  *
- * ANTHROPIC IS NOT MANAGED HERE. Its row's action navigates to Models &
- * providers › Accounts: sign-in, account switching and the endpoint override
- * are already whole surfaces of their own, and a sheet with a link in it would
- * be a detour, not a home.
+ * NO PROVIDER'S ACCOUNTS ARE MANAGED HERE (F14). The Anthropic row's action
+ * navigates to Models & providers › Accounts, and since every provider's stored
+ * accounts live on that one page, the Manage sheet's own Accounts card became a
+ * link to the same place — which is why `navigate` is threaded into the sheet
+ * rather than kept for the Anthropic row.
  *
  * ONE DEGRADED CASE (owner ruling 2, 2026-09-08): the opencode BINARY is
  * missing. A stopped server is not degraded — catalog discovery starts one — so
@@ -60,8 +61,15 @@ const ADD_EVENT = 'settings:add-provider'
 /** What the card renders from when the very first read failed. */
 const EMPTY_SNAPSHOT: ProviderRegistrySnapshot = { entries: [], opencodeInstalled: true }
 
-/** Chip order, and the order the ENABLED FOR group reads in. */
-const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi']
+/**
+ * Chip order, and the order the ENABLED FOR group reads in.
+ *
+ * Codex is LAST and is not a shared-provider route: the ChatGPT subscription
+ * reaches it by vault injection (ADR-068 §1), and the registry says so on that
+ * row alone. Before F14 the row chipped `opencode · pi` and read as "this
+ * subscription is not available to Codex".
+ */
+const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi', 'codex']
 
 /**
  * Why an enabled, credentialed route still surfaces nothing — appended to the
@@ -267,6 +275,7 @@ export function ProviderList({
         <ProviderSheet
           entry={open}
           opencodeInstalled={opencodeInstalled}
+          navigate={navigate}
           onWrote={handleWrote}
           onClose={() => setOpenId(null)}
         />
