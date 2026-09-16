@@ -1,6 +1,6 @@
 # ADR-026 — Development workflow: main model orchestrates, sub-agent implements, review every line
 
-**Status:** Accepted (model tiers updated 2026-07-30: Fable orchestrates, Opus implements)
+**Status:** Accepted (model tiers updated 2026-07-30: Fable orchestrates, Opus implements; amended 2026-09-16: an Opus verifier drives the real app and the main model reviews its proof)
 **Relates to:** ADR-027 (test data attributes — the structural-verification tier this workflow leans on)
 **Operational detail:** the loop + standing constraints below. (Originally mirrored from `docs/v2/ROADMAP.md` § "How we work"; the V2 docs were removed after V2 shipped, so this ADR is now the single home.)
 
@@ -35,6 +35,12 @@ user-visible. Trivial mechanical edits and pure conversational answers are exemp
 - **Opus sub-agent — implementer.** Writes code against the spec. **Never** commits, `git add`s,
   creates branches, or runs `bun install`/`add`/`remove`. Leaves the working tree for review and
   reports deltas, exact verify-gate output, and any deviation from the spec. **Never self-certifies.**
+- **Opus sub-agent — verifier (since 2026-09-16).** A SEPARATE agent from the implementer, dispatched
+  after code review is clean. Drives the real Electron app (`verifier-electron` skill /
+  `scripts/app-shot.mjs`) against a written verification brief, asserts the live DOM by `data-testid`
+  (ADR-027), and returns the evidence: the DOM assertions it ran with their output, and the absolute
+  paths of the screenshots it captured. It never edits source, never commits, and never certifies the
+  change; it reports what it saw. The main model reads the PNGs itself before committing.
 
 ### The loop
 
@@ -58,19 +64,30 @@ user-visible. Trivial mechanical edits and pure conversational answers are exemp
 7. **Verify against the real dev build.** All gates pass:
    `bun run typecheck && bun run test && bun run test:ci && bun run lint && bun run build`
    (0 lint errors; the handful of pre-existing `exhaustive-deps` warnings are OK). Then, for any
-   UI/behavior change, **drive the real Electron app** via the `verifier-electron` skill
-   (`scripts/app-shot.mjs`): assert the live DOM by `data-testid` (ADR-027) **before** reading the
-   PNG, drive clicks, and read the PNG to confirm. Headless/infra changes get a gated or integration
-   smoke. Tests passing is necessary but not sufficient — confirm it works in the actual app.
+   UI/behavior change, **dispatch the Opus verifier** (since 2026-09-16; before that the main model
+   drove the app itself) with a verification brief: which build to run, the exact user-visible claims
+   to check, the `data-testid`s to assert, and the screenshots to capture. The verifier drives the
+   real Electron app via the `verifier-electron` skill (`scripts/app-shot.mjs`), asserts the live DOM
+   **before** reading any PNG, and reports back the assertions with their output plus the screenshot
+   paths. **The main model then reads every screenshot itself** and checks each claim in the brief
+   against what the PNG shows — the verifier's summary is not the proof, the PNGs are. A screenshot
+   that does not show the claim sends the item back to the implementer, not to the verifier.
+   Headless/infra changes get a gated or integration smoke instead. Tests passing is necessary but
+   not sufficient — confirm it works in the actual app.
 8. **Commit + push** — one commit per item, after review and real-build verification are both clean.
    Stage **precisely** (never blind `git add -A` — agents and verifiers leave debris scripts);
    descriptive multi-paragraph message (subject + body); **no AI attribution / no Co-Authored-By.**
 9. **Update memory** — record the result, capture any new gotcha, then `AskUserQuestion`
    for the next step.
 
-**Cadence:** scope → forks → spec → dispatch → review↔fix loop → verify (gates + real-app drive) →
-commit+push → update. The implementing agent never commits; the main model commits only after the
-review loop and the real-build verification are both clean.
+**Cadence:** scope → forks → spec → dispatch → review↔fix loop → verify (gates + verifier's real-app
+drive + the main model's proof review) → commit+push → update. The implementing agent never commits;
+the main model commits only after the review loop and the real-build verification are both clean.
+
+**What the main model does, and only that (Daniel, 2026-09-16):** research, write the spec, delegate
+the build, review the code, delegate the end-to-end verification, review the proof, commit. It does
+not implement (beyond docs, specs and trivial edits) and it does not drive the app by hand any more:
+the verifier drives, the main model judges the screenshots.
 
 ### Parallelism
 
@@ -124,6 +141,10 @@ https://github.com/earendil-works/pi`) — there is deliberately **no** vendored
 
 - **Let the implementing agent self-certify** (run its own gates and call it done). Rejected: every
   phase proved the implementer misses its own bugs and its summary overstates correctness.
+- **Main model drives the real app itself** (the workflow until 2026-09-16). Rejected by Daniel: driving
+  the app burns the orchestrator's context on harness mechanics, and the evidence it produced was
+  read by the same model that produced it. A separate verifier agent produces the screenshots; the
+  main model only has to judge them.
 - **Main model implements directly, no sub-agent.** Viable for small changes (and used for the spec/ADRs/
   tooling themselves), but burns the orchestrator's context on mechanical edits and loses the
   fresh-eyes review separation on larger work.
