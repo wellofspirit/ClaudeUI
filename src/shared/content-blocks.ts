@@ -27,6 +27,15 @@ export function mergeContentBlocks(
       .filter((b): b is Extract<ContentBlock, { type: 'tool_result' }> => b.type === 'tool_result')
       .map((b) => b.toolUseId)
   )
+  // A judge's verdict (F18) arrives on its OWN channel and is never part of an
+  // engine's message payload, so every incoming upsert would drop it. Preserved
+  // by `reviewId` — the block's identity — for the same reason a tool_result is
+  // preserved by `toolUseId`.
+  const newReviewIds = new Set(
+    newBlocks
+      .filter((b): b is Extract<ContentBlock, { type: 'tool_review' }> => b.type === 'tool_review')
+      .map((b) => b.reviewId)
+  )
   const newThinkingCount = newBlocks.filter((b) => b.type === 'thinking').length
   const newHasText = newBlocks.some((b) => b.type === 'text')
 
@@ -41,6 +50,8 @@ export function mergeContentBlocks(
     if (b.type === 'tool_use' && !newToolUseIds.has(b.toolUseId)) {
       preserved.push(b)
     } else if (b.type === 'tool_result' && !newToolResultIds.has(b.toolUseId)) {
+      preserved.push(b)
+    } else if (b.type === 'tool_review' && !newReviewIds.has(b.reviewId)) {
       preserved.push(b)
     } else if (b.type === 'thinking') {
       if (thinkingsSeen < droppedThinkingCount) {

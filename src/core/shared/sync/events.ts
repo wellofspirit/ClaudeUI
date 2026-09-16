@@ -49,6 +49,7 @@ import type {
   TaskStartedData,
   TodoItem,
   ToolResultImage,
+  ToolReviewBlock,
   FileDiff,
   UISessionConfig,
   WatchUpdate
@@ -150,6 +151,17 @@ export interface SyncEventMap {
       /** Images the tool returned (see ToolResultImage). Omitted when there are none. */
       images?: ToolResultImage[]
     }
+  ) => void
+  /**
+   * A permission judge's verdict on the tool call it judged (F18). Shaped like
+   * `session:tool-result` for the same reason: it is a block that attaches to an
+   * assistant message that ALREADY exists. The producer is responsible for
+   * holding it until the `tool_use` has landed — the reducer drops a verdict it
+   * cannot bind rather than minting a message for it.
+   */
+  'session:tool-review': (
+    routingId: string,
+    data: { toolUseId: string; review: ToolReviewBlock }
   ) => void
   'session:status': (routingId: string, status: SessionStatus) => void
   'session:result': (routingId: string, result: SessionResult) => void

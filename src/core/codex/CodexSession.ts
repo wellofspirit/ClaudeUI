@@ -11,6 +11,7 @@ import type {
   QueuedItem,
   SessionStatus,
   ChatMessage,
+  ToolReviewBlock,
   MeteringSnapshot,
   TaskNotification
 } from '../../shared/types'
@@ -20,6 +21,7 @@ import type {
   CodexSettings
 } from '../../shared/codex-types'
 import { mergeContentBlocks } from '../../shared/content-blocks'
+import { clip, REVIEW_RATIONALE_LIMIT, reviewRationale } from '../shared/tool-review'
 import { parseCodexSettings, savedCodexOverrides } from './settings'
 import {
   assertCodexAttachments,
@@ -198,11 +200,7 @@ const GUARDIAN_VERB: Record<string, string> = {
   aborted: 'stopped reviewing',
   inProgress: 'did not finish reviewing'
 }
-const GUARDIAN_RATIONALE_LIMIT = 500
 const GUARDIAN_ACTION_LIMIT = 200
-
-const clip = (text: string, limit: number): string =>
-  text.length > limit ? `${text.slice(0, limit - 1)}\u2026` : text
 
 /** Human label for the reviewed action; commands are backticked, the rest read as prose. */
 function guardianActionLabel(action: GuardianApprovalReviewAction): string {
@@ -327,7 +325,7 @@ export function guardianReviewText(
   const verb = GUARDIAN_VERB[review.status] ?? 'reviewed'
   const risk = review.riskLevel ? ` (risk: ${review.riskLevel})` : ''
   const rationale = review.rationale
-    ? ` ${clip(normalizeWhitespace(review.rationale), GUARDIAN_RATIONALE_LIMIT)}`
+    ? ` ${clip(normalizeWhitespace(review.rationale), REVIEW_RATIONALE_LIMIT)}`
     : ''
   return `Codex auto-review ${verb} ${guardianActionLabel(action)}${risk}.${rationale}`
 }
@@ -547,8 +545,19 @@ export class CodexSession extends BaseSession {
   private pending = new Map<string, Pending>()
   /** Guardian-denial overrides by requestId — never `this.pending` (see the type). */
   private guardianOverrides = new Map<string, GuardianOverride>()
-  /** Denials whose declined item has not been mapped yet, by that item's id. */
-  private heldDenials = new Map<string, ItemGuardianApprovalReviewCompletedNotification>()
+  /**
+   * Bound reviews whose target item has not been mapped yet, by that item's id.
+   *
+   * ONE map for both duties a completed review has (F18): binding the verdict
+   * to the judged card (`bindGuardianReview`, which needs the `tool_use` block)
+   * and offering the override on a denial (`offerGuardianOverride`, which needs
+   * the item COMPLETED — see its doc comment). Either may still be unsatisfied
+   * when the other is, so the entry is released from one place — `item()` — and
+   * whichever half is still waiting simply parks itself again.
+   */
+  private heldReviews = new Map<string, ItemGuardianApprovalReviewCompletedNotification>()
+  /** `reviewId`s already emitted as `session:tool-review` — one review, one event. */
+  private emittedReviews = new Set<string>()
   /** Hosted-tool `callId`s already executed by THIS session object — one shot each. */
   private hostedCalls = new Set<string>()
   /**
@@ -1300,7 +1309,8 @@ export class CodexSession extends BaseSession {
     this.failUnresolvedHostedCalls(INTERRUPTED_HOSTED_TOOL, turnId)
     for (const pending of [...this.pending.values()]) pending.settle()
     this.clearGuardianOverrides()
-    this.heldDenials.clear()
+    this.heldReviews.clear()
+    this.emittedReviews.clear()
     this.connection = null
     this.turnId = null
     connection.detach()
@@ -1762,7 +1772,8 @@ export class CodexSession extends BaseSession {
     this.clearInactivityTimer()
     this.bashGate.cancelAll()
     this.output.clear()
-    this.heldDenials.clear()
+    this.heldReviews.clear()
+    this.emittedReviews.clear()
     this.ambiguousSteers.clear()
     // Same duty as the children below: a hosted call whose answer died with the
     // connection gets a result, not a spinner. A teardown is the user's own
@@ -1918,15 +1929,21 @@ export class CodexSession extends BaseSession {
       // `started` is deliberately dropped: it carries no verdict, and a row per
       // in-flight review would double every decision in the transcript.
       const notification = value as unknown as ItemGuardianApprovalReviewCompletedNotification
-      this.guardianRow(
-        codexItemId(this.threadId, value.turnId, value.reviewId),
-        guardianReviewText(notification)
-      )
+      // F18: a verdict about a thread item belongs ON that item's card, in the
+      // approval vocabulary, rather than as a system row beside it. Only a
+      // review that names NO item — a network-policy review, which the wire
+      // declares `targetItemId: null` for by design — still rows.
+      if (typeof notification.targetItemId === 'string') this.bindGuardianReview(notification)
+      else
+        this.guardianRow(
+          codexItemId(this.threadId, value.turnId, value.reviewId),
+          guardianReviewText(notification)
+        )
       this.offerGuardianOverride(notification)
     } else if (method === 'guardianWarning' && typeof value.message === 'string') {
       const message = value.message
       if (GUARDIAN_DECISION_WARNING.test(message)) return
-      const text = `Codex auto-review: ${clip(normalizeWhitespace(message), GUARDIAN_RATIONALE_LIMIT)}`
+      const text = `Codex auto-review: ${clip(normalizeWhitespace(message), REVIEW_RATIONALE_LIMIT)}`
       // No turnId on the wire (GuardianWarningNotification carries threadId and
       // message only), so the live turn stands in and the message hash keeps
       // repeats of the same warning on one row.
@@ -2327,6 +2344,50 @@ export class CodexSession extends BaseSession {
   }
 
   /**
+   * Bind a completed review to the card of the item it judged (F18, extending
+   * ADR-067's guardian-visibility amendment).
+   *
+   * The block is the verdict itself — decision, risk, rationale — in the same
+   * vocabulary as an approval card, so an APPROVED action is accounted for too
+   * rather than running silently. It rides `session:tool-review`, which attaches
+   * to the assistant message already holding the `tool_use`; if that message has
+   * not been mapped yet the verdict is HELD and released from `item()`, exactly
+   * as the denial override is, because the reducer drops a verdict it cannot
+   * bind (holding is the producer's job, deliberately in one place).
+   *
+   * Codex repeats a completed review on the authoritative replay path, so one
+   * `reviewId` is one event; the reducer's own `reviewId` idempotence is the
+   * second belt.
+   */
+  private bindGuardianReview(notification: ItemGuardianApprovalReviewCompletedNotification): void {
+    const { review, targetItemId, turnId, reviewId } = notification
+    if (!this.threadId || typeof targetItemId !== 'string') return
+    if (this.emittedReviews.has(reviewId)) return
+    const toolUseId = codexItemId(this.threadId, turnId, targetItemId)
+    const bound = this.messageHistory
+      .flatMap((message) => message.content)
+      .some((block) => block.type === 'tool_use' && block.toolUseId === toolUseId)
+    if (!bound) {
+      this.heldReviews.set(toolUseId, notification)
+      return
+    }
+    this.emittedReviews.add(reviewId)
+    const rationale = reviewRationale(review.rationale)
+    this.send('session:tool-review', {
+      toolUseId,
+      review: {
+        type: 'tool_review',
+        toolUseId,
+        reviewId,
+        reviewer: 'codex-auto-review',
+        decision: review.status,
+        ...(review.riskLevel ? { riskLevel: review.riskLevel } : {}),
+        ...(rationale ? { rationale } : {})
+      } satisfies ToolReviewBlock
+    })
+  }
+
+  /**
    * A denial is the one review outcome a human may want to reverse, so it also
    * raises an approval bound to the DECLINED item's own id. No pop-up: the card
    * is already in the transcript (`MessageBubble` binds by `toolUseId`, and
@@ -2361,21 +2422,18 @@ export class CodexSession extends BaseSession {
       .flatMap((message) => message.content)
       .find((block) => block.type === 'tool_use' && block.toolUseId === toolUseId)
     if (tool?.type !== 'tool_use' || !this.completedItems.has(toolUseId)) {
-      this.heldDenials.set(toolUseId, notification)
+      this.heldReviews.set(toolUseId, notification)
       return
     }
-    this.heldDenials.delete(toolUseId)
-    // The reviewer's rationale is untrusted model text from a thread the user
-    // never saw: collapsed and capped exactly as the transcript row treats it.
-    const rationale = review.rationale
-      ? ` ${clip(normalizeWhitespace(review.rationale), GUARDIAN_RATIONALE_LIMIT)}`
-      : ''
+    this.heldReviews.delete(toolUseId)
     const card: PendingApproval = {
       requestId,
       toolUseId,
       toolName: tool.toolName,
       input: tool.toolInput ?? {},
-      decisionReason: `Codex auto-review denied this action.${rationale}`,
+      // The reviewer's rationale is NOT repeated here: F18 puts it on the card's
+      // own review strip, which this approval sits directly under.
+      decisionReason: 'Codex auto-review denied this action.',
       // No `suggestions`: a standing rule cannot express "let this one through",
       // and under `auto` a ClaudeUI allow rule is never consulted anyway.
       codex: { guardianOverride: true }
@@ -2473,11 +2531,22 @@ export class CodexSession extends BaseSession {
     for (const pending of [...this.pending.values()]) {
       if (pending.turnId === turn.id) pending.settle()
     }
-    // A denial whose declined item never arrived (it cannot arrive after the
+    // A review whose target item never arrived (it cannot arrive after the
     // authoritative replay above) has nothing to bind to. Raised overrides are
-    // deliberately NOT touched: they outlive the turn that produced them.
-    for (const [id, held] of [...this.heldDenials])
-      if (held.turnId === turn.id) this.heldDenials.delete(id)
+    // deliberately NOT touched: they outlive the turn that produced them. The
+    // VERDICT is not dropped with the hold, though — it falls back to the
+    // standalone row it would have had before F18, because a review the user
+    // never sees is worse than one in the wrong place.
+    for (const [id, held] of [...this.heldReviews]) {
+      if (held.turnId !== turn.id) continue
+      this.heldReviews.delete(id)
+      if (this.emittedReviews.has(held.reviewId)) continue
+      this.emittedReviews.add(held.reviewId)
+      this.guardianRow(
+        codexItemId(this.threadId, held.turnId, held.reviewId),
+        guardianReviewText(held)
+      )
+    }
     if (this.turnId === turn.id || this.turnId === null) {
       this.turnId = null
       this.busy = false
@@ -2559,9 +2628,15 @@ export class CodexSession extends BaseSession {
       timestamp
     ))
       this.dispatch(event)
-    // The tool_use block a held denial was waiting for may have just landed.
-    const held = this.heldDenials.get(id)
-    if (held) this.offerGuardianOverride(held)
+    // The tool_use block — or the completion — a held review was waiting for may
+    // have just landed. Released once; whichever half is still unsatisfied parks
+    // the notification again.
+    const held = this.heldReviews.get(id)
+    if (held) {
+      this.heldReviews.delete(id)
+      this.bindGuardianReview(held)
+      this.offerGuardianOverride(held)
+    }
   }
 
   /**

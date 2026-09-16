@@ -87,8 +87,38 @@ export function isImageMediaType(mediaType: unknown): mediaType is ImageMediaTyp
   return typeof mediaType === 'string' && IMAGE_MEDIA_TYPES.has(mediaType)
 }
 
+/**
+ * A permission JUDGE's verdict on the tool call it judged, carried on the card
+ * of that call rather than as prose beside it (ADR-067, F18).
+ *
+ * Two reviewers produce one: Codex's native auto-review (`codex-auto-review`,
+ * whose `riskLevel` is the reviewer's own) and ClaudeUI's Auto-mode classifier
+ * for opencode and pi (`auto-mode`, whose `rule` names the corpus rule it
+ * matched). Claude's Auto mode is cli.js-native and emits no verdict on the
+ * wire, so it produces none.
+ *
+ * `rationale` and `rule` are UNTRUSTED model text. The PRODUCER (core) collapses
+ * whitespace and caps the length once — see `core/shared/tool-review.ts` — so
+ * every client renders them verbatim as plain text, never through markdown.
+ */
+export type ToolReviewBlock = {
+  type: 'tool_review'
+  /** The `tool_use` block this verdict is about. */
+  toolUseId: string
+  /** The reviewer's own stable id for this verdict — the block's identity. */
+  reviewId: string
+  reviewer: 'codex-auto-review' | 'auto-mode'
+  decision: 'approved' | 'denied' | 'timedOut' | 'aborted' | 'inProgress'
+  /** Codex's auto-review only — ClaudeUI's judge scores no risk level. */
+  riskLevel?: 'low' | 'medium' | 'high' | 'critical'
+  /** ClaudeUI's judge only — the corpus rule name behind a block. */
+  rule?: string
+  rationale?: string
+}
+
 export type ContentBlock =
   | { type: 'text'; text: string }
+  | ToolReviewBlock
   | { type: 'tool_use'; toolUseId: string; toolName: string; toolInput?: Record<string, unknown> }
   | {
       type: 'tool_result'

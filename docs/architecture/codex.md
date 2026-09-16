@@ -231,10 +231,23 @@ integration fixture, so containment claims rest on the Codex source at tag
 `rust-v0.154.0` and on real-app runs.
 
 Two additions landed on 2026-09-12. Under `auto`, each completed guardian
-review (`item/autoApprovalReview/completed`) becomes a system transcript row
-naming the action, verdict, risk level and rationale, and the guardian's
-circuit-breaker warning becomes a row plus `session:error`; reviews are not
-thread items, so cold history cannot reconstruct them. And the user-scope
+review (`item/autoApprovalReview/completed`) becomes visible instead of
+vanishing, and the guardian's circuit-breaker warning becomes a row plus
+`session:error`; reviews are not thread items, so cold history cannot
+reconstruct them. Since F18 (2026-09-16) a review that names a `targetItemId`
+renders ON the card of the item it judged — `session:tool-review` carries a
+`tool_review` block to the assistant message holding that `tool_use`, and
+`ToolCard` shows a chip in the header (collapsed and expanded) plus a review
+strip between header and body when expanded, in the approval card's own
+vocabulary: decision, risk level, rationale. Approved rows carry it too, which
+is the point: an action that ran under a machine's consent should say so. The
+system row survives only where there is no card — a `targetItemId: null`
+network-policy review, and every `guardianWarning`. A verdict whose target item
+has not been mapped yet is held by `CodexSession` and released from `item()`,
+falling back to the standalone row at turn end. The same block is produced for
+opencode and pi by ClaudeUI's own Auto-mode judge (`reviewer: 'auto-mode'`, with
+the corpus rule name instead of a risk level); Claude's Auto mode is cli.js-native
+and emits no verdict on the wire, so there is nothing to render there. And the user-scope
 Claude `Bash` rules are compiled into `$CODEX_HOME/rules/claudeui.rules`
 (`rules-sync.ts`, see ADR-067's amendment for the mapping and trade-offs), so
 deny rules bind even under `auto` and prefix allows skip the ask; the file is

@@ -169,6 +169,12 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: true,
     why: 'Attaches a tool_result block to its tool_use (first result wins) and re-derives todos / sentFiles.'
   },
+  'session:tool-review': {
+    cls: 'replicated',
+    ring: true,
+    canonical: true,
+    why: "Attaches a permission judge's verdict (tool_review) to its tool_use, idempotent by reviewId."
+  },
   'session:queue-changed': {
     cls: 'replicated',
     ring: true,

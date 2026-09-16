@@ -54,7 +54,7 @@ vi.mock('../../MockupPreviewCard', () => ({
 }))
 
 import { ToolCard, type ToolCardProps } from '../ToolCard'
-import type { ContentBlock } from '../../../../../../shared/types'
+import type { ContentBlock, ToolReviewBlock } from '../../../../../../shared/types'
 import type { ToolView } from '../../../../../../shared/tool-kinds'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
@@ -571,5 +571,127 @@ describe('ToolCard — tool-result images strip', () => {
       />
     )
     expect(screen.getAllByTestId('ToolResultImages.thumb')[0]).toBeDisabled()
+  })
+})
+
+/**
+ * F18 — a permission judge's verdict on the card it judged. Collapsed, it is one
+ * chip in the header; expanded, a review strip between the header and the body.
+ * Both carry the same three facts: who decided, how, and (Codex) at what risk.
+ */
+describe('ToolCard — review verdict', () => {
+  const codexReview = (over: Partial<ToolReviewBlock> = {}): ToolReviewBlock => ({
+    type: 'tool_review',
+    toolUseId: 'tu-1',
+    reviewId: 'rv-1',
+    reviewer: 'codex-auto-review',
+    decision: 'approved',
+    riskLevel: 'medium',
+    rationale: 'Builds inside the workspace.',
+    ...over
+  })
+
+  function renderCard(review: ToolReviewBlock, expandToolCalls = true) {
+    return render(
+      <ToolCard
+        {...baseProps({
+          kind: 'command',
+          view: { kind: 'command', command: 'bun run build' },
+          block: block('Bash', { command: 'bun run build' }),
+          review,
+          expandToolCalls
+        })}
+      />
+    )
+  }
+
+  it('shows the Codex chip with decision and risk, collapsed', () => {
+    renderCard(codexReview(), false)
+    expect(screen.getByTestId('ToolCard.reviewChip')).toHaveTextContent(
+      'Auto-review · approved · medium'
+    )
+    // Collapsed: the chip only — the strip belongs to the expanded card.
+    expect(screen.queryByTestId('ToolCard.review')).not.toBeInTheDocument()
+  })
+
+  it('shows the strip between header and body once expanded', () => {
+    renderCard(codexReview())
+    const strip = screen.getByTestId('ToolCard.review')
+    expect(strip).toHaveTextContent('Codex auto-review approved this action')
+    expect(strip).toHaveTextContent('medium risk')
+    expect(strip).toHaveTextContent('Builds inside the workspace.')
+    // The chip stays in the header when expanded too.
+    expect(screen.getByTestId('ToolCard.reviewChip')).toBeInTheDocument()
+  })
+
+  it.each([
+    ['approved', 'text-success'],
+    ['denied', 'text-danger'],
+    ['timedOut', 'text-warning'],
+    ['aborted', 'text-warning'],
+    ['inProgress', 'text-warning']
+  ] as const)('colours the %s chip with %s', (decision, tone) => {
+    renderCard(codexReview({ decision }), false)
+    expect(screen.getByTestId('ToolCard.reviewChip').className).toContain(tone)
+  })
+
+  it('words an unfinished Codex review as one', () => {
+    renderCard(codexReview({ decision: 'timedOut' }))
+    expect(screen.getByTestId('ToolCard.review')).toHaveTextContent(
+      'Codex auto-review did not finish reviewing this action'
+    )
+  })
+
+  it("names ClaudeUI's own judge and its corpus rule, with no risk level", () => {
+    renderCard({
+      type: 'tool_review',
+      toolUseId: 'tu-1',
+      reviewId: 'rv-2',
+      reviewer: 'auto-mode',
+      decision: 'denied',
+      rule: 'Remote Code Execution',
+      rationale: 'Pipes an unverified remote script into a shell.'
+    })
+    expect(screen.getByTestId('ToolCard.reviewChip')).toHaveTextContent('Auto mode · blocked')
+    const strip = screen.getByTestId('ToolCard.review')
+    expect(strip).toHaveTextContent('Auto mode blocked this action')
+    expect(strip).toHaveTextContent('Remote Code Execution')
+    expect(strip).not.toHaveTextContent('risk')
+  })
+
+  it('reads an allowed Auto-mode verdict as allowed', () => {
+    renderCard({
+      type: 'tool_review',
+      toolUseId: 'tu-1',
+      reviewId: 'rv-3',
+      reviewer: 'auto-mode',
+      decision: 'approved'
+    })
+    expect(screen.getByTestId('ToolCard.reviewChip')).toHaveTextContent('Auto mode · allowed')
+    expect(screen.getByTestId('ToolCard.review')).toHaveTextContent('Auto mode allowed this action')
+  })
+
+  /**
+   * The rationale is UNTRUSTED model text from a thread the user never saw. It
+   * is plain text, never markdown: the asterisks must survive as asterisks.
+   */
+  it('renders the rationale verbatim, never through markdown', () => {
+    renderCard(codexReview({ rationale: 'It writes **only** to dist/.' }))
+    expect(screen.getByTestId('ToolCard.review')).toHaveTextContent('It writes **only** to dist/.')
+    expect(screen.queryByTestId('MarkdownRenderer')).not.toBeInTheDocument()
+  })
+
+  it('renders neither chip nor strip when no verdict was reached', () => {
+    render(
+      <ToolCard
+        {...baseProps({
+          kind: 'command',
+          view: { kind: 'command', command: 'bun run build' },
+          block: block('Bash', { command: 'bun run build' })
+        })}
+      />
+    )
+    expect(screen.queryByTestId('ToolCard.reviewChip')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('ToolCard.review')).not.toBeInTheDocument()
   })
 })

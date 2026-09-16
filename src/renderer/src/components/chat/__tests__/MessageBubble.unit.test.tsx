@@ -11,6 +11,7 @@ import { render, screen, act } from '@testing-library/react'
 import { MessageBubble } from '../MessageBubble'
 import { useSessionStore } from '../../../stores/session-store'
 import { resolveOpencodeCapabilities } from '../../../../../shared/model-capabilities'
+import type { ToolReviewBlock } from '../../../../../shared/types'
 import {
   makeChatMessage,
   makeTextBlock,
@@ -385,6 +386,88 @@ describe('MessageBubble', () => {
       expect(screen.getByTestId('ApprovalButtons.approveAnyway')).toBeInTheDocument()
       expect(screen.getByTestId('ApprovalButtons.dismiss')).toBeInTheDocument()
       expect(screen.queryByTestId('ApprovalButtons.allow')).not.toBeInTheDocument()
+    })
+  })
+
+  /**
+   * F18 — a review verdict is bound to the card of the call it judged, by
+   * `toolUseId` and nothing else. The LAST verdict for a call wins: a re-review
+   * after "approve anyway" is a new decision, not a second opinion.
+   */
+  describe('review → tool_use binding', () => {
+    const review = (toolUseId: string, over: Partial<ToolReviewBlock> = {}): ToolReviewBlock => ({
+      type: 'tool_review',
+      toolUseId,
+      reviewId: `rv-${toolUseId}`,
+      reviewer: 'codex-auto-review',
+      decision: 'approved',
+      riskLevel: 'low',
+      ...over
+    })
+
+    it('reaches only the card whose toolUseId matches', () => {
+      const msg = makeChatMessage({
+        role: 'assistant',
+        content: [
+          makeToolUseBlock('Bash', { command: 'ls' }, 'toolu_a'),
+          makeToolUseBlock('Bash', { command: 'pwd' }, 'toolu_b'),
+          review('toolu_b', { decision: 'denied' })
+        ]
+      })
+      render(
+        <MessageBubble
+          message={msg}
+          pendingApprovals={[]}
+          isLastAssistant={true}
+          thinkingStartedAt={null}
+        />
+      )
+      const chips = screen.getAllByTestId('ToolCard.reviewChip')
+      expect(chips).toHaveLength(1)
+      expect(chips[0]).toHaveTextContent('Auto-review · denied · low')
+    })
+
+    it('shows the LAST verdict when a call was reviewed twice', () => {
+      const msg = makeChatMessage({
+        role: 'assistant',
+        content: [
+          makeToolUseBlock('Bash', { command: 'ls' }, 'toolu_a'),
+          review('toolu_a', { reviewId: 'rv-1', decision: 'denied' }),
+          review('toolu_a', { reviewId: 'rv-2', decision: 'approved' })
+        ]
+      })
+      render(
+        <MessageBubble
+          message={msg}
+          pendingApprovals={[]}
+          isLastAssistant={true}
+          thinkingStartedAt={null}
+        />
+      )
+      expect(screen.getByTestId('ToolCard.reviewChip')).toHaveTextContent(
+        'Auto-review · approved · low'
+      )
+    })
+
+    it('renders no stray row for the verdict block itself', () => {
+      const msg = makeChatMessage({
+        role: 'assistant',
+        content: [
+          makeToolUseBlock('Bash', { command: 'ls' }, 'toolu_a'),
+          review('toolu_a', { rationale: 'Reads only.' })
+        ]
+      })
+      const { container } = render(
+        <MessageBubble
+          message={msg}
+          pendingApprovals={[]}
+          isLastAssistant={true}
+          thinkingStartedAt={null}
+        />
+      )
+      // The rationale appears only inside the card's own strip, never loose in
+      // the transcript — the card is collapsed here, so not at all.
+      expect(container.textContent).not.toContain('Reads only.')
     })
   })
 

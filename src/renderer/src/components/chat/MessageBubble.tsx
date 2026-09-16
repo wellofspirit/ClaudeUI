@@ -1,5 +1,10 @@
 import { memo, useState } from 'react'
-import type { ChatMessage, ContentBlock, PendingApproval } from '../../../../shared/types'
+import type {
+  ChatMessage,
+  ContentBlock,
+  PendingApproval,
+  ToolReviewBlock
+} from '../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ToolCallBlock } from './ToolCallBlock'
@@ -39,7 +44,11 @@ function renderToolBlock(
   block: ToolUseBlockForDispatch,
   result: ToolResultBlockForDispatch | undefined,
   approval: PendingApproval | undefined,
-  key: number | string
+  key: number | string,
+  // A permission judge's verdict on this call (F18). Only the passive card shows
+  // it: the lifted kinds below are interactions (a plan, a question, a todo
+  // list), and none of them is an action a judge gates.
+  review?: ToolReviewBlock
 ): React.JSX.Element {
   const kind = hostedMcpKind(block.toolName) ?? toolMap.kindOf(block.toolName)
 
@@ -71,7 +80,9 @@ function renderToolBlock(
 
   // Passive kinds → ToolCallBlock host → ToolCard + kind body
   // (command/fileEdit/fileWrite/fileRead/search/web/diagram/mockup/mcp/unknown).
-  return <ToolCallBlock key={key} block={block} result={result} approval={approval} />
+  return (
+    <ToolCallBlock key={key} block={block} result={result} approval={approval} review={review} />
+  )
 }
 
 interface MessageBubbleProps {
@@ -253,9 +264,14 @@ export const MessageBubble = memo(function MessageBubble({
 
   // Pair tool_use blocks with their tool_result
   const resultMap = new Map<string, ToolResultBlock>()
+  // …and with a permission judge's verdict on them (F18). LAST one wins: a
+  // re-review after "approve anyway" is a new decision, not a second opinion.
+  const reviewMap = new Map<string, ToolReviewBlock>()
   for (const block of message.content) {
     if (block.type === 'tool_result') {
       resultMap.set(block.toolUseId, block)
+    } else if (block.type === 'tool_review') {
+      reviewMap.set(block.toolUseId, block)
     }
   }
 
@@ -304,6 +320,9 @@ export const MessageBubble = memo(function MessageBubble({
   const visible = message.content.filter(
     (b) =>
       b.type !== 'tool_result' &&
+      // A verdict renders ON its card, never as a row of its own — and never as
+      // a gap that would split a run of tool calls into two groups.
+      b.type !== 'tool_review' &&
       !(b.type === 'tool_use' && b.toolName && toolMap.hidden.has(b.toolName))
   )
   for (let i = 0; i < visible.length; i++) {
@@ -360,7 +379,8 @@ export const MessageBubble = memo(function MessageBubble({
           const { block, index } = item.blocks[0]
           const result = resultMap.get(block.toolUseId)
           const approval = approvalMap.get(block.toolUseId)
-          return renderToolBlock(toolMap, block, result, approval, index)
+          const review = reviewMap.get(block.toolUseId)
+          return renderToolBlock(toolMap, block, result, approval, index, review)
         }
         // Multiple tool calls — wrap in bordered group
         return (
@@ -371,7 +391,8 @@ export const MessageBubble = memo(function MessageBubble({
             {item.blocks.map(({ block, index }) => {
               const result = block.toolUseId ? resultMap.get(block.toolUseId) : undefined
               const approval = block.toolUseId ? approvalMap.get(block.toolUseId) : undefined
-              return renderToolBlock(toolMap, block, result, approval, index)
+              const review = block.toolUseId ? reviewMap.get(block.toolUseId) : undefined
+              return renderToolBlock(toolMap, block, result, approval, index, review)
             })}
           </div>
         )

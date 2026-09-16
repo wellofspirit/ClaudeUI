@@ -52,7 +52,8 @@ import type {
   EngineId,
   ModelRef,
   WorktreeInfo,
-  SlashCommandInfo
+  SlashCommandInfo,
+  ToolReviewBlock
 } from '../../../shared/types'
 import { mergeContentBlocks } from '../../../shared/content-blocks'
 import {
@@ -746,6 +747,40 @@ export function applyEvent(
         next = withSession(next, routingId, rederiveSentFiles)
       }
       return next
+    }
+
+    /**
+     * A permission judge's verdict, attached to the assistant message holding
+     * the `tool_use` it judged (F18). Deliberately NOT modelled on
+     * `session:tool-result`'s "first one wins": the identity here is `reviewId`,
+     * because a re-review after "approve anyway" is a genuinely NEW verdict on
+     * the same call and the renderer shows the LAST one. Idempotence is per
+     * review id, which is what makes a replayed catch-up a no-op.
+     *
+     * A verdict with no host message is DROPPED rather than parked: holding it
+     * is the producer's job (CodexSession holds one until its target item
+     * lands), and a reducer-side queue would be a second, divergent copy of
+     * that rule.
+     */
+    case 'session:tool-review': {
+      const routingId = routingIdOf(event)
+      const data = arg<{ toolUseId?: string; review?: ToolReviewBlock }>(event, 1)
+      if (!routingId || !data?.toolUseId || !data.review?.reviewId) return state
+      const session = state.sessions[routingId]
+      if (!session) return state
+
+      const { toolUseId, review } = data
+      const messages = [...session.messages]
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i]
+        if (msg.role !== 'assistant') continue
+        if (!msg.content.some((b) => b.type === 'tool_use' && b.toolUseId === toolUseId)) continue
+        if (msg.content.some((b) => b.type === 'tool_review' && b.reviewId === review.reviewId))
+          return state
+        messages[i] = { ...msg, content: [...msg.content, { ...review, toolUseId }] }
+        return withSession(state, routingId, () => ({ messages }))
+      }
+      return state
     }
 
     // The `session:stream` / `session:subagent-stream` branches lived here until

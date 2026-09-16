@@ -1386,6 +1386,83 @@ describe('OpencodeSession — auto-mode classifier wiring (ADR-023)', () => {
     session.dispose()
   })
 
+  /**
+   * F18 — the judge's verdict rides the card of the call it judged, so a user in
+   * Auto mode can see WHY an action ran (or did not) without reading a log.
+   */
+  describe('the verdict reaches the card it judged', () => {
+    const reviews = (win: MockWindow) =>
+      win.webContents.send.mock.calls
+        .filter((call) => call[0] === 'session:tool-review')
+        .map((call) => call[2])
+
+    async function judged(reply: string, id: string): Promise<MockWindow> {
+      enableAutoMode()
+      mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: reply }] })
+      feedPermissionAsked('bash', id, 'call-1')
+      const win = new MockWindow()
+      const session = new OpencodeSession(
+        'routing_id_1',
+        win as unknown as HostWindowHandle,
+        '/tmp/test-cwd',
+        { permissionMode: 'full' }
+      )
+      await session.run('go')
+      await vi.waitFor(() => expect(mockReplyPermission).toHaveBeenCalled())
+      session.dispose()
+      return win
+    }
+
+    it('an ALLOW emits one auto-mode verdict bound to the call id', async () => {
+      const win = await judged('<block>no</block>', 'per_review_allow')
+      expect(reviews(win)).toEqual([
+        {
+          toolUseId: 'call-1',
+          review: {
+            type: 'tool_review',
+            toolUseId: 'call-1',
+            reviewId: expect.any(String),
+            reviewer: 'auto-mode',
+            decision: 'approved'
+          }
+        }
+      ])
+    })
+
+    it('a BLOCK names the corpus rule and carries the reason verbatim', async () => {
+      const win = await judged(
+        '<block>yes</block><reason>touches prod secrets</reason><category>credential_leakage</category>',
+        'per_review_block'
+      )
+      expect(reviews(win)).toHaveLength(1)
+      expect(reviews(win)[0].review).toMatchObject({
+        reviewer: 'auto-mode',
+        decision: 'denied',
+        rule: expect.any(String),
+        rationale: 'touches prod secrets'
+      })
+    })
+
+    it('a fast-path allow never reaches the judge and emits NO verdict', async () => {
+      enableAutoMode()
+      feedPermissionAsked('read', 'per_review_fast', 'call-fast')
+      const win = new MockWindow()
+      const session = new OpencodeSession(
+        'routing_id_1',
+        win as unknown as HostWindowHandle,
+        '/tmp/test-cwd',
+        { permissionMode: 'full' }
+      )
+      await session.run('go')
+      await vi.waitFor(() =>
+        expect(mockReplyPermission).toHaveBeenCalledWith('per_review_fast', 'once')
+      )
+      expect(mockPrompt).not.toHaveBeenCalled()
+      expect(reviews(win)).toEqual([])
+      session.dispose()
+    })
+  })
+
   it('classifier BLOCK without reason → reject with the fallback feedback text', async () => {
     enableAutoMode()
     mockPrompt.mockResolvedValue({ parts: [{ type: 'text', text: '<block>yes</block>' }] })

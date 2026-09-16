@@ -35,6 +35,7 @@ import {
   FIXTURE_AUTHORIZATION,
   FIXTURE_COMPLETED,
   fixtureAssistantMessage,
+  isGuardianRequest,
   startFixtureProvider,
   writeFixtureCodexHome
 } from './fixture-provider'
@@ -177,16 +178,6 @@ afterEach(async () => {
   }
   expect(survivors, 'app-server groups survived bounded disposal').toEqual([])
 })
-
-/**
- * A guardian auto-review call, told apart from the agent's own. Codex frames the
- * planned action between `>>> APPROVAL REQUEST START` / `END`
- * (`core/src/guardian/prompt.rs`), in the reviewer prompt and nowhere else, so
- * this holds whether the reviewer got the catalog policy template or the
- * bundled one.
- */
-const isGuardianRequest = (request: Record<string, unknown>): boolean =>
-  JSON.stringify(request).includes('>>> APPROVAL REQUEST START')
 
 /**
  * The hosted-tool call the fixture scripts on the agent's FIRST turn: `true` is
@@ -828,7 +819,7 @@ it.skipIf(!enabled)(
 )
 
 it.skipIf(!enabled)(
-  'auto mode rows the native guardian decision no approval request ever reaches',
+  'auto mode binds the native guardian decision to the card no approval request ever reaches',
   async () => {
     const { cwd, env, errors, requests } = await setupFixture(true, true, true, true)
     session = new CodexSession(
@@ -847,6 +838,25 @@ it.skipIf(!enabled)(
       false
     )
     expect(requests.some((request) => isGuardianRequest(request))).toBe(true)
+    // F18: the verdict rides the card of the command it judged, not a system row
+    // beside it — and it names the declined/approved item's own `tool_use` id.
+    const verdicts = coreEvents.mock.calls
+      .filter(([channel]) => channel === 'session:tool-review')
+      .map(([, args]) => args[1] as { toolUseId: string; review: Record<string, unknown> })
+    expect(verdicts, 'no session:tool-review reached the transcript').toHaveLength(1)
+    expect(verdicts[0].review).toMatchObject({
+      type: 'tool_review',
+      reviewer: 'codex-auto-review',
+      decision: 'approved',
+      riskLevel: 'low',
+      rationale: 'Isolated fixture allow'
+    })
+    expect(
+      session!
+        .getMessages()
+        .flatMap((message) => message.content)
+        .some((block) => block.type === 'tool_use' && block.toolUseId === verdicts[0].toolUseId)
+    ).toBe(true)
     const rows = coreEvents.mock.calls
       .filter(([channel]) => channel === 'session:message')
       .map(
@@ -855,13 +865,9 @@ it.skipIf(!enabled)(
       .filter((message) => message.role === 'system')
       .flatMap((message) => message.content.map((block) => block.text ?? ''))
     expect(
-      rows.some(
-        (text) =>
-          text.startsWith('Codex auto-review approved `printf fixture-approved > ') &&
-          text.includes('(risk: low). Isolated fixture allow')
-      ),
-      `system rows: ${JSON.stringify(rows)}`
-    ).toBe(true)
+      rows.some((text) => text.startsWith('Codex auto-review approved')),
+      `a bound review still rowed: ${JSON.stringify(rows)}`
+    ).toBe(false)
     expect(errors).toEqual([])
   },
   90000

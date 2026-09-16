@@ -26,7 +26,8 @@ import type {
   PendingApproval,
   PermissionMode,
   PermissionSuggestion,
-  TaskNotification
+  TaskNotification,
+  ToolReviewBlock
 } from '../../../../../shared/types'
 import type { ToolKind, ToolView } from '../../../../../shared/tool-kinds'
 import type { ThemeId } from '../../../stores/session-store'
@@ -37,6 +38,7 @@ import { TOOL_RENDERERS, type PassiveToolKind } from './kinds'
 import { GenericBody } from './kinds/GenericBody'
 import { BackgroundBashOutput } from './kinds/bash-output'
 import { ToolResultImages } from './ToolResultImages'
+import { ToolReviewChip, ToolReviewStrip } from './ToolReview'
 import type { BashOutputSlice, BgOutputSlice } from './kinds/types'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
@@ -50,6 +52,12 @@ export interface ToolCardProps {
   block: ToolUseBlock
   result?: ToolResultBlock
   approval?: PendingApproval
+  /**
+   * A permission judge's verdict on THIS call (F18) — Codex's native auto-review
+   * or ClaudeUI's own Auto-mode judge. The last verdict wins when a call was
+   * reviewed twice (a re-review after "approve anyway"); the caller picks it.
+   */
+  review?: ToolReviewBlock
   isHistorical: boolean
   permissionMode: PermissionMode
   expandToolCalls: boolean
@@ -88,6 +96,7 @@ export function ToolCard({
   block,
   result,
   approval,
+  review,
   isHistorical,
   permissionMode,
   expandToolCalls,
@@ -264,6 +273,7 @@ export function ToolCard({
         <span className="text-text-secondary truncate flex-1 text-left font-mono text-[12px]">
           {summary}
         </span>
+        {review && <ToolReviewChip review={review} />}
         {isPendingApproval && (
           <span className="text-[11px] font-semibold text-warning uppercase tracking-wider mr-1">
             Permission
@@ -316,6 +326,10 @@ export function ToolCard({
           <polyline points="6 9 12 15 18 9" />
         </svg>
       </button>
+
+      {/* The verdict sits between the header and the body, in the approval
+          card's own vocabulary — it is a permission decision, not reasoning. */}
+      {expanded && review && <ToolReviewStrip review={review} />}
 
       {expanded && (
         <div className="border-t border-border">

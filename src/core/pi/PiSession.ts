@@ -89,10 +89,15 @@ import {
   classify,
   formatUnparseableJudgeReply,
   isAutoModeFastPathAllowed,
+  type ClassifyResult,
   type EnvironmentInfo,
   type JudgeTransport
 } from '../automode/classifier'
-import { AutoModeDenialTracker, formatAutoModeDenyReason } from '../automode/denial-tracker'
+import {
+  AutoModeDenialTracker,
+  autoModeReviewBlock,
+  formatAutoModeDenyReason
+} from '../automode/denial-tracker'
 import {
   analyzeRedirects,
   captureGitRemotes,
@@ -2339,10 +2344,12 @@ export class PiSession extends BaseSession {
         // something THIS monitor denied (post-block consent inheritance), not
         // as a fresh proposal.
         this.recordToolOutcome(toolCallId, 'automode-blocked')
+        this.sendToolReview(toolCallId, result)
         return decided({ behavior: 'deny', reason: formatAutoModeDenyReason(result) })
       }
 
       this.autoDenials.recordAllow()
+      this.sendToolReview(toolCallId, result)
       return decided({ behavior: 'allow' })
     } catch (err) {
       logger.warn(
@@ -2351,6 +2358,28 @@ export class PiSession extends BaseSession {
       )
       return ASK_HUMAN
     }
+  }
+
+  /**
+   * The judge's verdict on the card it judged (F18).
+   *
+   * `toolCallId` is pi's own call id, which is EXACTLY the `toolUseId` the
+   * transcript's `tool_use` block carries (`event-mapper.ts` maps
+   * `toolCall → tool_use { toolUseId: id }`), so the reducer binds it to the
+   * right card. No hold is needed the way Codex needs one: the assistant
+   * `message_end` that mints the block precedes `tool_execution_*` on pi's own
+   * verified event order, and the judge round-trip that produced this verdict
+   * sits on top of that.
+   *
+   * Only a real verdict reaches here — a fast-path allow returns before the
+   * judge, an `unavailable` result and a denial cap both return ASK_HUMAN, and
+   * the human's approval card carries its own reason.
+   */
+  private sendToolReview(toolCallId: string, result: ClassifyResult): void {
+    this.send('session:tool-review', {
+      toolUseId: toolCallId,
+      review: autoModeReviewBlock(toolCallId, uuid(), result)
+    })
   }
 
   // ── Hosted tools + cross-engine dispatch (M4a+b) ─────────────────────────────

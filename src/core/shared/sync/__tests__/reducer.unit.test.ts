@@ -517,6 +517,85 @@ describe('reducer — transcript', () => {
     expect(results[0]).toMatchObject({ toolResult: 'first' })
   })
 
+  /**
+   * F18 — a judge's verdict is a block on the card it judged, so it attaches to
+   * the assistant message holding the `tool_use` exactly as a `tool_result`
+   * does. Its identity is `reviewId`, not `toolUseId`: a re-review after
+   * "approve anyway" is a SECOND verdict on the same call and must append.
+   */
+  describe('session:tool-review', () => {
+    const review = (over: Record<string, unknown> = {}) => ({
+      type: 'tool_review' as const,
+      toolUseId: 't1',
+      reviewId: 'rv-1',
+      reviewer: 'codex-auto-review' as const,
+      decision: 'approved' as const,
+      riskLevel: 'medium' as const,
+      rationale: 'Stays inside the workspace.',
+      ...over
+    })
+    const hostMessage = (): [string, ...unknown[]] => [
+      'session:message',
+      'rid',
+      assistant('m1', [{ type: 'tool_use', toolUseId: 't1', toolName: 'Bash', toolInput: {} }])
+    ]
+    const reviews = (s: CanonicalState) =>
+      s.sessions['rid'].messages.flatMap((m) => m.content.filter((b) => b.type === 'tool_review'))
+
+    it('attaches the verdict to the message holding its tool_use', () => {
+      const s = fold([
+        created(),
+        hostMessage(),
+        ['session:tool-review', 'rid', { toolUseId: 't1', review: review() }]
+      ])
+      expect(reviews(s)).toEqual([review()])
+    })
+
+    it('is idempotent by reviewId — a replayed catch-up appends once', () => {
+      const s = fold([
+        created(),
+        hostMessage(),
+        ['session:tool-review', 'rid', { toolUseId: 't1', review: review() }],
+        ['session:tool-review', 'rid', { toolUseId: 't1', review: review() }]
+      ])
+      expect(reviews(s)).toHaveLength(1)
+    })
+
+    it('appends a SECOND verdict with a different reviewId (a re-review)', () => {
+      const s = fold([
+        created(),
+        hostMessage(),
+        ['session:tool-review', 'rid', { toolUseId: 't1', review: review() }],
+        [
+          'session:tool-review',
+          'rid',
+          { toolUseId: 't1', review: review({ reviewId: 'rv-2', decision: 'denied' }) }
+        ]
+      ])
+      expect(reviews(s).map((b) => b.reviewId)).toEqual(['rv-1', 'rv-2'])
+    })
+
+    it('is dropped when no message holds the tool_use (the producer holds)', () => {
+      const s = fold([
+        created(),
+        ['session:message', 'rid', assistant('m1', [{ type: 'text', text: 'hi' }])],
+        ['session:tool-review', 'rid', { toolUseId: 't1', review: review() }]
+      ])
+      expect(reviews(s)).toEqual([])
+    })
+
+    it('survives an item-scoped upsert of its host message (mergeContentBlocks)', () => {
+      const s = fold([
+        created(),
+        hostMessage(),
+        ['session:tool-review', 'rid', { toolUseId: 't1', review: review() }],
+        // The same message again, as a delta re-emits it mid-turn.
+        hostMessage()
+      ])
+      expect(reviews(s)).toEqual([review()])
+    })
+  })
+
   it('retracts messages by id and clears streaming buffers', () => {
     const s = fold([
       created(),

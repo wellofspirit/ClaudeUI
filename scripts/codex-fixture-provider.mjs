@@ -8,6 +8,7 @@
 //   bun scripts/codex-fixture-provider.mjs --codex-home <dir> [--port 0]
 //        [--provider openai|fixture] [--model <name>] [--text <assistant text>]
 //        [--no-auth] [--reviewer user|auto_review]
+//        [--command "<shell>"] [--guardian approved|denied]
 //        [--chatgpt [--vault-home <dir> [--accounts <n>]]]
 //
 // Prints `PORT <n>` on the first line of stdout and then one JSON line
@@ -15,6 +16,32 @@
 // turns until it is killed — or, with `--exit-on-stdin-close`, until its stdin
 // ends, which is how the stress harness guarantees it dies with its parent.
 // One `TURN <n>` line per request goes to stderr.
+//
+// --command "<shell>" scripts a TOOL CALL on the first agent request: the
+// fixture answers with `exec_command` carrying that script (the integration
+// suite's exact argument shape, `sandbox_permissions: "require_escalated"` +
+// a justification), and answers the request that follows the tool's output with
+// the ordinary assistant text. Without it the agent only ever speaks, and an
+// agent that proposes no action gives the reviewer nothing to review.
+//
+// What sends the action to the reviewer is `sandbox_permissions:
+// "require_escalated"` in that call — `core/src/tools/handlers/mod.rs:276`
+// returns `permissions_preapproved: false` for it — NOT where the command
+// writes. The integration suite's own scripted command writes inside the cwd
+// and is reviewed all the same. The path only has to be somewhere isolated.
+//
+// --guardian <approved|denied> scripts the NATIVE auto-reviewer: it implies
+// `--reviewer auto_review`, and every guardian call (told apart by the reviewer
+// prompt's own `>>> APPROVAL REQUEST START` frame, the same predicate the
+// integration suite uses) is answered with that verdict and a fixed rationale.
+// That is what makes a real-app drive in Auto mode show the tool card's review
+// chip and strip (F18) without a credential and without a paid turn. It also
+// DEFAULTS --command — an agent with nothing to propose is never reviewed — to
+// a write into the parent of --codex-home, i.e. the isolated test home this
+// very invocation was given. NEVER `$HOME`: the app-server child inherits the
+// untouched environment (the drive recipe's shim patches `os.homedir()` in the
+// Electron main process only), so `$HOME` there is the developer's real home.
+// Pass --command to review something else.
 //
 // --chatgpt serves an INJECTED ChatGPT identity instead of an API key: the
 // config gains `chatgpt_base_url` (so the binary's own `/wham/*` and usage reads
@@ -48,11 +75,13 @@
 // No credentials of any kind. `auth.json` gets a made-up API key whose only job
 // is to prove the child read the isolated home it was given.
 import { mkdirSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import {
   FIXTURE_API_KEY,
   FIXTURE_AUTHORIZATION,
   fixtureAssistantMessage,
+  fixtureGuardianVerdict,
+  isGuardianRequest,
   startFixtureProvider,
   writeFabricatedVault,
   writeFixtureCodexHome
@@ -73,7 +102,25 @@ if (!codexHome) {
 const provider = arg('provider', 'openai')
 const model = arg('model', '')
 const text = arg('text', undefined)
-const reviewer = arg('reviewer', 'user')
+const command = arg('command', '')
+const guardian = arg('guardian', '')
+if (guardian && guardian !== 'approved' && guardian !== 'denied') {
+  console.error('codex-fixture-provider: --guardian must be `approved` or `denied`')
+  process.exit(2)
+}
+// A scripted verdict is pointless unless the native reviewer is the one
+// deciding, so the flag turns it on rather than failing on a mismatched pair.
+const reviewer = guardian ? 'auto_review' : arg('reviewer', 'user')
+// Reviewed because the scripted call asks to be (`sandbox_permissions:
+// "require_escalated"`), not because of where it writes — so the path only has
+// to be isolated. An ABSOLUTE path derived from --codex-home is that: its
+// parent is the test home this invocation was handed. Deliberately not `$HOME`,
+// which in the app-server child is the developer's real home — the drive
+// recipe's shim patches `os.homedir()` in the Electron main process, and the
+// child inherits the untouched env.
+const DEFAULT_ESCALATION_TARGET = join(dirname(resolve(codexHome)), 'fixture-escalation.txt')
+const DEFAULT_ESCALATING_COMMAND = `printf fixture-escalation > "${DEFAULT_ESCALATION_TARGET}"`
+const scriptedCommand = command || (guardian ? DEFAULT_ESCALATING_COMMAND : '')
 const port = Number.parseInt(arg('port', '0'), 10)
 // `requires_openai_auth = true` in the override below, so the child sends the
 // key from `auth.json`; `--no-auth` is for a home that declares the `fixture`
@@ -103,8 +150,29 @@ const fixture = await startFixtureProvider({
   port,
   chatgpt,
   authorization: withAuth ? FIXTURE_AUTHORIZATION : undefined,
-  script: ({ requests }) => {
+  script: ({ request, requests }) => {
+    if (guardian && isGuardianRequest(request)) {
+      process.stderr.write(`GUARDIAN ${guardian}\n`)
+      return fixtureGuardianVerdict(guardian)
+    }
     process.stderr.write(`TURN ${requests.length}\n`)
+    // The reviewer is a SECOND model session on the SAME provider, so its calls
+    // interleave with the agent's and the step index must count only the
+    // agent's — otherwise the scripted command never fires.
+    const agentTurns = requests.filter(
+      (entry) => !isGuardianRequest(entry) && entry.generate !== false
+    ).length
+    if (scriptedCommand && request.generate !== false && agentTurns === 1)
+      return {
+        type: 'function_call',
+        call_id: 'fixture-command',
+        name: 'exec_command',
+        arguments: JSON.stringify({
+          cmd: scriptedCommand,
+          sandbox_permissions: 'require_escalated',
+          justification: 'Isolated fixture write outside the workspace root'
+        })
+      }
     return fixtureAssistantMessage(text)
   }
 })
@@ -132,6 +200,8 @@ console.log(
     provider,
     model: model || null,
     authorization: withAuth,
+    command: scriptedCommand || null,
+    guardian: guardian || null,
     chatgpt,
     vaultAccounts: vault ? vault.accounts.length : 0
   })

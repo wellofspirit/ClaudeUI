@@ -1166,17 +1166,29 @@ describe('Codex auto-review visibility', () => {
     },
     action: { type: 'command', source: 'shell', command: '/bin/zsh -lc ls', cwd: '/isolated' }
   }
+  /**
+   * A review that names NO target item — a network-policy review, the one case
+   * the wire declares `targetItemId: null` for by design. It is the only review
+   * that still gets a standalone system row (F18): a bound one rides the card of
+   * the item it judged.
+   */
+  const UNBOUND = { ...REVIEW, targetItemId: null }
   /** Every emitted system row, oldest first. */
   const rows = () =>
     events.mock.calls
       .filter(([channel]) => channel === 'session:message')
       .map((call) => call[1][1])
       .filter((message: { role: string }) => message.role === 'system')
+  /** Every emitted `session:tool-review` payload, oldest first. */
+  const verdicts = () =>
+    events.mock.calls
+      .filter(([channel]) => channel === 'session:tool-review')
+      .map((call) => call[1][1])
 
-  it('rows an approved review with the unwrapped command and its risk', async () => {
+  it('rows a target-less review with the unwrapped command and its risk', async () => {
     const { session, notify } = fixture()
     await session.run('hello')
-    notify('item/autoApprovalReview/completed', REVIEW)
+    notify('item/autoApprovalReview/completed', UNBOUND)
     expect(rows()).toEqual([
       expect.objectContaining({
         id: 'codex:["root","turn","review-1"]',
@@ -1189,13 +1201,14 @@ describe('Codex auto-review visibility', () => {
         ]
       })
     ])
+    expect(verdicts()).toEqual([])
   })
 
   it('words a denial as a denial and names the patched files', async () => {
     const { session, notify } = fixture()
     await session.run('hello')
     notify('item/autoApprovalReview/completed', {
-      ...REVIEW,
+      ...UNBOUND,
       review: {
         status: 'denied',
         riskLevel: 'critical',
@@ -1212,15 +1225,15 @@ describe('Codex auto-review visibility', () => {
   it('ignores a review for another thread and the started half of its own', async () => {
     const { session, notify } = fixture()
     await session.run('hello')
-    notify('item/autoApprovalReview/completed', { ...REVIEW, threadId: 'other' })
-    notify('item/autoApprovalReview/started', { ...REVIEW, review: { status: 'inProgress' } })
+    notify('item/autoApprovalReview/completed', { ...UNBOUND, threadId: 'other' })
+    notify('item/autoApprovalReview/started', { ...UNBOUND, review: { status: 'inProgress' } })
     expect(rows()).toEqual([])
   })
 
   it('does not double-post the per-decision warning that follows every review', async () => {
     const { session, notify } = fixture()
     await session.run('hello')
-    notify('item/autoApprovalReview/completed', REVIEW)
+    notify('item/autoApprovalReview/completed', UNBOUND)
     // core/src/guardian/review.rs:709-717 sends this for EVERY decision.
     notify('guardianWarning', {
       threadId: 'root',
@@ -1229,6 +1242,88 @@ describe('Codex auto-review visibility', () => {
     })
     expect(rows()).toHaveLength(1)
     expect(events.mock.calls.some(([channel]) => channel === 'session:error')).toBe(false)
+  })
+
+  /**
+   * F18 — a review that names a target item is a verdict ON that item's card,
+   * not prose beside it: `session:tool-review` and NO system row.
+   */
+  describe('a review bound to the item it judged', () => {
+    const TARGET = {
+      threadId: 'root',
+      turnId: 'turn',
+      item: {
+        id: 'esc',
+        type: 'commandExecution',
+        command: '/bin/zsh -lc ls',
+        cwd: '/isolated',
+        status: 'completed',
+        exitCode: 0,
+        aggregatedOutput: 'a.txt'
+      }
+    }
+    const TARGET_ID = 'codex:["root","turn","esc"]'
+
+    it('emits the verdict on the card and rows nothing', async () => {
+      const { session, notify } = fixture()
+      await session.run('hello')
+      notify('item/started', TARGET)
+      notify('item/autoApprovalReview/completed', REVIEW)
+      expect(verdicts()).toEqual([
+        {
+          toolUseId: TARGET_ID,
+          review: {
+            type: 'tool_review',
+            toolUseId: TARGET_ID,
+            reviewId: 'review-1',
+            reviewer: 'codex-auto-review',
+            decision: 'approved',
+            riskLevel: 'low',
+            rationale: 'Auto-review returned a low-risk allow decision.'
+          }
+        }
+      ])
+      expect(rows()).toEqual([])
+    })
+
+    it('holds a verdict that arrives before its tool_use and releases it once', async () => {
+      const { session, notify } = fixture()
+      await session.run('hello')
+      notify('item/autoApprovalReview/completed', REVIEW)
+      expect(verdicts()).toEqual([])
+      notify('item/started', TARGET)
+      notify('item/completed', TARGET)
+      expect(verdicts()).toHaveLength(1)
+      expect(verdicts()[0].toolUseId).toBe(TARGET_ID)
+    })
+
+    it('emits ONE verdict for the authoritative replay of the same reviewId', async () => {
+      const { session, notify } = fixture()
+      await session.run('hello')
+      notify('item/started', TARGET)
+      notify('item/autoApprovalReview/completed', REVIEW)
+      notify('item/autoApprovalReview/completed', REVIEW)
+      expect(verdicts()).toHaveLength(1)
+    })
+
+    /**
+     * The target never arrived (it cannot after the turn's authoritative
+     * replay), so the verdict falls back to the standalone row rather than
+     * vanishing: a review the user never sees is worse than one in the wrong
+     * place.
+     */
+    it('falls back to a standalone row when the target never lands', async () => {
+      const { session, notify } = fixture()
+      await session.run('hello')
+      notify('item/autoApprovalReview/completed', REVIEW)
+      notify('turn/completed', {
+        threadId: 'root',
+        turn: { id: 'turn', status: 'completed', items: [] }
+      })
+      expect(verdicts()).toEqual([])
+      expect(rows()).toHaveLength(1)
+      expect(rows()[0].content[0].text).toContain('Codex auto-review approved `ls`')
+    })
   })
 
   it('rows the circuit breaker and raises it as an error too', async () => {
@@ -1252,8 +1347,8 @@ describe('Codex auto-review visibility', () => {
   it('keeps review rows through the authoritative item replay and across duplicates', async () => {
     const { session, notify } = fixture()
     await session.run('hello')
-    notify('item/autoApprovalReview/completed', REVIEW)
-    notify('item/autoApprovalReview/completed', REVIEW)
+    notify('item/autoApprovalReview/completed', UNBOUND)
+    notify('item/autoApprovalReview/completed', UNBOUND)
     const id = rows()[0].id
     expect(rows().every((row: { id: string }) => row.id === id)).toBe(true)
     notify('turn/completed', {
@@ -1338,13 +1433,30 @@ describe('Codex guardian denial override', () => {
       toolUseId: TARGET_ID,
       toolName: 'commandExecution',
       input: { command: "/bin/zsh -lc 'rm -rf x'", cwd: '/isolated' },
-      // Untrusted reviewer prose: collapsed, never a second row of its own.
-      decisionReason: 'Codex auto-review denied this action. Isolated fixture deny',
+      // F18: the rationale lives on the card's review strip now, so the card
+      // above the buttons is the bare fact of the denial.
+      decisionReason: 'Codex auto-review denied this action.',
       codex: { guardianOverride: true }
     })
     expect(offers()[0].suggestions).toBeUndefined()
-    // The review row is unchanged: the override is an ADDITION, not a swap.
-    expect(rows()[0].content[0].text).toContain('Codex auto-review denied')
+    // The verdict rides the card it judged; no system row duplicates it.
+    expect(rows()).toEqual([])
+    expect(
+      events.mock.calls
+        .filter(([channel]) => channel === 'session:tool-review')
+        .map((call) => call[1][1].review)
+    ).toEqual([
+      {
+        type: 'tool_review',
+        toolUseId: TARGET_ID,
+        reviewId: 'review-1',
+        reviewer: 'codex-auto-review',
+        decision: 'denied',
+        riskLevel: 'critical',
+        // Untrusted reviewer prose: whitespace-collapsed by the producer.
+        rationale: 'Isolated fixture deny'
+      }
+    ])
   })
 
   /**

@@ -86,6 +86,36 @@ export function fixtureAssistantMessage(
   return { type: 'message', id, role: 'assistant', content: [{ type: 'output_text', text }] }
 }
 
+/**
+ * A guardian auto-review call, told apart from the agent's own.
+ *
+ * Codex frames the planned action between `>>> APPROVAL REQUEST START` / `END`
+ * (`core/src/guardian/prompt.rs`), in the REVIEWER prompt and nowhere else, so
+ * this holds whether the reviewer got the catalog policy template or the bundled
+ * one. The reviewer is a second model session on the SAME provider, so its calls
+ * interleave with the agent's and every script has to tell them apart.
+ */
+export const isGuardianRequest = (request: Record<string, unknown>): boolean =>
+  JSON.stringify(request).includes('>>> APPROVAL REQUEST START')
+
+/**
+ * The output item a scripted guardian verdict answers with: the reviewer speaks
+ * one JSON object as its final assistant message. Used by
+ * `scripts/codex-fixture-provider.mjs --guardian`, so a real-app drive in Auto
+ * mode shows an approved or denied review strip without a credential.
+ */
+export function fixtureGuardianVerdict(verdict: 'approved' | 'denied'): FixtureOutputItem {
+  return fixtureAssistantMessage(
+    JSON.stringify({
+      risk_level: verdict === 'denied' ? 'high' : 'medium',
+      user_authorization: 'unknown',
+      outcome: verdict === 'denied' ? 'deny' : 'allow',
+      rationale: `Fixture guardian ${verdict}: the write lands in the isolated test home.`
+    }),
+    'msg-guardian'
+  )
+}
+
 /** The three events one turn is made of. */
 export function fixtureResponseEvents(item: FixtureOutputItem): Record<string, unknown>[] {
   return [

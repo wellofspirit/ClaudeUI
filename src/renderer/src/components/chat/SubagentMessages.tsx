@@ -1,5 +1,10 @@
 import { memo, useMemo, useState } from 'react'
-import type { ChatMessage, ContentBlock, PendingApproval } from '../../../../shared/types'
+import type {
+  ChatMessage,
+  ContentBlock,
+  PendingApproval,
+  ToolReviewBlock
+} from '../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ImageGalleryProvider } from '../shared/ImageViewer'
@@ -71,6 +76,18 @@ export const SubagentMessages = memo(function SubagentMessages({
     return map
   }, [messages])
 
+  // A permission judge's verdict on a nested call (F18), paired exactly as the
+  // result is. LAST one wins — a re-review is a new decision, not a second one.
+  const reviewMap = useMemo(() => {
+    const map = new Map<string, ToolReviewBlock>()
+    for (const msg of messages) {
+      for (const b of msg.content) {
+        if (b.type === 'tool_review') map.set(b.toolUseId, b)
+      }
+    }
+    return map
+  }, [messages])
+
   // Bind the session's pending approvals to the NESTED tool calls, by
   // toolUseId, exactly as MessageBubble does for the top-level transcript.
   //
@@ -127,7 +144,7 @@ export const SubagentMessages = memo(function SubagentMessages({
               className="flex flex-col gap-1.5"
             >
               {msg.content.map((block, i) => {
-                if (block.type === 'tool_result') return null
+                if (block.type === 'tool_result' || block.type === 'tool_review') return null
                 if (block.type === 'tool_use') {
                   return (
                     <ToolCallBlock
@@ -135,6 +152,7 @@ export const SubagentMessages = memo(function SubagentMessages({
                       block={block}
                       result={resultMap.get(block.toolUseId)}
                       approval={approvalMap.get(block.toolUseId)}
+                      review={reviewMap.get(block.toolUseId)}
                     />
                   )
                 }

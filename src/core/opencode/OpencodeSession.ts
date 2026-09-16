@@ -58,10 +58,15 @@ import {
   classify,
   formatUnparseableJudgeReply,
   isAutoModeFastPathAllowed,
+  type ClassifyResult,
   type EnvironmentInfo,
   type JudgeTransport
 } from '../automode/classifier'
-import { AutoModeDenialTracker, formatAutoModeDenyReason } from '../automode/denial-tracker'
+import {
+  AutoModeDenialTracker,
+  autoModeReviewBlock,
+  formatAutoModeDenyReason
+} from '../automode/denial-tracker'
 import {
   analyzeRedirects,
   captureGitRemotes,
@@ -1940,9 +1945,11 @@ export class OpencodeSession extends BaseSession {
         // retry of something THIS monitor denied (post-block consent
         // inheritance), not as a fresh proposal.
         if (approval.toolUseId) this.recordToolOutcome(approval.toolUseId, 'automode-blocked')
+        this.sendToolReview(approval.toolUseId, result)
         this.autoReply(approval.requestId, 'reject', formatAutoModeDenyReason(result))
       } else {
         this.autoDenials.recordAllow()
+        this.sendToolReview(approval.toolUseId, result)
         this.autoReply(approval.requestId, 'once')
       }
     } catch (err) {
@@ -1952,6 +1959,26 @@ export class OpencodeSession extends BaseSession {
       )
       this.fallbackToHuman(approval)
     }
+  }
+
+  /**
+   * The judge's verdict on the card it judged (F18).
+   *
+   * `approval.toolUseId` is `permission.asked`'s `tool.callID`, which is EXACTLY
+   * the id `buildChatMessage` puts on the `tool_use` block (`snap.callID`), so
+   * the reducer binds it to the right card. No hold is needed here the way Codex
+   * needs one: the tool part carrying `state.input` is published
+   * (`message.part.updated`, which emits the whole assistant message) BEFORE the
+   * tool calls `ctx.ask` — the fact M-OC6 already relies on to read the real
+   * input off the accumulator — and the judge call that produced this verdict
+   * took a model round-trip on top of that.
+   */
+  private sendToolReview(toolUseId: string | undefined, result: ClassifyResult): void {
+    if (!toolUseId) return
+    this.send('session:tool-review', {
+      toolUseId,
+      review: autoModeReviewBlock(toolUseId, uuid(), result)
+    })
   }
 
   /**

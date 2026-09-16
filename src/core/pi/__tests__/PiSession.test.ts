@@ -2545,6 +2545,70 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     session.dispose()
   })
 
+  /**
+   * F18 — the verdict rides the card of the call it judged. pi's gate is keyed
+   * by `toolCallId`, which is exactly the id the transcript's `tool_use` block
+   * carries (`piToolCallBlock`), so the reducer binds it without a hold: the
+   * assistant `message_end` that mints the block precedes `tool_execution_*`,
+   * and the judge round-trip sits on top of that.
+   */
+  describe('the verdict reaches the card it judged', () => {
+    const reviews = (win: MockWindow) =>
+      sentPayloads(win, 'session:tool-review') as {
+        toolUseId: string
+        review: Record<string, unknown>
+      }[]
+
+    it('an ALLOW emits one auto-mode verdict bound to the tool call id', async () => {
+      enableAutoMode()
+      judgeScript.replies = ['<block>no</block>']
+      const win = new MockWindow()
+      const session = await autoSession('rid-review-allow', win)
+      await gate('call_r1', 'bash', { command: 'npm test' })
+      expect(reviews(win)).toEqual([
+        {
+          toolUseId: 'call_r1',
+          review: {
+            type: 'tool_review',
+            toolUseId: 'call_r1',
+            reviewId: expect.any(String),
+            reviewer: 'auto-mode',
+            decision: 'approved'
+          }
+        }
+      ])
+      session.dispose()
+    })
+
+    it('a BLOCK names the corpus rule and carries the reason verbatim', async () => {
+      enableAutoMode()
+      judgeScript.replies = [
+        '<block>yes</block><reason>ships uncommitted secrets</reason><category>credential_leakage</category>'
+      ]
+      const win = new MockWindow()
+      const session = await autoSession('rid-review-block', win)
+      await gate('call_r2', 'bash', { command: 'git push origin main' })
+      expect(reviews(win)).toHaveLength(1)
+      expect(reviews(win)[0].review).toMatchObject({
+        reviewer: 'auto-mode',
+        decision: 'denied',
+        rule: expect.any(String),
+        rationale: 'ships uncommitted secrets'
+      })
+      session.dispose()
+    })
+
+    it('a fast-path allow never reaches the judge and emits NO verdict', async () => {
+      enableAutoMode()
+      const win = new MockWindow()
+      const session = await autoSession('rid-review-fast', win)
+      expect(await gate('call_r3', 'read', { path: '/cwd/a.txt' })).toEqual({ behavior: 'allow' })
+      expect(judgeInstances).toHaveLength(0)
+      expect(reviews(win)).toEqual([])
+      session.dispose()
+    })
+  })
+
   it("a BLOCK records `automode-blocked`, which reaches the judge as the retry's outcome annotation", async () => {
     enableAutoMode()
     judgeScript.replies = ['<block>yes</block><reason>nope</reason>', '<block>no</block>']

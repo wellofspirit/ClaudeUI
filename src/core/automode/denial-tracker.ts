@@ -1,13 +1,15 @@
 /**
  * Auto-mode denial bookkeeping and block surfacing — engine-neutral.
  *
- * Two things live here, both of which exist to give `ClassifyResult.category`
+ * Three things live here, all of which exist to give `ClassifyResult.category`
  * (the corpus rule the judge matched) a real consumer instead of a log line:
  *
  * 1. {@link AutoModeDenialTracker} — the caps that decide when auto mode stops
  *    answering for the user and hands the decision back.
  * 2. {@link formatAutoModeDenyReason} — the model-visible deny text, which
  *    names the matched rule so the agent can tell WHICH bar it hit.
+ * 3. {@link autoModeReviewBlock} — the USER-visible verdict, rendered on the
+ *    card of the call it judged (F18).
  *
  * ## Why a category cap
  *
@@ -27,6 +29,8 @@
  * drift between engines is a bug waiting to happen, and the cap rules are pure
  * policy with no engine surface in them.
  */
+import type { ToolReviewBlock } from '../../shared/types'
+import { reviewRationale } from '../shared/tool-review'
 import { ruleNameForCategory } from './rules/corpus'
 
 /** Blocks on the SAME corpus rule in a row before the human takes over. */
@@ -122,4 +126,36 @@ export function formatAutoModeDenyReason(result: { reason?: string; category?: s
   const named =
     rule && !base.toLowerCase().includes(rule.toLowerCase()) ? `[${rule}] ${base}` : base
   return `Auto mode blocked: ${named}`
+}
+
+/**
+ * The judge's verdict as a block on the card it judged (F18) — the ClaudeUI
+ * half of what Codex's native auto-review produces for itself.
+ *
+ * Emitted for a real verdict only. A fast-path allow never reaches the judge, an
+ * `unavailable` result is not a verdict, and a denial CAP hands the decision to
+ * the human — whose approval card carries the cap sentence itself — so none of
+ * those three produce one; the caller does that gating, because only it knows
+ * which path it took.
+ *
+ * `reason` is UNTRUSTED model text, so it goes through the same collapse-and-cap
+ * as Codex's rationale. There is no risk level: ClaudeUI's classifier scores a
+ * rule, not a severity.
+ */
+export function autoModeReviewBlock(
+  toolUseId: string,
+  reviewId: string,
+  result: { block: boolean; reason?: string; category?: string }
+): ToolReviewBlock {
+  const rule = result.category ? ruleNameForCategory(result.category) : undefined
+  const rationale = reviewRationale(result.reason)
+  return {
+    type: 'tool_review',
+    toolUseId,
+    reviewId,
+    reviewer: 'auto-mode',
+    decision: result.block ? 'denied' : 'approved',
+    ...(rule ? { rule } : {}),
+    ...(rationale ? { rationale } : {})
+  }
 }
