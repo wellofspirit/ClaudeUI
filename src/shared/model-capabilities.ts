@@ -570,6 +570,27 @@ export const CODEX_ENGINE_CAPABILITIES: EngineCapabilities = {
   crossEngineDispatch: true
 }
 
+/**
+ * Does the codex catalog row for `model` publish `effort`?
+ *
+ * THE predicate for "this native tier is legal on this model" — the pre-spawn
+ * pick (`resolveSessionSdkOptions`) and the model switch (`handleSelectModel`)
+ * ask it the same way, because the engine does: `CodexSession.validateEffort`
+ * refuses a thread start on a tier the model never listed.
+ */
+export function codexPublishesEffort(
+  codexModels: ReadonlyArray<{
+    value: string
+    nativeEffortOptions?: ReadonlyArray<{ value: string }>
+  }>,
+  model: string | undefined,
+  effort: string | null | undefined
+): boolean {
+  if (!model || !effort) return false
+  const options = codexModels.find((m) => m.value === model)?.nativeEffortOptions
+  return !!options?.some((option) => option.value === effort)
+}
+
 export function resolveCodexCapabilities(model?: {
   vision?: boolean
   nativeEffortOptions?: Array<{ value: string; description: string }>

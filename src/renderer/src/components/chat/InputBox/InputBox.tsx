@@ -29,7 +29,8 @@ import {
   modelDefaultThinkingMode,
   canonicalizeModelValue,
   type EffortLevel,
-  type ThinkingMode
+  type ThinkingMode,
+  codexPublishesEffort
 } from '../../../../../shared/model-capabilities'
 
 const codexCatalogOf = (models: ReadonlyArray<{ value: string; engineId?: string }>) =>
@@ -111,27 +112,6 @@ export function codexDefaultEffortFor(
   const options = codexModels.find((m) => m.value === model)?.nativeEffortOptions
   if (!options || options.length === 0) return effort
   return options.some((option) => option.value === effort) ? effort : undefined
-}
-
-/**
- * Does the codex catalog row for `model` publish `effort`?
- *
- * THE predicate for "this native tier is legal on this model" — the pre-spawn
- * pick (`resolveSessionSdkOptions`) and the model switch (`handleSelectModel`)
- * ask it the same way, because the engine does: `CodexSession.validateEffort`
- * refuses a thread start on a tier the model never listed.
- */
-export function codexPublishesEffort(
-  codexModels: ReadonlyArray<{
-    value: string
-    nativeEffortOptions?: ReadonlyArray<{ value: string }>
-  }>,
-  model: string | undefined,
-  effort: string | null | undefined
-): boolean {
-  if (!model || !effort) return false
-  const options = codexModels.find((m) => m.value === model)?.nativeEffortOptions
-  return !!options?.some((option) => option.value === effort)
 }
 
 const ACCEPTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
@@ -537,23 +517,22 @@ export function InputBox(): React.JSX.Element {
         : undefined
       // The configured NATIVE tier seeds a session that has no thread yet, and
       // only when it is paired with the session's model (`codexDefaultEffortFor`).
-      // A resume must not carry it: `CodexSession.start` folds an explicit
-      // effort OVER the thread's remembered one, so re-sending the default
+      // A resume must not carry the DEFAULT: `CodexSession.start` folds an
+      // explicit effort OVER the thread's remembered one, so re-sending it
       // would silently undo a live `thread/settings/update` the user made.
       const fresh = !session?.status.sessionId && !session?.isHistorical
-      // The user's OWN pre-spawn pick outranks the configured default — it is
-      // the tier they just set in the composer, and pre-spawn there is no
-      // thread for `setEffort` to push it to (F11). Only a tier the SELECTED
-      // model's catalog row publishes may go: `CodexSession.validateEffort`
-      // refuses the start on any other, so an unpublished leftover is dropped
-      // and the configured default applies as before.
+      // The user's OWN pick outranks it and rides EVERY spawn, resume included
+      // (F15): it is the tier they set in the composer with no process there to
+      // take it, and folding it over the thread's remembered one is exactly
+      // what they asked for. Only a tier the SELECTED model's catalog row
+      // publishes may go: `CodexSession.validateEffort` refuses the start on
+      // any other, so an unpublished leftover is dropped and — on a fresh
+      // spawn only — the configured default applies as before.
       const picked =
-        fresh &&
-        session?.effort &&
-        codexPublishesEffort(catalog, session.selectedModel, session.effort)
+        session?.effort && codexPublishesEffort(catalog, session.selectedModel, session.effort)
           ? session.effort
           : undefined
-      const effort = fresh ? (picked ?? codexDefaultEffortFor(state, model, catalog)) : undefined
+      const effort = picked ?? (fresh ? codexDefaultEffortFor(state, model, catalog) : undefined)
       return { model, ...(effort ? { effort } : {}) }
     }
     const modelInfo = state.availableModels.find(
@@ -564,8 +543,12 @@ export function InputBox(): React.JSX.Element {
     // Effort precedence: explicit per-session pick > per-model user default > cli.js heuristic.
     const userDefault =
       state.settings.modelEffortDefaults?.[canonicalizeModelValue(modelInfo?.value)]
+    // Not the codex branch (returned above): here the store's pick is one of
+    // the Claude rungs, the only values the non-native picker can set.
     const desiredEffort: EffortLevel =
-      session?.effort ?? userDefault ?? modelDefaultEffort(modelInfo)
+      (session?.effort as EffortLevel | null | undefined) ??
+      userDefault ??
+      modelDefaultEffort(modelInfo)
     return {
       model: session?.selectedModel,
       effort: modelResolveEffort(modelInfo, desiredEffort) ?? desiredEffort,
@@ -971,7 +954,7 @@ export function InputBox(): React.JSX.Element {
           )
             setEffort(null)
         } else {
-          const coerced = modelResolveEffort(newModel, session.effort)
+          const coerced = modelResolveEffort(newModel, session.effort as EffortLevel)
           // Effort unsupported on new model → clear the user's pick (fall back to default).
           if (coerced === null) setEffort(null)
           else if (coerced !== session.effort) setEffort(coerced)
@@ -991,10 +974,13 @@ export function InputBox(): React.JSX.Element {
   // which use the fixed EffortLevel ladder derived from the selected model.
   const nativeEffortOptions = capabilities.reasoning.nativeEffort?.options
 
-  // The same "fresh" predicate `resolveSessionSdkOptions` spawns on: no backend
-  // thread and not a historical read. Pre-spawn, every live setter is a no-op
-  // on the host, so the store is the only place a pick can live.
-  const preSpawn = !startedSessionId && !isHistorical
+  // THE predicate for "a process is there to take a live setter": a thread id
+  // AND a connected backend. Everything else — not spawned yet, a historical
+  // read from the sidebar, a session whose host died (ADR-045 projects
+  // `disconnected` as idle + `sdkActive: false`) — has no session on the host
+  // for `session:set-effort` to find, so the store is the only place a pick can
+  // live until the next spawn or resume reads it (F15).
+  const liveBackend = sdkActive && !!startedSessionId
 
   // Effort and thinking mode are read at sdkQuery start time, so restart the
   // session (with resume) to apply changes mid-conversation.
@@ -1026,21 +1012,19 @@ export function InputBox(): React.JSX.Element {
       // `session:status` — no local optimistic write and no respawn. Claude and
       // opencode have no live setter, hence the cancel/recreate below.
       if (nativeEffortOptions) {
-        // Pre-spawn there is no thread to update: the main `setEffort` handler
-        // finds no live session and returns without emitting, so the pick
-        // vanished. Store it instead — the fresh branch of
-        // `resolveSessionSdkOptions` carries it into `session:create` (F11).
-        if (preSpawn) {
-          setEffort(level)
-          return
-        }
-        if (activeSessionId) await window.api.setEffort(activeSessionId, level)
+        // The store mirrors the user's LAST EXPLICIT PICK either way: with no
+        // process on the host the main `setEffort` handler finds no live
+        // session and returns without emitting, and the pick would vanish
+        // (F11 pre-spawn, F15 historical + disconnected). It is what
+        // `resolveSessionSdkOptions` carries into the next spawn or resume.
+        setEffort(level)
+        if (liveBackend && activeSessionId) await window.api.setEffort(activeSessionId, level)
         return
       }
       setEffort(level as EffortLevel)
       await restartSdkSession()
     },
-    [activeSessionId, nativeEffortOptions, preSpawn, setEffort, restartSdkSession]
+    [activeSessionId, nativeEffortOptions, liveBackend, setEffort, restartSdkSession]
   )
 
   const handleSelectReasoningVariant = useCallback(
@@ -1202,16 +1186,19 @@ export function InputBox(): React.JSX.Element {
   const effectiveEffort = useMemo<string>(
     () =>
       nativeEffortOptions
-        ? // The engine's ACKNOWLEDGED tier first — it is the live thread's
-          // truth. Then the session's OWN pick, which pre-spawn lives only in
-          // the store (F11) and is what `session:create` will carry. Only then
-          // the selected model's catalog default (`nativeDefaultEffort`, from
-          // model-discovery), never the first catalog row: that row is just the
-          // lowest tier the catalog happens to list, so it claimed a tier the
-          // engine never said.
-          (status.codex?.reasoningEffort ?? effort ?? selectedModel.nativeDefaultEffort ?? '')
+        ? // On a LIVE thread the engine's ACKNOWLEDGED tier is the truth, and a
+          // pick is pushed to it over IPC, so the pill follows the thread.
+          // Without a process nothing can refresh that acknowledgement, so the
+          // session's OWN pick comes first: it is what the next spawn or resume
+          // will carry (F15). Only then the selected model's catalog default
+          // (`nativeDefaultEffort`, from model-discovery), never the first
+          // catalog row: that row is just the lowest tier the catalog happens
+          // to list, so it claimed a tier the engine never said.
+          liveBackend
+          ? (status.codex?.reasoningEffort ?? effort ?? selectedModel.nativeDefaultEffort ?? '')
+          : (effort ?? status.codex?.reasoningEffort ?? selectedModel.nativeDefaultEffort ?? '')
         : (effort ?? modelDefaultEffort(selectedModel)),
-    [effort, selectedModel, nativeEffortOptions, status.codex?.reasoningEffort]
+    [effort, selectedModel, nativeEffortOptions, liveBackend, status.codex?.reasoningEffort]
   )
   const effectiveThinking = useMemo<ThinkingMode>(
     () => thinkingMode ?? modelDefaultThinkingMode(selectedModel),

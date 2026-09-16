@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
 import { VOICE_LANGUAGES } from '../../../shared/types'
-import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
+import { codexPublishesEffort, resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import type { EffortLevel } from '../../../shared/model-capabilities'
 import type { SharedProviderAccountList } from '../../../shared/shared-provider'
 import type { ProviderRegistrySnapshot } from '../../../shared/provider-registry'
@@ -787,8 +787,13 @@ export interface PerSessionState {
   isWatching: boolean
   needsAttention: boolean
   permissionMode: PermissionMode
-  /** null = use model default; non-null = user explicitly chose this tier */
-  effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null
+  /**
+   * null = use model default; non-null = user explicitly chose this tier.
+   * Canonical `effort` is `string | null` (sync/state.ts): Claude's five rungs
+   * for Claude/opencode/pi, an engine-native tier (Codex's `minimal`…`xhigh`)
+   * for Codex.
+   */
+  effort: string | null
   /** null = use model default; non-null = user explicitly chose this mode */
   thinkingMode: 'adaptive' | 'enabled' | 'disabled' | null
   /** null = opencode default (variant omitted); non-null = user chose a reasoning variant.
@@ -3044,10 +3049,24 @@ export const useSessionStore = create<SessionState>((set) => ({
     // the prior opencode session regardless of whether messages are preloaded locally).
     const isOpencode = session.selectedEngineId === 'opencode'
     const resumeId = session.messages.length > 0 || isOpencode ? routingId : undefined
+    // A Codex pick is a NATIVE tier and the store keeps the user's last one at
+    // every lifecycle stage (F15); `CodexSession.validateEffort` refuses a start
+    // on a tier the model never published, so only a published one may ride
+    // the respawn — the same gate the composer's own spawn path applies.
+    const effort =
+      session.selectedEngineId === 'codex'
+        ? codexPublishesEffort(
+            useSessionStore.getState().availableModels.filter((m) => m.engineId === 'codex'),
+            session.selectedModel,
+            session.effort
+          )
+          ? (session.effort ?? undefined)
+          : undefined
+        : (session.effort ?? undefined)
     await window.api.createSession(
       routingId,
       session.cwd || '',
-      session.effort ?? undefined,
+      effort,
       resumeId,
       session.permissionMode,
       session.selectedModel,

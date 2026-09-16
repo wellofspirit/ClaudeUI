@@ -216,3 +216,62 @@ describe('setSelectedEngine — switching TO codex', () => {
     expect(store().sessions['cx-6']?.codexModelExplicit).toBe(false)
   })
 })
+
+describe('retrySend — codex effort (F15)', () => {
+  const CATALOG_ROW = CATALOG.find((m) => m.engineId === 'codex')!
+  function codexSessionWithEffort(effort: string | null): void {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        'codex-1': {
+          ...useSessionStore.getState().sessions['codex-1'],
+          cwd: '/tmp/x',
+          selectedEngineId: 'codex' as EngineId,
+          selectedModel: CATALOG_ROW.value,
+          effort,
+          messages: [],
+          permissionMode: 'default',
+          thinkingMode: null
+        } as unknown as ReturnType<typeof useSessionStore.getState>['sessions'][string]
+      }
+    }))
+  }
+  function api(): {
+    createSession: ReturnType<typeof vi.fn>
+    sendPrompt: ReturnType<typeof vi.fn>
+  } {
+    const created = {
+      createSession: vi.fn(async () => undefined),
+      sendPrompt: vi.fn(async () => undefined)
+    }
+    Object.assign((window as unknown as { api: Record<string, unknown> }).api, created)
+    return created
+  }
+
+  it('respawns with a pick the selected model publishes', async () => {
+    useSessionStore.setState({
+      availableModels: [
+        { ...CATALOG_ROW, nativeEffortOptions: [{ value: 'high', description: '' }] }
+      ]
+    })
+    codexSessionWithEffort('high')
+    const { createSession } = api()
+    await useSessionStore.getState().retrySend('codex-1', 'again')
+    expect(createSession.mock.calls[0]?.[2]).toBe('high')
+  })
+
+  it('drops a pick the selected model does not publish, so the respawn is not refused', async () => {
+    // The store keeps the user's last pick at every lifecycle stage; a model
+    // switched on a started session skips the coercion, so the pick can be off
+    // the new model's ladder and `CodexSession.validateEffort` would refuse it.
+    useSessionStore.setState({
+      availableModels: [
+        { ...CATALOG_ROW, nativeEffortOptions: [{ value: 'low', description: '' }] }
+      ]
+    })
+    codexSessionWithEffort('max')
+    const { createSession } = api()
+    await useSessionStore.getState().retrySend('codex-1', 'again')
+    expect(createSession.mock.calls[0]?.[2]).toBeUndefined()
+  })
+})

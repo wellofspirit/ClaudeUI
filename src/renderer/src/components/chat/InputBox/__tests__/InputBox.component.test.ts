@@ -1274,6 +1274,12 @@ describe('InputBox FC — rendered', () => {
         ]
       })
     )
+    // A thread id alone is not a live backend — a disconnected session keeps
+    // one (ADR-045) and its pick is stored, not pushed (F15). This case is the
+    // LIVE one, so the session is marked active.
+    act(() => {
+      useSessionStore.getState().markSdkActive(FC_ROUTE)
+    })
     renderFC()
     expect(viewProps.effortSupported).toBe(true)
     expect(viewProps.nativeEffortOptions).toEqual([
@@ -1503,6 +1509,154 @@ describe('InputBox FC — rendered', () => {
     expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBeNull()
     expect(viewProps.effort).toBe('low')
     await sendFC()
+    expect(ipcCalls['session:create'][0][2]).toBeUndefined()
+  })
+
+  // -------------------------------------------------------------------------
+  // F15 — a native tier picked on a session with NO live process
+  // -------------------------------------------------------------------------
+
+  /**
+   * A codex session with a native thread id and no process behind it: loaded
+   * from the sidebar (`isHistorical`), or left over from a host that died
+   * (ADR-045 projects `disconnected` as idle + `sdkActive: false`). Both take
+   * the live setter today, which finds no session on the host and drops the
+   * pick — the pre-F11 bug, one lifecycle stage later.
+   */
+  function coldCodexSession(
+    kind: 'historical' | 'disconnected',
+    opts: { model?: string; models?: ModelInfo[]; acknowledged?: string } = {}
+  ): void {
+    const models = opts.models ?? [astraRow]
+    const model = opts.model ?? 'gpt-6-astra'
+    const row = models.find((m) => m.value === model)
+    // Same reason as `freshCodexSession`: the mount-time refetch would
+    // otherwise wipe the catalog row this slice is about.
+    app.bridge.ipcMain.handle('session:get-engine-models', () => [
+      { engineId: 'codex', vendorId: 'openai', vendorName: 'OpenAI', models }
+    ])
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: {
+          ...state.sessions[FC_ROUTE],
+          selectedEngineId: 'codex',
+          selectedModel: model,
+          codexModelExplicit: true,
+          sdkActive: false,
+          isHistorical: kind === 'historical',
+          status: {
+            ...state.sessions[FC_ROUTE].status,
+            sessionId: 'thread-1',
+            engineId: 'codex',
+            capabilities: resolveCodexCapabilities(row),
+            // A disconnected session keeps the last ACKNOWLEDGED tier: the
+            // reducer replaces the status with `{ ...status, state: 'idle' }`,
+            // codex block included.
+            ...(opts.acknowledged
+              ? {
+                  codex: {
+                    modelProvider: 'openai',
+                    reasoningEffort: opts.acknowledged,
+                    effortOptions: row?.nativeEffortOptions ?? [],
+                    pinnedAccountId: null
+                  }
+                }
+              : {})
+          }
+        }
+      },
+      availableModels: models
+    }))
+    mirrorStoreIntoReplica()
+  }
+
+  it('carries a tier picked on a HISTORICAL codex session into the resume', async () => {
+    coldCodexSession('historical')
+    renderFC()
+    expect(viewProps.effort).toBe('medium')
+    await act(async () => {
+      await viewProps.onSelectEffort('high')
+    })
+    expect(viewProps.effort).toBe('high')
+    // No process on the host, so the live setter would drop it: the store is
+    // the only place the pick can live until the resume reads it.
+    expect(ipcCalls['session:set-effort']).toBeUndefined()
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('high')
+    await sendFC()
+    expect(ipcCalls['session:create'][0][2]).toBe('high')
+    // ...and it is a RESUME: the thread id goes with it.
+    expect(ipcCalls['session:create'][0][3]).toBe(FC_ROUTE)
+  })
+
+  it('carries a tier picked on a DISCONNECTED codex session into the resume', async () => {
+    coldCodexSession('disconnected', { acknowledged: 'low' })
+    renderFC()
+    // The last tier the dead thread acknowledged.
+    expect(viewProps.effort).toBe('low')
+    await act(async () => {
+      await viewProps.onSelectEffort('xhigh')
+    })
+    // Nothing can refresh that acknowledgement while the process is gone, so
+    // the pill must show the tier the resume will carry.
+    expect(viewProps.effort).toBe('xhigh')
+    expect(ipcCalls['session:set-effort']).toBeUndefined()
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('xhigh')
+    await sendFC()
+    expect(ipcCalls['session:create'][0][2]).toBe('xhigh')
+    expect(ipcCalls['session:create'][0][3]).toBe(FC_ROUTE)
+  })
+
+  it('a LIVE codex session applies the pick over IPC and mirrors it into the store', async () => {
+    coldCodexSession('disconnected', { acknowledged: 'low' })
+    act(() => {
+      useSessionStore.getState().markSdkActive(FC_ROUTE)
+    })
+    renderFC()
+    await act(async () => {
+      await viewProps.onSelectEffort('high')
+    })
+    expect(ipcCalls['session:set-effort']).toEqual([[FC_ROUTE, 'high']])
+    // The store mirrors every pick, so a later respawn of this session carries
+    // it too; the pill still waits for the thread's acknowledgement.
+    expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('high')
+    expect(viewProps.effort).toBe('low')
+  })
+
+  it('a resume with no pick carries no effort, configured default or not', async () => {
+    useSessionStore.setState({
+      codexDefaultModel: 'gpt-6-astra',
+      codexDefaultModelConfigured: true,
+      codexDefaultEffort: 'xhigh'
+    })
+    coldCodexSession('historical')
+    renderFC()
+    await sendFC()
+    // `CodexSession.start` folds an explicit effort OVER the thread's
+    // remembered tier, so re-sending the CONFIGURED default would undo a live
+    // `thread/settings/update` the user made.
+    expect(ipcCalls['session:create'][0][2]).toBeUndefined()
+    expect(ipcCalls['session:create'][0][3]).toBe(FC_ROUTE)
+  })
+
+  it('drops a pick the resumed session’s model does not publish', async () => {
+    useSessionStore.setState({
+      codexDefaultModel: 'gpt-6-astra-mini',
+      codexDefaultModelConfigured: true,
+      codexDefaultEffort: 'high'
+    })
+    coldCodexSession('historical', { model: 'gpt-6-astra-mini', models: [astraRow, miniRow] })
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], effort: 'xhigh' }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    renderFC()
+    await sendFC()
+    // `xhigh` is astra-only — `CodexSession.validateEffort` would refuse the
+    // thread start — and a resume never falls back to the configured default.
     expect(ipcCalls['session:create'][0][2]).toBeUndefined()
   })
 
