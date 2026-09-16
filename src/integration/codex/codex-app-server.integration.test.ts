@@ -1123,6 +1123,15 @@ it.skipIf(!enabled)(
     // answer whether a resumed thread still has the hosted tools.
     const threadId = session.getSessionId()!
     session.dispose()
+    // Under ADR-069 a disposed session only DETACHES: the host stays up and the
+    // thread stays loaded in it, so a resume on the same host rejoins the live
+    // session and its next model request continues the response chain
+    // (`previous_response_id`, no developer text, no tool list) — nothing on the
+    // wire says which tools the thread still holds, though it holds them. Close
+    // the host so the resume is the COLD one this case is about: a new process,
+    // the rollout's SessionMeta, and a fresh chain whose first request names
+    // every tool the thread was restored with.
+    codexHostRegistry.dispose()
     const before = requests.length
     session = new CodexSession(
       'isolated-hosted-resume',
