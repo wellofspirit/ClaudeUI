@@ -126,3 +126,72 @@ describe('PlanReviewBar FC', () => {
     expect(respondCalls).toHaveLength(1)
   })
 })
+
+/**
+ * F20 — a plan panel opened for an engine with NO approval (Codex native plan
+ * mode). There is nothing to deny, so the composed comments become the next
+ * turn's prompt instead; the bar never expires, because a null id is the
+ * absence of an approval rather than one that went away.
+ */
+describe('PlanReviewBar FC — no approval (Codex plan item)', () => {
+  let app: TestApp
+  let respondCalls: unknown[]
+  let sentPrompts: Array<[string, string]>
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    respondCalls = []
+    sentPrompts = []
+    app.bridge.ipcMain.handle('session:approval-response', async () => {
+      respondCalls.push(1)
+    })
+    app.bridge.ipcMain.handle('session:send', async (_e, rid: string, prompt: string) => {
+      sentPrompts.push([rid, prompt])
+    })
+
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+    mirrorStoreIntoReplica()
+    // The Codex shape: a plan panel with no approval behind it.
+    useSessionStore.getState().openPlanPanel(ROUTE, 'plan', null)
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  async function renderFC(comments: PlanComment[]): Promise<void> {
+    const { PlanReviewBar } = await import('../PlanReviewBar')
+    await act(async () => {
+      render(React.createElement(PlanReviewBar, { comments }))
+    })
+  }
+
+  it('stays sendable even though no approval is pending', async () => {
+    await renderFC([makeComment()])
+    expect(viewProps.approvalStillPending).toBe(true)
+  })
+
+  it('sends the composed comments as a prompt and closes the panel', async () => {
+    await renderFC([makeComment()])
+    await act(async () => {
+      await viewProps.onSend()
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(respondCalls).toHaveLength(0)
+    expect(sentPrompts).toHaveLength(1)
+    expect(sentPrompts[0][0]).toBe(ROUTE)
+    expect(sentPrompts[0][1]).toContain('Comment:')
+    expect(useSessionStore.getState().sessions[ROUTE].planReview).toBeNull()
+  })
+
+  it('is still a no-op with no comments', async () => {
+    await renderFC([])
+    await act(async () => {
+      await viewProps.onSend()
+    })
+    expect(sentPrompts).toHaveLength(0)
+  })
+})

@@ -147,9 +147,30 @@ describe('summarizeTool — Claude equivalence guard vs getSummary', () => {
   })
 
   it('mcp: summarizeTool returns JSON for unknown mcp input', () => {
+    // Claude's `mcp__*` cards and opencode's underscore-joined `server_tool`
+    // names carry no server on the view, and keep the JSON dump they always had.
     const inp = { foo: 'bar', n: 42 }
     const view: ToolView = { kind: 'mcp', input: inp }
     expect(summarizeTool('mcp', view)).toBe(JSON.stringify(inp))
+  })
+
+  it('mcp: summarizeTool reads `server / tool` when the view carries them (F20)', () => {
+    // The mockup's section 2 header. `CodexEngineToolMap` splits them off
+    // `mcp__<server>__<tool>`, so this is what a Codex MCP card reads.
+    expect(
+      summarizeTool('mcp', {
+        kind: 'mcp',
+        input: {},
+        server: 'verify-stub',
+        tool: 'ping'
+      })
+    ).toBe('verify-stub / ping')
+  })
+
+  it('mcp: a server-only name summarises as the server alone', () => {
+    expect(summarizeTool('mcp', { kind: 'mcp', input: {}, server: 'verify-stub' })).toBe(
+      'verify-stub'
+    )
   })
 
   it('unknown: summarizeTool returns JSON for unknown input', () => {

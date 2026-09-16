@@ -12,6 +12,9 @@ import { ExitPlanModeCard } from './ExitPlanModeCard'
 import { AskUserQuestionBlock } from './AskUserQuestionBlock'
 import { ThinkingBlock } from './ThinkingBlock'
 import { TodoToolBlock } from './TodoToolBlock'
+import { SleepRow } from './SleepRow'
+import { ContextNoteBlock } from './ContextNoteBlock'
+import { ReviewResultCard } from './ReviewResultCard'
 import { TaskCard } from './TaskCard'
 import { hostedMcpKind } from '../../../../shared/tool-kinds'
 import type { EngineToolMap } from '../../../../shared/tool-kinds'
@@ -48,17 +51,29 @@ function renderToolBlock(
   // A permission judge's verdict on this call (F18). Only the passive card shows
   // it: the lifted kinds below are interactions (a plan, a question, a todo
   // list), and none of them is an action a judge gates.
-  review?: ToolReviewBlock
+  review?: ToolReviewBlock,
+  // Whether this block is on the LAST assistant message — read only by the plan
+  // card, whose no-approval action set (Codex, F20) belongs to the latest plan
+  // and to no earlier one.
+  isLastAssistant = false
 ): React.JSX.Element {
   const kind = hostedMcpKind(block.toolName) ?? toolMap.kindOf(block.toolName)
 
   // Compute the engine-neutral ToolView once and pass it to lifted components.
   // Passive kinds (command/fileEdit/…) still compute their view inside ToolCallBlock.
-  const view = toolMap.normalize(kind, block.toolInput, result)
+  const view = toolMap.normalize(kind, block.toolInput, result, block.toolName)
 
   // Lifted interaction components — consume the neutral view, not block.toolInput.
   if (kind === 'plan' && view.kind === 'plan') {
-    return <ExitPlanModeCard key={key} block={block} view={view} approval={approval} />
+    return (
+      <ExitPlanModeCard
+        key={key}
+        block={block}
+        view={view}
+        approval={approval}
+        isLatest={isLastAssistant}
+      />
+    )
   }
   if (kind === 'question' && view.kind === 'question') {
     return (
@@ -73,6 +88,9 @@ function renderToolBlock(
   }
   if (kind === 'todo' && view.kind === 'todo') {
     return <TodoToolBlock key={key} block={block} result={result} view={view} />
+  }
+  if (kind === 'sleep' && view.kind === 'sleep') {
+    return <SleepRow key={key} block={block} result={result} view={view} />
   }
   if (kind === 'task' && view.kind === 'task') {
     return <TaskCard key={key} block={block} result={result} view={view} approval={approval} />
@@ -139,6 +157,17 @@ export const MessageBubble = memo(function MessageBubble({
             ) : (
               <ApiErrorBlock key={i} block={block} />
             )
+          }
+          // Context an ENGINE injected into the model's prompt — Codex hook
+          // fragments today. Verbatim, never markdown (the fragments are
+          // third-party text).
+          if (block.type === 'context_note') {
+            return <ContextNoteBlock key={i} block={block} />
+          }
+          // A code review's findings. The one untrusted-text block that DOES go
+          // through markdown, by decision (F20) — see ReviewResultCard.
+          if (block.type === 'review_result') {
+            return <ReviewResultCard key={i} block={block} />
           }
           // A bare notice the engine wants in the transcript — Codex's `auto`
           // guardian decisions are the current producer. Rendered VERBATIM and
@@ -380,7 +409,7 @@ export const MessageBubble = memo(function MessageBubble({
           const result = resultMap.get(block.toolUseId)
           const approval = approvalMap.get(block.toolUseId)
           const review = reviewMap.get(block.toolUseId)
-          return renderToolBlock(toolMap, block, result, approval, index, review)
+          return renderToolBlock(toolMap, block, result, approval, index, review, isLastAssistant)
         }
         // Multiple tool calls — wrap in bordered group
         return (
@@ -392,7 +421,15 @@ export const MessageBubble = memo(function MessageBubble({
               const result = block.toolUseId ? resultMap.get(block.toolUseId) : undefined
               const approval = block.toolUseId ? approvalMap.get(block.toolUseId) : undefined
               const review = block.toolUseId ? reviewMap.get(block.toolUseId) : undefined
-              return renderToolBlock(toolMap, block, result, approval, index, review)
+              return renderToolBlock(
+                toolMap,
+                block,
+                result,
+                approval,
+                index,
+                review,
+                isLastAssistant
+              )
             })}
           </div>
         )

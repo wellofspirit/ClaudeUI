@@ -13,11 +13,13 @@ State on 2026-09-16. PR #37 (`codex-integration → pre-release`) merged on 2026
 
 ## Open work
 
+**Landed 2026-09-17:** F20 — every Codex thread item renders on both paths (web search, MCP calls, image view with bytes, image generation, sleep, the plan item on the Claude-style card with native plan mode sent on every turn, `update_plan` to the widget, hook context, review rows, compaction), plus the cross-harness fixes (structured web card for Claude and opencode, live Claude compaction, opencode compaction rows, pi full compaction summary and `custom_message`). Pushes to `pre-release` still need an explicit ask.
+
 **Landed 2026-09-16, both reviewed and verified (Landed paragraphs in `codex-followups-spec.md`):** F17 — the Codex desktop app's MCP servers and `openai-bundled` plugins are detected in the user's config and disabled per thread through the deep-merged `config` override, with the nine desktop feature flags off as hygiene; F18 — a judge's verdict renders on the card it judged (chip in the header, strip when expanded) for Codex's auto-review and ClaudeUI's Auto-mode judge on opencode and pi, with the system row kept only for target-less reviews and warnings. Pushes to `pre-release` still need an explicit ask.
 
 **Also landed 2026-09-16:** F19 — a detailed reasoning summary's bold headline renders as plain text, an empty summary delta no longer opens a bare "Thought", the Reasoning summaries row says it applies to new sessions, and the fixture script streams a reasoning item (`--reasoning`). Daniel still owes the real-account confirmation on a rebuilt app in a NEW session.
 
-**Next, in order:** nothing sequenced by Daniel after F19; pick from the list below or the roadmap.
+**Next, in order:** roadmap item 1 landed 2026-09-17 as F20 (survey in [`tool-survey.md`](tool-survey.md), kickoff and Landed in `codex-followups-spec.md`); roadmap item 2 (per-item volatile stream: design note and discussion before code) is next, or pick from the list below.
 
 **Open, not sequenced:**
 

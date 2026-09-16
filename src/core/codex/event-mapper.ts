@@ -1,8 +1,18 @@
-import type { ChatMessage, ContentBlock, FileDiff, StreamDelta } from '../../shared/types'
+import type {
+  ChatMessage,
+  ContentBlock,
+  FileDiff,
+  StreamDelta,
+  TodoItem,
+  ToolResultImage
+} from '../../shared/types'
 import { isImageMediaType } from '../../shared/types'
 import type { PatchChangeKind } from './protocol/v2/PatchChangeKind'
 import type { ThreadItem } from './protocol/v2/ThreadItem'
 import type { SubAgentActivityKind } from './protocol/v2/SubAgentActivityKind'
+import type { TurnPlanStep } from './protocol/v2/TurnPlanStep'
+import type { JsonValue } from './protocol/serde_json/JsonValue'
+import type { FunctionCallOutputBody } from './protocol/FunctionCallOutputBody'
 
 /** Length-safe composite identity shared by live items and future history readers. */
 export function codexItemId(threadId: string, turnId: string, itemId: string): string {
@@ -37,12 +47,15 @@ export type CodexMappedEvent =
   | { kind: 'message'; message: ChatMessage }
   | { kind: 'stream'; delta: StreamDelta }
   | { kind: 'commandDelta'; toolUseId: string; delta: string }
+  | { kind: 'planDelta'; toolUseId: string; delta: string }
   | {
       kind: 'toolResult'
       toolUseId: string
       result: string
       isError: boolean
       fileDiffs?: FileDiff[]
+      /** Pictures the call produced — MCP image content, a generated image. */
+      images?: ToolResultImage[]
     }
 
 /** A line that is ONE bold span and nothing else — the inner `(?!\*\*)` keeps
@@ -66,6 +79,34 @@ function unbold(text: string): string {
     .split('\n')
     .map((line) => BOLD_LINE.exec(line.trim())?.[1] ?? line)
     .join('\n')
+}
+
+/**
+ * `turn/plan/updated`'s steps as the engine-neutral {@link TodoItem}s the
+ * floating widget reads.
+ *
+ * `activeForm` is EMPTY: the wire carries one string per step (`step`) and no
+ * gerund form of it, and inventing one ("Doing <step>") would put words in the
+ * model's mouth. The widget falls back to `content` when it is blank.
+ *
+ * Live only — the notification has no thread item and `thread_history.rs`
+ * ignores it, so a cold open of the same thread shows no checklist at all.
+ */
+export function codexPlanSteps(plan: TurnPlanStep[]): TodoItem[] {
+  // The caller has an `unknown` array off the wire, so an entry whose `step` is
+  // not a string is dropped rather than rendered as `undefined` in the widget.
+  return plan
+    .filter((entry) => entry && typeof entry.step === 'string')
+    .map((entry) => ({
+      content: entry.step,
+      status:
+        entry.status === 'inProgress'
+          ? 'in_progress'
+          : entry.status === 'completed'
+            ? 'completed'
+            : 'pending',
+      activeForm: ''
+    }))
 }
 
 /** No clocks or session state: callers supply the observation timestamp. */
@@ -277,9 +318,335 @@ export function mapCodexItem(
       }
       return outputs
     }
+    case 'webSearch': {
+      // The wire's `results` are deliberately opaque JSON (`WebSearchItem`'s own
+      // doc comment): new fields must pass through without a Codex release. The
+      // three the card reads are lifted here and the rest is dropped rather than
+      // carried into the renderer as unvalidated shape.
+      const results = webSearchResults(item.results)
+      const outputs: CodexMappedEvent[] = [
+        message([
+          {
+            type: 'tool_use',
+            toolUseId: id,
+            toolName: 'webSearch',
+            toolInput: {
+              query: item.query,
+              ...(item.action ? { action: item.action } : {}),
+              ...(results.length ? { results } : {})
+            }
+          }
+        ])
+      ]
+      if (completed)
+        outputs.push({
+          kind: 'toolResult',
+          toolUseId: id,
+          // The card renders `results` itself, one row each. With none, the
+          // result is EMPTY rather than the query: `WebBody` already shows the
+          // query under the action line, and repeating it as a terminal
+          // "Result" block says the same thing twice.
+          result: results.length
+            ? results.map((entry) => `${entry.title} — ${entry.url}`).join('\n')
+            : '',
+          isError: false
+        })
+      return outputs
+    }
+    case 'mcpToolCall': {
+      // `mcp__<server>__<tool>` is the name Claude's rule vocabulary uses and
+      // the one Slice 4b's approval card already carries, so one `mcp` kind and
+      // one body cover the approval and the call.
+      //
+      // The INPUT is an envelope, not the arguments themselves: the card shows a
+      // `read-only` chip from the server's own `readOnlyHint`, and `normalize`
+      // is handed the tool name and the input and nothing else. Codex is the
+      // only producer of this shape and `CodexEngineToolMap` the only reader.
+      const outputs: CodexMappedEvent[] = [
+        message([
+          {
+            type: 'tool_use',
+            toolUseId: id,
+            toolName: `mcp__${item.server}__${item.tool}`,
+            toolInput: {
+              // A tool called with a JSON scalar or array has no object to
+              // spread; `{ value }` keeps it visible instead of dropping it.
+              arguments: isJsonObject(item.arguments) ? item.arguments : { value: item.arguments },
+              ...(item.readOnlyHint !== null ? { readOnlyHint: item.readOnlyHint } : {})
+            }
+          }
+        ])
+      ]
+      if (completed) {
+        const text = mcpResultText(item.result?.content)
+        const images = mcpResultImages(item.result?.content)
+        const isError = item.status === 'failed' || item.error !== null
+        outputs.push({
+          kind: 'toolResult',
+          toolUseId: id,
+          result: item.error ? item.error.message : text,
+          isError,
+          ...(images.length ? { images } : {})
+        })
+      }
+      return outputs
+    }
+    case 'imageView': {
+      // `path` is all the wire carries. The BYTES are attached by the caller
+      // (`codex-image-view.ts`), which is where a filesystem read belongs — this
+      // mapper is pure and runs on cold history too.
+      const outputs: CodexMappedEvent[] = [
+        message([
+          {
+            type: 'tool_use',
+            toolUseId: id,
+            toolName: 'imageView',
+            toolInput: { path: item.path }
+          }
+        ])
+      ]
+      // The result is EMPTY on purpose. `FileReadBody` renders `toolResult` as
+      // the file's CONTENT, so putting the path there would print it as if it
+      // were file text, under a header that already shows it. An empty result
+      // is the image-only Read shape `ToolCard` is built for: its body section
+      // collapses away and the returned-image strip renders regardless.
+      if (completed) outputs.push({ kind: 'toolResult', toolUseId: id, result: '', isError: false })
+      return outputs
+    }
+    case 'imageGeneration': {
+      const outputs: CodexMappedEvent[] = [
+        message([
+          {
+            type: 'tool_use',
+            toolUseId: id,
+            toolName: 'imageGeneration',
+            toolInput: {
+              ...(item.revisedPrompt !== null ? { prompt: item.revisedPrompt } : {}),
+              ...(item.savedPath !== undefined ? { savedPath: item.savedPath } : {})
+            }
+          }
+        ])
+      ]
+      if (completed) {
+        // The only failure the wire models is the usage limit. `resetsAt` is a
+        // unix SECOND stamp on this item (`ImageGenerationFailure`); it is
+        // rendered as an ISO instant rather than a relative phrase because this
+        // mapper has no clock.
+        if (item.failure)
+          outputs.push({
+            kind: 'toolResult',
+            toolUseId: id,
+            result:
+              item.failure.resetsAt !== null
+                ? `Image generation limit reached. Resets at ${new Date(item.failure.resetsAt * 1000).toISOString()}.`
+                : 'Image generation limit reached.',
+            isError: true
+          })
+        else
+          outputs.push({
+            kind: 'toolResult',
+            toolUseId: id,
+            result: item.savedPath ?? '',
+            isError: item.status !== 'completed',
+            // Always PNG: `ImageGenerationItem.result` is the base64 PNG the
+            // hosted tool returns (the `transparentBackground` flag is a PNG
+            // property). A blank result carries no strip rather than a broken
+            // thumbnail.
+            ...(item.result
+              ? { images: [{ mediaType: 'image/png' as const, base64Data: item.result }] }
+              : {})
+          })
+      }
+      return outputs
+    }
+    case 'sleep': {
+      const outputs: CodexMappedEvent[] = [
+        message([
+          {
+            type: 'tool_use',
+            toolUseId: id,
+            toolName: 'sleep',
+            toolInput: { durationMs: item.durationMs }
+          }
+        ])
+      ]
+      // The row reads the duration off the INPUT; the result exists only to
+      // resolve the card out of its "waiting" state.
+      if (completed) outputs.push({ kind: 'toolResult', toolUseId: id, result: '', isError: false })
+      return outputs
+    }
+    case 'plan':
+      // Native plan mode's `<proposed_plan>`, streamed by `item/plan/delta` and
+      // completed with the whole markdown. An in-progress item carries the text
+      // so far, which is exactly what the card should show while it grows.
+      return [
+        message([
+          { type: 'tool_use', toolUseId: id, toolName: 'plan', toolInput: { plan: item.text } }
+        ])
+      ]
+    case 'contextCompaction':
+      // The item carries an id and nothing else — no summary — so this is the
+      // hairline form of the separator, never the expandable amber card.
+      return completed ? [message([{ type: 'compact_separator' }], 'system')] : []
+    case 'hookPrompt':
+      // UNTRUSTED: a hook is a third-party script whose output was injected into
+      // the model's prompt. `context_note` is rendered verbatim, never markdown.
+      return completed && item.fragments.length
+        ? [
+            message(
+              [
+                {
+                  type: 'context_note',
+                  title: 'Injected context',
+                  fragments: item.fragments.map((fragment) => ({
+                    text: fragment.text,
+                    label: fragment.hookRunId
+                  }))
+                }
+              ],
+              'system'
+            )
+          ]
+        : []
+    case 'functionCallOutput': {
+      // A `function_call_output` some OTHER client submitted as turn input (the
+      // desktop app answering an async question, a hook). There is no matching
+      // call item to attach it to, so the card is result-only and says where it
+      // came from.
+      if (!completed) return []
+      const images = functionOutputImages(item.output)
+      return [
+        message([
+          {
+            type: 'tool_use',
+            toolUseId: id,
+            toolName: item.name,
+            toolInput: {
+              ...(item.namespace !== null ? { namespace: item.namespace } : {}),
+              source: 'another client'
+            }
+          }
+        ]),
+        {
+          kind: 'toolResult',
+          toolUseId: id,
+          result: functionOutputText(item.output),
+          isError: false,
+          ...(images.length ? { images } : {})
+        }
+      ]
+    }
+    case 'enteredReviewMode':
+      // A thin verbatim notice. `review` is `user_facing_hint`, which the core
+      // leaves empty when it has none.
+      return completed
+        ? [
+            message(
+              [{ type: 'text', text: `Review started: ${item.review || 'Review requested.'}` }],
+              'system'
+            )
+          ]
+        : []
+    case 'exitedReviewMode':
+      // The rendered explanation plus findings. Markdown BY DECISION (F20): it
+      // is the model's own structured review, and flattening it to plain text
+      // loses the numbered findings and their file:line citations.
+      return completed && item.review
+        ? [message([{ type: 'review_result', text: item.review }], 'system')]
+        : []
     default:
       return []
   }
+}
+
+/** A JSON object, told apart from an array, a scalar and null. */
+function isJsonObject(value: JsonValue): value is { [key: string]: JsonValue } {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** One string field of an opaque JSON record, or '' when it is absent or not a string. */
+function jsonString(record: { [key: string]: JsonValue }, key: string): string {
+  const value = record[key]
+  return typeof value === 'string' ? value : ''
+}
+
+/**
+ * The renderable rows inside `WebSearchItem.results`.
+ *
+ * The wire declares the array opaque on purpose, so nothing here trusts its
+ * shape: a non-object entry, or one with neither a title nor a url, is dropped
+ * rather than rendered as `undefined`. The title falls back to the url so a
+ * result never renders as a blank row, and the URL is passed through as TEXT —
+ * the renderer is what decides whether an `https?:` url becomes a link.
+ */
+function webSearchResults(
+  results: JsonValue[] | null | undefined
+): { title: string; url: string; snippet?: string }[] {
+  if (!Array.isArray(results)) return []
+  return results.flatMap((entry) => {
+    if (!isJsonObject(entry)) return []
+    const url = jsonString(entry, 'url')
+    const title = jsonString(entry, 'title') || url
+    if (!title && !url) return []
+    const snippet = jsonString(entry, 'snippet')
+    return [{ title, url, ...(snippet ? { snippet } : {}) }]
+  })
+}
+
+/**
+ * The text of an MCP tool result, joined from its `{type:'text', text}` content
+ * blocks.
+ *
+ * MCP content is opaque JSON on this wire (`McpToolCallResult.content`), and
+ * everything it carries is UNTRUSTED server output — it reaches the card as
+ * plain text and never the markdown pipeline. Resource blocks are skipped: a
+ * resource is a URI the reader cannot follow from here.
+ */
+function mcpResultText(content: JsonValue[] | null | undefined): string {
+  if (!Array.isArray(content)) return ''
+  return content
+    .flatMap((entry) =>
+      isJsonObject(entry) && entry.type === 'text' && typeof entry.text === 'string'
+        ? [entry.text]
+        : []
+    )
+    .join('\n')
+}
+
+/** The `{type:'image', data, mimeType}` blocks of an MCP result, allowlisted types only. */
+function mcpResultImages(content: JsonValue[] | null | undefined): ToolResultImage[] {
+  if (!Array.isArray(content)) return []
+  return content.flatMap((entry) => {
+    if (!isJsonObject(entry) || entry.type !== 'image') return []
+    const mediaType = entry.mimeType
+    const data = entry.data
+    return isImageMediaType(mediaType) && typeof data === 'string' && data.length
+      ? [{ mediaType, base64Data: data }]
+      : []
+  })
+}
+
+/**
+ * The text of a `functionCallOutput`. The body is a bare string, or the
+ * Responses content-item array — of which only `input_text` has anything a
+ * reader can see (`input_audio` and `encrypted_content` do not, and
+ * `input_image` rides {@link functionOutputImages} instead).
+ */
+function functionOutputText(output: FunctionCallOutputBody): string {
+  if (typeof output === 'string') return output
+  return output.flatMap((entry) => (entry.type === 'input_text' ? [entry.text] : [])).join('\n')
+}
+
+/** The `input_image` entries of a `functionCallOutput`, as inline data URLs only. */
+function functionOutputImages(output: FunctionCallOutputBody): ToolResultImage[] {
+  if (typeof output === 'string') return []
+  return output.flatMap((entry) => {
+    if (entry.type !== 'input_image') return []
+    const match = /^data:([^;]+);base64,([A-Za-z0-9+/]*={0,2})$/.exec(entry.image_url)
+    return match && isImageMediaType(match[1])
+      ? [{ mediaType: match[1], base64Data: match[2] }]
+      : []
+  })
 }
 
 /**
@@ -370,6 +737,22 @@ export function mapCodexDelta(
     // is where {@link unbold} runs, and it upserts over this under the same id.
     return params.delta.length
       ? [{ kind: 'stream', delta: { type: 'thinking', text: params.delta } }]
+      : []
+  if (method === 'item/plan/delta')
+    // Native plan mode streams the `<proposed_plan>` body. Its own event kind
+    // rather than a `stream`: `StreamDelta` is a replicated channel shape whose
+    // only members are text and thinking, and the plan is not either — the
+    // caller accumulates this into an item-scoped upsert of the `plan` tool_use
+    // under the plan item's id (`<turnId>-plan`), which `mergeContentBlocks`
+    // then lets the completed item replace by `toolUseId`.
+    return params.delta.length
+      ? [
+          {
+            kind: 'planDelta',
+            toolUseId: codexItemId(params.threadId, params.turnId, params.itemId),
+            delta: params.delta
+          }
+        ]
       : []
   if (method === 'item/commandExecution/outputDelta')
     return [

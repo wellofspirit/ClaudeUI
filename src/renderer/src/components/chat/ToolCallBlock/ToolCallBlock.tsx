@@ -76,7 +76,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   // hostedMcpKind (mermaid/mockup/mcp) is engine-independent and resolves first.
   const toolMap = engineToolMap(engineId)
   const kind = hostedMcpKind(block.toolName) ?? toolMap.kindOf(block.toolName)
-  const view = toolMap.normalize(kind, block.toolInput, result)
+  const view = toolMap.normalize(kind, block.toolInput, result, block.toolName)
   const toolDisplayName = toolMap.displayName(block.toolName)
 
   // Start file polling as soon as a background bash tool_use renders, independent of

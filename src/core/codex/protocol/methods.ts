@@ -54,5 +54,8 @@ export interface CodexNotifications {
   "item/autoApprovalReview/completed": import("./v2/ItemGuardianApprovalReviewCompletedNotification").ItemGuardianApprovalReviewCompletedNotification;
   "guardianWarning": import("./v2/GuardianWarningNotification").GuardianWarningNotification;
   "item/agentMessage/delta": import("./v2/AgentMessageDeltaNotification").AgentMessageDeltaNotification;
+  "item/plan/delta": import("./v2/PlanDeltaNotification").PlanDeltaNotification;
+  "turn/plan/updated": import("./v2/TurnPlanUpdatedNotification").TurnPlanUpdatedNotification;
+  "item/mcpToolCall/progress": import("./v2/McpToolCallProgressNotification").McpToolCallProgressNotification;
   "serverRequest/resolved": import("./v2/ServerRequestResolvedNotification").ServerRequestResolvedNotification;
 }

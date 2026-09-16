@@ -308,7 +308,7 @@ describe('mapPiEvent — turn error surfacing (M-PI2)', () => {
 })
 
 describe('mapPiEvent — compaction_end', () => {
-  it("with a result: emits a compact_separator message using the summary's first line", () => {
+  it('with a result: emits a compact_separator message carrying the WHOLE summary', () => {
     const state = createPiMapperState()
     const out = mapPiEvent(
       {
@@ -329,8 +329,14 @@ describe('mapPiEvent — compaction_end', () => {
     expect(out[0].kind).toBe('message')
     if (out[0].kind === 'message') {
       expect(out[0].message.role).toBe('system')
+      // The WHOLE summary, not its first line (F20): `CompactSeparator` renders
+      // a non-empty `text` as the expandable card and only shows the body on
+      // click, so nothing was gained by truncating it.
       expect(out[0].message.content).toEqual([
-        { type: 'compact_separator', text: 'First line summary.' }
+        {
+          type: 'compact_separator',
+          text: 'First line summary.\nMore details on a second line.'
+        }
       ])
     }
   })

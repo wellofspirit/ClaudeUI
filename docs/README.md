@@ -8,6 +8,7 @@ Read the doc that matches your task — don't load them speculatively.
 - [codex-integration-spec.md](codex-integration-spec.md) - the fourth-engine kickoff, milestone state and acceptance gates, governed by [ADR-066](adr/adr-066_codex-fourth-engine.md) and [ADR-067](adr/adr-067_codex-shared-permission-model.md). [codex-spike.md](codex-spike.md) records the isolated executable evidence and the native approval-surface probe.
 - [codex-accounts-spec.md](codex-accounts-spec.md) - the ChatGPT identity, accounts and Codex token-injection slices, governed by [ADR-068](adr/adr-068_chatgpt-identity-vault-owned-codex-injection.md).
 - [protocol-codex/](protocol-codex/README.md) - the Codex stdio app-server transport, pinned acquisition, generated types and real-binary tests. Phase-1 release gates are still open; see the integration spec.
+- [tool-survey.md](tool-survey.md) - the cross-harness tool and history-item inventory against the card vocabulary (roadmap item 1), with the Codex history-mapper proposal and its mockup page.
 - [testing-strategy.md](testing-strategy.md) — the four-layer test architecture (unit/component/e2e/git/integration), what belongs in each layer, test infra.
 - [component-guide.md](component-guide.md) — React component patterns and conventions for testability.
 - [plugin-development.md](plugin-development.md) — writing ClaudeUI plugins (VS Code-style, ADR-004/005).

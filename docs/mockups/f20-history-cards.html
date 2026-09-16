@@ -1,0 +1,1116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>History mapper cards — proposal</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body>
+    <style>
+      :root {
+        --bg0: #0d1117;
+        --bg1: #111318;
+        --bg2: #1a1d24;
+        --hov: #22262e;
+        --bd: #23272f;
+        --bdb: #343a46;
+        --t0: #d1d5db;
+        --t1: #8b929e;
+        --t2: #4b5261;
+        --ac: #6c9eff;
+        --ok: #4ade80;
+        --er: #f87171;
+        --wn: #fbbf24;
+        --plan: #2a8a7a;
+      }
+      body {
+        background: var(--bg0);
+        color: var(--t0);
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif;
+        font-size: 13px;
+      }
+      .mono {
+        font-family: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
+      }
+      .card {
+        border-radius: 8px;
+        background: var(--bg1);
+        overflow: hidden;
+        border: 1px solid var(--bd);
+      }
+      .card.ok {
+        border: 2px solid rgba(74, 222, 128, 0.3);
+      }
+      .card.run {
+        border: 2px solid rgba(108, 158, 255, 0.3);
+      }
+      .card.err {
+        border: 2px solid rgba(248, 113, 113, 0.3);
+      }
+      .card.pend {
+        border: 2px solid rgba(251, 191, 36, 0.4);
+      }
+      .hdr {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 12px;
+        height: 36px;
+        font-size: 13px;
+      }
+      .name {
+        color: var(--ac);
+        font-weight: 500;
+      }
+      .sum {
+        color: var(--t1);
+        font-size: 12px;
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        text-align: left;
+      }
+      .chev {
+        color: var(--t1);
+      }
+      .body {
+        border-top: 1px solid var(--bd);
+      }
+      .lbl {
+        font-size: 11px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--t1);
+        margin-bottom: 6px;
+      }
+      .pre {
+        font-size: 12px;
+        color: rgba(209, 213, 219, 0.7);
+        white-space: pre-wrap;
+        word-break: break-word;
+        line-height: 1.3;
+        background: var(--bg0);
+        border: 1px solid var(--bd);
+        border-radius: 6px;
+        padding: 8px;
+      }
+      .pill {
+        font-size: 10px;
+        padding: 1px 6px;
+        border-radius: 4px;
+      }
+      .sec {
+        margin: 34px 0 10px;
+        padding-bottom: 6px;
+        border-bottom: 1px solid var(--bd);
+      }
+      .sec h2 {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--t0);
+        margin: 0;
+      }
+      .src {
+        font-size: 11px;
+        color: var(--t1);
+        margin-top: 4px;
+        line-height: 1.6;
+      }
+      .src b {
+        color: var(--t0);
+        font-weight: 500;
+      }
+      .note {
+        font-size: 11px;
+        color: var(--wn);
+        margin-top: 6px;
+      }
+      .opt {
+        font-size: 10px;
+        color: var(--t2);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin: 10px 0 4px;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 8px;
+        height: 28px;
+        font-size: 12px;
+        color: var(--t1);
+        border-radius: 6px;
+        background: rgba(17, 19, 24, 0.5);
+      }
+      .sysrow {
+        font-size: 12px;
+        color: var(--t2);
+        line-height: 1.6;
+        border-left: 2px solid var(--bd);
+        padding: 2px 0 2px 12px;
+        white-space: pre-wrap;
+      }
+      .md p {
+        margin: 0 0 8px;
+      }
+      .md h4 {
+        font-size: 12px;
+        margin: 8px 0 4px;
+        color: var(--t0);
+      }
+      .md ul {
+        margin: 0 0 8px 18px;
+        padding: 0;
+      }
+      .md li {
+        margin: 2px 0;
+      }
+      .md code {
+        font-family: 'JetBrains Mono', Menlo, monospace;
+        font-size: 11px;
+        background: var(--bg0);
+        padding: 1px 4px;
+        border-radius: 3px;
+      }
+      .res {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding: 6px 8px;
+        border-radius: 6px;
+      }
+      .res:hover {
+        background: var(--hov);
+      }
+      .res .t {
+        color: var(--ac);
+        font-size: 12px;
+      }
+      .res .u {
+        color: var(--t2);
+        font-size: 11px;
+      }
+      .res .s {
+        color: var(--t1);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+      .thumb {
+        width: 96px;
+        height: 72px;
+        border-radius: 6px;
+        border: 1px solid var(--bdb);
+        background: linear-gradient(135deg, #23272f, #343a46);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--t1);
+        font-size: 10px;
+      }
+      .step {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        font-size: 12px;
+        padding: 2px 0;
+      }
+    </style>
+
+    <div class="max-w-[760px] mx-auto px-6 py-8">
+      <div class="mb-2 text-[11px] uppercase tracking-wider" style="color: var(--t1)">
+        Roadmap item 1 · proposal · decided 2026-09-16, see F20
+      </div>
+      <h1 class="text-[18px] font-semibold mb-1">History mapper cards</h1>
+      <p class="text-[12px] leading-[1.6]" style="color: var(--t1)">
+        Every card below is drawn in the app's existing card chrome. Each section names the harness
+        items that would map into it; where a decision is needed the variants sit side by side and
+        are labelled <span class="mono" style="color: var(--t0)">Option A / B</span>. Nothing here
+        is implemented.
+      </p>
+
+      <!-- ============ 1. WEB SEARCH ============ -->
+      <div class="sec">
+        <h2>
+          1 · Web search — new <span class="mono">WebBody</span> for the existing
+          <span class="mono">web</span> kind
+        </h2>
+        <div class="src">
+          <b>Codex</b> <span class="mono">webSearch</span> (query, action
+          search/openPage/findInPage, structured results) · <b>Claude</b>
+          <span class="mono">WebSearch</span> / <span class="mono">WebFetch</span> · <b>opencode</b>
+          <span class="mono">websearch</span> / <span class="mono">webfetch</span> · <b>pi</b> has
+          no web tool.<br />Today all of these render as a JSON dump. Results are shown when the
+          wire carries them (Codex results, Claude's "Links:" block); otherwise the body falls back
+          to the result text.
+        </div>
+      </div>
+
+      <div class="card ok">
+        <div class="hdr">
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="var(--ok)"
+            stroke-width="2"
+          >
+            <circle cx="12" cy="12" r="10" />
+            <polyline points="8 12 11 15 16 9" />
+          </svg>
+          <span class="name mono">Web search</span
+          ><span class="sum mono">electron 38 contextIsolation preload changes</span
+          ><svg
+            class="chev"
+            width="10"
+            height="10"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            style="transform: rotate(180deg)"
+          >
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </div>
+        <div class="body px-3 py-2.5">
+          <div class="lbl">Searched</div>
+          <div class="mono text-[12px] mb-2.5" style="color: var(--t0)">
+            "electron 38 contextIsolation preload changes" · "electron 38 breaking changes"
+          </div>
+          <div class="lbl">3 results</div>
+          <div class="res">
+            <span class="t">Electron 38.0.0 | Electron</span
+            ><span class="u">electronjs.org › blog › electron-38-0</span
+            ><span class="s"
+              >Electron 38.0.0 has been released! It includes upgrades to Chromium 140, V8 14.0, and
+              Node 22.19.0. Breaking changes: …</span
+            >
+          </div>
+          <div class="res">
+            <span class="t">Breaking Changes | Electron</span
+            ><span class="u">electronjs.org › docs › latest › breaking-changes</span
+            ><span class="s"
+              >Planned breaking API changes (38.0) — Behavior changed: contextIsolation now enforced
+              for preload scripts registered through …</span
+            >
+          </div>
+          <div class="res">
+            <span class="t">contextBridge | Electron</span
+            ><span class="u">electronjs.org › docs › latest › api › context-bridge</span
+            ><span class="s"
+              >Create a safe, bi-directional, synchronous bridge across isolated contexts.</span
+            >
+          </div>
+        </div>
+      </div>
+
+      <div class="opt">Same body, openPage / WebFetch shape</div>
+      <div class="card ok">
+        <div class="hdr">
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="var(--ok)"
+            stroke-width="2"
+          >
+            <circle cx="12" cy="12" r="10" />
+            <polyline points="8 12 11 15 16 9" />
+          </svg>
+          <span class="name mono">Web fetch</span
+          ><span class="sum mono">electronjs.org/docs/latest/breaking-changes</span
+          ><svg
+            class="chev"
+            width="10"
+            height="10"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </div>
+      </div>
+
+      <!-- ============ 2. MCP ============ -->
+      <div class="sec">
+        <h2>
+          2 · MCP tool call — new <span class="mono">McpBody</span> for the existing
+          <span class="mono">mcp</span> kind
+        </h2>
+        <div class="src">
+          <b>Codex</b> <span class="mono">mcpToolCall</span> (server, tool, arguments, result
+          content, error, readOnlyHint, progress) —
+          <span style="color: var(--er)">dropped entirely today; only the approval card shows</span>
+          · <b>Claude</b> <span class="mono">mcp__server__tool</span> · <b>opencode</b>
+          <span class="mono">server_tool</span> (underscore-joined, misses the
+          <span class="mono">mcp__</span> fast path today) · <b>pi</b> none.<br />Header splits
+          server and tool; a <span class="mono">read-only</span> chip when the server says so; the
+          running state shows the last progress message; images in the result use the existing
+          thumbnail strip.
+        </div>
+      </div>
+
+      <div class="card run">
+        <div class="hdr">
+          <span
+            style="
+              width: 12px;
+              height: 12px;
+              border-radius: 50%;
+              border: 2px solid var(--ac);
+              border-top-color: transparent;
+              display: inline-block;
+            "
+          ></span>
+          <span class="name mono">MCP</span
+          ><span class="sum mono"><span style="color: var(--t2)">github /</span> search_issues</span
+          ><span class="pill" style="background: rgba(139, 146, 158, 0.12); color: var(--t1)"
+            >read-only</span
+          ><svg
+            class="chev"
+            width="10"
+            height="10"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            style="transform: rotate(180deg)"
+          >
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </div>
+        <div class="body px-3 py-2.5">
+          <div class="lbl">Arguments</div>
+          <div class="pre mono">
+            { "query": "repo:daniel/ClaudeUI is:open label:codex", "per_page": 20 }
+          </div>
+        </div>
+        <div class="body px-3 py-1.5 flex items-center gap-1.5">
+          <span class="pill mono" style="background: rgba(108, 158, 255, 0.1); color: var(--ac)"
+            >progress</span
+          ><span class="text-[11px]" style="color: var(--t1)">Fetching page 2 of 3…</span>
+        </div>
+      </div>
+
+      <div class="opt">Completed, with an error from the server</div>
+      <div class="card err">
+        <div class="hdr">
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="var(--er)"
+            stroke-width="2"
+          >
+            <circle cx="12" cy="12" r="10" />
+            <line x1="15" y1="9" x2="9" y2="15" />
+            <line x1="9" y1="9" x2="15" y2="15" />
+          </svg>
+          <span class="name mono">MCP</span
+          ><span class="sum mono"><span style="color: var(--t2)">github /</span> create_issue</span
+          ><span class="text-[10px]" style="color: var(--t2)">1.8 s</span
+          ><svg
+            class="chev"
+            width="10"
+            height="10"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            style="transform: rotate(180deg)"
+          >
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </div>
+        <div class="body px-3 py-2.5">
+          <div class="lbl" style="color: var(--er)">Error</div>
+          <div class="pre mono" style="color: var(--er)">
+            Resource not accessible by integration (HTTP 403)
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ 3. IMAGE VIEW ============ -->
+      <div class="sec">
+        <h2>
+          3 · Image view — Codex <span class="mono">imageView</span> as a
+          <span class="mono">fileRead</span> card
+        </h2>
+        <div class="src">
+          <b>Codex</b> <span class="mono">imageView</span> (path only; the model's
+          <span class="mono">view_image</span> tool) · <b>Claude</b>
+          <span class="mono">Read</span> on an image · <b>opencode</b>
+          <span class="mono">read</span> on an image (attachment) · <b>pi</b>
+          <span class="mono">read</span> on an image. The other three already ship bytes; Codex
+          ships a path.
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <div class="opt" style="color: var(--ok)">
+            Chosen — core reads the file, thumbnail strip
+          </div>
+          <div class="card ok">
+            <div class="hdr">
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="var(--ok)"
+                stroke-width="2"
+              >
+                <circle cx="12" cy="12" r="10" />
+                <polyline points="8 12 11 15 16 9" />
+              </svg>
+              <span class="name mono">Read</span
+              ><span class="sum mono">…/screenshots/f19-thought.png</span
+              ><svg
+                class="chev"
+                width="10"
+                height="10"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </div>
+            <div class="body px-3 py-2 flex gap-2"><div class="thumb">PNG · 1284×812</div></div>
+          </div>
+          <div class="note">
+            Cap 5 MB, jpg/png/gif/webp only, read once at map time. The model already saw the file,
+            so this exposes nothing new.
+          </div>
+        </div>
+        <div>
+          <div class="opt">Fallback when the read fails — path only</div>
+          <div class="card">
+            <div class="hdr">
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="var(--t2)"
+                stroke-width="2"
+              >
+                <circle cx="12" cy="12" r="10" />
+                <line x1="8" y1="12" x2="16" y2="12" />
+              </svg>
+              <span class="name mono">Read</span
+              ><span class="sum mono">…/screenshots/f19-thought.png</span
+              ><span class="text-[10px]" style="color: var(--t2)">image</span
+              ><svg
+                class="chev"
+                width="10"
+                height="10"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </div>
+          </div>
+          <div class="note">
+            Honest but blind: the card says an image was viewed and shows nothing. Cold history on a
+            remote client cannot read the path anyway, so B is the fallback when A's read fails.
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ 4. IMAGE GENERATION ============ -->
+      <div class="sec">
+        <h2>4 · Image generation — new <span class="mono">image</span> kind</h2>
+        <div class="src">
+          <b>Codex</b> <span class="mono">imageGeneration</span> (revisedPrompt, base64 result,
+          savedPath, failure usageLimitExceeded) · no equivalent on Claude, opencode or pi. The
+          picture rides the existing tool-result image strip; the body carries the prompt the model
+          actually sent and where the file was saved.
+        </div>
+      </div>
+
+      <div class="card ok">
+        <div class="hdr">
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="var(--ok)"
+            stroke-width="2"
+          >
+            <circle cx="12" cy="12" r="10" />
+            <polyline points="8 12 11 15 16 9" />
+          </svg>
+          <span class="name mono">Image</span
+          ><span class="sum mono">Isometric icon of a desktop app with four engine badges</span
+          ><svg
+            class="chev"
+            width="10"
+            height="10"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            style="transform: rotate(180deg)"
+          >
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </div>
+        <div class="body px-3 py-2.5">
+          <div class="lbl">Revised prompt</div>
+          <div class="text-[12px] leading-[1.5] mb-2.5" style="color: rgba(209, 213, 219, 0.8)">
+            An isometric illustration of a dark desktop application window with four small engine
+            badges in the corner, flat vector style, transparent background.
+          </div>
+          <div class="lbl">Saved to</div>
+          <div class="mono text-[12px]" style="color: var(--t1)">
+            ~/.codex/images/2026-09-16/img_01.png
+          </div>
+        </div>
+        <div class="body px-3 py-2 flex gap-2"><div class="thumb">PNG · 1024×1024</div></div>
+      </div>
+
+      <div class="opt">Failure shape</div>
+      <div class="card err">
+        <div class="hdr">
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="var(--er)"
+            stroke-width="2"
+          >
+            <circle cx="12" cy="12" r="10" />
+            <line x1="15" y1="9" x2="9" y2="15" />
+            <line x1="9" y1="9" x2="15" y2="15" />
+          </svg>
+          <span class="name mono">Image</span
+          ><span class="sum mono">Image generation limit reached · resets in 3 h</span
+          ><svg
+            class="chev"
+            width="10"
+            height="10"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </div>
+      </div>
+
+      <!-- ============ 5. SLEEP ============ -->
+      <div class="sec">
+        <h2>
+          5 · Sleep — Codex <span class="mono">sleep</span> (the
+          <span class="mono">clock.sleep</span> tool)
+        </h2>
+        <div class="src">
+          <b>Codex</b> only. Carries one number. Two candidates: a full card is heavy for what it
+          says; the one-line row is the shape <span class="mono">TodoToolBlock</span> already uses.
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <div class="opt" style="color: var(--ok)">Chosen — one-line row</div>
+          <div class="row">
+            <svg
+              width="11"
+              height="11"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="var(--ok)"
+              stroke-width="2.5"
+            >
+              <polyline points="4 12 10 18 20 6" /></svg
+            ><span class="mono" style="color: var(--t2); font-size: 11px">Sleep</span
+            ><span>waited 2.5 s</span>
+          </div>
+          <div class="row mt-2">
+            <span
+              style="
+                width: 11px;
+                height: 11px;
+                border-radius: 50%;
+                border: 1.5px solid var(--t2);
+                border-top-color: transparent;
+                display: inline-block;
+              "
+            ></span
+            ><span class="mono" style="color: var(--t2); font-size: 11px">Sleep</span
+            ><span>waiting 30 s…</span>
+          </div>
+        </div>
+        <div>
+          <div class="opt">Not chosen — standard card</div>
+          <div class="card ok">
+            <div class="hdr">
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="var(--ok)"
+                stroke-width="2"
+              >
+                <circle cx="12" cy="12" r="10" />
+                <polyline points="8 12 11 15 16 9" /></svg
+              ><span class="name mono">Sleep</span><span class="sum mono">2.5 s</span
+              ><svg
+                class="chev"
+                width="10"
+                height="10"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ 6. PLAN ============ -->
+      <div class="sec">
+        <h2>
+          6 · Proposed plan — Codex <span class="mono">plan</span> item on the existing plan card
+        </h2>
+        <div class="src">
+          <b>Codex</b> <span class="mono">plan</span> (plan-mode's
+          <span class="mono">&lt;proposed_plan&gt;</span>, streamed by
+          <span class="mono">item/plan/delta</span>) · <b>Claude</b>
+          <span class="mono">ExitPlanMode</span> · <b>opencode</b>
+          <span class="mono">plan_exit</span> (never registered under our spawn) · <b>pi</b>
+          <span class="mono">exit_plan</span>. Same <span class="mono">ExitPlanModeCard</span>,
+          markdown body. Codex has no approval gate on the item itself, so the four Claude actions
+          do not apply.
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <div class="opt">Not chosen — plan card, no actions</div>
+          <div class="card" style="border-color: rgba(108, 158, 255, 0.4)">
+            <div class="hdr">
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="var(--ac)"
+                stroke-width="2"
+              >
+                <path d="M9 11l3 3L22 4" />
+                <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" /></svg
+              ><span class="name mono">Plan</span><span class="sum"></span
+              ><svg
+                class="chev"
+                width="10"
+                height="10"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                style="transform: rotate(180deg)"
+              >
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </div>
+            <div class="body px-3 py-2.5 md text-[12px] leading-[1.6]">
+              <h4>Map the nine Codex item kinds</h4>
+              <ul>
+                <li>Add <code>WebBody</code> and <code>McpBody</code> under <code>kinds/</code></li>
+                <li>
+                  Extend <code>ToolView</code> with <code>results</code> and <code>server</code>
+                </li>
+                <li>Guard tests per kind, proven failing first</li>
+              </ul>
+              <p>
+                Then verify on the fixture provider with a scripted <code>webSearch</code> turn.
+              </p>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="opt" style="color: var(--ok)">
+            Chosen — the Claude plan card: Review button, four options
+          </div>
+          <div class="card" style="border-color: rgba(108, 158, 255, 0.4)">
+            <div class="hdr">
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="var(--ac)"
+                stroke-width="2"
+              >
+                <path d="M9 11l3 3L22 4" />
+                <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" /></svg
+              ><span class="name mono">Plan</span><span class="sum"></span
+              ><svg
+                class="chev"
+                width="10"
+                height="10"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </div>
+            <div class="px-3 pb-2 pt-2 flex flex-col gap-1">
+              <button
+                class="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-md text-[12px] text-left"
+                style="background: rgba(108, 158, 255, 0.1); color: var(--t0)"
+              >
+                <span style="color: var(--ac); width: 16px" class="font-medium">1</span>Start fresh,
+                auto-accept edits
+              </button>
+              <button
+                class="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-md text-[12px] text-left"
+                style="color: var(--t1)"
+              >
+                <span style="color: var(--t2); width: 16px" class="font-medium">2</span>Continue,
+                auto-accept edits
+              </button>
+              <button
+                class="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-md text-[12px] text-left"
+                style="color: var(--t1)"
+              >
+                <span style="color: var(--t2); width: 16px" class="font-medium">3</span>Continue,
+                approve manually
+              </button>
+              <button
+                class="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-md text-[12px] text-left"
+                style="color: var(--t1)"
+              >
+                <span style="color: var(--t2); width: 16px" class="font-medium">4</span>Keep
+                planning
+              </button>
+            </div>
+          </div>
+          <div class="note">
+            Codex has no in-turn approval, so 2 and 3 switch the mode and send "Implement the
+            plan."; 1 starts a fresh session with the plan; 4 sends the feedback and stays in plan
+            mode. Requires ClaudeUI's plan mode to also send Codex's native plan collaboration mode,
+            otherwise no plan item is ever produced.
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ 7. UPDATE_PLAN ============ -->
+      <div class="sec">
+        <h2>
+          7 · Step checklist — Codex <span class="mono">update_plan</span> on the existing todo row
+          + widget
+        </h2>
+        <div class="src">
+          <b>Codex</b> <span class="mono">turn/plan/updated</span> (explanation, steps
+          pending/inProgress/completed) · <b>Claude</b> <span class="mono">TodoWrite</span> ·
+          <b>opencode</b> <span class="mono">todowrite</span> /
+          <span class="mono">todo.updated</span> · <b>pi</b> none.<br /><span
+            style="color: var(--wn)"
+            >Codex sends this as a notification only: it is absent from
+            <span class="mono">thread/read</span>, so the row is live-only and vanishes on cold
+            reload, the same class as the interrupted-tool ruling.</span
+          >
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <div class="opt">Not chosen — todo row + widget</div>
+          <div class="row">
+            <svg
+              width="11"
+              height="11"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="var(--ok)"
+              stroke-width="2.5"
+            >
+              <polyline points="4 12 10 18 20 6" /></svg
+            ><span class="mono" style="color: var(--t2); font-size: 11px">Plan steps</span
+            ><span>2/5 steps</span>
+          </div>
+          <div class="card mt-2" style="border-color: var(--bd)">
+            <div class="px-3 py-2">
+              <div class="step">
+                <span style="color: var(--ok)">✓</span
+                ><span style="color: var(--t2); text-decoration: line-through"
+                  >Inventory each harness</span
+                >
+              </div>
+              <div class="step">
+                <span style="color: var(--ok)">✓</span
+                ><span style="color: var(--t2); text-decoration: line-through"
+                  >Read the card vocabulary</span
+                >
+              </div>
+              <div class="step">
+                <span style="color: var(--ac)">●</span
+                ><span style="color: var(--t0)">Draft the mockups</span>
+              </div>
+              <div class="step">
+                <span style="color: var(--t2)">○</span
+                ><span style="color: var(--t1)">Write the survey doc</span>
+              </div>
+              <div class="step">
+                <span style="color: var(--t2)">○</span
+                ><span style="color: var(--t1)">Kickoff F20</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="opt" style="color: var(--ok)">Chosen — widget only, no transcript row</div>
+          <div class="note" style="color: var(--t1)">
+            The floating TodoWidget updates; the transcript shows nothing. Avoids a row that
+            disappears on reload, at the cost of no trace of the model's checklist in the
+            conversation.
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ 8. FUNCTION CALL OUTPUT ============ -->
+      <div class="sec">
+        <h2>
+          8 · Client-supplied tool output — Codex <span class="mono">functionCallOutput</span>
+        </h2>
+        <div class="src">
+          <b>Codex</b> only: a <span class="mono">function_call_output</span> another client
+          submitted as turn input (the desktop app answering an async question, a hook). ClaudeUI
+          never submits one, so this appears only in threads other clients ran. Name and namespace
+          are known; there is no matching call item to attach it to.
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <div class="opt" style="color: var(--ok)">Chosen — result-only card</div>
+          <div class="card">
+            <div class="hdr">
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="var(--t2)"
+                stroke-width="2"
+              >
+                <circle cx="12" cy="12" r="10" />
+                <line x1="8" y1="12" x2="16" y2="12" /></svg
+              ><span class="name mono">request_user_input_async</span
+              ><span class="sum mono">answer supplied by another client</span
+              ><svg
+                class="chev"
+                width="10"
+                height="10"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                style="transform: rotate(180deg)"
+              >
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </div>
+            <div class="body px-3 py-2.5">
+              <div class="lbl">Result</div>
+              <div class="pre mono">{"answers":{"Which branch?":"pre-release"}}</div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="opt">Not chosen — drop it</div>
+          <div class="note" style="color: var(--t1)">
+            Nothing rendered. The model saw the output; the reader does not. Rejected by default
+            under the "context the model saw is visible" rule, but cheap.
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ 9. HOOK PROMPT ============ -->
+      <div class="sec">
+        <h2>
+          9 · Injected context — Codex <span class="mono">hookPrompt</span>, pi
+          <span class="mono">custom_message</span>, Claude <span class="mono">attachment</span>
+        </h2>
+        <div class="src">
+          <b>Codex</b> <span class="mono">hookPrompt</span> (fragments with hook run ids) ·
+          <b>pi</b> <span class="mono">custom_message</span> entries (in the model's context,
+          dropped today) · <b>Claude</b> the <span class="mono">attachment</span> JSONL family
+          (2,628 of 9,173 lines in a local census, all dropped). A collapsed system row with a
+          count; expanded shows each fragment verbatim, never through markdown, same rule as the
+          guardian rows.
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="hdr" style="height: 32px">
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="var(--t1)"
+            stroke-width="2"
+          >
+            <path d="M4 4h16v12H5.17L4 17.17V4z" />
+            <line x1="8" y1="8" x2="16" y2="8" />
+            <line x1="8" y1="12" x2="13" y2="12" /></svg
+          ><span class="mono text-[11px]" style="color: var(--t1)">Injected context</span
+          ><span class="sum">2 hook fragments</span
+          ><svg
+            class="chev"
+            width="10"
+            height="10"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            style="transform: rotate(180deg)"
+          >
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </div>
+        <div class="body px-3 py-2">
+          <div class="sysrow" style="margin-bottom: 6px">
+            Repository policy: never write to files under vendor/.
+            <span class="mono" style="color: var(--t2)">· hook run 9f2a</span>
+          </div>
+          <div class="sysrow">
+            The working tree has 3 uncommitted files: history.ts, event-mapper.ts, ThreadItem.ts.
+            <span class="mono" style="color: var(--t2)">· hook run 9f2b</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ 10. REVIEW MODE ============ -->
+      <div class="sec">
+        <h2>
+          10 · Code review — Codex <span class="mono">enteredReviewMode</span> /
+          <span class="mono">exitedReviewMode</span>
+        </h2>
+        <div class="src">
+          <b>Codex</b> only (<span class="mono">/review</span>,
+          <span class="mono">review/start</span>). Entered carries a one-line hint and the target
+          (uncommitted / base branch / commit); exited carries the rendered findings text. A thin
+          system row for the start; a card for the findings, markdown body because the text is the
+          model's structured review, not a rationale from a hidden thread.
+        </div>
+      </div>
+
+      <div class="sysrow mb-3">Review started: uncommitted changes</div>
+      <div class="card" style="border-color: rgba(42, 138, 122, 0.5)">
+        <div class="hdr">
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="var(--plan)"
+            stroke-width="2"
+          >
+            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+            <polyline points="14 2 14 8 20 8" />
+            <line x1="9" y1="15" x2="15" y2="15" /></svg
+          ><span class="name mono" style="color: var(--plan)">Review</span
+          ><span class="sum">2 findings · uncommitted changes</span
+          ><svg
+            class="chev"
+            width="10"
+            height="10"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            style="transform: rotate(180deg)"
+          >
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </div>
+        <div class="body px-3 py-2.5 md text-[12px] leading-[1.6]">
+          <p>The mapper change is sound; two points need attention before merge.</p>
+          <h4>
+            1. <code>mapCodexItem</code> drops <code>mcpToolCall.result.content</code> image blocks
+            — <span class="mono" style="color: var(--t2)">event-mapper.ts:214</span>
+          </h4>
+          <p>
+            Only <code>inputText</code> entries are joined; an <code>image</code> block returns an
+            empty result.
+          </p>
+          <h4>
+            2. <code>WebBody</code> renders <code>results[].url</code> as a link without an origin
+            check — <span class="mono" style="color: var(--t2)">WebBody.tsx:41</span>
+          </h4>
+          <p>A <code>javascript:</code> URL from an untrusted result would be clickable.</p>
+        </div>
+      </div>
+
+      <!-- ============ 11. COMPACTION ============ -->
+      <div class="sec">
+        <h2>
+          11 · Compaction — Codex <span class="mono">contextCompaction</span> on the existing
+          separator
+        </h2>
+        <div class="src">
+          <b>Codex</b> <span class="mono">contextCompaction</span> (marker only, no summary) ·
+          <b>Claude</b> <span class="mono">compact_boundary</span> (history only today; live
+          dropped) · <b>opencode</b> <span class="mono">compaction</span> part (dropped today) ·
+          <b>pi</b> <span class="mono">compaction</span> (first line kept; full summary available).
+          Same <span class="mono">CompactSeparator</span>; the hairline when there is no summary,
+          the expandable amber card when there is one.
+        </div>
+      </div>
+
+      <div class="flex items-center gap-3 py-1">
+        <div class="flex-1 h-px" style="background: var(--bd)"></div>
+        <span class="mono text-[11px]" style="color: var(--t2)">compacted</span>
+        <div class="flex-1 h-px" style="background: var(--bd)"></div>
+      </div>
+
+      <div class="sec">
+        <h2>Not mocked, noted for the spec</h2>
+        <div class="src">
+          · <b>Codex</b> <span class="mono">agentMessage.questions</span> (async questions): render
+          on the assistant message as the completed-question summary; the answer path is a later
+          slice.<br />· <b>Codex</b> <span class="mono">commandExecution.commandActions</span> (read
+          / listFiles / search): could route a <span class="mono">cat</span> or
+          <span class="mono">rg</span> to the read and search cards; left as commands for now.<br />·
+          <b>Codex</b> <span class="mono">warning</span>,
+          <span class="mono">deprecationNotice</span>, <span class="mono">model/rerouted</span>:
+          session warnings, not transcript rows.<br />· <b>opencode</b>
+          <span class="mono">subtask</span>, <span class="mono">retry</span>,
+          <span class="mono">patch</span>; <b>pi</b> <span class="mono">powershell</span>,
+          <span class="mono">branch_summary</span>; <b>Claude</b>
+          <span class="mono">PowerShell</span>, <span class="mono">Skill</span>,
+          <span class="mono">permission_denied</span>: real gaps found by the survey, outside this
+          item.
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

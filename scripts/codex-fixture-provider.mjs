@@ -10,6 +10,7 @@
 //        [--no-auth] [--reviewer user|auto_review]
 //        [--command "<shell>"] [--guardian approved|denied]
 //        [--reasoning "<headline>"]
+//        [--web-search ["<query>"]] [--view-image <path>] [--mcp-tool <tool>] [--plan "<markdown>"]
 //        [--chatgpt [--vault-home <dir> [--accounts <n>]]]
 //
 // Prints `PORT <n>` on the first line of stdout and then one JSON line
@@ -54,6 +55,37 @@
 // as the backend writes one — a bold Markdown line — to exercise the strip
 // (F19: a whole-line `**…**` is dropped from the canonical thinking block).
 //
+// --web-search ["<query>"] scripts a hosted WEB SEARCH on the first agent turn:
+// the fixture answers with a Responses `web_search_call` output item, which the
+// core turns into a `webSearch` thread item. It carries NO structured results —
+// the Responses item has no such field on the pinned binary, and
+// `WebSearchItem.results` is filled out-of-band by the standalone web-search
+// extension — so the card shows the query, the "Searched" action line and its
+// text fallback. The query is optional; a default one is used.
+//
+// --view-image <path> scripts a `view_image` call on that path, producing an
+// `imageView` thread item. The path has to exist and be a readable PNG/JPEG/GIF/
+// WebP on the machine the app-server runs on, or the tool fails and no item is
+// produced. Put the file inside the isolated test home.
+//
+// --plan "<markdown>" wraps the assistant answer in `<proposed_plan>` tags. The
+// core lifts a `plan` thread item out of those tags ONLY when the turn ran under
+// `collaborationMode.mode === 'plan'`, so drive the app in Plan mode: the same
+// flag in Default mode deliberately yields an ordinary agent message and no plan
+// card, which is what the integration probe pins.
+//
+// --mcp-tool <tool> scripts a call to an MCP tool the app-server OFFERED on the
+// first agent turn: the model request carries every configured server as a
+// Responses namespace (`{ type: "namespace", name: "mcp__<server>", tools }`),
+// and the call is emitted against the namespace that lists <tool>. The server
+// itself comes from the isolated home's `config.toml` (`[mcp_servers.<name>]`,
+// a stdio stub); if no namespace offers the tool the turn answers with a plain
+// message saying so, which is the diagnosable outcome rather than a dead turn.
+//
+// The four scripted ITEMS (--command, --web-search, --view-image, --mcp-tool)
+// are mutually exclusive on one turn; the first one given wins, in that order.
+// Everything else — --reasoning, --plan, --text — composes with whichever fires.
+//
 // --chatgpt serves an INJECTED ChatGPT identity instead of an API key: the
 // config gains `chatgpt_base_url` (so the binary's own `/wham/*` and usage reads
 // land here and not on the real chatgpt.com, where a fabricated token kills the
@@ -92,7 +124,10 @@ import {
   FIXTURE_AUTHORIZATION,
   fixtureAssistantMessage,
   fixtureGuardianVerdict,
+  fixturePlanMessage,
   fixtureReasoningItem,
+  fixtureViewImageCall,
+  fixtureWebSearchItem,
   isGuardianRequest,
   startFixtureProvider,
   writeFabricatedVault,
@@ -118,6 +153,25 @@ const command = arg('command', '')
 const reasoning = arg('reasoning', '')
 if (argv.includes('--reasoning') && !reasoning) {
   console.error('codex-fixture-provider: --reasoning needs a headline')
+  process.exit(2)
+}
+// `--web-search` takes an OPTIONAL query, so presence and value are read apart:
+// a bare flag is legal and means "the default query".
+const webSearch = has('web-search')
+const webSearchQuery = arg('web-search', '')
+const viewImage = arg('view-image', '')
+if (argv.includes('--view-image') && !viewImage) {
+  console.error('codex-fixture-provider: --view-image needs a path')
+  process.exit(2)
+}
+const mcpTool = arg('mcp-tool', '')
+if (argv.includes('--mcp-tool') && !mcpTool) {
+  console.error('codex-fixture-provider: --mcp-tool needs a tool name')
+  process.exit(2)
+}
+const plan = arg('plan', '')
+if (argv.includes('--plan') && !plan) {
+  console.error('codex-fixture-provider: --plan needs the plan markdown')
   process.exit(2)
 }
 const guardian = arg('guardian', '')
@@ -163,6 +217,36 @@ if (vaultHome && (!Number.isInteger(accounts) || accounts < 1)) {
 const home = resolve(codexHome)
 mkdirSync(home, { recursive: true })
 
+/**
+ * A `function_call` against the MCP namespace that offers `tool`, read off the
+ * request's `tools` (the app-server names the namespace `mcp__<sanitised
+ * server>`, and guessing it would fail as "tool not available"). Same shape
+ * `src/integration/codex/codex-mcp-approval.integration.test.ts` builds.
+ */
+function fixtureMcpToolCall(request, tool) {
+  const tools = Array.isArray(request.tools) ? request.tools : []
+  const namespace = tools.find(
+    (entry) =>
+      entry &&
+      entry.type === 'namespace' &&
+      String(entry.name ?? '').startsWith('mcp__') &&
+      (Array.isArray(entry.tools) ? entry.tools : []).some((inner) => inner && inner.name === tool)
+  )
+  if (!namespace) {
+    console.error(
+      `codex-fixture-provider: no MCP namespace offers ${tool}; tools: ${JSON.stringify(tools.map((entry) => entry && entry.name))}`
+    )
+    return fixtureAssistantMessage(`Fixture: no MCP tool named ${tool} was offered.`)
+  }
+  return {
+    type: 'function_call',
+    call_id: 'fixture-mcp',
+    namespace: String(namespace.name),
+    name: tool,
+    arguments: '{}'
+  }
+}
+
 const fixture = await startFixtureProvider({
   port,
   chatgpt,
@@ -179,8 +263,11 @@ const fixture = await startFixtureProvider({
     const agentTurns = requests.filter(
       (entry) => !isGuardianRequest(entry) && entry.generate !== false
     ).length
+    // The FIRST agent turn is the one that carries a scripted item; every turn
+    // after it (including the one answering the item's output) just speaks.
+    const firstAgentTurn = request.generate !== false && agentTurns === 1
     const answer =
-      scriptedCommand && request.generate !== false && agentTurns === 1
+      firstAgentTurn && scriptedCommand
         ? {
             type: 'function_call',
             call_id: 'fixture-command',
@@ -191,7 +278,15 @@ const fixture = await startFixtureProvider({
               justification: 'Isolated fixture write outside the workspace root'
             })
           }
-        : fixtureAssistantMessage(text)
+        : firstAgentTurn && webSearch
+          ? fixtureWebSearchItem(webSearchQuery || undefined)
+          : firstAgentTurn && viewImage
+            ? fixtureViewImageCall(viewImage)
+            : firstAgentTurn && mcpTool
+              ? fixtureMcpToolCall(request, mcpTool)
+              : plan
+                ? fixturePlanMessage(plan)
+                : fixtureAssistantMessage(text)
     // Every AGENT turn reasons first. The guardian predicate is the gate even
     // without --guardian: a reviewer session's Thought belongs to no card.
     return reasoning && !isGuardianRequest(request) && request.generate !== false
@@ -224,6 +319,10 @@ console.log(
     model: model || null,
     authorization: withAuth,
     command: scriptedCommand || null,
+    webSearch: webSearch ? webSearchQuery || 'default' : null,
+    viewImage: viewImage || null,
+    mcpTool: mcpTool || null,
+    plan: plan || null,
     guardian: guardian || null,
     reasoning: reasoning || null,
     chatgpt,

@@ -348,11 +348,13 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
     case 'compaction_end': {
       const { result } = ev as Extract<PiEvent, { type: 'compaction_end' }>
       if (!result) return [{ kind: 'ignore' }] // aborted or failed — nothing to show
-      const firstLine = result.summary.split('\n')[0] ?? ''
       const message: ChatMessage = {
         id: uuid(),
         role: 'system',
-        content: [{ type: 'compact_separator', text: firstLine }],
+        // The WHOLE summary (F20). `CompactSeparator` collapses it to a header
+        // and reveals the body on click, so keeping only the first line threw
+        // away the one real compaction summary any harness gives us.
+        content: [{ type: 'compact_separator', text: result.summary }],
         timestamp: Date.now()
       }
       return [{ kind: 'message', message }]

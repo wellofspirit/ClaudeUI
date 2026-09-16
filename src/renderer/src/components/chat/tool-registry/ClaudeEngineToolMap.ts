@@ -57,10 +57,43 @@ function claudeKindOf(toolName: string): ToolKind {
   }
 }
 
+/**
+ * Claude's `WebSearch` result text ends with a `Links:` line carrying a JSON
+ * array of `{title, url}` — the structured rows the web card renders. Parsed
+ * defensively: a malformed tail, a non-array, or an entry without a usable url
+ * yields nothing and the body falls back to the result text, exactly as before.
+ *
+ * The array can be pretty-printed across lines, so the match runs to the END of
+ * the text rather than to the end of the line.
+ */
+export function parseClaudeWebLinks(
+  text: string | undefined
+): { title: string; url: string }[] | undefined {
+  if (!text) return undefined
+  const at = text.lastIndexOf('Links: ')
+  if (at < 0) return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text.slice(at + 'Links: '.length).trim())
+  } catch {
+    return undefined
+  }
+  if (!Array.isArray(parsed)) return undefined
+  const links = parsed.flatMap((entry) => {
+    if (typeof entry !== 'object' || entry === null) return []
+    const raw = entry as Record<string, unknown>
+    const url = typeof raw.url === 'string' ? raw.url : ''
+    const title = typeof raw.title === 'string' ? raw.title : url
+    return url || title ? [{ title: title || url, url }] : []
+  })
+  return links.length ? links : undefined
+}
+
 function claudeNormalize(
   kind: ToolKind,
   input: Record<string, unknown> | undefined,
-  result?: ToolResultBlock
+  result?: ToolResultBlock,
+  toolName?: string
 ): ToolView {
   const inp = input ?? {}
 
@@ -100,7 +133,8 @@ function claudeNormalize(
         query: inp.pattern != null ? String(inp.pattern) : JSON.stringify(inp)
       }
 
-    case 'web':
+    case 'web': {
+      const results = parseClaudeWebLinks(result?.toolResult)
       return {
         kind: 'web',
         target:
@@ -108,8 +142,13 @@ function claudeNormalize(
             ? String(inp.url)
             : inp.query != null
               ? String(inp.query)
-              : JSON.stringify(inp)
+              : JSON.stringify(inp),
+        // `WebFetch` fetches ONE url; `WebSearch` searches. The tool name is the
+        // only discriminator — both carry a plain string input.
+        action: toolName === 'WebFetch' ? 'fetch' : 'search',
+        ...(results ? { results } : {})
       }
+    }
 
     case 'task': {
       // Cross-engine dispatch (ADR-033 M3) shares the 'task' kind (via

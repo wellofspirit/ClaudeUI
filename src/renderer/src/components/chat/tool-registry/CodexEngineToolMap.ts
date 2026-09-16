@@ -55,6 +55,14 @@ export const CodexEngineToolMap: EngineToolMap = {
     if (name === 'commandExecution') return 'command'
     if (name === 'fileChange') return 'fileEdit'
     if (name === 'requestUserInput') return 'question'
+    // The eleven history-mapper kinds (F20). `imageView` takes the READ card —
+    // the model looked at a file, and the core attaches its bytes, so the same
+    // path header + thumbnail strip a Claude `Read` on a .png gets is right.
+    if (name === 'webSearch') return 'web'
+    if (name === 'imageView') return 'fileRead'
+    if (name === 'imageGeneration') return 'image'
+    if (name === 'sleep') return 'sleep'
+    if (name === 'plan') return 'plan'
     if (name === 'render_mermaid') return 'diagram'
     if (name === 'create_mockup' || name === 'show_mockup') return 'mockup'
     // Cross-engine dispatch (ADR-033, slice E) — the engine-neutral TaskCard
@@ -70,17 +78,26 @@ export const CodexEngineToolMap: EngineToolMap = {
     return 'unknown'
   },
   displayName(name) {
+    // An MCP call's header is the KIND, not the rule-vocabulary name: the server
+    // and the tool are the card's summary line (`summary.ts`), so repeating
+    // `mcp__<server>__<tool>` above them says it twice and reads as machinery.
+    if (name.startsWith('mcp__')) return 'MCP'
     return (
       {
         commandExecution: 'Command',
         fileChange: 'File changes',
         requestUserInput: 'Question',
+        webSearch: 'Web search',
+        imageView: 'Read',
+        imageGeneration: 'Image',
+        sleep: 'Sleep',
+        plan: 'Plan',
         ...HOSTED_DISPLAY_NAMES,
         ...COLLAB_DISPLAY_NAMES
       }[name] ?? name
     )
   },
-  normalize(kind, input, result) {
+  normalize(kind, input, result, toolName) {
     if (kind === 'command')
       return { kind, command: String(input?.command ?? ''), output: result?.toolResult }
     if (kind === 'fileEdit')
@@ -144,6 +161,75 @@ export const CodexEngineToolMap: EngineToolMap = {
           input?.directory != null ? String(input.directory) : extractMockupDirectory(result),
         title: input?.title != null ? String(input.title) : undefined
       }
+    if (kind === 'web') {
+      // `action` is the wire's own tagged union, narrowed here to the four the
+      // card knows. The v2 projection spells the tags in CAMEL case
+      // (`protocol/v2/WebSearchAction.ts`: `search | openPage | findInPage |
+      // other`) even though the core's Rust enum serialises snake_case; both
+      // spellings are accepted so a future projection change cannot silently
+      // demote every page fetch to `other`.
+      const tag = record(input?.action) ? String(input.action.type ?? '') : ''
+      const fetched = tag === 'openPage' || tag === 'open_page'
+      const found = tag === 'findInPage' || tag === 'find_in_page'
+      return {
+        kind,
+        // An `openPage`/`findInPage` item's `query` is the core's own rendering
+        // of the action (the url, or `'pattern' in url`), so the url is the
+        // truer target — and the query is the fallback when the wire omits it.
+        target:
+          fetched || found
+            ? webString(input?.action, 'url') || String(input?.query ?? '')
+            : String(input?.query ?? ''),
+        action: tag === 'search' ? 'search' : fetched ? 'fetch' : found ? 'find' : 'other',
+        ...(Array.isArray(input?.results)
+          ? { results: input.results as { title: string; url: string; snippet?: string }[] }
+          : {})
+      }
+    }
+    if (kind === 'fileRead')
+      // `imageView` is the only Codex item on this kind. The PICTURE rides the
+      // shared tool-result image strip; the body shows the path with no text.
+      return { kind, path: String(input?.path ?? ''), content: '' }
+    if (kind === 'image')
+      return {
+        kind,
+        ...(input?.prompt != null ? { prompt: String(input.prompt) } : {}),
+        ...(input?.savedPath != null ? { savedPath: String(input.savedPath) } : {})
+      }
+    if (kind === 'sleep')
+      return { kind, durationMs: typeof input?.durationMs === 'number' ? input.durationMs : 0 }
+    if (kind === 'plan') return { kind, plan: String(input?.plan ?? '') }
+    if (kind === 'mcp') {
+      // `mcp__<server>__<tool>`, split on the FIRST `__` after the prefix: a
+      // server name cannot contain `__` in Claude's rule vocabulary, but a tool
+      // name can, so the remainder is the tool whole.
+      const rest = toolName?.startsWith('mcp__') ? toolName.slice('mcp__'.length) : ''
+      const cut = rest.indexOf('__')
+      const server = cut < 0 ? rest : rest.slice(0, cut)
+      const tool = cut < 0 ? '' : rest.slice(cut + 2)
+      // The Codex mapper's envelope (`{ arguments, readOnlyHint? }`) — see
+      // `mapCodexItem`'s `mcpToolCall` case. An input without it (nothing
+      // produces one today) falls back to itself, so the card degrades to the
+      // arguments dump rather than an empty body.
+      const envelope = input && 'arguments' in input
+      return {
+        kind,
+        input: envelope ? input.arguments : input,
+        ...(server ? { server } : {}),
+        ...(tool ? { tool } : {}),
+        ...(typeof input?.readOnlyHint === 'boolean' ? { readOnly: input.readOnlyHint } : {})
+      }
+    }
     return { kind: 'unknown', input }
   }
+}
+
+/** A plain JSON object, told apart from an array and from null. */
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** One string field of a nested record, or '' when it is missing or not a string. */
+function webString(value: unknown, key: string): string {
+  return record(value) && typeof value[key] === 'string' ? value[key] : ''
 }

@@ -132,6 +132,22 @@ export type ContentBlock =
   | { type: 'cli_command'; commandName: string; commandArgs?: string; commandOutput?: string }
   | { type: 'api_error'; errorType: string; errorMessage: string }
   | { type: 'compact_separator'; text?: string }
+  /**
+   * Context an engine injected into the model's prompt that the USER never
+   * typed — Codex's `hookPrompt` fragments today, pi's `custom_message`
+   * entries, and (later) Claude's `attachment` family. Collapsed to a count by
+   * default; every fragment is UNTRUSTED third-party text and is rendered
+   * verbatim, never through the markdown pipeline.
+   */
+  | { type: 'context_note'; title: string; fragments: { text: string; label?: string }[] }
+  /**
+   * The rendered output of a code review the engine ran (Codex's
+   * `exitedReviewMode`). The one untrusted-text block that DOES go through
+   * markdown, by decision (F20): it is the model's own structured review — a
+   * numbered list with file:line citations — and reading it as a wall of plain
+   * text loses the structure that makes it usable.
+   */
+  | { type: 'review_result'; text: string }
   | {
       type: 'image'
       mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
@@ -3239,7 +3255,13 @@ export interface PlanComment {
 
 export interface PlanReviewData {
   planContent: string
-  approvalRequestId: string
+  /**
+   * The approval this review answers, or NULL when the plan came from an engine
+   * that has no approval gate on its plan item (Codex's native plan mode, F20).
+   * A null id means the comments are SENT AS A PROMPT instead of denied with
+   * feedback — there is nothing to deny.
+   */
+  approvalRequestId: string | null
   comments: PlanComment[]
 }
 

@@ -6,7 +6,7 @@
  * Parity with the live-turn buildChatMessage part→block mapping.
  */
 import { describe, it, expect } from 'vitest'
-import { convertStoredMessage } from '../event-mapper'
+import { convertStoredMessage, storedCompactionMessages } from '../event-mapper'
 import type { StoredMessage } from '../protocol/types'
 
 function msg(
@@ -404,5 +404,42 @@ describe('convertStoredMessage — tool-result images', () => {
     )
     const result = r!.content.find((b) => b.type === 'tool_result')!
     expect('images' in result).toBe(false)
+  })
+})
+
+/**
+ * F20 — opencode's `compaction` part was dropped on both paths, so a replayed
+ * conversation showed no sign that its history had been summarised away. It is
+ * a PART on an ordinary message, but the separator renders only on a SYSTEM
+ * message (MessageBubble's system switch), so it is lifted into its own row.
+ */
+describe('storedCompactionMessages', () => {
+  it('lifts each compaction part into a system compact_separator keyed by the part id', () => {
+    const rows = storedCompactionMessages(
+      msg('assistant', [
+        { type: 'text', text: 'before' },
+        { type: 'compaction', id: 'prt-compact-1' }
+      ])
+    )
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      id: 'prt-compact-1',
+      role: 'system',
+      content: [{ type: 'compact_separator' }]
+    })
+  })
+
+  it('leaves the message itself alone — the compaction is not folded into it', () => {
+    const converted = convertStoredMessage(
+      msg('assistant', [
+        { type: 'text', text: 'before' },
+        { type: 'compaction', id: 'prt-compact-1' }
+      ])
+    )
+    expect(converted?.content).toEqual([{ type: 'text', text: 'before' }])
+  })
+
+  it('returns nothing for a message with no compaction part', () => {
+    expect(storedCompactionMessages(msg('assistant', [{ type: 'text', text: 'x' }]))).toEqual([])
   })
 })

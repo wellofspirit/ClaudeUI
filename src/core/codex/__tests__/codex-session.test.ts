@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { CodexSession } from '../CodexSession'
 import { CodexHostRegistry, type CodexHostClient } from '../CodexHost'
 import { codexAuthHook, type CodexAuthHook, type CodexAuthSource } from '../codex-auth-hook'
@@ -11,6 +14,7 @@ import type { QueuedItem } from '../../../shared/types'
 import { applyEvent } from '../../shared/sync/reducer'
 import { emptyCanonicalState } from '../../shared/sync/state'
 import recordedElicitation from './fixtures/mcp-tool-approval-elicitation.json'
+import { codexItemId } from '../event-mapper'
 
 const events = vi.hoisted(() => vi.fn())
 const overrides = vi.hoisted(() => new Map<string, unknown>())
@@ -4457,6 +4461,48 @@ describe('Codex MCP tool approvals', () => {
     expect(await elicitation().result).toEqual(ACCEPT)
   })
 
+  it('leaves the approval card FLOATING: the mcpToolCall item is a different id (F20)', async () => {
+    // Codex's elicitation names no thread item (the app-server's own TODO says
+    // the core cannot correlate one yet), so the card is minted under a
+    // synthetic `mcp-elicitation-<requestId>` id while the call's own item
+    // arrives under the item id. They must NOT collide: the card floats, and the
+    // item card appears beside it once the call starts. This is what the F20
+    // `mcp` body renders, and the reason the two are not one card.
+    const { session, elicitation, notify } = fixture()
+    await session.run('hello')
+    const pending = elicitation()
+    notify('item/started', {
+      threadId: 'root',
+      turnId: 'turn',
+      item: {
+        id: 'mcp-item',
+        type: 'mcpToolCall',
+        server: 'verify-stub',
+        tool: 'ping',
+        status: 'inProgress',
+        arguments: {},
+        appContext: null,
+        pluginId: null,
+        readOnlyHint: true,
+        result: null,
+        error: null,
+        durationMs: null
+      }
+    })
+    const card = session
+      .getMessages()
+      .flatMap((message) => message.content)
+      .find((block) => block.type === 'tool_use' && block.toolName === TOOL)
+    expect(card).toBeDefined()
+    expect(card!.type === 'tool_use' && card!.toolUseId).toBe(
+      codexItemId('root', 'turn', 'mcp-item')
+    )
+    expect(pending.card.toolUseId).not.toBe(card!.type === 'tool_use' ? card!.toolUseId : undefined)
+    expect(pending.card.toolUseId).toContain('mcp-elicitation-')
+    session.resolveApproval(pending.card.requestId, 'allow')
+    expect(await pending.result).toEqual(ACCEPT)
+  })
+
   it('asks with a standard card in the mcp__ vocabulary and honours every answer', async () => {
     const first = fixture()
     await first.session.run('hello')
@@ -4681,5 +4727,211 @@ describe('Codex reasoning summaries', () => {
     notify('item/reasoning/summaryTextDelta', { ...thread, itemId: 'r1', delta: '' })
     notify('item/completed', { ...thread, item: reasoningItem([]) })
     expect(thinking()).toEqual([])
+  })
+})
+
+describe('Codex native plan mode and the live plan checklist (F20)', () => {
+  const thread = { threadId: 'root', turnId: 'turn' }
+  /** Every `turn/start` payload this session sent, oldest first. */
+  const turnStarts = (request: ReturnType<typeof fixture>['request']) =>
+    request.mock.calls
+      .filter(([method]) => method === 'turn/start')
+      .map(([, params]) => params as Record<string, unknown>)
+
+  it('sends collaborationMode plan on every turn/start while the mode is plan', async () => {
+    // Codex produces the `<proposed_plan>` item ONLY under its own plan
+    // collaboration mode (`core/src/session/turn.rs`); ClaudeUI's plan mode used
+    // to send the read-only sandbox and nothing else, so no ClaudeUI thread had
+    // ever carried one.
+    const { session, request } = fixture()
+    await session.setPermissionMode('plan')
+    await session.run('map the item kinds')
+    expect(turnStarts(request)).toEqual([
+      expect.objectContaining({
+        collaborationMode: {
+          mode: 'plan',
+          settings: {
+            model: 'native',
+            reasoning_effort: 'ultra',
+            developer_instructions: null
+          }
+        }
+      })
+    ])
+  })
+
+  it('sends collaborationMode default on an ordinary turn, so plan mode does not stick', async () => {
+    // The override lasts "for this turn and subsequent turns", so a plan turn
+    // followed by a default one has to say so — otherwise the thread stays in
+    // plan mode, where `update_plan` is refused and `request_user_input` blocks.
+    const { session, request, notify } = fixture()
+    await session.setPermissionMode('plan')
+    await session.run('plan it')
+    // The first turn has to END before a second prompt is a turn rather than a
+    // queued steer.
+    notify('turn/completed', { threadId: 'root', turn: { id: 'turn', status: 'completed' } })
+    await session.setPermissionMode('default')
+    await session.run('now do it')
+    expect(turnStarts(request).map((params) => params.collaborationMode)).toEqual([
+      expect.objectContaining({ mode: 'plan' }),
+      expect.objectContaining({ mode: 'default' })
+    ])
+  })
+
+  it('carries the thread’s EFFECTIVE effort, which the mode would otherwise wipe', async () => {
+    // `StepSettings::apply` takes a supplied `collaboration_mode` wholesale and
+    // ignores `update.effort` (core/src/session/step_settings.rs), so sending
+    // `reasoning_effort: null` here would reset the thread's effort to nothing
+    // on every turn. The thread reported `ultra` at `thread/start` and no
+    // explicit override was ever chosen.
+    const { session, request } = fixture()
+    await session.run('go')
+    expect(turnStarts(request)[0].collaborationMode).toMatchObject({
+      settings: { model: 'native', reasoning_effort: 'ultra' }
+    })
+  })
+
+  it('keeps ClaudeUI’s own approval policy and sandbox floor alongside the mode (ADR-067)', async () => {
+    const { session, request } = fixture()
+    await session.setPermissionMode('plan')
+    await session.run('plan it')
+    expect(turnStarts(request)[0]).toMatchObject({
+      approvalPolicy: 'untrusted',
+      approvalsReviewer: 'user',
+      sandboxPolicy: { type: 'readOnly', networkAccess: false },
+      collaborationMode: { mode: 'plan', settings: expect.objectContaining({ model: 'native' }) }
+    })
+  })
+
+  it('streams item/plan/delta into ONE plan card the completed item then replaces', async () => {
+    const { session, notify } = fixture()
+    await session.setPermissionMode('plan')
+    await session.run('plan it')
+    notify('item/plan/delta', { ...thread, itemId: 'turn-plan', delta: '## Ste' })
+    notify('item/plan/delta', { ...thread, itemId: 'turn-plan', delta: 'p one' })
+    const streamed = session
+      .getMessages()
+      .flatMap((message) => message.content)
+      .filter((block) => block.type === 'tool_use' && block.toolName === 'plan')
+    expect(streamed).toEqual([expect.objectContaining({ toolInput: { plan: '## Step one' } })])
+    notify('item/completed', {
+      ...thread,
+      item: { type: 'plan', id: 'turn-plan', text: '## Step one\n## Step two' }
+    })
+    const settled = session
+      .getMessages()
+      .flatMap((message) => message.content)
+      .filter((block) => block.type === 'tool_use' && block.toolName === 'plan')
+    expect(settled).toEqual([
+      expect.objectContaining({ toolInput: { plan: '## Step one\n## Step two' } })
+    ])
+  })
+
+  it('feeds turn/plan/updated to the floating widget and writes no transcript row', async () => {
+    // The notification has no thread item and `thread_history.rs` ignores it, so
+    // a transcript row would vanish on the next cold open (tool-survey § 6.4).
+    const { session, notify } = fixture()
+    await session.run('go')
+    const before = session.getMessages().length
+    notify('turn/plan/updated', {
+      ...thread,
+      explanation: null,
+      plan: [
+        { step: 'Read the survey', status: 'completed' },
+        { step: 'Write the mapper', status: 'inProgress' },
+        { step: 'Verify', status: 'pending' }
+      ]
+    })
+    expect(events).toHaveBeenCalledWith('session:plan', [
+      'temporary',
+      [
+        { content: 'Read the survey', status: 'completed', activeForm: '' },
+        { content: 'Write the mapper', status: 'in_progress', activeForm: '' },
+        { content: 'Verify', status: 'pending', activeForm: '' }
+      ]
+    ])
+    expect(session.getMessages()).toHaveLength(before)
+  })
+})
+
+describe('Codex imageView bytes reach a LIVE turn (F20)', () => {
+  const PNG = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64'
+  )
+  let directory: string
+  beforeEach(() => {
+    directory = mkdtempSync(join(tmpdir(), 'codex-session-image-view-'))
+  })
+  afterEach(() => {
+    rmSync(directory, { recursive: true, force: true })
+  })
+
+  const id = codexItemId('root', 'turn', 'iv')
+  /** Every `session:tool-result` this session emitted for the imageView card. */
+  const results = (): Record<string, unknown>[] =>
+    events.mock.calls
+      .filter(([channel]) => channel === 'session:tool-result')
+      .map((call) => (call[1] as [string, Record<string, unknown>])[1])
+      .filter((data) => data.toolUseId === id)
+
+  /** Drive one completed `imageView` and let the async read settle. */
+  const viewImage = async (path: string, notify: ReturnType<typeof fixture>['notify']) => {
+    notify('item/completed', {
+      threadId: 'root',
+      turnId: 'turn',
+      item: { type: 'imageView', id: 'iv', path }
+    })
+    // The read is fired without awaiting the notification pump; two macrotask
+    // turns is more than the `stat` + `readFile` pair needs on a temp file.
+    await new Promise((done) => setTimeout(done, 50))
+  }
+
+  it('emits exactly ONE tool_result, carrying the bytes', async () => {
+    // Two results is the bug: the shared reducer keeps the FIRST per tool_use id
+    // ("first result wins"), so the mapper's empty one won and the picture never
+    // reached a live renderer — while a cold reload of the same thread, which
+    // rebuilds from `messageHistory`, showed it.
+    const path = join(directory, 'shot.png')
+    writeFileSync(path, PNG)
+    const { session, notify } = fixture()
+    await session.run('look at it')
+    await viewImage(path, notify)
+
+    expect(results()).toHaveLength(1)
+    expect(results()[0]).toMatchObject({
+      result: '',
+      isError: false,
+      images: [{ mediaType: 'image/png', base64Data: PNG.toString('base64') }]
+    })
+    // …and the canonical history agrees with what went out on the wire.
+    const block = session
+      .getMessages()
+      .flatMap((message) => message.content)
+      .find((entry) => entry.type === 'tool_result' && entry.toolUseId === id)
+    expect(block).toMatchObject({ toolResult: '', images: [{ mediaType: 'image/png' }] })
+  })
+
+  it('still emits ONE tool_result, with no images, when the file cannot be read', async () => {
+    // The card must resolve either way: the mapper's result was suppressed, so
+    // this is the only one it will ever get and without it the card spins.
+    const { session, notify } = fixture()
+    await session.run('look at it')
+    await viewImage(join(directory, 'absent.png'), notify)
+
+    expect(results()).toHaveLength(1)
+    expect(results()[0]).toMatchObject({ result: '', isError: false })
+    expect(results()[0].images).toBeUndefined()
+  })
+
+  it('refuses a file whose bytes disagree with its extension, and still resolves', async () => {
+    const path = join(directory, 'lying.png')
+    writeFileSync(path, Buffer.from('%PDF-1.7\n'))
+    const { session, notify } = fixture()
+    await session.run('look at it')
+    await viewImage(path, notify)
+
+    expect(results()).toHaveLength(1)
+    expect(results()[0].images).toBeUndefined()
   })
 })

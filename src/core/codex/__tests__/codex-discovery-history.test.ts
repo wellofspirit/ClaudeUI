@@ -1,4 +1,7 @@
 import { beforeEach, expect, it, vi } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { discoverCodexModels } from '../model-discovery'
 import {
   listCodexSessions,
@@ -599,4 +602,116 @@ it('never treats a thread that claims itself as its own branch', async () => {
   mocks.read.mockImplementation(async () => ({ thread: { ...listedRoot, forkedFromId: 'root' } }))
   await scanCodexLineage({ cwd: '/isolated' }, instant)
   expect(mocks.forks.get('root')).toEqual([null, 2])
+})
+
+it('renders every F20 thread-item kind on the COLD path, image bytes included', async () => {
+  // `history.ts` and `CodexSession.item` share `mapCodexItem`, so this is the
+  // cold half of the same proof: at HEAD the mapper's `default` dropped all
+  // eleven and a reloaded thread showed only its messages and commands.
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00])
+  const directory = mkdtempSync(join(tmpdir(), 'codex-cold-history-'))
+  const imagePath = join(directory, 'shot.png')
+  writeFileSync(imagePath, png)
+  try {
+    mocks.history.mockResolvedValue({
+      id: 'root',
+      modelProvider: 'openai',
+      name: null,
+      createdAt: 1,
+      turns: [
+        {
+          id: 'turn',
+          status: 'completed',
+          startedAt: 1,
+          items: [
+            {
+              type: 'webSearch',
+              id: 'ws',
+              query: 'electron 38',
+              action: { type: 'search', query: 'electron 38' },
+              results: [{ title: 'Electron 38', url: 'https://electronjs.org' }]
+            },
+            {
+              type: 'mcpToolCall',
+              id: 'mcp',
+              server: 'verify-stub',
+              tool: 'ping',
+              status: 'completed',
+              arguments: {},
+              appContext: null,
+              pluginId: null,
+              readOnlyHint: true,
+              result: { content: [{ type: 'text', text: 'pong' }] },
+              error: null,
+              durationMs: 3
+            },
+            { type: 'imageView', id: 'iv', path: imagePath },
+            {
+              type: 'imageGeneration',
+              id: 'ig',
+              status: 'completed',
+              revisedPrompt: 'a cat',
+              result: 'QUJD',
+              failure: null,
+              savedPath: '/tmp/cat.png'
+            },
+            { type: 'sleep', id: 'zz', durationMs: 2500 },
+            { type: 'plan', id: 'turn-plan', text: '## Step one' },
+            { type: 'contextCompaction', id: 'cc' },
+            { type: 'hookPrompt', id: 'hp', fragments: [{ text: 'policy', hookRunId: '9f2a' }] },
+            {
+              type: 'functionCallOutput',
+              id: 'fco',
+              name: 'request_user_input_async',
+              namespace: null,
+              output: 'answered'
+            },
+            { type: 'enteredReviewMode', id: 'erm', review: 'uncommitted changes' },
+            { type: 'exitedReviewMode', id: 'xrm', review: '## 2 findings' }
+          ]
+        }
+      ]
+    })
+    const { messages } = await loadCodexHistory('root')
+    const named = (name: string): unknown =>
+      messages
+        .flatMap((message) => message.content)
+        .find((block) => block.type === 'tool_use' && block.toolName === name)
+    expect(named('webSearch')).toBeDefined()
+    expect(named('mcp__verify-stub__ping')).toBeDefined()
+    expect(named('imageView')).toBeDefined()
+    expect(named('imageGeneration')).toBeDefined()
+    expect(named('sleep')).toBeDefined()
+    expect(named('plan')).toBeDefined()
+    expect(named('request_user_input_async')).toBeDefined()
+    const systemBlocks = messages
+      .filter((message) => message.role === 'system')
+      .flatMap((message) => message.content)
+      .map((block) => block.type)
+    expect(systemBlocks).toEqual(
+      expect.arrayContaining(['compact_separator', 'context_note', 'text', 'review_result'])
+    )
+    // The bytes behind the `view_image` path are read on the cold path too —
+    // the app-server runs where the path is local.
+    // The result text is EMPTY (the path is the card header, and `FileReadBody`
+    // would render it as the file's content); the BYTES are what the cold read
+    // adds, so the block is found by its images and its owning tool_use.
+    const viewCard = messages
+      .flatMap((message) => message.content)
+      .find((block) => block.type === 'tool_use' && block.toolName === 'imageView')
+    const viewed = messages
+      .flatMap((message) => message.content)
+      .find(
+        (block) =>
+          block.type === 'tool_result' &&
+          viewCard?.type === 'tool_use' &&
+          block.toolUseId === viewCard.toolUseId
+      )
+    expect(viewed).toMatchObject({
+      toolResult: '',
+      images: [{ mediaType: 'image/png', base64Data: png.toString('base64') }]
+    })
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 })

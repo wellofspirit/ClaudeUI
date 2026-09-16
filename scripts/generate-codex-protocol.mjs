@@ -128,6 +128,15 @@ export const notifications = {
   'item/autoApprovalReview/completed': 'ItemGuardianApprovalReviewCompletedNotification',
   guardianWarning: 'GuardianWarningNotification',
   'item/agentMessage/delta': 'AgentMessageDeltaNotification',
+  // Native plan mode (F20). `item/plan/delta` streams the `<proposed_plan>` body
+  // of the `plan` thread item; `turn/plan/updated` is the `update_plan` checklist,
+  // which has NO thread item and is ignored by `thread_history.rs`, so it is
+  // live-only and feeds the floating widget alone.
+  'item/plan/delta': 'PlanDeltaNotification',
+  'turn/plan/updated': 'TurnPlanUpdatedNotification',
+  // Generated but NOT rendered in this slice: a running MCP card keeps its
+  // spinner rather than showing the server's last progress line.
+  'item/mcpToolCall/progress': 'McpToolCallProgressNotification',
   'serverRequest/resolved': 'ServerRequestResolvedNotification'
 }
 export const roots = [

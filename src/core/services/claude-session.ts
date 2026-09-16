@@ -1268,9 +1268,29 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.handleModelFallback(msg)
       return
     }
-    // Unknown / init / compact_boundary — init is already consumed in
-    // captureSessionBootstrap; compact_boundary is informational and not
-    // currently surfaced. Fall through silently.
+    if (msg.subtype === 'compact_boundary') {
+      // cli.js compacted the transcript (docs/protocol-cc/04-system-subtypes.md
+      // § 4.8). It was dropped live and only ever appeared on a JSONL reload, so
+      // the conversation silently lost its history mid-session with no marker at
+      // all until the next open. The `compact_metadata` carries no summary text,
+      // so this is the HAIRLINE form of the separator; the expandable amber card
+      // is what the reload path builds from the `isCompactSummary` user line
+      // that follows.
+      //
+      // Idempotent by id: the reload path keys the same boundary off `uuid`, so
+      // a session that compacts and is then reopened shows ONE separator.
+      const boundary: ChatMessage = {
+        id: typeof msg.uuid === 'string' ? msg.uuid : `compact-${uuid()}`,
+        role: 'system',
+        content: [{ type: 'compact_separator' }],
+        timestamp: Date.now()
+      }
+      this.upsertMessage(boundary)
+      this.send('session:message', boundary)
+      return
+    }
+    // Unknown / init — init is already consumed in captureSessionBootstrap.
+    // Fall through silently.
   }
 
   /**

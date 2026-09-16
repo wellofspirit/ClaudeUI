@@ -3,6 +3,7 @@ import { CodexService } from './CodexService'
 import type { CodexClientOptions } from './CodexAppServerClient'
 import { codexBinaryAvailable, locateCodexBinary } from './codex-locate'
 import { codexItemId, mapCodexItem, subAgentActivityResult } from './event-mapper'
+import { readCodexImageView } from './codex-image-view'
 import { assertCodexProvider } from './model-selection'
 import type { SessionInfo, ChatMessage, ForkAnchorResult } from '../../shared/types'
 import type { SessionHistoryResult } from '../services/session-history'
@@ -467,6 +468,11 @@ export async function loadCodexHistory(
               ]
           }
         }
+        // `imageView` records a PATH; the bytes live on disk. A cold read runs
+        // where the app-server runs, so the path is local here too — the same
+        // capped, type-checked read the live path takes, and the same path-only
+        // card when it fails.
+        const viewed = item.type === 'imageView' ? await readCodexImageView(item.path) : undefined
         for (const event of mapCodexItem(
           thread.id,
           turn.id,
@@ -487,7 +493,8 @@ export async function loadCodexHistory(
                   toolUseId: event.toolUseId,
                   toolResult: event.result,
                   isError: event.isError,
-                  ...(event.fileDiffs ? { fileDiffs: event.fileDiffs } : {})
+                  ...(event.fileDiffs ? { fileDiffs: event.fileDiffs } : {}),
+                  ...(viewed ? { images: [viewed] } : event.images ? { images: event.images } : {})
                 }
               ]
           }
@@ -553,7 +560,8 @@ async function readCodexChildren(
                   toolUseId: event.toolUseId,
                   toolResult: event.result,
                   isError: event.isError,
-                  ...(event.fileDiffs ? { fileDiffs: event.fileDiffs } : {})
+                  ...(event.fileDiffs ? { fileDiffs: event.fileDiffs } : {}),
+                  ...(event.images ? { images: event.images } : {})
                 }
               ]
           }

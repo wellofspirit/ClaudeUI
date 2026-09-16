@@ -21,10 +21,12 @@ import type {
   CodexSettings
 } from '../../shared/codex-types'
 import { mergeContentBlocks } from '../../shared/content-blocks'
+import { readCodexImageView } from './codex-image-view'
 import { clip, REVIEW_RATIONALE_LIMIT, reviewRationale } from '../shared/tool-review'
 import { parseCodexSettings, savedCodexOverrides } from './settings'
 import {
   assertCodexAttachments,
+  codexCollaborationMode,
   codexModePolicy,
   codexTurnInput,
   codexTurnPolicy,
@@ -72,6 +74,7 @@ import type { Model } from './protocol/v2/Model'
 import type { JsonValue } from './protocol/serde_json/JsonValue'
 import type { ThreadItem } from './protocol/v2/ThreadItem'
 import type { Turn } from './protocol/v2/Turn'
+import type { CollaborationMode } from './protocol/CollaborationMode'
 import type { CommandExecutionRequestApprovalParams } from './protocol/v2/CommandExecutionRequestApprovalParams'
 import type { GuardianApprovalReviewAction } from './protocol/v2/GuardianApprovalReviewAction'
 import type { ItemGuardianApprovalReviewCompletedNotification } from './protocol/v2/ItemGuardianApprovalReviewCompletedNotification'
@@ -81,6 +84,7 @@ import type { CollabAgentStatus } from './protocol/v2/CollabAgentStatus'
 import { assertCodexProvider, selectCodexModel } from './model-selection'
 import {
   codexItemId,
+  codexPlanSteps,
   mapCodexDelta,
   mapCodexItem,
   subAgentActivityResult,
@@ -1698,8 +1702,37 @@ export class CodexSession extends BaseSession {
     return codexModePolicy(this.permissionMode)
   }
 
-  private turnPolicy(): ReturnType<typeof codexTurnPolicy> {
-    return codexTurnPolicy(this.permissionMode)
+  /**
+   * The native policy AND the collaboration mode this turn runs under.
+   *
+   * A supplied `collaborationMode` REPLACES the whole of the thread's selected
+   * mode — `StepSettings::apply` takes `update.collaboration_mode` wholesale and
+   * ignores `update.model` and `update.effort` when it is present
+   * (`core/src/session/step_settings.rs`). So both settings have to carry the
+   * EFFECTIVE value, not just an explicit override, or sending the mode would
+   * silently reset the thread's model or wipe its reasoning effort:
+   *
+   *  - model: the turn's own override, else the thread's model as the
+   *    app-server last reported it (`thread/start`'s response, then every
+   *    `thread/settings/updated`);
+   *  - effort: the turn's own override, else the thread's current effort from
+   *    the same two sources.
+   *
+   * With no model known there is nothing honest to send and the whole
+   * `collaborationMode` is omitted — `run()` awaits `start()` before it ever
+   * calls this, so that is a defensive branch.
+   */
+  private turnPolicy(): ReturnType<typeof codexTurnPolicy> & {
+    collaborationMode?: CollaborationMode
+  } {
+    const model = this.model ?? this.effectiveModel
+    const effort = this.effort ?? this.native?.reasoningEffort ?? undefined
+    return {
+      ...codexTurnPolicy(this.permissionMode),
+      ...(model !== undefined
+        ? { collaborationMode: codexCollaborationMode(this.permissionMode, model, effort) }
+        : {})
+    }
   }
 
   async interrupt(): Promise<void> {
@@ -1940,6 +1973,13 @@ export class CodexSession extends BaseSession {
           guardianReviewText(notification)
         )
       this.offerGuardianOverride(notification)
+    } else if (method === 'turn/plan/updated' && Array.isArray(value.plan)) {
+      // `update_plan`'s checklist. It is a NOTIFICATION with no thread item and
+      // `thread_history.rs` ignores it, so it is absent from `thread/read` and a
+      // transcript row would vanish on the next cold open. It therefore feeds the
+      // floating widget ONLY (tool-survey § 6 decision 4), through the same
+      // `session:plan` channel opencode's `todos` output uses.
+      this.send('session:plan', codexPlanSteps(value.plan))
     } else if (method === 'guardianWarning' && typeof value.message === 'string') {
       const message = value.message
       if (GUARDIAN_DECISION_WARNING.test(message)) return
@@ -1983,7 +2023,26 @@ export class CodexSession extends BaseSession {
           itemId: value.itemId,
           delta: value.delta
         })) {
-          if (event.kind === 'stream') {
+          if (event.kind === 'planDelta') {
+            // The plan's own item-scoped upsert. The accumulated markdown is
+            // re-emitted as the WHOLE `plan` tool_use every time, so the
+            // completed item — same `toolUseId` — replaces it through
+            // `mergeContentBlocks` rather than appending a second card.
+            const id = event.toolUseId
+            if (this.completedItems.has(id)) continue
+            const previous = this.deltas.get(id)
+            const block = previous?.content[0]
+            const plan =
+              (block?.type === 'tool_use' ? String(block.toolInput?.plan ?? '') : '') + event.delta
+            const message: ChatMessage = {
+              id,
+              role: 'assistant',
+              timestamp: previous?.timestamp ?? Date.now(),
+              content: [{ type: 'tool_use', toolUseId: id, toolName: 'plan', toolInput: { plan } }]
+            }
+            this.deltas.set(id, message)
+            this.dispatch({ kind: 'message', message })
+          } else if (event.kind === 'stream') {
             const id = codexItemId(this.threadId, value.turnId, value.itemId)
             if (this.completedItems.has(id)) continue
             const previous = this.deltas.get(id)
@@ -2620,6 +2679,16 @@ export class CodexSession extends BaseSession {
     }
     const timestamp =
       this.messageHistory.find((message) => message.id === id)?.timestamp ?? Date.now()
+    // `imageView` carries a PATH and no bytes, so its completion is held back
+    // and re-emitted ONCE by {@link attachImageView} after the file is read.
+    //
+    // It cannot be two results. The shared reducer keeps the FIRST tool_result
+    // per tool_use id (`shared/sync/reducer.ts`, "first result wins" — a
+    // replayed catch-up must not append twice), so the mapper's empty result
+    // would win and a live renderer would never see the bytes. Only
+    // `messageHistory` here takes the later one, which is why a cold reload of
+    // the same thread showed the thumbnail and the live turn did not.
+    const deferredRead = completed && item.type === 'imageView'
     for (const event of mapCodexItem(
       this.threadId!,
       turnId,
@@ -2627,7 +2696,11 @@ export class CodexSession extends BaseSession {
       completed,
       timestamp
     ))
-      this.dispatch(event)
+      if (!deferredRead || event.kind !== 'toolResult') this.dispatch(event)
+    // Not awaited: the card is already on screen, the read is best-effort, and
+    // blocking the notification pump on a filesystem read would stall the turn.
+    // The single result is emitted once the read settles, either way.
+    if (completed && item.type === 'imageView') void this.attachImageView(id, item.path)
     // The tool_use block — or the completion — a held review was waiting for may
     // have just landed. Released once; whichever half is still unsatisfied parks
     // the notification again.
@@ -2637,6 +2710,28 @@ export class CodexSession extends BaseSession {
       this.bindGuardianReview(held)
       this.offerGuardianOverride(held)
     }
+  }
+
+  /**
+   * The ONE result a completed `imageView` gets — the bytes when the file could
+   * be read, nothing but the resolution when it could not.
+   *
+   * Always dispatched, read or no read: it is the only result this card will
+   * ever get (the mapper's was suppressed in {@link item}), and without it the
+   * card would spin for good. The result TEXT is empty either way — the path is
+   * already the card header, and `FileReadBody` renders `toolResult` as the
+   * file's content. {@link readCodexImageView} never throws.
+   */
+  private async attachImageView(toolUseId: string, path: string): Promise<void> {
+    const image = await readCodexImageView(path)
+    if (this.closed) return
+    this.dispatch({
+      kind: 'toolResult',
+      toolUseId,
+      result: '',
+      isError: false,
+      ...(image ? { images: [image] } : {})
+    })
   }
 
   /**
@@ -2691,6 +2786,10 @@ export class CodexSession extends BaseSession {
         this.send('session:message', event.message)
         break
       }
+      case 'planDelta':
+        // Consumed by the delta loop above, which turns it into an item-scoped
+        // message upsert; it never reaches `dispatch` as itself.
+        break
       case 'commandDelta': {
         const output = ((this.output.get(event.toolUseId) ?? '') + event.delta).slice(-256_000)
         this.output.set(event.toolUseId, output)
@@ -2718,7 +2817,8 @@ export class CodexSession extends BaseSession {
                 toolUseId: event.toolUseId,
                 toolResult: event.result,
                 isError: event.isError,
-                ...(event.fileDiffs ? { fileDiffs: event.fileDiffs } : {})
+                ...(event.fileDiffs ? { fileDiffs: event.fileDiffs } : {}),
+                ...(event.images ? { images: event.images } : {})
               }
             ]
           }
@@ -2727,7 +2827,8 @@ export class CodexSession extends BaseSession {
           toolUseId: event.toolUseId,
           result: event.result,
           isError: event.isError,
-          ...(event.fileDiffs ? { fileDiffs: event.fileDiffs } : {})
+          ...(event.fileDiffs ? { fileDiffs: event.fileDiffs } : {}),
+          ...(event.images ? { images: event.images } : {})
         })
         this.rearmGuardianOverrides(event.toolUseId)
         break

@@ -365,8 +365,8 @@ function convertPiTextOrImageContent(
 /**
  * Convert a whole active-branch entry list to ChatMessage[], in order.
  * Two passes: (1) index every toolResult message by toolCallId, (2) convert
- * `message`/`compaction` entries (everything else — model_change,
- * thinking_level_change, branch_summary, label, custom, custom_message — is
+ * `message`/`compaction`/`custom_message` entries (everything else —
+ * model_change, thinking_level_change, branch_summary, label, custom — is
  * skipped, matching convertStoredMessage's "silently skip unknown/irrelevant
  * types" precedent).
  */
@@ -388,9 +388,32 @@ export function convertPiSessionEntries(entries: PiSessionEntry[]): ChatMessage[
       messages.push({
         id: e.id,
         role: 'system',
-        content: [{ type: 'compact_separator', text: firstLine(e.summary) }],
+        // The WHOLE summary, not its first line (F20). `CompactSeparator`
+        // renders a non-empty `text` as the expandable amber card and shows the
+        // body only when the user opens it, so there was never a reason to
+        // throw away the rest — and pi is the one harness that has one.
+        content: [{ type: 'compact_separator', text: e.summary }],
         timestamp: Number.isFinite(ts) ? ts : Date.now()
       })
+    } else if (e.type === 'custom_message' && e.display) {
+      // An extension injected this into the model's context. It was dropped
+      // entirely, so the transcript disagreed with what the model saw. Same row
+      // Codex's hook fragments take, titled by the extension that wrote it, and
+      // rendered VERBATIM — an extension's text is third-party text.
+      const ts = Date.parse(e.timestamp)
+      const text =
+        typeof e.content === 'string'
+          ? e.content
+          : e.content
+              .flatMap((part) => (part.type === 'text' && part.text ? [part.text] : []))
+              .join('\n')
+      if (text)
+        messages.push({
+          id: e.id,
+          role: 'system',
+          content: [{ type: 'context_note', title: e.customType, fragments: [{ text }] }],
+          timestamp: Number.isFinite(ts) ? ts : Date.now()
+        })
     }
   }
   return messages

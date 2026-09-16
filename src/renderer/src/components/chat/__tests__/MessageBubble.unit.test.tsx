@@ -728,3 +728,81 @@ describe('MessageBubble', () => {
     })
   })
 })
+
+/**
+ * F20 — the ROUTING the new rows depend on. The components themselves are
+ * covered by their own unit files; what is pinned here is that MessageBubble
+ * reaches them at all: two new system `ContentBlock`s in the system switch, and
+ * the `sleep` kind lifted out of the card shell the way `todo` is.
+ */
+describe('MessageBubble — F20 rows', () => {
+  const codex = (): void => {
+    act(() => {
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          'test-session': {
+            ...state.sessions['test-session'],
+            status: { ...state.sessions['test-session'].status, engineId: 'codex' as const }
+          }
+        }
+      }))
+    })
+  }
+
+  it('routes a context_note system block to ContextNoteBlock', () => {
+    const msg = makeChatMessage({
+      role: 'system',
+      content: [
+        {
+          type: 'context_note',
+          title: 'Injected context',
+          fragments: [{ text: 'policy', label: '9f2a' }]
+        }
+      ]
+    })
+    render(
+      <MessageBubble
+        message={msg}
+        pendingApprovals={[]}
+        isLastAssistant={false}
+        thinkingStartedAt={null}
+      />
+    )
+    expect(screen.getByTestId('ContextNoteBlock')).toBeInTheDocument()
+  })
+
+  it('routes a review_result system block to ReviewResultCard', () => {
+    const msg = makeChatMessage({
+      role: 'system',
+      content: [{ type: 'review_result', text: 'Two findings need attention.' }]
+    })
+    render(
+      <MessageBubble
+        message={msg}
+        pendingApprovals={[]}
+        isLastAssistant={false}
+        thinkingStartedAt={null}
+      />
+    )
+    expect(screen.getByTestId('ReviewResultCard')).toBeInTheDocument()
+  })
+
+  it('lifts a Codex sleep tool_use out of the card shell into SleepRow', () => {
+    codex()
+    const msg = makeChatMessage({
+      role: 'assistant',
+      content: [makeToolUseBlock('sleep', { durationMs: 2500 }, 'tu-sleep')]
+    })
+    render(
+      <MessageBubble
+        message={msg}
+        pendingApprovals={[]}
+        isLastAssistant={true}
+        thinkingStartedAt={null}
+      />
+    )
+    expect(screen.getByTestId('SleepRow')).toBeInTheDocument()
+    expect(screen.queryByTestId('ToolCard')).not.toBeInTheDocument()
+  })
+})

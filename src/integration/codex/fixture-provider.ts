@@ -136,6 +136,63 @@ export function fixtureReasoningItem(
 }
 
 /**
+ * A Responses `web_search_call` output item — what the hosted web-search tool
+ * emits and what the core turns into a `webSearch` thread item
+ * (`core/src/event_mapping.rs`, pinned by `parses_web_search_call`).
+ *
+ * NO `results`. The Responses item has no such field on the pinned binary
+ * (`protocol/src/models.rs` `ResponseItem::WebSearchCall` carries `id`, `status`
+ * and `action` and nothing else) — `WebSearchItem.results` is filled
+ * out-of-band by the STANDALONE web-search extension, which a scripted provider
+ * cannot stand in for. So a fixture turn exercises the query, the action and the
+ * card's text fallback; the structured result rows are covered by the mapper's
+ * own guard tests instead.
+ */
+export function fixtureWebSearchItem(
+  query = 'electron 38 contextIsolation preload changes',
+  id = 'ws_fixture'
+): FixtureOutputItem {
+  return {
+    type: 'web_search_call',
+    id,
+    status: 'completed',
+    action: { type: 'search', query }
+  }
+}
+
+/**
+ * A `view_image` tool call on `path` — the one tool that produces an `imageView`
+ * thread item (`core/src/tools/handlers/view_image.rs`, whose args are
+ * `{ path, environment_id?, detail? }`).
+ *
+ * The path must exist and be a readable image on the machine the app-server
+ * runs on, or the tool fails and no item is produced.
+ */
+export function fixtureViewImageCall(
+  path: string,
+  callId = 'fixture-view-image'
+): FixtureOutputItem {
+  return {
+    type: 'function_call',
+    call_id: callId,
+    name: 'view_image',
+    arguments: JSON.stringify({ path })
+  }
+}
+
+/**
+ * The assistant message a PLAN-mode turn ends on.
+ *
+ * The core lifts a `plan` thread item out of `<proposed_plan>…</proposed_plan>`
+ * and ONLY under `collaborationMode.mode === 'plan'` — a default-mode turn
+ * carrying the same tags produces an ordinary agent message and no plan item,
+ * which is exactly what the integration probe asserts.
+ */
+export function fixturePlanMessage(plan: string, id = 'msg-plan'): FixtureOutputItem {
+  return fixtureAssistantMessage(`<proposed_plan>\n${plan}\n</proposed_plan>`, id)
+}
+
+/**
  * The events for ONE output item.
  *
  * A message is a bare `response.output_item.done` — three events is all Codex

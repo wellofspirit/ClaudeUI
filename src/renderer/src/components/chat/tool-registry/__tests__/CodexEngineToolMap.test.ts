@@ -189,3 +189,186 @@ describe('CodexEngineToolMap — v2 sub-agent activity cards', () => {
     ).toMatchObject({ subagent: 'gpt-mock', model: 'gpt-mock' })
   })
 })
+
+/**
+ * F20 — the history-mapper kinds. `kindOf` routes the seven new wire names and
+ * `normalize` reads the shapes `mapCodexItem` emits for them.
+ */
+describe('CodexEngineToolMap — the F20 history-mapper kinds', () => {
+  it.each([
+    ['webSearch', 'web'],
+    ['imageView', 'fileRead'],
+    ['imageGeneration', 'image'],
+    ['sleep', 'sleep'],
+    ['plan', 'plan']
+  ])('kindOf(%s) is %s', (name, kind) => {
+    expect(CodexEngineToolMap.kindOf(name)).toBe(kind)
+  })
+
+  it('displayName: an mcp__ name reads as the KIND, not the rule vocabulary', () => {
+    // The server and the tool are the card's SUMMARY line (`summary.ts`), so a
+    // header repeating `mcp__<server>__<tool>` says it twice and reads as
+    // machinery rather than as "an MCP call" (mockup § 2).
+    expect(CodexEngineToolMap.displayName('mcp__verify-stub__ping')).toBe('MCP')
+    expect(CodexEngineToolMap.displayName('mcp__verify-stub')).toBe('MCP')
+  })
+
+  it.each([
+    ['webSearch', 'Web search'],
+    ['imageView', 'Read'],
+    ['imageGeneration', 'Image'],
+    ['sleep', 'Sleep'],
+    ['plan', 'Plan']
+  ])('displayName(%s) is %s', (name, display) => {
+    expect(CodexEngineToolMap.displayName(name)).toBe(display)
+  })
+
+  it('web: a search reads the query and the structured rows', () => {
+    expect(
+      CodexEngineToolMap.normalize('web', {
+        query: 'electron 38',
+        action: { type: 'search', query: 'electron 38' },
+        results: [{ title: 'Electron 38', url: 'https://electronjs.org' }]
+      })
+    ).toEqual({
+      kind: 'web',
+      target: 'electron 38',
+      action: 'search',
+      results: [{ title: 'Electron 38', url: 'https://electronjs.org' }]
+    })
+  })
+
+  /**
+   * The REAL v2 wire tags. `protocol/v2/WebSearchAction.ts` spells them in CAMEL
+   * case — `search | openPage | findInPage | other` — even though the core's own
+   * Rust enum serialises snake_case, and matching only the snake_case spellings
+   * demoted every page fetch to `other`: the label read "Web" and `target` fell
+   * back to a `query` an openPage item need not carry.
+   */
+  it('web: openPage reads the url and takes the fetch action (v2 camelCase)', () => {
+    expect(
+      CodexEngineToolMap.normalize('web', {
+        query: 'https://electronjs.org',
+        action: { type: 'openPage', url: 'https://electronjs.org' }
+      })
+    ).toEqual({ kind: 'web', target: 'https://electronjs.org', action: 'fetch' })
+  })
+
+  it('web: findInPage reads the url and takes the find action (v2 camelCase)', () => {
+    expect(
+      CodexEngineToolMap.normalize('web', {
+        query: "'needle' in https://e.test",
+        action: { type: 'findInPage', url: 'https://e.test', pattern: 'needle' }
+      })
+    ).toEqual({ kind: 'web', target: 'https://e.test', action: 'find' })
+  })
+
+  it('web: an openPage with no query still reads its url as the target', () => {
+    // The shape that made the old snake_case match render a BLANK target.
+    expect(
+      CodexEngineToolMap.normalize('web', {
+        action: { type: 'openPage', url: 'https://electronjs.org/docs' }
+      })
+    ).toMatchObject({ target: 'https://electronjs.org/docs', action: 'fetch' })
+  })
+
+  it('web: the core\u2019s snake_case spellings are accepted too', () => {
+    // Belt and braces: the app-server projects camelCase today, but the core's
+    // own serialisation is snake_case and a projection change must not silently
+    // demote a fetch to `other`.
+    expect(
+      CodexEngineToolMap.normalize('web', {
+        action: { type: 'open_page', url: 'https://e.test' }
+      })
+    ).toMatchObject({ target: 'https://e.test', action: 'fetch' })
+    expect(
+      CodexEngineToolMap.normalize('web', {
+        action: { type: 'find_in_page', url: 'https://e.test', pattern: 'x' }
+      })
+    ).toMatchObject({ target: 'https://e.test', action: 'find' })
+  })
+
+  it('web: an openPage whose url the wire omitted falls back to the query', () => {
+    expect(
+      CodexEngineToolMap.normalize('web', {
+        query: 'https://fallback.test',
+        action: { type: 'openPage', url: null }
+      })
+    ).toMatchObject({ target: 'https://fallback.test', action: 'fetch' })
+  })
+
+  it('web: an item with no action at all takes `other` and keeps the query', () => {
+    expect(CodexEngineToolMap.normalize('web', { query: 'x' })).toEqual({
+      kind: 'web',
+      target: 'x',
+      action: 'other'
+    })
+  })
+
+  it('mcp: splits mcp__<server>__<tool> off the NAME and unwraps the envelope', () => {
+    expect(
+      CodexEngineToolMap.normalize(
+        'mcp',
+        { arguments: { host: 'example.test' }, readOnlyHint: true },
+        undefined,
+        'mcp__verify-stub__ping'
+      )
+    ).toEqual({
+      kind: 'mcp',
+      input: { host: 'example.test' },
+      server: 'verify-stub',
+      tool: 'ping',
+      readOnly: true
+    })
+  })
+
+  it('mcp: a tool name containing __ stays whole; a server-only name has no tool', () => {
+    expect(
+      CodexEngineToolMap.normalize('mcp', { arguments: {} }, undefined, 'mcp__srv__a__b')
+    ).toMatchObject({ server: 'srv', tool: 'a__b' })
+    const serverOnly = CodexEngineToolMap.normalize(
+      'mcp',
+      { arguments: {} },
+      undefined,
+      'mcp__verify-stub'
+    )
+    expect(serverOnly).toMatchObject({ server: 'verify-stub' })
+    expect('tool' in serverOnly).toBe(false)
+  })
+
+  it('mcp: an input without the envelope falls back to itself rather than blanking', () => {
+    expect(
+      CodexEngineToolMap.normalize('mcp', { host: 'x' }, undefined, 'mcp__srv__tool')
+    ).toMatchObject({ input: { host: 'x' } })
+  })
+
+  it('fileRead: imageView is a path with no text body', () => {
+    expect(CodexEngineToolMap.normalize('fileRead', { path: '/tmp/shot.png' })).toEqual({
+      kind: 'fileRead',
+      path: '/tmp/shot.png',
+      content: ''
+    })
+  })
+
+  it('image: carries the revised prompt and the saved path, omitting what is absent', () => {
+    expect(
+      CodexEngineToolMap.normalize('image', { prompt: 'a cat', savedPath: '/tmp/cat.png' })
+    ).toEqual({ kind: 'image', prompt: 'a cat', savedPath: '/tmp/cat.png' })
+    expect(CodexEngineToolMap.normalize('image', {})).toEqual({ kind: 'image' })
+  })
+
+  it('sleep: reads the duration, and a missing one is zero rather than NaN', () => {
+    expect(CodexEngineToolMap.normalize('sleep', { durationMs: 2500 })).toEqual({
+      kind: 'sleep',
+      durationMs: 2500
+    })
+    expect(CodexEngineToolMap.normalize('sleep', {})).toEqual({ kind: 'sleep', durationMs: 0 })
+  })
+
+  it('plan: reads the markdown the plan card renders', () => {
+    expect(CodexEngineToolMap.normalize('plan', { plan: '## Step one' })).toEqual({
+      kind: 'plan',
+      plan: '## Step one'
+    })
+  })
+})

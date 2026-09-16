@@ -19,7 +19,7 @@ import path from 'path'
 import fs from 'fs'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
-import { convertStoredMessage } from '../opencode/event-mapper'
+import { convertStoredMessage, storedCompactionMessages } from '../opencode/event-mapper'
 import { readOpencodeSessionRows } from './db'
 import { PERSISTED_SESSIONS_DIR } from './persisted-sessions-dir'
 import { logger } from './logger'
@@ -139,6 +139,9 @@ export async function loadOpencodeSessionHistory(sessionId: string): Promise<Cha
     const stored = await client.listMessages(sessionId)
     const messages: ChatMessage[] = []
     for (const s of stored) {
+      // A compaction is a PART on an ordinary message but renders as its own
+      // system row, so it is pushed ahead of the message it rode in on.
+      messages.push(...storedCompactionMessages(s))
       const msg = convertStoredMessage(s)
       if (msg) messages.push(msg)
     }

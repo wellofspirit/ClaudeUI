@@ -82,8 +82,16 @@ export function summarizeTool(kind: ToolKind, view: ToolView, toolName?: string)
       return ''
 
     case 'mcp':
+      // `server / tool` when the engine's name was splittable (Codex's
+      // `mcp__<server>__<tool>`, F20). Engines whose MCP names carry neither —
+      // opencode's underscore-joined `server_tool`, and any caller that
+      // normalized without a tool name — keep today's JSON dump.
+      if (view.kind === 'mcp' && view.server)
+        return view.tool ? `${view.server} / ${view.tool}` : view.server
+      return view.kind === 'mcp' ? JSON.stringify(view.input) : ''
+
     case 'unknown':
     default:
-      return view.kind === 'mcp' || view.kind === 'unknown' ? JSON.stringify(view.input) : ''
+      return view.kind === 'unknown' ? JSON.stringify(view.input) : ''
   }
 }

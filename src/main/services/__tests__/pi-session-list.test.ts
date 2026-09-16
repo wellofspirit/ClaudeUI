@@ -456,7 +456,9 @@ describe('loadPiSessionHistory — active-branch walk (fork)', () => {
     const compactMsg = messages.find((m) => m.id === 'c1')
     expect(compactMsg).toMatchObject({
       role: 'system',
-      content: [{ type: 'compact_separator', text: 'Summary line one.' }]
+      // The WHOLE summary, not its first line (F20) — the amber card reveals
+      // the body only when the user opens it.
+      content: [{ type: 'compact_separator', text: 'Summary line one.\nMore detail.' }]
     })
   })
 
@@ -679,5 +681,117 @@ describe('deletePiSession', () => {
 
   it('resolves without throwing when the session does not exist (best-effort)', async () => {
     await expect(deletePiSession('never-existed')).resolves.toBeUndefined()
+  })
+})
+
+/**
+ * F20 — a pi `custom_message` entry is context an extension injected into the
+ * model's prompt. It was dropped entirely, so the transcript disagreed with
+ * what the model actually saw.
+ */
+describe('loadPiSessionHistory — custom_message entries', () => {
+  const userEntry = (id: string, parentId: string | null, text: string) => ({
+    type: 'message',
+    id,
+    parentId,
+    timestamp: '2024-01-01T00:00:00.000Z',
+    message: { role: 'user', content: text, timestamp: 1 }
+  })
+
+  it('renders a displayed custom_message as a context_note titled by its extension', async () => {
+    writeSessionFile('--proj-custom--', 'x_sess-custom.jsonl', [
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-custom',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/custom'
+      },
+      userEntry('u1', null, 'hi'),
+      {
+        type: 'custom_message',
+        id: 'cm1',
+        parentId: 'u1',
+        timestamp: '2024-01-01T00:00:02.000Z',
+        customType: 'my-extension',
+        content: 'Injected context the model saw.',
+        display: true
+      }
+    ])
+    const messages = await loadPiSessionHistory('sess-custom')
+    expect(messages.find((m) => m.id === 'cm1')).toMatchObject({
+      role: 'system',
+      content: [
+        {
+          type: 'context_note',
+          title: 'my-extension',
+          fragments: [{ text: 'Injected context the model saw.' }]
+        }
+      ]
+    })
+  })
+
+  it('joins the text parts of an array-shaped content and skips image parts', async () => {
+    writeSessionFile('--proj-custom2--', 'x_sess-custom2.jsonl', [
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-custom2',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/custom2'
+      },
+      userEntry('u1', null, 'hi'),
+      {
+        type: 'custom_message',
+        id: 'cm2',
+        parentId: 'u1',
+        timestamp: '2024-01-01T00:00:02.000Z',
+        customType: 'ext',
+        content: [
+          { type: 'text', text: 'line one' },
+          { type: 'image', mimeType: 'image/png', data: 'AAAA' },
+          { type: 'text', text: 'line two' }
+        ],
+        display: true
+      }
+    ])
+    const messages = await loadPiSessionHistory('sess-custom2')
+    expect(messages.find((m) => m.id === 'cm2')).toMatchObject({
+      content: [{ type: 'context_note', fragments: [{ text: 'line one\nline two' }] }]
+    })
+  })
+
+  it('skips a hidden custom_message and one with no text at all', async () => {
+    writeSessionFile('--proj-custom3--', 'x_sess-custom3.jsonl', [
+      {
+        type: 'session',
+        version: 3,
+        id: 'sess-custom3',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/custom3'
+      },
+      userEntry('u1', null, 'hi'),
+      {
+        type: 'custom_message',
+        id: 'hidden',
+        parentId: 'u1',
+        timestamp: '2024-01-01T00:00:02.000Z',
+        customType: 'ext',
+        content: 'not for the user',
+        display: false
+      },
+      {
+        type: 'custom_message',
+        id: 'blank',
+        parentId: 'hidden',
+        timestamp: '2024-01-01T00:00:03.000Z',
+        customType: 'ext',
+        content: '',
+        display: true
+      }
+    ])
+    const messages = await loadPiSessionHistory('sess-custom3')
+    expect(messages.find((m) => m.id === 'hidden')).toBeUndefined()
+    expect(messages.find((m) => m.id === 'blank')).toBeUndefined()
   })
 })

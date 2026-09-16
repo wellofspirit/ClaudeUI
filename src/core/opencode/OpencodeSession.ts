@@ -37,6 +37,7 @@ import {
   mapEvent,
   extractToolResult,
   convertStoredMessage,
+  storedCompactionMessages,
   computeStoredDurationMs
 } from './event-mapper'
 import type { MapperOutput, MessageAccumulator } from './event-mapper'
@@ -745,6 +746,14 @@ export class OpencodeSession extends BaseSession {
       this.sendStatusLine()
 
       for (const stored of storedMessages) {
+        // Compaction parts ride an ordinary message but render as their own
+        // system row (see storedCompactionMessages); replayed ahead of it.
+        for (const separator of storedCompactionMessages(stored)) {
+          const at = this.messageHistory.findIndex((m) => m.id === separator.id)
+          if (at >= 0) this.messageHistory[at] = separator
+          else this.messageHistory.push(separator)
+          this.send('session:message', separator)
+        }
         const msg = convertStoredMessage(stored)
         if (!msg) continue
 

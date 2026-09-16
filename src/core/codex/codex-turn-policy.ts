@@ -1,4 +1,5 @@
 import { isImageMediaType } from '../../shared/types'
+import type { CollaborationMode } from './protocol/CollaborationMode'
 import type { AskForApproval } from './protocol/v2/AskForApproval'
 import type { ApprovalsReviewer } from './protocol/v2/ApprovalsReviewer'
 import type { SandboxMode } from './protocol/v2/SandboxMode'
@@ -97,4 +98,39 @@ export function codexTurnInput(prompt: string, attachments?: CodexAttachments): 
       url: `data:${attachment.mediaType};base64,${attachment.base64Data}`
     }))
   ]
+}
+
+/**
+ * The NATIVE collaboration mode a turn runs under, sent on EVERY `turn/start`.
+ *
+ * Codex only produces a `plan` thread item — the `<proposed_plan>` the plan card
+ * renders — when the turn ran under `collaborationMode.mode === 'plan'`
+ * (`core/src/session/turn.rs`). ClaudeUI's own plan mode used to send nothing but
+ * `approvalPolicy: untrusted` + `sandbox: read-only`, so no ClaudeUI thread had
+ * ever carried one. It is sent on every turn, `default` included, because the
+ * override sticks "for this turn and subsequent turns": a plan turn followed by
+ * an ordinary one would otherwise leave the thread in plan mode, where
+ * `update_plan` is refused and `request_user_input` blocks.
+ *
+ * ADR-067 is untouched by this: the approval policy and the sandbox floor stay
+ * ClaudeUI's, and are still sent alongside. The mode chooses the model's
+ * INSTRUCTIONS, not what it is allowed to run.
+ *
+ * `developer_instructions: null` means "use the builtin preset for this mode"
+ * (`app-server/src/request_processors/turn_processor.rs`), which is what the
+ * Codex TUI itself sends.
+ */
+export function codexCollaborationMode(
+  mode: string,
+  model: string,
+  effort?: string
+): CollaborationMode {
+  return {
+    mode: mode === 'plan' ? 'plan' : 'default',
+    settings: {
+      model,
+      reasoning_effort: effort ?? null,
+      developer_instructions: null
+    }
+  }
 }

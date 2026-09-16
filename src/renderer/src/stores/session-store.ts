@@ -1582,7 +1582,12 @@ export interface SessionState {
   removeDiffComment: (routingId: string, commentId: string) => void
   clearDiffComments: (routingId: string) => void
   // Plan review actions
-  openPlanPanel: (routingId: string, planContent: string, approvalRequestId: string) => void
+  /**
+   * `approvalRequestId` is null for an engine whose plan item carries no
+   * approval (Codex native plan mode). The review bar then SENDS the comments
+   * as a prompt instead of denying an approval with them.
+   */
+  openPlanPanel: (routingId: string, planContent: string, approvalRequestId: string | null) => void
   closePlanPanel: (routingId: string) => void
   addPlanComment: (routingId: string, comment: PlanComment) => void
   updatePlanComment: (routingId: string, commentId: string, text: string) => void

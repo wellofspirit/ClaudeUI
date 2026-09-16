@@ -15,19 +15,31 @@ export function PlanReviewBar({ comments }: Props): React.JSX.Element {
   const planReview = useActiveSession((s) => s.planReview)
   const pendingApprovals = useActiveSession((s) => s.pendingApprovals)
 
-  const approvalStillPending = planReview
-    ? pendingApprovals.some((a) => a.requestId === planReview.approvalRequestId)
-    : false
+  // An engine whose plan item carries NO approval (Codex native plan mode, F20)
+  // has nothing that can expire, so the bar stays sendable — `null` is not an
+  // approval that went away, it is the absence of one. The Claude path is
+  // unchanged: the id must still be in `pendingApprovals`.
+  const approvalStillPending = !planReview
+    ? false
+    : planReview.approvalRequestId === null
+      ? true
+      : pendingApprovals.some((a) => a.requestId === planReview.approvalRequestId)
 
   const handleSend = useCallback(async () => {
     if (!activeSessionId || !planReview || !comments.length || !approvalStillPending) return
 
     const feedback = composePlanFeedback(comments)
 
-    await window.api.respondApproval(activeSessionId, planReview.approvalRequestId, 'deny', {
-      feedback
-    })
-    dismissApproval(activeSessionId, planReview.approvalRequestId)
+    if (planReview.approvalRequestId === null) {
+      // No approval to deny — the comments ARE the next turn's prompt, which is
+      // how "keep planning" works on an engine that never asked.
+      await window.api.sendPrompt(activeSessionId, feedback)
+    } else {
+      await window.api.respondApproval(activeSessionId, planReview.approvalRequestId, 'deny', {
+        feedback
+      })
+      dismissApproval(activeSessionId, planReview.approvalRequestId)
+    }
     closePlanPanel(activeSessionId)
   }, [activeSessionId, planReview, comments, approvalStillPending, dismissApproval, closePlanPanel])
 

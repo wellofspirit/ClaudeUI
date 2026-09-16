@@ -278,6 +278,14 @@ function handleOwnEvent(
       const isNew = !acc.parts.has(partId)
       if (isNew) acc.partOrder.push(partId)
 
+      // opencode compacted the conversation. It is a PART on the assistant
+      // message, but the separator is a row of its own (the renderer paints
+      // `compact_separator` only on a system message), so it becomes one —
+      // identified by the PART id, which is what keeps a re-delivered
+      // `message.part.updated` from stacking a second hairline.
+      if (part.type === 'compaction')
+        return { kind: 'message', message: opencodeCompactionMessage(partId) }
+
       const partType = part.type as string
       const snap: PartSnapshot = { type: partType }
 
@@ -1086,6 +1094,35 @@ function storedFilePartToAttachment(part: StoredMessagePart): ContentBlock | nul
  *
  * Returns null if the message has no displayable content (so the caller can skip it).
  */
+/**
+ * The separator row for one opencode `compaction` part.
+ *
+ * opencode's compaction carries no summary on either path, so this is always
+ * the HAIRLINE form. Keyed by the part id so the live event and the stored
+ * replay of the same compaction produce one row, not two.
+ */
+export function opencodeCompactionMessage(partId: string): ChatMessage {
+  return {
+    id: partId,
+    role: 'system',
+    content: [{ type: 'compact_separator' }],
+    timestamp: Date.now()
+  }
+}
+
+/**
+ * The compaction separators inside ONE stored message, for the replay paths.
+ *
+ * `convertStoredMessage` cannot carry them: it returns the user/assistant
+ * message the parts belong to, and a `compact_separator` renders only on a
+ * SYSTEM row. The callers push these alongside it instead.
+ */
+export function storedCompactionMessages(stored: StoredMessage): ChatMessage[] {
+  return ((stored.parts ?? []) as StoredMessagePart[]).flatMap((part) =>
+    part.type === 'compaction' ? [opencodeCompactionMessage(part.id ?? uuid())] : []
+  )
+}
+
 export function convertStoredMessage(stored: StoredMessage): ChatMessage | null {
   const { info, parts } = stored
   if (!info?.id) return null
@@ -1138,7 +1175,9 @@ export function convertStoredMessage(stored: StoredMessage): ChatMessage | null 
         })
       }
     }
-    // step-start, step-finish, agent, subtask, compaction → skip
+    // step-start, step-finish, agent, subtask → skip. `compaction` is not
+    // dropped: it is lifted into its own system row by
+    // {@link storedCompactionMessages}, which the replay callers push alongside.
   }
 
   if (attachments.length > 0) content.unshift(...attachments)
