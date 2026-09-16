@@ -188,7 +188,9 @@ it, each carried by the phase that found it.
    Add-sheet candidate, not a row (the live walk showed 230 "Not connected" rows before that
    filter). The three old surfaces (`SharedProviders`, `PiVendors`, `VendorOpencodeSection`) and
    `ModelAllowlistDialog` are deleted rather than re-homed, so the fallback in § Providers was
-   not needed.
+   not needed. **Amended 2026-09-16 (F14):** a subscription's stored ACCOUNTS are not managed in
+   the Manage sheet — every provider's accounts live on Models & providers › Accounts as one
+   per-provider group each, and the sheet carries one link row to that page.
 
 5. **The phone is tabs = RAIL GROUPS and pages = ACCORDIONS**, not the page list with drill-in
    this ADR predicted (phase 5; recorded as an amendment on ADR-048). Several pages may be open
