@@ -253,6 +253,8 @@ describe('factory validation', () => {
 
 **Running:** `CLAUDE_INTEGRATION_TESTS=1 bun run test:integration`
 
+**The Codex fixture provider.** The real-binary Codex suites (`src/integration/codex/*.integration.test.ts`, gated by `CODEX_INTEGRATION=1`) never talk to a paid provider: they run against one shared localhost Responses server, `src/integration/codex/fixture-provider.ts`, which also writes the isolated `CODEX_HOME` (`config.toml`, `auth.json`) the child reads. `scripts/codex-fixture-provider.mjs` is a thin CLI wrapper around the same module, so a real-app drive and the integration suites exercise the identical fixture — there is deliberately no second copy. Its `chatgpt` mode serves a drive under an INJECTED ChatGPT identity (ADR-068 §1): `chatgpt_base_url` is pointed at the fixture, the binary's own backend calls are answered 404 and recorded, any bearer is accepted, and `writeFabricatedVault()` mints the scratch vault it comes from (it refuses `os.homedir()`). On the CLI: `--chatgpt --vault-home <home> --accounts <n>`, or `scripts/codex-render-stress.mjs --accounts <n>`. The module's own guards are `src/integration/codex/__tests__/fixture-provider.test.ts`, which runs everywhere — the suites it serves do not.
+
 ## Test Infrastructure
 
 ### TestIpcBridge (`src/test/bridges/test-ipc-bridge.ts`)
