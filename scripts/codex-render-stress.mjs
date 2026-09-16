@@ -12,13 +12,19 @@
 // Usage:
 //   node scripts/codex-render-stress.mjs [--iterations 20] [--load]
 //        [--home <dir>] [--out <png>] [--iteration-timeout 120000]
-//        [--prompt <text>] [--load-workers <n>] [--keep] [--headed] [--dry-run]
+//        [--prompt <text>] [--load-workers <n>] [--accounts <n>]
+//        [--keep] [--headed] [--dry-run]
 //
 // --dry-run       validate the arguments and print the plan; launch nothing.
 // --load          run a CPU + IO burner for the whole loop (the loss only ever
 //                 appeared under concurrent load).
 // --home <dir>    the isolated profile root. Default: a fresh directory under
 //                 the OS temp dir. NEVER the real profile — see below.
+// --accounts <n>  run the loop under an INJECTED ChatGPT identity: the fixture
+//                 is started with `--chatgpt --vault-home <home> --accounts <n>`,
+//                 which fabricates n vault accounts in the scratch home and
+//                 serves `chatgpt_base_url` from the fixture. Default 0 — no
+//                 vault file, so the identity resolves to `native`.
 // --keep          leave the app running at the end (implies --headed).
 //
 // ISOLATION. The app is launched with Electron's own `-r <shim>` where the shim
@@ -114,6 +120,7 @@ export function parseOptions(argv) {
     'out',
     'iteration-timeout',
     'prompt',
+    'accounts',
     'keep',
     'headed',
     'dry-run'
@@ -126,6 +133,9 @@ export function parseOptions(argv) {
     iterations: integer('iterations', 20, 1),
     iterationTimeout: integer('iteration-timeout', 120000, 5000),
     loadWorkers: integer('load-workers', Math.max(2, Math.min(4, cpus().length - 2)), 1),
+    // 0 = no vault at all (the identity resolves to `native`), n = n fabricated
+    // ChatGPT accounts in the scratch home and a fixture serving the backend.
+    accounts: integer('accounts', 0, 0),
     load: has('load'),
     keep: has('keep'),
     headed: has('headed') || has('keep'),
@@ -237,6 +247,12 @@ async function run(options) {
       join(root, 'scripts', 'codex-fixture-provider.mjs'),
       '--codex-home',
       codexHome,
+      // An injected identity needs BOTH: the fabricated vault the app reads
+      // (through the home shim) and a fixture that serves `chatgpt_base_url`.
+      // Passing one without the other is what kills the host.
+      ...(options.accounts > 0
+        ? ['--chatgpt', '--vault-home', home, '--accounts', String(options.accounts)]
+        : []),
       '--exit-on-stdin-close'
     ],
     { cwd: root, stdio: ['pipe', 'pipe', 'pipe'] }
@@ -268,7 +284,9 @@ async function run(options) {
       rejectPort(new Error(`fixture provider exited early (${code})`))
     })
   })
-  console.log(`FIXTURE 127.0.0.1:${port}`)
+  console.log(
+    `FIXTURE 127.0.0.1:${port}${options.accounts > 0 ? ` chatgpt vault=${options.accounts}` : ''}`
+  )
 
   // 2. The load, if asked for. Started BEFORE the app so the very first turn —
   //    the one that lost messages on 2026-09-12 — runs under it too.

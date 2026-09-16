@@ -16,13 +16,34 @@
  *    of a scripted turn. `scripts/codex-render-stress.mjs` drives a real app
  *    through it, and a silently-tolerated bad request there would look like a
  *    passing stress run.
+ *
+ * The `chatgpt` half (F16) is guarded to the same standard: it is what a drive
+ * under an INJECTED ChatGPT identity talks to, and the only thing keeping such a
+ * drive off the real `chatgpt.com` backend with a fabricated token.
+ *
+ * SAFETY: `node:os`.homedir is mocked for the whole file (the pattern
+ * `AuthVaultAccounts.test.ts` uses), so the fabricated vault is written and read
+ * under a temp directory and the real `~/.claude/ui/auth-vault.json` is never on
+ * any path this file computes.
  */
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { request as httpRequest } from 'node:http'
 import { connect } from 'node:net'
+import { gzipSync, zstdCompressSync } from 'node:zlib'
 import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+
+const fakeHome = vi.hoisted(() => ({ value: '' }))
+vi.mock('node:os', async () => {
+  const actual = await vi.importActual<typeof import('node:os')>('node:os')
+  return {
+    ...actual,
+    homedir: () => fakeHome.value,
+    default: { ...actual, homedir: () => fakeHome.value }
+  }
+})
+
 import {
   FIXTURE_API_KEY,
   FIXTURE_AUTHORIZATION,
@@ -30,9 +51,12 @@ import {
   fixtureAssistantMessage,
   renderFixtureConfigToml,
   startFixtureProvider,
+  writeFabricatedVault,
   writeFixtureCodexHome,
   type FixtureProvider
 } from '../fixture-provider'
+import { AuthVault, CHATGPT_PROVIDER_ID } from '../../../core/auth/vault/AuthVault'
+import { extractAccountId } from '../../../core/auth/vault/codex-oauth'
 
 let provider: FixtureProvider | undefined
 let home: string | undefined
@@ -41,12 +65,18 @@ afterEach(async () => {
   provider = undefined
   if (home) rmSync(home, { recursive: true, force: true })
   home = undefined
+  fakeHome.value = ''
 })
 
 function post(
   port: number,
-  body: string,
-  options: { path?: string; method?: string; authorization?: string } = {}
+  body: string | Buffer,
+  options: {
+    path?: string
+    method?: string
+    authorization?: string
+    headers?: Record<string, string>
+  } = {}
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const req = httpRequest(
@@ -57,7 +87,8 @@ function post(
         path: options.path ?? '/v1/responses',
         headers: {
           'Content-Type': 'application/json',
-          ...(options.authorization ? { authorization: options.authorization } : {})
+          ...(options.authorization ? { authorization: options.authorization } : {}),
+          ...(options.headers ?? {})
         }
       },
       (res) => {
@@ -171,6 +202,30 @@ shell_snapshot = false
     expect(toml).not.toContain('[model_providers.openai]')
     expect(toml).toContain('openai_base_url = "http://127.0.0.1:7/v1"')
     expect(toml.endsWith('shell_snapshot = false\n')).toBe(true)
+  })
+
+  it('points the binary at the fixture backend only in chatgpt mode', () => {
+    // Under an injected ChatGPT identity the binary calls `chatgpt_base_url`
+    // for its own reads (`/wham/*`, `/api/codex/usage`) and attaches the
+    // injected bearer to the provider call. Without the redirect those go to
+    // the REAL chatgpt.com with a fabricated token and the host dies within
+    // seconds (seen live 2026-09-16 on macOS).
+    const native = renderFixtureConfigToml({ port: 41999, model: 'mock-model' })
+    expect(native).not.toContain('chatgpt_base_url')
+    expect(native).toContain('requires_openai_auth = false')
+    const injected = renderFixtureConfigToml({ port: 41999, model: 'mock-model', chatgpt: true })
+    expect(injected).toContain('chatgpt_base_url = "http://127.0.0.1:41999/backend-api"')
+    expect(injected).toContain('requires_openai_auth = true')
+    // The redirect is additive: a home that also redirects the built-in
+    // provider (what a real app session uses) keeps both lines.
+    const both = renderFixtureConfigToml({
+      port: 41999,
+      provider: 'openai',
+      openaiBaseUrl: 'http://127.0.0.1:41999/v1',
+      chatgpt: true
+    })
+    expect(both).toContain('openai_base_url = "http://127.0.0.1:41999/v1"')
+    expect(both).toContain('chatgpt_base_url = "http://127.0.0.1:41999/backend-api"')
   })
 
   it('writes config.toml always and auth.json only for an API key', () => {
@@ -295,5 +350,170 @@ describe('fixture provider', () => {
     expect(requests).toEqual([{ a: 1 }])
     expect(errors).toEqual(['invalid provider JSON'])
     expect(provider.requests).toBe(requests)
+  })
+})
+
+describe('fixture provider under an injected ChatGPT identity', () => {
+  it("answers the binary's own backend calls 404 and records them outside errors", async () => {
+    // These are the calls the binary makes for ITSELF once an external token is
+    // injected — profile, workspace check, config bundle, usage — plus the
+    // catalog probe. None of them is a turn, none of them is a fixture
+    // rejection, and a fixture that 400s them makes the host give up.
+    provider = await startFixtureProvider({ chatgpt: true })
+    const profile = await post(provider.port, '', {
+      method: 'GET',
+      path: '/backend-api/wham/profiles/me'
+    })
+    expect(profile.status).toBe(404)
+    expect(profile.body).toBe('{"error":"fixture"}')
+    const models = await post(provider.port, '', { method: 'GET', path: '/v1/models' })
+    expect(models.status).toBe(404)
+    expect(provider.backend).toEqual(['GET /backend-api/wham/profiles/me', 'GET /v1/models'])
+    expect(provider.errors).toEqual([])
+    expect(provider.requests).toEqual([])
+  })
+
+  it('parses a gzip-encoded turn with any bearer and records the bearer', async () => {
+    // A session under an injected identity sends its model requests
+    // gzip-encoded (handoff, H-series gotcha 2), and the bearer is the vault's
+    // fabricated JWT rather than the fixture's own API key.
+    provider = await startFixtureProvider({ chatgpt: true })
+    const res = await post(provider.port, gzipSync(Buffer.from(JSON.stringify({ input: 'hi' }))), {
+      authorization: 'Bearer header.payload.unsigned-fabricated',
+      headers: { 'content-encoding': 'gzip' }
+    })
+    expect(res.status).toBe(200)
+    expect(res.body).toContain('"text":"fixture complete"')
+    expect(provider.requests).toEqual([{ input: 'hi' }])
+    expect(provider.authorizations).toEqual(['Bearer header.payload.unsigned-fabricated'])
+    expect(provider.errors).toEqual([])
+  })
+
+  it('parses a zstd-encoded turn too — what the macOS binary sends under an injected identity', async () => {
+    // Windows sent gzip; the macOS build of 0.154 sends zstd (seen live
+    // 2026-09-16: `REJECTED invalid provider JSON (content-encoding: zstd)`).
+    provider = await startFixtureProvider({ chatgpt: true })
+    const res = await post(
+      provider.port,
+      zstdCompressSync(Buffer.from(JSON.stringify({ input: 'hi' }))),
+      {
+        authorization: 'Bearer header.payload.unsigned-fabricated',
+        headers: { 'content-encoding': 'zstd' }
+      }
+    )
+    expect(res.status).toBe(200)
+    expect(provider.requests).toEqual([{ input: 'hi' }])
+    expect(provider.errors).toEqual([])
+  })
+
+  it('keeps the strict authorization match when chatgpt mode is off', async () => {
+    provider = await startFixtureProvider({ authorization: FIXTURE_AUTHORIZATION })
+    const wrong = await post(provider.port, '{}', { authorization: 'Bearer somebody-elses-token' })
+    expect(wrong.status).toBe(400)
+    expect(provider.requests).toEqual([])
+    expect(provider.errors).toEqual([
+      'unexpected provider request: POST /v1/responses; auth matched: false'
+    ])
+    // And a backend path is NOT quietly answered when the mode is off: the
+    // native fixture has no business serving chatgpt.com's routes.
+    const backend = await post(provider.port, '', {
+      method: 'GET',
+      path: '/backend-api/wham/profiles/me',
+      authorization: FIXTURE_AUTHORIZATION
+    })
+    expect(backend.status).toBe(400)
+    expect(provider.backend).toEqual([])
+  })
+
+  it('scripts the status of the next turn, which is how a 401 refresh is driven', async () => {
+    // `codex-injection.integration.test.ts` needs exactly this: one 401, then
+    // the ordinary answer, so the app-server asks the host to refresh.
+    const next = [401, 200]
+    provider = await startFixtureProvider({
+      chatgpt: true,
+      statusFor: () => next.shift() ?? 200
+    })
+    const refused = await post(provider.port, '{"input":"one"}', { authorization: 'Bearer first' })
+    expect(refused.status).toBe(401)
+    expect(refused.body).toBe('{"error":"scripted"}')
+    const answered = await post(provider.port, '{"input":"two"}', {
+      authorization: 'Bearer second'
+    })
+    expect(answered.status).toBe(200)
+    // The refused call still counts as a call: its bearer is what tells a test
+    // the FIRST attempt carried the pre-refresh token.
+    expect(provider.authorizations).toEqual(['Bearer first', 'Bearer second'])
+    expect(provider.errors).toEqual([])
+  })
+})
+
+describe('fabricated vault', () => {
+  it('writes N accounts the real AuthVault reads back, the first active', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'codex-fixture-vault-'))
+    home = scratch
+    fakeHome.value = join(tmpdir(), 'not-the-fixture-home')
+    const written = writeFabricatedVault(scratch, { accounts: 2 })
+    expect(written.path).toBe(join(scratch, '.claude', 'ui', 'auth-vault.json'))
+    expect(written.accounts.map((account) => account.id)).toEqual(['fab-acc-1', 'fab-acc-2'])
+
+    // The real vault reader is the assertion: a shape it silently drops would
+    // leave a drive with no identity at all.
+    fakeHome.value = scratch
+    const vault = new AuthVault()
+    const accounts = await vault.listAccounts(CHATGPT_PROVIDER_ID)
+    expect(accounts.map((account) => account.id)).toEqual(['fab-acc-1', 'fab-acc-2'])
+    expect(await vault.getActiveAccountId(CHATGPT_PROVIDER_ID)).toBe('fab-acc-1')
+    expect(accounts[0].email).toBe(written.accounts[0].email)
+    expect(accounts[0].accountId).toBe(written.accounts[0].accountId)
+    // The JWT is what Codex's own claim reader parses the workspace out of.
+    for (const [index, account] of accounts.entries())
+      expect(extractAccountId({ access_token: account.credential.access })).toBe(
+        written.accounts[index].accountId
+      )
+    // Far enough ahead that no refresh timer fires during a drive.
+    expect(accounts[0].credential.expires).toBeGreaterThan(Date.now() + 7 * 86400_000)
+  })
+
+  it('refuses to write into the real home', () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'codex-fixture-vault-'))
+    home = scratch
+    // The writer's own homedir IS this directory for the length of the case, so
+    // the refusal is the same one that protects `~/.claude/ui/auth-vault.json`.
+    fakeHome.value = scratch
+    expect(() => writeFabricatedVault(scratch, { accounts: 1 })).toThrow(/real home/i)
+    expect(existsSync(join(scratch, '.claude', 'ui', 'auth-vault.json'))).toBe(false)
+  })
+})
+
+describe('codex-render-stress --accounts', () => {
+  // The flag lives in `scripts/codex-render-stress.mjs`, whose own suite this
+  // slice does not own; guarded here because it is the one switch that puts the
+  // stress loop under an injected identity, and an unknown flag there is a
+  // silent no-op run.
+  const stress = resolve(__dirname, '../../../../scripts/codex-render-stress.mjs')
+  const parse = async (
+    argv: string[]
+  ): Promise<{ options: Record<string, unknown>; errors: string[] }> => {
+    const mod: {
+      parseOptions: (argv: string[]) => { options: Record<string, unknown>; errors: string[] }
+    } = await import(stress)
+    const parsed = mod.parseOptions(argv)
+    return {
+      options: parsed.options,
+      errors: parsed.errors.filter((error) => !error.includes('out/main/index.js'))
+    }
+  }
+
+  it('defaults to no vault and takes an account count', async () => {
+    expect((await parse([])).options.accounts).toBe(0)
+    const injected = await parse(['--accounts', '2'])
+    expect(injected.errors).toEqual([])
+    expect(injected.options.accounts).toBe(2)
+  })
+
+  it('refuses a non-integer account count instead of running without a vault', async () => {
+    expect((await parse(['--accounts', 'two'])).errors).toEqual([
+      '--accounts must be an integer >= 0 (got "two")'
+    ])
   })
 })

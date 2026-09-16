@@ -1,4 +1,3 @@
-import { createServer } from 'node:http'
 import {
   copyFileSync,
   mkdtempSync,
@@ -17,6 +16,11 @@ import { codexAuthHook, type CodexAuthSource } from '../../core/codex/codex-auth
 import { setHostPaths } from '../../core/host'
 import provenance from '../../core/codex/protocol/provenance.json'
 import { codexIntegrationEnabled } from './integration-host'
+import {
+  startFixtureProvider,
+  writeFixtureCodexHome,
+  type FixtureProvider
+} from './fixture-provider'
 
 /**
  * Slice 2a guard 8 — ChatGPT token INJECTION against the pinned binary
@@ -99,7 +103,7 @@ const fakeJwt = (suffix: string): string => fakeJwtFor(WORKSPACE, EMAIL, suffix)
 
 const clients: CodexClient[] = []
 let directory: string | undefined
-let server: ReturnType<typeof createServer> | undefined
+let provider: FixtureProvider | undefined
 
 afterEach(async () => {
   const survivors: number[] = []
@@ -128,11 +132,9 @@ afterEach(async () => {
     }
   } finally {
     try {
-      if (server) {
-        const closed = new Promise<void>((done) => server!.close(() => done()))
-        server.closeAllConnections()
-        await closed
-        server = undefined
+      if (provider) {
+        await provider.close()
+        provider = undefined
       }
     } finally {
       setHostPaths(null)
@@ -184,70 +186,24 @@ async function setupFixture(): Promise<Fixture> {
     join(directory, 'vendor/codex-cli', `codex-code-mode-host${exe}`)
   )
   setHostPaths({ getAppPath: () => directory! })
-  const authorizations: string[] = []
-  const errors: string[] = []
-  const backend: string[] = []
+  // The SHARED fixture in `chatgpt` mode (`fixture-provider.ts`): the binary's
+  // own backend calls (`chatgpt_base_url` — rate limits, profile, models) are
+  // answered 404 and recorded in `backend` instead of hitting chatgpt.com, where
+  // a fake token would earn a 401 and a refresh request the test did not script
+  // (seen on the unsandboxed Windows run); the provider call takes the INJECTED
+  // bearer, which the fixture records rather than matches; and a gzip-encoded
+  // body — what a session under an injected identity sends — is decoded before
+  // it is parsed. A private copy of this server drifts from the one the drives
+  // use, which is exactly how the fixture stopped serving `chatgpt_base_url`.
   const status = { next: [] as number[] }
-  server = createServer((req, res) => {
-    let body = ''
-    req.on('data', (chunk) => {
-      body += chunk
-      if (body.length > 4_000_000) req.destroy()
-    })
-    req.on('error', () => {})
-    req.on('end', () => {
-      // `chatgpt_base_url` points HERE too, so the binary's own backend calls
-      // (rate limits, models) land on the fixture instead of chatgpt.com — where
-      // a fake token would earn a 401 and a refresh request the test did not
-      // script (seen on the unsandboxed Windows run). Recorded, answered 404,
-      // never counted as errors.
-      // The catalog probe (`GET /v1/models`) is the binary's, not the turn's.
-      if (
-        req.url?.startsWith('/backend-api/') ||
-        (req.method === 'GET' && req.url?.startsWith('/v1/models'))
-      ) {
-        backend.push(`${req.method} ${req.url}`)
-        res.writeHead(404, { 'Content-Type': 'application/json' }).end('{"error":"fixture"}')
-        return
-      }
-      if (req.method !== 'POST' || req.url !== '/v1/responses') {
-        errors.push(`unexpected provider request: ${req.method} ${req.url}`)
-        res.writeHead(400).end()
-        return
-      }
-      authorizations.push(String(req.headers.authorization ?? ''))
-      const scripted = status.next.shift()
-      if (scripted && scripted !== 200) {
-        res.writeHead(scripted, { 'Content-Type': 'application/json' }).end('{"error":"scripted"}')
-        return
-      }
-      const events = [
-        { type: 'response.created', response: { id: 'resp-fixture' } },
-        {
-          type: 'response.output_item.done',
-          item: {
-            type: 'message',
-            id: 'msg-fixture',
-            role: 'assistant',
-            content: [{ type: 'output_text', text: 'fixture complete' }]
-          }
-        },
-        {
-          type: 'response.completed',
-          response: {
-            id: 'resp-fixture',
-            usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 }
-          }
-        }
-      ]
-      res.writeHead(200, { 'Content-Type': 'text/event-stream', Connection: 'close' })
-      res.end(
-        events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('')
-      )
-    })
+  provider = await startFixtureProvider({
+    chatgpt: true,
+    // The one addition a scripted 401 needs: `external_auth.rs` asks the host
+    // to refresh only for an unauthorized provider answer.
+    statusFor: () => status.next.shift() ?? 200
   })
-  await new Promise<void>((done) => server!.listen(0, '127.0.0.1', done))
-  const port = (server.address() as { port: number }).port
+  const { authorizations, errors, backend } = provider
+  const port = provider.port
   containment.profile = join(directory, 'isolation.sb')
   writeFileSync(
     containment.profile,
@@ -261,44 +217,13 @@ async function setupFixture(): Promise<Fixture> {
 (allow network-outbound (remote ip "localhost:${port}"))
 `
   )
-  writeFileSync(
-    join(codexHome, 'config.toml'),
-    `model = "mock-model"
-model_provider = "fixture"
-chatgpt_base_url = "http://127.0.0.1:${port}/backend-api"
-approval_policy = "on-request"
-approvals_reviewer = "user"
-sandbox_mode = "read-only"
-cli_auth_credentials_store = "file"
-check_for_update_on_startup = false
-web_search = "disabled"
-[model_providers.fixture]
-name = "Isolated localhost fixture"
-base_url = "http://127.0.0.1:${port}/v1"
-wire_api = "responses"
-# TRUE, unlike the other Codex fixtures: the injected token must actually be
-# attached to the provider call, and a 401 must be recoverable auth rather than
-# an ordinary failure, or nothing would ever ask the host to refresh.
-requires_openai_auth = true
-supports_websockets = false
-request_max_retries = 0
-stream_max_retries = 0
-stream_idle_timeout_ms = 15000
-[analytics]
-enabled = false
-[feedback]
-enabled = false
-[otel]
-exporter = "none"
-[features]
-apps = false
-plugins = false
-remote_plugin = false
-browser_use = false
-computer_use = false
-shell_snapshot = false
-`
-  )
+  // `chatgpt: true` is what adds `chatgpt_base_url` and, unlike every other
+  // Codex fixture, `requires_openai_auth = true`: the injected token must
+  // actually be attached to the provider call, and a 401 must be recoverable
+  // auth rather than an ordinary failure, or nothing would ever ask the host to
+  // refresh. No `apiKey`, so no `auth.json` — the token is memory-only, which
+  // two of the cases below assert by reading that path and expecting a throw.
+  writeFixtureCodexHome(codexHome, { port, model: 'mock-model', chatgpt: true })
   return {
     cwd,
     authorizations,
