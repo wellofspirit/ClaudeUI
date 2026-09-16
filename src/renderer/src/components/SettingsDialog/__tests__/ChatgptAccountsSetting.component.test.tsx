@@ -215,12 +215,12 @@ describe('the page section', () => {
     expect(screen.getAllByTestId('ChatgptAccounts.account')).toHaveLength(2)
   })
 
-  it('states the SWITCH RULE, which is not Claude’s (ADR-068 §2)', async () => {
+  it('states the SWITCH RULE as built: followers disconnect and resume, pins stay (ADR-069 §4)', async () => {
     withAccounts(twoAccounts)
     await renderPane()
     const rule = screen.getByTestId('ChatgptAccounts.switchRule')
     expect(rule).toHaveTextContent(
-      'Switching applies to new Codex sessions only; a running session keeps the account it started with. pi and opencode follow the active account.'
+      'Switching disconnects every running Codex session that follows the active account; each resumes with the new account on its next message. A session pinned to an account keeps it. pi and opencode follow the active account.'
     )
   })
 

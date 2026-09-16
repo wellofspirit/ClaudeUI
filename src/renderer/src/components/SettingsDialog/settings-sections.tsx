@@ -404,11 +404,11 @@ function ModelEffortRow({
  * this one page, so this pane grew a provider heading (name + credential badge +
  * "+ Add account") and states its own switch RULE.
  *
- * The rule is stated per provider because the two are NOT the same: switching a
- * Claude account respawns every running session on it (ADR-015), while a
- * running Codex session keeps the account it started with (ADR-068 §2).
- * Unifying them is a separate decision, so the page says what each one does
- * rather than implying one behaviour for both.
+ * The rule is stated per provider. Both DISCONNECT the sessions whose credential
+ * changed and let each resume on its next message (Claude: `invalidateLiveSessions`
+ * cancels every live Claude session, ADR-015 as built; Codex: a follower leaves
+ * its host, ADR-069 §4); the difference is the ChatGPT-only per-session pin,
+ * which a switch leaves alone.
  *
  * Switching and removing are writes this pane owns; ADDING is a sign-in, and
  * since ADR-068 §3 every sign-in runs in `SignInDialog` — the paste panel and
@@ -527,11 +527,11 @@ function AccountsSetting(): React.JSX.Element {
         })}
 
       {enabled && (
-        // ADR-015's switch semantics, stated where the switch happens — and
-        // deliberately not the same sentence the ChatGPT card carries.
+        // ADR-015's switch semantics as built (`invalidateLiveSessions`), stated
+        // where the switch happens.
         <SettingRow
           testid="AccountsSetting.switchRule"
-          description="Switching restarts every running Claude session on the new account; sessions resume where they were."
+          description="Switching disconnects every running Claude session; each resumes with the new account on its next message."
         />
       )}
     </div>

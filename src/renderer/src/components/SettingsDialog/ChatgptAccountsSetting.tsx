@@ -214,15 +214,16 @@ export function ChatgptAccountsSetting(): React.JSX.Element | null {
             </SettingRow>
           )}
 
-          {/* The switch RULE, stated per provider because it is not the same
-              rule Claude follows. Claude respawns every running session on the
-              new account (ADR-015); a Codex session keeps the token it started
-              with, because a live switch would change usage attribution mid
-              conversation (ADR-068 §2). Unifying the two is a separate ruling,
-              so the page says what each one does rather than implying one. */}
+          {/* The switch RULE, stated per provider. Both providers DISCONNECT
+              the sessions whose credential changed and let each resume on its
+              next message: Claude cancels every live Claude session
+              (`invalidateLiveSessions`, ADR-015 as built); a Codex session that
+              follows the active account leaves its host (ADR-069 §4), while one
+              PINNED to an account is left alone because its credential did not
+              change. Stated twice because the pin exists only on ChatGPT. */}
           <SettingRow
             testid={`${PANE}.switchRule`}
-            description="Switching applies to new Codex sessions only; a running session keeps the account it started with. pi and opencode follow the active account."
+            description="Switching disconnects every running Codex session that follows the active account; each resumes with the new account on its next message. A session pinned to an account keeps it. pi and opencode follow the active account."
           />
         </>
       )}
