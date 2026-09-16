@@ -5,13 +5,23 @@
  * One row per provider IDENTITY, whatever store backs it: the shared vault, the
  * Claude account, opencode's catalog + auth.json, pi's auth.json + models.json.
  * The rows come from `provider-registry:list` (phase 6a) and this component
- * renders them and nothing else — it derives no state, reads no store directly,
- * and every edit happens in the Manage sheet.
+ * renders them and nothing else — it derives no state beyond the rows it is
+ * given, and every edit happens in the Manage sheet.
  *
  * IT RE-READS AFTER EVERY WRITE. The registry publishes no change event, so a
  * write is only visible once `listProviderRegistry()` is called again; that is
  * also the moment a row can DISAPPEAR (turning a native pi provider off removes
  * it), which is why the sheet is closed here rather than by itself.
+ *
+ * THE SNAPSHOT LIVES IN THE STORE (`providerRegistry`, F12), not in this
+ * component. A write is not the only moment the registry changes: the Manage
+ * sheet's "+ Add account" hands over to the ONE sign-in dialog, and that
+ * dialog's `closeSignIn` refreshes the store — with a local copy here, the
+ * still-open sheet kept rendering the accounts from before the sign-in until
+ * the next write (Remove was one, which is why removing a row made the other
+ * appear). Reading the store field instead makes every refresher, wherever it
+ * lives, land on these rows. Only the ERROR is local: keeping the previous rows
+ * on a failed re-read is this card's own behaviour.
  *
  * ANTHROPIC IS NOT MANAGED HERE. Its row's action navigates to Models &
  * providers › Accounts: sign-in, account switching and the endpoint override
@@ -47,6 +57,9 @@ const LIST = 'ProviderList'
 /** The `settings:add-provider` header action — see `SettingsGroup.action`. */
 const ADD_EVENT = 'settings:add-provider'
 
+/** What the card renders from when the very first read failed. */
+const EMPTY_SNAPSHOT: ProviderRegistrySnapshot = { entries: [], opencodeInstalled: true }
+
 /** Chip order, and the order the ENABLED FOR group reads in. */
 const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi']
 
@@ -81,8 +94,16 @@ export function ProviderList({
   navigate?: (target: SettingsTarget) => void
 }): React.JSX.Element {
   /** null until the first read resolves — the card shows one loading row. */
-  const [snapshot, setSnapshot] = useState<ProviderRegistrySnapshot | null>(null)
+  const stored = useSessionStore((s) => s.providerRegistry)
   const [error, setError] = useState<string | null>(null)
+  /**
+   * A first read that FAILED, with nothing in the store to fall back on. The
+   * card then renders empty with its error row rather than sitting on the
+   * loading row forever; it is a flag rather than a second snapshot so there is
+   * still exactly one copy of the registry in the renderer.
+   */
+  const [failedEmpty, setFailedEmpty] = useState(false)
+  const snapshot = stored ?? (failedEmpty ? EMPTY_SNAPSHOT : null)
   /** The provider whose Manage sheet is open. */
   const [openId, setOpenId] = useState<string | null>(null)
   /**
@@ -100,19 +121,19 @@ export function ProviderList({
   const reload = useCallback(async (): Promise<ProviderRegistrySnapshot | null> => {
     try {
       const next = await window.api.listProviderRegistry()
-      setSnapshot(next)
       setError(null)
-      // The composer's hint and the model picker's Sign in item read the SAME
-      // registry through the store (ADR-068 §3, Slice 6), and it publishes no
-      // change event either. This is the one place every sheet's write lands
-      // (`handleWrote` / `handleAdded` both route here), so refreshing beside
-      // the re-read keeps those surfaces from going stale behind an open
-      // settings dialog.
-      void useSessionStore.getState().refreshProviderAuth(next)
+      // The store is where the snapshot lives (see the header), and the same
+      // call keeps the composer's hint and the model picker's Sign in item
+      // (ADR-068 §3, Slice 6) from going stale behind an open settings dialog.
+      // The read is handed over rather than repeated: `provider-registry:list`
+      // can start an opencode server to enumerate its catalog.
+      await useSessionStore.getState().refreshProviderAuth(next)
       return next
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
-      setSnapshot((current) => current ?? { entries: [], opencodeInstalled: true })
+      // The store keeps whatever it last resolved, so the rows the user is
+      // looking at survive; this only covers a FIRST read that never landed.
+      setFailedEmpty(true)
       return null
     }
   }, [])
@@ -156,7 +177,7 @@ export function ProviderList({
   // an Add sheet whose catalog fills in a moment later.
   const addSheet = adding && (
     <ProviderAddSheet
-      snapshot={snapshot ?? { entries: [], opencodeInstalled: true }}
+      snapshot={snapshot ?? EMPTY_SNAPSHOT}
       focusId={adding.focusId}
       onClose={() => setAdding(null)}
       onAdded={handleAdded}

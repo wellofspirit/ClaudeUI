@@ -1279,6 +1279,19 @@ export interface SessionState {
    * as the app did before this existed: an unprobed host is not a signed-out one.
    */
   providerAuth: ProviderAuthView
+  /**
+   * The last snapshot {@link SessionState.refreshProviderAuth} resolved, and the
+   * ONE copy of it in the renderer (F12). `provider-registry:list` publishes no
+   * change event, so every surface that renders the registry has to re-read it;
+   * before this field the settings list kept its own copy and the dialog's
+   * `closeSignIn` refresh landed only on `providerAuth`, leaving an OPEN sheet
+   * showing the accounts from before the sign-in it had just launched.
+   *
+   * Null until the first read lands, and never cleared by a FAILED read: a host
+   * that answered once and then failed keeps its rows rather than blanking a
+   * list the user is looking at.
+   */
+  providerRegistry: ProviderRegistrySnapshot | null
   /** Multi-account state (ADR-015). Null until first load/event. */
   accountsState: AccountsState | null
   /** Global vendor OAuth flow state (auto/loopback OAuth in progress). */
@@ -1490,9 +1503,10 @@ export interface SessionState {
   setAuthSource: (source: string) => void
   setVendorAuth: (map: VendorAuthMap) => void
   /**
-   * Re-read the provider registry into {@link SessionState.providerAuth}. Safe
-   * to call repeatedly and never throws: a failed read leaves ChatGPT
-   * `'unknown'` rather than claiming the user is signed out.
+   * Re-read the provider registry into {@link SessionState.providerRegistry} and
+   * {@link SessionState.providerAuth}. Safe to call repeatedly and never throws:
+   * a failed read leaves ChatGPT `'unknown'` rather than claiming the user is
+   * signed out, and leaves the last good snapshot standing.
    *
    * `snapshot` short-circuits the read for a caller that has just made it —
    * `provider-registry:list` can start an opencode server to enumerate its
@@ -1632,6 +1646,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   authSource: null,
   vendorAuth: null,
   providerAuth: UNKNOWN_PROVIDER_AUTH,
+  providerRegistry: null,
   accountsState: null,
   vendorOAuth: null,
   signInDialog: null,
@@ -2765,7 +2780,11 @@ export const useSessionStore = create<SessionState>((set) => ({
         /* No vault, no host, or the read failed — 'unknown', never 'signed out'. */
       }
     }
-    set((s) => ({ providerAuth: { ...s.providerAuth, ...chatgptAuthFromRegistry(resolved) } }))
+    set((s) => ({
+      // A failed read keeps the last good snapshot — see the field's own note.
+      providerRegistry: resolved ?? s.providerRegistry,
+      providerAuth: { ...s.providerAuth, ...chatgptAuthFromRegistry(resolved) }
+    }))
   },
   setAccountsState: (data) => set({ accountsState: data }),
   respawnAllSessions: () => {
@@ -2804,7 +2823,10 @@ export const useSessionStore = create<SessionState>((set) => ({
     set({ signInDialog: null })
     // The dialog's OUTCOME is what changes the answer, and it has no completion
     // event of its own — closing it is the one moment every path (done,
-    // cancelled, dismissed mid-flow) passes through.
+    // cancelled, dismissed mid-flow) passes through. Since F12 this reaches the
+    // settings list too, which renders `providerRegistry`: "+ Add account" opens
+    // this dialog from an OPEN sheet, and that sheet is not a write, so nothing
+    // else would have re-read the registry underneath it.
     void useSessionStore.getState().refreshProviderAuth()
   },
   cancelVendorOAuth: () => {

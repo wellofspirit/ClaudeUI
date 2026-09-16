@@ -141,6 +141,9 @@ const called = (method: keyof typeof api): unknown[][] => api[method].mock.calls
 
 beforeEach(async () => {
   app = await bootTestApp()
+  // The registry snapshot lives in the store (F12), which is a module singleton
+  // outliving `teardown()` — a case must not open on the previous case's rows.
+  useSessionStore.setState({ providerRegistry: null })
   calls = []
   registryReads = 0
   definitions = [chatgptDefinition, customDefinition]
