@@ -70,17 +70,15 @@ export function mapCodexItem(
   switch (item.type) {
     case 'agentMessage':
       return completed ? [message([{ type: 'text', text: item.text }])] : []
-    case 'reasoning':
-      return completed
-        ? [
-            message([
-              {
-                type: 'thinking',
-                text: (item.summary.length ? item.summary : item.content).join('\n\n')
-              }
-            ])
-          ]
-        : []
+    case 'reasoning': {
+      if (!completed) return []
+      // The ChatGPT backend returns reasoning items with neither summary nor
+      // content for some models unless a summary is requested
+      // (`model_reasoning_summary`); an empty "Thought" block is noise, so the
+      // item maps to nothing (F13). Live and cold history share this mapper.
+      const text = (item.summary.length ? item.summary : item.content).join('\n\n')
+      return text.length ? [message([{ type: 'thinking', text }])] : []
+    }
     case 'userMessage':
       return completed
         ? [

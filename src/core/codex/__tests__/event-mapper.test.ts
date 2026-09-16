@@ -34,6 +34,29 @@ describe('Codex item mapping', () => {
       result: expect.stringContaining('did not report completion')
     })
   })
+  it('renders a completed reasoning item with text, and nothing for one with none (F13)', () => {
+    const reasoning = (summary: string[], content: string[]): CodexMappedEvent[] =>
+      mapCodexItem(
+        'root',
+        'turn',
+        { type: 'reasoning', id: 'r1', summary, content } as ThreadItem,
+        true,
+        1
+      )
+    expect(reasoning(['thought'], [])).toEqual([
+      expect.objectContaining({
+        kind: 'message',
+        message: expect.objectContaining({ content: [{ type: 'thinking', text: 'thought' }] })
+      })
+    ])
+    expect(reasoning([], ['raw'])[0]).toMatchObject({
+      message: { content: [{ type: 'thinking', text: 'raw' }] }
+    })
+    // The ChatGPT backend returns reasoning items with neither a summary nor
+    // content for some models unless a summary is requested; an empty
+    // "Thought" block is noise, not a thought.
+    expect(reasoning([], [])).toEqual([])
+  })
   it('scopes item ids across turns and threads without delimiter collisions', () => {
     expect(
       new Set([
