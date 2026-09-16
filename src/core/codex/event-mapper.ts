@@ -45,6 +45,29 @@ export type CodexMappedEvent =
       fileDiffs?: FileDiff[]
     }
 
+/** A line that is ONE bold span and nothing else — the inner `(?!\*\*)` keeps
+ * `**a** and **b**` (two spans) from reading as one wrapper around `a** and **b`. */
+const BOLD_LINE = /^\*\*((?:(?!\*\*)[\s\S])+)\*\*$/
+
+/**
+ * Drops one wrapping `**…**` from every line that is entirely bold.
+ *
+ * The ChatGPT backend's reasoning summary is Markdown: for the GPT-5.6/6 models
+ * a "detailed" summary is a single bold headline
+ * (`**Calculating primes between 100 and 150**`, probed against a real account
+ * 2026-09-16), and a longer one opens each paragraph with one. `ThinkingBlock`
+ * renders the text verbatim and pre-wrapped (`ThinkingBlock.tsx`), so the
+ * asterisks would show — everything else in the app renders a summary as plain
+ * text. Only a whole-line span is touched: bold used INSIDE a sentence is the
+ * model's emphasis and is left alone rather than half-stripped.
+ */
+function unbold(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => BOLD_LINE.exec(line.trim())?.[1] ?? line)
+    .join('\n')
+}
+
 /** No clocks or session state: callers supply the observation timestamp. */
 export function mapCodexItem(
   threadId: string,
@@ -76,7 +99,7 @@ export function mapCodexItem(
       // content for some models unless a summary is requested
       // (`model_reasoning_summary`); an empty "Thought" block is noise, so the
       // item maps to nothing (F13). Live and cold history share this mapper.
-      const text = (item.summary.length ? item.summary : item.content).join('\n\n')
+      const text = unbold((item.summary.length ? item.summary : item.content).join('\n\n'))
       return text.length ? [message([{ type: 'thinking', text }])] : []
     }
     case 'userMessage':
@@ -338,7 +361,16 @@ export function mapCodexDelta(
   if (method === 'item/agentMessage/delta')
     return [{ kind: 'stream', delta: { type: 'text', text: params.delta } }]
   if (method === 'item/reasoning/summaryTextDelta' || method === 'item/reasoning/textDelta')
-    return [{ kind: 'stream', delta: { type: 'thinking', text: params.delta } }]
+    // An EMPTY delta maps to nothing: the caller turns a thinking delta into an
+    // item-scoped message upsert, so an empty one opens a "Thought" block with
+    // no text under it — which is what a `summary = "none"` turn would produce.
+    // The text is otherwise passed through WHOLE, asterisks included: the
+    // backend can split a headline mid-token across deltas, so no single delta
+    // can be recognised as a wrapper. The completed item's canonical `summary`
+    // is where {@link unbold} runs, and it upserts over this under the same id.
+    return params.delta.length
+      ? [{ kind: 'stream', delta: { type: 'thinking', text: params.delta } }]
+      : []
   if (method === 'item/commandExecution/outputDelta')
     return [
       {

@@ -9,6 +9,7 @@
 //        [--provider openai|fixture] [--model <name>] [--text <assistant text>]
 //        [--no-auth] [--reviewer user|auto_review]
 //        [--command "<shell>"] [--guardian approved|denied]
+//        [--reasoning "<headline>"]
 //        [--chatgpt [--vault-home <dir> [--accounts <n>]]]
 //
 // Prints `PORT <n>` on the first line of stdout and then one JSON line
@@ -42,6 +43,16 @@
 // untouched environment (the drive recipe's shim patches `os.homedir()` in the
 // Electron main process only), so `$HOME` there is the developer's real home.
 // Pass --command to review something else.
+//
+// --reasoning "<headline>" puts a REASONING item in front of whatever every
+// agent turn was going to answer with, streamed the way the wire streams one
+// (`output_item.added` with an empty summary, `reasoning_summary_part.added`,
+// `reasoning_summary_text.delta`, `output_item.done` carrying the summary), so
+// the app shows a rendered Thought without a credential. Guardian turns are
+// excluded exactly as --command excludes them: the reviewer's own session is
+// not the agent's, and a Thought on it would render nowhere. Pass the headline
+// as the backend writes one — a bold Markdown line — to exercise the strip
+// (F19: a whole-line `**…**` is dropped from the canonical thinking block).
 //
 // --chatgpt serves an INJECTED ChatGPT identity instead of an API key: the
 // config gains `chatgpt_base_url` (so the binary's own `/wham/*` and usage reads
@@ -81,6 +92,7 @@ import {
   FIXTURE_AUTHORIZATION,
   fixtureAssistantMessage,
   fixtureGuardianVerdict,
+  fixtureReasoningItem,
   isGuardianRequest,
   startFixtureProvider,
   writeFabricatedVault,
@@ -103,6 +115,11 @@ const provider = arg('provider', 'openai')
 const model = arg('model', '')
 const text = arg('text', undefined)
 const command = arg('command', '')
+const reasoning = arg('reasoning', '')
+if (argv.includes('--reasoning') && !reasoning) {
+  console.error('codex-fixture-provider: --reasoning needs a headline')
+  process.exit(2)
+}
 const guardian = arg('guardian', '')
 if (guardian && guardian !== 'approved' && guardian !== 'denied') {
   console.error('codex-fixture-provider: --guardian must be `approved` or `denied`')
@@ -162,18 +179,24 @@ const fixture = await startFixtureProvider({
     const agentTurns = requests.filter(
       (entry) => !isGuardianRequest(entry) && entry.generate !== false
     ).length
-    if (scriptedCommand && request.generate !== false && agentTurns === 1)
-      return {
-        type: 'function_call',
-        call_id: 'fixture-command',
-        name: 'exec_command',
-        arguments: JSON.stringify({
-          cmd: scriptedCommand,
-          sandbox_permissions: 'require_escalated',
-          justification: 'Isolated fixture write outside the workspace root'
-        })
-      }
-    return fixtureAssistantMessage(text)
+    const answer =
+      scriptedCommand && request.generate !== false && agentTurns === 1
+        ? {
+            type: 'function_call',
+            call_id: 'fixture-command',
+            name: 'exec_command',
+            arguments: JSON.stringify({
+              cmd: scriptedCommand,
+              sandbox_permissions: 'require_escalated',
+              justification: 'Isolated fixture write outside the workspace root'
+            })
+          }
+        : fixtureAssistantMessage(text)
+    // Every AGENT turn reasons first. The guardian predicate is the gate even
+    // without --guardian: a reviewer session's Thought belongs to no card.
+    return reasoning && !isGuardianRequest(request) && request.generate !== false
+      ? [fixtureReasoningItem(reasoning), answer]
+      : answer
   }
 })
 
@@ -202,6 +225,7 @@ console.log(
     authorization: withAuth,
     command: scriptedCommand || null,
     guardian: guardian || null,
+    reasoning: reasoning || null,
     chatgpt,
     vaultAccounts: vault ? vault.accounts.length : 0
   })

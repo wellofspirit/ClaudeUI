@@ -4608,3 +4608,78 @@ describe('Codex MCP tool approvals', () => {
     expect(await elicitation({ turnId: null }).result).toEqual(ACCEPT)
   })
 })
+
+/**
+ * Reasoning summaries (F19), against the wire a real account produced on
+ * 2026-09-16: with `model_reasoning_summary = "detailed"` a turn that reasons
+ * emits `item/started` (empty `summary` and `content`), one
+ * `item/reasoning/summaryPartAdded`, ONE `item/reasoning/summaryTextDelta`
+ * carrying a bold Markdown headline, and `item/completed` repeating that
+ * headline verbatim in `summary`.
+ *
+ * Both halves reach the transcript as an item-scoped upsert under the SAME
+ * `codexItemId`, so the completed item's text replaces the streamed one — which
+ * is why the strip belongs on the completed item and the deltas are left whole
+ * (a headline can be split mid-token across deltas). What a client renders is
+ * the canonical fold, so that is what these assert.
+ */
+describe('Codex reasoning summaries', () => {
+  const HEADLINE = '**Calculating primes between 100 and 150**'
+  const PLAIN = 'Calculating primes between 100 and 150'
+  const reasoningItem = (summary: string[]) => ({
+    id: 'r1',
+    type: 'reasoning',
+    summary,
+    content: []
+  })
+  const thread = { threadId: 'root', turnId: 'turn' }
+  /** Fold everything this session broadcast through the shared reducer. */
+  const canonical = () =>
+    events.mock.calls
+      // `session:status` re-keys canonical onto the native thread id; this
+      // fixture has no manager to mirror the move, and nothing here needs it.
+      .filter(([channel]) => channel !== 'session:status')
+      .reduce(
+        (state, [channel, args], index) => applyEvent(state, { channel, args, seq: index + 2 }),
+        applyEvent(emptyCanonicalState(), {
+          channel: 'session:created',
+          args: ['temporary', { cwd: '/isolated', engineId: 'codex' }],
+          seq: 1
+        })
+      ).sessions.temporary
+  const thinking = () =>
+    canonical()
+      .messages.filter((message) => message.role === 'assistant')
+      .flatMap((message) => message.content)
+      .filter((block) => block.type === 'thinking')
+
+  it('reconciles the streamed headline and the completed item into one plain thinking block', async () => {
+    const { session, notify } = fixture()
+    await session.run('primes between 100 and 150?')
+    notify('item/started', { ...thread, item: reasoningItem([]) })
+    notify('item/reasoning/summaryPartAdded', { ...thread, itemId: 'r1', summaryIndex: 0 })
+    notify('item/reasoning/summaryTextDelta', {
+      ...thread,
+      itemId: 'r1',
+      summaryIndex: 0,
+      delta: HEADLINE
+    })
+    notify('item/completed', { ...thread, item: reasoningItem([HEADLINE]) })
+    expect(thinking()).toEqual([{ type: 'thinking', text: PLAIN }])
+    // No leftover asterisks anywhere in the fold, and no live buffer left open.
+    expect(JSON.stringify(canonical().messages)).not.toContain('**')
+    expect(canonical().streamingThinking).toBe('')
+  })
+
+  it('leaves no empty Thought behind when the backend streams an empty delta', async () => {
+    // `summary: "none"` emits the reasoning item with nothing in it; an empty
+    // delta would otherwise open a thinking block with no text — the collapsed
+    // "Thought" header with nothing under it the owner screenshotted.
+    const { session, notify } = fixture()
+    await session.run('37 x 14?')
+    notify('item/started', { ...thread, item: reasoningItem([]) })
+    notify('item/reasoning/summaryTextDelta', { ...thread, itemId: 'r1', delta: '' })
+    notify('item/completed', { ...thread, item: reasoningItem([]) })
+    expect(thinking()).toEqual([])
+  })
+})

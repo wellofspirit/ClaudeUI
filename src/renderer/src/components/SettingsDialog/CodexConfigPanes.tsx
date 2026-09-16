@@ -422,11 +422,18 @@ export function CodexModelBehaviorSection(): React.JSX.Element {
   const { models, efforts } = useCodexCatalog()
   return (
     <PaneShell testid="CodexModelBehaviorSection" api={api}>
+      {/*
+        The value is resolved ONCE per thread, when its step settings are built
+        (`core/src/session/step_settings.rs`), and ClaudeUI sends no per-turn
+        `summary` override on `turn/start` — the user's config is the single
+        source (ruled 2026-09-16). So a write here reaches new threads only, and
+        the row says so rather than leaving the user watching an open session.
+      */}
       <SelectRow
         api={api}
         path={['model_reasoning_summary']}
         label="Reasoning summaries"
-        helper="How much of the model's reasoning Codex asks the API to summarise."
+        helper="How much of the model's reasoning Codex asks the API to summarise. Applies to sessions started after the change; an open session keeps the setting it started with."
         unsetLabel="Codex default"
         options={[
           { value: 'auto', label: 'Auto' },

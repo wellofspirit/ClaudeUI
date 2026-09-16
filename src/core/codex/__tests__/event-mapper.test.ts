@@ -57,6 +57,34 @@ describe('Codex item mapping', () => {
     // "Thought" block is noise, not a thought.
     expect(reasoning([], [])).toEqual([])
   })
+  it('strips the bold headline a detailed summary is made of (F19)', () => {
+    const thought = (summary: string[]): unknown =>
+      mapCodexItem(
+        'root',
+        'turn',
+        { type: 'reasoning', id: 'r1', summary, content: [] } as ThreadItem,
+        true,
+        1
+      )[0]
+    // The exact wire sample: `summary: "detailed"` on GPT-5.6 Luna, one bold
+    // Markdown headline (probed against a real account 2026-09-16).
+    expect(thought(['**Calculating primes between 100 and 150**'])).toMatchObject({
+      message: { content: [{ type: 'thinking', text: 'Calculating primes between 100 and 150' }] }
+    })
+    // A headline above its prose: the headline loses its asterisks, the prose
+    // keeps every character, including emphasis used INSIDE a sentence.
+    expect(thought(['**Counting primes 100–150**\n\nI check each **odd** number.'])).toMatchObject({
+      message: {
+        content: [
+          { type: 'thinking', text: 'Counting primes 100–150\n\nI check each **odd** number.' }
+        ]
+      }
+    })
+    // Two spans on one line are not a wrapper and are left exactly as they are.
+    expect(thought(['**one** and **two**'])).toMatchObject({
+      message: { content: [{ type: 'thinking', text: '**one** and **two**' }] }
+    })
+  })
   it('scopes item ids across turns and threads without delimiter collisions', () => {
     expect(
       new Set([
@@ -122,6 +150,27 @@ describe('Codex item mapping', () => {
         delta: 'thought'
       })
     ).toEqual([{ kind: 'stream', delta: { type: 'thinking', text: 'thought' } }])
+    // A headline reaches the stream WHOLE — the backend can split one across
+    // deltas, so no single delta can be recognised as a wrapper; the completed
+    // item's summary is what gets stripped, and it upserts over this (F19).
+    expect(
+      mapCodexDelta('item/reasoning/summaryTextDelta', {
+        threadId: 'r',
+        turnId: 't',
+        itemId: 'i',
+        delta: '**Calculating'
+      })
+    ).toEqual([{ kind: 'stream', delta: { type: 'thinking', text: '**Calculating' } }])
+    // An EMPTY delta maps to nothing: the caller would otherwise open a
+    // "Thought" block with no text under it.
+    expect(
+      mapCodexDelta('item/reasoning/summaryTextDelta', {
+        threadId: 'r',
+        turnId: 't',
+        itemId: 'i',
+        delta: ''
+      })
+    ).toEqual([])
     expect(
       mapCodexDelta('item/commandExecution/outputDelta', {
         threadId: 'r',

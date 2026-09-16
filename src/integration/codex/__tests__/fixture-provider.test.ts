@@ -49,6 +49,8 @@ import {
   FIXTURE_AUTHORIZATION,
   FIXTURE_HOLD,
   fixtureAssistantMessage,
+  fixtureReasoningItem,
+  fixtureResponseEvents,
   renderFixtureConfigToml,
   startFixtureProvider,
   writeFabricatedVault,
@@ -307,6 +309,73 @@ describe('fixture provider', () => {
     expect(first.body).toContain('"name":"fixture_echo"')
     expect(second.body).toContain('"text":"second"')
     expect(provider.requests.length).toBe(2)
+  })
+
+  it('streams a reasoning item the way the wire does, before the message (F19)', async () => {
+    // `scripts/probe-codex.py`'s `answer(reasoning=True)` is the shape: the item
+    // arrives with an EMPTY summary, the summary text comes as a delta, and only
+    // then is the item done. Without the delta the app-server emits no
+    // `item/reasoning/summaryTextDelta` at all and nothing streams.
+    const events = fixtureResponseEvents([
+      fixtureReasoningItem('**Fixture headline**'),
+      fixtureAssistantMessage('done')
+    ])
+    expect(events.map((event) => event.type)).toEqual([
+      'response.created',
+      'response.output_item.added',
+      'response.reasoning_summary_part.added',
+      'response.reasoning_summary_text.delta',
+      'response.output_item.done',
+      'response.output_item.done',
+      'response.completed'
+    ])
+    expect(events[1]).toMatchObject({
+      item: { type: 'reasoning', id: 'reason-fixture', summary: [] }
+    })
+    expect(events[3]).toEqual({
+      type: 'response.reasoning_summary_text.delta',
+      summary_index: 0,
+      delta: '**Fixture headline**'
+    })
+    expect(events[4]).toMatchObject({
+      item: { summary: [{ type: 'summary_text', text: '**Fixture headline**' }] }
+    })
+    expect(events[5]).toMatchObject({ item: { type: 'message' } })
+  })
+
+  it('keeps a one-item turn at exactly three events', async () => {
+    // The framing every existing caller asserts: a scripted item that is not
+    // reasoning is still `created` / `output_item.done` / `completed`.
+    expect(fixtureResponseEvents(fixtureAssistantMessage()).map((event) => event.type)).toEqual([
+      'response.created',
+      'response.output_item.done',
+      'response.completed'
+    ])
+  })
+
+  it('serves a scripted list of items over the wire in order', async () => {
+    provider = await startFixtureProvider({
+      script: () => [fixtureReasoningItem('**Fixture headline**'), fixtureAssistantMessage('done')]
+    })
+    const res = await post(provider.port, '{}')
+    expect(res.status).toBe(200)
+    expect(
+      res.body
+        .split('\n\n')
+        .filter(Boolean)
+        .map((block) => block.split('\n')[0])
+    ).toEqual([
+      'event: response.created',
+      'event: response.output_item.added',
+      'event: response.reasoning_summary_part.added',
+      'event: response.reasoning_summary_text.delta',
+      'event: response.output_item.done',
+      'event: response.output_item.done',
+      'event: response.completed'
+    ])
+    expect(res.body).toContain('"delta":"**Fixture headline**"')
+    expect(res.body).toContain('"text":"done"')
+    expect(provider.errors).toEqual([])
   })
 
   it('refuses a request whose authorization does not match, and records it', async () => {

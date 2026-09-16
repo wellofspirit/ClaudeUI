@@ -320,6 +320,17 @@ describe('control kinds', () => {
     expect(onlyEdit(1)).toEqual({ keyPath: 'model_reasoning_summary', value: null })
   })
 
+  it('says on the Reasoning summaries row that the change only reaches NEW sessions', async () => {
+    // Codex resolves the summary level once per thread, when its step settings
+    // are built, and ClaudeUI sends no per-turn `summary` override — so a user
+    // who flips this while a thread is open sees nothing change in it, and the
+    // owner hit exactly that on 2026-09-16. The row has to say so (F19).
+    await renderPane(<CodexModelBehaviorSection />)
+    expect(rowFor('model_reasoning_summary').textContent).toContain(
+      'Applies to sessions started after the change; an open session keeps the setting it started with.'
+    )
+  })
+
   it('a NUMBER commits on blur and an emptied field removes the key', async () => {
     userLayer = { tool_output_token_limit: 4096 }
     await renderPane(<CodexContextSection />)

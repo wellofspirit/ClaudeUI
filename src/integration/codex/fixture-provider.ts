@@ -10,9 +10,11 @@
  * fixture would drift from the one the integration suite proves, and the stress
  * loop would then be measuring a different provider than the tests do.
  *
- * What it is NOT: a mock of the Responses API. It answers exactly the three SSE
- * events Codex needs to finish a turn (`response.created`, one
- * `response.output_item.done`, `response.completed`) and nothing else. Anything
+ * What it is NOT: a mock of the Responses API. It answers exactly the SSE events
+ * Codex needs to finish a turn (`response.created`, one
+ * `response.output_item.done` per scripted output item, `response.completed` —
+ * plus the `reasoning_summary_*` deltas a reasoning item is streamed as, since
+ * nothing else makes the app-server emit a thinking delta) and nothing else. Anything
  * the caller did not ask for — another path, another method, a mismatched
  * `authorization` — is recorded in {@link FixtureProvider.errors} rather than
  * answered, because a fixture that quietly tolerates an unexpected request turns
@@ -116,11 +118,63 @@ export function fixtureGuardianVerdict(verdict: 'approved' | 'denied'): FixtureO
   )
 }
 
-/** The three events one turn is made of. */
-export function fixtureResponseEvents(item: FixtureOutputItem): Record<string, unknown>[] {
+/**
+ * A reasoning output item carrying ONE summary line.
+ *
+ * What the ChatGPT backend actually returns for `summary = "detailed"` on the
+ * GPT-5.6/6 models is a single bold Markdown headline — probed against a real
+ * account 2026-09-16 — so the default reads like one. Put it BEFORE the
+ * assistant message in a turn's items and {@link fixtureResponseEvents} expands
+ * it into the four-event sequence the wire really carries, which is what makes
+ * the app show a rendered Thought without a credential (F19).
+ */
+export function fixtureReasoningItem(
+  text = '**Fixture reasoning headline**',
+  id = 'reason-fixture'
+): FixtureOutputItem {
+  return { type: 'reasoning', id, summary: [{ type: 'summary_text', text }] }
+}
+
+/**
+ * The events for ONE output item.
+ *
+ * A message is a bare `response.output_item.done` — three events is all Codex
+ * needs to finish a turn, and every existing fixture caller asserts exactly
+ * those. A REASONING item is not: its summary only reaches the app-server's
+ * `item/reasoning/summaryTextDelta` if the provider streams it, so the item is
+ * expanded into the sequence `scripts/probe-codex.py`'s `answer(reasoning=True)`
+ * builds — `output_item.added` with an EMPTY summary, then one
+ * `reasoning_summary_part.added` + `reasoning_summary_text.delta` per summary
+ * entry, then `output_item.done` carrying the whole summary.
+ */
+function fixtureItemEvents(item: FixtureOutputItem): Record<string, unknown>[] {
+  if (item.type !== 'reasoning') return [{ type: 'response.output_item.done', item }]
+  const summary = Array.isArray(item.summary) ? item.summary : []
+  return [
+    { type: 'response.output_item.added', item: { ...item, summary: [] } },
+    ...summary.flatMap((part, summary_index) => [
+      {
+        type: 'response.reasoning_summary_part.added',
+        summary_index,
+        part: { type: 'summary_text', text: '' }
+      },
+      {
+        type: 'response.reasoning_summary_text.delta',
+        summary_index,
+        delta: (part as { text?: string })?.text ?? ''
+      }
+    ]),
+    { type: 'response.output_item.done', item }
+  ]
+}
+
+/** The events one turn is made of: `created`, its output items, `completed`. */
+export function fixtureResponseEvents(
+  item: FixtureOutputItem | FixtureOutputItem[]
+): Record<string, unknown>[] {
   return [
     { type: 'response.created', response: { id: 'resp-fixture' } },
-    { type: 'response.output_item.done', item },
+    ...(Array.isArray(item) ? item : [item]).flatMap(fixtureItemEvents),
     FIXTURE_COMPLETED
   ]
 }
@@ -143,8 +197,11 @@ export interface FixtureProviderOptions {
   host?: string
   /** Port. Default 0 (ephemeral) — read the real one off {@link FixtureProvider.port}. */
   port?: number
-  /** Chooses the output item per turn. Default: one assistant text message. */
-  script?: (turn: FixtureTurn) => FixtureOutputItem | typeof FIXTURE_HOLD
+  /**
+   * Chooses the output item — or the ordered LIST of items, for a turn that
+   * reasons before it speaks — per turn. Default: one assistant text message.
+   */
+  script?: (turn: FixtureTurn) => FixtureOutputItem | FixtureOutputItem[] | typeof FIXTURE_HOLD
   /**
    * The HTTP status an accepted turn is answered with. Anything other than 200
    * ends the request with `{"error":"scripted"}` and no SSE — the ONLY way to
