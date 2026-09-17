@@ -1,6 +1,6 @@
 # ADR-026 — Development workflow: main model orchestrates, sub-agent implements, review every line
 
-**Status:** Accepted (model tiers updated 2026-07-30: Fable orchestrates, Opus implements; amended 2026-09-16: an Opus verifier drives the real app and the main model reviews its proof)
+**Status:** Accepted (amended 2026-09-17: GPT-5.6 Sol replaces Opus for implementation and verification; the main model orchestrates, reviews and commits. The separate-verifier requirement from 2026-09-16 remains.)
 **Relates to:** ADR-027 (test data attributes — the structural-verification tier this workflow leans on)
 **Operational detail:** the loop + standing constraints below. (Originally mirrored from `docs/v2/ROADMAP.md` § "How we work"; the V2 docs were removed after V2 shipped, so this ADR is now the single home.)
 
@@ -9,7 +9,7 @@
 All of V2 (engine/vendor/account split, the opencode backend, persistence, metering, the
 interaction-parity series) was built with one division of labour, and it held up: **the main model
 is the orchestrator and reviewer; a cheaper sub-agent writes the code.** (Originally Opus
-orchestrating Sonnet; since 2026-07-30 the tiers are **Fable orchestrating Opus** — the division of
+orchestrating Sonnet; from 2026-07-30 the tiers were **Fable orchestrating Opus**, and on 2026-09-17 Daniel substituted **GPT-5.6 Sol** for the coding agent — the division of
 labour is the decision, the specific models track whatever the current tier pairing is.) Every phase that
 followed it surfaced at least one real bug _in review_ — a model-picker regression, dead persisted
 data, a vacuous migration test, an `acquire()` race, a per-frame token overcount, a wrong auth-source
@@ -30,12 +30,12 @@ user-visible. Trivial mechanical edits and pure conversational answers are exemp
 
 ### Roles
 
-- **Main model (Fable) — orchestrator + reviewer + committer.** Owns scope, design, the kickoff spec,
+- **Main model — orchestrator + reviewer + committer.** Owns scope, design, the kickoff spec,
   line-by-line review, the gates, the real-app verification, and the commit. The buck stops here.
-- **Opus sub-agent — implementer.** Writes code against the spec. **Never** commits, `git add`s,
+- **GPT-5.6 Sol sub-agent — implementer.** Writes code against the spec. **Never** commits, `git add`s,
   creates branches, or runs `bun install`/`add`/`remove`. Leaves the working tree for review and
   reports deltas, exact verify-gate output, and any deviation from the spec. **Never self-certifies.**
-- **Opus sub-agent — verifier (since 2026-09-16).** A SEPARATE agent from the implementer, dispatched
+- **GPT-5.6 Sol sub-agent — verifier (separate role since 2026-09-16).** A SEPARATE agent from the implementer, dispatched
   after code review is clean. Drives the real Electron app (`verifier-electron` skill /
   `scripts/app-shot.mjs`) against a written verification brief, asserts the live DOM by `data-testid`
   (ADR-027), and returns the evidence: the DOM assertions it ran with their output, and the absolute
@@ -53,7 +53,7 @@ user-visible. Trivial mechanical edits and pure conversational answers are exemp
 3. **Write a kickoff spec**: scope decisions with the chosen forks, a precise file/seam map,
    verified facts so the agent doesn't re-discover, an explicit out-of-scope list, step-by-step,
    verify gates, gotchas, a suggested commit message.
-4. **Dispatch the Opus agent** (`Agent` tool, `subagent_type: general-purpose`, `model: opus`)
+4. **Dispatch the GPT-5.6 Sol agent** (explicit model `gpt-5.6-sol`, or the tool's equivalent GPT-5.6 Sol identifier)
    pointed at the spec, with the standing constraints (no commit / no branch / no `bun install`).
 5. **Review every single line** of the agent's diff (`git diff <base>`). Read the actual code, not the
    agent's summary. Run independent checks (re-run gates, grep, probe the wire). Hunt subtle bugs.
@@ -64,7 +64,7 @@ user-visible. Trivial mechanical edits and pure conversational answers are exemp
 7. **Verify against the real dev build.** All gates pass:
    `bun run typecheck && bun run test && bun run test:ci && bun run lint && bun run build`
    (0 lint errors; the handful of pre-existing `exhaustive-deps` warnings are OK). Then, for any
-   UI/behavior change, **dispatch the Opus verifier** (since 2026-09-16; before that the main model
+   UI/behavior change, **dispatch a separate GPT-5.6 Sol verifier** (since 2026-09-16; before that the main model
    drove the app itself) with a verification brief: which build to run, the exact user-visible claims
    to check, the `data-testid`s to assert, and the screenshots to capture. The verifier drives the
    real Electron app via the `verifier-electron` skill (`scripts/app-shot.mjs`), asserts the live DOM
@@ -84,7 +84,7 @@ user-visible. Trivial mechanical edits and pure conversational answers are exemp
 drive + the main model's proof review) → commit+push → update. The implementing agent never commits;
 the main model commits only after the review loop and the real-build verification are both clean.
 
-**What the main model does, and only that (Daniel, 2026-09-16):** research, write the spec, delegate
+**What the main model does, and only that (Daniel, 2026-09-16; reaffirmed 2026-09-17):** research, write the spec, delegate
 the build, review the code, delegate the end-to-end verification, review the proof, commit. It does
 not implement (beyond docs, specs and trivial edits) and it does not drive the app by hand any more:
 the verifier drives, the main model judges the screenshots.
