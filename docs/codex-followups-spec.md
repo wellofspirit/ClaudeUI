@@ -477,6 +477,6 @@ read-only dependency on reliable event progress, retaining no-next-token recover
 with capped retry backoff, sharing message commit semantics with `session:message`
 while keeping legacy buffer clearing separate, and explicitly scheduling the
 Claude/opencode/pi migrations plus retirement as unfinished roadmap item 2 work.
-GPT-5.6 Sol now implements; the main model reviews and a separate Sol verifier
-reports real-app evidence (ADR-026 amendment). The review corrections and final
+For this GPT-6-driven slice, GPT-5.6 Sol implements and a separate Sol verifier
+reports real-app evidence; Fable-driven work retains Opus delegation (ADR-026). The review corrections and final
 verification are recorded in the per-item design's verification record.

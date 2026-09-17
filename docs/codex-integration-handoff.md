@@ -9,7 +9,7 @@ State on 2026-09-17. PR #37 (`codex-integration → pre-release`) merged on 2026
 3. [`codex-followups-spec.md`](codex-followups-spec.md) — F1 onwards; the open kickoffs are at the end.
 4. [`codex-integration-spec.md`](codex-integration-spec.md) § "Mandatory remaining work" — the milestone record.
 5. [`architecture/codex.md`](architecture/codex.md), then [`codex-spike.md`](codex-spike.md) for the binary probes.
-6. [ADR-026](adr/adr-026_development-workflow.md) (amended 2026-09-17: GPT-5.6 Sol implements and a separate Sol verifier drives the app; the main model reviews code and PNGs), [ADR-030](adr/adr-030_capability-honesty.md), [ADR-038](adr/adr-038_event-driven-approval-lifecycle.md), [ADR-053](adr/adr-053_queue-item-identity-cc-parity.md), [SyncCore](architecture/sync-core.md).
+6. [ADR-026](adr/adr-026_development-workflow.md) (amended 2026-09-17: Fable delegates to Opus; GPT-6 delegates to GPT-5.6 Sol; a separate verifier drives the app and the main model reviews code and PNGs), [ADR-030](adr/adr-030_capability-honesty.md), [ADR-038](adr/adr-038_event-driven-approval-lifecycle.md), [ADR-053](adr/adr-053_queue-item-identity-cc-parity.md), [SyncCore](architecture/sync-core.md).
 
 ## Open work
 

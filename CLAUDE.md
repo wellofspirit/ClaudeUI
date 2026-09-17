@@ -16,9 +16,9 @@ Architecture, services, persistence, multi-engine design → `docs/architecture/
 
 For any **non-trivial change**, follow the loop in `docs/adr/adr-026_development-workflow.md` (full step-by-step + standing constraints live there):
 
-- **The main model orchestrates, reviews, and commits; a GPT-5.6 Sol sub-agent implements** (explicitly select `gpt-5.6-sol`, against a written kickoff spec; Daniel, 2026-09-17). The implementing agent never self-certifies and never commits / `git add`s / branches / runs `bun install`.
+- **The main model orchestrates, reviews, and commits; delegation follows the driver:** Fable delegates implementation to Opus; GPT-6 delegates to GPT-5.6 Sol (explicitly select `gpt-5.6-sol`), against a written kickoff spec (Daniel, 2026-09-17). The implementing agent never self-certifies and never commits / `git add`s / branches / runs `bun install`.
 - **Review every single line** of the agent's diff — read the code, not the summary; re-run gates independently; verify guard tests fail pre-fix.
-- **Verify against the real dev build** before committing: all gates below, then have a separate GPT-5.6 Sol verifier drive the real Electron app (`verifier-electron` skill / `scripts/app-shot.mjs`) — assert the live DOM by `data-testid` (ADR-027) before reading the screenshot.
+- **Verify against the real dev build** before committing: all gates below, then have a separate verifier (Opus for Fable; GPT-5.6 Sol for GPT-6) drive the real Electron app (`verifier-electron` skill / `scripts/app-shot.mjs`) — assert the live DOM by `data-testid` (ADR-027) before reading the screenshot.
 - **Commit precisely** (never blind `git add -A`), one commit per item, no AI attribution.
 
 Trivial one-line/mechanical edits and conversational answers are exempt.
