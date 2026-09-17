@@ -9,7 +9,7 @@
 //        [--provider openai|fixture] [--model <name>] [--text <assistant text>]
 //        [--no-auth] [--reviewer user|auto_review]
 //        [--command "<shell>"] [--guardian approved|denied]
-//        [--reasoning "<headline>"]
+//        [--reasoning "<headline>"] [--stream-text] [--event-delay-ms 300]
 //        [--web-search ["<query>"]] [--view-image <path>] [--mcp-tool <tool>] [--plan "<markdown>"]
 //        [--chatgpt [--vault-home <dir> [--accounts <n>]]]
 //
@@ -248,6 +248,8 @@ function fixtureMcpToolCall(request, tool) {
 }
 
 const fixture = await startFixtureProvider({
+  streamText: argv.includes('--stream-text'),
+  eventDelayMs: Number(arg('event-delay-ms', '0')),
   port,
   chatgpt,
   authorization: withAuth ? FIXTURE_AUTHORIZATION : undefined,

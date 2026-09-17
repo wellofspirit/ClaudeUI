@@ -38,6 +38,11 @@
  * today's exact fan-out, asymmetries included.
  */
 
+import {
+  applyItemStreamFrame,
+  itemAppendFrame,
+  type ItemStreamFrame
+} from '../shared/sync/item-stream'
 import { EventRing } from './event-ring'
 import type { EventEntry, FullStateSnapshot } from '../../shared/remote-protocol'
 import { channelSpec, type ChannelClass } from '../shared/sync/channels'
@@ -165,6 +170,17 @@ export class SyncCore {
     this.deliverStream = fn
   }
 
+  /** Atomic current active set, including empty, at its reliable-event watermark. */
+  itemStreamReplay(routingId: string): ItemStreamFrame {
+    return {
+      type: 'item-stream',
+      op: 'replace',
+      routingId,
+      atSeq: this.ring.currentSeq(),
+      streams: this.state.sessions[routingId]?.itemStreams ?? {}
+    }
+  }
+
   /**
    * The coalesced value of every non-empty stream of `routingId`, as `offset: 0`
    * REPLACE frames — what a `stream:watch` pushes immediately.
@@ -258,6 +274,21 @@ export class SyncCore {
     // still calls `emit`; the CLASS is what routes it, and the FLAVOR is what
     // decides which frame it becomes.
     if (spec.cls === 'volatile') {
+      if (spec.volatileFlavor === 'item-stream') {
+        if (typeof args[0] !== 'string') return
+        const frame = itemAppendFrame(this.state, args[0], args[1], this.ring.currentSeq())
+        if (!frame) return
+        try {
+          const outcome = applyItemStreamFrame(this.state, frame)
+          if (outcome.result !== 'applied') return
+          this.state = outcome.state
+        } catch (err) {
+          this.onApplyError(channel, err)
+          return
+        }
+        this.deliverStream?.(frame)
+        return
+      }
       if (spec.volatileFlavor === 'pass-through') {
         // A TAIL. Nothing to fold — it has no canonical field and no
         // accumulation — so the emission rides verbatim and the client dispatches

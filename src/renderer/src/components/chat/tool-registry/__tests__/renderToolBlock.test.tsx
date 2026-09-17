@@ -63,6 +63,8 @@ beforeEach(() => {
         isHistorical: false,
         forkOrigin: null,
         messages: [],
+        itemStreams: {},
+        itemStreamRevision: 0,
         streamingText: '',
         streamingThinking: '',
         thinkingStartedAt: null,

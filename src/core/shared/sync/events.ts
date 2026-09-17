@@ -54,6 +54,7 @@ import type {
   UISessionConfig,
   WatchUpdate
 } from '../../../shared/types'
+import type { ItemStreamOpen, ItemStreamSeal } from './item-stream'
 
 /** Attachment shape as it rides `session:user-message` / a queued item. */
 export interface WireAttachment {
@@ -66,6 +67,8 @@ export interface SyncEventMap {
   // -------------------------------------------------------------------------
   // Session lifecycle + transcript
   // -------------------------------------------------------------------------
+  'session:item-open': (routingId: string, data: ItemStreamOpen) => void
+  'session:item-seal': (routingId: string, data: ItemStreamSeal) => void
   /**
    * A session was spawned. The payload carries the config it spawned WITH
    * (`prepareAndCreateSession`): `permissionMode`, `engineId` and the RESOLVED

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
+import type { ItemStreamTarget } from '../shared/sync/item-stream'
 import type { HostWindowHandle } from '../host'
 import { BaseSession } from '../providers/BaseSession'
 import type { EngineSpawnOptions } from '../providers/ISession'
@@ -506,6 +507,8 @@ export class CodexSession extends BaseSession {
   private interruptRequested = false
   private settingsUpdating = false
   private deltas = new Map<string, ChatMessage>()
+  private deltaTargets = new Map<string, { target: ItemStreamTarget; turnId: string }>()
+  private endedChildTurns = new Set<string>()
   private threadId: string | null = null
   private turnId: string | null = null
   private endedTurns = new Set<string>()
@@ -1798,6 +1801,9 @@ export class CodexSession extends BaseSession {
     // Read before `turnId` is cleared below — the in-flight turn is what a
     // still-unanswered hosted call belongs to.
     const turnId = this.turnId
+    this.flushItemStreams()
+    for (const child of this.children.values())
+      this.flushItemStreams(undefined, child.parentToolUseId)
     this.closed = true
     this.busy = false
     this.sending = false
@@ -2023,41 +2029,14 @@ export class CodexSession extends BaseSession {
           itemId: value.itemId,
           delta: value.delta
         })) {
-          if (event.kind === 'planDelta') {
-            // The plan's own item-scoped upsert. The accumulated markdown is
-            // re-emitted as the WHOLE `plan` tool_use every time, so the
-            // completed item — same `toolUseId` — replaces it through
-            // `mergeContentBlocks` rather than appending a second card.
-            const id = event.toolUseId
-            if (this.completedItems.has(id)) continue
-            const previous = this.deltas.get(id)
-            const block = previous?.content[0]
-            const plan =
-              (block?.type === 'tool_use' ? String(block.toolInput?.plan ?? '') : '') + event.delta
-            const message: ChatMessage = {
-              id,
-              role: 'assistant',
-              timestamp: previous?.timestamp ?? Date.now(),
-              content: [{ type: 'tool_use', toolUseId: id, toolName: 'plan', toolInput: { plan } }]
-            }
-            this.deltas.set(id, message)
-            this.dispatch({ kind: 'message', message })
-          } else if (event.kind === 'stream') {
-            const id = codexItemId(this.threadId, value.turnId, value.itemId)
-            if (this.completedItems.has(id)) continue
-            const previous = this.deltas.get(id)
-            const block = previous?.content[0]
-            const text =
-              (block && (block.type === 'text' || block.type === 'thinking') ? block.text : '') +
-              event.delta.text
-            const message: ChatMessage = {
-              id,
-              role: 'assistant',
-              timestamp: previous?.timestamp ?? Date.now(),
-              content: [{ type: event.delta.type, text }]
-            }
-            this.deltas.set(id, message)
-            this.dispatch({ kind: 'message', message })
+          if (event.kind === 'planDelta' || event.kind === 'stream') {
+            this.streamItem(
+              this.threadId,
+              value.turnId,
+              value.itemId,
+              event.kind === 'planDelta' ? 'plan' : event.delta.type,
+              event.kind === 'planDelta' ? event.delta : event.delta.text
+            )
           } else this.dispatch(event)
         }
       }
@@ -2227,9 +2206,12 @@ export class CodexSession extends BaseSession {
     }
     if (method === 'turn/completed' && record(value.turn)) {
       const turn = value.turn as Turn
+      if (this.endedChildTurns.has(JSON.stringify([childThreadId, turn.id]))) return
       // The child's authoritative replay, exactly as the root's own turn end is
       // replayed — a corrected item reaches the transcript either way.
       for (const item of turn.items ?? []) this.childItem(child, childThreadId, turn.id, item, true)
+      this.flushItemStreams(turn.id, child.parentToolUseId)
+      this.endedChildTurns.add(JSON.stringify([childThreadId, turn.id]))
       if (child.turnId === turn.id) child.turnId = null
       // Nothing can answer a question from a turn that ended.
       this.connection?.abortServerRequests(childThreadId, turn.id)
@@ -2271,15 +2253,19 @@ export class CodexSession extends BaseSession {
     }
     if (typeof value.turnId !== 'string') return
     const turnId = value.turnId
-    if (method === 'item/started' || method === 'item/completed') {
+    // Completion is authoritative and may race the parent's terminal child
+    // notification. Accept it after finishChild; only opens and deltas are late
+    // traffic once the card or turn has closed.
+    if (method === 'item/completed') {
+      if (this.endedChildTurns.has(JSON.stringify([childThreadId, turnId]))) return
       if (!record(value.item) || typeof value.item.id !== 'string') return
-      this.childItem(
-        child,
-        childThreadId,
-        turnId,
-        value.item as ThreadItem,
-        method === 'item/completed'
-      )
+      this.childItem(child, childThreadId, turnId, value.item as ThreadItem, true)
+      return
+    }
+    if (child.notified || this.endedChildTurns.has(JSON.stringify([childThreadId, turnId]))) return
+    if (method === 'item/started') {
+      if (!record(value.item) || typeof value.item.id !== 'string') return
+      this.childItem(child, childThreadId, turnId, value.item as ThreadItem, false)
       return
     }
     if (typeof value.itemId !== 'string' || typeof value.delta !== 'string') return
@@ -2288,17 +2274,18 @@ export class CodexSession extends BaseSession {
       turnId,
       itemId: value.itemId,
       delta: value.delta
-    }))
-      // `commandDelta` is deliberately dropped: `session:bash-output` is keyed
-      // by the tool_use id of a block in the SESSION's transcript, and a child's
-      // command block lives in the subagent transcript instead. The command's
-      // aggregated output still lands with its `tool_result`.
-      if (event.kind === 'stream')
-        this.send('session:subagent-stream', {
-          toolUseId: child.parentToolUseId,
-          type: event.delta.type,
-          text: event.delta.text
-        })
+    })) {
+      if (event.kind === 'stream' || event.kind === 'planDelta')
+        this.streamItem(
+          childThreadId,
+          turnId,
+          value.itemId,
+          event.kind === 'planDelta' ? 'plan' : event.delta.type,
+          event.kind === 'planDelta' ? event.delta : event.delta.text,
+          child.parentToolUseId
+        )
+      // Command tails remain represented by the child's completed tool result.
+    }
   }
 
   /** One child thread item, mapped under its parent card's id. */
@@ -2336,6 +2323,19 @@ export class CodexSession extends BaseSession {
     }
     const timestamp = child.timestamps.get(id) ?? Date.now()
     child.timestamps.set(id, timestamp)
+    if (
+      this.publishStreamItem(
+        childThreadId,
+        turnId,
+        item,
+        completed,
+        timestamp,
+        child.parentToolUseId
+      )
+    ) {
+      if (item.type === 'agentMessage' && completed) child.summary = item.text
+      return
+    }
     for (const event of mapCodexItem(childThreadId, turnId, item, completed, timestamp)) {
       if (event.kind === 'message') {
         const text = event.message.content.find((block) => block.type === 'text')
@@ -2368,6 +2368,7 @@ export class CodexSession extends BaseSession {
     status: TaskNotification['status']
   ): void {
     if (child.notified) return
+    this.flushItemStreams(undefined, child.parentToolUseId)
     child.notified = true
     child.state = CHILD_CLOSED_STATE[status]
     this.send('session:task-notification', {
@@ -2585,6 +2586,7 @@ export class CodexSession extends BaseSession {
         turn.status === 'interrupted' ? INTERRUPTED_HOSTED_TOOL : STOPPED_HOSTED_TOOL,
         turn.id
       )
+    this.flushItemStreams(turn.id)
     this.endedTurns.add(turn.id)
     this.connection?.abortServerRequests(this.threadId, turn.id)
     for (const pending of [...this.pending.values()]) {
@@ -2610,7 +2612,7 @@ export class CodexSession extends BaseSession {
       this.turnId = null
       this.busy = false
       this.interruptRequested = false
-      this.deltas.clear()
+      // Child streams may outlive this root turn.
       this.bashGate.cancelAll()
       this.output.clear()
       if (turn.error)
@@ -2688,6 +2690,7 @@ export class CodexSession extends BaseSession {
     // would win and a live renderer would never see the bytes. Only
     // `messageHistory` here takes the later one, which is why a cold reload of
     // the same thread showed the thumbnail and the live turn did not.
+    if (this.publishStreamItem(this.threadId!, turnId, item, completed, timestamp)) return
     const deferredRead = completed && item.type === 'imageView'
     for (const event of mapCodexItem(
       this.threadId!,
@@ -2767,6 +2770,108 @@ export class CodexSession extends BaseSession {
           { status: child.state, message: null }
         ])
       )
+    }
+  }
+
+  /** Local history remains current for queries/dispatch; only chunks hit the wire. */
+  private rememberMessage(message: ChatMessage): void {
+    const index = this.messageHistory.findIndex((m) => m.id === message.id)
+    if (index < 0) this.messageHistory.push(message)
+    else
+      this.messageHistory[index] = {
+        ...message,
+        content: mergeContentBlocks(this.messageHistory[index].content, message.content)
+      }
+  }
+
+  private streamItem(
+    threadId: string,
+    turnId: string,
+    itemId: string,
+    kind: ItemStreamTarget['kind'],
+    chunk: string,
+    ownerToolUseId?: string
+  ): void {
+    const id = codexItemId(threadId, turnId, itemId)
+    if (!chunk || this.completedItems.has(id)) return
+    const previous = this.deltas.get(id)
+    const block = previous?.content[0]
+    const value =
+      (block?.type === 'tool_use'
+        ? String(block.toolInput?.plan ?? '')
+        : block?.type === 'text' || block?.type === 'thinking'
+          ? block.text
+          : '') + chunk
+    const content = (text: string): ChatMessage['content'] =>
+      kind === 'plan'
+        ? [{ type: 'tool_use', toolUseId: id, toolName: 'plan', toolInput: { plan: text } }]
+        : [{ type: kind, text }]
+    const target: ItemStreamTarget = {
+      messageId: id,
+      blockIndex: 0,
+      kind,
+      ...(ownerToolUseId ? { ownerToolUseId } : {})
+    }
+    const timestamp =
+      previous?.timestamp ?? this.messageHistory.find((m) => m.id === id)?.timestamp ?? Date.now()
+    if (!previous) {
+      this.deltaTargets.set(id, { target, turnId })
+      this.send('session:item-open', {
+        target,
+        message: { id, role: 'assistant', timestamp, content: content('') }
+      })
+    }
+    const message: ChatMessage = { id, role: 'assistant', timestamp, content: content(value) }
+    this.deltas.set(id, message)
+    if (!ownerToolUseId) this.rememberMessage(message)
+    this.send('session:item-delta', { target, chunk })
+  }
+
+  private sealItemMessage(message: ChatMessage, ownerToolUseId?: string): void {
+    if (!ownerToolUseId) this.rememberMessage(message)
+    const target = this.deltaTargets.get(message.id)?.target
+    this.send('session:item-seal', {
+      message,
+      ...(target ? { target } : {}),
+      ...(ownerToolUseId ? { ownerToolUseId } : {})
+    })
+    this.deltas.delete(message.id)
+    this.deltaTargets.delete(message.id)
+  }
+
+  private publishStreamItem(
+    threadId: string,
+    turnId: string,
+    item: ThreadItem,
+    completed: boolean,
+    timestamp: number,
+    ownerToolUseId?: string
+  ): boolean {
+    if (item.type !== 'agentMessage' && item.type !== 'reasoning' && item.type !== 'plan')
+      return false
+    const id = codexItemId(threadId, turnId, item.id)
+    const mapped = mapCodexItem(
+      threadId,
+      turnId,
+      item,
+      completed,
+      this.deltas.get(id)?.timestamp ?? timestamp
+    ).find((e) => e.kind === 'message')
+    if (completed) {
+      const message = mapped?.kind === 'message' ? mapped.message : this.deltas.get(id)
+      if (message) this.sealItemMessage(message, ownerToolUseId)
+    } else if (item.type === 'plan' && !this.deltas.has(id) && item.text) {
+      this.streamItem(threadId, turnId, item.id, 'plan', item.text, ownerToolUseId)
+    }
+    return true
+  }
+
+  private flushItemStreams(turnId?: string, ownerToolUseId?: string): void {
+    for (const [id, entry] of this.deltaTargets) {
+      if (entry.target.ownerToolUseId !== ownerToolUseId || (turnId && entry.turnId !== turnId))
+        continue
+      const message = this.deltas.get(id)
+      if (message) this.sealItemMessage(message, ownerToolUseId)
     }
   }
 

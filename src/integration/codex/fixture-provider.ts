@@ -204,7 +204,35 @@ export function fixturePlanMessage(plan: string, id = 'msg-plan'): FixtureOutput
  * `reasoning_summary_part.added` + `reasoning_summary_text.delta` per summary
  * entry, then `output_item.done` carrying the whole summary.
  */
-function fixtureItemEvents(item: FixtureOutputItem): Record<string, unknown>[] {
+function fixtureItemEvents(
+  item: FixtureOutputItem,
+  streamText = false,
+  output_index = 0
+): Record<string, unknown>[] {
+  if (streamText && item.type === 'message' && Array.isArray(item.content)) {
+    const text = item.content
+      .map((part) => (typeof part.text === 'string' ? part.text : ''))
+      .join('')
+    const chunks = text.match(/[\s\S]{1,8}/g) ?? []
+    return [
+      { type: 'response.output_item.added', output_index, item: { ...item, content: [] } },
+      {
+        type: 'response.content_part.added',
+        item_id: item.id,
+        output_index,
+        content_index: 0,
+        part: { type: 'output_text', text: '', annotations: [] }
+      },
+      ...chunks.map((delta) => ({
+        type: 'response.output_text.delta',
+        item_id: item.id,
+        output_index,
+        content_index: 0,
+        delta
+      })),
+      { type: 'response.output_item.done', output_index, item }
+    ]
+  }
   if (item.type !== 'reasoning') return [{ type: 'response.output_item.done', item }]
   const summary = Array.isArray(item.summary) ? item.summary : []
   return [
@@ -227,11 +255,14 @@ function fixtureItemEvents(item: FixtureOutputItem): Record<string, unknown>[] {
 
 /** The events one turn is made of: `created`, its output items, `completed`. */
 export function fixtureResponseEvents(
-  item: FixtureOutputItem | FixtureOutputItem[]
+  item: FixtureOutputItem | FixtureOutputItem[],
+  streamText = false
 ): Record<string, unknown>[] {
   return [
     { type: 'response.created', response: { id: 'resp-fixture' } },
-    ...(Array.isArray(item) ? item : [item]).flatMap(fixtureItemEvents),
+    ...(Array.isArray(item) ? item : [item]).flatMap((entry, index) =>
+      fixtureItemEvents(entry, streamText, index)
+    ),
     FIXTURE_COMPLETED
   ]
 }
@@ -242,6 +273,9 @@ export function fixtureSseBody(events: Record<string, unknown>[]): string {
 }
 
 export interface FixtureProviderOptions {
+  /** Opt-in real text deltas and paced delivery for visible mid-item drives. */
+  streamText?: boolean
+  eventDelayMs?: number
   /**
    * The `authorization` header every request must carry. `undefined` means it
    * must be ABSENT — which is what `requires_openai_auth = false` produces, and
@@ -442,7 +476,23 @@ export async function startFixtureProvider(
         res.on('close', () => held.delete(res))
         return
       }
-      res.end(fixtureSseBody(fixtureResponseEvents(item)))
+      const events = fixtureResponseEvents(item, options.streamText)
+      if (options.eventDelayMs && options.eventDelayMs > 0) {
+        held.add(res)
+        let index = 0
+        const timer = setInterval(() => {
+          if (index < events.length) res.write(fixtureSseBody([events[index++]]))
+          else {
+            clearInterval(timer)
+            held.delete(res)
+            res.end()
+          }
+        }, options.eventDelayMs)
+        res.on('close', () => {
+          clearInterval(timer)
+          held.delete(res)
+        })
+      } else res.end(fixtureSseBody(events))
     })
   })
   server.on(

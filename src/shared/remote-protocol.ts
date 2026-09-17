@@ -949,6 +949,7 @@ export interface WsVoiceAudio {
 // preview whose durable record is the event lane.
 export type { StreamFrame, StreamEventFrame } from '../core/shared/sync/stream'
 import type { StreamFrame, StreamEventFrame } from '../core/shared/sync/stream'
+import type { ItemStreamFrame, ItemStreams } from '../core/shared/sync/item-stream'
 
 export type WsClientMessage =
   | WsAuthRequest
@@ -980,6 +981,7 @@ export type WsServerMessage =
   | WsTermResized
   | WsTermExit
   | WsTermDetached
+  | ItemStreamFrame
   | StreamFrame
   | StreamEventFrame
 
@@ -1022,6 +1024,8 @@ export interface PerSessionSnapshot {
   routingId: string
   cwd: string
   messages: ChatMessage[]
+  itemStreams?: ItemStreams
+  itemStreamRevision?: number
   streamingText: string
   streamingThinking: string
   status: SessionStatus

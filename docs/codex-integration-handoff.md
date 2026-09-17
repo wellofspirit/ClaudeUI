@@ -1,6 +1,6 @@
 # Codex integration handoff
 
-State on 2026-09-16. PR #37 (`codex-integration → pre-release`) merged on 2026-09-14 at `80d71efc` (v3.2.0); follow-ups land directly on `pre-release` and pushes there still need an explicit ask. Follow-ups F1–F16 are landed and recorded in [`codex-followups-spec.md`](codex-followups-spec.md) (one kickoff and one Landed paragraph each). The process model is [ADR-069](adr/adr-069_codex-host-per-home-and-account.md), built through [`codex-host-spec.md`](codex-host-spec.md) H0–H3: one `codex app-server` per Codex home and injected account, sessions are threads on it, reads borrow it, quit disposes the registry, an active-account switch moves the sessions that follow the active account. The older slice-by-slice history (ADR-066/067/068 arcs, Slices 1–7, the pre-merge checklist) lives in git history of this file (`git log -p -- docs/codex-integration-handoff.md`) and in the spec docs; nothing there is still open.
+State on 2026-09-17. PR #37 (`codex-integration → pre-release`) merged on 2026-09-14 at `80d71efc` (v3.2.0); follow-ups land directly on `pre-release` and pushes there still need an explicit ask. Follow-ups F1–F16 are landed and recorded in [`codex-followups-spec.md`](codex-followups-spec.md) (one kickoff and one Landed paragraph each). The process model is [ADR-069](adr/adr-069_codex-host-per-home-and-account.md), built through [`codex-host-spec.md`](codex-host-spec.md) H0–H3: one `codex app-server` per Codex home and injected account, sessions are threads on it, reads borrow it, quit disposes the registry, an active-account switch moves the sessions that follow the active account. The older slice-by-slice history (ADR-066/067/068 arcs, Slices 1–7, the pre-merge checklist) lives in git history of this file (`git log -p -- docs/codex-integration-handoff.md`) and in the spec docs; nothing there is still open.
 
 ## Read in this order
 
@@ -9,7 +9,7 @@ State on 2026-09-16. PR #37 (`codex-integration → pre-release`) merged on 2026
 3. [`codex-followups-spec.md`](codex-followups-spec.md) — F1 onwards; the open kickoffs are at the end.
 4. [`codex-integration-spec.md`](codex-integration-spec.md) § "Mandatory remaining work" — the milestone record.
 5. [`architecture/codex.md`](architecture/codex.md), then [`codex-spike.md`](codex-spike.md) for the binary probes.
-6. [ADR-026](adr/adr-026_development-workflow.md) (amended 2026-09-16: an Opus verifier drives the app, the main model reviews the PNGs), [ADR-030](adr/adr-030_capability-honesty.md), [ADR-038](adr/adr-038_event-driven-approval-lifecycle.md), [ADR-053](adr/adr-053_queue-item-identity-cc-parity.md), [SyncCore](architecture/sync-core.md).
+6. [ADR-026](adr/adr-026_development-workflow.md) (amended 2026-09-17: GPT-5.6 Sol implements and a separate Sol verifier drives the app; the main model reviews code and PNGs), [ADR-030](adr/adr-030_capability-honesty.md), [ADR-038](adr/adr-038_event-driven-approval-lifecycle.md), [ADR-053](adr/adr-053_queue-item-identity-cc-parity.md), [SyncCore](architecture/sync-core.md).
 
 ## Open work
 
@@ -19,7 +19,7 @@ State on 2026-09-16. PR #37 (`codex-integration → pre-release`) merged on 2026
 
 **Also landed 2026-09-16:** F19 — a detailed reasoning summary's bold headline renders as plain text, an empty summary delta no longer opens a bare "Thought", the Reasoning summaries row says it applies to new sessions, and the fixture script streams a reasoning item (`--reasoning`). Daniel still owes the real-account confirmation on a rebuilt app in a NEW session.
 
-**Next, in order:** roadmap item 1 landed 2026-09-17 as F20 (survey in [`tool-survey.md`](tool-survey.md), kickoff and Landed in `codex-followups-spec.md`); roadmap item 2 (per-item volatile stream: design note and discussion before code) is next, or pick from the list below.
+**Landed 2026-09-17 (F21):** roadmap item 2's approved first slice — shared per-item volatile streams, desktop/web transport and replica support, and Codex root/direct-child text, reasoning and plan adoption. Reliable open/seal events surround chunk-only volatile appends; rewatch restores the atomic active set, and interruption retains partial output. Design, as-built details and verification: [per-item streaming](per-item-streaming-design.md). Roadmap item 2 remains open: migrate Claude, opencode and pi in separate investigated slices, then retire the legacy session stream model after its last consumer migrates. Metering attribution and grandchild rendering follow that closure.
 
 **Open, not sequenced:**
 
@@ -87,7 +87,7 @@ The sanitized status probe is `node scripts/codex-native-status.mjs` (it returne
 - The v2 wire is camelCase where the core deserializes snake_case (`GuardianAssessmentEvent`, `apply_patch`, `unified_exec`); anything sent back to the core needs the mapping.
 - `BaseSession.flushQueuedItems` drops a boundary signal that arrives while a forward is in flight; Codex chains boundaries on its own promise, opencode and pi still call it blind.
 - A session under an injected ChatGPT identity sends its model requests compressed (gzip on Windows, zstd on macOS). Sandbox enforcement cannot be measured in the fixture (macOS refuses to nest a seatbelt profile).
-- Delta handling is item-scoped message upserts; per-item volatile streaming is roadmap item 2.
+- Codex text/reasoning/plan deltas use the per-item volatile lane (F21): reliable open, chunk-only append, reliable resolved final seal. Other engines still use the session stream lane. Native history remains authoritative after cold reload.
 
 ## Verification commands and artifacts
 

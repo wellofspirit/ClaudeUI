@@ -5,6 +5,7 @@ import { codexPublishesEffort, resolveClaudeCapabilities } from '../../../shared
 import type { EffortLevel } from '../../../shared/model-capabilities'
 import type { SharedProviderAccountList } from '../../../shared/shared-provider'
 import type { ProviderRegistrySnapshot } from '../../../shared/provider-registry'
+import type { ItemStreams } from '../../../core/shared/sync/item-stream'
 import {
   anthropicAuthState,
   chatgptAuthFromRegistry,
@@ -729,6 +730,8 @@ export interface PerSessionState {
    *  Read only while `!sdkActive`; the fork materializes lazily on first prompt. */
   forkOrigin: { sourceSessionId: string; anchorUuid: string } | null
   messages: ChatMessage[]
+  itemStreams: ItemStreams
+  itemStreamRevision: number
   streamingText: string
   streamingThinking: string
   /**
@@ -860,6 +863,8 @@ export const EMPTY_SESSION_STATE: PerSessionState = {
   isHistorical: false,
   forkOrigin: null,
   messages: [],
+  itemStreams: {},
+  itemStreamRevision: 0,
   streamingText: '',
   streamingThinking: '',
   thinkingStartedAt: null,
@@ -1113,6 +1118,7 @@ function coldSessionIds(
       !keep.has(id) &&
       !sess.evicted &&
       !sess.sdkActive &&
+      Object.keys(sess.itemStreams).length === 0 &&
       !sess.isWatching &&
       sess.pendingApprovals.length === 0 &&
       sess.messages.length > 0 &&

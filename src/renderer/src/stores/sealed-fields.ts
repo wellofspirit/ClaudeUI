@@ -53,6 +53,8 @@ import type { PerSessionSnapshot, FullStateSnapshot } from '../../../shared/remo
 export const SEALED_SESSION_FIELDS = [
   'cwd',
   'messages',
+  'itemStreams',
+  'itemStreamRevision',
   'streamingText',
   'streamingThinking',
   'status',
@@ -97,6 +99,8 @@ export const SEALED_SESSION_FIELD_SOURCE: Readonly<
 > = {
   cwd: 'cwd',
   messages: 'messages',
+  itemStreams: 'itemStreams',
+  itemStreamRevision: 'itemStreamRevision',
   streamingText: 'streamingText',
   streamingThinking: 'streamingThinking',
   status: 'status',

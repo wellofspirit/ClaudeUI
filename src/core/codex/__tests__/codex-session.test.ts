@@ -2570,6 +2570,34 @@ describe('Codex native children', () => {
   const sent = (channel: string): unknown[] =>
     events.mock.calls.filter((call) => call[0] === channel).map((call) => (call[1] as unknown[])[1])
 
+  it('keeps child streams alive after the parent ends and seals their partials on child interruption', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    spawn(f)
+    const part = { threadId: 'child', turnId: 'child-turn', itemId: 'm1' }
+    f.notify('item/agentMessage/delta', { ...part, delta: 'child ' })
+    f.notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn', status: 'completed', items: [] }
+    })
+    expect(sent('session:item-seal')).toEqual([])
+    f.notify('item/agentMessage/delta', { ...part, delta: 'continues' })
+    expect(sent('session:item-open')).toHaveLength(1)
+    f.notify('turn/completed', {
+      threadId: 'child',
+      turn: { id: 'child-turn', status: 'interrupted', items: [] }
+    })
+    expect(sent('session:item-seal')).toEqual([
+      expect.objectContaining({
+        ownerToolUseId: PARENT_CARD,
+        message: expect.objectContaining({ content: [{ type: 'text', text: 'child continues' }] })
+      })
+    ])
+    f.notify('item/agentMessage/delta', { ...part, delta: ' late' })
+    expect(sent('session:item-delta')).toHaveLength(2)
+    expect(sent('session:item-open')).toHaveLength(1)
+  })
+
   it('routes a child message into the subagent transcript under the spawning card', async () => {
     const f = fixture()
     await f.session.run('hello')
@@ -2579,9 +2607,9 @@ describe('Codex native children', () => {
       turnId: 'child-turn',
       item: { id: 'm1', type: 'agentMessage', text: 'child speaking' }
     })
-    expect(sent('session:subagent-message')).toEqual([
+    expect(sent('session:item-seal')).toEqual([
       {
-        toolUseId: PARENT_CARD,
+        ownerToolUseId: PARENT_CARD,
         message: expect.objectContaining({
           id: 'codex:["child","child-turn","m1"]',
           role: 'assistant',
@@ -2601,8 +2629,16 @@ describe('Codex native children', () => {
       itemId: 'm1',
       delta: 'tok'
     })
-    expect(sent('session:subagent-stream')).toEqual([
-      { toolUseId: PARENT_CARD, type: 'text', text: 'tok' }
+    expect(sent('session:item-delta')).toEqual([
+      {
+        target: {
+          ownerToolUseId: PARENT_CARD,
+          messageId: codexItemId('child', 'child-turn', 'm1'),
+          blockIndex: 0,
+          kind: 'text'
+        },
+        chunk: 'tok'
+      }
     ])
     f.notify('item/completed', {
       threadId: 'child',
@@ -2637,9 +2673,9 @@ describe('Codex native children', () => {
     })
     expect(sent('session:subagent-message')).toEqual([])
     spawn(f)
-    expect(sent('session:subagent-message')).toEqual([
+    expect(sent('session:item-seal')).toEqual([
       {
-        toolUseId: PARENT_CARD,
+        ownerToolUseId: PARENT_CARD,
         message: expect.objectContaining({ id: 'codex:["child","child-turn","m1"]' })
       }
     ])
@@ -3018,9 +3054,9 @@ describe('Codex native children over multi_agent_v2', () => {
       turnId: 'child-turn',
       item: { id: 'm1', type: 'agentMessage', text: 'v2 child speaking' }
     })
-    expect(sent('session:subagent-message')).toEqual([
+    expect(sent('session:item-seal')).toEqual([
       {
-        toolUseId: CARD,
+        ownerToolUseId: CARD,
         message: expect.objectContaining({ id: 'codex:["child","child-turn","m1"]' })
       }
     ])
@@ -3049,6 +3085,55 @@ describe('Codex native children over multi_agent_v2', () => {
         summary: 'v2 child done'
       })
     ])
+  })
+
+  it('accepts an authoritative child completion that races after the card closes', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    activity(f, 'started', 'spawn-call')
+    f.notify('item/agentMessage/delta', {
+      threadId: 'child',
+      turnId: 'child-turn',
+      itemId: 'm1',
+      delta: 'partial'
+    })
+    activity(f, 'completed', 'subagent-completed-child-turn')
+    const before = sent('session:item-seal').length
+    f.notify('item/completed', {
+      threadId: 'child',
+      turnId: 'child-turn',
+      item: { id: 'm1', type: 'agentMessage', text: 'authoritative final' }
+    })
+    expect(sent('session:item-seal').slice(before)).toEqual([
+      expect.objectContaining({
+        ownerToolUseId: CARD,
+        message: expect.objectContaining({
+          id: 'codex:["child","child-turn","m1"]',
+          content: [{ type: 'text', text: 'authoritative final' }]
+        })
+      })
+    ])
+  })
+
+  it('rejects a delayed child completion after the authoritative turn replay', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    activity(f, 'started', 'spawn-call')
+    f.notify('turn/completed', {
+      threadId: 'child',
+      turn: {
+        id: 'child-turn',
+        status: 'completed',
+        items: [{ id: 'm1', type: 'agentMessage', text: 'authoritative replay' }]
+      }
+    })
+    const before = sent('session:item-seal').length
+    f.notify('item/completed', {
+      threadId: 'child',
+      turnId: 'child-turn',
+      item: { id: 'm1', type: 'agentMessage', text: 'stale delayed item' }
+    })
+    expect(sent('session:item-seal')).toHaveLength(before)
   })
 
   it('treats an interrupted activity as terminal and an interacted one as noise', async () => {
@@ -4933,5 +5018,97 @@ describe('Codex imageView bytes reach a LIVE turn (F20)', () => {
 
     expect(results()).toHaveLength(1)
     expect(results()[0].images).toBeUndefined()
+  })
+})
+
+describe('Codex item stream lifecycle', () => {
+  const sent = (channel: string) =>
+    events.mock.calls.filter(([c]) => c === channel).map(([, args]) => args[1])
+  const delta = (
+    notify: ReturnType<typeof fixture>['notify'],
+    itemId: string,
+    text: string,
+    kind = 'agentMessage'
+  ) =>
+    notify(
+      `item/${kind === 'reasoning' ? 'reasoning/summaryTextDelta' : kind === 'plan' ? 'plan/delta' : 'agentMessage/delta'}`,
+      { threadId: 'root', turnId: 'turn', itemId, delta: text }
+    )
+  it('emits a single open per item, chunks only, then a corrected authoritative seal', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    delta(f.notify, 'answer', 'hello')
+    delta(f.notify, 'reason', 'consider', 'reasoning')
+    delta(f.notify, 'answer', ' world')
+    delta(f.notify, 'plan', 'step one', 'plan')
+    expect(sent('session:item-open')).toHaveLength(3)
+    expect(sent('session:item-delta').map((d) => d.chunk)).toEqual([
+      'hello',
+      'consider',
+      ' world',
+      'step one'
+    ])
+    expect(sent('session:message')).toEqual([])
+    f.notify('item/completed', {
+      threadId: 'root',
+      turnId: 'turn',
+      item: { id: 'answer', type: 'agentMessage', text: 'corrected' }
+    })
+    expect(sent('session:item-seal')).toHaveLength(1)
+    expect(sent('session:item-seal')[0].message.content).toEqual([
+      { type: 'text', text: 'corrected' }
+    ])
+    delta(f.notify, 'answer', 'late')
+    expect(sent('session:item-delta')).toHaveLength(4)
+    expect(
+      f.session.getMessages().find((m) => m.id === codexItemId('root', 'turn', 'answer'))?.content
+    ).toEqual([{ type: 'text', text: 'corrected' }])
+  })
+  it('preserves streamed reasoning when the completed summary is empty', async () => {
+    const f = fixture()
+    await f.session.run('reason')
+    delta(f.notify, 'reason', 'partial reasoning', 'reasoning')
+    f.notify('item/completed', {
+      threadId: 'root',
+      turnId: 'turn',
+      item: { id: 'reason', type: 'reasoning', summary: [], content: [] }
+    })
+    expect(sent('session:item-seal')[0].message.content).toEqual([
+      { type: 'thinking', text: 'partial reasoning' }
+    ])
+    expect(sent('session:item-seal')[0].target.kind).toBe('thinking')
+  })
+  it('commits partial text and plan once on interruption, ignoring late tokens', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    delta(f.notify, 'answer', 'partial')
+    delta(f.notify, 'plan', 'partial plan', 'plan')
+    f.notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn', status: 'interrupted', items: [] }
+    })
+    expect(sent('session:item-seal')).toHaveLength(2)
+    expect(sent('session:item-seal').map((d) => d.message.content[0])).toEqual([
+      { type: 'text', text: 'partial' },
+      expect.objectContaining({ toolInput: { plan: 'partial plan' } })
+    ])
+    delta(f.notify, 'answer', 'late')
+    expect(sent('session:item-delta')).toHaveLength(2)
+    f.session.cancel()
+    expect(sent('session:item-seal')).toHaveLength(2)
+  })
+  it('seals pending output on disconnect without losing local history', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    delta(f.notify, 'a', 'before close')
+    f.session.cancel()
+    expect(sent('session:item-seal')[0].message.content).toEqual([
+      { type: 'text', text: 'before close' }
+    ])
+    expect(
+      f.session
+        .getMessages()
+        .some((m) => m.content.some((b) => b.type === 'text' && b.text === 'before close'))
+    ).toBe(true)
   })
 })

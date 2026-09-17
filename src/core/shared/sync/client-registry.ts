@@ -27,6 +27,7 @@ import type {
   SyncListener,
   SyncEventTap,
   SyncStreamTap,
+  SyncItemStreamTap,
   SyncAnsweredTap
 } from './sync-client'
 import type { SyncEventMap } from './events'
@@ -34,13 +35,13 @@ import type { SyncEventMap } from './events'
 let client: SyncClient | null = null
 
 /** Which of the client's taps a deferred registration belongs to. */
-type DeferredKind = 'channel' | 'any-event' | 'stream' | 'answered'
+type DeferredKind = 'channel' | 'any-event' | 'stream' | 'item-stream' | 'answered'
 
 interface DeferredListener {
   kind: DeferredKind
   /** Non-null only for `kind: 'channel'`. */
   channel: string | null
-  cb: SyncListener | SyncEventTap | SyncStreamTap | SyncAnsweredTap
+  cb: SyncListener | SyncEventTap | SyncStreamTap | SyncItemStreamTap | SyncAnsweredTap
   /** The real unsubscribe, once a client exists to register against. */
   off: (() => void) | null
   cancelled: boolean
@@ -52,6 +53,8 @@ function attach(next: SyncClient, entry: DeferredListener): () => void {
       return next.on(entry.channel as string)(entry.cb as SyncListener)
     case 'any-event':
       return next.onAnyEvent(entry.cb as SyncEventTap)
+    case 'item-stream':
+      return next.onItemStreamFrame(entry.cb as SyncItemStreamTap)
     case 'stream':
       return next.onStreamFrame(entry.cb as SyncStreamTap)
     case 'answered':
@@ -131,11 +134,14 @@ export function onSyncAnyEvent(cb: SyncEventTap): () => void {
   return defer({ kind: 'any-event', channel: null, cb })
 }
 
+/** Subscribe to item-addressed volatile frames. */
+export function onSyncItemStreamFrame(cb: SyncItemStreamTap): () => void {
+  return defer({ kind: 'item-stream', channel: null, cb })
+}
+
 /**
  * Subscribe to the VOLATILE STREAM lane (phase 5 S1) — the replica's second
- * feed. Deferred identically to {@link onSyncAnyEvent}, and for the same reason:
- * the replica is installed by the store module, which the web client imports
- * lazily.
+ * feed. Deferred identically to {@link onSyncAnyEvent}.
  */
 export function onSyncStreamFrame(cb: SyncStreamTap): () => void {
   return defer({ kind: 'stream', channel: null, cb })

@@ -96,6 +96,9 @@ export function startDesktopSync(onFullState: FullStateHandler): SyncClient {
           client.receiveEvent({ seq: frame.seq, channel: frame.channel, args: frame.args ?? [] })
         }
         return
+      case 'item-stream':
+        client.receiveItemStreamFrame(frame)
+        return
       case 'stream':
         // The volatile lane (phase 5 S1). Validated inside the client, so this
         // decoder stays a router; it never touches the cursor.

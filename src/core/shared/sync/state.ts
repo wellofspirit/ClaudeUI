@@ -11,6 +11,8 @@
  * renderer and the web client all read this module.
  */
 
+import type { ItemStreams } from './item-stream'
+
 import type {
   ChatMessage,
   SessionStatus,
@@ -35,6 +37,8 @@ export interface CanonicalSessionState {
   routingId: string
   cwd: string
   messages: ChatMessage[]
+  itemStreams: ItemStreams
+  itemStreamRevision: number
   streamingText: string
   streamingThinking: string
   status: SessionStatus
@@ -123,6 +127,8 @@ export function emptySession(routingId: string, cwd = ''): CanonicalSessionState
     routingId,
     cwd,
     messages: [],
+    itemStreams: {},
+    itemStreamRevision: 0,
     streamingText: '',
     streamingThinking: '',
     status: { ...DEFAULT_STATUS },
@@ -200,6 +206,8 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
       routingId: id,
       cwd: s.cwd,
       messages: s.messages,
+      itemStreams: s.itemStreams ?? {},
+      itemStreamRevision: s.itemStreamRevision ?? 0,
       streamingText: s.streamingText,
       streamingThinking: s.streamingThinking,
       status: s.status,
@@ -266,6 +274,8 @@ export function toSnapshot(state: CanonicalState, seq: number): FullStateSnapsho
       routingId: id,
       cwd: s.cwd,
       messages: s.messages,
+      itemStreams: s.itemStreams ?? {},
+      itemStreamRevision: s.itemStreamRevision ?? 0,
       streamingText: s.streamingText,
       streamingThinking: s.streamingThinking,
       status: s.status,

@@ -97,6 +97,17 @@ Every feature must express each interaction as exactly one of these. There is no
 
    **Owner ruling, recorded:** there is NO backward-compatibility lane for cached client bundles — no dual emission, no shim. The desktop and web clients ship with the server; an older cached bundle sees text update at message boundaries instead of token by token, which is a degraded animation rather than a broken transcript.
 
+   **Per-item extension (2026-09-17):** Codex root/direct-child text, reasoning and
+   plans now use `item-stream` frames: explicit `append` or atomic `replace` of
+   the session's active set. Reliable `session:item-open`/`session:item-seal`
+   establish the scaffold and commit final content. Target = owner/message/block
+   slot/kind; generation = open sequence. Snapshots carry `itemStreams` and
+   `itemStreamRevision`; clients require the reliable watermark before folding
+   volatile frames. `item-stream.ts` owns both folds and the render-only overlay.
+   Congested sockets retain session ids and retry fresh replay after the existing
+   buffered-amount gate allows delivery, even without another token. Existing
+   session streams remain for other engines. [Design and as built](../per-item-streaming-design.md).
+
 4. **Queries** (client ↔ core, RPC): reads — history loads, git reads, catalogs, directory listings. No state effects.
 
 ## Replication model

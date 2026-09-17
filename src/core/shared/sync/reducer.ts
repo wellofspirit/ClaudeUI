@@ -56,6 +56,7 @@ import type {
   ToolReviewBlock
 } from '../../../shared/types'
 import { mergeContentBlocks } from '../../../shared/content-blocks'
+import { applyItemLifecycle, type ItemStreamTarget } from './item-stream'
 import {
   buildTodosFromMessages,
   buildSentFilesFromMessages,
@@ -282,6 +283,71 @@ function rederiveSentFiles(s: CanonicalSessionState): Partial<CanonicalSessionSt
   return sentFiles ? { sentFiles } : {}
 }
 
+/**
+ * Commit one transcript message with the merge and derived-field rules shared by
+ * ordinary message events and item seals. Legacy stream generations and buffers
+ * are deliberately managed by their event cases, since an item seal must not
+ * clear the session-wide text lane.
+ */
+function commitMessage(
+  session: CanonicalSessionState,
+  message: ChatMessage,
+  ownerToolUseId?: string,
+  sealingTarget?: ItemStreamTarget,
+  matchedIndex?: number
+): CanonicalSessionState {
+  const current = ownerToolUseId
+    ? (session.subagentMessages[ownerToolUseId] ?? [])
+    : session.messages
+  const index = matchedIndex ?? current.findIndex((candidate) => candidate.id === message.id)
+  const content = message.content ?? []
+  const { thinkingDurationMs, ...bare } = message
+  let merged = index < 0 ? content : mergeContentBlocks(current[index].content ?? [], content)
+  if (index >= 0 && sealingTarget) {
+    const oldContent = current[index].content ?? []
+    // While sibling fields are active, their scaffold indices are protocol
+    // addresses. Apply the authoritative payload by slot over the existing
+    // scaffold, retaining omitted completed/auxiliary blocks. Item lifecycle
+    // validation guarantees the target itself occupies its addressed slot.
+    merged = [...oldContent]
+    // The completion is authoritative for its named field only. Other slots may
+    // already contain newer committed values than the adapter's item scaffold.
+    merged[sealingTarget.blockIndex] = content[sealingTarget.blockIndex]
+  }
+  const committed: ChatMessage = {
+    ...bare,
+    content: sealingTarget
+      ? merged.map((block, blockIndex) =>
+          blockIndex === sealingTarget.blockIndex &&
+          sealingTarget.kind === 'thinking' &&
+          block.type === 'thinking' &&
+          typeof thinkingDurationMs === 'number' &&
+          block.durationMs == null
+            ? { ...block, durationMs: thinkingDurationMs }
+            : block
+        )
+      : stampThinkingDuration(merged, thinkingDurationMs)
+  }
+  const messages =
+    index < 0
+      ? [...current, committed]
+      : current.map((candidate, candidateIndex) =>
+          candidateIndex === index ? committed : candidate
+        )
+  if (ownerToolUseId) {
+    return {
+      ...session,
+      subagentMessages: { ...session.subagentMessages, [ownerToolUseId]: messages }
+    }
+  }
+  let next = { ...session, messages }
+  if (content.some((block) => block.type === 'tool_use' && TODO_TRIGGER_TOOLS.has(block.toolName)))
+    next = { ...next, ...rederiveTodos(next) }
+  if (content.some((block) => block.type === 'tool_use' && block.toolName === SEND_USER_FILE_TOOL))
+    next = { ...next, ...rederiveSentFiles(next) }
+  return next
+}
+
 /** Drop a fully-completed todo list, as every client does at a turn boundary. */
 function dismissCompletedTodos(s: CanonicalSessionState): Partial<CanonicalSessionState> {
   if (s.todos.length === 0) return {}
@@ -414,6 +480,20 @@ export function applyEvent(
   if (spec.cls === 'volatile') return state
 
   switch (event.channel) {
+    case 'session:item-open':
+    case 'session:item-seal': {
+      const id = routingIdOf(event)
+      const session = id ? state.sessions[id] : undefined
+      if (!id || !session) return state
+      const next = applyItemLifecycle(
+        session,
+        event.channel,
+        event.args[1],
+        event.seq ?? 0,
+        commitMessage
+      )
+      return next === session ? state : { ...state, sessions: { ...state.sessions, [id]: next } }
+    }
     // -----------------------------------------------------------------------
     // Session registry
     // -----------------------------------------------------------------------
@@ -560,6 +640,7 @@ export function applyEvent(
       const fresh = emptySession(routingId, session.cwd)
       return withSession(state, routingId, (s) => ({
         ...fresh,
+        itemStreamRevision: event.seq ?? 0,
         sdkActive: s.sdkActive,
         // Carried, not reset. These per-session copies are vestigial — canonical
         // holds ONE app-level list and `toSnapshot` fans it into every entry, so
@@ -636,39 +717,16 @@ export function applyEvent(
       // The emitter's elapsed-time hint (phase 4b) is consumed here and never
       // stored: it moves onto the sealed thinking block and the field is dropped,
       // so a snapshot carries `durationMs` exactly where a client renders it.
-      const { thinkingDurationMs, ...bare } = message
-      const merged =
-        idx < 0 ? content : mergeContentBlocks(session.messages[idx].content ?? [], content)
-      const committed: ChatMessage = {
-        ...bare,
-        content: stampThinkingDuration(merged, thinkingDurationMs)
-      }
-      const messages =
-        idx < 0
-          ? [...session.messages, committed]
-          : session.messages.map((m, i) => (i === idx ? committed : m))
-
       if (sealsThinking) aux.thinkingOpen[routingId] = false
       // The seal is a CLEAR of the live buffers, so both streams turn over.
       bumpSelfStream(aux, routingId, 'text')
       if (sealsThinking) bumpSelfStream(aux, routingId, 'thinking')
 
-      next = withSession(next, routingId, () => ({
-        messages,
+      next = withSession(next, routingId, (current) => ({
+        ...commitMessage(current, message, undefined, undefined, idx),
         streamingText: '',
         ...(sealsThinking ? { streamingThinking: '' } : {})
       }))
-
-      // Derived fields (ratified §2) — same triggers as the as-built renderer:
-      // task-tool presence rebuilds todos, SendUserFile presence rebuilds files.
-      const hasTaskTool = content.some(
-        (b) => b.type === 'tool_use' && TODO_TRIGGER_TOOLS.has(b.toolName)
-      )
-      if (hasTaskTool) next = withSession(next, routingId, rederiveTodos)
-      const hasSendUserFile = content.some(
-        (b) => b.type === 'tool_use' && b.toolName === SEND_USER_FILE_TOOL
-      )
-      if (hasSendUserFile) next = withSession(next, routingId, rederiveSentFiles)
       return next
     }
 
@@ -681,6 +739,15 @@ export function applyEvent(
       bumpSelfStream(aux, routingId, 'text')
       bumpSelfStream(aux, routingId, 'thinking')
       return withSession(state, routingId, (s) => ({
+        itemStreams: Object.fromEntries(
+          Object.entries(s.itemStreams).filter(
+            ([, stream]) =>
+              messageIds.length === 0 ||
+              (!messageIds.includes(stream.target.messageId) &&
+                !messageIds.includes(stream.target.ownerToolUseId ?? ''))
+          )
+        ),
+        itemStreamRevision: event.seq ?? 0,
         messages:
           messageIds.length > 0 ? s.messages.filter((m) => !messageIds.includes(m.id)) : s.messages,
         streamingText: '',

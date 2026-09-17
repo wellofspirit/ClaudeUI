@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { overlayItemStreams } from '../../../../core/shared/sync/item-stream'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from '../chat/MarkdownRenderer'
 import { SubagentOutputBody } from '../chat/SubagentOutputBody'
@@ -41,6 +42,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const messages = useActiveSession((s) => s.messages)
   const taskProgressMap = useActiveSession((s) => s.taskProgressMap)
+  const itemStreams = useActiveSession((s) => s.itemStreams)
   const subagentMsgs = useActiveSession((s) => s.subagentMessages)
   const subagentText = useActiveSession((s) => s.subagentStreamingText)
   const subagentThinking = useActiveSession((s) => s.subagentStreamingThinking)
@@ -62,7 +64,10 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   // Referenced by the autoscroll effect below, so they must be computed before
   // it; they default to empty when the task block isn't present yet. `msgs` is
   // memoized so its identity is stable across renders (it's an effect dep).
-  const msgs = useMemo(() => subagentMsgs[toolUseId] || [], [subagentMsgs, toolUseId])
+  const msgs = useMemo(
+    () => overlayItemStreams(subagentMsgs[toolUseId] || [], itemStreams, toolUseId),
+    [subagentMsgs, itemStreams, toolUseId]
+  )
   const streamText = subagentText[toolUseId] || ''
   const streamThinking = subagentThinking[toolUseId] || ''
 

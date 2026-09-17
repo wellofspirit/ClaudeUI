@@ -106,10 +106,13 @@ export function clearSyncSubscribersForTests(): void {
 // — which is what preserves ADR-054's promise that a 4010 max-age cut ends every
 // authority the socket held, this one included.
 
-/** One connection's stream sink. Carries BOTH lane flavors (phase 5 S2). */
-export type StreamSink = (frame: LaneFrame) => void
+/** One connection's stream sink. Carries every stream-lane flavor. */
+export type StreamSink = (frame: LaneFrame) => void | boolean
 
 interface StreamSubscriber {
+  pendingItems: Set<string>
+  retry?: ReturnType<typeof setTimeout>
+  retryDelayMs: number
   sink: StreamSink
   /** Routing ids this connection is watching — a REPLACE set, never additive. */
   watch: Set<string>
@@ -124,6 +127,8 @@ interface StreamSubscriber {
 }
 
 const streamSubscribers = new Map<string, StreamSubscriber>()
+const ITEM_RETRY_INITIAL_MS = 100
+const ITEM_RETRY_MAX_MS = 2_000
 
 /**
  * Register a connection's stream sink. Returns the unregister, which the
@@ -133,9 +138,18 @@ const streamSubscribers = new Map<string, StreamSubscriber>()
  * nothing and must send `stream:watch`.
  */
 export function addStreamSubscriber(connectionId: string, sink: StreamSink): () => void {
-  streamSubscribers.set(connectionId, { sink, watch: new Set(), automationWatch: new Set() })
+  clearTimeout(streamSubscribers.get(connectionId)?.retry)
+  const entry: StreamSubscriber = {
+    sink,
+    watch: new Set(),
+    automationWatch: new Set(),
+    pendingItems: new Set(),
+    retryDelayMs: ITEM_RETRY_INITIAL_MS
+  }
+  streamSubscribers.set(connectionId, entry)
   return () => {
-    streamSubscribers.delete(connectionId)
+    clearTimeout(entry.retry)
+    if (streamSubscribers.get(connectionId) === entry) streamSubscribers.delete(connectionId)
   }
 }
 
@@ -166,6 +180,12 @@ export function setStreamWatch(
   const entry = streamSubscribers.get(connectionId)
   if (!entry) return 0
   entry.watch = new Set(sessionIds)
+  for (const id of entry.pendingItems) if (!entry.watch.has(id)) entry.pendingItems.delete(id)
+  if (!entry.pendingItems.size) {
+    clearTimeout(entry.retry)
+    entry.retry = undefined
+    entry.retryDelayMs = ITEM_RETRY_INITIAL_MS
+  }
   if (options.automationRuns) entry.automationWatch = new Set(options.automationRuns)
   // `replay: false` exists for ONE caller — the engine-test stub window, which
   // re-watches after every emission and would otherwise re-deliver every
@@ -175,9 +195,12 @@ export function setStreamWatch(
   if (options.replay === false) return 0
   let pushed = 0
   for (const routingId of entry.watch) {
-    for (const frame of syncCore.streamReplay(routingId)) {
+    for (const frame of [
+      ...syncCore.streamReplay(routingId),
+      syncCore.itemStreamReplay(routingId)
+    ]) {
       try {
-        entry.sink(frame)
+        deliverStreamTo(entry, frame)
         pushed++
       } catch (err) {
         logger.error(
@@ -240,6 +263,7 @@ export function streamSubscriberCount(): number {
 
 /** Drop every stream sink. Test seam only. */
 export function clearStreamSubscribersForTests(): void {
+  for (const entry of streamSubscribers.values()) clearTimeout(entry.retry)
   streamSubscribers.clear()
 }
 
@@ -276,18 +300,59 @@ export function clearStreamObserversForTests(): void {
 }
 
 /**
+ * Retain only ids of dropped item traffic, then send fresh state after drain.
+ * One capped-backoff timer per connection also heals an idle item with no next
+ * token, without polling a persistently congested socket at a fixed rate.
+ */
+function deliverStreamTo(entry: StreamSubscriber, frame: LaneFrame): void {
+  const sent = entry.sink(frame)
+  if (frame.type !== 'item-stream') return
+  if (sent === false) entry.pendingItems.add(frame.routingId)
+  else if (frame.op === 'replace') {
+    entry.pendingItems.delete(frame.routingId)
+    if (!entry.pendingItems.size) {
+      clearTimeout(entry.retry)
+      entry.retry = undefined
+      entry.retryDelayMs = ITEM_RETRY_INITIAL_MS
+    }
+  }
+  if (!entry.pendingItems.size || entry.retry) return
+  const delay = entry.retryDelayMs
+  entry.retryDelayMs = Math.min(delay * 2, ITEM_RETRY_MAX_MS)
+  entry.retry = setTimeout(() => {
+    entry.retry = undefined
+    for (const id of [...entry.pendingItems]) {
+      if (!entry.watch.has(id)) {
+        entry.pendingItems.delete(id)
+        continue
+      }
+      try {
+        deliverStreamTo(entry, syncCore.itemStreamReplay(id))
+      } catch {
+        entry.pendingItems.delete(id)
+      }
+    }
+  }, delay)
+  entry.retry.unref?.()
+}
+
+/**
  * The stream fan-out: every connection whose watch set names the frame's session,
  * and nobody else. Fenced per sink for the same reason the event lane is — one
  * dead socket must not stop the others.
  */
+
 function streamDelivery(frame: LaneFrame): void {
-  // One predicate for both flavors: a text frame names its session in the
+  // One predicate for each flavor: a text frame names its session in the
   // streamId, a pass-through frame names its scope in the payload. Derived from
   // the ONE shared parser in each case — a second answer here about "who is this
   // for" is exactly the drift `shared/sync/stream.ts` exists to prevent.
   let wants: (entry: StreamSubscriber) => boolean
   let label: string
-  if (frame.type === 'stream-ev') {
+  if (frame.type === 'item-stream') {
+    wants = (entry) => entry.watch.has(frame.routingId)
+    label = frame.routingId
+  } else if (frame.type === 'stream-ev') {
     const scope = streamEventScopeOf(frame)
     if (!scope) return
     wants =
@@ -305,7 +370,7 @@ function streamDelivery(frame: LaneFrame): void {
   for (const entry of [...streamSubscribers.values()]) {
     if (!wants(entry)) continue
     try {
-      entry.sink(frame)
+      deliverStreamTo(entry, frame)
     } catch (err) {
       logger.error(
         LOG_SOURCE,
@@ -413,6 +478,7 @@ syncCore.onRekey((oldId, newId) => {
   for (const entry of streamSubscribers.values()) {
     if (!entry.watch.delete(oldId)) continue
     entry.watch.add(newId)
+    if (entry.pendingItems.delete(oldId)) entry.pendingItems.add(newId)
   }
 })
 

@@ -1,4 +1,5 @@
 import { useRef, useEffect, useState, useMemo, useCallback } from 'react'
+import { overlayItemStreams } from '../../../../../core/shared/sync/item-stream'
 import {
   useActiveSession,
   useSessionStore,
@@ -52,7 +53,22 @@ function persistFullscreenHintDismissed(): void {
 
 export function ChatPanel(): React.JSX.Element {
   const focusedData = useFocusedAgentData()
-  const messages = focusedData.messages
+  const itemStreams = useActiveSession((s) => s.itemStreams)
+  const messages = useMemo(
+    () => overlayItemStreams(focusedData.messages, itemStreams),
+    [focusedData.messages, itemStreams]
+  )
+  const activeThinkingSlotsByMessage = useMemo(() => {
+    const slots = new Map<string, number[]>()
+    for (const stream of Object.values(itemStreams)) {
+      if (stream.target.ownerToolUseId || stream.target.kind !== 'thinking') continue
+      const current = slots.get(stream.target.messageId) ?? []
+      current.push(stream.target.blockIndex)
+      slots.set(stream.target.messageId, current)
+    }
+    return slots
+  }, [itemStreams])
+  const hasItemStreams = Object.values(itemStreams).some((s) => !s.target.ownerToolUseId)
   const hasStreamingText = !!focusedData.streamingText
   const streamingThinking = focusedData.streamingThinking
   const thinkingStartedAt = focusedData.thinkingStartedAt
@@ -312,6 +328,7 @@ export function ChatPanel(): React.JSX.Element {
                         pendingApprovals={pendingApprovals}
                         isLastAssistant={msg.id === lastAssistantId}
                         thinkingStartedAt={thinkingStartedAt}
+                        activeThinkingSlots={activeThinkingSlotsByMessage.get(msg.id)}
                       />
                     </div>
                   ))}
@@ -320,9 +337,10 @@ export function ChatPanel(): React.JSX.Element {
               <div className="flex flex-col gap-5">
                 {hasStreamingText && <StreamingText />}
                 {thinkingStartedAt && <ThinkingBlock text={streamingThinking} isActive />}
-                {!hasStreamingText && !thinkingStartedAt && status.state === 'running' && (
-                  <TypingIndicator />
-                )}
+                {!hasStreamingText &&
+                  !thinkingStartedAt &&
+                  !hasItemStreams &&
+                  status.state === 'running' && <TypingIndicator />}
               </div>
             </div>
           )}

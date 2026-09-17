@@ -23,6 +23,7 @@
  * harness — two counters would manufacture gaps and trip resync detection.
  */
 
+import { itemAppendFrame } from '../../core/shared/sync/item-stream'
 import { SyncClient } from '../../core/shared/sync/sync-client'
 import {
   getSyncClient,
@@ -127,6 +128,11 @@ export function advanceSeqTo(value: number): void {
 export function emitSync(channel: string, args: unknown[]): void {
   const c = client()
   if (isVolatileStream(channel)) {
+    if (volatileFlavorOf(channel) === 'item-stream') {
+      const frame = itemAppendFrame(getReplicaState(), String(args[0]), args[1], seq)
+      if (frame) c.receiveItemStreamFrame(frame)
+      return
+    }
     if (volatileFlavorOf(channel) === 'pass-through') {
       c.receiveStreamEvent({ type: 'stream-ev', channel, args })
       return

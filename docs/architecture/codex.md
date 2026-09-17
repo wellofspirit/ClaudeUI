@@ -310,12 +310,12 @@ with no clients connected.
 
 ## Four contract lanes
 
-| SyncCore lane    | Codex use                                                                                                                                                          |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Commands         | Create/resume, send/interrupt, permission-mode and model/effort changes, approvals and authorized login actions. Steer and recall are built (`4050eb0a`)           |
-| Domain events    | Session identity/status/effective config, final transcript items, pending request lifecycle, queue state, task lifecycle and usage metadata                        |
-| Volatile streams | Command-output tails. Text/reasoning currently use stable item-scoped message upserts so independent native items cannot concatenate in the single session stream. |
-| Queries          | Native catalog/status, history/list/fork anchors, non-secret account metadata                                                                                      |
+| SyncCore lane    | Codex use                                                                                                                                                                                                                                                                          |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Commands         | Create/resume, send/interrupt, permission-mode and model/effort changes, approvals and authorized login actions. Steer and recall are built (`4050eb0a`)                                                                                                                           |
+| Domain events    | Session identity/status/effective config, final transcript items, pending request lifecycle, queue state, task lifecycle and usage metadata                                                                                                                                        |
+| Volatile streams | Command-output tails plus root/direct-child text, reasoning and plans on the [per-item lane](../per-item-streaming-design.md): reliable open/seal, volatile chunk-only append, atomic watch replay. Partial output is sealed on interruption; a child may outlive the parent turn. |
+| Queries          | Native catalog/status, history/list/fork anchors, non-secret account metadata                                                                                                                                                                                                      |
 
 Extend the existing contracts in `src/core/shared/sync/`, `src/shared/types.ts`, and `src/shared/remote-protocol.ts`, not an engine-specific renderer side channel. Canonical and replica reducers must converge after reconnect, including pending approvals and non-recallable sends. Core continues operating with zero clients.
 

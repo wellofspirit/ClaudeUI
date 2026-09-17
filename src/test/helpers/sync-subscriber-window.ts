@@ -56,6 +56,10 @@ export function subscribeWindowToSync(win: WindowLike): () => void {
 
   const connectionId = `test-stub-${nextStubConnection++}`
   const offStream = addStreamSubscriber(connectionId, (frame: LaneFrame) => {
+    if (frame.type === 'item-stream') {
+      win.webContents.send('session:item-delta', frame.routingId, frame)
+      return
+    }
     if (frame.type === 'stream-ev') return // delivered through the observer below
     // The SHARED inverse — the same one the plugin bridge uses. Hand-rolling it
     // here would be a second answer to "what did the emitter send", in the one

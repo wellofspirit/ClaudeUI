@@ -1,4 +1,5 @@
 import type { FullStateSnapshot } from '../../../shared/remote-protocol'
+import { isItemStreamFrame, type ItemStreamFrame } from './item-stream'
 import { isStreamEventFrame, isStreamFrame, type StreamFrame } from './stream'
 
 /** One domain event as a transport hands it over (frame envelope stripped). */
@@ -12,7 +13,9 @@ export type SyncListener = (...args: unknown[]) => void
 export type SyncFullStateHandler = (state: FullStateSnapshot) => void
 /** Raw-event tap (SyncCore phase 4c) — see {@link SyncClient.onAnyEvent}. */
 export type SyncEventTap = (event: SyncEvent) => void
-/** Volatile-lane tap (phase 5 S1) — see {@link SyncClient.onStreamFrame}. */
+/** Item-addressed volatile-lane tap. */
+export type SyncItemStreamTap = (frame: ItemStreamFrame) => void
+/** Session/tail volatile-lane tap (phase 5 S1). */
 export type SyncStreamTap = (frame: StreamFrame) => void
 /** Fired whenever a `sync` was ANSWERED — see {@link SyncClient.onSyncAnswered}. */
 export type SyncAnsweredTap = () => void
@@ -62,6 +65,8 @@ const DEFAULT_BUFFER_LIMIT = 5000
 export class SyncClient {
   private readonly listeners = new Map<string, Set<SyncListener>>()
   private readonly taps = new Set<SyncEventTap>()
+  private readonly itemStreamTaps = new Set<SyncItemStreamTap>()
+  private itemResyncPending = false
   private readonly streamTaps = new Set<SyncStreamTap>()
   private readonly answeredTaps = new Set<SyncAnsweredTap>()
   private readonly requestResync: () => void
@@ -127,14 +132,38 @@ export class SyncClient {
     }
   }
 
+  /** Subscribe to item frames without advancing the reliable event cursor. */
+  onItemStreamFrame(cb: SyncItemStreamTap): () => void {
+    this.itemStreamTaps.add(cb)
+    return () => {
+      this.itemStreamTaps.delete(cb)
+    }
+  }
+
+  receiveItemStreamFrame(frame: unknown): void {
+    if (!this.ready || !isItemStreamFrame(frame)) return
+    if (frame.atSeq > this.lastSeq || this.draining) {
+      if (!this.itemResyncPending) {
+        this.itemResyncPending = true
+        this.triggerResync()
+      }
+      return // answered sync triggers rewatch; never apply before the open
+    }
+    for (const tap of this.itemStreamTaps) {
+      try {
+        tap(frame)
+      } catch {
+        /* isolate subscribers */
+      }
+    }
+  }
+
   /**
    * Subscribe to the VOLATILE STREAM lane (phase 5 S1).
    *
    * Deliberately separate from {@link onAnyEvent}: a stream frame is not an
    * event. It carries no seq, so it must NOT touch `lastSeq`, the pre-ready
-   * buffer or gap detection — a delta that advanced the cursor would make the
-   * client claim it had applied events it never saw, which is the exact hole the
-   * ack discipline exists to prevent.
+   * buffer or gap detection.
    */
   onStreamFrame(cb: SyncStreamTap): () => void {
     this.streamTaps.add(cb)
@@ -297,6 +326,7 @@ export class SyncClient {
   }
 
   private announceAnswered(): void {
+    this.itemResyncPending = false
     for (const tap of this.answeredTaps) {
       try {
         tap()

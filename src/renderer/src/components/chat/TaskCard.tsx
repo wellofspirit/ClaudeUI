@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react'
 import type { ContentBlock, PendingApproval, PermissionSuggestion } from '../../../../shared/types'
 import type { ToolView } from '../../../../shared/tool-kinds'
+import { overlayItemStreams } from '../../../../core/shared/sync/item-stream'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { SubagentOutputBody } from './SubagentOutputBody'
@@ -83,6 +84,7 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
   const dismissApproval = useSessionStore((s) => s.dismissApproval)
   const permissionMode = useActiveSession((s) => s.permissionMode)
   const openTaskPanel = useSessionStore((s) => s.openTaskPanel)
+  const itemStreams = useActiveSession((s) => s.itemStreams)
   const subagentMsgs = useActiveSession((s) => s.subagentMessages)
   const subagentText = useActiveSession((s) => s.subagentStreamingText)
   const subagentThinking = useActiveSession((s) => s.subagentStreamingThinking)
@@ -97,7 +99,10 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
   const toolUseId = block.toolUseId
   const isHistorical = useActiveSession((s) => s.isHistorical)
   const hasResult = !!result
-  const msgs = subagentMsgs[toolUseId] || []
+  const msgs = useMemo(
+    () => overlayItemStreams(subagentMsgs[toolUseId] || [], itemStreams, toolUseId),
+    [subagentMsgs, itemStreams, toolUseId]
+  )
   const streamText = subagentText[toolUseId] || ''
   const streamThinking = subagentThinking[toolUseId] || ''
   const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)

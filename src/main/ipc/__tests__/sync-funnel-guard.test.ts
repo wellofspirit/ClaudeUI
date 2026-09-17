@@ -462,7 +462,9 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
   const textStreams = volatileStreamChannels('text-stream')
   const passThrough = volatileStreamChannels('pass-through')
 
-  it('is the two delta channels plus the three tails, split by flavor', () => {
+  it('partitions session deltas, item deltas and the three tails by flavor', () => {
+    const itemStreams = volatileStreamChannels('item-stream')
+    expect(itemStreams).toEqual(['session:item-delta'])
     expect(textStreams).toEqual(['session:stream', 'session:subagent-stream'])
     expect(passThrough).toEqual([
       'automation:stream-event',
@@ -473,7 +475,7 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
     // volatile channel with no flavor would be routed by `SyncCore.process`'s
     // else-branch into `streamFrameFrom`, which returns null for it — a silent
     // drop of the whole channel.
-    expect([...textStreams, ...passThrough].sort()).toEqual(volatile)
+    expect([...textStreams, ...itemStreams, ...passThrough].sort()).toEqual(volatile)
   })
 
   it('the interim `volatile-pending-phase-5` class is GONE, not merely empty', () => {

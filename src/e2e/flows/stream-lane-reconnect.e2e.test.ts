@@ -1,3 +1,10 @@
+import {
+  applyItemStreamFrame,
+  itemStreamKey,
+  type ItemStreamFrame,
+  type ItemStreamTarget
+} from '../../core/shared/sync/item-stream'
+import { applyEvent } from '../../core/shared/sync/reducer'
 /**
  * @vitest-environment node
  *
@@ -231,4 +238,54 @@ describe('E2E: the volatile stream lane survives a reconnect (phase 5 exit crite
 
     await client.close()
   })
+})
+
+it('streams individual items over WebSocket, catches up after 5500 chunks and seals for unwatched clients', async () => {
+  const id = 'item-wire'
+  const target: ItemStreamTarget = { messageId: 'answer', blockIndex: 0, kind: 'text' }
+  const msg = (text: string) => ({
+    id: 'answer',
+    role: 'assistant' as const,
+    timestamp: 1,
+    content: [{ type: 'text' as const, text }]
+  })
+  emitEvent('session:created', [id, { cwd: CWD, engineId: 'codex' }])
+  const first = await connect()
+  try {
+    await first.client.send({ type: 'sync', lastSeq: 0 })
+    await waitFor(() => first.frames.some((f) => f.type === 'sync-full'))
+    const full = first.frames.find((f) => f.type === 'sync-full') as WsSyncFull
+    emitEvent('session:item-open', [id, { target, message: msg('') }])
+    for (let n = 0; n < 5500; n++) emitEvent('session:item-delta', [id, { target, chunk: 'x' }])
+    expect(syncCore.currentSeq()).toBe(full.state.seq + 1)
+    expect(first.frames.some((f) => f.type === 'item-stream')).toBe(false)
+    const second = await connect()
+    try {
+      await second.client.send({ type: 'sync', lastSeq: full.state.seq, epoch: full.epoch })
+      await waitFor(() => second.frames.some((f) => f.type === 'sync-catchup'))
+      const catchup = second.frames.find((f) => f.type === 'sync-catchup') as WsSyncCatchup
+      let state = fromSnapshot(full.state)
+      for (const event of catchup.events) state = applyEvent(state, event)
+      await second.client.invoke('stream:watch', { sessionIds: [id] })
+      await waitFor(() => second.frames.some((f) => f.type === 'item-stream'))
+      const replay = second.frames.find((f) => f.type === 'item-stream') as ItemStreamFrame
+      state = applyItemStreamFrame(state, replay).state
+      expect(state.sessions[id].itemStreams[itemStreamKey(target)].value).toBe('x'.repeat(5500))
+      emitEvent('session:item-seal', [id, { message: msg('authoritative final') }])
+      await waitFor(() =>
+        first.frames.some((f) => f.type === 'event' && f.channel === 'session:item-seal')
+      )
+      const seal = first.frames.find(
+        (f) => f.type === 'event' && f.channel === 'session:item-seal'
+      )!
+      if (seal.type !== 'event') throw new Error('missing seal')
+      state = applyEvent(state, seal)
+      expect(state.sessions[id].messages[0].content).toEqual(msg('authoritative final').content)
+      expect(state.sessions[id].itemStreams).toEqual({})
+    } finally {
+      await second.client.close()
+    }
+  } finally {
+    await first.client.close()
+  }
 })

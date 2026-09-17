@@ -79,7 +79,7 @@
 export type ChannelClass = 'replicated' | 'volatile' | 'host-local'
 
 /** Which interpretation a `volatile` channel's frames carry (phase 5). */
-export type VolatileFlavor = 'text-stream' | 'pass-through'
+export type VolatileFlavor = 'text-stream' | 'pass-through' | 'item-stream'
 
 export interface ChannelSpec {
   cls: ChannelClass
@@ -150,6 +150,25 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     ring: true,
     canonical: true,
     why: 'The single source of truth for a non-queued user turn entering the transcript.'
+  },
+  'session:item-open': {
+    cls: 'replicated',
+    ring: true,
+    canonical: true,
+    why: 'Establishes a stream target and transcript position once, before volatile appends.'
+  },
+  'session:item-seal': {
+    cls: 'replicated',
+    ring: true,
+    canonical: true,
+    why: 'Commits final content and retires only that item atomically.'
+  },
+  'session:item-delta': {
+    cls: 'volatile',
+    ring: false,
+    canonical: true,
+    volatileFlavor: 'item-stream',
+    why: 'Item-addressed appends; canonical accumulation, no event ring entry.'
   },
   'session:message': {
     cls: 'replicated',

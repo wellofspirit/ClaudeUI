@@ -108,13 +108,15 @@ interface MessageBubbleProps {
   pendingApprovals: PendingApproval[]
   isLastAssistant: boolean
   thinkingStartedAt: number | null
+  activeThinkingSlots?: readonly number[]
 }
 
 export const MessageBubble = memo(function MessageBubble({
   message,
   pendingApprovals,
   isLastAssistant,
-  thinkingStartedAt
+  thinkingStartedAt,
+  activeThinkingSlots = []
 }: MessageBubbleProps): React.JSX.Element {
   // Hooks must run unconditionally — declared before the role-based early returns.
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
@@ -395,7 +397,8 @@ export const MessageBubble = memo(function MessageBubble({
             <ThinkingBlock
               key={item.index}
               text={item.block.text || ''}
-              isActive={false}
+              isActive={activeThinkingSlots.includes(item.index)}
+              startedAt={activeThinkingSlots.includes(item.index) ? message.timestamp : undefined}
               durationMs={item.block.durationMs}
             />
           )

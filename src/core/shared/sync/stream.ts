@@ -46,6 +46,7 @@
 
 import type { CanonicalSessionState, CanonicalState } from './state'
 import type { ReducerAux } from './reducer'
+import type { ItemStreamFrame } from './item-stream'
 
 // ---------------------------------------------------------------------------
 // The wire frame
@@ -101,8 +102,8 @@ export interface StreamEventFrame {
   args: unknown[]
 }
 
-/** Either flavor of the volatile lane. Both transports carry both. */
-export type LaneFrame = StreamFrame | StreamEventFrame
+/** Every flavor of the volatile lane. Both transports carry all three. */
+export type LaneFrame = StreamFrame | StreamEventFrame | ItemStreamFrame
 
 /** Structural validation for an inbound pass-through frame (single source). */
 export function isStreamEventFrame(value: unknown): value is StreamEventFrame {

@@ -8,7 +8,8 @@ import { SessionManager } from '../../core/services/session-manager'
 import { AutomationManager } from '../../core/services/automation-manager'
 import { RemoteDispatcher } from '../../core/services/remote-dispatcher'
 import { commandRegistry, hostConnection, registerCommand } from '../../core/ipc/command-registry'
-import { addStreamObserver, addSyncSubscriber } from '../../core/services/sync-host'
+import { addStreamObserver, addSyncSubscriber, syncCore } from '../../core/services/sync-host'
+import { overlayItemStreams } from '../../core/shared/sync/item-stream'
 import { streamFrameToEmission } from '../../core/shared/sync/stream'
 import type {
   ClaudeUIPlugin,
@@ -93,6 +94,18 @@ export class PluginManager {
         logger.debug(LOG_SOURCE, `[trace] ${channel} ${JSON.stringify(args).slice(0, 200)}`)
       }
       this.fireSessionScoped(channel, args)
+      if (channel === 'session:item-seal') {
+        const data = args[1] as { message: unknown; ownerToolUseId?: string }
+        this.fireSessionScoped(
+          data.ownerToolUseId ? 'session:subagent-message' : 'session:message',
+          [
+            args[0],
+            data.ownerToolUseId
+              ? { toolUseId: data.ownerToolUseId, message: data.message }
+              : data.message
+          ]
+        )
+      }
     })
 
     // The VOLATILE LANE (phase 5 S1, extended by S2). The two delta channels and
@@ -108,6 +121,29 @@ export class PluginManager {
     // channels the synthesis is skipped entirely, so the token firehose costs
     // nothing on a machine with no plugins — which is every machine by default.
     this.unsubscribeStream = addStreamObserver((frame) => {
+      if (frame.type === 'item-stream') {
+        if (frame.op !== 'append') return
+        this.fireSessionScoped('session:item-delta', [frame.routingId, frame])
+        if (!frame.target.ownerToolUseId && this.hasListeners('session:message')) {
+          const session = syncCore.getCanonicalState().sessions[frame.routingId]
+          const message = session?.messages.find((m) => m.id === frame.target.messageId)
+          if (session && message)
+            this.fireSessionScoped('session:message', [
+              frame.routingId,
+              overlayItemStreams([message], session.itemStreams)[0]
+            ])
+        }
+        if (frame.target.ownerToolUseId && frame.target.kind !== 'plan')
+          this.fireSessionScoped('session:subagent-stream', [
+            frame.routingId,
+            {
+              toolUseId: frame.target.ownerToolUseId,
+              type: frame.target.kind,
+              text: frame.chunk
+            }
+          ])
+        return
+      }
       if (frame.type === 'stream-ev') {
         if (!this.hasListeners(frame.channel)) return
         if (this.tracing) {

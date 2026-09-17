@@ -620,3 +620,15 @@ describe('codex-render-stress --accounts', () => {
     ])
   })
 })
+
+it('optionally streams message chunks while preserving the default completed-item fixture', () => {
+  const item = fixtureAssistantMessage('A streamed answer with several chunks')
+  const basic = fixtureResponseEvents(item)
+  expect(basic).toHaveLength(3)
+  const streamed = fixtureResponseEvents(item, true)
+  const chunks = streamed.filter((e) => e.type === 'response.output_text.delta')
+  expect(chunks.length).toBeGreaterThan(1)
+  expect(chunks.map((e) => e.delta).join('')).toBe('A streamed answer with several chunks')
+  expect(streamed[1]).toMatchObject({ type: 'response.output_item.added', item: { content: [] } })
+  expect(streamed.at(-2)).toEqual({ type: 'response.output_item.done', output_index: 0, item })
+})

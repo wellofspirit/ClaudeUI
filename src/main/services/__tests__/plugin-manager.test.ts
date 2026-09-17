@@ -531,6 +531,41 @@ describe('PluginManager', () => {
       delete (global as any).__deltas
     })
 
+    it('preserves message observers across the Codex item lane without ringing prefixes', async () => {
+      s = scaffold({ sessionIdFor: () => 'SID-1' })
+      writePlugin({
+        id: 'item-listener',
+        entryJs: `module.exports = { activate(ctx) {
+        global.__itemMessages = []
+        ctx.on('session:message', evt => global.__itemMessages.push(evt))
+      } }`
+      })
+      await s.manager.loadAll()
+      syncCore.seedSession('R-1', {})
+      const target = { messageId: 'item', blockIndex: 0, kind: 'text' }
+      const message = {
+        id: 'item',
+        role: 'assistant',
+        timestamp: 1,
+        content: [{ type: 'text', text: '' }]
+      }
+      emitEvent('session:item-open', ['R-1', { target, message }])
+      const seq = syncCore.currentSeq()
+      emitEvent('session:item-delta', ['R-1', { target, chunk: 'one' }])
+      emitEvent('session:item-delta', ['R-1', { target, chunk: ' two' }])
+      expect(syncCore.currentSeq()).toBe(seq)
+      emitEvent('session:item-seal', [
+        'R-1',
+        { message: { ...message, content: [{ type: 'text', text: 'final' }] } }
+      ])
+      expect((global as any).__itemMessages.map((m: any) => m.content[0].text)).toEqual([
+        'one',
+        'one two',
+        'final'
+      ])
+      delete (global as any).__itemMessages
+    })
+
     it('forwards the VOLATILE TAILS with their pre-phase-5 payload shape (parity guard)', async () => {
       // The S2 half of the same promise: `session:bash-output`,
       // `session:background-output` and `automation:stream-event` left the event

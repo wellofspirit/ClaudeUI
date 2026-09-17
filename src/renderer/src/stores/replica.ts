@@ -52,7 +52,12 @@
  * the `canonical: false` channels are NOT in it.
  */
 
-import { onSyncAnyEvent, onSyncStreamFrame } from '../../../core/shared/sync/client-registry'
+import { applyItemStreamFrame } from '../../../core/shared/sync/item-stream'
+import {
+  onSyncAnyEvent,
+  onSyncStreamFrame,
+  onSyncItemStreamFrame
+} from '../../../core/shared/sync/client-registry'
 import { channelSpec } from '../../../core/shared/sync/channels'
 import {
   applyStreamFrame,
@@ -96,7 +101,9 @@ let canonical: CanonicalState = emptyCanonicalState()
 let aux: ReducerAux = emptyAux()
 /** The installed raw-event tap's unsubscribe, or null — see {@link startReplica}. */
 let tapOff: (() => void) | null = null
-/** The volatile lane's tap (phase 5 S1). */
+/** The item-addressed volatile lane's tap. */
+let itemStreamTapOff: (() => void) | null = null
+/** The session/tail volatile lane's tap (phase 5 S1). */
 let streamTapOff: (() => void) | null = null
 
 /** Post-apply observers — see {@link onReplicaApplied}. */
@@ -199,6 +206,11 @@ export function startReplica(): () => void {
   // `applyStreamFrame` writes the same sealed streaming fields the reducer used
   // to, through the same `commit` + identity-diffed projection.
   streamTapOff = onSyncStreamFrame(foldStreamFrame)
+  itemStreamTapOff = onSyncItemStreamFrame((frame) => {
+    const outcome = applyItemStreamFrame(canonical, frame)
+    if (outcome.result === 'mismatch') scheduleRewatch()
+    else if (outcome.result === 'applied') commit(outcome.state)
+  })
   return stopReplica
 }
 
@@ -206,6 +218,8 @@ export function startReplica(): () => void {
 function stopReplica(): void {
   tapOff?.()
   tapOff = null
+  itemStreamTapOff?.()
+  itemStreamTapOff = null
   streamTapOff?.()
   streamTapOff = null
 }
@@ -595,6 +609,8 @@ export function evictLocalSessions(routingIds: readonly string[]): void {
     sessions[id] = {
       ...session,
       messages: [],
+      itemStreams: {},
+      itemStreamRevision: 0,
       streamingText: '',
       streamingThinking: '',
       subagentMessages: {},
@@ -808,6 +824,8 @@ function projectSession(
     ...base,
     cwd: c.cwd,
     messages: c.messages,
+    itemStreams: c.itemStreams,
+    itemStreamRevision: c.itemStreamRevision,
     streamingText: c.streamingText,
     streamingThinking: c.streamingThinking,
     status: c.status,
