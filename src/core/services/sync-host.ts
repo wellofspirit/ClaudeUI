@@ -51,7 +51,7 @@
 
 import type { HostWindowHandle } from '../host'
 import { SyncCore, type Delivery } from '../sync/sync-core'
-import { sessionIdOfStream, streamEventScopeOf, type LaneFrame } from '../shared/sync/stream'
+import { streamEventScopeOf, type StreamLaneFrame } from '../shared/sync/stream'
 import { getHostWindow } from './host-window'
 import { logger } from './logger'
 import {
@@ -107,7 +107,7 @@ export function clearSyncSubscribersForTests(): void {
 // authority the socket held, this one included.
 
 /** One connection's stream sink. Carries every stream-lane flavor. */
-export type StreamSink = (frame: LaneFrame) => void | boolean
+export type StreamSink = (frame: StreamLaneFrame) => void | boolean
 
 interface StreamSubscriber {
   pendingItems: Set<string>
@@ -195,20 +195,15 @@ export function setStreamWatch(
   if (options.replay === false) return 0
   let pushed = 0
   for (const routingId of entry.watch) {
-    for (const frame of [
-      ...syncCore.streamReplay(routingId),
-      syncCore.itemStreamReplay(routingId)
-    ]) {
-      try {
-        deliverStreamTo(entry, frame)
-        pushed++
-      } catch (err) {
-        logger.error(
-          LOG_SOURCE,
-          `stream sink threw during replay of ${routingId}: ` +
-            `${err instanceof Error ? err.message : String(err)}`
-        )
-      }
+    try {
+      deliverStreamTo(entry, syncCore.itemStreamReplay(routingId))
+      pushed++
+    } catch (err) {
+      logger.error(
+        LOG_SOURCE,
+        `stream sink threw during replay of ${routingId}: ` +
+          `${err instanceof Error ? err.message : String(err)}`
+      )
     }
   }
   return pushed
@@ -235,7 +230,7 @@ export function setStreamWatch(
  *
  * Same lane, same guarantees: never ringed, never logged, no seq, no replay.
  */
-export function sendToStreamConnection(connectionId: string, frame: LaneFrame): boolean {
+export function sendToStreamConnection(connectionId: string, frame: StreamLaneFrame): boolean {
   const entry = streamSubscribers.get(connectionId)
   if (!entry) return false
   try {
@@ -277,12 +272,8 @@ export function clearStreamSubscribersForTests(): void {
  * inventing a connection id for something that is not a connection, and every
  * `stream:watch` bound would then have to reason about entries no client owns.
  *
- * The one production consumer is the ADR-005 plugin bridge, which was a
- * subscriber of `session:stream` before phase 5 S1 moved those channels off the
- * event lane — and of the three TAILS before S2 moved those. Restoring it here
- * keeps a plugin's contract unchanged by a lane change it has no part in — the
- * alternative was silently deleting token deltas and bash output from every
- * plugin.
+ * Production consumers include the plugin bridge, which synthesizes its legacy
+ * in-process callbacks from item frames, and tail observers.
  */
 const streamObservers = new Set<StreamSink>()
 
@@ -304,7 +295,7 @@ export function clearStreamObserversForTests(): void {
  * One capped-backoff timer per connection also heals an idle item with no next
  * token, without polling a persistently congested socket at a fixed rate.
  */
-function deliverStreamTo(entry: StreamSubscriber, frame: LaneFrame): void {
+function deliverStreamTo(entry: StreamSubscriber, frame: StreamLaneFrame): void {
   const sent = entry.sink(frame)
   if (frame.type !== 'item-stream') return
   if (sent === false) entry.pendingItems.add(frame.routingId)
@@ -342,17 +333,15 @@ function deliverStreamTo(entry: StreamSubscriber, frame: LaneFrame): void {
  * dead socket must not stop the others.
  */
 
-function streamDelivery(frame: LaneFrame): void {
-  // One predicate for each flavor: a text frame names its session in the
-  // streamId, a pass-through frame names its scope in the payload. Derived from
-  // the ONE shared parser in each case — a second answer here about "who is this
-  // for" is exactly the drift `shared/sync/stream.ts` exists to prevent.
+function streamDelivery(frame: StreamLaneFrame): void {
+  // Item frames carry routingId directly; tails derive their session or
+  // automation scope from the shared parser.
   let wants: (entry: StreamSubscriber) => boolean
   let label: string
   if (frame.type === 'item-stream') {
     wants = (entry) => entry.watch.has(frame.routingId)
     label = frame.routingId
-  } else if (frame.type === 'stream-ev') {
+  } else {
     const scope = streamEventScopeOf(frame)
     if (!scope) return
     wants =
@@ -360,11 +349,6 @@ function streamDelivery(frame: LaneFrame): void {
         ? (entry) => entry.automationWatch.has(scope.id)
         : (entry) => entry.watch.has(scope.id)
     label = `${frame.channel} (${scope.kind} ${scope.id})`
-  } else {
-    const routingId = sessionIdOfStream(frame.streamId)
-    if (!routingId) return
-    wants = (entry) => entry.watch.has(routingId)
-    label = frame.streamId
   }
 
   for (const entry of [...streamSubscribers.values()]) {

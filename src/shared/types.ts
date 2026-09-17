@@ -879,20 +879,6 @@ export interface AskUserQuestionInput {
   questions: AskUserQuestion[]
 }
 
-/**
- * The payload `BaseSession.send('session:stream', …)` carries.
- *
- * NOT a `SyncEventMap` entry any more (phase 5 S1): this channel left the event
- * lane, so nothing subscribes to it — the deltas arrive as `StreamFrame`s and
- * fold through `shared/sync/stream.ts`. The type survives because the EMITTERS
- * still speak it and `streamFrameFrom` still parses it; it is the wire shape of
- * an emission, not of a subscription.
- */
-export interface StreamDelta {
-  type: 'text' | 'thinking'
-  text: string
-}
-
 export type TodoStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled'
 
 export interface TodoItem {
@@ -970,13 +956,6 @@ export interface TaskNotification {
   outputFile: string
   summary: string
   usage?: { totalTokens: number; toolUses: number; durationMs: number }
-}
-
-/** The subagent twin of {@link StreamDelta} — same phase-5 note applies. */
-export interface SubagentStreamDelta {
-  toolUseId: string
-  type: 'text' | 'thinking'
-  text: string
 }
 
 export interface SubagentMessageData {

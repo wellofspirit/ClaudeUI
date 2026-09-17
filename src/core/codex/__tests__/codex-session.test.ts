@@ -4797,9 +4797,10 @@ describe('Codex reasoning summaries', () => {
     })
     notify('item/completed', { ...thread, item: reasoningItem([HEADLINE]) })
     expect(thinking()).toEqual([{ type: 'thinking', text: PLAIN }])
-    // No leftover asterisks anywhere in the fold, and no live buffer left open.
+    // No leftover asterisks or active item remains after the completed item.
     expect(JSON.stringify(canonical().messages)).not.toContain('**')
-    expect(canonical().streamingThinking).toBe('')
+    expect(canonical().itemStreams).toEqual({})
+    expect(canonical()).not.toHaveProperty('streamingThinking')
   })
 
   it('leaves no empty Thought behind when the backend streams an empty delta', async () => {

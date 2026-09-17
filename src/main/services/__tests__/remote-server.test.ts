@@ -1840,20 +1840,32 @@ describe('RemoteServer — sync-full is canonical (phase 4b)', () => {
     expect(syncCore.getAfter(state.seq)).toEqual([])
   })
 
-  it('a resync mid-stream carries the accumulated streaming buffers', async () => {
+  it('a resync mid-stream carries active item accumulations with identity', async () => {
     await server.start(port, '127.0.0.1')
     emitEvent('session:created', ['canon-1', { cwd: '/repo' }])
-    emitEvent('session:stream', ['canon-1', { type: 'thinking', text: 'weighing' }])
-    emitEvent('session:stream', ['canon-1', { type: 'text', text: 'partial ' }])
+    const message = {
+      id: 'answer',
+      role: 'assistant' as const,
+      timestamp: 1,
+      content: [
+        { type: 'thinking' as const, text: '' },
+        { type: 'text' as const, text: '' }
+      ]
+    }
+    const thinking = { messageId: 'answer', blockIndex: 0, kind: 'thinking' as const }
+    const text = { messageId: 'answer', blockIndex: 1, kind: 'text' as const }
+    emitEvent('session:item-open', ['canon-1', { target: thinking, message }])
+    emitEvent('session:item-open', ['canon-1', { target: text, message }])
+    emitEvent('session:item-delta', ['canon-1', { target: thinking, chunk: 'weighing' }])
+    emitEvent('session:item-delta', ['canon-1', { target: text, chunk: 'partial ' }])
 
     const msg = await firstSyncFull()
     const state = msg.state as {
-      sessions: Record<string, { streamingText: string; streamingThinking: string }>
+      sessions: Record<string, { itemStreams: Record<string, { value: string }> }>
     }
-    expect(state.sessions['canon-1'].streamingText).toBe('partial ')
-    // The thinking buffer was sealed by the text delta, exactly as every client
-    // replica seals it — canonical is not a second interpretation.
-    expect(state.sessions['canon-1'].streamingThinking).toBe('')
+    expect(
+      Object.values(state.sessions['canon-1'].itemStreams).map((stream) => stream.value)
+    ).toEqual(['weighing', 'partial '])
   })
 })
 

@@ -166,9 +166,37 @@ describe('auditProjection — what `emptyTurn` excludes', () => {
     expect(report).toBeNull()
   })
 
-  it('does not fire while a streaming buffer is unsealed', () => {
-    expect(auditProjection(endingOnUser({ streamingText: 'half an ans' }))).toBeNull()
-    expect(auditProjection(endingOnUser({ streamingThinking: 'hmm' }))).toBeNull()
+  it('does not fire while an item is unsealed', () => {
+    const target = { messageId: 'assistant-1', blockIndex: 0, kind: 'text' as const }
+    const report = auditProjection(
+      endingOnUser({
+        itemStreams: {
+          '[null,"assistant-1",0,"text"]': { target, generation: 8, value: 'partial reply' }
+        }
+      })
+    )
+    expect(report).toBeNull()
+  })
+
+  it('still fires when only a child item is unsealed', () => {
+    const target = {
+      messageId: 'child-1',
+      blockIndex: 0,
+      kind: 'text' as const,
+      ownerToolUseId: 'background-tool'
+    }
+    const report = auditProjection(
+      endingOnUser({
+        itemStreams: {
+          '["background-tool","child-1",0,"text"]': {
+            target,
+            generation: 8,
+            value: 'child output'
+          }
+        }
+      })
+    )
+    expect(report?.findings).toEqual(['emptyTurn'])
   })
 
   it('does not fire for a session canonical no longer has', () => {

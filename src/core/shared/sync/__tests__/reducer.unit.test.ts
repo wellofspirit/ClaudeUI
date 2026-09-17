@@ -9,18 +9,10 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import {
-  applyEvent,
-  emptyAux,
-  auxFromCanonical,
-  checkDerivedFields,
-  rekeyTargetFor,
-  type ReducerAux
-} from '../reducer'
+import { applyEvent, checkDerivedFields, rekeyTargetFor } from '../reducer'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { channelSpec, isVolatileStream } from '../channels'
-import { applyStreamFrame, streamFrameFrom } from '../stream'
+import { channelSpec } from '../channels'
 import { emptyCanonicalState, fromSnapshot, toSnapshot, type CanonicalState } from '../state'
 import type { ChatMessage, SessionStatus, StatusLineData } from '../../../../shared/types'
 
@@ -38,28 +30,15 @@ function status(overrides: Partial<SessionStatus> = {}): SessionStatus {
 }
 
 /**
- * Fold a list of `[channel, ...args]` tuples, assigning seqs 1..n — routed by the
- * channel's CLASS exactly as `SyncCore.process` routes it.
- *
- * A `volatile` channel (phase 5 S1) never reaches `applyEvent`: it is translated
- * into a stream frame and folded by `applyStreamFrame`. Keeping ONE fold helper
- * that knows both lanes is deliberate — the seal/clear interplay between them
- * (a text delta seals a thinking span; a `session:message` clears the buffer and
- * bumps its generation) is only testable if a test can express both.
+ * Fold reliable `[channel, ...args]` tuples, assigning seqs 1..n.
  */
 function fold(
   events: Array<[string, ...unknown[]]>,
-  initial: CanonicalState = emptyCanonicalState(),
-  aux: ReducerAux = emptyAux()
+  initial: CanonicalState = emptyCanonicalState()
 ): CanonicalState {
   let state = initial
   events.forEach(([channel, ...args], i) => {
-    if (isVolatileStream(channel)) {
-      const frame = streamFrameFrom(state, aux, channel, args)
-      if (frame) state = applyStreamFrame(state, aux, frame).state
-      return
-    }
-    state = applyEvent(state, { channel, args, seq: i + 1 }, aux)
+    state = applyEvent(state, { channel, args, seq: i + 1 })
   })
   return state
 }
@@ -125,23 +104,6 @@ describe('reducer — session registry', () => {
     // Identity-stable too: the replica's projection is identity-diffed, so a
     // no-op that returned a fresh object would re-write every slice.
     expect(after).toBe(before)
-  })
-
-  it('a stream delta for an unknown id leaves no orphan thinking-span flag', () => {
-    // The aux write used to happen before the (bootstrapping) session write, so a
-    // delta for a dead id parked `thinkingOpen` that a same-id respawn inherited
-    // — its first real thinking output would be blanked by the next text delta.
-    const aux = emptyAux()
-    applyEvent(
-      emptyCanonicalState(),
-      {
-        channel: 'session:stream',
-        args: ['rid', { type: 'thinking', text: 'hmm' }],
-        seq: 1
-      },
-      aux
-    )
-    expect(aux.thinkingOpen['rid']).toBeUndefined()
   })
 
   it('session:watch-update KEEPS the bootstrap — it is the only birth event a watched session has', () => {
@@ -227,25 +189,21 @@ describe('reducer — session registry', () => {
         { cwd: '/repo', permissionMode: 'acceptEdits', engineId: 'opencode', model: 'zen/qwen' }
       ]
     ])
-    const again = applyEvent(
-      seeded,
-      {
-        channel: 'session:created',
-        args: [
-          'rid',
-          { cwd: '/repo', permissionMode: 'acceptEdits', engineId: 'opencode', model: 'zen/qwen' }
-        ],
-        seq: 2
-      },
-      emptyAux()
-    )
+    const again = applyEvent(seeded, {
+      channel: 'session:created',
+      args: [
+        'rid',
+        { cwd: '/repo', permissionMode: 'acceptEdits', engineId: 'opencode', model: 'zen/qwen' }
+      ],
+      seq: 2
+    })
     expect(again.sessions['rid']).toEqual(seeded.sessions['rid'])
 
-    const oldShape = applyEvent(
-      seeded,
-      { channel: 'session:created', args: ['rid', { cwd: '/repo' }], seq: 3 },
-      emptyAux()
-    )
+    const oldShape = applyEvent(seeded, {
+      channel: 'session:created',
+      args: ['rid', { cwd: '/repo' }],
+      seq: 3
+    })
     expect(oldShape.sessions['rid'].permissionMode).toBe('acceptEdits')
     expect(oldShape.sessions['rid'].selectedEngineId).toBe('opencode')
     expect(oldShape.sessions['rid'].selectedModel).toBe('zen/qwen')
@@ -298,24 +256,6 @@ describe('reducer — session:removed (explicit delete)', () => {
     expect(twice).toBe(once)
   })
 
-  it('drops the thinking-span bookkeeping, so a same-id respawn starts clean', () => {
-    const aux = emptyAux()
-    // The span is opened by the STREAM lane (phase 5 S1) and dropped by the event
-    // lane's removal branch — the aux is what the two share.
-    const state = fold(
-      [created(), ['session:stream', 'rid', { type: 'thinking', text: 'hmm' }]],
-      emptyCanonicalState(),
-      aux
-    )
-    expect(aux.thinkingOpen['rid']).toBe(true)
-    expect(aux.streamTurn).not.toEqual({})
-    applyEvent(state, { channel: 'session:removed', args: ['rid'], seq: 3 }, aux)
-    expect(aux.thinkingOpen['rid']).toBeUndefined()
-    // The stream generations go with it, or a same-id respawn's first frame would
-    // be judged against a dead session's turn counter.
-    expect(aux.streamTurn).toEqual({})
-  })
-
   it('a late engine event after a removal cannot resurrect the session (F7)', () => {
     const s = fold([
       created('rid'),
@@ -341,7 +281,6 @@ describe('reducer — session:conversation-cleared', () => {
         { cwd: '/repo', permissionMode: 'plan', engineId: 'pi', model: 'gpt-5' }
       ],
       ['session:message', 'rid', assistant('m1', [{ type: 'text', text: 'hi' }])],
-      ['session:stream', 'rid', { type: 'text', text: 'partial' }],
       ['session:approval-request', 'rid', { requestId: 'r1', toolUseId: 't1' }],
       ['session:task-started', 'rid', { toolUseId: 't1', taskId: 'a', taskType: 'b' }],
       [
@@ -356,7 +295,6 @@ describe('reducer — session:conversation-cleared', () => {
     const s = fold([['session:conversation-cleared', 'rid', {}]], dirty())
     const session = s.sessions['rid']
     expect(session.messages).toEqual([])
-    expect(session.streamingText).toBe('')
     expect(session.pendingApprovals).toEqual([])
     expect(session.activeTasks).toEqual({})
     expect(session.queue).toEqual([])
@@ -408,22 +346,6 @@ describe('reducer — session:conversation-cleared', () => {
     expect(s.sessions['rid'].permissionMode).toBe('default')
   })
 
-  it('closes any open thinking span', () => {
-    const aux = emptyAux()
-    let state = applyEvent(
-      emptyCanonicalState(),
-      { channel: 'session:created', args: ['rid', { cwd: '/repo' }], seq: 1 },
-      aux
-    )
-    state = applyEvent(
-      state,
-      { channel: 'session:stream', args: ['rid', { type: 'thinking', text: 'hmm' }], seq: 2 },
-      aux
-    )
-    applyEvent(state, { channel: 'session:conversation-cleared', args: ['rid', {}], seq: 3 }, aux)
-    expect(aux.thinkingOpen['rid']).toBe(false)
-  })
-
   it('is a no-op for an unknown id', () => {
     const before = emptyCanonicalState()
     expect(fold([['session:conversation-cleared', 'ghost', {}]], before)).toBe(before)
@@ -469,36 +391,6 @@ describe('reducer — transcript', () => {
     expect(msg).toHaveLength(1)
     // mergeContentBlocks keeps the old text block (the update carries none).
     expect(msg[0].content.map((b) => b.type)).toEqual(['text', 'tool_use'])
-  })
-
-  it('clears the streaming buffer when a message lands', () => {
-    const s = fold([
-      created(),
-      ['session:stream', 'rid', { type: 'text', text: 'strea' }],
-      ['session:stream', 'rid', { type: 'text', text: 'ming' }],
-      ['session:message', 'rid', assistant('m1', [{ type: 'text', text: 'streaming' }])]
-    ])
-    expect(s.sessions['rid'].streamingText).toBe('')
-  })
-
-  it('accumulates text and thinking into separate buffers', () => {
-    const s = fold([
-      created(),
-      ['session:stream', 'rid', { type: 'thinking', text: 'hmm' }],
-      ['session:stream', 'rid', { type: 'thinking', text: '...' }]
-    ])
-    expect(s.sessions['rid'].streamingThinking).toBe('hmm...')
-    expect(s.sessions['rid'].streamingText).toBe('')
-  })
-
-  it('seals an open thinking span when text starts (clock-free)', () => {
-    const s = fold([
-      created(),
-      ['session:stream', 'rid', { type: 'thinking', text: 'hmm' }],
-      ['session:stream', 'rid', { type: 'text', text: 'answer' }]
-    ])
-    expect(s.sessions['rid'].streamingThinking).toBe('')
-    expect(s.sessions['rid'].streamingText).toBe('answer')
   })
 
   it('attaches a tool_result to its tool_use, first result wins (idempotent)', () => {
@@ -596,16 +488,14 @@ describe('reducer — transcript', () => {
     })
   })
 
-  it('retracts messages by id and clears streaming buffers', () => {
+  it('retracts messages by id', () => {
     const s = fold([
       created(),
       ['session:message', 'rid', assistant('m1', [{ type: 'text', text: 'a' }])],
       ['session:message', 'rid', assistant('m2', [{ type: 'text', text: 'b' }])],
-      ['session:stream', 'rid', { type: 'text', text: 'partial' }],
       ['session:messages-retracted', 'rid', { messageIds: ['m1'] }]
     ])
     expect(s.sessions['rid'].messages.map((m) => m.id)).toEqual(['m2'])
-    expect(s.sessions['rid'].streamingText).toBe('')
   })
 
   it('mints a DETERMINISTIC id for a user message (the payload carries none)', () => {
@@ -659,12 +549,10 @@ describe('reducer — event-carried identity (phase 4b)', () => {
   })
 })
 
-describe('reducer — emitter-supplied thinking duration (phase 4b)', () => {
+describe('reducer — reliable thinking duration', () => {
   it('moves thinkingDurationMs onto the sealed block and drops the field', () => {
     const s = fold([
       created(),
-      ['session:stream', 'rid', { type: 'thinking', text: 'weighing' }],
-      ['session:stream', 'rid', { type: 'text', text: 'answer' }],
       [
         'session:message',
         'rid',
@@ -1271,7 +1159,7 @@ describe('reducer — app-level config', () => {
   })
 })
 
-describe('snapshot restore — fromSnapshot / auxFromCanonical (phase 4b)', () => {
+describe('snapshot restore — fromSnapshot (phase 4b)', () => {
   it('round-trips canonical state through the wire shape', () => {
     const live = fold([
       created(),
@@ -1301,6 +1189,16 @@ describe('snapshot restore — fromSnapshot / auxFromCanonical (phase 4b)', () =
       )
     })
     expect(strip(restored)).toEqual(strip(live))
+    for (const session of [
+      live.sessions.rid,
+      restored.sessions.rid,
+      toSnapshot(live, 42).sessions.rid
+    ]) {
+      expect(session).not.toHaveProperty('streamingText')
+      expect(session).not.toHaveProperty('streamingThinking')
+      expect(session).not.toHaveProperty('subagentStreamingText')
+      expect(session).not.toHaveProperty('subagentStreamingThinking')
+    }
   })
 
   it("fills defaults for an older host's snapshot (absent optional fields)", () => {
@@ -1311,16 +1209,12 @@ describe('snapshot restore — fromSnapshot / auxFromCanonical (phase 4b)', () =
           routingId: 'rid',
           cwd: '/repo',
           messages: [],
-          streamingText: '',
-          streamingThinking: '',
           status: status({ state: 'idle' }),
           pendingApprovals: [],
           todos: [],
           taskNotifications: [],
           taskProgressMap: {},
           subagentMessages: {},
-          subagentStreamingText: {},
-          subagentStreamingThinking: {},
           permissionMode: 'default',
           effort: null,
           statusLine: null,
@@ -1345,27 +1239,6 @@ describe('snapshot restore — fromSnapshot / auxFromCanonical (phase 4b)', () =
     expect(s.selectedEngineId).toBe('claude')
     expect(restored.autoModeDisabledBySettings).toBe(false)
   })
-
-  it('recovers the open-thinking-span flag from streamingThinking', () => {
-    // The flag is core-internal, but it is DERIVABLE: a non-empty thinking buffer
-    // IS an unsealed span. Without recovering it, a client restored mid-span would
-    // never clear that buffer — stale thinking text under a finished answer.
-    const midSpan = fold([created(), ['session:stream', 'rid', { type: 'thinking', text: 'hmm' }]])
-    const restored = fromSnapshot(toSnapshot(midSpan, 2))
-    const aux = auxFromCanonical(restored)
-    expect(aux.thinkingOpen['rid']).toBe(true)
-
-    const sealed = fold(
-      [['session:stream', 'rid', { type: 'text', text: 'answer' }]],
-      restored,
-      aux
-    )
-    expect(sealed.sessions['rid'].streamingThinking).toBe('')
-    // And an idle session restores with no open span at all.
-    expect(auxFromCanonical(fromSnapshot(toSnapshot(fold([created()]), 1))).thinkingOpen).toEqual(
-      {}
-    )
-  })
 })
 
 describe('reducer — purity (invariant 5)', () => {
@@ -1383,8 +1256,6 @@ describe('reducer — purity (invariant 5)', () => {
     fold([
       created(),
       ['session:user-message', 'rid', { prompt: 'hi' }],
-      ['session:stream', 'rid', { type: 'thinking', text: 'hmm' }],
-      ['session:stream', 'rid', { type: 'text', text: 'answer' }],
       ['session:message', 'rid', assistant('m1', [{ type: 'text', text: 'answer' }])],
       ['session:status', 'rid', status({ state: 'idle' })],
       ['session:result', 'rid', {}],
@@ -1420,10 +1291,9 @@ describe('reducer — purity (invariant 5)', () => {
 })
 
 describe('reducer — subagents', () => {
-  it('upserts subagent messages and clears the buffers for that subagent', () => {
+  it('upserts subagent messages', () => {
     const s = fold([
       created(),
-      ['session:subagent-stream', 'rid', { type: 'text', toolUseId: 'task-1', text: 'partial' }],
       [
         'session:subagent-message',
         'rid',
@@ -1431,31 +1301,6 @@ describe('reducer — subagents', () => {
       ]
     ])
     expect(s.sessions['rid'].subagentMessages['task-1'].map((m) => m.id)).toEqual(['s1'])
-    expect(s.sessions['rid'].subagentStreamingText['task-1']).toBe('')
-  })
-
-  it('clears FOREGROUND subagent buffers when the parent goes idle, keeps background', () => {
-    const s = fold([
-      created(),
-      [
-        'session:message',
-        'rid',
-        assistant('m1', [
-          {
-            type: 'tool_use',
-            toolUseId: 'bg-1',
-            toolName: 'Task',
-            toolInput: { run_in_background: true }
-          },
-          { type: 'tool_use', toolUseId: 'fg-1', toolName: 'Task', toolInput: {} }
-        ])
-      ],
-      ['session:subagent-stream', 'rid', { type: 'text', toolUseId: 'bg-1', text: 'still going' }],
-      ['session:subagent-stream', 'rid', { type: 'text', toolUseId: 'fg-1', text: 'stale' }],
-      ['session:status', 'rid', status({ state: 'idle' })]
-    ])
-    expect(s.sessions['rid'].subagentStreamingText['bg-1']).toBe('still going')
-    expect(s.sessions['rid'].subagentStreamingText['fg-1']).toBe('')
   })
 
   it('a task notification drops the task from activeTasks', () => {

@@ -7,6 +7,8 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { emitItemDelta, sealItem } from '@test/helpers/item-stream'
+import { itemStreamKey } from '../../core/shared/sync/item-stream'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
 import {
   makeAssistantMessage,
@@ -49,15 +51,15 @@ describe('E2E: session switching during streaming', () => {
     // A starts streaming
     app.emit('session:status', 'A', makeSessionStatus({ state: 'running', sessionId: 'A' }))
     app.emit('session:user-message', 'A', { prompt: 'work on A', queued: false })
-    app.emit('session:stream', 'A', { type: 'text', text: 'A-partial' })
+    const targetA = emitItemDelta(app, 'A', 'A-partial', { open: true })
 
     // User creates B and switches (createNewSession switches activeSessionId by default)
     useSessionStore.getState().createNewSession('B', '/project-b')
     expect(useSessionStore.getState().activeSessionId).toBe('B')
 
     // A continues to receive events — not affected by active change
-    app.emit('session:stream', 'A', { type: 'text', text: '-more' })
-    app.emit('session:message', 'A', makeAssistantMessage('A-partial-more'))
+    emitItemDelta(app, 'A', '-more', { open: false })
+    sealItem(app, 'A', targetA, 'A-partial-more')
     app.emit('session:status', 'A', makeSessionStatus({ state: 'idle', sessionId: 'A' }))
 
     const sessionA = useSessionStore.getState().sessions['A']
@@ -71,7 +73,7 @@ describe('E2E: session switching during streaming', () => {
 
     // B is untouched
     expect(sessionB.messages).toHaveLength(0)
-    expect(sessionB.streamingText).toBe('')
+    expect(sessionB.itemStreams).toEqual({})
     expect(sessionB.status.state).toBe('idle')
   })
 
@@ -80,15 +82,15 @@ describe('E2E: session switching during streaming', () => {
     useSessionStore.getState().createNewSession('B', '/b')
 
     // Interleaved streams
-    app.emit('session:stream', 'A', { type: 'text', text: 'aaa' })
-    app.emit('session:stream', 'B', { type: 'text', text: 'bbb' })
-    app.emit('session:stream', 'A', { type: 'text', text: 'AAA' })
-    app.emit('session:stream', 'B', { type: 'text', text: 'BBB' })
+    const targetA = emitItemDelta(app, 'A', 'aaa', { open: true })
+    const targetB = emitItemDelta(app, 'B', 'bbb', { open: true })
+    emitItemDelta(app, 'A', 'AAA', { open: false })
+    emitItemDelta(app, 'B', 'BBB', { open: false })
 
     const sessionA = useSessionStore.getState().sessions['A']
     const sessionB = useSessionStore.getState().sessions['B']
-    expect(sessionA.streamingText).toBe('aaaAAA')
-    expect(sessionB.streamingText).toBe('bbbBBB')
+    expect(sessionA.itemStreams[itemStreamKey(targetA)].value).toBe('aaaAAA')
+    expect(sessionB.itemStreams[itemStreamKey(targetB)].value).toBe('bbbBBB')
   })
 
   it('switching active session does not clear or replay events on the other session', () => {

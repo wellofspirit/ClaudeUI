@@ -1,10 +1,10 @@
 import { useState, useEffect, useMemo } from 'react'
-import { useActiveSession, useSessionStore } from '../../stores/session-store'
+import { useSessionStore } from '../../stores/session-store'
 
 interface Props {
   text: string
   isActive: boolean
-  /** Item-local start time; session streams use the session clock. */
+  /** Item-local start time. */
   startedAt?: number
   /** Finished-span duration for THIS thinking block. Read from the block itself
    *  (per-message) so each historical "Thought for Xs" shows its own value
@@ -39,8 +39,7 @@ function WaveText({ text }: { text: string }): React.JSX.Element {
 export function ThinkingBlock({ text, isActive, durationMs, startedAt }: Props): React.JSX.Element {
   const expandThinking = useSessionStore((s) => s.settings.expandThinking)
   const [expanded, setExpanded] = useState(expandThinking)
-  const sessionThinkingStartedAt = useActiveSession((s) => s.thinkingStartedAt)
-  const thinkingStartedAt = startedAt ?? sessionThinkingStartedAt
+  const thinkingStartedAt = startedAt
   const [elapsed, setElapsed] = useState(0)
 
   // Live timer while thinking is active

@@ -1,6 +1,6 @@
 import type { FullStateSnapshot } from '../../../shared/remote-protocol'
 import { isItemStreamFrame, type ItemStreamFrame } from './item-stream'
-import { isStreamEventFrame, isStreamFrame, type StreamFrame } from './stream'
+import { isStreamEventFrame } from './stream'
 
 /** One domain event as a transport hands it over (frame envelope stripped). */
 export interface SyncEvent {
@@ -15,8 +15,6 @@ export type SyncFullStateHandler = (state: FullStateSnapshot) => void
 export type SyncEventTap = (event: SyncEvent) => void
 /** Item-addressed volatile-lane tap. */
 export type SyncItemStreamTap = (frame: ItemStreamFrame) => void
-/** Session/tail volatile-lane tap (phase 5 S1). */
-export type SyncStreamTap = (frame: StreamFrame) => void
 /** Fired whenever a `sync` was ANSWERED — see {@link SyncClient.onSyncAnswered}. */
 export type SyncAnsweredTap = () => void
 
@@ -67,7 +65,6 @@ export class SyncClient {
   private readonly taps = new Set<SyncEventTap>()
   private readonly itemStreamTaps = new Set<SyncItemStreamTap>()
   private itemResyncPending = false
-  private readonly streamTaps = new Set<SyncStreamTap>()
   private readonly answeredTaps = new Set<SyncAnsweredTap>()
   private readonly requestResync: () => void
   private readonly bufferLimit: number
@@ -159,20 +156,6 @@ export class SyncClient {
   }
 
   /**
-   * Subscribe to the VOLATILE STREAM lane (phase 5 S1).
-   *
-   * Deliberately separate from {@link onAnyEvent}: a stream frame is not an
-   * event. It carries no seq, so it must NOT touch `lastSeq`, the pre-ready
-   * buffer or gap detection.
-   */
-  onStreamFrame(cb: SyncStreamTap): () => void {
-    this.streamTaps.add(cb)
-    return () => {
-      this.streamTaps.delete(cb)
-    }
-  }
-
-  /**
    * Fired after every ANSWERED `sync` — the initial one, every resync, and every
    * reconnect.
    *
@@ -239,29 +222,6 @@ export class SyncClient {
   }
 
   /**
-   * A volatile stream frame (phase 5 S1). Validated here so a transport cannot
-   * hand a malformed one to the replica.
-   *
-   * **Pre-ready frames are DROPPED, not buffered — a deliberate loss.** The
-   * readiness gate exists because an EVENT dropped before the listeners mount is
-   * a permanent hole in a seq-ordered stream. A stream frame is not: the
-   * post-ready `stream:watch` replays the whole accumulation at `offset: 0`,
-   * which supersedes anything that arrived early by construction. Buffering them
-   * would mean applying deltas at offsets the replay has already invalidated.
-   */
-  receiveStreamFrame(frame: unknown): void {
-    if (!this.ready) return
-    if (!isStreamFrame(frame)) return
-    for (const tap of this.streamTaps) {
-      try {
-        tap(frame)
-      } catch {
-        /* one broken tap must not stop the others */
-      }
-    }
-  }
-
-  /**
    * A PASS-THROUGH lane frame (phase 5 S2) — one of the three tails, carrying the
    * emission verbatim.
    *
@@ -271,7 +231,7 @@ export class SyncClient {
    * keeps working with no rewiring and there is no second interpretation of the
    * payload to drift.
    *
-   * It is NOT an event, so — exactly like {@link receiveStreamFrame} — it never
+   * It is NOT an event, so it never
    * touches `lastSeq`, the buffer, the gap check or the `onAnyEvent` taps (the
    * replica folds those, and a tail has no canonical field to fold into).
    *

@@ -37,6 +37,7 @@ import {
 } from '../replica'
 import { seed, seedSession, emitSync, resetReplicaSeam } from '@test/helpers/replica-seed'
 import { toSnapshot } from '../../../../core/shared/sync/state'
+import { overlayItemStreams } from '../../../../core/shared/sync/item-stream'
 import { makeAssistantMessage, makeSessionStatus } from '@test/factories/messages'
 
 const store = (): ReturnType<typeof useSessionStore.getState> => useSessionStore.getState()
@@ -68,21 +69,45 @@ describe('the fold projects into the store', () => {
     expect(store().sessions['r1'].sdkActive).toBe(true)
   })
 
-  it('accumulates a stream delta and seals it on the committed message', () => {
+  it('projects item deltas in place and seals the committed message', () => {
     seed.created('r1', { cwd: '/p' })
     seed.streamThinking('r1', 'hmm ')
-    expect(store().sessions['r1'].streamingThinking).toBe('hmm ')
-    // The presentation clock is DERIVED from the buffer, not measured by a handler.
-    expect(store().sessions['r1'].thinkingStartedAt).not.toBeNull()
+    let session = store().sessions['r1']
+    expect(overlayItemStreams(session.messages, session.itemStreams)[0].content[0]).toEqual({
+      type: 'thinking',
+      text: 'hmm '
+    })
 
-    seed.streamText('r1', 'answer')
-    expect(store().sessions['r1'].streamingThinking).toBe('')
-    expect(store().sessions['r1'].thinkingStartedAt).toBeNull()
-    expect(store().sessions['r1'].streamingText).toBe('answer')
-
-    seed.message('r1', makeAssistantMessage('answer'))
-    expect(store().sessions['r1'].streamingText).toBe('')
-    expect(store().sessions['r1'].messages).toHaveLength(1)
+    seed.streamThinking('r1', 'more')
+    session = store().sessions['r1']
+    expect(overlayItemStreams(session.messages, session.itemStreams)[0].content[0]).toEqual({
+      type: 'thinking',
+      text: 'hmm more'
+    })
+    const target = {
+      messageId: 'fixture-r1-assistant-thinking',
+      blockIndex: 0,
+      kind: 'thinking' as const
+    }
+    emitSync('session:item-seal', [
+      'r1',
+      {
+        target,
+        message: {
+          id: target.messageId,
+          role: 'assistant',
+          timestamp: 1,
+          content: [{ type: 'thinking', text: 'Final thought', durationMs: 1250 }]
+        }
+      }
+    ])
+    session = store().sessions['r1']
+    expect(session.itemStreams).toEqual({})
+    expect(session.messages[0].content[0]).toEqual({
+      type: 'thinking',
+      text: 'Final thought',
+      durationMs: 1250
+    })
   })
 
   it('leaves per-client VIEW state untouched', () => {
@@ -108,6 +133,16 @@ describe('the fold projects into the store', () => {
     expect(session.needsAttention).toBe(true)
     expect(session.errors).toEqual(['a transient toast'])
     expect(session.messages).toHaveLength(1)
+  })
+
+  it('keeps a background owner item active when the parent session becomes idle', () => {
+    seed.created('r1', { cwd: '/p' })
+    seed.subagentStreamText('r1', 'background-tool', 'still working')
+    seed.status('r1', makeSessionStatus({ state: 'idle' }))
+
+    const stream = Object.values(store().sessions['r1'].itemStreams)[0]
+    expect(stream.target.ownerToolUseId).toBe('background-tool')
+    expect(stream.value).toBe('still working')
   })
 
   it('does not re-write slices the event did not touch (identity-diffed)', () => {
@@ -361,12 +396,13 @@ describe('sanctioned local writes', () => {
 
     const session = store().sessions['r1']
     expect(session.messages).toEqual([])
-    expect(session.subagentStreamingText).toEqual({})
+    expect(session.itemStreams).toEqual({})
     // The lightweight entry stays resident — draft, engine, mode all survive.
     expect(session.cwd).toBe('/p')
-    // And a later event does not resurrect the transcript.
+    // A later lifecycle starts from a fresh scaffold; it does not resurrect the transcript.
     seed.streamText('r1', 'x')
-    expect(store().sessions['r1'].messages).toEqual([])
+    expect(store().sessions['r1'].messages).toHaveLength(1)
+    expect(store().sessions['r1'].messages[0].content[0]).toEqual({ type: 'text', text: '' })
   })
 
   it('dropLocalSessions removes the entry from canonical', () => {

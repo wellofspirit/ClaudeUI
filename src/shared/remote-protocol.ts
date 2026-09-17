@@ -940,15 +940,11 @@ export interface WsVoiceAudio {
 // Volatile stream lane (SyncCore phase 5)
 // ---------------------------------------------------------------------------
 //
-// Both flavors are declared in `shared/sync/stream.ts` — with the streamId
-// scheme, the validators and the one reducer that interprets a text frame — and
-// re-exported here so the frame unions stay the single list of what may cross a
-// socket. Like `term-data`, neither enters the event ring and neither reaches the
-// audit log (security.md §Audit): a delta stream is fully summarized by the
-// accumulation in canonical state, and a tail (`stream-ev`, S2) is a lossy
-// preview whose durable record is the event lane.
-export type { StreamFrame, StreamEventFrame } from '../core/shared/sync/stream'
-import type { StreamFrame, StreamEventFrame } from '../core/shared/sync/stream'
+// Item lifecycle frames and pass-through tails share the volatile lane. Like
+// `term-data`, neither enters the event ring or audit log; item state is carried
+// by snapshots and a tail is a lossy preview of a durable reliable event.
+export type { StreamEventFrame, StreamLaneFrame } from '../core/shared/sync/stream'
+import type { StreamEventFrame } from '../core/shared/sync/stream'
 import type { ItemStreamFrame, ItemStreams } from '../core/shared/sync/item-stream'
 
 export type WsClientMessage =
@@ -982,7 +978,6 @@ export type WsServerMessage =
   | WsTermExit
   | WsTermDetached
   | ItemStreamFrame
-  | StreamFrame
   | StreamEventFrame
 
 // ---------------------------------------------------------------------------
@@ -1026,8 +1021,6 @@ export interface PerSessionSnapshot {
   messages: ChatMessage[]
   itemStreams?: ItemStreams
   itemStreamRevision?: number
-  streamingText: string
-  streamingThinking: string
   status: SessionStatus
   pendingApprovals: PendingApproval[]
   todos: TodoItem[]
@@ -1045,8 +1038,6 @@ export interface PerSessionSnapshot {
   activeTasks?: Record<string, { taskId: string; taskType: string }>
   taskProgressMap: Record<string, TaskProgress>
   subagentMessages: Record<string, ChatMessage[]>
-  subagentStreamingText: Record<string, string>
-  subagentStreamingThinking: Record<string, string>
   permissionMode: string
   /**
    * `null` when unset. The declaration used to say `string`, but no producer has

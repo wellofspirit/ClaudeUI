@@ -732,25 +732,6 @@ export interface PerSessionState {
   messages: ChatMessage[]
   itemStreams: ItemStreams
   itemStreamRevision: number
-  streamingText: string
-  streamingThinking: string
-  /**
-   * Wall clock at the start of the currently-open thinking span, or null.
-   *
-   * PRESENTATION ONLY as of SyncCore phase 4c — it drives ThinkingBlock's live
-   * "Thought for Ns" ticker and nothing else. The DURATION a finished block
-   * renders now arrives on the block itself (`BaseSession.send` times the span and
-   * the reducer stamps it), so the renderer no longer measures anything that ends
-   * up in state: the two scalars that used to park a measured duration
-   * (`thinkingDurationMs`, `pendingThinkingDurationMs`) are deleted.
-   *
-   * Written by the replica projection, derived from `streamingThinking`: stamped
-   * when the buffer goes from empty to non-empty, cleared when it empties. One
-   * place instead of the four writers (`appendStreamingThinking`,
-   * `appendStreamingText`, `addMessage`, `setStatus`) that each had to remember
-   * the same rule.
-   */
-  thinkingStartedAt: number | null
   /** True once the heavy arrays (messages, subagentMessages, bash/background
    *  outputs) have been evicted from memory for an inactive session. The entry
    *  is kept resident (draft/effort/engine preserved) and re-hydrated from disk
@@ -781,8 +762,6 @@ export interface PerSessionState {
   openedTaskToolUseIds: string[]
   rightPanel: 'none' | 'task' | 'git' | 'plan' | 'mockup'
   subagentMessages: Record<string, ChatMessage[]>
-  subagentStreamingText: Record<string, string>
-  subagentStreamingThinking: Record<string, string>
   bashOutputs: Record<string, { output: string; totalLines: number; totalBytes: number }>
   backgroundOutputs: Record<string, { tail: string; totalSize: number }>
   backgroundWatcherCounts: Record<string, number>
@@ -865,9 +844,6 @@ export const EMPTY_SESSION_STATE: PerSessionState = {
   messages: [],
   itemStreams: {},
   itemStreamRevision: 0,
-  streamingText: '',
-  streamingThinking: '',
-  thinkingStartedAt: null,
   evicted: false,
   // Full caps assumed for new sessions before the first status event.
   status: {
@@ -891,8 +867,6 @@ export const EMPTY_SESSION_STATE: PerSessionState = {
   openedTaskToolUseIds: [],
   rightPanel: 'none',
   subagentMessages: {},
-  subagentStreamingText: {},
-  subagentStreamingThinking: {},
   bashOutputs: {},
   backgroundOutputs: {},
   backgroundWatcherCounts: {},
@@ -3521,9 +3495,6 @@ export function useActiveSession<T>(selector: (s: PerSessionState) => T): T {
 export interface FocusedAgentData {
   isMain: boolean
   messages: ChatMessage[]
-  streamingText: string
-  streamingThinking: string
-  thinkingStartedAt: number | null
 }
 
 const EMPTY_MESSAGES: ChatMessage[] = []
@@ -3539,19 +3510,13 @@ export function useFocusedAgentData(): FocusedAgentData {
       if (!id || !state.sessions[id]) {
         return {
           isMain: true,
-          messages: EMPTY_MESSAGES,
-          streamingText: '',
-          streamingThinking: '',
-          thinkingStartedAt: null
+          messages: EMPTY_MESSAGES
         }
       }
       const session = state.sessions[id]
       return {
         isMain: true,
-        messages: session.messages,
-        streamingText: session.streamingText,
-        streamingThinking: session.streamingThinking,
-        thinkingStartedAt: session.thinkingStartedAt
+        messages: session.messages
       }
     })
   )

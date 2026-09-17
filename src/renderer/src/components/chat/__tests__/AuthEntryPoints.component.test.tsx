@@ -116,14 +116,7 @@ describe('AuthErrorBlock — the transcript row', () => {
       content: [{ type: 'api_error', errorType: 'authentication', errorMessage: 'API Error: 401' }],
       timestamp: 0
     } as ChatMessage
-    render(
-      <MessageBubble
-        message={message}
-        pendingApprovals={[]}
-        isLastAssistant={false}
-        thinkingStartedAt={null}
-      />
-    )
+    render(<MessageBubble message={message} pendingApprovals={[]} isLastAssistant={false} />)
     expect(screen.getByTestId('AuthErrorBlock')).toHaveTextContent(
       'Turn stopped: Claude rejected the credential'
     )

@@ -10,7 +10,6 @@ import { RemoteDispatcher } from '../../core/services/remote-dispatcher'
 import { commandRegistry, hostConnection, registerCommand } from '../../core/ipc/command-registry'
 import { addStreamObserver, addSyncSubscriber, syncCore } from '../../core/services/sync-host'
 import { overlayItemStreams } from '../../core/shared/sync/item-stream'
-import { streamFrameToEmission } from '../../core/shared/sync/stream'
 import type {
   ClaudeUIPlugin,
   PluginContext,
@@ -124,9 +123,9 @@ export class PluginManager {
     // longer sees them — but a plugin's contract predates the lane split and must
     // not change because of it. An in-process OBSERVER receives every frame (it
     // has no session selection to filter by, unlike a remote connection) and it is
-    // re-materialized into the emission shape plugins have always been handed: a
-    // text frame through the shared inverse, a PASS-THROUGH frame by simply
-    // reading `(channel, args)` back off it — it never stopped being the emission.
+    // re-materialized into the emission shape plugins have always been handed.
+    // Item appends synthesize the legacy plugin event names in process; a
+    // PASS-THROUGH frame is already the original `(channel, args)` emission.
     //
     // GATED on someone actually listening: with no plugin subscribed to these
     // channels the synthesis is skipped entirely, so the token firehose costs
@@ -173,24 +172,12 @@ export class PluginManager {
         this.fireSessionScoped(frame.channel, frame.args)
         return
       }
-      if (!this.hasStreamListeners()) return
-      const emission = streamFrameToEmission(frame)
-      if (!emission) return
-      if (this.tracing) {
-        logger.debug(LOG_SOURCE, `[trace] ${emission.channel} ${frame.streamId}`)
-      }
-      this.fireSessionScoped(emission.channel, [emission.routingId, emission.data])
     })
   }
 
   /** Is any plugin listening to `channel`? */
   private hasListeners(channel: string): boolean {
     return (this.eventListeners.get(channel)?.size ?? 0) > 0
-  }
-
-  /** Is any plugin listening to the lane's two TEXT-STREAM channels? */
-  private hasStreamListeners(): boolean {
-    return this.hasListeners('session:stream') || this.hasListeners('session:subagent-stream')
   }
 
   /** One wrapper for both lanes — see the ADR-005 event shape note above. */

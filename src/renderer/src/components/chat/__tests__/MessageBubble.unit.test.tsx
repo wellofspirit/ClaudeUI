@@ -53,9 +53,6 @@ beforeEach(() => {
         messages: [],
         itemStreams: {},
         itemStreamRevision: 0,
-        streamingText: '',
-        streamingThinking: '',
-        thinkingStartedAt: null,
         evicted: false,
         status: makeSessionStatus({ state: 'idle', sessionId: null, model: null, cwd: null }),
         pendingApprovals: [],
@@ -69,8 +66,6 @@ beforeEach(() => {
         openedTaskToolUseIds: [],
         rightPanel: 'none',
         subagentMessages: {},
-        subagentStreamingText: {},
-        subagentStreamingThinking: {},
         bashOutputs: {},
         backgroundOutputs: {},
         backgroundWatcherCounts: {},
@@ -128,14 +123,7 @@ describe('MessageBubble', () => {
         role: 'user',
         content: [makeTextBlock('Hello Claude')]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={false}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={false} />)
       expect(screen.getByText('Hello Claude')).toBeInTheDocument()
     })
 
@@ -145,14 +133,7 @@ describe('MessageBubble', () => {
         content: [makeTextBlock('plan text')],
         planContent: '# My Plan\n\nDo things'
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={false}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={false} />)
       // ExitPlanModeCard renders the plan
       expect(screen.getByText(/My Plan/)).toBeInTheDocument()
     })
@@ -164,14 +145,7 @@ describe('MessageBubble', () => {
         role: 'assistant',
         content: [makeTextBlock('The answer is 42')]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={true}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} />)
       expect(screen.getByText(/The answer is 42/)).toBeInTheDocument()
     })
 
@@ -180,14 +154,7 @@ describe('MessageBubble', () => {
         role: 'assistant',
         content: [makeToolUseBlock('Read', { file_path: '/foo.ts' })]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={true}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} />)
       expect(screen.getByText('Read')).toBeInTheDocument()
     })
 
@@ -196,14 +163,7 @@ describe('MessageBubble', () => {
         role: 'assistant',
         content: [makeToolUseBlock('EnterPlanMode', {}), makeTextBlock('After plan mode')]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={true}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} />)
       // EnterPlanMode should not render — but text after it should
       expect(screen.getByText(/After plan mode/)).toBeInTheDocument()
       expect(screen.queryByText('EnterPlanMode')).not.toBeInTheDocument()
@@ -217,14 +177,7 @@ describe('MessageBubble', () => {
           makeTextBlock('Here is my answer')
         ]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={true}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} />)
       expect(screen.getByText(/Here is my answer/)).toBeInTheDocument()
     })
 
@@ -233,14 +186,7 @@ describe('MessageBubble', () => {
         role: 'assistant',
         content: [makeThinkingBlock(''), makeTextBlock('Visible answer')]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={true}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} />)
       expect(screen.queryByTestId('ThinkingBlock')).not.toBeInTheDocument()
       expect(screen.getByText(/Visible answer/)).toBeInTheDocument()
     })
@@ -254,14 +200,7 @@ describe('MessageBubble', () => {
           makeToolResultBlock(toolUseId, 'hello')
         ]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={true}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} />)
       expect(screen.getByText('Bash')).toBeInTheDocument()
     })
 
@@ -274,14 +213,7 @@ describe('MessageBubble', () => {
           })
         ]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={true}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} />)
       // TodoToolBlock renders the task list — verify the component rendered
       const container = document.querySelector('[class*="animate-fade-in"]')
       expect(container).toBeInTheDocument()
@@ -294,14 +226,7 @@ describe('MessageBubble', () => {
           makeToolUseBlock('Agent', { description: 'Search codebase', prompt: 'find files' })
         ]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={true}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} />)
       expect(screen.getByText(/Search codebase/)).toBeInTheDocument()
     })
   })
@@ -330,14 +255,7 @@ describe('MessageBubble', () => {
         toolName: 'Bash',
         input: { command: 'ls' }
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[approval]}
-          isLastAssistant={true}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[approval]} isLastAssistant={true} />)
       // Exactly one approval prompt visible — not one per matching
       // tool_use block. ToolCallBlockView renders an "Allow" button when
       // isPendingApproval is true; duplicated cards would yield two.
@@ -359,7 +277,6 @@ describe('MessageBubble', () => {
           message={msg}
           pendingApprovals={[approvalWithoutId]}
           isLastAssistant={true}
-          thinkingStartedAt={null}
         />
       )
       expect(screen.getAllByRole('button', { name: /^Allow$/ })).toHaveLength(1)
@@ -394,14 +311,7 @@ describe('MessageBubble', () => {
         decisionReason: 'Codex auto-review denied this action.',
         codex: { guardianOverride: true }
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[approval]}
-          isLastAssistant={true}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[approval]} isLastAssistant={true} />)
       expect(screen.getByTestId('ApprovalButtons.approveAnyway')).toBeInTheDocument()
       expect(screen.getByTestId('ApprovalButtons.dismiss')).toBeInTheDocument()
       expect(screen.queryByTestId('ApprovalButtons.allow')).not.toBeInTheDocument()
@@ -433,14 +343,7 @@ describe('MessageBubble', () => {
           review('toolu_b', { decision: 'denied' })
         ]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={true}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} />)
       const chips = screen.getAllByTestId('ToolCard.reviewChip')
       expect(chips).toHaveLength(1)
       expect(chips[0]).toHaveTextContent('Auto-review · denied · low')
@@ -455,14 +358,7 @@ describe('MessageBubble', () => {
           review('toolu_a', { reviewId: 'rv-2', decision: 'approved' })
         ]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={true}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} />)
       expect(screen.getByTestId('ToolCard.reviewChip')).toHaveTextContent(
         'Auto-review · approved · low'
       )
@@ -477,12 +373,7 @@ describe('MessageBubble', () => {
         ]
       })
       const { container } = render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={true}
-          thinkingStartedAt={null}
-        />
+        <MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} />
       )
       // The rationale appears only inside the card's own strip, never loose in
       // the transcript — the card is collapsed here, so not at all.
@@ -496,14 +387,7 @@ describe('MessageBubble', () => {
         role: 'system',
         content: [{ type: 'compact_separator', text: 'Context compacted' } as any]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={false}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={false} />)
       // CompactSeparator shows "Compacted" label and "Context summary" text
       expect(screen.getByText('Compacted')).toBeInTheDocument()
     })
@@ -513,14 +397,7 @@ describe('MessageBubble', () => {
         role: 'system',
         content: [{ type: 'compact_separator' } as any]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={false}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={false} />)
       // Without summary, shows "compacted" in lowercase
       expect(screen.getByText('compacted')).toBeInTheDocument()
     })
@@ -535,14 +412,7 @@ describe('MessageBubble', () => {
           { type: 'text', text: 'Codex auto-review approved `ls` (risk: low). Looks safe.' }
         ]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={false}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={false} />)
       const notice = screen.getByTestId('MessageBubble.systemNotice')
       expect(notice).toHaveTextContent('Codex auto-review approved `ls` (risk: low). Looks safe.')
       // Untrusted model text: rendered verbatim, never as markdown/HTML.
@@ -556,14 +426,7 @@ describe('MessageBubble', () => {
           { type: 'api_error', errorType: 'overloaded', errorMessage: 'Server busy' } as any
         ]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={false}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={false} />)
       // ApiErrorBlock shows "API Error" header and error type as label
       expect(screen.getByText('API Error')).toBeInTheDocument()
       expect(screen.getByText('Overloaded')).toBeInTheDocument()
@@ -586,14 +449,7 @@ describe('MessageBubble', () => {
           } as any
         ]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={false}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={false} />)
       expect(screen.getByTestId('AuthErrorBlock')).toHaveTextContent(
         'Turn stopped: Claude rejected the credential'
       )
@@ -609,14 +465,7 @@ describe('MessageBubble', () => {
         role: 'system',
         content: [{ type: 'api_error', errorType: 'authentication', errorMessage: '401' } as any]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={false}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={false} />)
       act(() => {
         screen.getByTestId('AuthErrorBlock.signIn').click()
       })
@@ -642,14 +491,7 @@ describe('MessageBubble', () => {
         role: 'system',
         content: [{ type: 'api_error', errorType: 'authentication', errorMessage: '401' } as any]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={false}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={false} />)
       expect(screen.getByTestId('AuthErrorBlock')).toBeInTheDocument()
       expect(screen.queryByText('Signed in as user@example.com')).not.toBeInTheDocument()
       expect(screen.queryByText('Retry message')).not.toBeInTheDocument()
@@ -661,14 +503,7 @@ describe('MessageBubble', () => {
         role: 'system',
         content: [{ type: 'api_error', errorType: 'authentication', errorMessage: '401' } as any]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={false}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={false} />)
       act(() => {
         screen.getByTestId('AuthErrorBlock.dismiss').click()
       })
@@ -686,14 +521,7 @@ describe('MessageBubble', () => {
           makeTextBlock('Second point')
         ]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={true}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} />)
       expect(screen.getByText(/First point/)).toBeInTheDocument()
       expect(screen.getByText(/Second point/)).toBeInTheDocument()
     })
@@ -705,14 +533,7 @@ describe('MessageBubble', () => {
         role: 'assistant',
         content: [makeTextBlock('hi')]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={true}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} />)
       expect(screen.queryByTestId('MessageBubble.fork')).toBeInTheDocument()
     })
 
@@ -735,14 +556,7 @@ describe('MessageBubble', () => {
         role: 'assistant',
         content: [makeTextBlock('hi')]
       })
-      render(
-        <MessageBubble
-          message={msg}
-          pendingApprovals={[]}
-          isLastAssistant={true}
-          thinkingStartedAt={null}
-        />
-      )
+      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} />)
       expect(screen.queryByTestId('MessageBubble.fork')).not.toBeInTheDocument()
     })
   })
@@ -780,14 +594,7 @@ describe('MessageBubble — F20 rows', () => {
         }
       ]
     })
-    render(
-      <MessageBubble
-        message={msg}
-        pendingApprovals={[]}
-        isLastAssistant={false}
-        thinkingStartedAt={null}
-      />
-    )
+    render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={false} />)
     expect(screen.getByTestId('ContextNoteBlock')).toBeInTheDocument()
   })
 
@@ -796,14 +603,7 @@ describe('MessageBubble — F20 rows', () => {
       role: 'system',
       content: [{ type: 'review_result', text: 'Two findings need attention.' }]
     })
-    render(
-      <MessageBubble
-        message={msg}
-        pendingApprovals={[]}
-        isLastAssistant={false}
-        thinkingStartedAt={null}
-      />
-    )
+    render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={false} />)
     expect(screen.getByTestId('ReviewResultCard')).toBeInTheDocument()
   })
 
@@ -813,14 +613,7 @@ describe('MessageBubble — F20 rows', () => {
       role: 'assistant',
       content: [makeToolUseBlock('sleep', { durationMs: 2500 }, 'tu-sleep')]
     })
-    render(
-      <MessageBubble
-        message={msg}
-        pendingApprovals={[]}
-        isLastAssistant={true}
-        thinkingStartedAt={null}
-      />
-    )
+    render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={true} />)
     expect(screen.getByTestId('SleepRow')).toBeInTheDocument()
     expect(screen.queryByTestId('ToolCard')).not.toBeInTheDocument()
   })

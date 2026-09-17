@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it } from 'vitest'
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { useSessionStore } from '../../../stores/session-store'
 import { TaskCard } from '../TaskCard'
@@ -64,4 +64,58 @@ it('updates the matching child card and detail panel in place, then replaces wit
   expect(screen.queryByText('Child preview continues')).not.toBeInTheDocument()
   expect(screen.getAllByText('Final child answer')).toHaveLength(2)
   expect(Object.values(useSessionStore.getState().sessions.r.itemStreams)).toHaveLength(1)
+})
+
+it('keeps committed text, active thinking, and active text in stable item-slot order', () => {
+  const scaffold: ChatMessage = {
+    id: 'ordered-child',
+    role: 'assistant',
+    timestamp: 1,
+    content: [
+      { type: 'text', text: 'Committed first' },
+      { type: 'thinking', text: '' },
+      { type: 'text', text: '' }
+    ]
+  }
+  const thinking = {
+    ownerToolUseId: owner,
+    messageId: scaffold.id,
+    blockIndex: 1,
+    kind: 'thinking'
+  } as const
+  const text = {
+    ownerToolUseId: owner,
+    messageId: scaffold.id,
+    blockIndex: 2,
+    kind: 'text'
+  } as const
+  act(() => {
+    app.emit('session:item-open', 'r', { target: thinking, message: scaffold })
+    app.emit('session:item-delta', 'r', { target: thinking, chunk: 'Working it through' })
+    app.emit('session:item-open', 'r', { target: text, message: scaffold })
+    app.emit('session:item-delta', 'r', { target: text, chunk: 'Answering now' })
+  })
+  render(
+    <>
+      <TaskCard block={block} view={view} />
+      <TaskEntry toolUseId={owner} />
+    </>
+  )
+  fireEvent.click(screen.getByTestId('TaskCard.expand'))
+
+  const outputs = screen.getAllByTestId('SubagentMessages')
+  expect(outputs).toHaveLength(2)
+  for (const output of outputs) {
+    const committed = within(output).getByText('Committed first')
+    const thinkingToggle = within(output).getByTestId('SubagentMessages.thinkingToggle')
+    const activeText = within(output).getByText('Answering now')
+    expect(
+      committed.compareDocumentPosition(thinkingToggle) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(
+      thinkingToggle.compareDocumentPosition(activeText) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    fireEvent.click(thinkingToggle)
+    expect(within(output).getByText('Working it through')).toBeInTheDocument()
+  }
 })

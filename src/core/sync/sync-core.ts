@@ -12,13 +12,9 @@
  * provably contains every event through N, which is what kills the as-built
  * watermark race by construction rather than by under-claiming.
  *
- * **Phase 5 S1 added a second lane, chosen by the channel's CLASS.** A `volatile`
- * channel (`session:stream`, `session:subagent-stream`) takes none of the three
- * steps above: it is translated into a `{streamId, turnId, offset, chunk}` frame,
- * folded into canonical through `shared/sync/stream.ts`, and delivered only to
- * connections that subscribed with `stream:watch`. No ring entry, no seq, no
- * cursor — which is what stops one turn of tokens from flushing a 5000-entry ring
- * and forcing a `sync-full` on every reconnect. Emitters are unchanged.
+ * Item deltas use a second lane chosen by channel class. They fold into canonical
+ * item state and reach only connections subscribed with `stream:watch`, without
+ * consuming reliable ring entries.
  *
  * **S2 completed it with the pass-through flavor.** The three tails
  * (`session:bash-output`, `session:background-output`, `automation:stream-event`)
@@ -49,18 +45,10 @@ import { channelSpec, type ChannelClass } from '../shared/sync/channels'
 import {
   applyEvent,
   applyWatchedContent,
-  emptyAux,
   rekeyTargetFor,
-  type ReducerAux,
   type WatchedContent
 } from '../shared/sync/reducer'
-import {
-  applyStreamFrame,
-  streamFrameFrom,
-  streamReplayFrames,
-  type LaneFrame,
-  type StreamFrame
-} from '../shared/sync/stream'
+import type { StreamLaneFrame } from '../shared/sync/stream'
 import {
   emptyCanonicalState,
   toSnapshot,
@@ -107,7 +95,7 @@ export type DeliverFn = (
  * only to the connections that asked for that session
  * (`services/sync-host.ts` §"Stream registry").
  */
-export type StreamDeliverFn = (frame: LaneFrame) => void
+export type StreamDeliverFn = (frame: StreamLaneFrame) => void
 
 /** Fired when core rekeys a session, so the host registry can follow in-tick. */
 export type RekeyObserver = (oldId: string, newId: string) => void
@@ -131,7 +119,6 @@ export interface SyncCoreOptions {
 export class SyncCore {
   private readonly ring: EventRing
   private state: CanonicalState = emptyCanonicalState()
-  private readonly aux: ReducerAux = emptyAux()
   private deliver: DeliverFn | null = null
   private deliverStream: StreamDeliverFn | null = null
   private rekeyObservers: RekeyObserver[] = []
@@ -179,16 +166,6 @@ export class SyncCore {
       atSeq: this.ring.currentSeq(),
       streams: this.state.sessions[routingId]?.itemStreams ?? {}
     }
-  }
-
-  /**
-   * The coalesced value of every non-empty stream of `routingId`, as `offset: 0`
-   * REPLACE frames — what a `stream:watch` pushes immediately.
-   *
-   * Lives here because the generations live in `aux`, which is core-internal.
-   */
-  streamReplay(routingId: string): StreamFrame[] {
-    return streamReplayFrames(this.state, this.aux, routingId)
   }
 
   /**
@@ -268,11 +245,7 @@ export class SyncCore {
       return
     }
 
-    // The VOLATILE lane (phase 5). No ring, no seq, no reducer, no event fan-out:
-    // the emission becomes a lane frame and reaches only the connections watching
-    // it. The emitters are untouched — `BaseSession.send('session:stream', …)`
-    // still calls `emit`; the CLASS is what routes it, and the FLAVOR is what
-    // decides which frame it becomes.
+    // Volatile item deltas and pass-through tails never enter the reliable ring.
     if (spec.cls === 'volatile') {
       if (spec.volatileFlavor === 'item-stream') {
         if (typeof args[0] !== 'string') return
@@ -297,19 +270,6 @@ export class SyncCore {
         this.deliverStream?.({ type: 'stream-ev', channel, args })
         return
       }
-      const frame = streamFrameFrom(this.state, this.aux, channel, args)
-      // No frame ⇒ a malformed delta or a session canonical has never met. Both
-      // were honest no-ops in the deleted reducer branches; they stay no-ops, and
-      // nothing is delivered for a frame nobody could place.
-      if (!frame) return
-      try {
-        const outcome = applyStreamFrame(this.state, this.aux, frame)
-        this.state = outcome.state
-      } catch (err) {
-        this.onApplyError(channel, err)
-        return
-      }
-      this.deliverStream?.(frame)
       return
     }
 
@@ -329,7 +289,7 @@ export class SyncCore {
       // divergence against the renderer's replica.
       try {
         const rekey = this.pendingRekeyFor(channel, args)
-        this.state = applyEvent(this.state, { channel, args, seq }, this.aux)
+        this.state = applyEvent(this.state, { channel, args, seq })
         if (rekey) {
           for (const observer of this.rekeyObservers) observer(rekey.oldId, rekey.newId)
         }
@@ -522,7 +482,5 @@ export class SyncCore {
   /** Test seam: wipe canonical state (the ring's seq stays monotonic). */
   resetCanonicalForTests(): void {
     this.state = emptyCanonicalState()
-    this.aux.thinkingOpen = {}
-    this.aux.streamTurn = {}
   }
 }

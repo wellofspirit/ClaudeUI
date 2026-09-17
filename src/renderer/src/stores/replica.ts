@@ -2,7 +2,7 @@
  * The client replica — SyncCore phase 4c (ADR-051 §"Replication model").
  *
  * One module owns every replicated slice of the renderer store. It holds a real
- * {@link CanonicalState} (plus the reducer's {@link ReducerAux}), folds
+ * {@link CanonicalState}, folds
  * `applyEvent` over the raw event tap, and projects the result into Zustand in a
  * single `set()`. Both clients use it: the desktop over the MessagePort, the web
  * client over the WebSocket — same reducer, same projection, same bugs or none.
@@ -20,7 +20,7 @@
  * ## Projection is identity-diffed, and that is load-bearing
  *
  * `applyEvent` is persistent: it returns the SAME object for slices it did not
- * touch. The projection exploits that — a `session:stream` delta rebuilds one
+ * touch. The projection exploits that — an item delta rebuilds one
  * session entry and writes nothing app-level. Without the diff, every event would
  * re-write `settings`, `recentSessionIds`, and every session, so any in-flight
  * local write (a pick whose `config:*` echo has not landed yet) would be reverted
@@ -31,9 +31,9 @@
  *
  * 1. **The fold** — `onSyncAnyEvent` → `applyEvent` → project. The default, and
  *    the only path for anything an event carries. Since phase 5 S1 there is a
- *    SECOND feed on the same path: `onSyncStreamFrame` → `applyStreamFrame` →
- *    project, carrying the streaming deltas that left the event lane.
- * 2. **Hydration** — `sync-full` → `fromSnapshot` + `auxFromCanonical` → project
+ *    SECOND feed on the same path: `onSyncItemStreamFrame` →
+ *    `applyItemStreamFrame` → project, carrying item-addressed text deltas.
+ * 2. **Hydration** — `sync-full` → `fromSnapshot` → project
  *    everything. Carries ADR-041's local selection resolution (see
  *    {@link resolveActiveSessionId}).
  * 3. **Sanctioned local writes** — a small, named set for state that is genuinely
@@ -53,24 +53,12 @@
  */
 
 import { applyItemStreamFrame } from '../../../core/shared/sync/item-stream'
-import {
-  onSyncAnyEvent,
-  onSyncStreamFrame,
-  onSyncItemStreamFrame
-} from '../../../core/shared/sync/client-registry'
+import { onSyncAnyEvent, onSyncItemStreamFrame } from '../../../core/shared/sync/client-registry'
 import { channelSpec } from '../../../core/shared/sync/channels'
-import {
-  applyStreamFrame,
-  dropStreamTurns,
-  type StreamFrame
-} from '../../../core/shared/sync/stream'
 import {
   applyEvent,
   applyWatchedContent,
-  auxFromCanonical,
-  emptyAux,
   rekeyTargetFor,
-  type ReducerAux,
   type WatchedContent
 } from '../../../core/shared/sync/reducer'
 import {
@@ -98,13 +86,10 @@ import {
 // ---------------------------------------------------------------------------
 
 let canonical: CanonicalState = emptyCanonicalState()
-let aux: ReducerAux = emptyAux()
 /** The installed raw-event tap's unsubscribe, or null — see {@link startReplica}. */
 let tapOff: (() => void) | null = null
 /** The item-addressed volatile lane's tap. */
 let itemStreamTapOff: (() => void) | null = null
-/** The session/tail volatile lane's tap (phase 5 S1). */
-let streamTapOff: (() => void) | null = null
 
 /** Post-apply observers — see {@link onReplicaApplied}. */
 type PostApplyObserver = (channel: string, args: unknown[]) => void
@@ -116,14 +101,6 @@ const observers = new Set<PostApplyObserver>()
  */
 export function getReplicaState(): CanonicalState {
   return canonical
-}
-
-/**
- * The replica's reducer aux (thinking spans + stream generations). Diagnostics +
- * tests only — in production the only reader is the fold itself.
- */
-export function getReplicaAux(): ReducerAux {
-  return aux
 }
 
 /**
@@ -163,7 +140,7 @@ export function startReplica(): () => void {
       // afterwards the old id is gone from the map.
       const rekey = pendingRekeyFor(event)
       const removed = removedIdOf(event)
-      commit(applyEvent(canonical, event, aux), { rekey, removed })
+      commit(applyEvent(canonical, event), { rekey, removed })
       if (rekey) rekeyed.set(rekey.oldId, rekey.newId)
       // The host now owns this id (or has dropped it) — either way it stops being
       // this client's private invention. A rekey carries the marker across, since
@@ -202,10 +179,6 @@ export function startReplica(): () => void {
       }
     }
   })
-  // The volatile lane's fold (phase 5 S1). A second feed, not a second writer:
-  // `applyStreamFrame` writes the same sealed streaming fields the reducer used
-  // to, through the same `commit` + identity-diffed projection.
-  streamTapOff = onSyncStreamFrame(foldStreamFrame)
   itemStreamTapOff = onSyncItemStreamFrame((frame) => {
     const outcome = applyItemStreamFrame(canonical, frame)
     if (outcome.result === 'mismatch') scheduleRewatch()
@@ -220,8 +193,6 @@ function stopReplica(): void {
   tapOff = null
   itemStreamTapOff?.()
   itemStreamTapOff = null
-  streamTapOff?.()
-  streamTapOff = null
 }
 
 // ---------------------------------------------------------------------------
@@ -261,18 +232,6 @@ function scheduleRewatch(): void {
 }
 
 const STREAM_REWATCH_DEBOUNCE_MS = 50
-
-function foldStreamFrame(frame: StreamFrame): void {
-  const outcome = applyStreamFrame(canonical, aux, frame)
-  if (outcome.result === 'mismatch') {
-    scheduleRewatch()
-    return
-  }
-  // `unknown` is an honest no-op: a frame for a session this client has never
-  // heard of (a delete it already folded, a watch that outlived a selection).
-  if (outcome.result === 'unknown') return
-  commit(outcome.state)
-}
 
 /**
  * Does this event imply a rekey (the engine reported a stable session id that
@@ -436,7 +395,6 @@ export function hydrateReplica(snapshot: FullStateSnapshot, isResync = false): v
     sdkSkillNames:
       restored.sdkSkillNames.length > 0 ? restored.sdkSkillNames : canonical.sdkSkillNames
   }
-  aux = auxFromCanonical(next)
   const activeSessionId = resolveActiveSessionId(snapshot, next, isResync)
   commit(next, { force: true, activeSessionId })
 }
@@ -584,8 +542,6 @@ export function dropLocalSessions(routingIds: readonly string[]): void {
     if (!sessions[id]) continue
     if (sessions === canonical.sessions) sessions = { ...sessions }
     delete sessions[id]
-    delete aux.thinkingOpen[id]
-    dropStreamTurns(aux, id)
   }
   if (sessions === canonical.sessions) return
   commit({ ...canonical, sessions })
@@ -611,18 +567,9 @@ export function evictLocalSessions(routingIds: readonly string[]): void {
       messages: [],
       itemStreams: {},
       itemStreamRevision: 0,
-      streamingText: '',
-      streamingThinking: '',
       subagentMessages: {},
-      subagentStreamingText: {},
-      subagentStreamingThinking: {},
       seeded: false
     }
-    delete aux.thinkingOpen[id]
-    // The stripped buffers are back to length 0, so their generations restart —
-    // otherwise the next live delta would arrive at an offset this entry no
-    // longer has and cost a re-watch round trip.
-    dropStreamTurns(aux, id)
   }
   if (sessions === canonical.sessions) return
   commit({ ...canonical, sessions })
@@ -659,7 +606,6 @@ export function patchLocalApp(patch: Partial<Omit<CanonicalState, 'sessions'>>):
 /** Test seam — production hydrates exactly once per page. */
 export function resetReplicaForTests(): void {
   canonical = emptyCanonicalState()
-  aux = emptyAux()
   locallyCreated.clear()
   rekeyed.clear()
   observers.clear()
@@ -826,8 +772,6 @@ function projectSession(
     messages: c.messages,
     itemStreams: c.itemStreams,
     itemStreamRevision: c.itemStreamRevision,
-    streamingText: c.streamingText,
-    streamingThinking: c.streamingThinking,
     status: c.status,
     pendingApprovals: c.pendingApprovals,
     todos: c.todos,
@@ -837,8 +781,6 @@ function projectSession(
     activeTasks: c.activeTasks,
     taskProgressMap: c.taskProgressMap,
     subagentMessages: c.subagentMessages,
-    subagentStreamingText: c.subagentStreamingText,
-    subagentStreamingThinking: c.subagentStreamingThinking,
     permissionMode: c.permissionMode as PermissionMode,
     effort: c.effort as PerSessionState['effort'],
     thinkingMode: c.thinkingMode as PerSessionState['thinkingMode'],
@@ -853,13 +795,6 @@ function projectSession(
     // The per-session mirror of the app-level map, so `session:status`'s
     // worktree-exit rule (the reducer drops the entry when cwd returns to
     // `originalCwd`) clears the card without a second code path.
-    worktreeInfo: worktreeInfo ?? null,
-    // Presentation clock for ThinkingBlock's live ticker, derived from the sealed
-    // buffer rather than measured by a handler: stamped when thinking output
-    // starts, cleared the moment the reducer seals the span. The four writers this
-    // replaces each had to re-implement that rule, and `setStatus`'s copy was the
-    // "safety net" for the paths the other three missed.
-    thinkingStartedAt:
-      c.streamingThinking === '' ? null : (resident?.thinkingStartedAt ?? Date.now())
+    worktreeInfo: worktreeInfo ?? null
   }
 }

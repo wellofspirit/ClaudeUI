@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { SyncCore } from '../../../sync/sync-core'
-import { applyEvent, emptyAux, rekeyCanonical } from '../reducer'
+import { applyEvent, rekeyCanonical } from '../reducer'
 import { fromSnapshot } from '../state'
 import {
   applyItemStreamFrame,
@@ -281,7 +281,7 @@ describe('per-item volatile streams', () => {
       channel: 'session:item-seal',
       args: ['s', { message: message('a', 'corrected final') }]
     }
-    replica = applyEvent(replica, event, emptyAux())
+    replica = applyEvent(replica, event)
     expect(replica.sessions.s.messages[0].content).toEqual([
       { type: 'text', text: 'corrected final' }
     ])
@@ -534,9 +534,8 @@ describe('per-item volatile streams', () => {
       { type: 'thinking', text: 'second final', durationMs: 250 }
     ])
   })
-  it('shares root commit derivations while keeping child scope and legacy buffers separate', () => {
+  it('shares root commit derivations while keeping child scope separate', () => {
     const f = fixture()
-    f.core.emit('session:stream', ['s', { type: 'text', text: 'legacy preview' }])
     f.core.emit('session:item-seal', [
       's',
       {
@@ -564,7 +563,6 @@ describe('per-item volatile streams', () => {
       }
     ])
     const root = f.core.getCanonicalState().sessions.s
-    expect(root.streamingText).toBe('legacy preview')
     expect(root.todos).toHaveLength(1)
     expect(root.sentFiles).toHaveLength(1)
     expect(root.messages[0].content[0]).toEqual({

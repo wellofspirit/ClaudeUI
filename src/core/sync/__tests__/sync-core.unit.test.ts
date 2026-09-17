@@ -87,6 +87,31 @@ describe('SyncCore.emit — fail-closed classification (item 3)', () => {
     expect(delivered).toEqual([])
   })
 
+  it.each(['session:stream', 'session:subagent-stream'])(
+    'rejects retired producer channel %s without ring, state, or delivery',
+    (channel) => {
+      const onUnclassified = vi.fn()
+      const { core, delivered } = recordingCore({ onUnclassified })
+      core.emit('session:created', ['rid', { cwd: '/repo' }], ALL)
+      delivered.length = 0
+      const before = core.getCanonicalState()
+      const streamFrames: unknown[] = []
+      core.setStreamDelivery((frame) => streamFrames.push(frame))
+
+      const payload =
+        channel === 'session:subagent-stream'
+          ? { type: 'text', toolUseId: 'child-1', text: 'obsolete' }
+          : { type: 'text', text: 'obsolete' }
+      core.emit(channel, ['rid', payload], ALL)
+
+      expect(onUnclassified).toHaveBeenCalledWith(channel)
+      expect(core.currentSeq()).toBe(1)
+      expect(core.getCanonicalState()).toBe(before)
+      expect(delivered).toEqual([])
+      expect(streamFrames).toEqual([])
+    }
+  )
+
   it('a reducer throw does NOT break the emission it rode in on', () => {
     // Routing every send through the funnel is only safe if a malformed payload
     // degrades canonical state and nothing else — before the funnel such a payload
@@ -364,19 +389,6 @@ describe('SyncCore.seedSession (item 5)', () => {
     // And the stream keeps working on the rehydrated entry.
     core.emit('session:message', ['rid', { id: 'm2', role: 'assistant', content: [] }], ALL)
     expect(core.getSnapshot().sessions['rid'].messages.map((m) => m.id)).toEqual(['h1', 'm1', 'm2'])
-  })
-
-  it('removeSession drops the thinking-span bookkeeping too', () => {
-    const { core } = recordingCore()
-    core.emit('session:created', ['rid', { cwd: '/x' }], ALL)
-    core.emit('session:stream', ['rid', { type: 'thinking', text: 'hmm' }], ALL)
-    core.removeSession('rid')
-    // A recreated session must not inherit the removed one's open span, which
-    // would silently blank its first streamingThinking.
-    core.emit('session:created', ['rid', { cwd: '/x' }], ALL)
-    core.emit('session:stream', ['rid', { type: 'thinking', text: 'fresh' }], ALL)
-    core.emit('session:stream', ['rid', { type: 'text', text: 'answer' }], ALL)
-    expect(core.getCanonicalState().sessions['rid'].streamingText).toBe('answer')
   })
 })
 

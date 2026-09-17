@@ -107,7 +107,6 @@ interface MessageBubbleProps {
   message: ChatMessage
   pendingApprovals: PendingApproval[]
   isLastAssistant: boolean
-  thinkingStartedAt: number | null
   activeThinkingSlots?: readonly number[]
 }
 
@@ -115,7 +114,6 @@ export const MessageBubble = memo(function MessageBubble({
   message,
   pendingApprovals,
   isLastAssistant,
-  thinkingStartedAt,
   activeThinkingSlots = []
 }: MessageBubbleProps): React.JSX.Element {
   // Hooks must run unconditionally — declared before the role-based early returns.
@@ -373,9 +371,6 @@ export const MessageBubble = memo(function MessageBubble({
     }
   }
 
-  // Find the last thinking item so only it can be "active"
-  const lastThinkingGi = items.reduce((acc, item, i) => (item.kind === 'thinking' ? i : acc), -1)
-
   return (
     <div
       data-testid="MessageBubble"
@@ -384,16 +379,6 @@ export const MessageBubble = memo(function MessageBubble({
     >
       {items.map((item, gi) => {
         if (item.kind === 'thinking') {
-          const isLast = gi === lastThinkingGi
-          // Only hide if this message was updated during the current thinking session
-          // (meaning the SDK sent a partial with this thinking block for the active turn)
-          const isActive =
-            isLast &&
-            isLastAssistant &&
-            !!thinkingStartedAt &&
-            message.timestamp >= thinkingStartedAt
-          // Active thinking is rendered by the standalone ThinkingBlock in ChatPanel
-          if (isActive) return null
           return (
             <ThinkingBlock
               key={item.index}

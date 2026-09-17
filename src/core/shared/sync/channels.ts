@@ -15,7 +15,7 @@
  * | Class | Ring | Canonical | Delivery |
  * | --- | --- | --- | --- |
  * | `replicated` | yes | where the snapshot carries the field | every subscriber |
- * | `volatile` | **no** | text-stream flavor only | WATCHING connections only |
+ * | `volatile` | **no** | item lifecycle only | WATCHING connections only |
  * | `host-local` | no | no | owning desktop window only |
  *
  * ## Delivery is a function of CLASS as of 4c
@@ -43,24 +43,9 @@
  *    remote clients live, which is what a reconnecting client already replayed
  *    from the ring. That was 4a's "catchup leak" wrinkle; it dies here.
  *
- * ## Rule 1 is RETIRED (phase 5 S1 + S2)
- *
- * 4a's surviving rule was **never reduce ring membership** — "a channel that
- * rings today still rings, even where that is clearly wrong (`session:stream`);
- * removing entries is phase-5 work with its own migration". This IS that
- * migration. S1 moved the two canonical-backed delta channels; S2 moved the three
- * TAILS (`session:bash-output`, `session:background-output`,
- * `automation:stream-event`), and with them the last member of the interim
- * `volatile-pending-phase-5` class — which is therefore DELETED, not left as an
- * empty option. The owner waived backward compatibility for cached client
- * bundles, so there is no dual-emission lane — desktop and web ship with the
- * server.
- *
  * ## Two flavors of `volatile` ({@link ChannelSpec.volatileFlavor})
  *
- *  - `text-stream` — a `{streamId, turnId, offset, chunk}` frame folded into
- *    canonical by `applyStreamFrame`. Accumulating, offset-guarded, self-healing
- *    (a mismatch is cured by re-watching, which replays the coalesced value).
+ *  - `item-stream` — item-addressed append/recovery frames folded into canonical.
  *  - `pass-through` — the emission `(channel, args)` verbatim in a
  *    `{type:'stream-ev'}` frame, dispatched client-side into the ordinary
  *    per-channel listener registry. NOT canonical, NOT accumulating, and
@@ -69,7 +54,7 @@
  *
  * Both ride the same watch-filtered lane and neither ever rings, which is the
  * property the phase-5 exit criterion is about; the flavor decides only what a
- * frame MEANS. `shared/sync/stream.ts` owns both interpretations.
+ * frame MEANS.
  *
  * {@link ChannelSpec.deliveryDelta} still records the 4a-sanctioned visibility
  * additions, and the funnel guard still pins that set exactly.
@@ -79,7 +64,7 @@
 export type ChannelClass = 'replicated' | 'volatile' | 'host-local'
 
 /** Which interpretation a `volatile` channel's frames carry (phase 5). */
-export type VolatileFlavor = 'text-stream' | 'pass-through' | 'item-stream'
+export type VolatileFlavor = 'pass-through' | 'item-stream'
 
 export interface ChannelSpec {
   cls: ChannelClass
@@ -360,20 +345,6 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
   // Session domain — the volatile lane. Nothing here rings (phase 5 S1 + S2);
   // the flavor is what decides how a frame is interpreted.
   // -------------------------------------------------------------------------
-  'session:stream': {
-    cls: 'volatile',
-    volatileFlavor: 'text-stream',
-    ring: false,
-    canonical: true,
-    why: 'Text/thinking deltas. Phase 5 S1 took them off the ring entirely: they ride the stream lane (`{streamId, turnId, offset, chunk}`) to watching connections only, and canonical accumulates through `applyStreamFrame` because streamingText/streamingThinking are snapshot fields.'
-  },
-  'session:subagent-stream': {
-    cls: 'volatile',
-    volatileFlavor: 'text-stream',
-    ring: false,
-    canonical: true,
-    why: 'Per-subagent deltas — same lane, same frame family; the subagentStreaming* maps are snapshot fields.'
-  },
   'session:bash-output': {
     cls: 'volatile',
     volatileFlavor: 'pass-through',

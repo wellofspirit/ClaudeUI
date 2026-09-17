@@ -127,8 +127,10 @@ function turnLegitimatelyEndsOnUser(session: CanonicalSessionState): boolean {
   if (session.queue.some((item) => item.state === 'queued')) return true
   // The turn is parked at a permission gate; nothing has been lost yet.
   if (session.pendingApprovals.length > 0) return true
-  // The reply exists, unsealed: it is in the streaming buffer, not in a message.
-  if (session.streamingText !== '' || session.streamingThinking !== '') return true
+  // A reliable ROOT scaffold exists and its item-addressed value is still arriving.
+  // A background child's output cannot explain a missing response in this transcript.
+  if (Object.values(session.itemStreams).some((stream) => !stream.target.ownerToolUseId))
+    return true
   return false
 }
 

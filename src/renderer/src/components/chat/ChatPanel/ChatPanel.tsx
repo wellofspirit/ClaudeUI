@@ -6,8 +6,6 @@ import {
   useFocusedAgentData
 } from '../../../stores/session-store'
 import { MessageBubble } from '../MessageBubble'
-import { StreamingText } from '../StreamingText'
-import { ThinkingBlock } from '../ThinkingBlock'
 import { InputBox } from '../InputBox'
 import { TodoWidget } from '../../TodoWidget'
 import { SentFilesWidget } from '../../SentFilesWidget'
@@ -69,9 +67,6 @@ export function ChatPanel(): React.JSX.Element {
     return slots
   }, [itemStreams])
   const hasItemStreams = Object.values(itemStreams).some((s) => !s.target.ownerToolUseId)
-  const hasStreamingText = !!focusedData.streamingText
-  const streamingThinking = focusedData.streamingThinking
-  const thinkingStartedAt = focusedData.thinkingStartedAt
   const pendingApprovals = useActiveSession((s) => s.pendingApprovals)
   const status = useActiveSession((s) => s.status)
 
@@ -258,7 +253,13 @@ export function ChatPanel(): React.JSX.Element {
       ? `${chatWidthPx}px`
       : `${chatWidthPercent}%`
   const chatZoom = chatFontScale / uiFontScale
-  const hasContent = messages.length > 0 || hasStreamingText || !!thinkingStartedAt
+  const hasContent = messages.length > 0
+  const lastAssistantId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'assistant') return messages[i].id
+    }
+    return null
+  }, [messages])
   const showEmptyScreen = !hasContent && status.state === 'idle'
 
   // Mobile web only: double-tapping the chat toggles browser fullscreen (there
@@ -278,13 +279,6 @@ export function ChatPanel(): React.JSX.Element {
     const id = setTimeout(dismissFullscreenHint, FULLSCREEN_HINT_TIMEOUT_MS)
     return () => clearTimeout(id)
   }, [showFullscreenHint, dismissFullscreenHint])
-
-  const lastAssistantId = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === 'assistant') return messages[i].id
-    }
-    return null
-  }, [messages])
 
   return (
     <div data-testid="ChatPanel" className="flex-1 flex flex-col min-h-0 min-w-0 relative">
@@ -327,7 +321,6 @@ export function ChatPanel(): React.JSX.Element {
                         message={msg}
                         pendingApprovals={pendingApprovals}
                         isLastAssistant={msg.id === lastAssistantId}
-                        thinkingStartedAt={thinkingStartedAt}
                         activeThinkingSlots={activeThinkingSlotsByMessage.get(msg.id)}
                       />
                     </div>
@@ -335,12 +328,7 @@ export function ChatPanel(): React.JSX.Element {
                 </DiagramGalleryProvider>
               </ImageGalleryProvider>
               <div className="flex flex-col gap-5">
-                {hasStreamingText && <StreamingText />}
-                {thinkingStartedAt && <ThinkingBlock text={streamingThinking} isActive />}
-                {!hasStreamingText &&
-                  !thinkingStartedAt &&
-                  !hasItemStreams &&
-                  status.state === 'running' && <TypingIndicator />}
+                {!hasItemStreams && status.state === 'running' && <TypingIndicator />}
               </div>
             </div>
           )}

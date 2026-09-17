@@ -44,8 +44,6 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const taskProgressMap = useActiveSession((s) => s.taskProgressMap)
   const itemStreams = useActiveSession((s) => s.itemStreams)
   const subagentMsgs = useActiveSession((s) => s.subagentMessages)
-  const subagentText = useActiveSession((s) => s.subagentStreamingText)
-  const subagentThinking = useActiveSession((s) => s.subagentStreamingThinking)
   const bashOutput = useActiveSession((s) => s.bashOutputs[toolUseId])
   const removeTaskFromPanel = useSessionStore((s) => s.removeTaskFromPanel)
   const stoppingTaskIds = useActiveSession((s) => s.stoppingTaskIds)
@@ -68,8 +66,6 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
     () => overlayItemStreams(subagentMsgs[toolUseId] || [], itemStreams, toolUseId),
     [subagentMsgs, itemStreams, toolUseId]
   )
-  const streamText = subagentText[toolUseId] || ''
-  const streamThinking = subagentThinking[toolUseId] || ''
 
   useEffect(() => {
     const el = bodyRef.current
@@ -79,7 +75,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
     requestAnimationFrame(() => {
       isAutoScrolling.current = false
     })
-  }, [msgs, streamText, streamThinking, bashOutput, following])
+  }, [msgs, bashOutput, following])
 
   const handleScroll = useCallback(() => {
     if (isAutoScrolling.current) return
@@ -106,7 +102,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
 
   const input = taskBlock.toolInput || {}
   const description = String(input.description || input.prompt || '')
-  const hasSubagentOutput = msgs.length > 0 || !!streamText || !!streamThinking
+  const hasSubagentOutput = msgs.length > 0
   const isBash = engineToolMap(engineId).kindOf(taskBlock.toolName) === 'command'
   const isBackground = !!input.run_in_background
   const progress = taskProgressMap[toolUseId]
@@ -245,8 +241,6 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
               <div>
                 <SubagentOutputBody
                   msgs={msgs}
-                  streamThinking={streamThinking}
-                  streamText={streamText}
                   isRunning={isRunning}
                   isBackground={isBackground}
                   elapsedLabel={elapsed != null ? formatElapsed(elapsed) : undefined}

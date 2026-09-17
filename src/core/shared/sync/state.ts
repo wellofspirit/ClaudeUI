@@ -39,8 +39,6 @@ export interface CanonicalSessionState {
   messages: ChatMessage[]
   itemStreams: ItemStreams
   itemStreamRevision: number
-  streamingText: string
-  streamingThinking: string
   status: SessionStatus
   pendingApprovals: PendingApproval[]
   /** Derived on message-apply (reducer-internal, ratified §2) — never client-computed. */
@@ -53,8 +51,6 @@ export interface CanonicalSessionState {
   activeTasks: Record<string, { taskId: string; taskType: string }>
   taskProgressMap: Record<string, TaskProgress>
   subagentMessages: Record<string, ChatMessage[]>
-  subagentStreamingText: Record<string, string>
-  subagentStreamingThinking: Record<string, string>
   permissionMode: string
   /** `null` when unset — matches what every producer actually puts on the wire. */
   effort: string | null
@@ -129,8 +125,6 @@ export function emptySession(routingId: string, cwd = ''): CanonicalSessionState
     messages: [],
     itemStreams: {},
     itemStreamRevision: 0,
-    streamingText: '',
-    streamingThinking: '',
     status: { ...DEFAULT_STATUS },
     pendingApprovals: [],
     todos: [],
@@ -140,8 +134,6 @@ export function emptySession(routingId: string, cwd = ''): CanonicalSessionState
     activeTasks: {},
     taskProgressMap: {},
     subagentMessages: {},
-    subagentStreamingText: {},
-    subagentStreamingThinking: {},
     permissionMode: 'default',
     effort: null,
     thinkingMode: null,
@@ -208,8 +200,6 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
       messages: s.messages,
       itemStreams: s.itemStreams ?? {},
       itemStreamRevision: s.itemStreamRevision ?? 0,
-      streamingText: s.streamingText,
-      streamingThinking: s.streamingThinking,
       status: s.status,
       pendingApprovals: s.pendingApprovals,
       todos: s.todos,
@@ -219,8 +209,6 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
       activeTasks: s.activeTasks ?? {},
       taskProgressMap: s.taskProgressMap,
       subagentMessages: s.subagentMessages,
-      subagentStreamingText: s.subagentStreamingText,
-      subagentStreamingThinking: s.subagentStreamingThinking,
       permissionMode: s.permissionMode,
       effort: s.effort ?? null,
       thinkingMode: s.thinkingMode ?? null,
@@ -276,8 +264,6 @@ export function toSnapshot(state: CanonicalState, seq: number): FullStateSnapsho
       messages: s.messages,
       itemStreams: s.itemStreams ?? {},
       itemStreamRevision: s.itemStreamRevision ?? 0,
-      streamingText: s.streamingText,
-      streamingThinking: s.streamingThinking,
       status: s.status,
       pendingApprovals: s.pendingApprovals,
       todos: s.todos,
@@ -287,8 +273,6 @@ export function toSnapshot(state: CanonicalState, seq: number): FullStateSnapsho
       activeTasks: s.activeTasks,
       taskProgressMap: s.taskProgressMap,
       subagentMessages: s.subagentMessages,
-      subagentStreamingText: s.subagentStreamingText,
-      subagentStreamingThinking: s.subagentStreamingThinking,
       permissionMode: s.permissionMode,
       effort: s.effort,
       thinkingMode: s.thinkingMode,

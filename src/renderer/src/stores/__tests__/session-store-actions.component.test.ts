@@ -1211,82 +1211,6 @@ describe('setStatus', () => {
 
   // Thinking-span durations are the emitter's (4b) and the renderer's parallel clock
   // is deleted (4c) — see base-session-thinking-span.test.ts.
-
-  it('clears foreground subagent streaming buffers on idle', () => {
-    store().createNewSession('r1', '/test')
-    seed.message(
-      'r1',
-      makeChatMessage({
-        id: 'asst-1',
-        role: 'assistant',
-        content: [makeToolUseBlock('Task', { description: 'do work' }, 'tool-fg')]
-      })
-    )
-    seed.subagentStreamThinking('r1', 'tool-fg', 'subagent thinking...')
-    seed.subagentStreamText('r1', 'tool-fg', 'subagent answering...')
-
-    seed.status('r1', makeSessionStatus({ state: 'idle' }))
-
-    const s = store().sessions['r1']
-    expect(s.subagentStreamingThinking['tool-fg']).toBe('')
-    expect(s.subagentStreamingText['tool-fg']).toBe('')
-  })
-
-  it('preserves background subagent streaming buffers on idle', () => {
-    store().createNewSession('r1', '/test')
-    seed.message(
-      'r1',
-      makeChatMessage({
-        id: 'asst-1',
-        role: 'assistant',
-        content: [
-          makeToolUseBlock('Task', { description: 'bg work', run_in_background: true }, 'tool-bg')
-        ]
-      })
-    )
-    // appendSubagentStreamingText clears thinking by design (text supersedes
-    // thinking in the live preview), so seed both buffers directly.
-    useSessionStore.setState((state) => ({
-      sessions: {
-        ...state.sessions,
-        r1: {
-          ...state.sessions.r1,
-          subagentStreamingThinking: { 'tool-bg': 'still thinking...' },
-          subagentStreamingText: { 'tool-bg': 'still answering...' }
-        }
-      }
-    }))
-    mirrorStoreIntoReplica()
-
-    seed.status('r1', makeSessionStatus({ state: 'idle' }))
-
-    const s = store().sessions['r1']
-    expect(s.subagentStreamingThinking['tool-bg']).toBe('still thinking...')
-    expect(s.subagentStreamingText['tool-bg']).toBe('still answering...')
-  })
-
-  it('clears foreground but not background subagent buffers when both are present', () => {
-    store().createNewSession('r1', '/test')
-    seed.message(
-      'r1',
-      makeChatMessage({
-        id: 'asst-1',
-        role: 'assistant',
-        content: [
-          makeToolUseBlock('Task', { description: 'fg' }, 'tool-fg'),
-          makeToolUseBlock('Task', { description: 'bg', run_in_background: true }, 'tool-bg')
-        ]
-      })
-    )
-    seed.subagentStreamThinking('r1', 'tool-fg', 'fg thinking')
-    seed.subagentStreamThinking('r1', 'tool-bg', 'bg thinking')
-
-    seed.status('r1', makeSessionStatus({ state: 'idle' }))
-
-    const s = store().sessions['r1']
-    expect(s.subagentStreamingThinking['tool-fg']).toBe('')
-    expect(s.subagentStreamingThinking['tool-bg']).toBe('bg thinking')
-  })
 })
 
 describe('updateTaskProgress', () => {
@@ -1384,13 +1308,6 @@ describe('appendSubagentMessageBatch', () => {
     const msgs = store().sessions['r1'].subagentMessages['tool-1']
     expect(msgs).toHaveLength(1)
     expect(msgs[0].content[0]).toMatchObject({ text: 'new' })
-  })
-
-  it('clears streaming text and thinking', () => {
-    store().createNewSession('r1', '/test')
-    seed.subagentStreamText('r1', 'tool-1', 'partial...')
-    seed.subagentMessageBatch('r1', 'tool-1', [makeAssistantMessage('done')])
-    expect(store().sessions['r1'].subagentStreamingText['tool-1']).toBe('')
   })
 })
 

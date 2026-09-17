@@ -65,9 +65,6 @@ beforeEach(() => {
         messages: [],
         itemStreams: {},
         itemStreamRevision: 0,
-        streamingText: '',
-        streamingThinking: '',
-        thinkingStartedAt: null,
         evicted: false,
         status: makeSessionStatus({ state: 'idle', sessionId: null, model: null, cwd: null }),
         pendingApprovals: [],
@@ -81,8 +78,6 @@ beforeEach(() => {
         openedTaskToolUseIds: [],
         rightPanel: 'none',
         subagentMessages: {},
-        subagentStreamingText: {},
-        subagentStreamingThinking: {},
         bashOutputs: {},
         backgroundOutputs: {},
         backgroundWatcherCounts: {},
@@ -154,7 +149,6 @@ function renderMsg(toolName: string, toolInput?: Record<string, unknown>): void 
       message={makeMessage(toolName, toolInput)}
       pendingApprovals={[]}
       isLastAssistant={true}
-      thinkingStartedAt={null}
     />
   )
 }

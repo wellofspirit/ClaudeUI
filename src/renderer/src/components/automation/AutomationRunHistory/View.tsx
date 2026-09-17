@@ -142,7 +142,6 @@ export function AutomationRunHistoryView({
                     message={msg}
                     pendingApprovals={[]}
                     isLastAssistant={false}
-                    thinkingStartedAt={null}
                   />
                 ))}
               </DiagramGalleryProvider>

@@ -86,8 +86,6 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
   const openTaskPanel = useSessionStore((s) => s.openTaskPanel)
   const itemStreams = useActiveSession((s) => s.itemStreams)
   const subagentMsgs = useActiveSession((s) => s.subagentMessages)
-  const subagentText = useActiveSession((s) => s.subagentStreamingText)
-  const subagentThinking = useActiveSession((s) => s.subagentStreamingThinking)
   const taskNotifications = useActiveSession((s) => s.taskNotifications)
   const activeTasks = useActiveSession((s) => s.activeTasks)
   const stoppingTaskIds = useActiveSession((s) => s.stoppingTaskIds)
@@ -103,10 +101,8 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
     () => overlayItemStreams(subagentMsgs[toolUseId] || [], itemStreams, toolUseId),
     [subagentMsgs, itemStreams, toolUseId]
   )
-  const streamText = subagentText[toolUseId] || ''
-  const streamThinking = subagentThinking[toolUseId] || ''
   const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
-  const hasSubagentOutput = msgs.length > 0 || !!streamText || !!streamThinking
+  const hasSubagentOutput = msgs.length > 0
   const isBackground = !!view.background
   // Has this task received a task_started wire event with no matching
   // task_notification yet? If so it is DEFINITELY still running, regardless
@@ -419,8 +415,6 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
               <div className="px-3 py-2 max-h-[300px] overflow-y-auto">
                 <SubagentOutputBody
                   msgs={msgs}
-                  streamThinking={streamThinking}
-                  streamText={streamText}
                   isRunning={isRunning}
                   isBackground={isBackground}
                   elapsedLabel={elapsed != null ? formatElapsed(elapsed) : undefined}

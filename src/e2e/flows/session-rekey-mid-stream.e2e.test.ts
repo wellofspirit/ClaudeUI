@@ -7,6 +7,8 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { appendItem, emitItemDelta, sealItem } from '@test/helpers/item-stream'
+import { itemStreamKey } from '../../core/shared/sync/item-stream'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
 import {
   makeAssistantMessage,
@@ -48,8 +50,10 @@ describe('E2E: session rekey mid-stream', () => {
     useSessionStore.getState().createNewSession(tempId, '/project')
 
     // Start streaming under tempId
-    app.emit('session:stream', tempId, { type: 'text', text: 'Partial ' })
-    expect(useSessionStore.getState().sessions[tempId].streamingText).toBe('Partial ')
+    const target = emitItemDelta(app, tempId, 'Partial ', { open: true })
+    expect(
+      useSessionStore.getState().sessions[tempId].itemStreams[itemStreamKey(target)].value
+    ).toBe('Partial ')
 
     // Status arrives with the SDK's stable sessionId → triggers rekey
     app.emit('session:status', tempId, makeSessionStatus({ state: 'running', sessionId: sdkId }))
@@ -58,15 +62,17 @@ describe('E2E: session rekey mid-stream', () => {
     expect(state.sessions[tempId]).toBeUndefined()
     expect(state.sessions[sdkId]).toBeDefined()
     // Streaming text carried over to new key
-    expect(state.sessions[sdkId].streamingText).toBe('Partial ')
+    expect(state.sessions[sdkId].itemStreams[itemStreamKey(target)].value).toBe('Partial ')
     expect(state.sessions[sdkId].status.state).toBe('running')
 
     // Continue streaming under new sdkId
-    app.emit('session:stream', sdkId, { type: 'text', text: 'answer' })
-    expect(useSessionStore.getState().sessions[sdkId].streamingText).toBe('Partial answer')
+    appendItem(app, sdkId, target, 'answer')
+    expect(
+      useSessionStore.getState().sessions[sdkId].itemStreams[itemStreamKey(target)].value
+    ).toBe('Partial answer')
 
     // Final message lands under new key
-    app.emit('session:message', sdkId, makeAssistantMessage('Partial answer'))
+    sealItem(app, sdkId, target, 'Partial answer')
     const session = useSessionStore.getState().sessions[sdkId]
     expect(session.messages).toHaveLength(1)
     expect(session.messages[0].role).toBe('assistant')
@@ -79,13 +85,17 @@ describe('E2E: session rekey mid-stream', () => {
 
     app.emit('session:status', tempId, makeSessionStatus({ state: 'running', sessionId: sdkId }))
 
-    // Old ID stream events — should not create ghost session, since rekey
-    // removed the old entry and the stream handler ensureSession would re-create it.
-    // Instead, verify the new session continues unaffected.
-    const beforeText = useSessionStore.getState().sessions[sdkId].streamingText
-    app.emit('session:stream', sdkId, { type: 'text', text: 'correct' })
+    emitItemDelta(app, tempId, 'late', { open: true })
+    expect(useSessionStore.getState().sessions[tempId]).toBeUndefined()
 
-    expect(useSessionStore.getState().sessions[sdkId].streamingText).toBe(beforeText + 'correct')
+    // The stable session continues unaffected by the rejected late lifecycle.
+    const beforeStreams = useSessionStore.getState().sessions[sdkId].itemStreams
+    const target = emitItemDelta(app, sdkId, 'correct', { open: true })
+
+    expect(beforeStreams).toEqual({})
+    expect(
+      useSessionStore.getState().sessions[sdkId].itemStreams[itemStreamKey(target)].value
+    ).toBe('correct')
   })
 
   it('rekey preserves messages, approvals, and cwd from before', () => {
@@ -95,7 +105,7 @@ describe('E2E: session rekey mid-stream', () => {
 
     // Populate pre-rekey state
     app.emit('session:message', tempId, makeAssistantMessage('before rekey'))
-    app.emit('session:stream', tempId, { type: 'text', text: 'streaming' })
+    const target = emitItemDelta(app, tempId, 'streaming', { open: true })
     seed.approvalRequest(tempId, {
       requestId: 'req-preserved',
       toolName: 'Read',
@@ -111,9 +121,9 @@ describe('E2E: session rekey mid-stream', () => {
 
     const session = useSessionStore.getState().sessions[sdkId]
     expect(session).toBeDefined()
-    expect(session.messages).toHaveLength(1)
+    expect(session.messages).toHaveLength(2)
     expect(session.messages[0].content[0]).toEqual({ type: 'text', text: 'before rekey' })
-    expect(session.streamingText).toBe('streaming')
+    expect(session.itemStreams[itemStreamKey(target)].value).toBe('streaming')
     expect(session.pendingApprovals).toHaveLength(1)
     expect(session.pendingApprovals[0].requestId).toBe('req-preserved')
     expect(session.cwd).toBe('/my/project')

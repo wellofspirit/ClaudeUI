@@ -94,7 +94,7 @@ import { registerCommand, commandRegistry } from '../../core/ipc/command-registr
 import { syncCore } from '../../core/services/sync-host'
 import { watchSession, unwatchAll } from '../../core/services/session-watcher'
 import { loadSessionHistory } from '../../core/services/session-history'
-import { applyEvent, applyWatchedContent, auxFromCanonical } from '../../core/shared/sync/reducer'
+import { applyEvent, applyWatchedContent } from '../../core/shared/sync/reducer'
 import { fromSnapshot, type CanonicalState } from '../../core/shared/sync/state'
 import type { ChatMessage } from '../../shared/types'
 import type {
@@ -205,8 +205,7 @@ async function foldAndRefetch(
   replica: CanonicalState,
   entry: { seq: number; channel: string; args: unknown[] }
 ): Promise<CanonicalState> {
-  const aux = auxFromCanonical(replica)
-  let next = applyEvent(replica, { channel: entry.channel, args: entry.args, seq: entry.seq }, aux)
+  let next = applyEvent(replica, { channel: entry.channel, args: entry.args, seq: entry.seq })
   const payload = entry.args[0] as { routingId: string; sessionId: string; projectKey: string }
   const history = (await client.invoke(
     'session:load-history',

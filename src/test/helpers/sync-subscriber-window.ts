@@ -15,16 +15,9 @@
  *
  * ## The stream lane (phase 5 S1)
  *
- * `session:stream` / `session:subagent-stream` are no longer events, so they no
- * longer reach a sync subscriber at all. The stub therefore also registers a
- * STREAM sink, watching every session it is told about, and re-materializes each
- * frame with the shared {@link streamFrameToEmission} — the same inverse the
- * ADR-005 plugin bridge uses, so there is one answer to "what did the emitter
- * send" rather than one per consumer.
- *
- * CLIENTS never use that inverse: they fold `applyStreamFrame`, which is what the
- * offsets are for. It exists only for in-process consumers whose contract
- * predates the lane split.
+ * Item appends no longer reach a sync subscriber. The stub therefore also
+ * registers a stream sink, watching every session it is told about, and forwards
+ * the real item identity to the client-facing `session:item-delta` listener.
  *
  * S2 moved the three TAILS (`session:bash-output`, `session:background-output`,
  * `automation:stream-event`) onto the same lane in the PASS-THROUGH flavor. Those
@@ -40,7 +33,7 @@ import {
   setStreamWatch,
   syncCore
 } from '../../core/services/sync-host'
-import { streamFrameToEmission, type LaneFrame } from '../../core/shared/sync/stream'
+import type { StreamLaneFrame } from '../../core/shared/sync/stream'
 
 interface WindowLike {
   webContents: { send: (channel: string, ...args: unknown[]) => void }
@@ -55,18 +48,12 @@ export function subscribeWindowToSync(win: WindowLike): () => void {
   })
 
   const connectionId = `test-stub-${nextStubConnection++}`
-  const offStream = addStreamSubscriber(connectionId, (frame: LaneFrame) => {
+  const offStream = addStreamSubscriber(connectionId, (frame: StreamLaneFrame) => {
     if (frame.type === 'item-stream') {
       win.webContents.send('session:item-delta', frame.routingId, frame)
       return
     }
-    if (frame.type === 'stream-ev') return // delivered through the observer below
-    // The SHARED inverse — the same one the plugin bridge uses. Hand-rolling it
-    // here would be a second answer to "what did the emitter send", in the one
-    // place nobody would think to look for it.
-    const emission = streamFrameToEmission(frame)
-    if (!emission) return
-    win.webContents.send(emission.channel, emission.routingId, emission.data)
+    // Pass-through tails are delivered through the observer below.
   })
 
   // The PASS-THROUGH flavor (phase 5 S2) rides the OBSERVER list instead, and
@@ -76,7 +63,7 @@ export function subscribeWindowToSync(win: WindowLike): () => void {
   // sink above would silently drop a tail for a session the re-watch below has
   // not caught up with yet — turning a lane change into hundreds of failed engine
   // assertions about output the engine did emit.
-  const offTails = addStreamObserver((frame: LaneFrame) => {
+  const offTails = addStreamObserver((frame: StreamLaneFrame) => {
     if (frame.type !== 'stream-ev') return
     win.webContents.send(frame.channel, ...frame.args)
   })

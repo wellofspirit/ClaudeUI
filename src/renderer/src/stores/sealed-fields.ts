@@ -55,8 +55,6 @@ export const SEALED_SESSION_FIELDS = [
   'messages',
   'itemStreams',
   'itemStreamRevision',
-  'streamingText',
-  'streamingThinking',
   'status',
   'pendingApprovals',
   'todos',
@@ -66,8 +64,6 @@ export const SEALED_SESSION_FIELDS = [
   'activeTasks',
   'taskProgressMap',
   'subagentMessages',
-  'subagentStreamingText',
-  'subagentStreamingThinking',
   'permissionMode',
   'effort',
   'thinkingMode',
@@ -84,13 +80,7 @@ export const SEALED_SESSION_FIELDS = [
    * disagree — which they did, since `setWorktreeInfo` wrote both and
    * `session:status`'s worktree-exit rule only cleared one path.
    */
-  'worktreeInfo',
-  /**
-   * Also not a snapshot field: a PRESENTATION clock derived from
-   * `streamingThinking` (stamped when the buffer fills, cleared when the reducer
-   * seals the span). Sealed because the projection is its only writer.
-   */
-  'thinkingStartedAt'
+  'worktreeInfo'
 ] as const
 
 /** Wire field each sealed per-session store field projects from. */
@@ -101,8 +91,6 @@ export const SEALED_SESSION_FIELD_SOURCE: Readonly<
   messages: 'messages',
   itemStreams: 'itemStreams',
   itemStreamRevision: 'itemStreamRevision',
-  streamingText: 'streamingText',
-  streamingThinking: 'streamingThinking',
   status: 'status',
   pendingApprovals: 'pendingApprovals',
   todos: 'todos',
@@ -112,8 +100,6 @@ export const SEALED_SESSION_FIELD_SOURCE: Readonly<
   activeTasks: 'activeTasks',
   taskProgressMap: 'taskProgressMap',
   subagentMessages: 'subagentMessages',
-  subagentStreamingText: 'subagentStreamingText',
-  subagentStreamingThinking: 'subagentStreamingThinking',
   permissionMode: 'permissionMode',
   effort: 'effort',
   thinkingMode: 'thinkingMode',
@@ -124,8 +110,7 @@ export const SEALED_SESSION_FIELD_SOURCE: Readonly<
   selectedEngineId: 'selectedEngineId',
   selectedModel: 'selectedModel',
   authRequired: 'authRequired',
-  worktreeInfo: 'worktreeInfoMap',
-  thinkingStartedAt: 'streamingThinking'
+  worktreeInfo: 'worktreeInfoMap'
 }
 
 /**

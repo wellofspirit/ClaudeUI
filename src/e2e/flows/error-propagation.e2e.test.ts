@@ -12,6 +12,7 @@ import { useClaudeEvents } from '../../renderer/src/hooks/useClaudeEvents'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
 import { makeChatMessage, makeSessionStatus, resetFactoryCounter } from '@test/factories/messages'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
+import { emitItemDelta } from '@test/helpers/item-stream'
 
 let app: TestApp
 
@@ -140,12 +141,15 @@ describe('E2E: warning propagation (model_refusal_fallback / model_fallback)', (
       routingId,
       makeChatMessage({ id: 'msg_keep', content: [{ type: 'text', text: 'keep' }] })
     )
-    seed.streamText(routingId, 'refused partial stream')
+    emitItemDelta(app, routingId, 'refused partial stream', {
+      messageId: 'msg_refused',
+      open: true
+    })
 
     app.emit('session:messages-retracted', routingId, { messageIds: ['msg_refused'] })
 
     const session = useSessionStore.getState().sessions[routingId]
     expect(session.messages.map((m) => m.id)).toEqual(['msg_keep'])
-    expect(session.streamingText).toBe('')
+    expect(session.itemStreams).toEqual({})
   })
 })

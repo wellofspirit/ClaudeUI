@@ -216,6 +216,24 @@ function fireSessionEventViaBridge(
   emitEvent(channel, [routingId, data])
 }
 
+function fireItemDelta(routingId: string, chunk: string): void {
+  if (!syncCore.getCanonicalState().sessions[routingId]) syncCore.seedSession(routingId, {})
+  const target = { messageId: `fixture-${routingId}`, blockIndex: 0, kind: 'text' as const }
+  emitEvent('session:item-open', [
+    routingId,
+    {
+      target,
+      message: {
+        id: target.messageId,
+        role: 'assistant',
+        timestamp: 1,
+        content: [{ type: 'text', text: '' }]
+      }
+    }
+  ])
+  emitEvent('session:item-delta', [routingId, { target, chunk }])
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -486,12 +504,9 @@ describe('PluginManager', () => {
       delete (global as any).__sessionEvents
     })
 
-    it('forwards VOLATILE-lane deltas with the pre-phase-5 payload shape (parity guard)', async () => {
-      // `session:stream` / `session:subagent-stream` stopped being events in
-      // phase 5 S1. A plugin's contract predates that split and must not change
-      // because of it, so the bridge observes the stream lane in-process and
-      // re-materializes the emission through the SHARED inverse. This test is the
-      // guard: it fails if the observer, the gate or the inverse regresses.
+    it('synthesizes legacy plugin delta names from item appends (parity guard)', async () => {
+      // These names remain an in-process plugin contract. The bridge derives
+      // them only from the real item lane, including the target owner identity.
       s = scaffold({ sessionIdFor: (rid) => (rid === 'R-1' ? 'SID-1' : null) })
 
       writePlugin({
@@ -508,15 +523,40 @@ describe('PluginManager', () => {
       })
       await s.manager.loadAll()
 
-      fireSessionEventViaBridge(s.manager, 'session:stream', 'R-1', {
-        type: 'thinking',
-        text: 'weighing'
-      })
-      fireSessionEventViaBridge(s.manager, 'session:subagent-stream', 'R-1', {
-        toolUseId: 'tu-1',
-        type: 'text',
-        text: 'sub output'
-      })
+      syncCore.seedSession('R-1', { selectedEngineId: 'claude' })
+      const rootTarget = { messageId: 'root', blockIndex: 0, kind: 'thinking' as const }
+      const childTarget = {
+        messageId: 'child',
+        blockIndex: 0,
+        kind: 'text' as const,
+        ownerToolUseId: 'tu-1'
+      }
+      emitEvent('session:item-open', [
+        'R-1',
+        {
+          target: rootTarget,
+          message: {
+            id: 'root',
+            role: 'assistant',
+            timestamp: 1,
+            content: [{ type: 'thinking', text: '' }]
+          }
+        }
+      ])
+      emitEvent('session:item-open', [
+        'R-1',
+        {
+          target: childTarget,
+          message: {
+            id: 'child',
+            role: 'assistant',
+            timestamp: 1,
+            content: [{ type: 'text', text: '' }]
+          }
+        }
+      ])
+      emitEvent('session:item-delta', ['R-1', { target: rootTarget, chunk: 'weighing' }])
+      emitEvent('session:item-delta', ['R-1', { target: childTarget, chunk: 'sub output' }])
 
       const deltas = (global as any).__deltas as any[]
       expect(deltas).toHaveLength(2)
@@ -868,7 +908,7 @@ describe('PluginManager', () => {
       })
       await s.manager.loadAll()
 
-      fireSessionEventViaBridge(s.manager, 'session:stream', 'R-temp', { type: 'text', text: 'hi' })
+      fireItemDelta('R-temp', 'hi')
 
       const events = (global as any).__early as any[]
       expect(events).toHaveLength(1)
@@ -894,7 +934,7 @@ describe('PluginManager', () => {
       await s.manager.loadAll()
 
       fireSessionEventViaBridge(s.manager, 'session:result', 'R-1', { cost: 1 })
-      fireSessionEventViaBridge(s.manager, 'session:stream', 'R-1', { type: 'text', text: 'x' })
+      fireItemDelta('R-1', 'x')
 
       expect((global as any).__streamHits).toBe(1)
       expect((global as any).__resultHits).toBe(0)

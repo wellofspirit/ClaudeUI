@@ -2,7 +2,6 @@ import type {
   ChatMessage,
   ContentBlock,
   FileDiff,
-  StreamDelta,
   TodoItem,
   ToolResultImage
 } from '../../shared/types'
@@ -45,7 +44,7 @@ export function subAgentActivityResult(kind: SubAgentActivityKind): string | und
 
 export type CodexMappedEvent =
   | { kind: 'message'; message: ChatMessage }
-  | { kind: 'stream'; delta: StreamDelta }
+  | { kind: 'stream'; delta: { type: 'text' | 'thinking'; text: string } }
   | { kind: 'commandDelta'; toolUseId: string; delta: string }
   | { kind: 'planDelta'; toolUseId: string; delta: string }
   | {
@@ -740,8 +739,8 @@ export function mapCodexDelta(
       : []
   if (method === 'item/plan/delta')
     // Native plan mode streams the `<proposed_plan>` body. Its own event kind
-    // rather than a `stream`: `StreamDelta` is a replicated channel shape whose
-    // only members are text and thinking, and the plan is not either — the
+    // rather than a `stream`: transcript deltas contain text or thinking, and
+    // the plan is not either — the
     // caller accumulates this into an item-scoped upsert of the `plan` tool_use
     // under the plan item's id (`<turnId>-plan`), which `mergeContentBlocks`
     // then lets the completed item replace by `toolUseId`.

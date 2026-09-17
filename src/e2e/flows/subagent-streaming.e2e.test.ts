@@ -1,12 +1,13 @@
 /**
  * Layer 3: E2E test — Subagent streaming.
  *
- * Parent task spawns a subagent → session:subagent-stream events route to the
- * correct subagent bucket keyed by toolUseId (used by AgentTabBar).
+ * Parent task spawns a subagent → item appends retain the owner tool identity.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { emitItemDelta } from '@test/helpers/item-stream'
+import { itemStreamKey } from '../../core/shared/sync/item-stream'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
 import {
   makeChatMessage,
@@ -58,44 +59,36 @@ describe('E2E: subagent streaming', () => {
     )
 
     // Subagent streams text
-    app.emit('session:subagent-stream', routingId, {
-      toolUseId: subagentToolUseId,
-      type: 'text',
-      text: 'Looking '
+    const target = emitItemDelta(app, routingId, 'Looking ', {
+      ownerToolUseId: subagentToolUseId,
+      open: true
     })
-    app.emit('session:subagent-stream', routingId, {
-      toolUseId: subagentToolUseId,
-      type: 'text',
-      text: 'for files...'
+    emitItemDelta(app, routingId, 'for files...', {
+      ownerToolUseId: subagentToolUseId,
+      open: false
     })
 
     const session = useSessionStore.getState().sessions[routingId]
-    expect(session.subagentStreamingText[subagentToolUseId]).toBe('Looking for files...')
+    expect(session.itemStreams[itemStreamKey(target)].value).toBe('Looking for files...')
   })
 
   it('multiple subagents get independent streaming buckets', () => {
     const routingId = 'r1'
     useSessionStore.getState().createNewSession(routingId, '/test')
 
-    app.emit('session:subagent-stream', routingId, {
-      toolUseId: 'sub-A',
-      type: 'text',
-      text: 'alpha'
+    const targetA = emitItemDelta(app, routingId, 'alpha', {
+      ownerToolUseId: 'sub-A',
+      open: true
     })
-    app.emit('session:subagent-stream', routingId, {
-      toolUseId: 'sub-B',
-      type: 'text',
-      text: 'beta'
+    const targetB = emitItemDelta(app, routingId, 'beta', {
+      ownerToolUseId: 'sub-B',
+      open: true
     })
-    app.emit('session:subagent-stream', routingId, {
-      toolUseId: 'sub-A',
-      type: 'text',
-      text: '-more'
-    })
+    emitItemDelta(app, routingId, '-more', { ownerToolUseId: 'sub-A', open: false })
 
     const session = useSessionStore.getState().sessions[routingId]
-    expect(session.subagentStreamingText['sub-A']).toBe('alpha-more')
-    expect(session.subagentStreamingText['sub-B']).toBe('beta')
+    expect(session.itemStreams[itemStreamKey(targetA)].value).toBe('alpha-more')
+    expect(session.itemStreams[itemStreamKey(targetB)].value).toBe('beta')
   })
 
   it('subagent messages land in the correct bucket (subagentMessages)', () => {
@@ -121,15 +114,18 @@ describe('E2E: subagent streaming', () => {
     const routingId = 'r1'
     useSessionStore.getState().createNewSession(routingId, '/test')
 
-    app.emit('session:subagent-stream', routingId, {
-      toolUseId: 'sub-think',
-      type: 'thinking',
-      text: 'pondering...'
+    const target = emitItemDelta(app, routingId, 'pondering...', {
+      ownerToolUseId: 'sub-think',
+      kind: 'thinking',
+      open: true
     })
 
     const session = useSessionStore.getState().sessions[routingId]
-    expect(session.subagentStreamingThinking['sub-think']).toBe('pondering...')
-    // Text bucket for same subagent remains empty
-    expect(session.subagentStreamingText['sub-think']).toBeUndefined()
+    expect(session.itemStreams[itemStreamKey(target)].value).toBe('pondering...')
+    expect(
+      Object.values(session.itemStreams).some(
+        (stream) => stream.target.ownerToolUseId === 'sub-think' && stream.target.kind === 'text'
+      )
+    ).toBe(false)
   })
 })

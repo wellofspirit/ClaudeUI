@@ -19,10 +19,6 @@ import type { ChatMessage, ContentBlock } from '../../../../../shared/types'
 vi.mock('../../chat/MarkdownRenderer', () => ({
   MarkdownRenderer: (p: { content: string }) => <div data-testid="md">{p.content}</div>
 }))
-vi.mock('../../chat/SubagentMessages', () => ({
-  SubagentMessages: () => <div data-testid="subagent-msgs" />
-}))
-
 import { TaskEntry } from '../TaskEntry'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
@@ -70,55 +66,6 @@ describe('TaskEntry — subagent output ordering + thinking toggle', () => {
     mirrorStoreIntoReplica()
   })
 
-  it('renders the message list, then live thinking, then live streamed text, in that DOM order', () => {
-    seed.subagentMessage(ROUTE, TOOL_USE_ID, {
-      id: 'm1',
-      role: 'assistant',
-      content: [{ type: 'text', text: 'partial result' }],
-      timestamp: Date.now()
-    })
-    // Set both live buffers directly (bypassing the append* actions): in real
-    // usage appendSubagentStreamingText clears the thinking buffer for the
-    // same toolUseId (thinking ends before text starts), so calling both
-    // actions in sequence can never produce a state with both non-empty.
-    // This test only needs the render-time DOM order for that combined
-    // state, not a realistic action sequence.
-    useSessionStore.setState((state) => {
-      const session = state.sessions[ROUTE]
-      return {
-        sessions: {
-          ...state.sessions,
-          [ROUTE]: {
-            ...session,
-            subagentStreamingThinking: {
-              ...session.subagentStreamingThinking,
-              [TOOL_USE_ID]: 'pondering'
-            },
-            subagentStreamingText: {
-              ...session.subagentStreamingText,
-              [TOOL_USE_ID]: 'final answer'
-            }
-          }
-        }
-      }
-    })
-    mirrorStoreIntoReplica()
-
-    render(<TaskEntry toolUseId={TOOL_USE_ID} />)
-
-    const msgsEl = screen.getByTestId('subagent-msgs')
-    const thinkingEl = screen.getByTestId('SubagentOutputBody.liveThinking')
-    const textEl = screen.getByTestId('md')
-
-    // Pre-fix, thinkingEl preceded msgsEl in the DOM.
-    expect(
-      msgsEl.compareDocumentPosition(thinkingEl) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy()
-    expect(
-      thinkingEl.compareDocumentPosition(textEl) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy()
-  })
-
   it('expandThinking=false: live thinking starts collapsed (tail preview only)', () => {
     useSessionStore.setState((s) => ({ settings: { ...s.settings, expandThinking: false } }))
     const longText = 'x'.repeat(50) + 'TAIL_MARKER' + 'y'.repeat(250)
@@ -127,7 +74,7 @@ describe('TaskEntry — subagent output ordering + thinking toggle', () => {
     render(<TaskEntry toolUseId={TOOL_USE_ID} />)
 
     expect(screen.queryByText(longText, { exact: false })).not.toBeInTheDocument()
-    expect(screen.getByTestId('SubagentOutputBody.liveThinking')).toBeInTheDocument()
+    expect(screen.getByTestId('SubagentMessages.thinkingToggle')).toBeInTheDocument()
   })
 
   it('expandThinking=false: clicking the live-thinking toggle reveals the full buffer', () => {
@@ -136,7 +83,7 @@ describe('TaskEntry — subagent output ordering + thinking toggle', () => {
     seed.subagentStreamThinking(ROUTE, TOOL_USE_ID, longText)
 
     render(<TaskEntry toolUseId={TOOL_USE_ID} />)
-    fireEvent.click(screen.getByTestId('SubagentOutputBody.liveThinking.toggle'))
+    fireEvent.click(screen.getByTestId('SubagentMessages.thinkingToggle'))
 
     expect(screen.getByText(longText)).toBeInTheDocument()
   })
