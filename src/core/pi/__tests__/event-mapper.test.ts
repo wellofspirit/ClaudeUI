@@ -1,8 +1,13 @@
 /**
  * Fixture-driven tests for mapPiEvent — the pure pi RPC event → MapperOutput[] mapper.
  */
-import { describe, it, expect } from 'vitest'
-import { mapPiEvent, createPiMapperState, buildPiChatMessage } from '../event-mapper'
+import { describe, it, expect, vi } from 'vitest'
+import {
+  mapPiEvent,
+  createPiMapperState,
+  buildPiChatMessage,
+  finishPiMessage
+} from '../event-mapper'
 import type { PiMapperState } from '../event-mapper'
 import type {
   PiAssistantMessage,
@@ -102,13 +107,39 @@ describe('mapPiEvent — full happy turn', () => {
     expect(out).toEqual([{ kind: 'ignore' }])
 
     out = mapPiEvent(messageUpdate({ type: 'text_delta', contentIndex: 0, delta: 'Hel' }), state)
-    expect(out).toEqual([{ kind: 'stream', streamType: 'text', delta: 'Hel', messageId }])
+    expect(out).toEqual([
+      {
+        kind: 'item_open',
+        target: { messageId, blockIndex: 0, kind: 'text' },
+        message: expect.objectContaining({ id: messageId, content: [{ type: 'text', text: '' }] })
+      },
+      expect.objectContaining({
+        kind: 'item_delta',
+        target: { messageId, blockIndex: 0, kind: 'text' },
+        chunk: 'Hel'
+      })
+    ])
 
     out = mapPiEvent(messageUpdate({ type: 'text_delta', contentIndex: 0, delta: 'lo' }), state)
-    expect(out).toEqual([{ kind: 'stream', streamType: 'text', delta: 'lo', messageId }])
+    expect(out).toEqual([
+      expect.objectContaining({
+        kind: 'item_delta',
+        target: { messageId, blockIndex: 0, kind: 'text' },
+        chunk: 'lo'
+      })
+    ])
 
     out = mapPiEvent(messageUpdate({ type: 'text_end', contentIndex: 0, content: 'Hello' }), state)
-    expect(out).toEqual([{ kind: 'ignore' }])
+    expect(out).toEqual([
+      {
+        kind: 'item_seal',
+        target: { messageId, blockIndex: 0, kind: 'text' },
+        message: expect.objectContaining({
+          id: messageId,
+          content: [{ type: 'text', text: 'Hello' }]
+        })
+      }
+    ])
 
     // 3. toolcall_end — interim upsert assembled from the accumulated blocks
     out = mapPiEvent(
@@ -140,7 +171,7 @@ describe('mapPiEvent — full happy turn', () => {
     out = mapPiEvent({ type: 'message_end', message: finalAssistant }, state)
     expect(out).toHaveLength(2)
     expect(out[0]).toEqual({
-      kind: 'message',
+      kind: 'item_seal',
       message: {
         id: messageId,
         role: 'assistant',
@@ -181,7 +212,7 @@ describe('mapPiEvent — full happy turn', () => {
 })
 
 describe('mapPiEvent — thinking deltas', () => {
-  it('thinking_delta maps to a stream output with streamType thinking', () => {
+  it('thinking_delta opens and appends to its addressed block', () => {
     const state = createPiMapperState()
     mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
     const messageId = state.currentMessageId!
@@ -189,7 +220,151 @@ describe('mapPiEvent — thinking deltas', () => {
       messageUpdate({ type: 'thinking_delta', contentIndex: 0, delta: 'pondering' }),
       state
     )
-    expect(out).toEqual([{ kind: 'stream', streamType: 'thinking', delta: 'pondering', messageId }])
+    expect(out).toEqual([
+      {
+        kind: 'item_open',
+        target: { messageId, blockIndex: 0, kind: 'thinking' },
+        message: expect.objectContaining({
+          id: messageId,
+          content: [{ type: 'thinking', text: '' }]
+        })
+      },
+      expect.objectContaining({
+        kind: 'item_delta',
+        target: { messageId, blockIndex: 0, kind: 'thinking' },
+        chunk: 'pondering'
+      })
+    ])
+  })
+})
+
+describe('mapPiEvent — item lifecycle termination', () => {
+  it('retains a received partial when the process ends before message_end', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+    const messageId = state.currentMessageId!
+    mapPiEvent(messageUpdate({ type: 'text_delta', contentIndex: 0, delta: 'partial' }), state)
+
+    expect(finishPiMessage(state)).toEqual([
+      {
+        kind: 'item_seal',
+        message: expect.objectContaining({
+          id: messageId,
+          content: [{ type: 'text', text: 'partial' }]
+        })
+      }
+    ])
+    expect(finishPiMessage(state)).toEqual([])
+  })
+
+  it('finalizes an active thinking clock when the process ends', () => {
+    vi.useFakeTimers()
+    try {
+      const state = createPiMapperState()
+      mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+      vi.setSystemTime(1_000)
+      mapPiEvent(
+        messageUpdate({ type: 'thinking_delta', contentIndex: 0, delta: 'partial thought' }),
+        state
+      )
+      vi.setSystemTime(2_250)
+
+      const [sealed] = finishPiMessage(state)
+      expect(sealed).toMatchObject({
+        kind: 'item_seal',
+        message: {
+          content: [{ type: 'thinking', text: 'partial thought', durationMs: 1250 }]
+        }
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('ignores a late delta after message_end instead of minting a new row', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+    mapPiEvent({ type: 'message_end', message: assistantMsg({ content: [] }) }, state)
+
+    expect(
+      mapPiEvent(messageUpdate({ type: 'text_delta', contentIndex: 0, delta: 'late' }), state)
+    ).toEqual([{ kind: 'ignore' }])
+    expect(state.currentMessageId).toBeNull()
+  })
+
+  it('ignores a duplicate assistant message_end without double-counting usage', () => {
+    const state = createPiMapperState()
+    const final = assistantMsg({ content: [{ type: 'text', text: 'done' }] })
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+    mapPiEvent({ type: 'message_end', message: final }, state)
+    const cost = state.totalCostUsd
+
+    expect(mapPiEvent({ type: 'message_end', message: final }, state)).toEqual([{ kind: 'ignore' }])
+    expect(state.totalCostUsd).toBe(cost)
+  })
+
+  it('keeps a text block after empty native thinking in its stable native slot', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+    const messageId = state.currentMessageId!
+    mapPiEvent(messageUpdate({ type: 'thinking_start', contentIndex: 0 }), state)
+
+    const outputs = mapPiEvent(
+      messageUpdate({ type: 'text_delta', contentIndex: 1, delta: 'answer' }),
+      state
+    )
+    expect(outputs.map((output) => output.kind)).toEqual(['item_open', 'item_delta'])
+    expect(outputs[0]).toMatchObject({
+      target: { messageId, blockIndex: 1, kind: 'text' },
+      message: {
+        content: [
+          { type: 'thinking', text: '' },
+          { type: 'text', text: '' }
+        ]
+      }
+    })
+    expect(
+      mapPiEvent(messageUpdate({ type: 'thinking_end', contentIndex: 0, content: '' }), state)
+    ).toEqual([{ kind: 'ignore' }])
+  })
+
+  it('uses toolcall_start to stabilize the following text slot before arguments finish', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+    const messageId = state.currentMessageId!
+    mapPiEvent(
+      messageUpdate({ type: 'toolcall_start', contentIndex: 0, id: 'call', toolName: 'read' }),
+      state
+    )
+
+    const outputs = mapPiEvent(
+      messageUpdate({ type: 'text_delta', contentIndex: 1, delta: 'after tool' }),
+      state
+    )
+    expect(outputs[0]).toMatchObject({
+      kind: 'item_open',
+      target: { messageId, blockIndex: 1, kind: 'text' },
+      message: {
+        content: [
+          { type: 'tool_use', toolUseId: 'call', toolName: 'read' },
+          { type: 'text', text: '' }
+        ]
+      }
+    })
+  })
+
+  it('does not reopen a block on a duplicate end notification', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+    mapPiEvent(messageUpdate({ type: 'text_start', contentIndex: 0 }), state)
+    const first = mapPiEvent(
+      messageUpdate({ type: 'text_end', contentIndex: 0, content: 'done' }),
+      state
+    )
+    expect(first.map((output) => output.kind)).toEqual(['item_open', 'item_seal'])
+    expect(
+      mapPiEvent(messageUpdate({ type: 'text_end', contentIndex: 0, content: 'done' }), state)
+    ).toEqual([{ kind: 'ignore' }])
   })
 })
 
@@ -205,7 +380,7 @@ describe('mapPiEvent — abort', () => {
     })
     const out = mapPiEvent({ type: 'message_end', message: aborted }, state)
     expect(out[0]).toEqual({
-      kind: 'message',
+      kind: 'item_seal',
       message: {
         id: messageId,
         role: 'assistant',
@@ -246,7 +421,7 @@ describe('mapPiEvent — empty assistant message (M-PI4 fork-anchor parity)', ()
       },
       state
     )
-    expect(out.some((o) => o.kind === 'message')).toBe(true)
+    expect(out.some((o) => o.kind === 'item_seal')).toBe(true)
   })
 })
 
@@ -1135,9 +1310,14 @@ describe('mapPiEvent — defensive fallback when message_start was missed', () =
       state
     )
     expect(state.currentMessageId).toBeTruthy()
-    expect(out).toEqual([
-      { kind: 'stream', streamType: 'text', delta: 'x', messageId: state.currentMessageId }
-    ])
+    expect(out.map((item) => item.kind)).toEqual(['item_open', 'item_delta'])
+    expect(out[1]).toEqual(
+      expect.objectContaining({
+        kind: 'item_delta',
+        target: { messageId: state.currentMessageId, blockIndex: 0, kind: 'text' },
+        chunk: 'x'
+      })
+    )
   })
 })
 
@@ -1232,7 +1412,16 @@ describe('mapPiEvent — message_update block assembly (pi 0.84.x deltas-only wi
         messageUpdate({ type: 'thinking_end', contentIndex: 0, content: 'weighing options' }),
         state
       )
-    ).toEqual([{ kind: 'ignore' }])
+    ).toEqual([
+      expect.objectContaining({
+        kind: 'item_open',
+        target: { messageId, blockIndex: 0, kind: 'thinking' }
+      }),
+      expect.objectContaining({
+        kind: 'item_seal',
+        target: { messageId, blockIndex: 0, kind: 'thinking' }
+      })
+    ])
     expect(
       mapPiEvent(
         messageUpdate({
@@ -1329,7 +1518,7 @@ describe('mapPiEvent — message_update block assembly (pi 0.84.x deltas-only wi
       state
     )
     expect(out[0]).toEqual({
-      kind: 'message',
+      kind: 'item_seal',
       message: {
         id: messageId,
         role: 'assistant',

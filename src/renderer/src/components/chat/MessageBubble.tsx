@@ -366,6 +366,7 @@ export const MessageBubble = memo(function MessageBubble({
         items.push({ kind: 'tool_group', blocks: [{ block, index: i }] })
       }
     } else if (block.type === 'thinking') {
+      if (!block.text && !activeThinkingSlots.includes(i)) continue
       items.push({ kind: 'thinking', block, index: i })
     } else {
       items.push({ kind: 'other', block, index: i })

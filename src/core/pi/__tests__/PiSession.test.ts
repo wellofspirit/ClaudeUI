@@ -725,7 +725,7 @@ describe('PiSession.run — sends a prompt', () => {
 })
 
 describe('PiSession — event dispatch (real mapper, mocked client)', () => {
-  it('routes message_start/message_update/message_end through to session:stream and session:message', async () => {
+  it('routes message_start/message_update/message_end through item lifecycle channels', async () => {
     const win = new MockWindow()
     const session = new PiSession('rid-5', win as never, '/cwd', {})
     await session.run('hi')
@@ -765,9 +765,14 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
       assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'Hi' }
     })
 
-    expect(sentChannels(win)).toContain('session:stream')
-    const [streamPayload] = sentPayloads(win, 'session:stream')
-    expect(streamPayload).toEqual({ type: 'text', text: 'Hi' })
+    expect(sentChannels(win)).toContain('session:item-open')
+    const [deltaPayload] = sentPayloads(win, 'session:item-delta')
+    expect(deltaPayload).toMatchObject({
+      target: { blockIndex: 0, kind: 'text' },
+      chunk: 'Hi'
+    })
+    expect(session.getMessages().filter((message) => message.role === 'assistant')).toHaveLength(1)
+    expect(session.getMessages().at(-1)?.content).toEqual([{ type: 'text', text: 'Hi' }])
 
     const finalAssistant = {
       role: 'assistant' as const,
@@ -787,12 +792,16 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
     }
     handler({ type: 'message_end', message: finalAssistant })
 
-    expect(sentChannels(win)).toContain('session:message')
-    const [msgPayload] = sentPayloads(win, 'session:message').slice(-1) as [{ content: unknown }]
+    expect(sentChannels(win)).toContain('session:item-seal')
+    const [{ message: msgPayload }] = sentPayloads(win, 'session:item-seal').slice(-1) as [
+      { message: { content: unknown } }
+    ]
     expect(msgPayload).toMatchObject({
       role: 'assistant',
       content: [{ type: 'text', text: 'Hi there' }]
     })
+    expect(session.getMessages().filter((message) => message.role === 'assistant')).toHaveLength(1)
+    expect(session.getMessages().at(-1)?.content).toEqual([{ type: 'text', text: 'Hi there' }])
 
     // usage → recordUsageEvent, engineId 'pi'
     expect(mockRecordUsageEvent).toHaveBeenCalledWith(
@@ -827,11 +836,7 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
     expect(resultPayload.totalCostUsd).toBeCloseTo(0.003)
   })
 
-  // SyncCore phase 4b, invariant 5: the elapsed thinking span rides the sealing
-  // message so a snapshot-fed client renders "Thought for Xs". The timing lives on
-  // BaseSession.send (one implementation for all three engines); this pins that
-  // pi's own thinking deltas actually reach it, through the real event mapper.
-  it('stamps thinkingDurationMs on the message that seals a thinking span', async () => {
+  it('stamps durationMs on the addressed thinking block', async () => {
     vi.useFakeTimers()
     try {
       const win = new MockWindow()
@@ -860,21 +865,27 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
         type: 'message_update',
         assistantMessageEvent: { type: 'thinking_delta', contentIndex: 0, delta: 'weighing' }
       } as never)
-      expect(sentPayloads(win, 'session:stream').slice(-1)[0]).toEqual({
-        type: 'thinking',
-        text: 'weighing'
-      })
-
       vi.setSystemTime(11_800)
       handler({
+        type: 'message_update',
+        assistantMessageEvent: {
+          type: 'thinking_end',
+          contentIndex: 0,
+          content: 'weighing'
+        }
+      } as never)
+      handler({
         type: 'message_end',
-        message: message([{ type: 'text', text: 'answer' }])
+        message: message([
+          { type: 'thinking', thinking: 'weighing' },
+          { type: 'text', text: 'answer' }
+        ])
       } as never)
 
-      const [sealed] = sentPayloads(win, 'session:message').slice(-1) as [
-        { thinkingDurationMs?: number }
+      const [sealed] = sentPayloads(win, 'session:item-seal').slice(-1) as [
+        { message: { content: Array<{ type: string; durationMs?: number }> } }
       ]
-      expect(sealed.thinkingDurationMs).toBe(1800)
+      expect(sealed.message.content[0].durationMs).toBe(1800)
     } finally {
       vi.useRealTimers()
     }

@@ -2877,9 +2877,6 @@ export class CodexSession extends BaseSession {
 
   private dispatch(event: CodexMappedEvent): void {
     switch (event.kind) {
-      case 'stream':
-        this.send('session:stream', event.delta)
-        break
       case 'message': {
         const index = this.messageHistory.findIndex((message) => message.id === event.message.id)
         if (index < 0) this.messageHistory.push(event.message)

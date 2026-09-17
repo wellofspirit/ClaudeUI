@@ -77,6 +77,9 @@ export interface MessageAccumulator {
   partOrder: string[]
   /** Current snapshot per part.id */
   parts: Map<string, PartSnapshot>
+  /** Stable creation time reused by every live projection of this message. */
+  timestamp?: number
+  timestampNative?: boolean
 }
 
 export interface PartSnapshot {
@@ -85,6 +88,16 @@ export interface PartSnapshot {
   toolName?: string
   callID?: string
   state?: ToolPartState
+  time?: { start?: number; end?: number }
+  sealed?: boolean
+}
+
+export interface OpencodeStreamItem {
+  messageId: string
+  partId: string
+  blockIndex: number
+  kind: 'text' | 'thinking'
+  completed: boolean
 }
 
 export interface ToolPartState {
@@ -125,8 +138,14 @@ export interface ToolAttachment {
 // ── Mapper output types ───────────────────────────────────────────────────────
 
 export type MapperOutput =
-  | { kind: 'stream'; streamType: 'text' | 'thinking'; delta: string; messageId?: string }
-  | { kind: 'message'; message: ChatMessage }
+  | {
+      kind: 'stream'
+      streamType: 'text' | 'thinking'
+      delta: string
+      messageId: string
+      item: OpencodeStreamItem
+    }
+  | { kind: 'message'; message: ChatMessage; item?: OpencodeStreamItem }
   | { kind: 'tool_result'; toolUseId: string; result: string; isError: boolean }
   | { kind: 'approval'; approval: PendingApproval }
   /** A pending permission was resolved server-side (M-OC2 — `permission.replied`).
@@ -153,8 +172,14 @@ export type MapperOutput =
     }
   | { kind: 'error'; message: string }
   | { kind: 'auth-required'; vendorId: string; message: string }
-  | { kind: 'subagent-stream'; toolUseId: string; streamType: 'text' | 'thinking'; delta: string }
-  | { kind: 'subagent-message'; toolUseId: string; message: ChatMessage }
+  | {
+      kind: 'subagent-stream'
+      toolUseId: string
+      streamType: 'text' | 'thinking'
+      delta: string
+      item: OpencodeStreamItem
+    }
+  | { kind: 'subagent-message'; toolUseId: string; message: ChatMessage; item?: OpencodeStreamItem }
   | {
       kind: 'subagent-tool-result'
       toolUseId: string
@@ -251,19 +276,15 @@ function handleOwnEvent(
       const field = props.field as string | undefined
       const delta = props.delta as string | undefined
       if (!delta || (field !== 'text' && field !== 'reasoning')) return { kind: 'ignore' }
-      // peek at the accumulator to know the part type; default to text
-      let streamType: 'text' | 'thinking' = 'text'
-      if (messageId) {
-        const acc = accumulators.get(messageId)
-        if (acc) {
-          const partId = props.partID as string | undefined
-          if (partId) {
-            const snap = acc.parts.get(partId)
-            if (snap?.type === 'reasoning') streamType = 'thinking'
-          }
-        }
-      }
-      return { kind: 'stream', streamType, delta, messageId }
+      const partId = props.partID as string | undefined
+      const acc = messageId ? accumulators.get(messageId) : undefined
+      if (!messageId || !partId || !acc || acc.role === 'user') return { kind: 'ignore' }
+      const item = streamItemOf(acc, messageId, partId)
+      if (!item || (field !== 'text' && field !== 'reasoning')) return { kind: 'ignore' }
+      const snap = acc.parts.get(partId)
+      if (item.completed || snap?.sealed) return { kind: 'ignore' }
+      if (snap) snap.text = (snap.text ?? '') + delta
+      return { kind: 'stream', streamType: item.kind, delta, messageId, item }
     }
 
     case 'message.part.updated': {
@@ -275,6 +296,14 @@ function handleOwnEvent(
       if (!partId || !messageId) return { kind: 'ignore' }
 
       const acc = ensureAccumulator(accumulators, messageId)
+      const previous = acc.parts.get(partId)
+      const incomingTime = part.time as { start?: number; end?: number } | undefined
+      if (
+        previous?.sealed &&
+        (part.type === 'text' || part.type === 'reasoning') &&
+        typeof incomingTime?.end !== 'number'
+      )
+        return { kind: 'ignore' }
       const isNew = !acc.parts.has(partId)
       if (isNew) acc.partOrder.push(partId)
 
@@ -291,6 +320,8 @@ function handleOwnEvent(
 
       if (partType === 'text' || partType === 'reasoning') {
         snap.text = (part.text as string) ?? ''
+        snap.time = incomingTime
+        snap.sealed = previous?.sealed
       } else if (partType === 'tool') {
         snap.toolName = part.tool as string
         snap.callID = part.callID as string
@@ -333,7 +364,8 @@ function handleOwnEvent(
       // Build the ChatMessage from current accumulator state
       const message = buildChatMessage(messageId, acc)
 
-      return { kind: 'message', message }
+      const item = streamItemOf(acc, messageId, partId)
+      return { kind: 'message', message, ...(item ? { item } : {}) }
     }
 
     case 'permission.asked': {
@@ -439,6 +471,11 @@ function handleOwnEvent(
       // part.updated.
       const role = info.role as 'user' | 'assistant' | 'system' | undefined
       if (role === 'user' || role === 'assistant' || role === 'system') acc.role = role
+      const time = info.time as { created?: number } | undefined
+      if (typeof time?.created === 'number' && !acc.timestampNative) {
+        acc.timestamp = time.created
+        acc.timestampNative = true
+      }
 
       // info.tokens is a per-message CUMULATIVE snapshot (store, do not add).
       // Shape (from opencode 1.17.9 /doc): { input, output, reasoning, cache: { read, write } }
@@ -559,18 +596,15 @@ function handleChildEvent(
       const field = props.field as string | undefined
       const delta = props.delta as string | undefined
       if (!delta || (field !== 'text' && field !== 'reasoning')) return { kind: 'ignore' }
-      let streamType: 'text' | 'thinking' = 'text'
-      if (messageId) {
-        const acc = accumulators.get(messageId)
-        if (acc) {
-          const partId = props.partID as string | undefined
-          if (partId) {
-            const snap = acc.parts.get(partId)
-            if (snap?.type === 'reasoning') streamType = 'thinking'
-          }
-        }
-      }
-      return { kind: 'subagent-stream', toolUseId, streamType, delta }
+      const partId = props.partID as string | undefined
+      const acc = messageId ? accumulators.get(messageId) : undefined
+      if (!messageId || !partId || !acc || acc.role === 'user') return { kind: 'ignore' }
+      const item = streamItemOf(acc, messageId, partId)
+      if (!item || (field !== 'text' && field !== 'reasoning')) return { kind: 'ignore' }
+      const snap = acc.parts.get(partId)
+      if (item.completed || snap?.sealed) return { kind: 'ignore' }
+      if (snap) snap.text = (snap.text ?? '') + delta
+      return { kind: 'subagent-stream', toolUseId, streamType: item.kind, delta, item }
     }
 
     case 'message.part.updated': {
@@ -582,6 +616,14 @@ function handleChildEvent(
       if (!partId || !messageId) return { kind: 'ignore' }
 
       const acc = ensureAccumulator(accumulators, messageId)
+      const previous = acc.parts.get(partId)
+      const incomingTime = part.time as { start?: number; end?: number } | undefined
+      if (
+        previous?.sealed &&
+        (part.type === 'text' || part.type === 'reasoning') &&
+        typeof incomingTime?.end !== 'number'
+      )
+        return { kind: 'ignore' }
       // Mark as a child accumulator so the parent's metering loops skip it
       // (otherwise the child's tokens are attributed to the parent model).
       acc.isChild = true
@@ -593,6 +635,8 @@ function handleChildEvent(
 
       if (partType === 'text' || partType === 'reasoning') {
         snap.text = (part.text as string) ?? ''
+        snap.time = incomingTime
+        snap.sealed = previous?.sealed
       } else if (partType === 'tool') {
         snap.toolName = part.tool as string
         snap.callID = part.callID as string
@@ -606,7 +650,8 @@ function handleChildEvent(
       if (acc.role === 'user') return { kind: 'ignore' }
 
       const message = buildChatMessage(messageId, acc)
-      return { kind: 'subagent-message', toolUseId, message }
+      const item = streamItemOf(acc, messageId, partId)
+      return { kind: 'subagent-message', toolUseId, message, ...(item ? { item } : {}) }
     }
 
     case 'message.updated': {
@@ -631,6 +676,11 @@ function handleChildEvent(
 
       const role = info.role as 'user' | 'assistant' | 'system' | undefined
       if (role === 'user' || role === 'assistant' || role === 'system') acc.role = role
+      const time = info.time as { created?: number } | undefined
+      if (typeof time?.created === 'number' && !acc.timestampNative) {
+        acc.timestamp = time.created
+        acc.timestampNative = true
+      }
 
       const rawTokens = info.tokens as Record<string, unknown> | undefined
       if (rawTokens) {
@@ -868,7 +918,13 @@ export function buildChatMessage(messageId: string, acc: MessageAccumulator): Ch
     if (snap.type === 'text') {
       content.push({ type: 'text', text: snap.text ?? '' })
     } else if (snap.type === 'reasoning') {
-      content.push({ type: 'thinking', text: snap.text ?? '' })
+      content.push({
+        type: 'thinking',
+        text: snap.text ?? '',
+        ...(typeof snap.time?.start === 'number' && typeof snap.time.end === 'number'
+          ? { durationMs: Math.max(0, snap.time.end - snap.time.start) }
+          : {})
+      })
     } else if (snap.type === 'tool') {
       const toolUseId = snap.callID ?? partId
       content.push({
@@ -888,8 +944,34 @@ export function buildChatMessage(messageId: string, acc: MessageAccumulator): Ch
     id: messageId,
     role: acc.role ?? 'assistant',
     content,
-    timestamp: Date.now()
+    timestamp: (acc.timestamp ??= Date.now())
   }
+}
+
+/** Resolve a native part id to the renderer slot after unsupported parts are filtered. */
+export function streamItemOf(
+  acc: MessageAccumulator,
+  messageId: string,
+  partId: string
+): OpencodeStreamItem | undefined {
+  let blockIndex = 0
+  for (const id of acc.partOrder) {
+    const snap = acc.parts.get(id)
+    if (!snap) continue
+    const emitted = snap.type === 'text' || snap.type === 'reasoning' || snap.type === 'tool'
+    if (id === partId) {
+      if (snap.type !== 'text' && snap.type !== 'reasoning') return undefined
+      return {
+        messageId,
+        partId,
+        blockIndex,
+        kind: snap.type === 'reasoning' ? 'thinking' : 'text',
+        completed: typeof snap.time?.end === 'number'
+      }
+    }
+    if (emitted) blockIndex++
+  }
+  return undefined
 }
 
 /**

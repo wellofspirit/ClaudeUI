@@ -80,6 +80,9 @@ export interface StreamEventMessage extends BaseSDKMessage {
   type: 'stream_event'
   event?: {
     type?: string
+    message?: { id?: string; content?: unknown; [k: string]: unknown }
+    index?: number
+    content_block?: Record<string, unknown>
     delta?: {
       type?: string
       text?: string

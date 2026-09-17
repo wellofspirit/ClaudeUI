@@ -7,6 +7,7 @@ import {
   itemStreamKey,
   overlayItemStreams,
   isItemStreamFrame,
+  mergeItemContent,
   type ItemStreamTarget,
   type ItemStreamFrame
 } from '../item-stream'
@@ -52,6 +53,160 @@ function fixture() {
 }
 
 describe('per-item volatile streams', () => {
+  it('preserves established native slots on open, dedupes cloned auxiliaries, and truncates finals', () => {
+    const tool = { type: 'tool_use' as const, toolUseId: 't', toolName: 'Bash', toolInput: {} }
+    const old = [
+      { type: 'text' as const, text: 'sealed sibling' },
+      tool,
+      { type: 'tool_result' as const, toolUseId: 't', toolResult: 'old', isError: false },
+      {
+        type: 'tool_review' as const,
+        toolUseId: 't',
+        reviewId: 'r',
+        reviewer: 'auto-mode' as const,
+        decision: 'approved' as const
+      }
+    ]
+    expect(
+      mergeItemContent(
+        old,
+        [{ type: 'text', text: 'stale sibling' }, tool, { type: 'text', text: '' }],
+        true
+      ).map((block) => (block.type === 'text' ? block.text : block.type))
+    ).toEqual(['sealed sibling', 'tool_use', '', 'tool_result', 'tool_review'])
+    expect(
+      mergeItemContent(old, [{ ...old[2] }, { ...old[3] }]).map((block) => block.type)
+    ).toEqual(['tool_result', 'tool_review'])
+    expect(mergeItemContent(old, [{ type: 'text', text: 'final' }])).toEqual([
+      { type: 'text', text: 'final' },
+      old[2],
+      old[3]
+    ])
+  })
+  it('keeps native stream slots ahead of attached result and review blocks', () => {
+    const f = fixture()
+    f.core.emit('session:message', [
+      's',
+      {
+        id: 'multi',
+        role: 'assistant',
+        timestamp: 1,
+        content: [
+          { type: 'tool_use', toolUseId: 'tool', toolName: 'Bash', toolInput: {} },
+          { type: 'tool_result', toolUseId: 'tool', toolResult: 'done', isError: false },
+          {
+            type: 'tool_review',
+            toolUseId: 'tool',
+            reviewId: 'review',
+            reviewer: 'auto-mode',
+            decision: 'approved'
+          }
+        ]
+      }
+    ])
+    const textTarget: ItemStreamTarget = { messageId: 'multi', blockIndex: 1, kind: 'text' }
+    f.core.emit('session:item-open', [
+      's',
+      {
+        target: textTarget,
+        message: {
+          id: 'multi',
+          role: 'assistant',
+          timestamp: 1,
+          content: [
+            { type: 'tool_use', toolUseId: 'tool', toolName: 'Bash', toolInput: {} },
+            { type: 'text', text: '' }
+          ]
+        }
+      }
+    ])
+    const state = f.core.getCanonicalState().sessions.s
+    expect(state.itemStreams[itemStreamKey(textTarget)]).toBeDefined()
+    expect(state.messages[0].content.map((block) => block.type)).toEqual([
+      'tool_use',
+      'text',
+      'tool_result',
+      'tool_review'
+    ])
+
+    f.core.emit('session:message', [
+      's',
+      {
+        id: 'multi',
+        role: 'assistant',
+        timestamp: 2,
+        content: [
+          { type: 'tool_use', toolUseId: 'tool', toolName: 'Bash', toolInput: { command: 'pwd' } },
+          { type: 'text', text: 'structural snapshot' }
+        ]
+      }
+    ])
+    const updated = f.core.getCanonicalState().sessions.s
+    expect(updated.messages[0].content.map((block) => block.type)).toEqual([
+      'tool_use',
+      'text',
+      'tool_result',
+      'tool_review'
+    ])
+    expect(updated.itemStreams[itemStreamKey(textTarget)]).toBeDefined()
+  })
+  it('keeps child native slots stable across a structural subagent snapshot', () => {
+    const f = fixture()
+    const owner = 'child-tool'
+    const tool = { type: 'tool_use' as const, toolUseId: 'inner', toolName: 'Bash', toolInput: {} }
+    f.core.emit('session:subagent-message', [
+      's',
+      {
+        toolUseId: owner,
+        message: {
+          id: 'child-message',
+          role: 'assistant',
+          timestamp: 1,
+          content: [
+            tool,
+            { type: 'tool_result', toolUseId: 'inner', toolResult: 'done', isError: false }
+          ]
+        }
+      }
+    ])
+    const childTarget: ItemStreamTarget = {
+      messageId: 'child-message',
+      blockIndex: 1,
+      kind: 'text',
+      ownerToolUseId: owner
+    }
+    f.core.emit('session:item-open', [
+      's',
+      {
+        target: childTarget,
+        message: {
+          id: 'child-message',
+          role: 'assistant',
+          timestamp: 1,
+          content: [tool, { type: 'text', text: '' }]
+        }
+      }
+    ])
+    f.core.emit('session:subagent-message', [
+      's',
+      {
+        toolUseId: owner,
+        message: {
+          id: 'child-message',
+          role: 'assistant',
+          timestamp: 2,
+          content: [tool, { type: 'text', text: 'structural' }]
+        }
+      }
+    ])
+    const state = f.core.getCanonicalState().sessions.s
+    expect(state.itemStreams[itemStreamKey(childTarget)]).toBeDefined()
+    expect(state.subagentMessages[owner][0].content.map((block) => block.type)).toEqual([
+      'tool_use',
+      'text',
+      'tool_result'
+    ])
+  })
   it('keeps the native id when a Codex acknowledgement replaces an optimistic user row', () => {
     const f = fixture()
     f.core.emit('session:user-message', ['s', { id: 'optimistic', prompt: 'hello', timestamp: 1 }])

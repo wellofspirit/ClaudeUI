@@ -10,6 +10,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
 import { clearSyncSubscribersForTests } from '../../services/sync-host'
+import { syncCore } from '../../services/sync-host'
 import { EventEmitter } from 'node:events'
 
 // The fetch stub in setupMocks must never leak into other files sharing this
@@ -3196,6 +3197,99 @@ describe('OpencodeSession — queue + steer capability flags (Phase 8c)', () => 
 //   (vii) unknown foreign session → no subagent-* emitted
 // ---------------------------------------------------------------------------
 
+describe('OpencodeSession — per-item canonical streaming', () => {
+  beforeEach(setupMocks)
+
+  it('folds 1000 native chunks into one stable item without per-token ring growth', async () => {
+    const PARENT_SES = 'ses_item_stress'
+    const routingId = `r_item_stress_${Date.now()}`
+    const messageId = 'msg_item_stress'
+    const partId = 'part_item_stress'
+    const chunks = Array.from({ length: 1000 }, (_, index) => String(index % 10))
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        {
+          id: 'role',
+          type: 'message.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            info: { id: messageId, role: 'assistant', time: { created: 1234 } }
+          }
+        } as OpencodeEvent,
+        {
+          id: 'open',
+          type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: { id: partId, messageID: messageId, type: 'text', text: '', time: { start: 10 } }
+          }
+        } as OpencodeEvent,
+        ...chunks.map(
+          (delta, index) =>
+            ({
+              id: `delta-${index}`,
+              type: 'message.part.delta',
+              properties: {
+                sessionID: PARENT_SES,
+                messageID: messageId,
+                partID: partId,
+                field: 'text',
+                delta
+              }
+            }) as OpencodeEvent
+        ),
+        {
+          id: 'seal',
+          type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: partId,
+              messageID: messageId,
+              type: 'text',
+              text: chunks.join(''),
+              time: { start: 10, end: 20 }
+            }
+          }
+        } as OpencodeEvent,
+        {
+          id: 'seal-duplicate',
+          type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: partId,
+              messageID: messageId,
+              type: 'text',
+              text: chunks.join(''),
+              time: { start: 10, end: 20 }
+            }
+          }
+        } as OpencodeEvent,
+        { id: 'idle', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
+      ])
+    )
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    const before = syncCore.currentSeq()
+    const win = new MockWindow() as unknown as HostWindowHandle
+    const session = new OpencodeSession(routingId, win, '/tmp')
+    await session.run('go')
+    await vi.waitFor(() => expect(session.status.state).toBe('idle'))
+
+    // Opencode publishes its native session id in status, which rekeys canonical state.
+    const canonical = syncCore.getCanonicalState().sessions[PARENT_SES]
+    expect(canonical.messages).toContainEqual(
+      expect.objectContaining({ id: messageId, content: [{ type: 'text', text: chunks.join('') }] })
+    )
+    expect(Object.keys(canonical.itemStreams)).toHaveLength(0)
+    expect(syncCore.currentSeq() - before).toBeLessThan(20)
+    const reliable = (win as unknown as MockWindow).webContents.send.mock.calls
+    expect(reliable.filter((call) => call[0] === 'session:item-open')).toHaveLength(1)
+    expect(session.getMessages().find((message) => message.id === messageId)?.timestamp).toBe(1234)
+    session.dispose()
+  })
+})
+
 describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
   const PARENT_SES = 'ses_parent_8d'
   const CHILD_SES = 'ses_child_8d'
@@ -3300,7 +3394,13 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
           type: 'message.part.updated',
           properties: {
             sessionID: CHILD_SES,
-            part: { id: 'cp_a', messageID: 'child_msg_a', type: 'text', text: 'done' }
+            part: {
+              id: 'cp_a',
+              messageID: 'child_msg_a',
+              type: 'text',
+              text: 'done',
+              time: { start: 1, end: 2 }
+            }
           }
         } as OpencodeEvent,
         // End parent turn
@@ -3320,16 +3420,16 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     )
 
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
-    const subagentMsgCall = calls.find((c) => c[0] === 'session:subagent-message')
-    expect(subagentMsgCall).toBeDefined()
-    expect(subagentMsgCall![2].toolUseId).toBe(TASK_CALL_ID)
-    expect(subagentMsgCall![2].message.id).toBe('child_msg_a')
-    expect(subagentMsgCall![2].message.content[0]).toMatchObject({ type: 'text', text: 'done' })
+    const itemSeal = calls.find((c) => c[0] === 'session:item-seal')
+    expect(itemSeal).toBeDefined()
+    expect(itemSeal![2].target.ownerToolUseId).toBe(TASK_CALL_ID)
+    expect(itemSeal![2].message.id).toBe('child_msg_a')
+    expect(itemSeal![2].message.content[0]).toMatchObject({ type: 'text', text: 'done' })
 
     session.dispose()
   })
 
-  it('(iv) child delta → session:subagent-stream with correct toolUseId and type', async () => {
+  it('(iv) child delta stays on the item stream and seals under the parent tool owner', async () => {
     mockCreateSession.mockResolvedValue({ id: PARENT_SES })
     mockSubscribeEvents.mockImplementation(
       streamOf([
@@ -3349,9 +3449,28 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
             }
           }
         } as OpencodeEvent,
-        // Child delta
         {
           id: 'e2',
+          type: 'message.updated',
+          properties: { sessionID: CHILD_SES, info: { id: 'child_msg_delta', role: 'assistant' } }
+        } as OpencodeEvent,
+        {
+          id: 'e3',
+          type: 'message.part.updated',
+          properties: {
+            sessionID: CHILD_SES,
+            part: {
+              id: 'cp_delta',
+              messageID: 'child_msg_delta',
+              type: 'text',
+              text: '',
+              time: { start: 1 }
+            }
+          }
+        } as OpencodeEvent,
+        // Child delta
+        {
+          id: 'e4',
           type: 'message.part.delta',
           properties: {
             sessionID: CHILD_SES,
@@ -3361,8 +3480,8 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
             delta: 'streaming child'
           }
         } as OpencodeEvent,
-        { id: 'e3', type: 'session.idle', properties: { sessionID: CHILD_SES } } as OpencodeEvent,
-        { id: 'e4', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
+        { id: 'e5', type: 'session.idle', properties: { sessionID: CHILD_SES } } as OpencodeEvent,
+        { id: 'e6', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
       ])
     )
 
@@ -3377,11 +3496,28 @@ describe('OpencodeSession — Phase 8d: subagent dispatch', () => {
     )
 
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
-    const streamCall = calls.find((c) => c[0] === 'session:subagent-stream')
-    expect(streamCall).toBeDefined()
-    expect(streamCall![2].toolUseId).toBe(TASK_CALL_ID)
-    expect(streamCall![2].type).toBe('text')
-    expect(streamCall![2].text).toBe('streaming child')
+    expect(calls.some((c) => c[0] === 'session:subagent-stream')).toBe(false)
+    await vi.waitFor(() =>
+      expect(
+        (session as unknown as { activeStreamItems: Map<string, unknown> }).activeStreamItems.size
+      ).toBe(0)
+    )
+    const settledCalls = (win as unknown as MockWindow).webContents.send.mock.calls
+    const seal = settledCalls.find(
+      (call) => call[0] === 'session:item-seal' && call[2]?.message?.id === 'child_msg_delta'
+    )
+    expect(seal).toBeDefined()
+    expect(seal![2]).toMatchObject({
+      ownerToolUseId: TASK_CALL_ID,
+      target: { ownerToolUseId: TASK_CALL_ID, messageId: 'child_msg_delta', kind: 'text' }
+    })
+    expect(
+      syncCore
+        .getCanonicalState()
+        .sessions[PARENT_SES].subagentMessages[TASK_CALL_ID]?.find(
+          (message) => message.id === 'child_msg_delta'
+        )?.content
+    ).toEqual([{ type: 'text', text: 'streaming child' }])
 
     session.dispose()
   })

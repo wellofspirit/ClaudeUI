@@ -38,12 +38,8 @@
 
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { connectRemoteClient, ephemeralPort, type RemoteClient } from '@test/helpers/ws-test-client'
-import type {
-  WsServerMessage,
-  WsEvent,
-  FullStateSnapshot,
-  StreamFrame
-} from '../../shared/remote-protocol'
+import type { WsServerMessage, WsEvent, FullStateSnapshot } from '../../shared/remote-protocol'
+import type { ItemStreamFrame } from '../../core/shared/sync/item-stream'
 import type { QueuedItem } from '../../shared/types'
 
 // ---------------------------------------------------------------------------
@@ -331,10 +327,12 @@ function makeEngineHandle(): EngineHandle {
 const engines: EngineHandle[] = []
 
 /** A cli.js `stream_event` carrying one content-block delta. */
-const delta = (d: Record<string, unknown>): Record<string, unknown> => ({
+const streamEvent = (event: Record<string, unknown>): Record<string, unknown> => ({
   type: 'stream_event',
-  event: { type: 'content_block_delta', delta: d }
+  event
 })
+const delta = (index: number, d: Record<string, unknown>): Record<string, unknown> =>
+  streamEvent({ type: 'content_block_delta', index, delta: d })
 
 // ---------------------------------------------------------------------------
 // Boot + one client, shared by the whole flow (it IS one flow).
@@ -357,8 +355,8 @@ function eventsOn(channel: string): WsEvent[] {
 }
 
 /** Volatile-lane frames, oldest first (phase 5 S1). */
-function streamFrames(): StreamFrame[] {
-  return frames.filter((f): f is StreamFrame => f.type === 'stream')
+function itemStreamFrames(): ItemStreamFrame[] {
+  return frames.filter((f): f is WsServerMessage & ItemStreamFrame => f.type === 'item-stream')
 }
 
 function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
@@ -527,49 +525,70 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
     await waitFor(() => engines.length === 1)
     const engine = engines[0]
 
-    // Deltas ride the VOLATILE lane since phase 5 S1, and it is
-    // subscription-scoped: without a `stream:watch` this socket sees none of
-    // them. Asserted first, because "no watch ⇒ no frames" is the property the
-    // lane exists for — the ring stays free of tokens.
-    engine.emit(delta({ type: 'thinking_delta', thinking: 'weighing it up' }))
-    await waitFor(() => syncCore.getCanonicalState().sessions[ROUTING_ID].streamingThinking !== '')
-    expect(streamFrames()).toEqual([])
-    // Canonical folded it all the same — one interpretation, so the snapshot a
-    // reconnect would get already agrees with what a watching client sees.
-    expect(syncCore.getCanonicalState().sessions[ROUTING_ID].streamingThinking).toContain(
-      'weighing it up'
+    engine.emit(streamEvent({ type: 'message_start', message: { id: 'msg-windowless' } }))
+    engine.emit(
+      streamEvent({
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'thinking', thinking: '' }
+      })
     )
-    // And nothing entered the ring: no `session:stream` event, on any seq.
+    engine.emit(delta(0, { type: 'thinking_delta', thinking: 'weighing it up' }))
+    await waitFor(
+      () => Object.keys(syncCore.getCanonicalState().sessions[ROUTING_ID].itemStreams).length === 1
+    )
+    expect(itemStreamFrames()).toEqual([])
     expect(eventsOn('session:stream')).toEqual([])
 
-    // Now watch. The replay carries the accumulation this socket missed, at
-    // offset 0 — the self-heal that replaces catchup for this lane.
     await client.invoke('stream:watch', { sessionIds: [ROUTING_ID] })
-    await waitFor(() => streamFrames().length >= 2)
-    // The replay states every stream of the session at offset 0, empty ones
-    // included — the thinking buffer is the one with content here.
-    expect(streamFrames().map((f) => [f.streamId, f.chunk])).toEqual([
-      [`${ROUTING_ID}/text`, ''],
-      [`${ROUTING_ID}/thinking`, 'weighing it up']
-    ])
-    expect(streamFrames().every((f) => f.offset === 0)).toBe(true)
+    await waitFor(() => itemStreamFrames().some((frame) => frame.op === 'replace'))
+    const replay = itemStreamFrames().find((frame) => frame.op === 'replace')
+    expect(replay).toMatchObject({
+      routingId: ROUTING_ID,
+      op: 'replace'
+    })
+    expect(
+      replay?.op === 'replace'
+        ? Object.values(replay.streams).map((stream) => ({
+            target: stream.target,
+            value: stream.value
+          }))
+        : []
+    ).toContainEqual({
+      target: { messageId: 'msg-windowless', blockIndex: 0, kind: 'thinking' },
+      value: 'weighing it up'
+    })
 
-    const beforeText = streamFrames().length
-    engine.emit(delta({ type: 'text_delta', text: 'on it' }))
-    await waitFor(() => streamFrames().length > beforeText)
-    const live = streamFrames()[beforeText]
-    expect(live).toMatchObject({ streamId: `${ROUTING_ID}/text`, offset: 0, chunk: 'on it' })
-    // (offset 0 because the text buffer really was empty — this is a turn's first
-    // text chunk, not a replay, and it is what seals the thinking span.)
-    // No seq anywhere on this lane — that is what "leaves the event system" means.
+    engine.emit(streamEvent({ type: 'content_block_stop', index: 0 }))
+    engine.emit(
+      streamEvent({
+        type: 'content_block_start',
+        index: 1,
+        content_block: { type: 'text', text: '' }
+      })
+    )
+    const beforeText = itemStreamFrames().length
+    engine.emit(delta(1, { type: 'text_delta', text: 'on it' }))
+    await waitFor(() => itemStreamFrames().length > beforeText)
+    const live = itemStreamFrames().at(-1)!
+    expect(live).toMatchObject({
+      op: 'append',
+      routingId: ROUTING_ID,
+      target: { messageId: 'msg-windowless', blockIndex: 1, kind: 'text' },
+      offset: 0,
+      chunk: 'on it'
+    })
     expect('seq' in live).toBe(false)
-
-    const canonical = syncCore.getCanonicalState().sessions[ROUTING_ID]
-    expect(canonical.streamingText).toContain('on it')
-    // The text delta SEALED the thinking span (reducer rule, mirrored by
-    // BaseSession.trackThinkingSpan's emitter-side clock), so the open thinking
-    // buffer is empty again rather than stale.
-    expect(canonical.streamingThinking).toBe('')
+    engine.emit(streamEvent({ type: 'content_block_stop', index: 1 }))
+    engine.emit(streamEvent({ type: 'message_stop' }))
+    await waitFor(() => eventsOn('session:item-seal').length >= 3)
+    const final = syncCore.getCanonicalState().sessions[ROUTING_ID]
+    expect(final.itemStreams).toEqual({})
+    expect(final.messages.at(-1)?.content).toMatchObject([
+      { type: 'thinking', text: 'weighing it up' },
+      { type: 'text', text: 'on it' }
+    ])
+    expect(eventsOn('session:item-seal').at(-1)!.seq).toBeGreaterThan(0)
   })
 
   it('a mid-turn prompt queues, and the client takes it back (ADR-053)', async () => {

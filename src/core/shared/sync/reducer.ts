@@ -56,7 +56,7 @@ import type {
   ToolReviewBlock
 } from '../../../shared/types'
 import { mergeContentBlocks } from '../../../shared/content-blocks'
-import { applyItemLifecycle, type ItemStreamTarget } from './item-stream'
+import { applyItemLifecycle, mergeItemContent, type ItemStreamTarget } from './item-stream'
 import {
   buildTodosFromMessages,
   buildSentFilesFromMessages,
@@ -294,7 +294,8 @@ function commitMessage(
   message: ChatMessage,
   ownerToolUseId?: string,
   sealingTarget?: ItemStreamTarget,
-  matchedIndex?: number
+  matchedIndex?: number,
+  itemLifecycle = false
 ): CanonicalSessionState {
   const current = ownerToolUseId
     ? (session.subagentMessages[ownerToolUseId] ?? [])
@@ -302,7 +303,16 @@ function commitMessage(
   const index = matchedIndex ?? current.findIndex((candidate) => candidate.id === message.id)
   const content = message.content ?? []
   const { thinkingDurationMs, ...bare } = message
-  let merged = index < 0 ? content : mergeContentBlocks(current[index].content ?? [], content)
+  const hasActiveItem = Object.values(session.itemStreams).some(
+    (stream) =>
+      stream.target.messageId === message.id && stream.target.ownerToolUseId === ownerToolUseId
+  )
+  let merged =
+    index < 0
+      ? content
+      : hasActiveItem && !itemLifecycle
+        ? mergeItemContent(current[index].content ?? [], content)
+        : mergeContentBlocks(current[index].content ?? [], content)
   if (index >= 0 && sealingTarget) {
     const oldContent = current[index].content ?? []
     // While sibling fields are active, their scaffold indices are protocol
@@ -490,7 +500,8 @@ export function applyEvent(
         event.channel,
         event.args[1],
         event.seq ?? 0,
-        commitMessage
+        (current, message, owner, target) =>
+          commitMessage(current, message, owner, target, undefined, true)
       )
       return next === session ? state : { ...state, sessions: { ...state.sessions, [id]: next } }
     }
@@ -1320,11 +1331,18 @@ function upsertSubagentMessages(
   for (const message of incoming) {
     const idx = current.findIndex((m) => m.id === message.id)
     if (idx < 0) current.push(message)
-    else
+    else {
+      const hasActiveItem = Object.values(session.itemStreams).some(
+        (stream) =>
+          stream.target.ownerToolUseId === toolUseId && stream.target.messageId === message.id
+      )
       current[idx] = {
         ...message,
-        content: mergeContentBlocks(current[idx].content, message.content)
+        content: hasActiveItem
+          ? mergeItemContent(current[idx].content, message.content)
+          : mergeContentBlocks(current[idx].content, message.content)
       }
+    }
   }
   return withSession(state, routingId, (s) => ({
     subagentMessages: { ...s.subagentMessages, [toolUseId]: current },

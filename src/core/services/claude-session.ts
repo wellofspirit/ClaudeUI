@@ -20,6 +20,7 @@ import type { HostWindowHandle } from '../host'
 import { computeTokenMetrics } from './session-history'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { transformAssistantMessage } from './assistant-message'
+import { ClaudeItemStreamLifecycle } from './claude-item-stream'
 import { extractToolResultContent } from './tool-result-content'
 import { classifyApiError } from './api-error'
 import { ANTHROPIC_AUTH_PROVIDER_ID } from '../auth/auth-providers'
@@ -202,6 +203,19 @@ export class ClaudeSession extends BaseSession {
    * model_refusal_fallback arrives with retracted_message_uuids.
    */
   private wireUuidToMessageId = new Map<string, string>()
+  private readonly itemStreams = new ClaudeItemStreamLifecycle({
+    open: (target, message) => this.send('session:item-open', { target, message }),
+    delta: (target, chunk) => this.send('session:item-delta', { target, chunk }),
+    seal: (target, message, ownerToolUseId) =>
+      this.send('session:item-seal', {
+        ...(target ? { target } : {}),
+        message,
+        ...(ownerToolUseId ? { ownerToolUseId } : {})
+      }),
+    updateLocal: (message, ownerToolUseId) => {
+      if (!ownerToolUseId) this.upsertMessage(message)
+    }
+  })
   private abortController: AbortController | null = null
   private isProcessing = false
   private wasInterrupted = false
@@ -945,6 +959,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       myAbort.abort()
 
       if (!superseded) {
+        if (!this.disposed) this.itemStreams.sealAll()
         this.messageChannel?.end()
         this.messageChannel = null
         // Reject any in-flight ensureActiveQuery() awaits so callers don't
@@ -1165,12 +1180,17 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     const hadUsage = this.accumulateUsage(msg, isSidechain)
 
     if (chatMsg) {
+      if (!parentToolUseId && typeof msg.uuid === 'string') {
+        this.wireUuidToMessageId.set(msg.uuid.slice(0, RETRACTION_UUID_PREFIX_LEN), chatMsg.id)
+      }
+      const snapshot = this.itemStreams.handleSnapshot(chatMsg, parentToolUseId)
+      if (snapshot !== 'none') {
+        if (hadUsage && !parentToolUseId) this.scheduleStatusLineUpdate()
+        return
+      }
       if (parentToolUseId) {
         this.send('session:subagent-message', { toolUseId: parentToolUseId, message: chatMsg })
       } else {
-        if (typeof msg.uuid === 'string') {
-          this.wireUuidToMessageId.set(msg.uuid.slice(0, RETRACTION_UUID_PREFIX_LEN), chatMsg.id)
-        }
         this.upsertMessage(chatMsg)
         this.send('session:message', chatMsg)
         // Only update status line when usage actually changed (final message per API call)
@@ -1182,34 +1202,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   private handleStreamEvent(msg: StreamEventMessage): void {
     const routingId = msg.parent_tool_use_id ?? undefined
     const event = msg.event
-    if (!event || event.type !== 'content_block_delta') return
-
-    const delta = event.delta
-    if (!delta) return
-
-    if (delta.type === 'text_delta' && typeof delta.text === 'string') {
-      if (routingId) {
-        this.send('session:subagent-stream', {
-          toolUseId: routingId,
-          type: 'text',
-          text: delta.text
-        })
-      } else {
-        this.send('session:stream', { type: 'text', text: delta.text })
-      }
-      return
-    }
-    if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
-      if (routingId) {
-        this.send('session:subagent-stream', {
-          toolUseId: routingId,
-          type: 'thinking',
-          text: delta.thinking
-        })
-      } else {
-        this.send('session:stream', { type: 'thinking', text: delta.thinking })
-      }
-    }
+    if (event) this.itemStreams.handleEvent(event, routingId)
   }
 
   private handleToolProgress(msg: ToolProgressMessage): void {
@@ -1329,6 +1322,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       if (messageIds.length > 0) {
         this.messageHistory = this.messageHistory.filter((m) => !messageIds.includes(m.id))
       }
+      this.itemStreams.retract(messageIds)
       this.send('session:messages-retracted', { messageIds })
     }
   }
@@ -1382,6 +1376,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     const toolUseId = this.taskIdMap.get(taskId) || null
     if (!toolUseId) return
 
+    this.itemStreams.sealOwner(toolUseId, true)
     this.markBackgroundDone(toolUseId)
     this.taskIdMap.delete(taskId)
 
@@ -1410,6 +1405,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     // already evicted by an earlier stopTask/task_updated race).
     const matchedToolUseId = this.taskIdMap.get(taskId) || msg.tool_use_id || null
     if (matchedToolUseId) {
+      this.itemStreams.sealOwner(matchedToolUseId, true)
       this.markBackgroundDone(matchedToolUseId)
       this.taskIdMap.delete(taskId)
     }
@@ -1465,6 +1461,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   }
 
   private handleResultMessage(msg: ResultMessage, stderrChunks: string[]): void {
+    this.itemStreams.sealOwner(undefined)
     // total_cost_usd / modelUsage are CUMULATIVE WITHIN this cli.js process —
     // REPLACE the live overlay, never add (see the field doc comment on
     // liveTotalCostUsd/liveModelCosts for the full explanation of why `+=`
@@ -2325,6 +2322,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     this.pendingApprovals.clear()
 
     this.wasInterrupted = true
+    if (!this.disposed) this.itemStreams.sealAll()
     this.clearInactivityTimer()
     this.stopAllBackgroundPollers()
     unwatchAllSubagents()
@@ -2401,6 +2399,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       try {
         this.wasInterrupted = true
         await this.activeQuery.interrupt()
+        this.itemStreams.sealOwner(toolUseId, true)
         return { success: true }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
@@ -2414,6 +2413,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
 
     try {
       await this.activeQuery.stopTask(taskId)
+      this.itemStreams.sealOwner(toolUseId, true)
 
       // The SDK's TaskStop calls the notification sender (HDY → VB), but VB
       // enqueues to the CLI's output queue which is only consumed during model
@@ -2800,6 +2800,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
    *  (M-CL3). Sets the flag BEFORE cancel() so cancel()'s own status emit is
    *  suppressed too. */
   dispose(): void {
+    this.itemStreams.sealAll()
     this.disposed = true
     this.cancel()
   }

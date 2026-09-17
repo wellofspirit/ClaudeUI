@@ -1,6 +1,5 @@
 /** Item-addressed volatile text. Lifecycle is reliable; only appends are lossy. */
 import type { ChatMessage, ContentBlock } from '../../../shared/types'
-import { mergeContentBlocks } from '../../../shared/content-blocks'
 import type { CanonicalSessionState, CanonicalState } from './state'
 
 export interface ItemStreamTarget {
@@ -136,12 +135,49 @@ function upsert(
   const merged =
     index < 0
       ? message
-      : { ...message, content: mergeContentBlocks(messages[index].content, message.content) }
+      : { ...message, content: mergeItemContent(messages[index].content, message.content, true) }
   const next =
     index < 0 ? [...messages, merged] : messages.map((m, i) => (i === index ? merged : m))
   return owner
     ? { ...s, subagentMessages: { ...s.subagentMessages, [owner]: next } }
     : { ...s, messages: next }
+}
+
+/**
+ * Merge a native-indexed item scaffold without letting separately attached
+ * results/reviews occupy a native block address. Native blocks keep the
+ * incoming slot order; auxiliary blocks absent from the native snapshot trail
+ * that scaffold in their existing order.
+ */
+export function mergeItemContent(
+  oldBlocks: ContentBlock[],
+  nativeBlocks: ContentBlock[],
+  preserveExistingNativeSlots = false
+): ContentBlock[] {
+  const isAuxiliary = (block: ContentBlock): boolean =>
+    block.type === 'tool_result' || block.type === 'tool_review'
+  const slots = nativeBlocks.map((incoming, index) => {
+    const old = oldBlocks[index]
+    if (preserveExistingNativeSlots && old && !isAuxiliary(old)) return old
+    return incoming
+  })
+  if (preserveExistingNativeSlots) {
+    for (let index = nativeBlocks.length; index < oldBlocks.length; index++) {
+      if (!isAuxiliary(oldBlocks[index])) slots[index] = oldBlocks[index]
+    }
+  }
+  const resultIds = new Set(
+    nativeBlocks.filter((block) => block.type === 'tool_result').map((block) => block.toolUseId)
+  )
+  const reviewIds = new Set(
+    nativeBlocks.filter((block) => block.type === 'tool_review').map((block) => block.reviewId)
+  )
+  const auxiliary = oldBlocks.filter((block) => {
+    if (block.type === 'tool_result') return !resultIds.has(block.toolUseId)
+    if (block.type === 'tool_review') return !reviewIds.has(block.reviewId)
+    return false
+  })
+  return [...slots.filter(Boolean), ...auxiliary]
 }
 
 function isMessage(v: unknown): v is ChatMessage {
@@ -181,7 +217,7 @@ export function applyItemLifecycle(
     const scaffold = existing
       ? {
           ...existing,
-          content: [...existing.content, ...data.message.content.slice(existing.content.length)]
+          content: mergeItemContent(existing.content, data.message.content, true)
         }
       : data.message
     // A reopen continues from the preserved scaffold. Starting from the incoming

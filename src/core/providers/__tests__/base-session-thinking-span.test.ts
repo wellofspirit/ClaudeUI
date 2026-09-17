@@ -8,10 +8,10 @@
  * span and stamps `ChatMessage.thinkingDurationMs` on the event that seals it;
  * the reducer moves it onto the block (`reducer.unit.test.ts` covers that half).
  *
- * The logic lives on `BaseSession` rather than in each adapter BECAUSE all three
- * engines emit their deltas and messages through this one method — so this file
- * pins the mechanism once, and the last test pins the premise it rests on by
- * scanning the three adapters for a bypass.
+ * The legacy clock remains until the old session stream lane is retired. Item
+ * producers stamp durations in their engine-local lifecycle helpers; the source
+ * guards below pin that every adapter uses the item lifecycle without reviving
+ * reliable prefix messages or the legacy transcript stream lane.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -231,31 +231,27 @@ describe('BaseSession — thinking-span timing', () => {
   })
 })
 
-describe('all three engine adapters inherit the stamp (no bypass)', () => {
-  // The premise this file rests on: every engine's thinking deltas AND messages
-  // go through `BaseSession.send`. A future adapter that emitted them any other
-  // way would silently lose durations for its engine only, and no behavioral test
-  // of THIS class would notice.
+describe('engine adapters use item-addressed transcript streaming', () => {
   const ADAPTERS = [
     'src/core/services/claude-session.ts',
     'src/core/opencode/OpencodeSession.ts',
-    'src/core/pi/PiSession.ts'
+    'src/core/pi/PiSession.ts',
+    'src/core/codex/CodexSession.ts'
   ]
 
-  it.each(ADAPTERS)('%s emits stream + message through this.send', (rel) => {
+  it.each(ADAPTERS)('%s emits the reliable/volatile item lifecycle', (rel) => {
     const src = fs.readFileSync(path.join(process.cwd(), rel), 'utf-8')
-    expect(src).toMatch(/this\.send\(\s*'session:stream'/)
-    expect(src).toMatch(/this\.send\(\s*'session:message'/)
-    // …and never around it.
-    expect(src).not.toMatch(/emitEvent\(\s*'session:(stream|message)'/)
-    expect(src).not.toMatch(/webContents\s*\.\s*send\(\s*'session:(stream|message)'/)
+    expect(src).toMatch(/session:item-open/)
+    expect(src).toMatch(/session:item-delta/)
+    expect(src).toMatch(/session:item-seal/)
+    expect(src).not.toMatch(/this\.send\(\s*'session:(?:subagent-)?stream'/)
+    expect(src).not.toMatch(/emitEvent\(\s*'session:(?:subagent-)?stream'/)
   })
 
-  it('every adapter can actually open a span (thinking deltas reach the wire)', () => {
+  it('every adapter maps thinking into an item target', () => {
     for (const rel of ADAPTERS) {
       const src = fs.readFileSync(path.join(process.cwd(), rel), 'utf-8')
-      // claude names the type inline; opencode/pi forward a mapped `streamType`.
-      expect(/'thinking'|streamType/.test(src), `${rel} never emits a thinking delta`).toBe(true)
+      expect(/thinking/.test(src), `${rel} never maps thinking`).toBe(true)
     }
   })
 })

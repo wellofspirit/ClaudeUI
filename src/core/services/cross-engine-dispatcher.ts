@@ -51,13 +51,15 @@ import { claudeSpawnPrep } from '../providers/claude-spawn-prep'
 import { loadEngineConfig } from './ui-config'
 import { transformAssistantMessage } from './assistant-message'
 import { extractToolResultContent } from './tool-result-content'
+import { ClaudeItemStreamLifecycle } from './claude-item-stream'
 // event-mapper.ts is a leaf module (no cycle risk — it does not import
 // OpencodeSession.ts/OpencodeServerManager.ts/this module). Reused here so the
 // opencode-target streaming tap (ADR-033 M3) shares the exact same
 // message.part.delta/updated → {stream|message} logic OpencodeSession.ts uses
 // for its own turns, instead of a second hand-rolled implementation.
-import { mapEvent, extractToolResult } from '../opencode/event-mapper'
-import type { MessageAccumulator } from '../opencode/event-mapper'
+import { mapEvent, extractToolResult, buildChatMessage } from '../opencode/event-mapper'
+import type { MessageAccumulator, OpencodeStreamItem } from '../opencode/event-mapper'
+import type { ItemStreamTarget } from '../shared/sync/item-stream'
 import type { OpencodeEvent, StoredMessage } from '../opencode/protocol/types'
 // pi target primitives (ADR-033 M4c — pi as a dispatch TARGET). None of these
 // leaf modules import THIS file (or PiSession.ts, which does), so — same
@@ -67,7 +69,7 @@ import { locatePiBinary, piBinaryAvailable } from '../pi/pi-locate'
 import { PiRpcClient } from '../pi/PiRpcClient'
 import { PiBridgeHost, writeBridgeExtension } from '../pi/PiBridgeHost'
 import type { GateDecision, PiBridgeHandler, PiToolCallPayload } from '../pi/PiBridgeHost'
-import { mapPiEvent, createPiMapperState } from '../pi/event-mapper'
+import { mapPiEvent, createPiMapperState, finishPiMessage } from '../pi/event-mapper'
 import type { PiMapperOutput, PiMapperState } from '../pi/event-mapper'
 import { decide, EMPTY_RULES as EMPTY_PI_RULES } from '../pi/permission-engine'
 import type {
@@ -709,6 +711,10 @@ interface OpencodeTargetEntry {
    * message ids never collide with a previous turn's.
    */
   accumulators: Map<string, MessageAccumulator>
+  activeStreamItems: Map<
+    string,
+    { target: ItemStreamTarget; ownerSessionId: string; partId: string }
+  >
   /** Cumulative cost across every turn this target has run (ADR-033 M4-C —
    *  the per-dispatch cost cap). Never decreases; reset only by creating a
    *  fresh target (a new session_id). */
@@ -789,6 +795,7 @@ interface ClaudeTargetEntry {
    *  targets run includePartialMessages, so the same assistant message is
    *  forwarded repeatedly under the same betaMessage id). */
   turnToolUseIds: Set<string>
+  itemStreams: ClaudeItemStreamLifecycle
 }
 
 /**
@@ -1029,6 +1036,16 @@ interface CodexTargetEntry {
   /** First-seen timestamp per item id, so a replayed item keeps its original
    *  one instead of jumping to now. */
   itemTimestamps: Map<string, number>
+  activeStreamItems: Map<
+    string,
+    {
+      target: ItemStreamTarget
+      text: string
+      timestamp: number
+      ownerToolUseId: string
+      startedAt?: number
+    }
+  >
   /**
    * The changed-file list of each mapped `fileChange` item, by item id.
    * `FileChangeRequestApprovalParams` carries NO changes of its own
@@ -1782,6 +1799,7 @@ export class CrossEngineDispatcher {
       this.targets.delete(sessionId)
       this.dismissPendingForTarget(sessionId)
       if (entry.kind === 'opencode') {
+        if (entry.ctx.toolUseId) this.sealOpencodeTargetItems(entry, entry.ctx.toolUseId)
         // Settle a turn still in flight (ADR-033's 2026-09-01 amendment). The
         // entry has just left `this.targets` and its session is about to be
         // deleted, so NOTHING can settle it afterwards — the SSE branches look
@@ -1795,10 +1813,13 @@ export class CrossEngineDispatcher {
         entry.client.deleteSession(sessionId).catch(() => {})
         this.releaseConnection(entry)
       } else if (entry.kind === 'claude') {
+        entry.itemStreams.sealAll()
         // Killing the process is the only teardown a Claude target needs —
         // no server ref, no remote session to delete.
         entry.abortController.abort()
       } else if (entry.kind === 'pi') {
+        for (const output of finishPiMessage(entry.mapperState))
+          this.forwardPiTargetMessage(entry, output)
         // pi (ADR-033 M4c): kill the child + its OWN per-target bridge host
         // (mirrors PiSession.cancel()'s identical teardown order). Both calls
         // are idempotent (PiRpcClient.dispose()/PiBridgeHost.dispose() no-op
@@ -1807,6 +1828,7 @@ export class CrossEngineDispatcher {
         entry.client.dispose()
         entry.bridgeHost.dispose()
       } else {
+        if (entry.ctx.toolUseId) this.sealCodexTargetItems(entry, entry.ctx.toolUseId)
         // codex (slice H, ADR-069 §7): a target is a THREAD on the caller's
         // host, so teardown is an interrupt and a detach — never a kill, which
         // would take every other session on that account down with it. The
@@ -2303,6 +2325,7 @@ export class CrossEngineDispatcher {
       })
       return { text: outText, sessionId: entry.sessionId }
     } finally {
+      if (ctx.toolUseId) this.sealOpencodeTargetItems(entry, ctx.toolUseId)
       entry.busy = false
       // Belt-and-suspenders settle-once (the winner branches already null it on
       // the give-up paths, and the settlers null it before invoking): whatever
@@ -2356,6 +2379,7 @@ export class CrossEngineDispatcher {
         emittedToolResults: new Set(),
         priorMessageIds: new Set(),
         accumulators: new Map(),
+        activeStreamItems: new Map(),
         cumulativeCostUsd: 0,
         turnToolUseIds: new Set()
       }
@@ -2742,11 +2766,7 @@ export class CrossEngineDispatcher {
       case 'stream':
         // A delta against a prior turn's message is that turn's, not ours.
         if (output.messageId !== undefined && entry.priorMessageIds.has(output.messageId)) break
-        entry.ctx.emit('session:subagent-stream', {
-          toolUseId,
-          type: output.streamType,
-          text: output.delta
-        })
+        this.appendOpencodeTargetItem(entry, output.item, output.delta, toolUseId)
         break
       case 'message': {
         // A message this target streamed in an EARLIER turn is not this turn's
@@ -2757,7 +2777,9 @@ export class CrossEngineDispatcher {
         // tool_use ids in `turnToolUseIds`.
         if (entry.priorMessageIds.has(output.message.id)) break
         collectToolUseIds(output.message, entry.turnToolUseIds)
-        entry.ctx.emit('session:subagent-message', { toolUseId, message: output.message })
+        if (output.item)
+          this.updateOpencodeTargetItem(entry, output.item, output.message, toolUseId)
+        else entry.ctx.emit('session:subagent-message', { toolUseId, message: output.message })
         // Tool RESULTS are a separate channel from the message's `tool_use`
         // blocks — an opencode ChatMessage never carries them, so without this
         // the dispatch TaskCard's tool chips spin forever (the Claude tap has
@@ -2791,6 +2813,97 @@ export class CrossEngineDispatcher {
         // this tap owns neither completion nor metering (see the DUMMY note
         // above), and approvals ride handleSseEvent's own branches.
         break
+    }
+  }
+
+  private opencodeTargetItemKey(ownerToolUseId: string, partId: string): string {
+    return JSON.stringify([ownerToolUseId, partId])
+  }
+
+  private opencodeTargetItemTarget(
+    item: OpencodeStreamItem,
+    ownerToolUseId: string
+  ): ItemStreamTarget {
+    return {
+      messageId: item.messageId,
+      blockIndex: item.blockIndex,
+      kind: item.kind,
+      ownerToolUseId
+    }
+  }
+
+  private appendOpencodeTargetItem(
+    entry: OpencodeTargetEntry,
+    item: OpencodeStreamItem,
+    chunk: string,
+    ownerToolUseId: string
+  ): void {
+    const key = this.opencodeTargetItemKey(ownerToolUseId, item.partId)
+    let active = entry.activeStreamItems.get(key)
+    const acc = entry.accumulators.get(item.messageId)
+    if (!active && acc && !acc.parts.get(item.partId)?.sealed) {
+      const target = this.opencodeTargetItemTarget(item, ownerToolUseId)
+      const message = buildChatMessage(item.messageId, acc)
+      const content = [...message.content]
+      content[item.blockIndex] =
+        item.kind === 'thinking' ? { type: 'thinking', text: '' } : { type: 'text', text: '' }
+      entry.ctx.emit('session:item-open', { target, message: { ...message, content } })
+      active = { target, ownerSessionId: ownerToolUseId, partId: item.partId }
+      entry.activeStreamItems.set(key, active)
+    }
+    if (active) entry.ctx.emit('session:item-delta', { target: active.target, chunk })
+  }
+
+  private updateOpencodeTargetItem(
+    entry: OpencodeTargetEntry,
+    item: OpencodeStreamItem,
+    message: ChatMessage,
+    ownerToolUseId: string
+  ): void {
+    const key = this.opencodeTargetItemKey(ownerToolUseId, item.partId)
+    const target = this.opencodeTargetItemTarget(item, ownerToolUseId)
+    const snap = entry.accumulators.get(item.messageId)?.parts.get(item.partId)
+    if (snap?.sealed) {
+      if (item.completed) entry.ctx.emit('session:item-seal', { target, ownerToolUseId, message })
+      return
+    }
+    if (!entry.activeStreamItems.has(key)) {
+      const block = message.content[item.blockIndex]
+      if (item.kind === 'thinking' && block?.type === 'thinking' && !block.text) return
+      entry.ctx.emit('session:item-open', { target, message })
+      entry.activeStreamItems.set(key, {
+        target,
+        ownerSessionId: ownerToolUseId,
+        partId: item.partId
+      })
+    }
+    if (item.completed) {
+      entry.ctx.emit('session:item-seal', { target, ownerToolUseId, message })
+      entry.activeStreamItems.delete(key)
+      if (snap) snap.sealed = true
+    }
+  }
+
+  private sealOpencodeTargetItems(entry: OpencodeTargetEntry, ownerToolUseId: string): void {
+    for (const [key, active] of entry.activeStreamItems) {
+      if (active.ownerSessionId !== ownerToolUseId) continue
+      const acc = entry.accumulators.get(active.target.messageId)
+      if (acc) {
+        const snap = acc.parts.get(active.partId)
+        if (snap) {
+          snap.sealed = true
+          if (snap.type === 'reasoning' && typeof snap.time?.end !== 'number') {
+            const end = Date.now()
+            snap.time = { start: snap.time?.start ?? end, end }
+          }
+        }
+        entry.ctx.emit('session:item-seal', {
+          target: active.target,
+          ownerToolUseId,
+          message: buildChatMessage(active.target.messageId, acc)
+        })
+      }
+      entry.activeStreamItems.delete(key)
     }
   }
 
@@ -3109,6 +3222,7 @@ export class CrossEngineDispatcher {
         sessionId: entry.sessionId ?? ''
       }
     } finally {
+      entry.itemStreams.sealAll()
       entry.busy = false
       clearInterval(heartbeat)
       if (timeoutTimer) clearTimeout(timeoutTimer)
@@ -3157,18 +3271,12 @@ export class CrossEngineDispatcher {
     if (!toolUseId) return
 
     if (msg.type === 'stream_event') {
-      const event = (msg as { event?: { type?: string; delta?: Record<string, unknown> } }).event
-      if (!event || event.type !== 'content_block_delta' || !event.delta) return
-      const delta = event.delta
-      if (delta.type === 'text_delta' && typeof delta.text === 'string') {
-        entry.ctx.emit('session:subagent-stream', { toolUseId, type: 'text', text: delta.text })
-      } else if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
-        entry.ctx.emit('session:subagent-stream', {
-          toolUseId,
-          type: 'thinking',
-          text: delta.thinking
-        })
+      const envelope = msg as {
+        parent_tool_use_id?: string | null
+        event?: Parameters<ClaudeItemStreamLifecycle['handleEvent']>[0]
       }
+      if (envelope.event)
+        entry.itemStreams.handleEvent(envelope.event, envelope.parent_tool_use_id ?? undefined)
       return
     }
 
@@ -3176,7 +3284,10 @@ export class CrossEngineDispatcher {
       const chatMsg = transformAssistantMessage(msg as unknown as Record<string, unknown>)
       if (chatMsg) {
         collectToolUseIds(chatMsg, entry.turnToolUseIds)
-        entry.ctx.emit('session:subagent-message', { toolUseId, message: chatMsg })
+        const nativeOwner =
+          (msg as unknown as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? undefined
+        if (entry.itemStreams.handleSnapshot(chatMsg, nativeOwner) === 'none')
+          entry.ctx.emit('session:subagent-message', { toolUseId, message: chatMsg })
       }
       return
     }
@@ -3231,8 +3342,37 @@ export class CrossEngineDispatcher {
       ctx,
       cumulativeCostUsd: 0,
       lastReportedTotalCostUsd: 0,
-      turnToolUseIds: new Set()
+      turnToolUseIds: new Set(),
+      itemStreams: undefined as unknown as ClaudeItemStreamLifecycle
     }
+    entry.itemStreams = new ClaudeItemStreamLifecycle({
+      open: (target, message) => {
+        const ownerToolUseId = entry.ctx.toolUseId
+        if (ownerToolUseId)
+          entry.ctx.emit('session:item-open', {
+            target: { ...target, ownerToolUseId },
+            message
+          })
+      },
+      delta: (target, chunk) => {
+        const ownerToolUseId = entry.ctx.toolUseId
+        if (ownerToolUseId)
+          entry.ctx.emit('session:item-delta', {
+            target: { ...target, ownerToolUseId },
+            chunk
+          })
+      },
+      seal: (target, message) => {
+        const ownerToolUseId = entry.ctx.toolUseId
+        if (ownerToolUseId)
+          entry.ctx.emit('session:item-seal', {
+            ...(target ? { target: { ...target, ownerToolUseId } } : {}),
+            ownerToolUseId,
+            message
+          })
+      },
+      updateLocal: () => {}
+    })
     const canUseTool: CanUseTool = async (
       toolName: string,
       input: Record<string, unknown>,
@@ -3701,6 +3841,8 @@ export class CrossEngineDispatcher {
       })
       return { text: outText, sessionId: entry.sessionId ?? '' }
     } finally {
+      for (const output of finishPiMessage(entry.mapperState))
+        this.forwardPiTargetMessage(entry, output)
       entry.busy = false
       clearInterval(heartbeat)
       if (timeoutTimer) clearTimeout(timeoutTimer)
@@ -3761,6 +3903,8 @@ export class CrossEngineDispatcher {
       // the bridge host here (not just on disposeFor) — an unexpected process
       // death must not leak the loopback HTTP server's port (mirrors
       // PiSession's own onExit teardown of its bridgeHost).
+      for (const output of finishPiMessage(entry.mapperState))
+        this.forwardPiTargetMessage(entry, output)
       const settle = entry.settled
       entry.settled = null
       settle?.({ kind: 'error', message: 'pi target process exited unexpectedly' })
@@ -3823,6 +3967,7 @@ export class CrossEngineDispatcher {
    */
   private drivePiTurn(entry: PiTargetEntry, prompt: string): Promise<PiTurnOutcome> {
     entry.mapperState.startTimeMs = Date.now()
+    entry.mapperState.messageEnded = false
     // A fresh turn (first turn, or a continuation after a prior stop/timeout/
     // abort) is never draining — see PiTargetEntry.draining's doc comment.
     entry.draining = false
@@ -3882,13 +4027,26 @@ export class CrossEngineDispatcher {
     if (!toolUseId) return
 
     switch (out.kind) {
-      case 'stream':
-        entry.ctx.emit('session:subagent-stream', {
-          toolUseId,
-          type: out.streamType,
-          text: out.delta
+      case 'item_open': {
+        const target = { ...out.target, ownerToolUseId: toolUseId }
+        entry.ctx.emit('session:item-open', { target, message: out.message })
+        break
+      }
+      case 'item_delta': {
+        const target = { ...out.target, ownerToolUseId: toolUseId }
+        entry.ctx.emit('session:item-delta', { target, chunk: out.chunk })
+        break
+      }
+      case 'item_seal': {
+        const target = out.target ? { ...out.target, ownerToolUseId: toolUseId } : undefined
+        collectToolUseIds(out.message, entry.turnToolUseIds)
+        entry.ctx.emit('session:item-seal', {
+          message: out.message,
+          ownerToolUseId: toolUseId,
+          ...(target ? { target } : {})
         })
         break
+      }
       case 'message':
         collectToolUseIds(out.message, entry.turnToolUseIds)
         entry.ctx.emit('session:subagent-message', { toolUseId, message: out.message })
@@ -3905,10 +4063,14 @@ export class CrossEngineDispatcher {
         entry.turnTotalTokens += out.tokens.input + out.tokens.output + (out.tokens.reasoning ?? 0)
         break
       case 'error':
-        entry.ctx.emit('session:subagent-stream', {
+        entry.ctx.emit('session:subagent-message', {
           toolUseId,
-          type: 'text',
-          text: `\n[error: ${out.message}]`
+          message: {
+            id: uuidv4(),
+            role: 'assistant',
+            content: [{ type: 'text', text: `[error: ${out.message}]` }],
+            timestamp: Date.now()
+          }
         })
         break
       case 'bash_output':
@@ -4228,6 +4390,7 @@ export class CrossEngineDispatcher {
       })
       return { text: outText, sessionId: entry.sessionId ?? '' }
     } finally {
+      if (ctx.toolUseId) this.sealCodexTargetItems(entry, ctx.toolUseId)
       entry.busy = false
       clearInterval(heartbeat)
       if (timeoutTimer) clearTimeout(timeoutTimer)
@@ -4384,6 +4547,7 @@ export class CrossEngineDispatcher {
       cumulativeCostUsd: 0,
       completedItems: new Map(),
       itemTimestamps: new Map(),
+      activeStreamItems: new Map(),
       fileChanges: new Map(),
       lastAgentText: '',
       turnStartedAtMs: 0
@@ -4604,7 +4768,11 @@ export class CrossEngineDispatcher {
         itemId: value.itemId,
         delta: value.delta
       }))
-        this.forwardCodexTargetEvent(entry, event)
+        this.forwardCodexTargetEvent(
+          entry,
+          event,
+          codexItemId(entry.sessionId, turnId, value.itemId)
+        )
     }
   }
 
@@ -4635,6 +4803,12 @@ export class CrossEngineDispatcher {
     if (item.type === 'agentMessage' && completed) entry.lastAgentText = item.text
     const timestamp = entry.itemTimestamps.get(id) ?? Date.now()
     entry.itemTimestamps.set(id, timestamp)
+    const streamable =
+      item.type === 'agentMessage' || item.type === 'reasoning' || item.type === 'plan'
+    if (item.type === 'plan' && !completed && item.text && entry.ctx.toolUseId) {
+      this.appendCodexTargetItem(entry, id, { type: 'plan', text: item.text }, entry.ctx.toolUseId)
+      return
+    }
     for (const event of mapCodexItem(entry.sessionId, turnId, item, completed, timestamp)) {
       // Taken from the MAPPED block rather than re-deriving it from
       // `item.changes`, so the gate decides about exactly the paths the caller
@@ -4650,7 +4824,7 @@ export class CrossEngineDispatcher {
             entry.fileChanges.set(block.toolUseId, block.toolInput.files as FileDiff[])
         }
       }
-      this.forwardCodexTargetEvent(entry, event)
+      this.forwardCodexTargetEvent(entry, event, undefined, streamable && completed)
     }
   }
 
@@ -4661,20 +4835,32 @@ export class CrossEngineDispatcher {
    * caller's TaskCard does not stream a dispatch target's raw bash output, same
    * as every other direction.
    */
-  private forwardCodexTargetEvent(entry: CodexTargetEntry, event: CodexMappedEvent): void {
+  private forwardCodexTargetEvent(
+    entry: CodexTargetEntry,
+    event: CodexMappedEvent,
+    nativeMessageId?: string,
+    forceItemSeal = false
+  ): void {
     const toolUseId = entry.ctx.toolUseId
     if (!toolUseId) return
     switch (event.kind) {
       case 'message':
         collectToolUseIds(event.message, entry.turnToolUseIds)
-        entry.ctx.emit('session:subagent-message', { toolUseId, message: event.message })
+        if (!this.sealCodexTargetItem(entry, event.message, toolUseId, forceItemSeal))
+          entry.ctx.emit('session:subagent-message', { toolUseId, message: event.message })
         break
       case 'stream':
-        entry.ctx.emit('session:subagent-stream', {
-          toolUseId,
-          type: event.delta.type,
-          text: event.delta.text
-        })
+        if (nativeMessageId)
+          this.appendCodexTargetItem(entry, nativeMessageId, event.delta, toolUseId)
+        break
+      case 'planDelta':
+        if (nativeMessageId)
+          this.appendCodexTargetItem(
+            entry,
+            nativeMessageId,
+            { type: 'plan', text: event.delta },
+            toolUseId
+          )
         break
       case 'toolResult':
         entry.ctx.emit('session:subagent-tool-result', {
@@ -4687,6 +4873,127 @@ export class CrossEngineDispatcher {
         break
       case 'commandDelta':
         break
+    }
+  }
+
+  private appendCodexTargetItem(
+    entry: CodexTargetEntry,
+    messageId: string,
+    delta: { type: 'text' | 'thinking' | 'plan'; text: string },
+    ownerToolUseId: string
+  ): void {
+    if (!delta.text || entry.completedItems.has(messageId)) return
+    const key = JSON.stringify([ownerToolUseId, messageId, delta.type])
+    let active = entry.activeStreamItems.get(key)
+    if (!active) {
+      const target: ItemStreamTarget = {
+        messageId,
+        blockIndex: 0,
+        kind: delta.type,
+        ownerToolUseId
+      }
+      active = {
+        target,
+        text: '',
+        timestamp: entry.itemTimestamps.get(messageId) ?? Date.now(),
+        ownerToolUseId,
+        ...(delta.type === 'thinking' ? { startedAt: Date.now() } : {})
+      }
+      entry.activeStreamItems.set(key, active)
+      entry.ctx.emit('session:item-open', {
+        target,
+        message: {
+          id: messageId,
+          role: 'assistant',
+          content: [
+            delta.type === 'plan'
+              ? {
+                  type: 'tool_use',
+                  toolUseId: messageId,
+                  toolName: 'plan',
+                  toolInput: { plan: '' }
+                }
+              : delta.type === 'thinking'
+                ? { type: 'thinking', text: '' }
+                : { type: 'text', text: '' }
+          ],
+          timestamp: active.timestamp
+        }
+      })
+    }
+    active.text += delta.text
+    entry.ctx.emit('session:item-delta', { target: active.target, chunk: delta.text })
+  }
+
+  private sealCodexTargetItem(
+    entry: CodexTargetEntry,
+    message: ChatMessage,
+    ownerToolUseId: string,
+    forceItemSeal = false
+  ): boolean {
+    const matches = [...entry.activeStreamItems].filter(
+      ([, active]) =>
+        active.ownerToolUseId === ownerToolUseId && active.target.messageId === message.id
+    )
+    if (!matches.length) {
+      if (forceItemSeal) {
+        entry.ctx.emit('session:item-seal', { ownerToolUseId, message })
+        return true
+      }
+      return false
+    }
+    for (const [key, active] of matches) {
+      let sealed = message
+      if (active.target.kind === 'thinking' && active.startedAt !== undefined) {
+        sealed = {
+          ...message,
+          content: message.content.map((block, index) =>
+            index === active.target.blockIndex && block.type === 'thinking'
+              ? { ...block, durationMs: Math.max(0, Date.now() - active.startedAt!) }
+              : block
+          )
+        }
+      }
+      entry.ctx.emit('session:item-seal', {
+        ownerToolUseId,
+        target: active.target,
+        message: sealed
+      })
+      entry.activeStreamItems.delete(key)
+    }
+    return true
+  }
+
+  private sealCodexTargetItems(entry: CodexTargetEntry, ownerToolUseId: string): void {
+    for (const [key, active] of entry.activeStreamItems) {
+      if (active.ownerToolUseId !== ownerToolUseId) continue
+      entry.ctx.emit('session:item-seal', {
+        ownerToolUseId,
+        message: {
+          id: active.target.messageId,
+          role: 'assistant',
+          content: [
+            active.target.kind === 'plan'
+              ? {
+                  type: 'tool_use',
+                  toolUseId: active.target.messageId,
+                  toolName: 'plan',
+                  toolInput: { plan: active.text }
+                }
+              : active.target.kind === 'thinking'
+                ? {
+                    type: 'thinking',
+                    text: active.text,
+                    ...(active.startedAt !== undefined
+                      ? { durationMs: Math.max(0, Date.now() - active.startedAt) }
+                      : {})
+                  }
+                : { type: 'text', text: active.text }
+          ],
+          timestamp: active.timestamp
+        }
+      })
+      entry.activeStreamItems.delete(key)
     }
   }
 
@@ -4810,10 +5117,14 @@ export class CrossEngineDispatcher {
       // invisible to the caller's human without this line — the same
       // visibility choice `forwardPiTargetMessage` makes for a target error.
       if (entry.ctx.toolUseId) {
-        entry.ctx.emit('session:subagent-stream', {
+        entry.ctx.emit('session:subagent-message', {
           toolUseId: entry.ctx.toolUseId,
-          type: 'text',
-          text: `\n[denied: ${verdict.reason}]`
+          message: {
+            id: uuidv4(),
+            role: 'assistant',
+            content: [{ type: 'text', text: `[denied: ${verdict.reason}]` }],
+            timestamp: Date.now()
+          }
         })
       }
       // `decline` is honoured on both request kinds even though it never

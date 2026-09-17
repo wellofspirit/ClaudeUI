@@ -16,6 +16,7 @@
  * Mock scaffold mirrors claude-session-model-cost.component.test.ts.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import type { ChatMessage } from '../../../shared/types'
 import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
 import { clearSyncSubscribersForTests } from '../../../core/services/sync-host'
 
@@ -122,9 +123,13 @@ function makeWin(): { win: BrowserWindow; sent: Array<[string, string, unknown]>
 }
 
 /** A cli.js `stream_event` carrying one content-block delta. */
-const delta = (d: Record<string, unknown>): Record<string, unknown> => ({
+const delta = (d: Record<string, unknown>, index = 0): Record<string, unknown> => ({
   type: 'stream_event',
-  event: { type: 'content_block_delta', delta: d }
+  event: { type: 'content_block_delta', index, delta: d }
+})
+const streamEvent = (event: Record<string, unknown>): Record<string, unknown> => ({
+  type: 'stream_event',
+  event
 })
 
 const assistantMessage = (content: Array<Record<string, unknown>>): Record<string, unknown> => ({
@@ -147,12 +152,26 @@ describe('ClaudeSession — thinking span reaches the emitter (phase 4b)', () =>
   it('stamps thinkingDurationMs on the assistant message that seals the span', async () => {
     mockQuery.mockImplementation(() =>
       makeFakeQueryHandle([
+        streamEvent({ type: 'message_start', message: { id: 'msg_wire_1' } }),
+        streamEvent({
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'thinking', thinking: '' }
+        }),
         delta({ type: 'thinking_delta', thinking: 'weighing options' }),
-        delta({ type: 'text_delta', text: 'here you go' }),
+        streamEvent({ type: 'content_block_stop', index: 0 }),
+        streamEvent({
+          type: 'content_block_start',
+          index: 1,
+          content_block: { type: 'text', text: '' }
+        }),
+        delta({ type: 'text_delta', text: 'here you go' }, 1),
         assistantMessage([
           { type: 'thinking', thinking: 'weighing options' },
           { type: 'text', text: 'here you go' }
-        ])
+        ]),
+        streamEvent({ type: 'content_block_stop', index: 1 }),
+        streamEvent({ type: 'message_stop' })
       ])
     )
 
@@ -162,22 +181,33 @@ describe('ClaudeSession — thinking span reaches the emitter (phase 4b)', () =>
     await session.run('hello')
 
     // The span opened on the thinking delta (verbatim cli.js wire shape).
-    const streams = sent.filter(([c]) => c === 'session:stream').map(([, , d]) => d)
-    expect(streams[0]).toEqual({ type: 'thinking', text: 'weighing options' })
+    const streams = sent.filter(([c]) => c === 'session:item-delta').map(([, , d]) => d)
+    expect(streams[0]).toMatchObject({ chunk: 'weighing options', target: { kind: 'thinking' } })
 
     const messages = sent
-      .filter(([c]) => c === 'session:message')
-      .map(([, , d]) => d as { thinkingDurationMs?: number })
+      .filter(([c]) => c === 'session:item-seal')
+      .map(([, , d]) => d as { message: ChatMessage })
     expect(messages.length).toBeGreaterThan(0)
-    expect(typeof messages[0].thinkingDurationMs).toBe('number')
-    expect(messages[0].thinkingDurationMs).toBeGreaterThanOrEqual(0)
+    const thinking = messages
+      .flatMap((entry) => entry.message.content)
+      .find((b) => b.type === 'thinking')
+    expect(thinking?.type).toBe('thinking')
+    if (thinking?.type === 'thinking') expect(thinking.durationMs).toBeGreaterThanOrEqual(0)
   })
 
   it('sends no duration for a turn with no thinking at all', async () => {
     mockQuery.mockImplementation(() =>
       makeFakeQueryHandle([
+        streamEvent({ type: 'message_start', message: { id: 'msg_wire_1' } }),
+        streamEvent({
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'text', text: '' }
+        }),
         delta({ type: 'text_delta', text: 'straight to it' }),
-        assistantMessage([{ type: 'text', text: 'straight to it' }])
+        assistantMessage([{ type: 'text', text: 'straight to it' }]),
+        streamEvent({ type: 'content_block_stop', index: 0 }),
+        streamEvent({ type: 'message_stop' })
       ])
     )
 
@@ -187,9 +217,10 @@ describe('ClaudeSession — thinking span reaches the emitter (phase 4b)', () =>
     await session.run('hello')
 
     const messages = sent
-      .filter(([c]) => c === 'session:message')
-      .map(([, , d]) => d as Record<string, unknown>)
+      .filter(([c]) => c === 'session:item-seal')
+      .map(([, , d]) => (d as { message: ChatMessage }).message)
     expect(messages.length).toBeGreaterThan(0)
-    for (const m of messages) expect('thinkingDurationMs' in m).toBe(false)
+    for (const m of messages)
+      expect(m.content.every((block) => block.type !== 'thinking')).toBe(true)
   })
 })

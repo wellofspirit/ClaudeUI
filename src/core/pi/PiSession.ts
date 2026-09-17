@@ -29,7 +29,8 @@ import {
   createPiMapperState,
   buildPiChatMessage,
   piToolResultImages,
-  piToolResultText
+  piToolResultText,
+  finishPiMessage
 } from './event-mapper'
 import type { PiMapperOutput, PiMapperState, PiSubagentUpdatePayload } from './event-mapper'
 import type {
@@ -771,6 +772,7 @@ export class PiSession extends BaseSession {
       // THIRD process, leaking the second). Only the attached client's own exit
       // may run this teardown.
       if (this.client !== client) return
+      this.dispatchOutputs(finishPiMessage(this.mapperState))
       this.isProcessing = false
       this.disconnected = true
       this.client = null
@@ -1215,9 +1217,24 @@ export class PiSession extends BaseSession {
 
   private dispatchOutput(output: PiMapperOutput): void {
     switch (output.kind) {
-      case 'stream':
-        this.send('session:stream', { type: output.streamType, text: output.delta })
+      case 'item_open':
+        this.rememberPiMessage(output.message)
+        this.send('session:item-open', { target: output.target, message: output.message })
         break
+
+      case 'item_delta':
+        this.rememberPiMessage(output.message)
+        this.send('session:item-delta', { target: output.target, chunk: output.chunk })
+        break
+
+      case 'item_seal': {
+        this.rememberPiMessage(output.message)
+        this.send('session:item-seal', {
+          message: output.message,
+          ...(output.target ? { target: output.target } : {})
+        })
+        break
+      }
 
       case 'message': {
         const idx = this.messageHistory.findIndex((m) => m.id === output.message.id)
@@ -1324,6 +1341,12 @@ export class PiSession extends BaseSession {
       case 'ignore':
         break
     }
+  }
+
+  private rememberPiMessage(message: ChatMessage): void {
+    const index = this.messageHistory.findIndex((candidate) => candidate.id === message.id)
+    if (index >= 0) this.messageHistory[index] = message
+    else this.messageHistory.push(message)
   }
 
   /**
@@ -1433,6 +1456,7 @@ export class PiSession extends BaseSession {
 
   cancel(): void {
     this.clearInactivityTimer()
+    this.dispatchOutputs(finishPiMessage(this.mapperState))
     this._cancelled = true
     this.isProcessing = false
     this.disconnected = false

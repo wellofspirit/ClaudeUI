@@ -228,6 +228,23 @@ describe('MessageBubble', () => {
       expect(screen.getByText(/Here is my answer/)).toBeInTheDocument()
     })
 
+    it('hides an empty inactive thinking slot', () => {
+      const msg = makeChatMessage({
+        role: 'assistant',
+        content: [makeThinkingBlock(''), makeTextBlock('Visible answer')]
+      })
+      render(
+        <MessageBubble
+          message={msg}
+          pendingApprovals={[]}
+          isLastAssistant={true}
+          thinkingStartedAt={null}
+        />
+      )
+      expect(screen.queryByTestId('ThinkingBlock')).not.toBeInTheDocument()
+      expect(screen.getByText(/Visible answer/)).toBeInTheDocument()
+    })
+
     it('renders tool_use with tool_result together', () => {
       const toolUseId = 'tool-123'
       const msg = makeChatMessage({

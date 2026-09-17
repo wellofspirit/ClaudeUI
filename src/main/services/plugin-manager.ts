@@ -95,16 +95,27 @@ export class PluginManager {
       }
       this.fireSessionScoped(channel, args)
       if (channel === 'session:item-seal') {
-        const data = args[1] as { message: unknown; ownerToolUseId?: string }
-        this.fireSessionScoped(
-          data.ownerToolUseId ? 'session:subagent-message' : 'session:message',
-          [
-            args[0],
-            data.ownerToolUseId
-              ? { toolUseId: data.ownerToolUseId, message: data.message }
-              : data.message
-          ]
-        )
+        const routingId = args[0] as string
+        const data = args[1] as {
+          message: { id: string }
+          ownerToolUseId?: string
+          target?: { ownerToolUseId?: string }
+        }
+        const ownerToolUseId = data.ownerToolUseId ?? data.target?.ownerToolUseId
+        const compatibilityChannel = ownerToolUseId ? 'session:subagent-message' : 'session:message'
+        if (!this.hasListeners(compatibilityChannel)) return
+        const session = syncCore.getCanonicalState().sessions[routingId]
+        const canonical = ownerToolUseId
+          ? session?.subagentMessages[ownerToolUseId]?.find(
+              (message) => message.id === data.message.id
+            )
+          : session?.messages.find((message) => message.id === data.message.id)
+        if (!session || !canonical) return
+        const message = overlayItemStreams([canonical], session.itemStreams)[0]
+        this.fireSessionScoped(compatibilityChannel, [
+          routingId,
+          ownerToolUseId ? { toolUseId: ownerToolUseId, message } : message
+        ])
       }
     })
 
@@ -124,14 +135,24 @@ export class PluginManager {
       if (frame.type === 'item-stream') {
         if (frame.op !== 'append') return
         this.fireSessionScoped('session:item-delta', [frame.routingId, frame])
-        if (!frame.target.ownerToolUseId && this.hasListeners('session:message')) {
+        if (!frame.target.ownerToolUseId) {
           const session = syncCore.getCanonicalState().sessions[frame.routingId]
-          const message = session?.messages.find((m) => m.id === frame.target.messageId)
-          if (session && message)
-            this.fireSessionScoped('session:message', [
+          if (!session) return
+          if (session.selectedEngineId === 'codex') {
+            if (this.hasListeners('session:message')) {
+              const message = session.messages.find((m) => m.id === frame.target.messageId)
+              if (message)
+                this.fireSessionScoped('session:message', [
+                  frame.routingId,
+                  overlayItemStreams([message], session.itemStreams)[0]
+                ])
+            }
+          } else if (frame.target.kind !== 'plan') {
+            this.fireSessionScoped('session:stream', [
               frame.routingId,
-              overlayItemStreams([message], session.itemStreams)[0]
+              { type: frame.target.kind, text: frame.chunk }
             ])
+          }
         }
         if (frame.target.ownerToolUseId && frame.target.kind !== 'plan')
           this.fireSessionScoped('session:subagent-stream', [

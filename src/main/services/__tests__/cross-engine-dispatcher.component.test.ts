@@ -65,6 +65,7 @@ import type { StoredMessage } from '../../../core/opencode/protocol/types'
 import type { EngineConfig, EngineId } from '../../../shared/types'
 import type { PiRpcClient } from '../../../core/pi/PiRpcClient'
 import type { PiBridgeHost, PiBridgeHandler } from '../../../core/pi/PiBridgeHost'
+import { SyncCore } from '../../../core/sync/sync-core'
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -1822,6 +1823,15 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
     )
     await tick()
     target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+
+    target.push({
+      type: 'stream_event',
+      event: { type: 'message_start', message: { id: 'm1', content: [] } }
+    } as unknown as SDKMessage)
+    target.push({
+      type: 'stream_event',
+      event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }
+    } as unknown as SDKMessage)
     target.push({ type: 'assistant' } as SDKMessage)
     target.push(resultMsg({ result: 'the review text', session_id: 'claude-sess-1' }))
 
@@ -2289,6 +2299,99 @@ const RELEVANT_SUBAGENT_CHANNELS = [
 ]
 
 describe('CrossEngineDispatcher — M3 (Claude direction: streaming/progress/notification/stop)', () => {
+  it('keeps root and native-child streams isolated while remapping both to the outer owner', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'outer-owner' })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-interleave' } as SDKMessage)
+    const frame = (parent: string | undefined, event: Record<string, unknown>): SDKMessage =>
+      ({ type: 'stream_event', parent_tool_use_id: parent, event }) as unknown as SDKMessage
+    target.push(frame(undefined, { type: 'message_start', message: { id: 'root-message' } }))
+    target.push(
+      frame(undefined, {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text', text: '' }
+      })
+    )
+    target.push(frame('native-child', { type: 'message_start', message: { id: 'child-message' } }))
+    target.push(
+      frame('native-child', {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text', text: '' }
+      })
+    )
+    target.push(
+      frame(undefined, {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'root' }
+      })
+    )
+    target.push(
+      frame('native-child', {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'child' }
+      })
+    )
+    await tick()
+    target.push(resultMsg({ result: 'done' }))
+    await pending
+
+    const deltas = ctx.emit.mock.calls
+      .filter((call) => call[0] === 'session:item-delta')
+      .map(
+        (call) =>
+          call[1] as { target: { messageId: string; ownerToolUseId: string }; chunk: string }
+      )
+    expect(deltas).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          target: expect.objectContaining({
+            messageId: 'root-message',
+            ownerToolUseId: 'outer-owner'
+          }),
+          chunk: 'root'
+        }),
+        expect.objectContaining({
+          target: expect.objectContaining({
+            messageId: 'child-message',
+            ownerToolUseId: 'outer-owner'
+          }),
+          chunk: 'child'
+        })
+      ])
+    )
+
+    const core = new SyncCore({ capacity: 20 })
+    core.emit('session:created', ['dispatch', { cwd: '/fixture', engineId: 'claude' }])
+    const before = core.getSnapshot().seq
+    for (const [channel, payload] of ctx.emit.mock.calls) {
+      if (channel === 'session:item-open') core.emit(channel, ['dispatch', payload])
+      if (channel === 'session:item-delta') core.emit(channel, ['dispatch', payload])
+      if (channel === 'session:item-seal') core.emit(channel, ['dispatch', payload])
+    }
+    const session = core.getCanonicalState().sessions.dispatch
+    expect(Object.keys(session.itemStreams)).toHaveLength(0)
+    expect(session.subagentMessages['outer-owner'].map((message) => message.content[0])).toEqual(
+      expect.arrayContaining([
+        { type: 'text', text: 'root' },
+        { type: 'text', text: 'child' }
+      ])
+    )
+    const reliableItemEvents = ctx.emit.mock.calls.filter(
+      ([channel]) => channel === 'session:item-open' || channel === 'session:item-seal'
+    ).length
+    expect(core.getSnapshot().seq - before).toBe(reliableItemEvents)
+  })
+
   it('toolUseId set: forwards stream_event deltas + assistant messages + heartbeat progress + a final "completed" notification', async () => {
     const target = makeFakeClaudeTarget()
     const { dispatcher } = makeHarness({
@@ -2303,7 +2406,15 @@ describe('CrossEngineDispatcher — M3 (Claude direction: streaming/progress/not
 
     target.push({
       type: 'stream_event',
-      event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Hello' } }
+      event: { type: 'message_start', message: { id: 'm1', content: [] } }
+    } as unknown as SDKMessage)
+    target.push({
+      type: 'stream_event',
+      event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }
+    } as unknown as SDKMessage)
+    target.push({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello' } }
     } as unknown as SDKMessage)
     await tick()
     target.push({
@@ -2319,17 +2430,10 @@ describe('CrossEngineDispatcher — M3 (Claude direction: streaming/progress/not
     const result = await pending
     expect(result.isError).toBeUndefined()
 
-    const streamCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:subagent-stream')
-    expect(streamCall?.[1]).toMatchObject({
-      toolUseId: 'toolu_disp_1',
-      type: 'text',
-      text: 'Hello'
+    expect(ctx.emit).toHaveBeenCalledWith('session:item-delta', {
+      target: expect.objectContaining({ ownerToolUseId: 'toolu_disp_1', kind: 'text' }),
+      chunk: 'Hello'
     })
-
-    const msgCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:subagent-message')
-    expect(msgCall?.[1]).toMatchObject({ toolUseId: 'toolu_disp_1' })
-    const forwarded = msgCall![1] as { message: { content: unknown[] } }
-    expect(forwarded.message.content).toEqual([{ type: 'text', text: 'Hello' }])
 
     const progressCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-progress')
     expect(progressCall?.[1]).toMatchObject({
@@ -2522,10 +2626,13 @@ describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/n
     })
     await tick()
 
-    const msgCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:subagent-message')
-    expect(msgCall?.[1]).toMatchObject({ toolUseId: 'toolu_oc_1' })
-    const forwarded = msgCall![1] as { message: { content: unknown[] } }
-    expect(forwarded.message.content).toEqual([{ type: 'text', text: 'partial output' }])
+    expect(ctx.emit).toHaveBeenCalledWith(
+      'session:item-open',
+      expect.objectContaining({
+        target: expect.objectContaining({ ownerToolUseId: 'toolu_oc_1', kind: 'text' }),
+        message: expect.objectContaining({ content: [{ type: 'text', text: 'partial output' }] })
+      })
+    )
 
     await new Promise((r) => setTimeout(r, 30))
     const progressCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-progress')
@@ -2543,7 +2650,7 @@ describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/n
     })
   })
 
-  it('forwards message.part.delta as a subagent-stream text delta', async () => {
+  it('forwards message.part.delta as an addressed text delta', async () => {
     const { dispatcher, client, stream } = makeHarness()
     holdTurn(client)
     const ctx = makeCtx({ toolUseId: 'toolu_oc_2' })
@@ -2565,11 +2672,9 @@ describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/n
     })
     await tick()
 
-    const streamCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:subagent-stream')
-    expect(streamCall?.[1]).toMatchObject({
-      toolUseId: 'toolu_oc_2',
-      type: 'text',
-      text: 'streaming chunk'
+    expect(ctx.emit).toHaveBeenCalledWith('session:item-delta', {
+      target: expect.objectContaining({ ownerToolUseId: 'toolu_oc_2', kind: 'text' }),
+      chunk: 'streaming chunk'
     })
 
     completeTurn(stream)
@@ -2712,7 +2817,7 @@ describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/n
       part: { id: 'part-1', messageID: 'msg-1', type: 'text', text: 'assistant text' }
     })
     await tick()
-    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:subagent-message')).toBe(true)
+    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:item-open')).toBe(true)
 
     completeTurn(stream)
     await pending
@@ -2815,11 +2920,11 @@ describe('CrossEngineDispatcher — M3 (opencode direction: streaming/progress/n
     })
     await tick()
 
-    const msg = ctx2.emit.mock.calls.find((c) => c[0] === 'session:subagent-message')
-    expect(msg?.[1]).toMatchObject({ toolUseId: 'toolu_gate_2' })
-    expect((msg![1] as { message: { content: unknown[] } }).message.content).toEqual([
-      { type: 'text', text: 'turn two' }
-    ])
+    const open = ctx2.emit.mock.calls.find((c) => c[0] === 'session:item-open')
+    expect(open?.[1]).toMatchObject({
+      target: { ownerToolUseId: 'toolu_gate_2' },
+      message: { content: [{ type: 'text', text: 'turn two' }] }
+    })
 
     completeTurn(stream)
     await turn2
@@ -4719,7 +4824,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
 })
 
 describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notification', () => {
-  it('forwards subagent-stream/message/tool-result with the exact payload shapes; the final notification carries usage', async () => {
+  it('forwards item lifecycle/message/tool-result with the exact payload shapes; the final notification carries usage', async () => {
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
@@ -4757,18 +4862,24 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
     const result = await pending
     expect(result.isError).toBeUndefined()
 
-    const streamCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:subagent-stream')
-    expect(streamCall?.[1]).toMatchObject({
-      toolUseId: 'toolu_disp_1',
-      type: 'text',
-      text: 'Hello'
+    const openCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:item-open')
+    expect(openCall?.[1]).toMatchObject({
+      target: { ownerToolUseId: 'toolu_disp_1', blockIndex: 0, kind: 'text' }
+    })
+    const deltaCall = ctx.emit.mock.calls.find((c) => c[0] === 'session:item-delta')
+    expect(deltaCall?.[1]).toMatchObject({
+      target: { ownerToolUseId: 'toolu_disp_1', blockIndex: 0, kind: 'text' },
+      chunk: 'Hello'
     })
 
-    const msgCalls = ctx.emit.mock.calls.filter((c) => c[0] === 'session:subagent-message')
-    expect(msgCalls.length).toBeGreaterThan(0)
-    const lastMsg = msgCalls.at(-1)![1] as { toolUseId: string; message: { content: unknown[] } }
-    expect(lastMsg.toolUseId).toBe('toolu_disp_1')
-    expect(lastMsg.message.content).toEqual([
+    const sealCalls = ctx.emit.mock.calls.filter((c) => c[0] === 'session:item-seal')
+    expect(sealCalls.length).toBeGreaterThan(0)
+    const lastSeal = sealCalls.at(-1)![1] as {
+      ownerToolUseId: string
+      message: { content: unknown[] }
+    }
+    expect(lastSeal.ownerToolUseId).toBe('toolu_disp_1')
+    expect(lastSeal.message.content).toEqual([
       { type: 'text', text: 'Hello' },
       { type: 'tool_use', toolUseId: 'pi-call-1', toolName: 'bash', toolInput: { command: 'ls' } }
     ])
@@ -5882,10 +5993,10 @@ describe('CrossEngineDispatcher — codex direction (slice H): the gate', () => 
     // type carries a reason.
     const denial = ctx.emit.mock.calls.find(
       (c) =>
-        c[0] === 'session:subagent-stream' &&
-        String((c[1] as { text: string }).text).includes('denied')
+        c[0] === 'session:subagent-message' &&
+        JSON.stringify((c[1] as { message: unknown }).message).includes('denied')
     )
-    expect((denial![1] as { text: string }).text).toContain(
+    expect(JSON.stringify((denial![1] as { message: unknown }).message)).toContain(
       'Plan mode is read-only — present a plan and call exit_plan to proceed'
     )
     target.completeTurn()
@@ -6090,6 +6201,105 @@ describe('CrossEngineDispatcher — codex direction (slice H): the gate', () => 
 })
 
 describe('CrossEngineDispatcher — codex direction (slice H): streaming, result, usage', () => {
+  it('folds plan and thinking items, seals interrupted thinking, and rejects late completed deltas across owners', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(1_000)
+      const target = makeFakeCodexTarget()
+      const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
+      const ctx1 = makeCtx({ fromEngine: 'claude', toolUseId: 'codex-owner-1' })
+      const first = dispatcher.dispatch({ engine: 'codex', prompt: 'first' }, ctx1)
+      await vi.advanceTimersByTimeAsync(0)
+      const turn1 = target.currentTurnId()
+
+      target.notify('item/reasoning/summaryTextDelta', {
+        threadId: CODEX_THREAD_ID,
+        turnId: turn1,
+        itemId: 'reason-1',
+        delta: 'considering'
+      })
+      vi.setSystemTime(1_250)
+      target.notify('item/completed', {
+        threadId: CODEX_THREAD_ID,
+        turnId: turn1,
+        item: { type: 'reasoning', id: 'reason-1', summary: ['considering'], content: [] }
+      })
+      target.notify('item/plan/delta', {
+        threadId: CODEX_THREAD_ID,
+        turnId: turn1,
+        itemId: 'plan-1',
+        delta: 'step one'
+      })
+      target.notify('item/completed', {
+        threadId: CODEX_THREAD_ID,
+        turnId: turn1,
+        item: { type: 'plan', id: 'plan-1', text: 'step one' }
+      })
+      const beforeLate = ctx1.emit.mock.calls.filter(
+        ([channel]) => channel === 'session:item-open'
+      ).length
+      target.notify('item/plan/delta', {
+        threadId: CODEX_THREAD_ID,
+        turnId: turn1,
+        itemId: 'plan-1',
+        delta: ' late'
+      })
+      expect(
+        ctx1.emit.mock.calls.filter(([channel]) => channel === 'session:item-open').length
+      ).toBe(beforeLate)
+      target.completeTurn({ turnId: turn1, text: 'first done' })
+      await first
+
+      const ctx2 = makeCtx({ fromEngine: 'claude', toolUseId: 'codex-owner-2' })
+      const second = dispatcher.dispatch(
+        { engine: 'codex', prompt: 'second', sessionId: CODEX_THREAD_ID },
+        ctx2
+      )
+      await vi.advanceTimersByTimeAsync(0)
+      const turn2 = target.currentTurnId()
+      vi.setSystemTime(2_000)
+      target.notify('item/reasoning/textDelta', {
+        threadId: CODEX_THREAD_ID,
+        turnId: turn2,
+        itemId: 'reason-2',
+        delta: 'interrupted thought'
+      })
+      vi.setSystemTime(2_400)
+      dispatcher.disposeFor(ctx2.fromRoutingId)
+      await second
+
+      const core = new SyncCore({ capacity: 40 })
+      core.emit('session:created', ['codex-dispatch', { cwd: '/fixture', engineId: 'claude' }])
+      for (const ctx of [ctx1, ctx2]) {
+        for (const [channel, payload] of ctx.emit.mock.calls) {
+          if (channel === 'session:item-open') core.emit(channel, ['codex-dispatch', payload])
+          if (channel === 'session:item-delta') core.emit(channel, ['codex-dispatch', payload])
+          if (channel === 'session:item-seal') core.emit(channel, ['codex-dispatch', payload])
+        }
+      }
+      const session = core.getCanonicalState().sessions['codex-dispatch']
+      expect(Object.keys(session.itemStreams)).toHaveLength(0)
+      const owner1 = session.subagentMessages['codex-owner-1']
+      expect(owner1.flatMap((message) => message.content)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'thinking', text: 'considering', durationMs: 250 }),
+          expect.objectContaining({
+            type: 'tool_use',
+            toolName: 'plan',
+            toolInput: { plan: 'step one' }
+          })
+        ])
+      )
+      expect(session.subagentMessages['codex-owner-2'][0].content[0]).toEqual({
+        type: 'thinking',
+        text: 'interrupted thought',
+        durationMs: 400
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("streams items, deltas and tool results to the caller's subagent channels under ctx.toolUseId", async () => {
     const target = makeFakeCodexTarget()
     const { dispatcher } = makeCodexHarness({ attachCodexTarget: target.spawnCodexTarget })
@@ -6124,10 +6334,9 @@ describe('CrossEngineDispatcher — codex direction (slice H): streaming, result
     const result = await pending
 
     const itemId = `codex:${JSON.stringify([CODEX_THREAD_ID, CODEX_TURN_ID, 'item-cmd-1'])}`
-    expect(ctx.emit).toHaveBeenCalledWith('session:subagent-stream', {
-      toolUseId: 'toolu_dispatch_1',
-      type: 'text',
-      text: 'Hel'
+    expect(ctx.emit).toHaveBeenCalledWith('session:item-delta', {
+      target: expect.objectContaining({ ownerToolUseId: 'toolu_dispatch_1', kind: 'text' }),
+      chunk: 'Hel'
     })
     expect(ctx.emit).toHaveBeenCalledWith('session:subagent-tool-result', {
       toolUseId: 'toolu_dispatch_1',
@@ -6144,8 +6353,8 @@ describe('CrossEngineDispatcher — codex direction (slice H): streaming, result
     )
     expect(toolUse).toBeTruthy()
     // One command stream, and only ONE — the outputDelta above is skipped.
-    const streams = ctx.emit.mock.calls.filter((c) => c[0] === 'session:subagent-stream')
-    expect(streams).toHaveLength(1)
+    const deltas = ctx.emit.mock.calls.filter((c) => c[0] === 'session:item-delta')
+    expect(deltas).toHaveLength(1)
     expect(result.text).toBe('all done')
     expect(result.sessionId).toBe(CODEX_THREAD_ID)
   })

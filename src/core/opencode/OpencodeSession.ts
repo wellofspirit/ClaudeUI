@@ -35,12 +35,15 @@ import { equivalentCostUsd } from '../../shared/pricing'
 import { logger } from '../services/logger'
 import {
   mapEvent,
+  buildChatMessage,
   extractToolResult,
   convertStoredMessage,
   storedCompactionMessages,
   computeStoredDurationMs
 } from './event-mapper'
 import type { MapperOutput, MessageAccumulator } from './event-mapper'
+import type { OpencodeStreamItem } from './event-mapper'
+import type { ItemStreamTarget } from '../shared/sync/item-stream'
 import { BashStreamGate } from './bash-stream-gate'
 import { discoverOpencodeSkills } from './command-skill-discovery'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
@@ -232,6 +235,10 @@ export class OpencodeSession extends BaseSession {
   private pendingQuestions = new Map<string, AskUserQuestion[]>()
   // Per-message part accumulator keyed by messageId
   private accumulators = new Map<string, MessageAccumulator>()
+  private activeStreamItems = new Map<
+    string,
+    { target: ItemStreamTarget; ownerSessionId: string; partId: string }
+  >()
   // Track last emitted tool completion per partId to avoid double-emitting
   private emittedToolResults = new Set<string>()
   // Live bash output streaming (own-session only — parity with Claude's
@@ -841,6 +848,7 @@ export class OpencodeSession extends BaseSession {
   private markDisconnected(reason: string): void {
     if (this.disconnected && !this.conn) return
     this.disconnected = true
+    this.sealStreamItems()
     if (this.isProcessing) {
       // A turn was in flight — unwedge it and tell the user why it stopped.
       this.isProcessing = false
@@ -1093,7 +1101,7 @@ export class OpencodeSession extends BaseSession {
   private dispatchMapperOutput(output: MapperOutput): void {
     switch (output.kind) {
       case 'stream':
-        this.send('session:stream', { type: output.streamType, text: output.delta })
+        this.appendStreamItem(output.item, output.delta)
         break
 
       case 'message': {
@@ -1105,7 +1113,8 @@ export class OpencodeSession extends BaseSession {
         } else {
           this.messageHistory.push(msg)
         }
-        this.send('session:message', msg)
+        if (output.item) this.updateStreamItem(output.item, msg)
+        else this.send('session:message', msg)
 
         // Check for newly completed tool parts in the accumulator
         const acc = this.accumulators.get(msg.id)
@@ -1198,6 +1207,7 @@ export class OpencodeSession extends BaseSession {
       }
 
       case 'result':
+        this.sealStreamItems(this.openSessionId ?? undefined)
         this.isProcessing = false
         // Turn just completed — its wall-clock cost moves from the live
         // "in flight" delta (turnStartedAtMs) into the completed-turns total.
@@ -1255,6 +1265,7 @@ export class OpencodeSession extends BaseSession {
         break
 
       case 'error':
+        this.sealStreamItems(this.openSessionId ?? undefined)
         this.isProcessing = false
         this.send('session:error', output.message)
         this.sendStatus()
@@ -1262,16 +1273,13 @@ export class OpencodeSession extends BaseSession {
         break
 
       case 'subagent-stream':
-        this.send('session:subagent-stream', {
-          toolUseId: output.toolUseId,
-          type: output.streamType,
-          text: output.delta
-        })
+        this.appendStreamItem(output.item, output.delta, output.toolUseId)
         break
 
       case 'subagent-message': {
         const { toolUseId, message } = output
-        this.send('session:subagent-message', { toolUseId, message })
+        if (output.item) this.updateStreamItem(output.item, message, toolUseId)
+        else this.send('session:subagent-message', { toolUseId, message })
 
         // Extract newly completed child tool parts → session:subagent-tool-result.
         // Mirrors the own 'message' case's extractToolResult + emittedToolResults dedup.
@@ -1299,6 +1307,7 @@ export class OpencodeSession extends BaseSession {
       }
 
       case 'task-notification':
+        this.sealStreamItems(output.notification.taskId)
         this.send('session:task-notification', output.notification)
         // Tidy: remove the completed/failed child mapping so its sessionId is no
         // longer tracked (also prevents a future session with the same id from
@@ -1319,10 +1328,118 @@ export class OpencodeSession extends BaseSession {
     }
   }
 
+  private streamItemKey(ownerSessionId: string, partId: string): string {
+    return JSON.stringify([ownerSessionId, partId])
+  }
+
+  private streamTarget(item: OpencodeStreamItem, ownerToolUseId?: string): ItemStreamTarget {
+    return {
+      messageId: item.messageId,
+      blockIndex: item.blockIndex,
+      kind: item.kind,
+      ...(ownerToolUseId ? { ownerToolUseId } : {})
+    }
+  }
+
+  private updateStreamItem(
+    item: OpencodeStreamItem,
+    message: ChatMessage,
+    ownerToolUseId?: string
+  ): void {
+    const ownerSessionId = ownerToolUseId
+      ? ([...this.childSessions].find(([, toolUseId]) => toolUseId === ownerToolUseId)?.[0] ?? '')
+      : (this.openSessionId ?? '')
+    const key = this.streamItemKey(ownerSessionId, item.partId)
+    const target = this.streamTarget(item, ownerToolUseId)
+    const active = this.activeStreamItems.get(key)
+    const snap = this.accumulators.get(item.messageId)?.parts.get(item.partId)
+    if (snap?.sealed) {
+      if (item.completed)
+        this.send('session:item-seal', {
+          target,
+          message,
+          ...(ownerToolUseId ? { ownerToolUseId } : {})
+        })
+      return
+    }
+    const block = message.content[item.blockIndex]
+    if (
+      !active &&
+      item.kind === 'thinking' &&
+      block?.type === 'thinking' &&
+      block.text.length === 0
+    )
+      return
+    if (!active) {
+      this.activeStreamItems.set(key, { target, ownerSessionId, partId: item.partId })
+      this.send('session:item-open', { target, message })
+    }
+    if (item.completed) {
+      this.send('session:item-seal', {
+        target,
+        message,
+        ...(ownerToolUseId ? { ownerToolUseId } : {})
+      })
+      this.activeStreamItems.delete(key)
+      if (snap) snap.sealed = true
+    }
+  }
+
+  private appendStreamItem(item: OpencodeStreamItem, chunk: string, ownerToolUseId?: string): void {
+    const ownerSessionId = ownerToolUseId
+      ? ([...this.childSessions].find(([, toolUseId]) => toolUseId === ownerToolUseId)?.[0] ?? '')
+      : (this.openSessionId ?? '')
+    const acc = this.accumulators.get(item.messageId)
+    const key = this.streamItemKey(ownerSessionId, item.partId)
+    let active = this.activeStreamItems.get(key)
+    if (!active && acc && !acc.parts.get(item.partId)?.sealed) {
+      const target = this.streamTarget(item, ownerToolUseId)
+      const message = buildChatMessage(item.messageId, acc)
+      const content = [...message.content]
+      content[item.blockIndex] =
+        item.kind === 'thinking' ? { type: 'thinking', text: '' } : { type: 'text', text: '' }
+      this.send('session:item-open', { target, message: { ...message, content } })
+      active = { target, ownerSessionId, partId: item.partId }
+      this.activeStreamItems.set(key, active)
+    }
+    if (!active) return
+    this.send('session:item-delta', { target: active.target, chunk })
+    if (acc && !ownerToolUseId) {
+      const message = buildChatMessage(item.messageId, acc)
+      const index = this.messageHistory.findIndex((entry) => entry.id === message.id)
+      if (index >= 0) this.messageHistory[index] = message
+      else this.messageHistory.push(message)
+    }
+  }
+
+  private sealStreamItems(ownerSessionId?: string): void {
+    for (const [key, active] of this.activeStreamItems) {
+      if (ownerSessionId !== undefined && active.ownerSessionId !== ownerSessionId) continue
+      const acc = this.accumulators.get(active.target.messageId)
+      if (acc) {
+        const snap = acc.parts.get(active.partId)
+        if (snap) {
+          snap.sealed = true
+          if (snap.type === 'reasoning' && typeof snap.time?.end !== 'number') {
+            const end = Date.now()
+            snap.time = { start: snap.time?.start ?? end, end }
+          }
+        }
+        this.send('session:item-seal', {
+          target: active.target,
+          message: buildChatMessage(active.target.messageId, acc),
+          ...(active.target.ownerToolUseId ? { ownerToolUseId: active.target.ownerToolUseId } : {})
+        })
+      }
+      this.activeStreamItems.delete(key)
+    }
+  }
+
   async interrupt(): Promise<void> {
     if (this.client && this.openSessionId) {
       try {
         await this.client.abortSession(this.openSessionId)
+        this.sealStreamItems(this.openSessionId)
       } catch (err) {
         logger.warn(
           'OpencodeSession',
@@ -1334,6 +1451,7 @@ export class OpencodeSession extends BaseSession {
 
   cancel(): void {
     this.clearInactivityTimer()
+    this.sealStreamItems()
     this._cancelled = true
     this.isProcessing = false
     // Deliberate teardown (window close, idle timeout) is still a disconnect as
