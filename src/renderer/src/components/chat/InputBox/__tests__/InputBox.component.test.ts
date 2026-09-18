@@ -776,6 +776,24 @@ describe('InputBox FC — rendered', () => {
     expect(useSessionStore.getState().sessions[FC_ROUTE].sdkActive).toBe(true)
   })
 
+  // The pre-spawn mode pick has no event to carry it: `changePermissionMode`
+  // writes it into this client's replica and the spawn reads it back off the
+  // session. Pin the whole path — pick, then send — so a regression that drops
+  // the local write shows up as a session spawned in the wrong mode, which is
+  // the part that actually matters.
+  it('onSend carries a pre-spawn permission-mode pick into createSession', async () => {
+    useSessionStore.getState().changePermissionMode(FC_ROUTE, 'plan')
+    useSessionStore.getState().setDraftText('hello world')
+
+    renderFC()
+
+    await viewProps.onSend()
+
+    expect(ipcCalls['session:create']).toHaveLength(1)
+    // args: routingId, cwd, effort, resumeId, permissionMode, model, thinkingMode
+    expect(ipcCalls['session:create'][0][4]).toBe('plan')
+  })
+
   it('onSend clears the draft when the engine rekeys the session mid-send', async () => {
     // Codex reports its stable session id on `thread/start`, which lands while
     // `sendPrompt` is still awaiting `turn/start` — so the rekey retires

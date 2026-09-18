@@ -132,9 +132,10 @@ export function sendPrompt(
  * broadcast (`session.setPermissionMode` sends `session:permission-mode` itself,
  * including the reverted mode if the SDK rejects the change).
  *
- * **The pre-spawn echo is gone (R5), because it could no longer do anything.**
- * It used to emit `session:permission-mode` when no session object existed, on
- * the theory that "multiple clients can be looking at the same pre-spawn session
+ * **With no session object this is a no-op, and that is the whole contract for
+ * the pre-spawn case (R5).** There used to be an echo here that emitted
+ * `session:permission-mode` when no session existed, on the theory that
+ * "multiple clients can be looking at the same pre-spawn session
  * simultaneously". They cannot: `createNewSession` (session-store.ts) registers a
  * not-yet-spawned session ONLY in its creating client's own replica and never
  * calls `window.api.createSession`, so no other client — and not canonical —
@@ -142,9 +143,14 @@ export function sendPrompt(
  * like it worked because the reducer's `ensured()` minted a placeholder entry
  * for the unknown id; that placeholder was the `cwd: ''` ghost F7 deleted, and
  * with it gone the emit became an unconditional no-op with a ring entry attached.
- * The originator's own optimistic store write is, and always was, what makes a
- * pre-spawn pick visible — and the real config now reaches every client in the
- * birth event (`session:created`, 0065eef).
+ *
+ * So the pre-spawn pick is applied by the ORIGINATING CLIENT, locally:
+ * `session-store.changePermissionMode` writes `permissionMode` through the
+ * replica whenever the session is not `sdkActive`. That local value is what the
+ * spawn reads (InputBox passes `session.permissionMode` to `createSession`), and
+ * the real config then reaches every client in the birth event
+ * (`session:created`, 0065eef). Nothing on this side is required for it, and
+ * nothing on this side should be added back.
  *
  * `mode` still arrives as an untyped string over a remote-reachable channel, so
  * it is validated before being handed to the session.

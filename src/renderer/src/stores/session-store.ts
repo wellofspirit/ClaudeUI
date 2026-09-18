@@ -428,6 +428,18 @@ export interface AppSettings {
    * setting — but from then on the two are independent.
    */
   defaultAutonomyMode: AutonomyMode
+  /**
+   * How many dispatched agents may run at once, across every session
+   * (ADR-033, 2026-09-18). Unset means
+   * `DEFAULT_MAX_CONCURRENT_DISPATCHES` (3); `0` means no limit.
+   *
+   * The one AppSettings key with NO entry in {@link DEFAULT_SETTINGS}, and
+   * deliberately so: "unset" is a distinct state from "3" for the resolver
+   * (`resolveDispatchMaxConcurrent` in `shared/dispatch-concurrency.ts` owns
+   * the rule, shared with the dispatcher), and it is what lets the row's Reset
+   * clear the key rather than bake today's default into every profile on disk.
+   */
+  dispatchMaxConcurrent?: number
 }
 
 /** Exported for the replica's settings projection (one merge base, not two). */
@@ -2588,23 +2600,34 @@ export const useSessionStore = create<SessionState>((set) => ({
   // the desktop Shift+Tab handler and the mobile mode picker (any client that
   // lets the user pick a mode).
   //
-  // SyncCore phase 4c deleted the optimistic write AND its revert. Both halves
-  // existed because the mode the pill showed was this client's guess: a LIVE
-  // session's `auto` could be rejected, so the guess was skipped for that one
-  // case and un-guessed in a `.catch`. The pill now renders `permissionMode`
-  // straight from the replica, and EVERY path emits `session:permission-mode` —
-  // the live session's own setter (including the reverted mode when the engine
-  // says no) and, pre-spawn where there is no session object,
-  // `handlers-core.setPermissionMode`'s echo. So there is nothing left to guess
-  // and nothing left to undo.
+  // `permissionMode` is SEALED, and which writer owns it depends on whether an
+  // engine process is attached:
   //
-  // `causedBy` (ADR-051 contract 2) is the designed escape hatch if the
+  //  - LIVE (`sdkActive`) — the session's own setter owns the value and emits
+  //    `session:permission-mode`, including the reverted mode when the engine
+  //    refuses the pick. So this client writes nothing and has nothing to undo:
+  //    the echo IS the applied mode. (SyncCore phase 4c deleted the optimistic
+  //    guess and its `.catch` revert for exactly this case.)
+  //  - PRE-SPAWN or disconnected — no session object exists in main, so
+  //    `handlers-core.setPermissionMode` reaches nothing and emits nothing. The
+  //    originating client's own local write through the replica is what makes
+  //    the pick visible, and it is also what the spawn READS: InputBox hands
+  //    `session.permissionMode` to `window.api.createSession`. From there the
+  //    `session:created` birth config carries the real mode to every replica
+  //    (0065eef). Same sanctioned route as `setEffort` below.
+  //
+  // The IPC call goes out either way — a no-op with no session object, and one
+  // code shape for both halves.
+  //
+  // `causedBy` (ADR-051 contract 2) is the designed escape hatch if the LIVE
   // round-trip ever feels slow from a phone: tag the command, apply optimistically,
   // reconcile when the tagged event lands. NOT built — the owner decides after
   // living with the honest round trip.
   changePermissionMode: (routingId, next) => {
+    const session = useSessionStore.getState().sessions[routingId]
+    if (session && !session.sdkActive) patchLocalSession(routingId, { permissionMode: next })
     void window.api.setPermissionMode(routingId, next).catch(() => {
-      /* the engine's own broadcast is the source of truth for the applied mode */
+      /* live: the engine's own broadcast is the source of truth for the applied mode */
     })
   },
 

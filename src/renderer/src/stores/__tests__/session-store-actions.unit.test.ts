@@ -24,6 +24,7 @@ import {
 import { claudeModel, type GitStatusData } from '../../../../shared/types'
 import { renderHook } from '@testing-library/react'
 import { seed, resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
+import { getReplicaState } from '../replica'
 
 const store = () => useSessionStore.getState()
 
@@ -728,15 +729,33 @@ describe('clearConversation', () => {
 // ---------------------------------------------------------------------------
 
 describe('changePermissionMode', () => {
-  // SyncCore phase 4c deleted BOTH halves of the optimism: the pre-spawn "update
-  // the store directly" and the `.catch` revert. They existed because the mode the
-  // pill showed was this client's guess — skipped for the one case a live session
-  // could reject (`auto`), un-guessed when the invoke failed. `permissionMode` is
-  // SEALED now and every path emits `session:permission-mode`: the live session's
-  // own setter (including the reverted mode the engine chose) and, pre-spawn where
-  // there is no session object, `handlers-core.setPermissionMode`'s echo.
-  it('is invoke-only: the pill does not move until the event says so', () => {
+  // Two owners, split by whether an engine process is attached. LIVE: the
+  // session's own setter emits `session:permission-mode` (including the reverted
+  // mode when the engine refuses `auto`), so this client writes nothing and has
+  // nothing to undo. PRE-SPAWN / disconnected: no session object exists in main,
+  // so the IPC setter reaches nothing and emits nothing — the originating
+  // client's own local write is the only thing that moves the pill, and it is
+  // also what the spawn reads (InputBox hands `session.permissionMode` to
+  // `window.api.createSession`).
+  it('applies the pick locally pre-spawn — and still invokes', () => {
     store().createNewSession('r1', '/p')
+    expect(store().sessions['r1'].sdkActive).toBe(false)
+    expect(store().sessions['r1'].permissionMode).toBe('default')
+
+    store().changePermissionMode('r1', 'plan')
+
+    // Visible immediately, because nothing else will ever say it.
+    expect(store().sessions['r1'].permissionMode).toBe('plan')
+    // ...and through the replica, so the next projection does not revert it.
+    expect(getReplicaState().sessions['r1'].permissionMode).toBe('plan')
+    // The invoke still goes out: a harmless no-op with no session object in
+    // main, and one code shape for both halves.
+    expect(window.api.setPermissionMode).toHaveBeenCalledWith('r1', 'plan')
+  })
+
+  it('is invoke-only for a LIVE session: the pill does not move until the event says so', () => {
+    store().createNewSession('r1', '/p')
+    store().markSdkActive('r1')
     expect(store().sessions['r1'].permissionMode).toBe('default')
 
     store().changePermissionMode('r1', 'acceptEdits')
@@ -749,8 +768,9 @@ describe('changePermissionMode', () => {
     expect(store().sessions['r1'].permissionMode).toBe('acceptEdits')
   })
 
-  it('a rejected invoke leaves the mode exactly where the engine last put it', async () => {
+  it('a rejected invoke on a LIVE session leaves the mode where the engine last put it', async () => {
     store().createNewSession('r1', '/p')
+    store().markSdkActive('r1')
     seed.permissionMode('r1', 'plan')
     ;(window.api.setPermissionMode as any).mockRejectedValueOnce(new Error('rejected by SDK'))
 
@@ -759,6 +779,12 @@ describe('changePermissionMode', () => {
 
     // No local revert to undo, because there was no local apply to begin with.
     expect(store().sessions['r1'].permissionMode).toBe('plan')
+  })
+
+  it('leaves the store alone for an unknown id, but still invokes', () => {
+    store().changePermissionMode('ghost', 'plan')
+    expect(store().sessions['ghost']).toBeUndefined()
+    expect(window.api.setPermissionMode).toHaveBeenCalledWith('ghost', 'plan')
   })
 })
 

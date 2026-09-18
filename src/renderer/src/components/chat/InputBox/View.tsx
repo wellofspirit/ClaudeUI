@@ -585,6 +585,8 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
           {/* Mode tab */}
           {permissionMode !== 'default' && (
             <div
+              data-testid="InputBox.modeTab"
+              data-mode={permissionMode}
               className={`absolute bottom-full left-3 px-1.5 pt-0.5 pb-px rounded-t text-[9px] font-semibold tracking-wider uppercase text-text-primary border border-b-0 transition-colors ${
                 permissionMode === 'acceptEdits'
                   ? 'border-mode-edit-dim group-focus-within:border-mode-edit bg-mode-edit-dim group-focus-within:bg-mode-edit'
