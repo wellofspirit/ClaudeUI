@@ -53,6 +53,7 @@
  */
 
 import { safeHandler } from './safe-handler'
+import { opt } from './wire-args'
 import { CHATGPT_PROVIDER_ID } from '../auth/vault/AuthVault'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import type { CommandConnection, CommandRegistration } from './command-registry'
@@ -319,7 +320,7 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
           engineId: EngineId,
           vendorId: string,
           method: number,
-          code?: string
+          code?: string | null
         ): Promise<boolean> => {
           const provider = deps.requireEngineAuth(engineId)
           if (!provider.oauthCallback) {
@@ -327,7 +328,15 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
           }
           // `code` may be a bare code OR a whole pasted callback URL — the
           // provider (pi Codex / opencode) decides how to consume it (ADR-057).
-          return provider.oauthCallback(vendorId, method, code)
+          //
+          // Through `opt` because the CODELESS call is a real one: the `auto`
+          // method awaits the host-side loopback with no code at all, and over
+          // the web transport that omission arrives as an explicit `null`.
+          // `OpencodeAuthProvider` hands the value to `OpencodeClient.oauthCallback`,
+          // which spreads it into the POST body on `code !== undefined` — so a
+          // `null` would be sent as `"code": null` to an endpoint that types the
+          // field `Schema.optional(Schema.String)` and rejects null outright.
+          return provider.oauthCallback(vendorId, method, opt(code))
         }
       )
     },
@@ -478,8 +487,19 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
       channel: 'shared-provider:set-default',
       capability: 'config',
       kind: 'command',
-      handler: safeHandler(async (id: string, harness: ConfigurableHarnessId, modelId?: string) =>
-        sharedProviderService.setRouteDefaultModel(id, harness, modelId)
+      // `modelId` omitted is how the UI CLEARS the route's default (the picker
+      // sends `value || undefined`), and through `opt` because on the web
+      // transport that omission is an explicit `null` by the time it lands here.
+      // `setRouteDefaultModel` writes the value straight into the definition —
+      // `withRoute(previous, route, { defaultModel: modelId })` — and a `null`
+      // KEEPS the key where `undefined` would drop it. That is not a cosmetic
+      // difference: `SharedProviderRepository.save` validates before writing and
+      // `isRoute` accepts `defaultModel === undefined` or a non-empty string and
+      // nothing else, so the clear threw "Invalid shared provider routes" and
+      // left the old default in place.
+      handler: safeHandler(
+        async (id: string, harness: ConfigurableHarnessId, modelId?: string | null) =>
+          sharedProviderService.setRouteDefaultModel(id, harness, opt(modelId))
       )
     }
   ]

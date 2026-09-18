@@ -290,6 +290,7 @@ import {
   SHELL_READ_VERBS
 } from '../../../core/services/step-up-tier'
 import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
+import { sharedProviderService } from '../../../core/shared-providers'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import { resolveOpencodeSpawnModel } from '../../../core/opencode/model-discovery'
 import { setProxyEnv } from '../../../core/sdk/proxy'
@@ -2296,12 +2297,16 @@ describe('S4 vendor-credential surface dispatch (ADR-057)', () => {
       instructions: 'Sign in.'
     })),
     cancelVendorOauth: vi.fn(async () => {}),
-    oauthCallback: vi.fn(async () => true)
+    // Parameters spelled out (not `vi.fn(async () => true)`) so the null-guard
+    // below can read `mock.calls[0][2]` — an argument-less fake types its calls
+    // as an empty tuple.
+    oauthCallback: vi.fn(async (_vendorId: string, _method: number, _code?: string) => true)
   }
 
   beforeEach(() => {
     fakeProvider.probe.mockClear()
     fakeProvider.cancelVendorOauth.mockClear()
+    fakeProvider.oauthCallback.mockClear()
     makeFakeWindow()
     dispatcher = new RemoteDispatcher()
     registerRemoteHandlers(dispatcher, sessionManagerStub, undefined, {
@@ -2375,5 +2380,85 @@ describe('S4 vendor-credential surface dispatch (ADR-057)', () => {
     expect(res.ok).toBe(true)
     expect(res.data?.url).toContain('auth.example.com')
     expect(fakeProvider.cancelVendorOauth).not.toHaveBeenCalled()
+  })
+
+  // -------------------------------------------------------------------------
+  // JSON-null optional arguments in the SHARED command modules.
+  //
+  // 922644bf normalised the remote-only handlers in `remote-handlers.ts`; the
+  // declarations `session.ipc.ts` and `remote-handlers.ts` BOTH spread carried
+  // the same class. The web client marshals `invoke` args as JSON and
+  // `api-adapter.ts` forwards every declared parameter positionally, so an
+  // argument the renderer stopped short of arrives here as an explicit `null`
+  // rather than `undefined`. These two are the ones whose consumers actually
+  // break on it — see `src/core/ipc/wire-args.ts`.
+  // -------------------------------------------------------------------------
+
+  it('vendor-auth:oauth-callback normalises a null code to undefined (GUARD — fails pre-fix)', async () => {
+    const conn = makeRemoteConnection('password', null)
+    // The `auto` method awaits the host loopback with NO code — the renderer
+    // simply omits the argument, and the wire turns that into null.
+    const res = (await dispatcher.handle(
+      makeRequest('vendor-auth:oauth-callback', 'opencode', 'anthropic', 0, null),
+      conn
+    )) as { ok: boolean }
+    expect(res.ok).toBe(true)
+    // `OpencodeClient.oauthCallback` spreads `code` into the POST body on
+    // `code !== undefined`, and opencode types that field
+    // `Schema.optional(Schema.String)` — a null would be sent and rejected.
+    expect(
+      fakeProvider.oauthCallback.mock.calls[0][2],
+      'code must be undefined, not null'
+    ).toBeUndefined()
+  })
+
+  it('vendor-auth:oauth-callback passes a real pasted code through unchanged', async () => {
+    const conn = makeRemoteConnection('password', null)
+    await dispatcher.handle(
+      makeRequest('vendor-auth:oauth-callback', 'pi', 'openai-codex', 0, 'pasted-code#state'),
+      conn
+    )
+    expect(fakeProvider.oauthCallback.mock.calls[0]).toEqual([
+      'openai-codex',
+      0,
+      'pasted-code#state'
+    ])
+  })
+
+  it('shared-provider:set-default normalises a null modelId to undefined (GUARD — fails pre-fix)', async () => {
+    const setDefault = vi
+      .spyOn(sharedProviderService, 'setRouteDefaultModel')
+      .mockResolvedValue(undefined)
+    try {
+      const conn = makeRemoteConnection('password', null)
+      // Clearing the default: `ProviderSheet.tsx` sends `value || undefined`.
+      const res = (await dispatcher.handle(
+        makeRequest('shared-provider:set-default', 'ollama-local', 'pi', null),
+        conn
+      )) as { ok: boolean }
+      expect(res.ok).toBe(true)
+      // `undefined` DROPS `defaultModel` from the saved definition; `null` keeps
+      // it, and `SharedProviderRepository.save`'s `isRoute` check then refuses
+      // the whole write with "Invalid shared provider routes".
+      expect(setDefault.mock.calls[0][2], 'modelId must be undefined, not null').toBeUndefined()
+    } finally {
+      setDefault.mockRestore()
+    }
+  })
+
+  it('shared-provider:set-default passes a real modelId through unchanged', async () => {
+    const setDefault = vi
+      .spyOn(sharedProviderService, 'setRouteDefaultModel')
+      .mockResolvedValue(undefined)
+    try {
+      const conn = makeRemoteConnection('password', null)
+      await dispatcher.handle(
+        makeRequest('shared-provider:set-default', 'ollama-local', 'pi', 'llama-4'),
+        conn
+      )
+      expect(setDefault.mock.calls[0]).toEqual(['ollama-local', 'pi', 'llama-4'])
+    } finally {
+      setDefault.mockRestore()
+    }
   })
 })

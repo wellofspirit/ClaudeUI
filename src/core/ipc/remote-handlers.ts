@@ -74,6 +74,11 @@ import {
   type CommandConnection,
   type CommandRegistration
 } from './command-registry'
+// The JSON-null normaliser. It was defined in this file until the command
+// modules both transports share were swept for the same class — see its doc
+// comment for what `null` does downstream and where it is deliberately left
+// alone.
+import { opt } from './wire-args'
 import { configCommands } from './config-commands'
 import { ideCommands, type IdeCommandHost } from './ide-commands'
 import { remoteViewCommands, type RemoteStatusHost } from './remote-view-commands'
@@ -154,33 +159,6 @@ import {
  */
 function handleRemote(reg: Omit<CommandRegistration, 'transport'>): void {
   registerCommand({ ...reg, transport: 'remote' })
-}
-
-/**
- * Normalise an OMITTED optional argument back to `undefined`.
- *
- * The web client marshals `invoke` arguments as JSON, and a JSON array cannot
- * carry a hole: an argument the caller left out arrives here as an explicit
- * `null`. Electron IPC preserves `undefined`, which is why only the remote
- * transport ever sees this. `null` is not "unset" to the shared code behind
- * these handlers — several places distinguish unset with `=== undefined`
- * (`CodexSession.validateEffort` threw "Codex reasoning effort is unavailable
- * for the selected model" on every fresh web-client Codex session because of
- * exactly this), and the rest declare the parameter `?: T`, which `null` does
- * not satisfy. So every optional argument is put back through here at the
- * transport boundary rather than teaching each service to accept two spellings
- * of "nothing".
- *
- * Deliberately NOT applied where `null` is a MEANINGFUL value the caller sent
- * on purpose — `session:set-account`, `session:set-reasoning-variant`,
- * `usage:set-account-filter`, `webauthn:rename` all declare `T | null` and mean
- * "clear it" by it — nor where the parameter is only tested for truthiness and
- * `null` already reads as the omitted case (`session:stop-task`'s `isDispatch`,
- * `usage:chatgpt-limits`' `refresh`, `terminal:create`'s `index`, which the
- * terminal service already types `number | null`).
- */
-function opt<T>(value: T | null | undefined): T | undefined {
-  return value ?? undefined
 }
 
 /**
