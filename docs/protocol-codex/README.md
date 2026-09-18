@@ -2,7 +2,7 @@
 
 This is the transport reference. Codex is registered as the fourth engine and
 runs under the shared permission model (ADR-067); the phase-1 release gates in
-the [integration spec](../codex-integration-spec.md) are still open.
+the [handoff](../codex-integration-handoff.md) are still open.
 The pin is `package.json#codexCliVersion`, currently `0.154.0`. No Codex command
 is hooked into postinstall, ordinary builds or release packaging yet.
 
@@ -261,4 +261,4 @@ warmup, and tests a real native command approval/write plus cold read/list.
 Root/service environments are replaced by fixture environments and all writes
 stay inside the outer sandbox's temporary directory. No real keys or tokens are
 used. The latest milestone status and remaining release gates are in the
-[integration spec](../codex-integration-spec.md).
+[handoff](../codex-integration-handoff.md).

@@ -1,13 +1,13 @@
 # ADR-069: One Codex app-server host per home and account — sessions as threads, reads on the host
 
-**Status:** Accepted (2026-09-15, design ruled by the owner); implementation tracked in `docs/codex-host-spec.md` — see § As built when slices land
+**Status:** Accepted (2026-09-15, design ruled by the owner); implemented as H0–H3 (2026-09-15/16) — see § As built. The slice-by-slice build spec was deleted once it landed: `git log -p -- docs/codex-host-spec.md`.
 **Supersedes:** [ADR-066](adr-066_codex-fourth-engine.md) §"Decision" process-model sentences ("One app-server child belongs to each root session and carries its native child threads" and "A separate, minimal service-client lifecycle may serve catalog, history, and auth operations"), and the 2026-09-13 ruling 11(c) recorded in `docs/codex-integration-handoff.md` ("keep one app-server per root session; at about 52 MB idle per process the shared-process redesign is not worth it")
 **Amends:** [ADR-068](adr-068_chatgpt-identity-vault-owned-codex-injection.md) §1 (token injection is per HOST, one identity per process, unchanged in mechanism), [ADR-033](adr-033_cross-engine-dispatch.md) (a Codex dispatch target becomes a thread on the caller's host, not a process)
 **Relates to:** ADR-045 (a host's death is the opencode server's death: every session on it goes `disconnected`), ADR-047 (opencode recycles on account switch; Codex hosts now do the same), ADR-067 (policy stays per thread; nothing here changes the permission model), ADR-030 (capability honesty)
 
 ## Context
 
-ClaudeUI runs Codex as one `codex app-server --listen stdio://` process per session, plus a fresh one-shot process for every read: catalog discovery, the sidebar's thread listing (every 30 seconds), the lineage scan, rate limits, the config page, the auth probe, deletes. The follow-ups F7–F9 (2026-09-15, `docs/codex-followups-spec.md`) put a label and a stderr capture on every spawn and showed what that costs: a session's app-server dying with `failed to initialize sqlite state runtime` because it started while a one-shot sibling was being torn down; the boot-time lineage scan dying the same way on a fresh home; a `taskkill /F` on Windows that never lets Codex close its sqlite files; and a standing process spawn every 30 seconds for as long as the app is open. F8 serialised the first spawn per home and removed the boot deaths; the class remained, because the model was wrong.
+ClaudeUI runs Codex as one `codex app-server --listen stdio://` process per session, plus a fresh one-shot process for every read: catalog discovery, the sidebar's thread listing (every 30 seconds), the lineage scan, rate limits, the config page, the auth probe, deletes. The follow-ups F7–F9 (2026-09-15) put a label and a stderr capture on every spawn and showed what that costs: a session's app-server dying with `failed to initialize sqlite state runtime` because it started while a one-shot sibling was being torn down; the boot-time lineage scan dying the same way on a fresh home; a `taskkill /F` on Windows that never lets Codex close its sqlite files; and a standing process spawn every 30 seconds for as long as the app is open. F8 serialised the first spawn per home and removed the boot deaths; the class remained, because the model was wrong.
 
 Reading the app-server at the pinned tag (`.cache/codex-src`, `rust-v0.154.0`) settled the direction:
 
@@ -37,7 +37,7 @@ The 2026-09-13 ruling weighed 52 MB of idle memory per session against the redes
 - The writer-lock rule for delete (`delete.ts`: a thread is deletable only when no process holds it) changes shape: the holder is now the host, and stopping a session no longer exits a process. Probe P3 decides whether an idle thread releases its lock in a live host or delete must wait for host recycle.
 - Cross-process races are out of scope: a desktop app and a `claudeui-server` on the same never-initialised home still race (F8's note stands).
 - Tests that pin one-process-per-session semantics (`codex-session.test.ts` dispose-kills assertions, `codex-service.test.ts` one-client-per-read, `codex-lifecycle` stop-holder waits, `codex-delete.test.ts` stop-then-delete, `codex-dispatch-target`) are rewritten against the host contract, not deleted.
-- Docs: ADR-066's process-model sentences, `docs/architecture/codex.md` ownership table and transport section, `docs/protocol-codex/README.md` "M1b service and ownership", `docs/codex-integration-spec.md` §M1/M2 process notes.
+- Docs: ADR-066's process-model sentences, `docs/architecture/codex.md` ownership table and transport section, `docs/protocol-codex/README.md` "M1b service and ownership".
 
 ## Probes before code (real binary, fixture provider, no real account)
 

@@ -81,6 +81,6 @@ Advertise a capability only after its complete path passes, per ADR-030. Resolve
 
 ## Delivery and consequences
 
-The [integration spec](../codex-integration-spec.md) defines M0 through M5, mandatory release behavior, gates, and source seams. The [planned architecture](../architecture/codex.md) describes ownership and data flow. M0 delivers documents, not a running adapter. Each landed milestone must update its as-built status and verify shared-engine regressions. Runnable milestones follow ADR-026's gates and real-host verification; documentation-only work does not need an app launch.
+The integration spec that defined M0 through M5 and their gates was deleted once the arc shipped (`git log -p -- docs/codex-integration-spec.md`); what is still open lives in [codex-integration-handoff.md](../codex-integration-handoff.md). The [planned architecture](../architecture/codex.md) describes ownership and data flow. M0 delivers documents, not a running adapter. Each landed milestone must update its as-built status and verify shared-engine regressions. Runnable milestones follow ADR-026's gates and real-host verification; documentation-only work does not need an app launch.
 
 This accepts native-policy differences to avoid pretending wire interception provides shared classifier parity. It adds a fourth process lifecycle and some shared type/history work, but does not authorize a SyncCore or dispatcher rewrite. Open gates are blockers for the relevant capabilities, not quiet feature cuts. No commit or push is authorized by this ADR.

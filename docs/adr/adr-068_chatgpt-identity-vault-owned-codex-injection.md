@@ -102,7 +102,7 @@ Stale copy is corrected: the Default-models note "Codex uses its native configur
 
 ## As built (2026-09-14)
 
-All five phases landed on `codex-integration` as eight reviewed slices (`855755af` Slice 1, `786902fd` 2a, `81822982` 2b, `a54776e7` 3, `772d89eb` fix, `37ccd411` 4, `c3c32850` 4b, `3be8e0b2` 5a, and the 5b commit after it). Every as-built deviation is recorded per slice in [codex-accounts-spec.md](../codex-accounts-spec.md); the ones that change what this ADR says:
+All five phases landed on `codex-integration` as eight reviewed slices (`855755af` Slice 1, `786902fd` 2a, `81822982` 2b, `a54776e7` 3, `772d89eb` fix, `37ccd411` 4, `c3c32850` 4b, `3be8e0b2` 5a, and the 5b commit after it). Every as-built deviation is recorded per slice in the accounts spec, deleted once the arc landed (`git log -p -- docs/codex-accounts-spec.md`); the ones that change what this ADR says:
 
 - **§1** holds: injection is memory-only, the host answers `account/chatgptAuthTokens/refresh` from the vault, and a user-level `forced_chatgpt_workspace_id` does not gate an injected token. A migrated v2 account's id is derived, not random.
 - **§2**: `removeAccount` rings the active-changed hook on every path that changes what the engines hold, so opencode is recycled per ADR-047.

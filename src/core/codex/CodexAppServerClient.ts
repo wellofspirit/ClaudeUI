@@ -151,7 +151,7 @@ const STDERR_CAPTURE_ENV = 'CLAUDEUI_CODEX_STDERR'
  * it started. Widening this gate to every start made that collision
  * deterministic (the waiter is released exactly when the sibling has answered
  * `initialize` and is about to exit), so the gate stays first-run only; the
- * second shape is an open item in `docs/codex-followups-spec.md` (F8 Landed).
+ * second shape stays unguarded (follow-up F8, 2026-09-15).
  */
 const firstRunGate = new Map<string, Promise<void>>()
 

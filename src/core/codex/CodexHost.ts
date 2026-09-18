@@ -11,7 +11,7 @@
  * app-servers on one home at once, which is the assumption the binary itself
  * violates: the daemon transport takes a per-home startup lock before it builds
  * its sqlite state runtime, and the boot deaths F7/F8 chased were that
- * assumption breaking (`docs/codex-followups-spec.md`).
+ * assumption breaking.
  *
  * The one piece of PROCESS-level state is identity: `account/login/start
  * {chatgptAuthTokens}` binds the whole process to one ChatGPT account and a
