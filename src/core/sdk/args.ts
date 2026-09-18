@@ -291,6 +291,18 @@ export function buildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
   // would re-tier the spawned cli.js as Agent SDK usage.
   env.CLAUDE_CODE_ENTRYPOINT = 'claude-desktop'
 
+  // Give the model a checklist tool. `TodoWrite.isEnabled` is `!z_() && mL()` in
+  // 2.1.268: `z_()` is "the Tasks system is on", true unless CLAUDE_CODE_ENABLE_TASKS
+  // is false, so TodoWrite is OFF by default; its replacement family
+  // (TaskCreate/TaskGet/TaskList/TaskUpdate, gated on `z_() && mL()`) needs this
+  // variable. With neither set, a Claude session has NO checklist tool at all and
+  // the todo widget never fires — probed against the real binary's `system/init`
+  // on 2026-09-18 (docs/tool-survey.md § 7). The renderer already handles the
+  // family: `HIDDEN_TOOLS` suppresses the four cards and `derive-session.ts`
+  // folds them into the widget. Set only when the user has not chosen otherwise,
+  // so an explicit opt-out in the environment still wins.
+  env.CLAUDE_CODE_ENABLE_TODO_TOOLS ??= 'true'
+
   // Scoped proxy: overlay proxy env vars only onto this spawn, not the main
   // Electron process. If `proxyAllSubprocesses` is off (default), the
   // subprocess-proxy-strip patch in cli.js removes these from Bash/MCP/LSP
