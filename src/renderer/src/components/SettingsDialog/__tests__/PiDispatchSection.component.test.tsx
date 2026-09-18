@@ -248,9 +248,13 @@ describe('PiDispatchSection — saves merge, never clobber', () => {
     expect(savedConfigs[1].dispatch?.defaultModel).toBe('openai-codex/gpt-5.4')
   })
 
-  it('does NOT offer the turn/inactivity timeouts — the watchdog is opencode-only', async () => {
+  it('offers the turn/inactivity timeouts with "no limit" placeholders (ADR-033 2026-09-18)', async () => {
     await renderLoaded()
-    expect(screen.queryByTestId('PiDispatchSection.turnTimeout')).toBeNull()
-    expect(screen.queryByTestId('PiDispatchSection.idleTimeout')).toBeNull()
+    expect(
+      (screen.getByTestId('PiDispatchSection.turnTimeout') as HTMLInputElement).placeholder
+    ).toBe('no limit')
+    expect(
+      (screen.getByTestId('PiDispatchSection.idleTimeout') as HTMLInputElement).placeholder
+    ).toBe('no limit')
   })
 })

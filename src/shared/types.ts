@@ -751,8 +751,9 @@ export interface PiConfig {
 
 /**
  * Governs `dispatch_agent` calls targeting an engine (ADR-033). Lives in
- * `engines/<engineId>.json` (plane ③). Edited in Settings › opencode ›
- * Cross-engine dispatch (the Claude-side twin ships with M2).
+ * `engines/<engineId>.json` (plane ③). Edited per engine in Settings ›
+ * <engine> › Cross-engine dispatch — every field below is honoured in every
+ * dispatch direction.
  */
 export interface DispatchConfig {
   /** When non-empty, only these models may be requested for dispatched agents. */
@@ -767,19 +768,27 @@ export interface DispatchConfig {
    */
   maxCostUsd?: number
   /**
-   * Absolute cap on ONE dispatched turn, in MILLISECONDS (ADR-033's 2026-09-01
-   * amendment). `0` disables it; undefined = 60 min. Consumed by the OPENCODE
-   * dispatch direction only — the Claude/pi directions keep their fixed
-   * 10-minute cap. The turn is aborted server-side when it trips.
+   * Absolute cap on ONE dispatched turn, in MILLISECONDS — the user's own
+   * limit, applied in EVERY dispatch direction (Claude, opencode, pi, Codex).
+   *
+   * THERE IS NO BUILT-IN DEFAULT (ADR-033's 2026-09-18 amendment): undefined
+   * and `0` both mean NO LIMIT. A dispatched agent then runs until it finishes,
+   * the user stops it, the caller aborts it, `idleTimeoutMs` trips, or
+   * `maxCostUsd` is reached. When set, the turn is interrupted on the target
+   * (the target survives for a continuation in every direction except Claude,
+   * whose process dies with the turn).
    */
   turnTimeoutMs?: number
   /**
    * Inactivity cap for one dispatched turn, in MILLISECONDS: how long the
-   * target may produce NO events at all before the turn is aborted. `0`
-   * disables it; undefined = 15 min. Opencode direction only, same as
-   * `turnTimeoutMs`. This is the real liveness guard — a slow-but-working
-   * target streams continuously, so it should normally be the cap that fires
-   * on a genuinely wedged turn.
+   * target may show NO sign of life before the turn is interrupted. Applies in
+   * EVERY dispatch direction, and like `turnTimeoutMs` has NO built-in default
+   * — undefined and `0` both mean NO LIMIT (ADR-033's 2026-09-18 amendment).
+   *
+   * This is the liveness guard rather than the runaway guard: a working target
+   * streams continuously (SSE events, SDK messages, pi RPC events, app-server
+   * notifications), so this is the cap that should fire on a genuinely wedged
+   * turn. A turn parked on an approval forwarded to the human counts as ALIVE.
    */
   idleTimeoutMs?: number
 }

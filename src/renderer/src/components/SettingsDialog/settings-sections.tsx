@@ -979,8 +979,7 @@ function DispatchLimitsSection({
   engineId,
   testid,
   installed,
-  notInstalledMessage,
-  showTurnTimeouts = false
+  notInstalledMessage
 }: {
   engineId: EngineId
   /**
@@ -993,12 +992,6 @@ function DispatchLimitsSection({
   testid: string
   installed: boolean | null
   notInstalledMessage: string
-  /** Render the turn/inactivity timeout editors. OPENCODE ONLY: the watchdog
-   *  they configure lives in the opencode dispatch direction (ADR-033's
-   *  2026-09-01 amendment); the Claude/pi directions still run on the fixed
-   *  10-minute `DISPATCH_TIMEOUT_MS`, so showing these there would be an inert
-   *  control that silently writes config nothing reads. */
-  showTurnTimeouts?: boolean
 }): React.JSX.Element {
   const { engineCfg, dispatch, update } = useDispatchConfig(engineId)
   const root = `${testid}.limits`
@@ -1007,13 +1000,13 @@ function DispatchLimitsSection({
   if (gate) return gate
 
   // Both timeouts are stored in MILLISECONDS (DispatchConfig) but edited in
-  // MINUTES — nobody wants to type 3600000. Blank = the built-in default,
-  // 0 = disabled; both round-trip through the same undefined-vs-number
+  // MINUTES — nobody wants to type 3600000. Blank and 0 BOTH mean no limit
+  // (ADR-033's 2026-09-18 amendment: there is no built-in cap left in any
+  // direction), and both round-trip through the same undefined-vs-number
   // convention the maxCost field uses. A NEGATIVE minute count drops the key
-  // rather than persisting a negative duration: the watchdog's `> 0` gates read
-  // a persisted negative as "cap disabled", silently — not what someone
-  // fumbling a keystroke meant to configure. (Which is also why these fields
-  // carry no `min`: clamping -5 to 0 would MEAN "disabled".)
+  // rather than persisting a negative duration — same end state, but it keeps
+  // a fumbled keystroke out of the config file. (Which is also why these
+  // fields carry no `min`: clamping -5 to 0 would change nothing.)
   const toMinutes = (ms: number | undefined): number | undefined =>
     ms === undefined ? undefined : ms / 60000
   const fromMinutes = (minutes: number | undefined): number | undefined =>
@@ -1038,41 +1031,37 @@ function DispatchLimitsSection({
         />
       </SettingRow>
 
-      {showTurnTimeouts && (
-        <>
-          <SettingRow
-            testid={`${testid}.turnTimeoutRow`}
-            label="Max turn duration"
-            description="One dispatched turn is cut off after this long. 0 disables."
-            modified={dispatch.turnTimeoutMs !== undefined}
-            onReset={() => update({ turnTimeoutMs: undefined })}
-          >
-            <NumberField
-              testid={`${testid}.turnTimeout`}
-              value={toMinutes(dispatch.turnTimeoutMs)}
-              unit="min"
-              placeholder="60"
-              onChange={(v) => update({ turnTimeoutMs: fromMinutes(v) })}
-            />
-          </SettingRow>
+      <SettingRow
+        testid={`${testid}.turnTimeoutRow`}
+        label="Max turn duration"
+        description="One dispatched turn is cut off after this long. Empty or 0 means no limit."
+        modified={dispatch.turnTimeoutMs !== undefined}
+        onReset={() => update({ turnTimeoutMs: undefined })}
+      >
+        <NumberField
+          testid={`${testid}.turnTimeout`}
+          value={toMinutes(dispatch.turnTimeoutMs)}
+          unit="min"
+          placeholder="no limit"
+          onChange={(v) => update({ turnTimeoutMs: fromMinutes(v) })}
+        />
+      </SettingRow>
 
-          <SettingRow
-            testid={`${testid}.idleTimeoutRow`}
-            label="Inactivity timeout"
-            description="Give up on a target that stops producing output."
-            modified={dispatch.idleTimeoutMs !== undefined}
-            onReset={() => update({ idleTimeoutMs: undefined })}
-          >
-            <NumberField
-              testid={`${testid}.idleTimeout`}
-              value={toMinutes(dispatch.idleTimeoutMs)}
-              unit="min"
-              placeholder="15"
-              onChange={(v) => update({ idleTimeoutMs: fromMinutes(v) })}
-            />
-          </SettingRow>
-        </>
-      )}
+      <SettingRow
+        testid={`${testid}.idleTimeoutRow`}
+        label="Inactivity timeout"
+        description="Give up on a target that stops producing output. Empty or 0 means no limit."
+        modified={dispatch.idleTimeoutMs !== undefined}
+        onReset={() => update({ idleTimeoutMs: undefined })}
+      >
+        <NumberField
+          testid={`${testid}.idleTimeout`}
+          value={toMinutes(dispatch.idleTimeoutMs)}
+          unit="min"
+          placeholder="no limit"
+          onChange={(v) => update({ idleTimeoutMs: fromMinutes(v) })}
+        />
+      </SettingRow>
     </div>
   )
 }
@@ -1139,7 +1128,6 @@ export function OpencodeDispatchLimitsSection(): React.JSX.Element {
       testid="OpencodeDispatchSection"
       installed={installed}
       notInstalledMessage={OPENCODE_DISPATCH_ABSENT}
-      showTurnTimeouts
     />
   )
 }
@@ -1149,7 +1137,7 @@ export function OpencodeDispatchLimitsSection(): React.JSX.Element {
  * `cross-engine-dispatcher.ts`'s `resolveAndRunPi` reads
  * `engines/pi.json#dispatch` and its error text already points at this pane —
  * the settings UI simply never gained one (ADR-065 § Cross-engine dispatch into
- * pi). No timeouts: the watchdog is the opencode target path's.
+ * pi).
  */
 export function PiDispatchIntoSection(): React.JSX.Element {
   const installed = usePiInstalled()
@@ -1180,8 +1168,7 @@ export function PiDispatchLimitsSection(): React.JSX.Element {
  * Codex as a dispatch TARGET (ADR-068 §6, Slice 5b). `resolveAndRunCodex` has
  * read `engines/codex.json#dispatch` — `defaultModel`, `allowedModels`,
  * `maxCostUsd` — since ADR-033 slice H; only the pane was missing, which is why
- * `DISPATCH_CALLERS.codex` still said "unsupported". No timeouts here: the
- * turn/idle watchdog belongs to the opencode target path alone.
+ * `DISPATCH_CALLERS.codex` still said "unsupported".
  */
 export function CodexDispatchIntoSection(): React.JSX.Element {
   const installed = useEngineInstalled('codex')

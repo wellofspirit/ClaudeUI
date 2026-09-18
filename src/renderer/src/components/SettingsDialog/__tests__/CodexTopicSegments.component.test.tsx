@@ -266,11 +266,15 @@ describe('CodexDispatchIntoSection / Limits — engines/codex.json#dispatch', ()
     expect(saved[1].dispatch).toEqual({ defaultModel: 'gpt-5.6-codex-mini', maxCostUsd: 7 })
   })
 
-  it('does not draw the opencode-only turn/idle timeouts', async () => {
+  it('draws the turn/idle timeouts with "no limit" placeholders (ADR-033 2026-09-18)', async () => {
     render(<CodexDispatchLimitsSection />)
     await waitFor(() => expect(screen.getByTestId('CodexDispatchSection.maxCost')).toBeTruthy())
-    expect(screen.queryByTestId('CodexDispatchSection.turnTimeout')).toBeNull()
-    expect(screen.queryByTestId('CodexDispatchSection.idleTimeout')).toBeNull()
+    expect(
+      (screen.getByTestId('CodexDispatchSection.turnTimeout') as HTMLInputElement).placeholder
+    ).toBe('no limit')
+    expect(
+      (screen.getByTestId('CodexDispatchSection.idleTimeout') as HTMLInputElement).placeholder
+    ).toBe('no limit')
   })
 
   it('shares ONE config object with the Default-models segment', async () => {

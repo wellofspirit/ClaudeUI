@@ -321,9 +321,11 @@ describe('OpencodeDispatchSection — dispatch turn timeouts', () => {
     const idle = screen.getByTestId('OpencodeDispatchSection.idleTimeout') as HTMLInputElement
     expect(turn.value).toBe('')
     expect(idle.value).toBe('')
-    // The placeholder is what an EMPTY field means (ADR-065's number-with-unit).
-    expect(turn.placeholder).toBe('60')
-    expect(idle.placeholder).toBe('15')
+    // The placeholder is what an EMPTY field means (ADR-065's number-with-unit)
+    // — and since ADR-033's 2026-09-18 amendment that is NO LIMIT, in every
+    // direction, rather than a built-in 60/15 minutes.
+    expect(turn.placeholder).toBe('no limit')
+    expect(idle.placeholder).toBe('no limit')
     expect(screen.getByTestId('OpencodeDispatchSection.turnTimeoutRow').textContent).toContain(
       'min'
     )

@@ -93,7 +93,10 @@ describe('buildOpencodeConfigContent', () => {
 
   // ── ADR-033 M2: dispatch timeout + caller-identity plugin ──────────────────
 
-  it('sets mcp.claudeui.timeout to a generous value (exceeds the dispatcher 10-min DISPATCH_TIMEOUT_MS)', () => {
+  it("sets mcp.claudeui.timeout orders of magnitude above the dispatcher's 15 s progress heartbeat", () => {
+    // It is an IDLE cap that every heartbeat resets (see DISPATCH_MCP_TIMEOUT_MS),
+    // so what matters is the margin over the heartbeat interval, not any
+    // per-turn cap — ADR-033's 2026-09-18 amendment deleted the last of those.
     const out = parse()
     const mcp = out.mcp as Record<string, unknown>
     const claudeui = mcp.claudeui as Record<string, unknown>

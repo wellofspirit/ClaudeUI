@@ -97,8 +97,12 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
         makeClient: () => {
           throw new Error('makeClient should never be called dispatching engine: "pi"')
         },
-        loadEngineConfig: () => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } }),
-        dispatchTimeoutMs: 60_000,
+        // `turnTimeoutMs` configured deliberately: ADR-033's 2026-09-18
+        // amendment removed the built-in cap, so without one a wedged real
+        // binary would hang this suite instead of failing it.
+        loadEngineConfig: () => ({
+          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', turnTimeoutMs: 60_000 }
+        }),
         recordDispatchedUsage: () => {}
         // spawnPiTarget intentionally OMITTED — exercises the REAL
         // defaultSpawnPiTarget (real PiRpcClient + PiBridgeHost).

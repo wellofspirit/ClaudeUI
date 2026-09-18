@@ -48,6 +48,7 @@ State on 2026-09-17. PR #37 (`codex-integration → pre-release`) merged on 2026
 - **Cost is nullable:** unknown, never $0, for an unpriced model. Capabilities are true only when the whole path works (ADR-030).
 - **`--disable-auth` web-client dead-end: ignore.** No `off` route for the browser client.
 - **Same-engine dispatch stays refused for Codex.** The ADR-068 "caller pin reaches the target" plumbing stays as is.
+- **A dispatched agent runs until the USER's limit** (2026-09-18, ADR-033's amendment of that date): the only things that end a dispatched turn early are a user stop, a caller abort, `dispatch.turnTimeoutMs`/`idleTimeoutMs`, or `dispatch.maxCostUsd`. Empty or `0` for either time limit means NO limit, in every direction (Claude, opencode, pi, Codex) — there is no built-in cap and no built-in default left to reintroduce.
 - Pinned binary 0.154.0 over stdio; native-owned auth with upstream refresh concurrency accepted; the fixture provider's fabricated vault writer is test tooling only (F16).
 
 ## Drive recipes (no credential, no spend)

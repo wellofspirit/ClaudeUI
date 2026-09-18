@@ -128,6 +128,7 @@ import type { DispatchedUsageRow } from './db'
 import type {
   ApprovalDecision,
   ChatMessage,
+  DispatchConfig,
   EngineConfig,
   EngineId,
   FileDiff,
@@ -435,14 +436,6 @@ export interface DispatcherDeps {
    */
   codexVaultAccounts?: boolean
   maxConcurrent?: number
-  /**
-   * Absolute per-turn cap for the CLAUDE and PI directions. The opencode
-   * direction deliberately does NOT read this — it runs on the configurable
-   * inactivity + absolute watchdog (`DispatchConfig.idleTimeoutMs` /
-   * `turnTimeoutMs`, defaults `DISPATCH_IDLE_TIMEOUT_MS`/
-   * `DISPATCH_TURN_TIMEOUT_MS`) instead.
-   */
-  dispatchTimeoutMs?: number
   heartbeatMs?: number
   /**
    * ADR-033 M4c: how long `resolveAndRunPi`'s give-up path (timeout/abort/
@@ -509,38 +502,85 @@ const EMPTY_PI_SESSION_ALLOWS: ReadonlySet<string> = new Set()
 const EMPTY_CODEX_SESSION_ALLOWS: ReadonlySet<string> = new Set()
 
 const MAX_CONCURRENT = 3
-/** Absolute per-turn cap for the CLAUDE and PI directions only — the opencode
- *  direction is governed by `DISPATCH_TURN_TIMEOUT_MS`/`DISPATCH_IDLE_TIMEOUT_MS`
- *  below (ADR-033's 2026-09-01 amendment). */
-const DISPATCH_TIMEOUT_MS = 10 * 60 * 1000
 const HEARTBEAT_MS = 15 * 1000
 /**
- * Default absolute cap on ONE opencode dispatch turn (`DispatchConfig.
- * turnTimeoutMs` overrides; `0` disables). Deliberately an order of magnitude
- * above the claude/pi directions' fixed 10 minutes: a dispatched local model
- * (the reason this rework exists) can legitimately grind for the better part of
- * an hour, and a slow-but-ALIVE turn should be allowed to finish — liveness is
- * policed by the inactivity watchdog below, this is only the backstop against a
- * turn that never ends at all.
- */
-const DISPATCH_TURN_TIMEOUT_MS = 60 * 60_000
-/**
- * Default inactivity cap for an opencode dispatch turn (`DispatchConfig.
- * idleTimeoutMs` overrides; `0` disables): how long the target may go without
- * producing ANY SSE event for its session before the turn is aborted. This —
- * not the absolute cap — is the real liveness signal, because a working target
- * emits message/part events continuously.
- */
-const DISPATCH_IDLE_TIMEOUT_MS = 15 * 60_000
-/**
- * How often the opencode turn watchdog re-checks the two caps above. A polling
+ * How often the turn watchdog re-checks the two configured caps. A polling
  * interval rather than two `setTimeout`s because the inactivity deadline MOVES
- * (every SSE event for a busy target bumps `lastActivityAt`) — re-arming a
+ * (every sign of life from a busy target bumps `lastActivityAt`) — re-arming a
  * timer on every event would be far more churn for no extra precision at this
  * granularity. All the arithmetic goes through `this.now()` so fake-timer tests
- * control it.
+ * control it. Never armed at all when both caps are unlimited — see
+ * `startTurnWatchdog`.
  */
-const DISPATCH_WATCHDOG_INTERVAL_MS = 10_000
+export const DISPATCH_WATCHDOG_INTERVAL_MS = 10_000
+
+/** Which of the two liveness caps ended a turn. */
+type TurnTimeoutReason = 'absolute' | 'inactivity'
+
+/** The watchdog's only outcome — shaped to drop straight into each direction's
+ *  `Raced` union. */
+type TurnTimeout = { kind: 'timeout'; reason: TurnTimeoutReason }
+
+/**
+ * The two per-turn liveness caps, in ms, resolved for ONE dispatch turn.
+ * `0` is the canonical "unlimited" here: `resolveTurnLiveness` folds the
+ * undefined case into it, so every consumer has exactly one comparison to make.
+ */
+interface TurnLivenessCaps {
+  turnTimeoutMs: number
+  idleTimeoutMs: number
+}
+
+/**
+ * Resolve one dispatch turn's liveness caps from the TARGET engine's
+ * `DispatchConfig` (ADR-033's 2026-09-18 amendment — Daniel's ruling).
+ *
+ * THERE IS NO BUILT-IN DEFAULT, in any direction. An unset field and an
+ * explicit `0` both mean UNLIMITED: the only things that end a dispatched turn
+ * early are the user stopping it, the caller aborting it, one of these
+ * user-configured caps, or `dispatch.maxCostUsd`. The previous behaviour — a
+ * fixed 10 minutes for claude/pi/codex and 60/15-minute defaults for opencode —
+ * silently killed legitimately long agent runs, which is the bug this closes.
+ */
+function resolveTurnLiveness(cfg: DispatchConfig | undefined): TurnLivenessCaps {
+  return {
+    // A negative value is impossible from the Settings editor (it drops the key
+    // rather than persisting one) but a hand-edited config could carry one;
+    // clamped to 0 = unlimited so the watchdog's `> 0` gates read uniformly.
+    turnTimeoutMs: Math.max(0, cfg?.turnTimeoutMs ?? 0),
+    idleTimeoutMs: Math.max(0, cfg?.idleTimeoutMs ?? 0)
+  }
+}
+
+/**
+ * The give-up text for a fired cap: WHICH cap it was and the minutes the user
+ * configured for it, plus the direction's own aftermath clause (whether the
+ * target survives for a continuation turn). Every direction's timeout message
+ * is built here so the two reasons are never conflated in one of them.
+ */
+function turnTimeoutText(
+  reason: TurnTimeoutReason,
+  caps: TurnLivenessCaps,
+  aftermath: string
+): string {
+  const minutes = Math.round(
+    (reason === 'absolute' ? caps.turnTimeoutMs : caps.idleTimeoutMs) / 60000
+  )
+  const head =
+    reason === 'absolute'
+      ? `Dispatch timed out after ${minutes} minutes (absolute limit)`
+      : `Dispatch timed out after ${minutes} minutes with no activity from the target agent`
+  return `${head} — ${aftermath}`
+}
+
+/** Aftermath clauses for `turnTimeoutText`, per direction. Claude targets die
+ *  with their process; opencode/pi/codex targets survive for a continuation. */
+const CLAUDE_TIMEOUT_AFTERMATH = 'the target agent was aborted.'
+const OPENCODE_TIMEOUT_AFTERMATH = 'the target agent was aborted.'
+const PI_TIMEOUT_AFTERMATH =
+  'the target agent was interrupted (the session survives; a fresh turn may still be dispatched against it).'
+const CODEX_TIMEOUT_AFTERMATH =
+  'the target agent was interrupted (the thread survives; a fresh turn may still be dispatched against it).'
 /**
  * Slack allowed when `reconcileBusyTargets` compares a stored message's
  * server-written `info.time.created` against the dispatcher's own
@@ -659,7 +699,7 @@ interface OpencodeTargetEntry {
   turnStartedAt: number
   /**
    * `this.now()` at the last sign of life from this session while busy — the
-   * inactivity watchdog's clock (see `DISPATCH_IDLE_TIMEOUT_MS`). Two feeds:
+   * inactivity watchdog's clock (see `startTurnWatchdog`). Two feeds:
    *  - `handleSseEvent` bumps it for EVERY event type carrying this sessionID,
    *    not just streamed content — a tool part updating or a cost snapshot is
    *    proof of life just as much as a text delta;
@@ -790,6 +830,15 @@ interface ClaudeTargetEntry {
    * the cumulative counter can never restart under a live entry.
    */
   lastReportedTotalCostUsd: number
+  /**
+   * `this.now()` at the last SDK message read off this target's iterator while
+   * busy — the inactivity watchdog's clock. Fed by `driveClaudeTurn` for EVERY
+   * message (`stream_event` deltas included, which is what makes a streaming
+   * target provably alive) and refreshed by the watchdog itself while a
+   * forwarded approval for this target is still unanswered. See
+   * `startTurnWatchdog`; reset to turn start at the start of every turn.
+   */
+  lastActivityAt: number
   /** DISTINCT tool_use ids seen in the turn CURRENTLY in flight (ADR-033
    *  M4-B) — same Set-not-counter rationale as OpencodeTargetEntry (Claude
    *  targets run includePartialMessages, so the same assistant message is
@@ -871,6 +920,15 @@ interface PiTargetEntry {
    * pattern as the Claude target (same wire-cumulative-total hazard).
    */
   lastReportedTotalCostUsd: number
+  /**
+   * `this.now()` at the last pi RPC event received for this target while busy
+   * — the inactivity watchdog's clock. Fed by the ambient `onEvent` callback
+   * installed in `createPiTarget`, BEFORE the mapper runs, so an event the
+   * mapper drops as `ignore` still counts as proof of life; refreshed by the
+   * watchdog itself while a forwarded approval is unanswered. See
+   * `startTurnWatchdog`; reset to turn start at the start of every turn.
+   */
+  lastActivityAt: number
   /** DISTINCT tool_use ids seen in the turn CURRENTLY in flight (ADR-033
    *  M4-B) — same Set-not-counter rationale as the other two target kinds. */
   turnToolUseIds: Set<string>
@@ -1016,6 +1074,15 @@ interface CodexTargetEntry {
    * `endedTurns` (a request whose turn id we never learned still has this).
    */
   draining: boolean
+  /**
+   * `this.now()` at the last app-server notification addressed to this target's
+   * thread while busy — the inactivity watchdog's clock. Fed by
+   * `handleCodexTargetNotification` for every notification that passes its
+   * threadId guard (item events, deltas, usage snapshots), and refreshed by the
+   * watchdog itself while a forwarded approval is unanswered. See
+   * `startTurnWatchdog`; reset to turn start at the start of every turn.
+   */
+  lastActivityAt: number
   /** DISTINCT tool_use ids seen in the turn CURRENTLY in flight (ADR-033 M4-B). */
   turnToolUseIds: Set<string>
   /** Latest CUMULATIVE thread usage (`thread/tokenUsage/updated`'s `total`) —
@@ -1519,7 +1586,6 @@ async function defaultSpawnPiTarget(opts: PiTargetSpawnOpts): Promise<PiTargetPr
 export class CrossEngineDispatcher {
   private readonly deps: DispatcherDeps
   private readonly maxConcurrent: number
-  private readonly dispatchTimeoutMs: number
   private readonly heartbeatMs: number
   private readonly piAbortSettleGraceMs: number
   private readonly codexAbortSettleGraceMs: number
@@ -1565,7 +1631,6 @@ export class CrossEngineDispatcher {
   constructor(deps: DispatcherDeps) {
     this.deps = deps
     this.maxConcurrent = deps.maxConcurrent ?? MAX_CONCURRENT
-    this.dispatchTimeoutMs = deps.dispatchTimeoutMs ?? DISPATCH_TIMEOUT_MS
     this.heartbeatMs = deps.heartbeatMs ?? HEARTBEAT_MS
     this.piAbortSettleGraceMs = deps.piAbortSettleGraceMs ?? PI_ABORT_SETTLE_GRACE_MS
     this.codexAbortSettleGraceMs = deps.codexAbortSettleGraceMs ?? CODEX_ABORT_SETTLE_GRACE_MS
@@ -1951,7 +2016,6 @@ export class CrossEngineDispatcher {
       emitDispatchProgress(ctx, (beats * this.heartbeatMs) / 1000)
     }, this.heartbeatMs)
 
-    let watchdogTimer: ReturnType<typeof setInterval> | undefined
     const signal = ctx.extra?.signal
     let abortListener: (() => void) | undefined
 
@@ -2017,38 +2081,17 @@ export class CrossEngineDispatcher {
         (err): Raced => ({ kind: 'err', err })
       )
     /*
-     * Turn liveness (ADR-033's 2026-09-01 amendment) — the fixed absolute
-     * `dispatchTimeoutMs` of the claude/pi directions is the WRONG shape here:
-     * a slow-but-alive local model should be allowed to finish, and a wedged
-     * one should not have to burn a whole hour first. Two caps, both
-     * configurable per engine (`0` disables either):
-     *   - inactivity: no sign of life from this session for `idleTimeoutMs`;
-     *   - absolute:   the turn has simply run for `turnTimeoutMs`.
-     * Polled (rather than two timers) because the inactivity deadline moves on
-     * every event — see `DISPATCH_WATCHDOG_INTERVAL_MS`.
+     * Turn liveness — the two caps the user configured for the TARGET engine,
+     * both unlimited unless set (ADR-033's 2026-09-01 amendment for the shape,
+     * its 2026-09-18 amendment for "no built-in default", and
+     * `startTurnWatchdog` for the one implementation all four directions now
+     * share).
      */
-    const turnTimeoutMs = dispatchCfg?.turnTimeoutMs ?? DISPATCH_TURN_TIMEOUT_MS
-    const idleTimeoutMs = dispatchCfg?.idleTimeoutMs ?? DISPATCH_IDLE_TIMEOUT_MS
-    const timeoutPromise = new Promise<Raced>((resolve) => {
-      watchdogTimer = setInterval(() => {
-        const now = this.now()
-        // A target BLOCKED on a forwarded approval is alive but SILENT: opencode
-        // publishes `permission.asked` once and then nothing at all for that
-        // session until the human answers (its keepalives carry no sessionID),
-        // so the inactivity clock would otherwise run out on a turn whose only
-        // fault is that its user is slow — aborting the turn and dismissing the
-        // very card they were reading. Keep the clock rolling while the ask is
-        // outstanding; answering it therefore also starts a FRESH inactivity
-        // window for the resumed turn. The ABSOLUTE cap deliberately keeps
-        // running: an approval nobody ever answers still ends the turn.
-        if (this.hasPendingApprovalFor(entry.sessionId)) entry.lastActivityAt = now
-        if (turnTimeoutMs > 0 && now - turnStartedAt > turnTimeoutMs) {
-          resolve({ kind: 'timeout', reason: 'absolute' })
-        } else if (idleTimeoutMs > 0 && now - entry.lastActivityAt > idleTimeoutMs) {
-          resolve({ kind: 'timeout', reason: 'inactivity' })
-        }
-      }, DISPATCH_WATCHDOG_INTERVAL_MS)
-    })
+    const caps = resolveTurnLiveness(dispatchCfg)
+    const watchdog = this.startTurnWatchdog(entry, caps, turnStartedAt, () =>
+      this.hasPendingApprovalFor(entry.sessionId)
+    )
+    const timeoutPromise: Promise<Raced> = watchdog.promise
     const abortPromise: Promise<Raced> = signal
       ? signal.aborted
         ? Promise.resolve({ kind: 'abort' })
@@ -2096,9 +2139,7 @@ export class CrossEngineDispatcher {
         const text =
           winner.kind === 'abort'
             ? 'Dispatch cancelled.'
-            : winner.reason === 'absolute'
-              ? `Dispatch timed out after ${Math.round(turnTimeoutMs / 60000)} minutes — the target agent was aborted.`
-              : `Dispatch aborted after ${Math.round(idleTimeoutMs / 60000)} minutes with no activity from the target agent.`
+            : turnTimeoutText(winner.reason, caps, OPENCODE_TIMEOUT_AFTERMATH)
         const status = winner.kind === 'timeout' ? 'failed' : 'stopped'
         emitDispatchNotification(ctx, entry.sessionId, status, text)
         // Recorded for 'failed' (timeout) only — 'stopped' (abort/cancel) is
@@ -2332,7 +2373,7 @@ export class CrossEngineDispatcher {
       // happened, no LATER SSE event may resolve a turn that has returned.
       entry.settled = null
       clearInterval(heartbeat)
-      if (watchdogTimer) clearInterval(watchdogTimer)
+      watchdog.dispose()
       if (signal && abortListener) signal.removeEventListener('abort', abortListener)
     }
   }
@@ -3013,6 +3054,8 @@ export class CrossEngineDispatcher {
     // Per-turn distinct tool_use id set (ADR-033 M4-B) — fresh at the start of
     // every turn, populated by forwardClaudeTargetMessage, .size read at turn end.
     entry.turnToolUseIds = new Set()
+    const turnStartedAt = this.now()
+    entry.lastActivityAt = turnStartedAt
     entry.channel.push(buildClaudeDispatchMessage(req.prompt, entry.sessionId))
 
     // ── Run the turn ──────────────────────────────────────────────────────
@@ -3026,14 +3069,13 @@ export class CrossEngineDispatcher {
       emitDispatchProgress(ctx, (beats * this.heartbeatMs) / 1000)
     }, this.heartbeatMs)
 
-    let timeoutTimer: ReturnType<typeof setTimeout> | undefined
     const signal = ctx.extra?.signal
     let abortListener: (() => void) | undefined
 
     type Raced =
       | { kind: 'ok'; msg: ResultMessage }
       | { kind: 'err'; err: unknown }
-      | { kind: 'timeout' }
+      | TurnTimeout
       | { kind: 'abort' }
       | { kind: 'stop' }
 
@@ -3041,9 +3083,15 @@ export class CrossEngineDispatcher {
       (msg): Raced => ({ kind: 'ok', msg }),
       (err): Raced => ({ kind: 'err', err })
     )
-    const timeoutPromise = new Promise<Raced>((resolve) => {
-      timeoutTimer = setTimeout(() => resolve({ kind: 'timeout' }), this.dispatchTimeoutMs)
-    })
+    // Turn liveness: the TARGET engine's two configured caps, unlimited unless
+    // the user set them (ADR-033's 2026-09-18 amendment) — the same watchdog
+    // the opencode direction runs, which is why `driveClaudeTurn` bumps
+    // `entry.lastActivityAt` on every message it reads off the iterator.
+    const caps = resolveTurnLiveness(dispatchCfg)
+    const watchdog = this.startTurnWatchdog(entry, caps, turnStartedAt, () =>
+      this.hasPendingApprovalFor(entry.sessionId)
+    )
+    const timeoutPromise: Promise<Raced> = watchdog.promise
     const abortPromise: Promise<Raced> = signal
       ? signal.aborted
         ? Promise.resolve({ kind: 'abort' })
@@ -3074,7 +3122,7 @@ export class CrossEngineDispatcher {
         }
         const text =
           winner.kind === 'timeout'
-            ? `Dispatch timed out after ${Math.round(this.dispatchTimeoutMs / 60000)} minutes — the target agent was aborted.`
+            ? turnTimeoutText(winner.reason, caps, CLAUDE_TIMEOUT_AFTERMATH)
             : winner.kind === 'stop'
               ? 'Dispatch stopped by user.'
               : 'Dispatch cancelled.'
@@ -3235,7 +3283,7 @@ export class CrossEngineDispatcher {
       entry.itemStreams.sealAll()
       entry.busy = false
       clearInterval(heartbeat)
-      if (timeoutTimer) clearTimeout(timeoutTimer)
+      watchdog.dispose()
       if (signal && abortListener) signal.removeEventListener('abort', abortListener)
     }
   }
@@ -3253,6 +3301,9 @@ export class CrossEngineDispatcher {
         throw new Error('Claude target process ended unexpectedly')
       }
       const msg = value as SDKMessage
+      // Proof of life for the inactivity watchdog — EVERY message counts,
+      // `stream_event` deltas included (see ClaudeTargetEntry.lastActivityAt).
+      entry.lastActivityAt = this.now()
       if (msg.session_id && !entry.sessionId) {
         entry.sessionId = msg.session_id
         this.targets.set(msg.session_id, entry)
@@ -3352,6 +3403,7 @@ export class CrossEngineDispatcher {
       ctx,
       cumulativeCostUsd: 0,
       lastReportedTotalCostUsd: 0,
+      lastActivityAt: 0,
       turnToolUseIds: new Set(),
       itemStreams: undefined as unknown as ClaudeItemStreamLifecycle
     }
@@ -3443,18 +3495,79 @@ export class CrossEngineDispatcher {
   }
 
   /**
-   * Is an opencode dispatch target's forwarded approval still awaiting a human?
-   * Read by the turn watchdog to keep an approval-PARKED turn's inactivity clock
-   * rolling (see the watchdog's own comment). Scoped to `kind: 'opencode'`
-   * because only that direction's turns are policed by this watchdog — the
-   * claude/pi directions run on the fixed `dispatchTimeoutMs`. A plain scan: the
-   * map holds at most a handful of live approvals.
+   * Is a forwarded approval for this dispatch target still awaiting a human?
+   * Read by the turn watchdog to keep an approval-PARKED turn's inactivity
+   * clock rolling (see `startTurnWatchdog`). NOT scoped to any target kind: as
+   * of ADR-033's 2026-09-18 amendment all four directions run on that
+   * watchdog, and a Claude/pi/codex target blocked on its gate is exactly as
+   * silent as an opencode one blocked on `ctx.ask`. A plain scan: the map holds
+   * at most a handful of live approvals. A null session id (a Claude target
+   * whose `system/init` has not landed yet) can own no approval by definition.
    */
-  private hasPendingApprovalFor(targetSessionId: string): boolean {
+  private hasPendingApprovalFor(targetSessionId: string | null): boolean {
+    if (targetSessionId === null) return false
     for (const pending of this.pendingApprovals.values()) {
-      if (pending.kind === 'opencode' && pending.targetSessionId === targetSessionId) return true
+      if (pending.targetSessionId === targetSessionId) return true
     }
     return false
+  }
+
+  /**
+   * Arm one dispatch turn's liveness watchdog — the SINGLE implementation
+   * shared by all four directions (ADR-033's 2026-09-18 amendment; before it
+   * only the opencode direction had one, and claude/pi/codex raced a fixed
+   * 10-minute `setTimeout` no user could change).
+   *
+   * Returns a promise that resolves ONLY when one of the two configured caps
+   * fires, plus a `dispose` the caller MUST run in its `finally`. With both
+   * caps unlimited — which is the default, since `resolveTurnLiveness` has no
+   * built-in fallback — NO interval is armed at all and the promise never
+   * resolves: the turn then ends only on its own completion, the caller's
+   * abort, the user's stop, or `dispatch.maxCostUsd`.
+   *
+   * `entry` is taken BY REFERENCE, not snapshotted: the inactivity deadline
+   * MOVES as the target streams (each direction bumps `lastActivityAt` from its
+   * own event feed), and the parked-on-an-approval refresh below WRITES it.
+   */
+  private startTurnWatchdog(
+    entry: { lastActivityAt: number },
+    caps: TurnLivenessCaps,
+    turnStartedAt: number,
+    isApprovalParked: () => boolean
+  ): { promise: Promise<TurnTimeout>; dispose: () => void } {
+    const { turnTimeoutMs, idleTimeoutMs } = caps
+    if (turnTimeoutMs <= 0 && idleTimeoutMs <= 0) {
+      // Unlimited in both dimensions — nothing to poll for.
+      return { promise: new Promise<TurnTimeout>(() => {}), dispose: (): void => {} }
+    }
+    let timer: ReturnType<typeof setInterval> | undefined
+    const promise = new Promise<TurnTimeout>((resolve) => {
+      timer = setInterval(() => {
+        const now = this.now()
+        // A target BLOCKED on a forwarded approval is alive but SILENT — an
+        // opencode target parked on `ctx.ask` emits no session events at all
+        // (the server's keepalives carry no sessionID), and a Claude/pi/codex
+        // target parked on its gate is just as quiet. The inactivity clock
+        // would otherwise run out on a turn whose only fault is that its human
+        // is slow, aborting it and dismissing the very card they were reading.
+        // Keep the clock rolling while the ask is outstanding; answering it
+        // therefore also starts a FRESH inactivity window for the resumed
+        // turn. The ABSOLUTE cap deliberately keeps running: an approval nobody
+        // ever answers still ends the turn.
+        if (isApprovalParked()) entry.lastActivityAt = now
+        if (turnTimeoutMs > 0 && now - turnStartedAt > turnTimeoutMs) {
+          resolve({ kind: 'timeout', reason: 'absolute' })
+        } else if (idleTimeoutMs > 0 && now - entry.lastActivityAt > idleTimeoutMs) {
+          resolve({ kind: 'timeout', reason: 'inactivity' })
+        }
+      }, DISPATCH_WATCHDOG_INTERVAL_MS)
+    })
+    return {
+      promise,
+      dispose: (): void => {
+        if (timer) clearInterval(timer)
+      }
+    }
   }
 
   /** Dismiss all forwarded approvals for one target (timeout/abort/dispose).
@@ -3637,6 +3750,8 @@ export class CrossEngineDispatcher {
     entry.busy = true
     entry.turnToolUseIds = new Set()
     entry.turnTotalTokens = 0
+    const turnStartedAt = this.now()
+    entry.lastActivityAt = turnStartedAt
 
     // ── Run the turn ──────────────────────────────────────────────────────
     let beats = 0
@@ -3649,14 +3764,13 @@ export class CrossEngineDispatcher {
       emitDispatchProgress(ctx, (beats * this.heartbeatMs) / 1000)
     }, this.heartbeatMs)
 
-    let timeoutTimer: ReturnType<typeof setTimeout> | undefined
     const signal = ctx.extra?.signal
     let abortListener: (() => void) | undefined
 
     type Raced =
       | { kind: 'ok'; outcome: Extract<PiTurnOutcome, { kind: 'ok' }> }
       | { kind: 'err'; message: string }
-      | { kind: 'timeout' }
+      | TurnTimeout
       | { kind: 'abort' }
       | { kind: 'stop' }
 
@@ -3664,9 +3778,15 @@ export class CrossEngineDispatcher {
       (outcome): Raced =>
         outcome.kind === 'ok' ? { kind: 'ok', outcome } : { kind: 'err', message: outcome.message }
     )
-    const timeoutPromise = new Promise<Raced>((resolve) => {
-      timeoutTimer = setTimeout(() => resolve({ kind: 'timeout' }), this.dispatchTimeoutMs)
-    })
+    // Turn liveness: the TARGET engine's two configured caps, unlimited unless
+    // the user set them (ADR-033's 2026-09-18 amendment). The ambient `onEvent`
+    // callback installed in `createPiTarget` is what bumps
+    // `entry.lastActivityAt`.
+    const caps = resolveTurnLiveness(dispatchCfg)
+    const watchdog = this.startTurnWatchdog(entry, caps, turnStartedAt, () =>
+      this.hasPendingApprovalFor(entry.sessionId)
+    )
+    const timeoutPromise: Promise<Raced> = watchdog.promise
     const abortPromise: Promise<Raced> = signal
       ? signal.aborted
         ? Promise.resolve({ kind: 'abort' })
@@ -3730,7 +3850,7 @@ export class CrossEngineDispatcher {
         if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
         const text =
           winner.kind === 'timeout'
-            ? `Dispatch timed out after ${Math.round(this.dispatchTimeoutMs / 60000)} minutes — the target agent was interrupted (the session survives; a fresh turn may still be dispatched against it).`
+            ? turnTimeoutText(winner.reason, caps, PI_TIMEOUT_AFTERMATH)
             : winner.kind === 'stop'
               ? 'Dispatch stopped by user.'
               : 'Dispatch cancelled.'
@@ -3856,7 +3976,7 @@ export class CrossEngineDispatcher {
         this.forwardPiTargetMessage(entry, output)
       entry.busy = false
       clearInterval(heartbeat)
-      if (timeoutTimer) clearTimeout(timeoutTimer)
+      watchdog.dispose()
       if (signal && abortListener) signal.removeEventListener('abort', abortListener)
     }
   }
@@ -3885,6 +4005,7 @@ export class CrossEngineDispatcher {
       busy: false,
       cumulativeCostUsd: 0,
       lastReportedTotalCostUsd: 0,
+      lastActivityAt: 0,
       turnToolUseIds: new Set(),
       turnTotalTokens: 0,
       mapperState: createPiMapperState(),
@@ -3905,6 +4026,10 @@ export class CrossEngineDispatcher {
     entry.bridgeHost = primitives.bridgeHost
 
     entry.client.onEvent((ev) => {
+      // Proof of life for the inactivity watchdog, taken BEFORE the mapper so
+      // an event it drops as `ignore` still counts (see
+      // PiTargetEntry.lastActivityAt).
+      entry.lastActivityAt = this.now()
       const outputs = mapPiEvent(ev, entry.mapperState)
       for (const output of outputs) this.forwardPiTargetMessage(entry, output)
     })
@@ -4265,6 +4390,8 @@ export class CrossEngineDispatcher {
     const model = entry.model
     entry.busy = true
     entry.turnToolUseIds = new Set()
+    const turnStartedAt = this.now()
+    entry.lastActivityAt = turnStartedAt
 
     // ── Run the turn ──────────────────────────────────────────────────────
     let beats = 0
@@ -4277,14 +4404,13 @@ export class CrossEngineDispatcher {
       emitDispatchProgress(ctx, (beats * this.heartbeatMs) / 1000)
     }, this.heartbeatMs)
 
-    let timeoutTimer: ReturnType<typeof setTimeout> | undefined
     const signal = ctx.extra?.signal
     let abortListener: (() => void) | undefined
 
     type Raced =
       | { kind: 'ok'; outcome: Extract<CodexTurnOutcome, { kind: 'ok' }> }
       | { kind: 'err'; message: string }
-      | { kind: 'timeout' }
+      | TurnTimeout
       | { kind: 'abort' }
       | { kind: 'stop' }
 
@@ -4292,9 +4418,14 @@ export class CrossEngineDispatcher {
       (outcome): Raced =>
         outcome.kind === 'ok' ? { kind: 'ok', outcome } : { kind: 'err', message: outcome.message }
     )
-    const timeoutPromise = new Promise<Raced>((resolve) => {
-      timeoutTimer = setTimeout(() => resolve({ kind: 'timeout' }), this.dispatchTimeoutMs)
-    })
+    // Turn liveness: the TARGET engine's two configured caps, unlimited unless
+    // the user set them (ADR-033's 2026-09-18 amendment).
+    // `handleCodexTargetNotification` is what bumps `entry.lastActivityAt`.
+    const caps = resolveTurnLiveness(dispatchCfg)
+    const watchdog = this.startTurnWatchdog(entry, caps, turnStartedAt, () =>
+      this.hasPendingApprovalFor(entry.sessionId)
+    )
+    const timeoutPromise: Promise<Raced> = watchdog.promise
     const abortPromise: Promise<Raced> = signal
       ? signal.aborted
         ? Promise.resolve({ kind: 'abort' })
@@ -4323,7 +4454,7 @@ export class CrossEngineDispatcher {
         if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
         const text =
           winner.kind === 'timeout'
-            ? `Dispatch timed out after ${Math.round(this.dispatchTimeoutMs / 60000)} minutes — the target agent was interrupted (the thread survives; a fresh turn may still be dispatched against it).`
+            ? turnTimeoutText(winner.reason, caps, CODEX_TIMEOUT_AFTERMATH)
             : winner.kind === 'stop'
               ? 'Dispatch stopped by user.'
               : 'Dispatch cancelled.'
@@ -4410,7 +4541,7 @@ export class CrossEngineDispatcher {
       if (ctx.toolUseId) this.sealCodexTargetItems(entry, ctx.toolUseId)
       entry.busy = false
       clearInterval(heartbeat)
-      if (timeoutTimer) clearTimeout(timeoutTimer)
+      watchdog.dispose()
       if (signal && abortListener) signal.removeEventListener('abort', abortListener)
     }
   }
@@ -4558,6 +4689,7 @@ export class CrossEngineDispatcher {
       endedTurns: new Set(),
       settled: null,
       draining: false,
+      lastActivityAt: 0,
       turnToolUseIds: new Set(),
       usageTotal: null,
       usageBaseline: null,
@@ -4753,6 +4885,9 @@ export class CrossEngineDispatcher {
     value: unknown
   ): void {
     if (!isRecord(value) || !entry.sessionId || value.threadId !== entry.sessionId) return
+    // Proof of life for the inactivity watchdog: ANY notification addressed to
+    // this thread counts (see CodexTargetEntry.lastActivityAt).
+    entry.lastActivityAt = this.now()
     if (method === 'turn/started' && isRecord(value.turn) && typeof value.turn.id === 'string') {
       if (!entry.endedTurns.has(value.turn.id)) entry.turnId = value.turn.id
       return

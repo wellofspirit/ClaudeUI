@@ -1,7 +1,8 @@
 # ADR-033: Cross-engine agent dispatch — hosted `dispatch_agent` tool, headless subtask-style targets
 
 **Status:** Accepted (M4 claude-target usage-capture cost semantics amended by ADR-034; M1's
-synchronous opencode turn transport superseded by the 2026-09-01 amendment below)
+synchronous opencode turn transport superseded by the 2026-09-01 amendment below; that amendment's
+per-direction liveness split superseded by the 2026-09-18 amendment below)
 **Date:** 2026-07-14
 **Relates to:** ADR-018/019 (engine model), ADR-020 (config plane), ADR-022/023 (opencode permissions), ADR-026 (workflow), ADR-030 (capability honesty), ADR-032 (non-fatal denials)
 
@@ -196,7 +197,10 @@ three dispatched qwen3.8:27b turns failed at 5m02–03s each. Worse, the error p
   cap (default 60 min), both configurable per engine as `DispatchConfig.idleTimeoutMs` /
   `turnTimeoutMs` (ms; `0` disables; edited in MINUTES in Settings › opencode › Cross-engine
   dispatch). A slow-but-alive local model can now finish; a wedged one still dies. `DISPATCH_TIMEOUT_MS`
-  stays as the claude/pi directions' cap, and the timeout editors are opencode-only in the UI.
+  stays as the claude/pi directions' cap, and the timeout editors are opencode-only in the UI —
+  **superseded by the 2026-09-18 amendment below**, which deletes every built-in cap, makes both
+  fields mean "no limit" when unset, and applies the same watchdog to all four directions. The
+  sentence is kept as the record of what shipped between 2026-09-01 and 2026-09-18.
   **A turn parked on an unanswered approval counts as alive**: a target blocked on `ctx.ask` emits no
   session events whatsoever (the server's keepalives carry no sessionID), so the watchdog refreshes
   the inactivity clock for as long as a forwarded approval for that target is outstanding —
@@ -290,3 +294,110 @@ fires, so an ended turn stops the target as a cli.js interrupt does. The shared 
 gates it as kind `task` (ask in default/acceptEdits/auto, deny in plan); an ask is a card bound to the
 call's id. `crossEngineDispatchAvailable('codex')` is always true because claude is a bundled target,
 the same reasoning as the opencode branch. Codex as a TARGET landed in `749886cc`: a headless `CodexClient` per target, the caller's autonomy mode written into the thread baseline at `thread/start` (plan: untrusted + read-only + writes denied at the gate; default/acceptEdits: untrusted + workspace-write with asks forwarded to the caller; auto: on-request + native reviewer), no dynamic tools (no recursion), model allowlist checked before the thread exists, `turn/interrupt` on stop, continuation only by a thread id this dispatcher created, usage rows carrying the API-rate equivalent cost or null.
+
+## Amendment (2026-09-18): no built-in dispatch time limit
+
+**Ruling (Daniel, 2026-09-18).** A dispatched agent must be able to run indefinitely. The ONLY things
+that end a dispatched turn early are the user stopping it, the caller aborting it, a user-configured
+time limit, or the user-configured cost cap. An EMPTY or `0` time limit means unlimited. This applies
+to every dispatch direction: Claude, opencode, pi and Codex targets.
+
+**What was wrong.** `DISPATCH_TIMEOUT_MS` (10 min) was raced against the turn in the Claude, pi and
+Codex directions as a plain `setTimeout` — fixed, not configurable, with `deps.dispatchTimeoutMs`
+existing only so tests could shorten it. The opencode direction had the right SHAPE (a polled
+watchdog with an absolute and an inactivity cap read from the target engine's `DispatchConfig`) but
+the wrong DEFAULTS: 60 min and 15 min when the field was undefined, so "leave it empty" silently
+meant "one hour", not "no limit". A legitimately long agent run therefore died on a limit nobody had
+asked for, in all four directions.
+
+**One liveness model, four directions.**
+
+- `DISPATCH_TIMEOUT_MS`, `DISPATCH_TURN_TIMEOUT_MS`, `DISPATCH_IDLE_TIMEOUT_MS`,
+  `this.dispatchTimeoutMs` and `deps.dispatchTimeoutMs` are DELETED. `resolveTurnLiveness(cfg)` is
+  the only source of a cap: `Math.max(0, cfg?.turnTimeoutMs ?? 0)` and the same for
+  `idleTimeoutMs`, so undefined, `0` and a hand-edited negative all collapse to the single
+  "unlimited" value the watchdog's `> 0` gates read.
+- `startTurnWatchdog(entry, caps, turnStartedAt, isApprovalParked)` is the one implementation all
+  four directions share (the opencode branch's polled shape, factored out; `DISPATCH_WATCHDOG_INTERVAL_MS`
+  stays 10 s on the injectable clock). **With both caps unlimited it arms no interval at all** and
+  returns a promise that never resolves — not a very large timer, so there is no far-future deadline
+  to reason about and nothing for a fake-timer test to trip over.
+- The Claude, pi and Codex directions gained the inactivity clock the opencode one had.
+  `entry.lastActivityAt` is bumped from each direction's own event feed, as far upstream as the feed
+  goes: `driveClaudeTurn` on every SDK message read off the iterator (`stream_event` deltas
+  included); `createPiTarget`'s ambient `onEvent` BEFORE `mapPiEvent` runs, so an event the mapper
+  drops as `ignore` still counts as proof of life; `handleCodexTargetNotification` on every
+  notification that passes its threadId guard. `hasPendingApprovalFor` lost its `kind: 'opencode'`
+  scope — a Claude/pi/Codex target blocked on its gate is exactly as silent as an opencode one
+  blocked on `ctx.ask`, so the parked-on-an-approval refresh (and the fresh window an answer starts)
+  now applies everywhere. The absolute cap still runs while parked, deliberately, as before.
+- Timeout text is built by one helper, `turnTimeoutText(reason, caps, aftermath)`, so every message
+  names WHICH cap fired and the minutes the user configured for it: "Dispatch timed out after N
+  minutes (absolute limit)" or "... after N minutes with no activity from the target agent", plus the
+  direction's own aftermath clause (Claude's process dies with the turn; opencode/pi/Codex targets
+  survive for a continuation).
+- Everything else on the give-up paths is unchanged: the server-side interrupt, `dismissPendingForTarget`,
+  the `failed` usage row for a timeout and none for a stop, the settle-first ordering, pi's bounded
+  abort-drain grace, Codex's `turn/interrupt` waits, and each direction's entry-survival rule.
+
+**Config and UI.** `DispatchConfig.turnTimeoutMs` / `idleTimeoutMs` keep their names and units (ms)
+and are now documented as applying to every direction with no built-in default. The two editors are
+drawn in EVERY engine's "Cross-engine dispatch › Limits" group (`showTurnTimeouts` is gone), with
+placeholder `no limit` and descriptions ending "Empty or 0 means no limit."; testids
+(`<Engine>DispatchSection.turnTimeout` / `.idleTimeout` and their rows) are unchanged, as are the
+minutes↔milliseconds round-trip and the install-gating messages.
+
+**Caller-side survey (2026-09-18) — what could still cut a long dispatch short from the CALLER's
+end.** None of these needed a change.
+
+- **opencode as caller.** Confirmed in the vendored source that the MCP tool call path resets its
+  timeout on progress: `McpCatalog.convertTool` (`vendor/opencode-src/packages/opencode/src/mcp/catalog.ts:53-67`)
+  calls `client.callTool(..., { resetTimeoutOnProgress: true, timeout, onprogress: () => {} })` —
+  the `onprogress` hook is what makes the MCP SDK attach a progress token at all, and it is the tool
+  factory `session/tools.ts:391` uses for every MCP tool. It passes NO `maxTotalTimeout`, and in the
+  SDK that field is the only absolute ceiling (`@modelcontextprotocol/sdk@1.29.0`
+  `dist/esm/shared/protocol.js:177-195`, `:434-439`, `:712-714`). So the 20-minute
+  `DISPATCH_MCP_TIMEOUT_MS` we write into `mcp.claudeui.timeout`
+  (`src/core/opencode/OpencodeServerManager.ts:96-163`) is an IDLE cap, reset by the dispatcher's
+  15 s `sendProgress` heartbeat, which does carry a token (`extra._meta.progressToken` →
+  `SdkToolExtra.progressToken`, `src/core/opencode/opencode-hosted-tools.ts:269-273`;
+  `sendProgress` no-ops only when the token is absent, `src/core/sdk/create-sdk-mcp.ts:94-106`).
+  Left at 20 minutes: raising it would change nothing, since no reachable absolute cap exists. Its
+  doc comment now says "exceeds the heartbeat interval by orders of magnitude" instead of pointing at
+  the deleted `DISPATCH_TIMEOUT_MS`.
+- **pi as caller.** No tool-call deadline beyond the bridge's own, which is handled: bridge v6
+  (`docs/protocol-pi/README.md` § "Long-poll protocol") turns each exchange into a sequence of
+  bounded requests — a 45 s hold, then `200 {"pending": true}`, then unbounded re-polls on
+  `/tool-call/wait` — precisely so pi's embedded-Bun 300.6 s `fetch` idle timeout can never close a
+  long call. The only other clock is `abandonMs` (30 s), and it runs ONLY while nobody is parked,
+  i.e. it fires when the pi child is gone, not when the dispatched agent is slow.
+  `vendor/pi-cli/docs/` documents no execution deadline for an extension-registered tool
+  (`settings.md`'s `retry.provider.timeoutMs` / `httpIdleTimeoutMs` are provider-request clocks;
+  `rpc.md`'s `timeout` belongs to UI dialogs).
+- **Codex as caller.** No deadline on a dynamic tool call response. `bespoke_event_handling.rs:1129-1137`
+  sends `item/tool/call` and spawns `dynamic_tools::on_call_response`, whose first line is a bare
+  `receiver.await` on the oneshot (`.cache/codex-src/codex-rs/app-server/src/dynamic_tools.rs:18-24`)
+  — no `tokio::time::timeout` anywhere in that file, and every `timeout` in `outgoing_message.rs` is
+  inside its `#[cfg(test)] mod tests` (from line 843). A pending server request is resolved early
+  only on a TURN TRANSITION (`TURN_TRANSITION_PENDING_REQUEST_ERROR_REASON`,
+  `outgoing_message.rs:204`), which is the interrupt/turn-end path the dispatcher already rides via
+  `extra.signal`.
+- **Claude as caller.** Nothing to change — the resolved "Still-open questions" item above:
+  cli.js's MCP callTool timeout is OFF by default, exists only under `MCP_TOOL_TIMEOUT` or a
+  per-server `timeout`, and is idle-reset by the `onprogress` cli.js always passes. `grep -rn
+MCP_TOOL_TIMEOUT src/` finds nothing: ClaudeUI never sets it on a spawn, so only a user's own
+  environment could introduce one, exactly as that item records.
+
+**Tests.** The three directions that had no watchdog gained, per direction, (a) a no-config turn that
+keeps producing events and runs past 10 AND 60 minutes on fake timers before completing normally,
+(b) an absolute cap firing with its configured minutes in the text even while the target streams,
+(c) an inactivity cap that fires only after real silence and is reset both by an event and by a
+pending forwarded approval, and (d) both caps `0` arming no 10 s interval (asserted by spying on
+`setInterval` — the progress heartbeat is an interval too, so a bare timer count cannot tell them
+apart). Every test that used to inject `deps.dispatchTimeoutMs` now configures the cap through the
+mocked `loadEngineConfig(...).dispatch` and runs on fake timers. **Fake-timer gotcha, learned the
+hard way:** `vi.useFakeTimers()` must be installed BEFORE the dispatcher is constructed —
+`this.now` defaults to a captured reference to `Date.now`, so a later install leaves the watchdog
+reading real wall time and no cap ever fires. The gated real-binary suites
+(`src/integration/{pi,codex}/*-dispatch-target.integration.test.ts`) now set `turnTimeoutMs`
+explicitly, so a wedged binary fails them instead of hanging them.

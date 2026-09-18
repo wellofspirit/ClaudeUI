@@ -321,10 +321,12 @@ function makeDispatcher(
       throw new Error('makeClient must never run for engine: "codex"')
     },
     // No model/allowlist configured: the target resolves the fixture's own
-    // config model, which is the ordinary no-config-needed path.
-    loadEngineConfig: () => ({}),
+    // config model, which is the ordinary no-config-needed path. The absolute
+    // cap IS configured here (ADR-033's 2026-09-18 amendment removed every
+    // built-in one), so a wedged real binary fails this suite rather than
+    // hanging it.
+    loadEngineConfig: () => ({ dispatch: { turnTimeoutMs: 45_000 } }),
     attachCodexTarget,
-    dispatchTimeoutMs: 45_000,
     codexAbortSettleGraceMs: 5_000,
     // A no-op rather than the real better-sqlite3 insert: this vitest context
     // has no Electron `app` for a userData path, and the point here is the ROW

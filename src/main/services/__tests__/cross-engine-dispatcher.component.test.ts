@@ -39,6 +39,7 @@ vi.mock('../../../core/codex/codex-locate', () => ({
 
 import {
   CrossEngineDispatcher,
+  DISPATCH_WATCHDOG_INTERVAL_MS,
   XENG_REQUEST_PREFIX,
   crossEngineDispatchAvailable,
   buildPiTargetChildEnv
@@ -242,7 +243,6 @@ function makeHarness(overrides: Partial<DispatcherDeps> = {}): {
     serverManager,
     makeClient: () => client,
     loadEngineConfig: () => ({ dispatch: { defaultModel: 'openai/gpt-5' } }),
-    dispatchTimeoutMs: 2000,
     heartbeatMs: 50,
     // ADR-033 M4c: keep pi's stop/timeout/abort grace-period wait (see
     // PiTargetEntry.settled's "RACE NOTE") fast in tests by default — tests
@@ -304,6 +304,17 @@ function completeTurn(stream: ReturnType<typeof makeEventStream>, sessionId = 'o
  */
 const advance = async (ms: number): Promise<void> => {
   await vi.advanceTimersByTimeAsync(ms)
+}
+
+/**
+ * The fake-timer analogue of `tick()`: drain the multi-`await` promise chains a
+ * dispatch target's creation goes through (spawn → get_state → set_model for
+ * pi; config/read → model/list → thread/start for Codex). One `advance(0)`
+ * flushes a single microtask round, which is not enough to get from `dispatch()`
+ * to the point where the turn — and its watchdog — is actually running.
+ */
+const settle = async (): Promise<void> => {
+  for (let i = 0; i < 8; i++) await vi.advanceTimersByTimeAsync(0)
 }
 
 beforeEach(() => {
@@ -1445,7 +1456,6 @@ describe('CrossEngineDispatcher — SSE reconnect (opencode approval forwarding)
       },
       makeClient: () => client,
       loadEngineConfig: () => ({ dispatch: { defaultModel: 'openai/gpt-5' } }),
-      dispatchTimeoutMs: 2000,
       heartbeatMs: 50,
       piAbortSettleGraceMs: 20,
       sseReconnectDelayMs: 5
@@ -2036,30 +2046,39 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
   })
 
   describe('timeout / abort', () => {
-    it('per-dispatch timeout aborts the target and removes the entry (no continuation possible)', async () => {
-      const target = makeFakeClaudeTarget()
-      const { dispatcher } = makeHarness({
-        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
-        dispatchTimeoutMs: 30,
-        spawnClaudeQuery: target.spawnClaudeQuery
-      })
-      const ctx = makeCtx({ fromEngine: 'opencode' })
-      const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
-      await tick()
-      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
-      // Never push a result — the turn hangs until the timeout fires.
-      const result = await pending
-      expect(result.isError).toBe(true)
-      expect(result.text).toContain('timed out')
-      expect(result.sessionId).toBe('claude-sess-1')
-      expect(target.lastAbortController()?.signal.aborted).toBe(true)
+    it('the configured absolute cap aborts the target and removes the entry (no continuation possible)', async () => {
+      vi.useFakeTimers()
+      try {
+        const target = makeFakeClaudeTarget()
+        const { dispatcher } = makeHarness({
+          loadEngineConfig: vi.fn(() => ({
+            dispatch: { defaultModel: 'haiku', turnTimeoutMs: 60_000 }
+          })),
+          heartbeatMs: 30_000,
+          spawnClaudeQuery: target.spawnClaudeQuery
+        })
+        const ctx = makeCtx({ fromEngine: 'opencode' })
+        const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+        await settle()
+        target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+        // Never push a result — the turn hangs until the configured cap fires.
+        await advance(70_000)
+        const result = await pending
+        expect(result.isError).toBe(true)
+        expect(result.text).toContain('timed out')
+        expect(result.text).toContain('1 minutes')
+        expect(result.sessionId).toBe('claude-sess-1')
+        expect(target.lastAbortController()?.signal.aborted).toBe(true)
 
-      // The entry was removed — continuation now fails.
-      const cont = await dispatcher.dispatch(
-        { engine: 'claude', prompt: 'y', sessionId: 'claude-sess-1' },
-        ctx
-      )
-      expect(cont.isError).toBe(true)
+        // The entry was removed — continuation now fails.
+        const cont = await dispatcher.dispatch(
+          { engine: 'claude', prompt: 'y', sessionId: 'claude-sess-1' },
+          ctx
+        )
+        expect(cont.isError).toBe(true)
+      } finally {
+        vi.useRealTimers()
+      }
     })
 
     it('extra.signal abort cancels the dispatch and aborts the target', async () => {
@@ -2083,39 +2102,50 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
     })
 
     it('timeout dismisses forwarded canUseTool approvals still pending for that target', async () => {
-      const target = makeFakeClaudeTarget()
-      const { dispatcher } = makeHarness({
-        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
-        dispatchTimeoutMs: 60,
-        spawnClaudeQuery: target.spawnClaudeQuery
-      })
-      const ctx = makeCtx({ fromEngine: 'opencode' })
-      const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
-      await tick()
-      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
-      await tick()
+      vi.useFakeTimers()
+      try {
+        // The ABSOLUTE cap, deliberately (mirrors the opencode twin): a pending
+        // forwarded approval keeps the INACTIVITY clock rolling, so a turn
+        // parked on a human is never an inactive turn.
+        const target = makeFakeClaudeTarget()
+        const { dispatcher } = makeHarness({
+          loadEngineConfig: vi.fn(() => ({
+            dispatch: { defaultModel: 'haiku', turnTimeoutMs: 60_000 }
+          })),
+          heartbeatMs: 30_000,
+          spawnClaudeQuery: target.spawnClaudeQuery
+        })
+        const ctx = makeCtx({ fromEngine: 'opencode' })
+        const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+        await settle()
+        target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+        await settle()
 
-      // The target calls a tool mid-turn — never resolved by the test.
-      const canUseTool = target.lastCanUseTool()!
-      const approvalPromise = canUseTool(
-        'Bash',
-        { command: 'x' },
-        {
-          signal: new AbortController().signal,
-          toolUseId: 'toolu_1'
-        }
-      )
-      await tick()
-      expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
+        // The target calls a tool mid-turn — never resolved by the test.
+        const canUseTool = target.lastCanUseTool()!
+        const approvalPromise = canUseTool(
+          'Bash',
+          { command: 'x' },
+          {
+            signal: new AbortController().signal,
+            toolUseId: 'toolu_1'
+          }
+        )
+        await settle()
+        expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
 
-      const result = await pending
-      expect(result.isError).toBe(true)
-      const dismiss = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-dismiss')
-      expect(dismiss).toBeTruthy()
+        await advance(70_000)
+        const result = await pending
+        expect(result.isError).toBe(true)
+        const dismiss = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-dismiss')
+        expect(dismiss).toBeTruthy()
 
-      // The hanging canUseTool promise must resolve (deny) — never left hanging.
-      const approval = await approvalPromise
-      expect(approval.behavior).toBe('deny')
+        // The hanging canUseTool promise must resolve (deny) — never left hanging.
+        const approval = await approvalPromise
+        expect(approval.behavior).toBe('deny')
+      } finally {
+        vi.useRealTimers()
+      }
     })
   })
 
@@ -2594,21 +2624,29 @@ describe('CrossEngineDispatcher — M3 (Claude direction: streaming/progress/not
   })
 
   it('a timeout notification uses status "failed" (distinct from an explicit user stop)', async () => {
-    const target = makeFakeClaudeTarget()
-    const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
-      dispatchTimeoutMs: 30,
-      spawnClaudeQuery: target.spawnClaudeQuery
-    })
-    const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_timeout_1' })
-    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
-    await tick()
-    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
-    const result = await pending
-    expect(result.isError).toBe(true)
+    vi.useFakeTimers()
+    try {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'haiku', turnTimeoutMs: 60_000 }
+        })),
+        heartbeatMs: 30_000,
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_timeout_1' })
+      const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+      await settle()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      await advance(70_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
 
-    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
-    expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_timeout_1', status: 'failed' })
+      const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+      expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_timeout_1', status: 'failed' })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -3515,23 +3553,31 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
   })
 
   it('does NOT call ctx.addDispatchedCost for a timed-out Claude-direction turn', async () => {
-    const target = makeFakeClaudeTarget()
-    const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
-      spawnClaudeQuery: target.spawnClaudeQuery,
-      dispatchTimeoutMs: 30
-    })
-    const ctx = makeCtx({ fromEngine: 'opencode' })
-    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
-    await tick()
-    target.push({
-      type: 'system',
-      subtype: 'init',
-      session_id: 'claude-sess-timeout'
-    } as SDKMessage)
-    const result = await pending
-    expect(result.isError).toBe(true)
-    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+    vi.useFakeTimers()
+    try {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'haiku', turnTimeoutMs: 60_000 }
+        })),
+        heartbeatMs: 30_000,
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const ctx = makeCtx({ fromEngine: 'opencode' })
+      const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+      await settle()
+      target.push({
+        type: 'system',
+        subtype: 'init',
+        session_id: 'claude-sess-timeout'
+      } as SDKMessage)
+      await advance(70_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('turn 2+ converts the CUMULATIVE total_cost_usd into a per-turn delta (record, fold-in, cap)', async () => {
@@ -3715,28 +3761,36 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
   })
 
   it('a stopped turn is NOT recorded; a timed-out turn IS recorded with null usage', async () => {
-    const recordDispatchedUsage = vi.fn()
-    const target = makeFakeClaudeTarget()
-    const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
-      spawnClaudeQuery: target.spawnClaudeQuery,
-      recordDispatchedUsage,
-      dispatchTimeoutMs: 30
-    })
-    const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude_timeout' })
-    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
-    await tick()
-    target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
-    const result = await pending
-    expect(result.isError).toBe(true)
-
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        toolUseId: 'toolu_claude_timeout',
-        totalTokens: null,
-        costUsd: null
+    vi.useFakeTimers()
+    try {
+      const recordDispatchedUsage = vi.fn()
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'haiku', turnTimeoutMs: 60_000 }
+        })),
+        heartbeatMs: 30_000,
+        spawnClaudeQuery: target.spawnClaudeQuery,
+        recordDispatchedUsage
       })
-    )
+      const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude_timeout' })
+      const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+      await settle()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      await advance(70_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+
+      expect(recordDispatchedUsage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolUseId: 'toolu_claude_timeout',
+          totalTokens: null,
+          costUsd: null
+        })
+      )
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -4633,27 +4687,43 @@ describe('CrossEngineDispatcher — pi direction (M4c): timeout / abort / stop (
     expect((await cont).isError).toBeUndefined()
   })
 
-  it('per-dispatch timeout interrupts the turn (status "failed", recorded) — the entry is ALSO kept alive for continuation', async () => {
-    const target = makeFakePiTarget()
-    const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
-      dispatchTimeoutMs: 30,
-      spawnPiTarget: target.spawnPiTarget
-    })
-    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_1' })
-    const result = await dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('timed out')
+  it('the configured absolute cap interrupts the turn (status "failed", recorded) — the entry is ALSO kept alive for continuation', async () => {
+    vi.useFakeTimers()
+    try {
+      const target = makeFakePiTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', turnTimeoutMs: 60_000 }
+        })),
+        heartbeatMs: 30_000,
+        piAbortSettleGraceMs: 20,
+        spawnPiTarget: target.spawnPiTarget
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_1' })
+      const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+      await settle()
+      await advance(70_000)
+      // The give-up path's own bounded grace wait (piAbortSettleGraceMs) runs
+      // AFTER the cap fires, so the clock has to keep moving past it.
+      await advance(1_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('timed out')
+      expect(result.text).toContain('1 minutes')
 
-    const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
-    expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_timeout_1', status: 'failed' })
+      const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+      expect(notif?.[1]).toMatchObject({ toolUseId: 'toolu_timeout_1', status: 'failed' })
 
-    const cont = dispatcher.dispatch({ engine: 'pi', prompt: 'y', sessionId: 'pi-target-1' }, ctx)
-    await tick()
-    target.pushEvent(piAssistantMessageEnd({ text: 'recovered' }))
-    target.pushEvent(PI_AGENT_SETTLED)
-    expect((await cont).isError).toBeUndefined()
-    expect(target.spawnCalls).toHaveLength(1)
+      const cont = dispatcher.dispatch({ engine: 'pi', prompt: 'y', sessionId: 'pi-target-1' }, ctx)
+      await settle()
+      target.pushEvent(piAssistantMessageEnd({ text: 'recovered' }))
+      target.pushEvent(PI_AGENT_SETTLED)
+      await settle()
+      expect((await cont).isError).toBeUndefined()
+      expect(target.spawnCalls).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('extra.signal abort → "cancelled" text', async () => {
@@ -5050,42 +5120,59 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
   })
 
   it('a timed-out turn IS recorded (status "failed") with null usage numbers; a stopped turn is NOT recorded', async () => {
-    const recordDispatchedUsage = vi.fn()
-    const target = makeFakePiTarget()
-    const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
-      spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage,
-      dispatchTimeoutMs: 30
-    })
-    const result = await dispatcher.dispatch(
-      { engine: 'pi', prompt: 'x' },
-      makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_record' })
-    )
-    expect(result.isError).toBe(true)
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        toolUseId: 'toolu_timeout_record',
-        totalTokens: null,
-        costUsd: null
+    vi.useFakeTimers()
+    try {
+      const recordDispatchedUsage = vi.fn()
+      const target = makeFakePiTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', turnTimeoutMs: 60_000 }
+        })),
+        heartbeatMs: 30_000,
+        piAbortSettleGraceMs: 20,
+        spawnPiTarget: target.spawnPiTarget,
+        recordDispatchedUsage
       })
-    )
+      const pending = dispatcher.dispatch(
+        { engine: 'pi', prompt: 'x' },
+        makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_record' })
+      )
+      await settle()
+      await advance(70_000)
+      await advance(1_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(recordDispatchedUsage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolUseId: 'toolu_timeout_record',
+          totalTokens: null,
+          costUsd: null
+        })
+      )
 
-    recordDispatchedUsage.mockClear()
-    const target2 = makeFakePiTarget({ sessionId: 'pi-target-2' })
-    const { dispatcher: dispatcher2 } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
-      spawnPiTarget: target2.spawnPiTarget,
-      recordDispatchedUsage
-    })
-    const pending2 = dispatcher2.dispatch(
-      { engine: 'pi', prompt: 'x' },
-      makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stopped_norecord' })
-    )
-    await tick()
-    expect(dispatcher2.stopDispatch('toolu_stopped_norecord')).toBe(true)
-    await pending2
-    expect(recordDispatchedUsage).not.toHaveBeenCalled()
+      recordDispatchedUsage.mockClear()
+      const target2 = makeFakePiTarget({ sessionId: 'pi-target-2' })
+      const { dispatcher: dispatcher2 } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' }
+        })),
+        heartbeatMs: 30_000,
+        piAbortSettleGraceMs: 20,
+        spawnPiTarget: target2.spawnPiTarget,
+        recordDispatchedUsage
+      })
+      const pending2 = dispatcher2.dispatch(
+        { engine: 'pi', prompt: 'x' },
+        makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stopped_norecord' })
+      )
+      await settle()
+      expect(dispatcher2.stopDispatch('toolu_stopped_norecord')).toBe(true)
+      await advance(30)
+      await pending2
+      expect(recordDispatchedUsage).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -5146,27 +5233,39 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
   })
 
   it('a timed-out turn that streamed cost still advances cumulativeCostUsd/addDispatchedCost and records the spend+tokens on the usage row', async () => {
-    const recordDispatchedUsage = vi.fn()
-    const target = makeFakePiTarget()
-    const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
-      spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage,
-      dispatchTimeoutMs: 30
-    })
-    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_cost' })
-    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
-    await tick()
-    target.pushEvent(piAssistantMessageEnd({ text: 'partial', cost: 0.03, input: 20, output: 10 }))
-    // Never push agent_settled — the turn hangs until the timeout fires.
-    const result = await pending
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('timed out')
+    vi.useFakeTimers()
+    try {
+      const recordDispatchedUsage = vi.fn()
+      const target = makeFakePiTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', turnTimeoutMs: 60_000 }
+        })),
+        heartbeatMs: 30_000,
+        piAbortSettleGraceMs: 20,
+        spawnPiTarget: target.spawnPiTarget,
+        recordDispatchedUsage
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_cost' })
+      const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+      await settle()
+      target.pushEvent(
+        piAssistantMessageEnd({ text: 'partial', cost: 0.03, input: 20, output: 10 })
+      )
+      // Never push agent_settled — the turn hangs until the cap fires.
+      await advance(70_000)
+      await advance(1_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('timed out')
 
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ toolUseId: 'toolu_timeout_cost', costUsd: 0.03, totalTokens: 30 })
-    )
-    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.03)
+      expect(recordDispatchedUsage).toHaveBeenCalledWith(
+        expect.objectContaining({ toolUseId: 'toolu_timeout_cost', costUsd: 0.03, totalTokens: 30 })
+      )
+      expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.03)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('a stopped turn that streamed cost advances cumulativeCostUsd/addDispatchedCost but records NO usage row (ADR-033 M4-B: no usage numbers for a turn that never returned) — cap accounting still applies', async () => {
@@ -5283,6 +5382,11 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
   })
 
   it('a timed-out turn whose fake get_session_stats reports MORE cost than any streamed usage event is reconciled too', async () => {
+    // FAKE TIMERS FIRST, before the dispatcher is constructed: its `now` dep
+    // defaults to a captured reference to `Date.now`, so installing the fake
+    // clock afterwards would leave the watchdog reading real wall time and the
+    // configured cap would never fire.
+    vi.useFakeTimers()
     const recordDispatchedUsage = vi.fn()
     const target = makeFakePiTarget({
       requestHandler: (cmd) => {
@@ -5301,24 +5405,35 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
       }
     })
     const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      loadEngineConfig: vi.fn(() => ({
+        dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', turnTimeoutMs: 60_000 }
+      })),
+      heartbeatMs: 30_000,
+      piAbortSettleGraceMs: 20,
       spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage,
-      dispatchTimeoutMs: 30
+      recordDispatchedUsage
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_reconcile' })
-    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
-    await tick()
-    target.pushEvent(piAssistantMessageEnd({ text: 'partial', cost: 0.03, input: 20, output: 10 }))
-    // Never push agent_settled — the turn hangs until the timeout fires.
-    const result = await pending
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('timed out')
+    try {
+      const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+      await settle()
+      target.pushEvent(
+        piAssistantMessageEnd({ text: 'partial', cost: 0.03, input: 20, output: 10 })
+      )
+      // Never push agent_settled — the turn hangs until the cap fires.
+      await advance(70_000)
+      await advance(1_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('timed out')
 
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ toolUseId: 'toolu_timeout_reconcile', costUsd: 0.08 })
-    )
-    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.08)
+      expect(recordDispatchedUsage).toHaveBeenCalledWith(
+        expect.objectContaining({ toolUseId: 'toolu_timeout_reconcile', costUsd: 0.08 })
+      )
+      expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.08)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('when get_session_stats reports the SAME cost as the mapper already streamed, the recorded spend is unchanged (no double count)', async () => {
@@ -6827,25 +6942,38 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
     expect(second.text).toContain('Dispatch cost cap')
   })
 
-  it('the absolute per-turn timeout interrupts the turn and records a failed row', async () => {
-    const recordDispatchedUsage = vi.fn()
-    const target = makeFakeCodexTarget()
-    const { dispatcher } = makeCodexHarness({
-      attachCodexTarget: target.spawnCodexTarget,
-      dispatchTimeoutMs: 30,
-      codexAbortSettleGraceMs: 10,
-      recordDispatchedUsage
-    })
-    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_1' })
-    const result = await dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('Dispatch timed out')
-    expect(target.requests.some((e) => e.method === 'turn/interrupt')).toBe(true)
-    expect(recordDispatchedUsage).toHaveBeenCalledTimes(1)
-    expect(recordDispatchedUsage.mock.calls[0]![0]).toMatchObject({
-      targetEngine: 'codex',
-      targetSessionId: CODEX_THREAD_ID
-    })
+  it('the configured absolute cap interrupts the turn and records a failed row', async () => {
+    vi.useFakeTimers()
+    try {
+      const recordDispatchedUsage = vi.fn()
+      const target = makeFakeCodexTarget()
+      const { dispatcher } = makeCodexHarness({
+        attachCodexTarget: target.spawnCodexTarget,
+        dispatch: { turnTimeoutMs: 60_000 },
+        heartbeatMs: 30_000,
+        codexAbortSettleGraceMs: 10,
+        recordDispatchedUsage
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_1' })
+      const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+      await settle()
+      await advance(70_000)
+      // The give-up path's bounded grace waits (codexAbortSettleGraceMs) run
+      // AFTER the cap fires, so the clock has to keep moving past them.
+      await advance(1_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('Dispatch timed out')
+      expect(result.text).toContain('1 minutes')
+      expect(target.requests.some((e) => e.method === 'turn/interrupt')).toBe(true)
+      expect(recordDispatchedUsage).toHaveBeenCalledTimes(1)
+      expect(recordDispatchedUsage.mock.calls[0]![0]).toMatchObject({
+        targetEngine: 'codex',
+        targetSessionId: CODEX_THREAD_ID
+      })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -6906,5 +7034,561 @@ describe('CrossEngineDispatcher — codex direction: the caller account (ADR-068
     await pending
 
     expect(target.spawnCalls[0]!.identity).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// One liveness model for every dispatch direction (ADR-033's 2026-09-18
+// amendment). A dispatched agent runs until the USER's limit: undefined or 0
+// for `turnTimeoutMs`/`idleTimeoutMs` in the TARGET engine's DispatchConfig
+// means unlimited, in EVERY direction — there is no built-in cap left. The
+// opencode direction's own suite (above) already covers it; these cover the
+// three directions that used to run on the fixed `DISPATCH_TIMEOUT_MS`.
+// ---------------------------------------------------------------------------
+
+describe('CrossEngineDispatcher — no built-in dispatch time limit (ADR-033 2026-09-18)', () => {
+  /** Record the delay of every `setInterval` armed while a test runs, for the
+   *  "no watchdog was ever armed" assertions — the progress heartbeat is an
+   *  interval too, so a bare `vi.getTimerCount()` cannot tell them apart. */
+  function recordIntervals(): { delays: () => number[]; restore: () => void } {
+    const spy = vi.spyOn(globalThis, 'setInterval')
+    return {
+      delays: () => spy.mock.calls.map((call) => call[1] as number),
+      restore: () => spy.mockRestore()
+    }
+  }
+
+  // ── opencode direction ───────────────────────────────────────────────────
+  //
+  // Its own suite above already covers both caps set and both at 0; what was
+  // missing is the UNSET case, which used to mean 60/15 minutes rather than
+  // "no limit".
+
+  it('opencode: with no configured caps a turn that keeps producing events runs past 15 AND 60 minutes and completes normally', async () => {
+    vi.useFakeTimers()
+    try {
+      const { dispatcher, client, stream } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai/gpt-5' } })),
+        heartbeatMs: 30_000
+      })
+      holdTurn(client)
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+      await settle()
+
+      // 90 minutes of a working target — past the old 15-minute inactivity
+      // default (events keep coming) and past the old 60-minute absolute one.
+      for (let i = 0; i < 18; i++) {
+        await advance(5 * 60_000)
+        stream.push('message.part.updated', {
+          sessionID: 'oc-sess-1',
+          part: { id: `part-${i}`, messageID: 'msg-1', type: 'text', text: `chunk ${i}` }
+        })
+        await settle()
+      }
+      expect(client.abortSession).not.toHaveBeenCalled()
+
+      completeTurn(stream)
+      await settle()
+      const result = await pending
+      expect(result.isError).toBeUndefined()
+      expect(result.text).toBe('target answer')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('opencode: with no configured caps a SILENT turn is never aborted either — an unset inactivity cap is no cap', async () => {
+    vi.useFakeTimers()
+    try {
+      const { dispatcher, client, stream } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai/gpt-5' } })),
+        heartbeatMs: 30_000
+      })
+      holdTurn(client)
+      const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+      await settle()
+      await advance(6 * 60 * 60_000) // six silent hours
+      expect(client.abortSession).not.toHaveBeenCalled()
+
+      completeTurn(stream)
+      await settle()
+      const result = await pending
+      expect(result.isError).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // ── Claude direction ─────────────────────────────────────────────────────
+
+  it('claude: with no configured caps a turn that keeps producing messages runs past 10 AND 60 minutes and completes normally', async () => {
+    vi.useFakeTimers()
+    try {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery,
+        heartbeatMs: 30_000
+      })
+      const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude_unlimited' })
+      const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+      await settle()
+      target.push({
+        type: 'system',
+        subtype: 'init',
+        session_id: 'claude-sess-unlimited'
+      } as SDKMessage)
+      await settle()
+
+      // 90 minutes of a working target — past the old fixed 10-minute
+      // DISPATCH_TIMEOUT_MS and past the old 60-minute opencode default.
+      for (let i = 0; i < 18; i++) {
+        await advance(5 * 60_000)
+        target.push({ type: 'assistant' } as SDKMessage)
+        await settle()
+      }
+      expect(target.lastAbortController()?.signal.aborted).toBe(false)
+
+      target.push(resultMsg({ result: 'finished after 90 minutes' }))
+      const result = await pending
+      expect(result.isError).toBeUndefined()
+      expect(result.text).toBe('finished after 90 minutes')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('claude: turnTimeoutMs fires as an ABSOLUTE cap naming its configured minutes, even on a continuously-active turn', async () => {
+    vi.useFakeTimers()
+    try {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'haiku', turnTimeoutMs: 120_000 }
+        })),
+        spawnClaudeQuery: target.spawnClaudeQuery,
+        heartbeatMs: 30_000
+      })
+      const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude_absolute' })
+      const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+      await settle()
+      target.push({
+        type: 'system',
+        subtype: 'init',
+        session_id: 'claude-sess-absolute'
+      } as SDKMessage)
+
+      for (let i = 0; i < 3; i++) {
+        await advance(50_000)
+        target.push({ type: 'assistant' } as SDKMessage)
+        await settle()
+      }
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('timed out')
+      expect(result.text).toContain('2 minutes')
+      expect(target.lastAbortController()?.signal.aborted).toBe(true)
+      const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+      expect(notif?.[1]).toMatchObject({ status: 'failed' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('claude: idleTimeoutMs fires only after SILENCE — a message resets the clock, and a pending forwarded approval holds it open', async () => {
+    vi.useFakeTimers()
+    try {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'haiku', idleTimeoutMs: 120_000, turnTimeoutMs: 0 }
+        })),
+        spawnClaudeQuery: target.spawnClaudeQuery,
+        heartbeatMs: 30_000
+      })
+      const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude_idle' })
+      const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+      await settle()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-idle' } as SDKMessage)
+      await settle()
+
+      // Four 90 s stretches (6 minutes, triple the 2-minute cap), each broken
+      // by one message — the clock keeps resetting.
+      for (let i = 0; i < 4; i++) {
+        await advance(90_000)
+        target.push({ type: 'assistant' } as SDKMessage)
+        await settle()
+      }
+      expect(target.lastAbortController()?.signal.aborted).toBe(false)
+
+      // Parked on a human: canUseTool forwards an approval nobody answers.
+      const canUseTool = target.lastCanUseTool()!
+      void canUseTool('Bash', { command: 'ls' }, {
+        signal: new AbortController().signal
+      } as unknown as Parameters<typeof canUseTool>[2])
+      await settle()
+      expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(true)
+      await advance(600_000) // ten silent minutes, five times the cap
+      expect(target.lastAbortController()?.signal.aborted).toBe(false)
+      expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-dismiss')).toBe(false)
+
+      // Answered — ordinary silence now times the turn out, naming the cap.
+      const approval = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')![1] as {
+        requestId: string
+      }
+      dispatcher.resolveApproval(approval.requestId, 'allow')
+      await advance(130_000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('no activity')
+      expect(result.text).toContain('2 minutes')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('claude: both caps 0 → no watchdog interval is ever armed', async () => {
+    vi.useFakeTimers()
+    const intervals = recordIntervals()
+    try {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'haiku', turnTimeoutMs: 0, idleTimeoutMs: 0 }
+        })),
+        spawnClaudeQuery: target.spawnClaudeQuery,
+        heartbeatMs: 30_000
+      })
+      const pending = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'x' },
+        makeCtx({ fromEngine: 'opencode' })
+      )
+      await settle()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-nowd' } as SDKMessage)
+      await advance(6 * 60 * 60_000) // six silent hours
+      expect(target.lastAbortController()?.signal.aborted).toBe(false)
+      // The heartbeat is armed; the 10 s watchdog poll is not.
+      expect(intervals.delays()).toContain(30_000)
+      expect(intervals.delays()).not.toContain(DISPATCH_WATCHDOG_INTERVAL_MS)
+
+      target.push(resultMsg({ result: 'still here' }))
+      const result = await pending
+      expect(result.isError).toBeUndefined()
+    } finally {
+      intervals.restore()
+      vi.useRealTimers()
+    }
+  })
+
+  // ── pi direction ─────────────────────────────────────────────────────────
+
+  it('pi: with no configured caps a turn that keeps producing events runs past 10 AND 60 minutes and completes normally', async () => {
+    vi.useFakeTimers()
+    try {
+      const target = makeFakePiTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' }
+        })),
+        spawnPiTarget: target.spawnPiTarget,
+        heartbeatMs: 30_000
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_pi_unlimited' })
+      const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+      await settle()
+
+      for (let i = 0; i < 18; i++) {
+        await advance(5 * 60_000)
+        target.pushEvent(piAssistantMessageEnd({ text: `chunk ${i}` }))
+        await settle()
+      }
+      expect(target.client.request).not.toHaveBeenCalledWith({ type: 'abort' })
+
+      target.pushEvent(piAssistantMessageEnd({ text: 'finished after 90 minutes' }))
+      target.pushEvent(PI_AGENT_SETTLED)
+      await settle()
+      const result = await pending
+      expect(result.isError).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('pi: turnTimeoutMs fires as an ABSOLUTE cap naming its configured minutes, even on a continuously-active turn', async () => {
+    vi.useFakeTimers()
+    try {
+      const target = makeFakePiTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', turnTimeoutMs: 120_000 }
+        })),
+        spawnPiTarget: target.spawnPiTarget,
+        heartbeatMs: 30_000,
+        piAbortSettleGraceMs: 20
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_pi_absolute' })
+      const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+      await settle()
+
+      for (let i = 0; i < 3; i++) {
+        await advance(50_000)
+        target.pushEvent(piAssistantMessageEnd({ text: `chunk ${i}` }))
+        await settle()
+      }
+      await advance(1000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('timed out')
+      expect(result.text).toContain('2 minutes')
+      expect(target.client.request).toHaveBeenCalledWith({ type: 'abort' })
+      const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+      expect(notif?.[1]).toMatchObject({ status: 'failed' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('pi: idleTimeoutMs fires only after SILENCE — an event resets the clock, and a pending forwarded approval holds it open', async () => {
+    vi.useFakeTimers()
+    try {
+      const target = makeFakePiTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: {
+            defaultModel: 'openai-codex/gpt-5.6-luna',
+            idleTimeoutMs: 120_000,
+            turnTimeoutMs: 0
+          }
+        })),
+        spawnPiTarget: target.spawnPiTarget,
+        heartbeatMs: 30_000,
+        piAbortSettleGraceMs: 20
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_pi_idle' })
+      const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+      await settle()
+
+      for (let i = 0; i < 4; i++) {
+        await advance(90_000)
+        target.pushEvent(piAssistantMessageEnd({ text: `chunk ${i}` }))
+        await settle()
+      }
+      expect(target.client.request).not.toHaveBeenCalledWith({ type: 'abort' })
+
+      void target.gateHandler()({
+        toolCallId: 'pi-call-parked',
+        toolName: 'bash',
+        input: { command: 'ls' }
+      })
+      await settle()
+      const approval = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')?.[1] as
+        { requestId: string } | undefined
+      expect(approval).toBeTruthy()
+      await advance(600_000)
+      expect(target.client.request).not.toHaveBeenCalledWith({ type: 'abort' })
+
+      dispatcher.resolveApproval(approval!.requestId, 'allow')
+      await advance(130_000)
+      await advance(1000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('no activity')
+      expect(result.text).toContain('2 minutes')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('pi: both caps 0 → no watchdog interval is ever armed', async () => {
+    vi.useFakeTimers()
+    const intervals = recordIntervals()
+    try {
+      const target = makeFakePiTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: {
+            defaultModel: 'openai-codex/gpt-5.6-luna',
+            turnTimeoutMs: 0,
+            idleTimeoutMs: 0
+          }
+        })),
+        spawnPiTarget: target.spawnPiTarget,
+        heartbeatMs: 30_000
+      })
+      const pending = dispatcher.dispatch(
+        { engine: 'pi', prompt: 'x' },
+        makeCtx({ fromEngine: 'claude' })
+      )
+      await settle()
+      await advance(6 * 60 * 60_000)
+      expect(target.client.request).not.toHaveBeenCalledWith({ type: 'abort' })
+      expect(intervals.delays()).toContain(30_000)
+      expect(intervals.delays()).not.toContain(DISPATCH_WATCHDOG_INTERVAL_MS)
+
+      target.pushEvent(piAssistantMessageEnd({ text: 'still here' }))
+      target.pushEvent(PI_AGENT_SETTLED)
+      await settle()
+      const result = await pending
+      expect(result.isError).toBeUndefined()
+    } finally {
+      intervals.restore()
+      vi.useRealTimers()
+    }
+  })
+
+  // ── Codex direction ──────────────────────────────────────────────────────
+
+  /** One notification addressed to the target thread — the codex liveness feed. */
+  const codexPing = (target: ReturnType<typeof makeFakeCodexTarget>, total: number): void => {
+    target.notify('thread/tokenUsage/updated', {
+      threadId: CODEX_THREAD_ID,
+      turnId: target.currentTurnId(),
+      tokenUsage: {
+        total: codexUsage({ totalTokens: total, inputTokens: total, outputTokens: 0 }),
+        last: codexUsage({ totalTokens: total }),
+        modelContextWindow: null
+      }
+    })
+  }
+
+  it('codex: with no configured caps a turn that keeps producing notifications runs past 10 AND 60 minutes and completes normally', async () => {
+    vi.useFakeTimers()
+    try {
+      const target = makeFakeCodexTarget()
+      const { dispatcher } = makeCodexHarness({
+        attachCodexTarget: target.spawnCodexTarget,
+        heartbeatMs: 30_000
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_codex_unlimited' })
+      const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+      await settle()
+
+      for (let i = 0; i < 18; i++) {
+        await advance(5 * 60_000)
+        codexPing(target, 10 * (i + 1))
+        await settle()
+      }
+      expect(target.requests.some((e) => e.method === 'turn/interrupt')).toBe(false)
+
+      target.completeTurn({ text: 'finished after 90 minutes' })
+      await settle()
+      const result = await pending
+      expect(result.isError).toBeUndefined()
+      expect(result.text).toBe('finished after 90 minutes')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('codex: turnTimeoutMs fires as an ABSOLUTE cap naming its configured minutes, even on a continuously-active turn', async () => {
+    vi.useFakeTimers()
+    try {
+      const target = makeFakeCodexTarget()
+      const { dispatcher } = makeCodexHarness({
+        attachCodexTarget: target.spawnCodexTarget,
+        dispatch: { turnTimeoutMs: 120_000 },
+        heartbeatMs: 30_000,
+        codexAbortSettleGraceMs: 10
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_codex_absolute' })
+      const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+      await settle()
+
+      for (let i = 0; i < 3; i++) {
+        await advance(50_000)
+        codexPing(target, 10 * (i + 1))
+        await settle()
+      }
+      await advance(1000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('timed out')
+      expect(result.text).toContain('2 minutes')
+      expect(target.requests.some((e) => e.method === 'turn/interrupt')).toBe(true)
+      const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
+      expect(notif?.[1]).toMatchObject({ status: 'failed' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('codex: idleTimeoutMs fires only after SILENCE — a notification resets the clock, and a pending forwarded approval holds it open', async () => {
+    vi.useFakeTimers()
+    try {
+      const target = makeFakeCodexTarget()
+      const { dispatcher } = makeCodexHarness({
+        attachCodexTarget: target.spawnCodexTarget,
+        dispatch: { idleTimeoutMs: 120_000, turnTimeoutMs: 0 },
+        heartbeatMs: 30_000,
+        codexAbortSettleGraceMs: 10
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_codex_idle' })
+      const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
+      await settle()
+
+      for (let i = 0; i < 4; i++) {
+        await advance(90_000)
+        codexPing(target, 10 * (i + 1))
+        await settle()
+      }
+      expect(target.requests.some((e) => e.method === 'turn/interrupt')).toBe(false)
+
+      void target.serverRequest('item/commandExecution/requestApproval', {
+        threadId: CODEX_THREAD_ID,
+        turnId: target.currentTurnId(),
+        itemId: 'item-cmd-parked',
+        startedAtMs: 0,
+        kind: 'command',
+        environmentId: null,
+        command: '/bin/zsh -lc "rm -rf x"',
+        cwd: '/tmp/xeng-project'
+      })
+      await settle()
+      const approval = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')?.[1] as
+        { requestId: string } | undefined
+      expect(approval).toBeTruthy()
+      await advance(600_000)
+      expect(target.requests.some((e) => e.method === 'turn/interrupt')).toBe(false)
+
+      dispatcher.resolveApproval(approval!.requestId, 'allow')
+      await advance(130_000)
+      await advance(1000)
+      const result = await pending
+      expect(result.isError).toBe(true)
+      expect(result.text).toContain('no activity')
+      expect(result.text).toContain('2 minutes')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('codex: both caps 0 → no watchdog interval is ever armed', async () => {
+    vi.useFakeTimers()
+    const intervals = recordIntervals()
+    try {
+      const target = makeFakeCodexTarget()
+      const { dispatcher } = makeCodexHarness({
+        attachCodexTarget: target.spawnCodexTarget,
+        dispatch: { turnTimeoutMs: 0, idleTimeoutMs: 0 },
+        heartbeatMs: 30_000
+      })
+      const pending = dispatcher.dispatch(
+        { engine: 'codex', prompt: 'x' },
+        makeCtx({ fromEngine: 'claude' })
+      )
+      await settle()
+      await advance(6 * 60 * 60_000)
+      expect(target.requests.some((e) => e.method === 'turn/interrupt')).toBe(false)
+      expect(intervals.delays()).toContain(30_000)
+      expect(intervals.delays()).not.toContain(DISPATCH_WATCHDOG_INTERVAL_MS)
+
+      target.completeTurn({ text: 'still here' })
+      await settle()
+      const result = await pending
+      expect(result.isError).toBeUndefined()
+    } finally {
+      intervals.restore()
+      vi.useRealTimers()
+    }
   })
 })
