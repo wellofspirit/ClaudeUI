@@ -942,6 +942,46 @@ describe('PluginManager', () => {
       delete (global as any).__resultHits
     })
 
+    it('does zero fan-out work for an item append when nobody listens', async () => {
+      // The item lane is the token firehose. With no plugin subscribed to the
+      // synthesized channels, an append must not even reach the fan-out helper
+      // — including the child (`session:subagent-stream`) branch and the
+      // explicit `session:item-delta` one, which used to fire ungated.
+      s = scaffold({ sessionIdFor: () => 'SID-1' })
+      writePlugin({
+        id: 'unrelated-listener',
+        entryJs: `module.exports = { activate(ctx) { ctx.on('session:result', () => {}) } }`
+      })
+      await s.manager.loadAll()
+      syncCore.seedSession('R-quiet', { selectedEngineId: 'claude' })
+      const root = { messageId: 'quiet', blockIndex: 0, kind: 'text' as const }
+      const child = { ...root, ownerToolUseId: 'tu-quiet' }
+      for (const target of [root, child]) {
+        emitEvent('session:item-open', [
+          'R-quiet',
+          {
+            target,
+            message: {
+              id: 'quiet',
+              role: 'assistant',
+              timestamp: 1,
+              content: [{ type: 'text', text: '' }]
+            }
+          }
+        ])
+      }
+      // Opens are RELIABLE events and are forwarded unconditionally; only the
+      // volatile appends after this point are under test.
+      const spy = vi.spyOn(
+        s.manager as unknown as { fireSessionScoped: (channel: string, args: unknown[]) => void },
+        'fireSessionScoped'
+      )
+      emitEvent('session:item-delta', ['R-quiet', { target: root, chunk: 'root tokens' }])
+      emitEvent('session:item-delta', ['R-quiet', { target: child, chunk: 'child tokens' }])
+      expect(spy).not.toHaveBeenCalled()
+      spy.mockRestore()
+    })
+
     it('drops events silently when no listener is registered for the channel', async () => {
       // No plugins at all — event on an unregistered channel must not throw.
       await s.manager.loadAll()
