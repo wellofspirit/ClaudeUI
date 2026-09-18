@@ -538,6 +538,17 @@ export const PAGES: SettingsPage[] = [
       'A session on one engine can hand a task to an agent on another. Configure what each engine accepts when it is the target.',
     groups: [
       {
+        // App-level and first: the slot count bounds every direction at once,
+        // so it is read before any per-target rule. No storage tag (ClaudeUI's
+        // own settings.json) and no engine segment — a cap that counts
+        // dispatches into ALL engines cannot belong to one of them. No
+        // applies-later badge either: the dispatcher re-reads the setting on
+        // every dispatch call, so a change binds the very next one.
+        id: 'concurrency',
+        label: 'Concurrency',
+        items: itemsOf('dispatch-concurrency')
+      },
+      {
         id: 'into',
         label: 'Dispatch into',
         storage: engineFile,
@@ -1026,6 +1037,7 @@ export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; gro
   'vendor-anthropic': { page: 'models', group: 'anthropic' },
   accounts: { page: 'models', group: 'accounts' },
 
+  'dispatch-concurrency': { page: 'dispatch', group: 'concurrency' },
   'claude-dispatch': { page: 'dispatch', group: 'into' },
   'opencode-dispatch': { page: 'dispatch', group: 'into' },
   'pi-dispatch': { page: 'dispatch', group: 'into' },

@@ -29,6 +29,17 @@ import {
 } from '../settings-pages'
 import type { EngineCapabilities } from '../../../../../shared/model-capabilities'
 
+/**
+ * One group of the dispatch page BY ID. The page grew an app-level Concurrency
+ * card in front of the two engine cards (ADR-033, 2026-09-18), and every
+ * assertion below is about a named card, not about a position.
+ */
+function dispatchGroup(id: string): SettingsGroup {
+  const group = pageOf('dispatch').groups.find((g) => g.id === id)
+  if (!group) throw new Error(`dispatch page has no group "${id}"`)
+  return group
+}
+
 /** Every item a group can render, across every engine list it declares. */
 function allItemsOf(group: SettingsGroup): Array<{ key: string; engine?: string }> {
   if (group.items) return group.items.map((i) => ({ key: i.key }))
@@ -98,7 +109,7 @@ describe('PAGES structure', () => {
         'anthropic',
         'accounts'
       ],
-      dispatch: ['into', 'limits'],
+      dispatch: ['concurrency', 'into', 'limits'],
       mockups: ['network'],
       remote: ['follow', 'server', 'access', 'security', 'links'],
       claude: ['sandbox', 'proxy'],
@@ -233,12 +244,13 @@ describe('PAGES structure', () => {
     // pi joined as a dispatch TARGET: core has accepted it since M4c, the UI
     // pane is what was missing (ADR-065 § Cross-engine dispatch into pi).
     // Codex joined on the same terms with ADR-068 §6 (slice H accepted it).
-    expect(enginesOf(pageOf('dispatch').groups[0])).toEqual(['claude', 'opencode', 'pi', 'codex'])
-    expect(enginesOf(pageOf('dispatch').groups[1])).toEqual(['claude', 'opencode', 'pi', 'codex'])
+    expect(enginesOf(dispatchGroup('into'))).toEqual(['claude', 'opencode', 'pi', 'codex'])
+    expect(enginesOf(dispatchGroup('limits'))).toEqual(['claude', 'opencode', 'pi', 'codex'])
   })
 
   it('the Limits card follows the Dispatch-into segment instead of drawing its own', () => {
-    const [into, limits] = pageOf('dispatch').groups
+    const into = dispatchGroup('into')
+    const limits = dispatchGroup('limits')
     expect(into.engineFrom).toBeUndefined()
     // Two segments on one page would let the two cards describe DIFFERENT
     // targets while sitting one above the other.
@@ -260,7 +272,7 @@ describe('PAGES structure', () => {
     expect(noteOf(defaults, 'pi')).toBe('Applies to new pi sessions.')
 
     // The dispatch Limits note names the target and its callers.
-    const limits = pageOf('dispatch').groups[1]
+    const limits = dispatchGroup('limits')
     // Codex hosts `dispatch_agent` too (ADR-033 slice H), so it is named as a
     // possible CALLER of every other target, not only as a target of its own.
     expect(noteOf(limits, 'pi')).toContain('into pi from a Claude, opencode or Codex session')
@@ -269,7 +281,7 @@ describe('PAGES structure', () => {
   })
 
   it('the Limits card carries no applies-later badge and no storage tag', () => {
-    const limits = pageOf('dispatch').groups[1]
+    const limits = dispatchGroup('limits')
     // The dispatcher re-reads `loadEngineConfig(engine).dispatch` on EVERY
     // dispatch call (cross-engine-dispatcher.ts's three cost-cap gates), so a
     // changed cap or timeout binds the very next one — "Next session" would be
@@ -280,7 +292,7 @@ describe('PAGES structure', () => {
     // one on the card directly above it (`board2-Dispatch.png`).
     expect(limits.storage).toBeUndefined()
     expect(storageOf(limits, 'pi')).toBeUndefined()
-    expect(storageOf(pageOf('dispatch').groups[0], 'pi')).toBe('engines/pi.json')
+    expect(storageOf(dispatchGroup('into'), 'pi')).toBe('engines/pi.json')
   })
 
   it('a STATIC note and applies-on are returned unchanged, whatever the engine', () => {
@@ -327,7 +339,8 @@ describe('Codex on the topic pages (ADR-068 §6, Slice 5b)', () => {
   })
 
   it('Dispatch into / Limits gain a codex segment and name its real callers', () => {
-    const [into, limits] = pageOf('dispatch').groups
+    const into = dispatchGroup('into')
+    const limits = dispatchGroup('limits')
     expect(enginesOf(into)).toEqual(['claude', 'opencode', 'pi', 'codex'])
     expect(enginesOf(limits)).toEqual(['claude', 'opencode', 'pi', 'codex'])
     expect(storageOf(into, 'codex')).toBe('engines/codex.json')
@@ -351,7 +364,7 @@ describe('Codex on the topic pages (ADR-068 §6, Slice 5b)', () => {
     }
     // DISPATCH_CALLERS.codex = 'unsupported' — the dispatcher has accepted
     // Codex as a target since ADR-033 slice H.
-    const limits = pageOf('dispatch').groups[1]
+    const limits = dispatchGroup('limits')
     for (const engine of enginesOf(limits)) {
       expect(noteOf(limits, engine)).not.toContain('unsupported')
     }

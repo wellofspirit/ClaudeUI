@@ -20,7 +20,11 @@ vi.mock('../../../core/services/logger', () => ({
 // used by createCollabServer itself to resolve the dispatch_agent model hint
 // (ADR-033 follow-up) — see the describe block below.
 vi.mock('../../../core/services/ui-config', () => ({
-  loadEngineConfig: vi.fn(() => ({}))
+  loadEngineConfig: vi.fn(() => ({})),
+  // The REAL dispatcher singleton resolves its concurrency cap from the app
+  // settings on every dispatch (ADR-033, 2026-09-18). Empty settings = the
+  // default cap, and no read of the developer's own settings.json.
+  loadSettings: vi.fn(() => ({}))
 }))
 // The model-hint's cached-known-models source (ADR-033 follow-up). Mocked to
 // a controllable, synchronous stub — createCollabServer must NEVER trigger

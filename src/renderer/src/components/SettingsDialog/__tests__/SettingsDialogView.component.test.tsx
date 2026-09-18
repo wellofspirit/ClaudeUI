@@ -504,7 +504,10 @@ describe('engine segments', () => {
     expect(
       screen.getAllByTestId('SettingsGroup.engineSegment.option').map((el) => el.dataset.id)
     ).toEqual(['claude', 'opencode', 'pi', 'codex'])
+    // The app-level Concurrency row leads the page: its cap bounds every
+    // direction, so it is read before any per-target rule (ADR-033, 2026-09-18).
     expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
+      'dispatchMaxConcurrent',
       'piDispatch',
       'piDispatchLimits'
     ])
@@ -536,6 +539,7 @@ describe('engine segments', () => {
 
     // …and the Limits card renders the engine the segment above it is on.
     expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
+      'dispatchMaxConcurrent',
       'opencodeDispatch',
       'opencodeDispatchLimits'
     ])
@@ -544,6 +548,7 @@ describe('engine segments', () => {
   it('switching the into segment swaps the Limits card with it', () => {
     renderView({ activePage: 'dispatch', engineByGroup: { 'dispatch/into': 'claude' as EngineId } })
     expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
+      'dispatchMaxConcurrent',
       'claudeDispatch',
       'claudeDispatchLimits'
     ])
@@ -555,6 +560,7 @@ describe('engine segments', () => {
       engineByGroup: { 'dispatch/into': 'claude' as EngineId, 'dispatch/limits': 'pi' as EngineId }
     })
     expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
+      'dispatchMaxConcurrent',
       'claudeDispatch',
       'claudeDispatchLimits'
     ])

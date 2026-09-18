@@ -48,7 +48,8 @@ import { buildRuleset } from '../opencode/permission-ruleset'
 import type { PermissionRule } from '../opencode/permission-ruleset'
 import { parseModelString } from '../opencode/model-discovery'
 import { claudeSpawnPrep } from '../providers/claude-spawn-prep'
-import { loadEngineConfig } from './ui-config'
+import { loadEngineConfig, loadSettings } from './ui-config'
+import { resolveDispatchMaxConcurrent } from '../../shared/dispatch-concurrency'
 import { transformAssistantMessage } from './assistant-message'
 import { extractToolResultContent } from './tool-result-content'
 import { ClaudeItemStreamLifecycle } from './claude-item-stream'
@@ -435,7 +436,16 @@ export interface DispatcherDeps {
    * account asked for is then the caller's pin, else the active one.
    */
   codexVaultAccounts?: boolean
-  maxConcurrent?: number
+  /**
+   * The app-wide concurrent-dispatch cap, as a THUNK: it is called at the gate
+   * on every dispatch, not read once in the constructor, because the setting
+   * behind it is user-editable while the app runs (ADR-033, 2026-09-18).
+   * `Infinity` means no limit. Defaults to
+   * {@link defaultResolveMaxConcurrent}, which reads
+   * `AppSettings.dispatchMaxConcurrent` through
+   * {@link resolveDispatchMaxConcurrent}.
+   */
+  resolveMaxConcurrent?: () => number
   heartbeatMs?: number
   /**
    * ADR-033 M4c: how long `resolveAndRunPi`'s give-up path (timeout/abort/
@@ -501,7 +511,16 @@ const EMPTY_PI_SESSION_ALLOWS: ReadonlySet<string> = new Set()
  */
 const EMPTY_CODEX_SESSION_ALLOWS: ReadonlySet<string> = new Set()
 
-const MAX_CONCURRENT = 3
+/**
+ * The default app-wide dispatch cap, read fresh on EVERY dispatch call so a
+ * Settings change binds the next one without an app restart — the same
+ * re-read-per-call contract `loadEngineConfig(engine).dispatch` already has for
+ * the per-target cost/timeout gates. `loadSettings` is a small JSON read and a
+ * dispatch is a rare, expensive event, so there is nothing to cache.
+ */
+const defaultResolveMaxConcurrent = (): number =>
+  resolveDispatchMaxConcurrent(loadSettings().dispatchMaxConcurrent)
+
 const HEARTBEAT_MS = 15 * 1000
 /**
  * How often the turn watchdog re-checks the two configured caps. A polling
@@ -1585,7 +1604,7 @@ async function defaultSpawnPiTarget(opts: PiTargetSpawnOpts): Promise<PiTargetPr
 
 export class CrossEngineDispatcher {
   private readonly deps: DispatcherDeps
-  private readonly maxConcurrent: number
+  private readonly resolveMaxConcurrent: () => number
   private readonly heartbeatMs: number
   private readonly piAbortSettleGraceMs: number
   private readonly codexAbortSettleGraceMs: number
@@ -1630,7 +1649,7 @@ export class CrossEngineDispatcher {
 
   constructor(deps: DispatcherDeps) {
     this.deps = deps
-    this.maxConcurrent = deps.maxConcurrent ?? MAX_CONCURRENT
+    this.resolveMaxConcurrent = deps.resolveMaxConcurrent ?? defaultResolveMaxConcurrent
     this.heartbeatMs = deps.heartbeatMs ?? HEARTBEAT_MS
     this.piAbortSettleGraceMs = deps.piAbortSettleGraceMs ?? PI_ABORT_SETTLE_GRACE_MS
     this.codexAbortSettleGraceMs = deps.codexAbortSettleGraceMs ?? CODEX_ABORT_SETTLE_GRACE_MS
@@ -1756,9 +1775,16 @@ export class CrossEngineDispatcher {
     ) {
       return errorResult(`Dispatching into engine "${req.engine}" is not supported yet.`)
     }
-    if (this.activeDispatches >= this.maxConcurrent) {
+    // Read the cap HERE, not in the constructor: the user can raise it in
+    // Settings mid-run and the next dispatch has to honour the new number.
+    // `Infinity` (the "no limit" pick) can never satisfy the comparison, so the
+    // refusal text below never has to render it.
+    const maxConcurrent = this.resolveMaxConcurrent()
+    if (this.activeDispatches >= maxConcurrent) {
       return errorResult(
-        `Too many concurrent dispatches (max ${this.maxConcurrent}). Wait for one to finish and retry.`
+        `Too many concurrent dispatches (max ${maxConcurrent}). Wait for one to finish and retry, ` +
+          'or raise "Max concurrent dispatches" in Settings › Cross-engine dispatch ' +
+          '(0 means no limit).'
       )
     }
 

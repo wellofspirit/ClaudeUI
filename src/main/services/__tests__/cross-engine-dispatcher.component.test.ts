@@ -11,6 +11,11 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
+import {
+  DEFAULT_MAX_CONCURRENT_DISPATCHES,
+  resolveDispatchMaxConcurrent
+} from '../../../shared/dispatch-concurrency'
+
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
 vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
@@ -248,6 +253,10 @@ function makeHarness(overrides: Partial<DispatcherDeps> = {}): {
     // PiTargetEntry.settled's "RACE NOTE") fast in tests by default — tests
     // that specifically exercise the grace period's own timing override this.
     piAbortSettleGraceMs: 20,
+    // Hermetic: the production default resolver reads the USER's settings.json
+    // (`AppSettings.dispatchMaxConcurrent`), which no test may depend on. Every
+    // concurrency test overrides this with the cap it is actually about.
+    resolveMaxConcurrent: () => DEFAULT_MAX_CONCURRENT_DISPATCHES,
     ...overrides
   }
   return { dispatcher: new CrossEngineDispatcher(deps), client, stream, deps: { serverManager } }
@@ -351,7 +360,7 @@ describe('CrossEngineDispatcher — guards', () => {
   })
 
   it('enforces the global concurrency cap', async () => {
-    const { dispatcher, client, stream } = makeHarness({ maxConcurrent: 2 })
+    const { dispatcher, client, stream } = makeHarness({ resolveMaxConcurrent: () => 2 })
     // Hold both turns open so the dispatches stay in flight.
     holdTurn(client)
 
@@ -372,8 +381,72 @@ describe('CrossEngineDispatcher — guards', () => {
     expect(dispatcher.inFlightCount).toBe(0)
   })
 
+  // The cap became a user setting (ADR-033, 2026-09-18): "the slot can be a
+  // configuration as well … in certain cases we will need more dispatches". The
+  // three tests below pin the three things that ruling asks of the gate.
+
+  it('refuses with the EFFECTIVE cap and where to raise it', async () => {
+    const { dispatcher, client } = makeHarness({ resolveMaxConcurrent: () => 1 })
+    holdTurn(client)
+
+    void dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx())
+    await tick()
+
+    const refused = await dispatcher.dispatch({ engine: 'opencode', prompt: 'b' }, makeCtx())
+    expect(refused.isError).toBe(true)
+    // The number the caller actually hit, not the built-in default — a model
+    // told "max 3" by an app configured to 1 would retry into the same wall.
+    expect(refused.text).toContain('max 1')
+    expect(refused.text).toContain('Settings')
+    expect(refused.text).toContain('0 means no limit')
+  })
+
+  it('admits past the old built-in cap when the resolver says "no limit"', async () => {
+    // `0` in Settings resolves to Infinity — five at once, where the constant
+    // this replaced allowed three.
+    const { dispatcher, client, stream } = makeHarness({
+      resolveMaxConcurrent: () => resolveDispatchMaxConcurrent(0)
+    })
+    holdTurn(client)
+
+    const runs = [1, 2, 3, 4, 5].map((n) =>
+      dispatcher.dispatch({ engine: 'opencode', prompt: `p${n}` }, makeCtx())
+    )
+    await tick()
+    expect(dispatcher.inFlightCount).toBe(5)
+
+    for (let n = 1; n <= 5; n++) completeTurn(stream, `oc-sess-${n}`)
+    const results = await Promise.all(runs)
+    expect(results.every((r) => r.isError === undefined)).toBe(true)
+    expect(dispatcher.inFlightCount).toBe(0)
+  })
+
+  it('reads the cap per call, so a Settings change binds the very next dispatch', async () => {
+    let cap = 1
+    const { dispatcher, client, stream } = makeHarness({ resolveMaxConcurrent: () => cap })
+    holdTurn(client)
+
+    const d1 = dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx())
+    await tick()
+    const refused = await dispatcher.dispatch({ engine: 'opencode', prompt: 'b' }, makeCtx())
+    expect(refused.isError).toBe(true)
+
+    // The user raises it while the first dispatch is still running. No restart,
+    // no new dispatcher — the constructor never read this value.
+    cap = 2
+    const d2 = dispatcher.dispatch({ engine: 'opencode', prompt: 'c' }, makeCtx())
+    await tick()
+    expect(dispatcher.inFlightCount).toBe(2)
+
+    completeTurn(stream, 'oc-sess-1')
+    completeTurn(stream, 'oc-sess-2')
+    const [r1, r2] = await Promise.all([d1, d2])
+    expect(r1.isError).toBeUndefined()
+    expect(r2.isError).toBeUndefined()
+  })
+
   it('same-tick dispatches cannot race past the cap (slot reserved before first await)', async () => {
-    const { dispatcher, client } = makeHarness({ maxConcurrent: 1 })
+    const { dispatcher, client } = makeHarness({ resolveMaxConcurrent: () => 1 })
     // Gate target creation so the first dispatch is parked INSIDE resolution
     // when the second one starts — the exact window the old check-then-await
     // ordering left open.

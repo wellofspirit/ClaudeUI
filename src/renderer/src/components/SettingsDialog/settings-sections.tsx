@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { DEFAULT_SETTINGS, useActiveSession, useSessionStore } from '../../stores/session-store'
+import { DEFAULT_MAX_CONCURRENT_DISPATCHES } from '../../../../shared/dispatch-concurrency'
 import type { AppSettings } from '../../stores/session-store'
 import { PermissionsDialog } from '../PermissionsDialog'
 import type {
@@ -964,6 +965,54 @@ function DispatchIntoSection({
             }
           />
         )}
+      </SettingRow>
+    </div>
+  )
+}
+
+/**
+ * "Concurrency" — the app-wide slot count (ADR-033, 2026-09-18). The one row on
+ * the dispatch page that is NOT per-target: the gate it feeds counts every
+ * in-flight dispatch in the process, whatever engine it went to, so it lives in
+ * ClaudeUI's own settings.json rather than in any `engines/<engine>.json`.
+ *
+ * Unset is a real state, not a synonym for 3 — the placeholder says what empty
+ * means and Reset clears the key. `resolveDispatchMaxConcurrent` owns the rule
+ * and is the same function the dispatcher calls, so the field and the gate can
+ * never drift.
+ */
+export function DispatchConcurrencySection({
+  settings,
+  update
+}: {
+  settings: AppSettings
+  update: (p: Partial<AppSettings>) => void
+}): React.JSX.Element {
+  return (
+    <div data-testid="DispatchConcurrencySection" className="divide-y divide-border/55">
+      <SettingRow
+        testid="DispatchConcurrencySection.maxConcurrentRow"
+        label="Max concurrent dispatches"
+        description={`Dispatched agents running at once, across every session. Empty means ${DEFAULT_MAX_CONCURRENT_DISPATCHES}; 0 means no limit.`}
+        modified={settings.dispatchMaxConcurrent !== undefined}
+        onReset={() => update({ dispatchMaxConcurrent: undefined })}
+      >
+        <NumberField
+          testid="DispatchConcurrencySection.maxConcurrent"
+          value={settings.dispatchMaxConcurrent}
+          unit="agents"
+          placeholder={String(DEFAULT_MAX_CONCURRENT_DISPATCHES)}
+          // No `min`, unlike a field whose floor is meaningful: clamping a
+          // fumbled -1 to 0 here would silently turn "one slot, mistyped" into
+          // "no limit". A negative drops the key instead (same as the dispatch
+          // timeout fields), and a fraction is floored so the file never holds
+          // a count the resolver would have to reinterpret.
+          onChange={(v) =>
+            update({
+              dispatchMaxConcurrent: v === undefined || v < 0 ? undefined : Math.floor(v)
+            })
+          }
+        />
       </SettingRow>
     </div>
   )
@@ -3291,6 +3340,37 @@ export const SECTIONS: Section[] = [
             description="Applies to the Claude API connection; shell commands only when the toggle above is on."
           />
         )
+      }
+    ]
+  },
+  {
+    // App-level, and the first card on the dispatch page: the slot count bounds
+    // every direction at once, so it is read before any per-target rule.
+    id: 'dispatch-concurrency',
+    label: 'Concurrency',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <line x1="4" y1="6" x2="20" y2="6" />
+        <line x1="4" y1="12" x2="20" y2="12" />
+        <line x1="4" y1="18" x2="20" y2="18" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'dispatchMaxConcurrent',
+        label: 'Max concurrent dispatches',
+        keywords:
+          'dispatch concurrent concurrency slots parallel simultaneous agents limit cap max cross engine',
+        render: (s, u) => <DispatchConcurrencySection settings={s} update={u} />
       }
     ]
   },

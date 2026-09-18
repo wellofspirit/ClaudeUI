@@ -401,3 +401,25 @@ hard way:** `vi.useFakeTimers()` must be installed BEFORE the dispatcher is cons
 reading real wall time and no cap ever fires. The gated real-binary suites
 (`src/integration/{pi,codex}/*-dispatch-target.integration.test.ts`) now set `turnTimeoutMs`
 explicitly, so a wedged binary fails them instead of hanging them.
+
+**Concurrency (same-day ruling).** The app-wide slot count is a setting too: "the slot can be a
+configuration as well, so we can have more slots. not saying I want to hide the effect, but in
+certain cases we will need more dispatches" (Daniel, 2026-09-18). `const MAX_CONCURRENT = 3` and
+`deps.maxConcurrent` are replaced by `deps.resolveMaxConcurrent?: () => number`, called AT THE GATE
+on every `dispatch()` rather than once in the constructor — so raising the cap in Settings binds the
+very next dispatch, with no restart, the same re-read-per-call contract the per-target cost and
+timeout gates already have. The value is the new app-level setting
+`AppSettings.dispatchMaxConcurrent` (ClaudeUI's own `settings.json`, NOT any
+`engines/<engine>.json` — the gate counts every in-flight dispatch in the process, whatever engine
+it went to). `resolveDispatchMaxConcurrent` (`src/shared/dispatch-concurrency.ts`) is the single
+resolution rule, imported by both the dispatcher and the Settings row so the field and the gate
+cannot drift: **unset → 3** (the old constant stays the default, so the effect is opt-in and nobody's
+behaviour moves until they raise it), **`0` → `Infinity`, i.e. no limit**, `n` → `n` floored to a
+whole agent and never below 1; a negative or non-finite value reads as unset, never as `0`. The
+refusal text now names the EFFECTIVE cap and where to change it — a model told "max 3" by an app
+configured to 1 would just retry into the same wall — and says that `0` means no limit. The UI is a
+new FIRST group "Concurrency" on the Cross-engine dispatch page (`DispatchConcurrencySection`, row
+testids `.maxConcurrentRow` / `.maxConcurrent`), app-level: no storage tag, no engine segment and no
+applies-later badge, since a cap over all engines belongs to none of them and a change binds
+immediately. Empty renders the placeholder `3` and Reset CLEARS the key rather than writing 3, so the
+default stays a default.
