@@ -52,6 +52,7 @@
 import type { HostWindowHandle } from '../host'
 import { SyncCore, type Delivery } from '../sync/sync-core'
 import { streamEventScopeOf, type StreamLaneFrame } from '../shared/sync/stream'
+import { isItemTarget, itemStreamKey } from '../shared/sync/item-stream'
 import { getHostWindow } from './host-window'
 import { logger } from './logger'
 import {
@@ -158,8 +159,9 @@ export function addStreamSubscriber(connectionId: string, sink: StreamSink): () 
  * client never has to track what it previously asked for.
  *
  * Pushes the replay for every newly-watched session immediately (the
- * terminal-attach symmetry): one `offset: 0` frame per non-empty accumulation,
- * which is a REPLACE by construction and is therefore the lane's self-heal. The
+ * terminal-attach symmetry): ONE `replace` frame per watched session carrying its
+ * whole active item set, the empty set included, at the ring watermark it was
+ * read at — an atomic set replacement, and therefore the lane's self-heal. The
  * replay goes out for the WHOLE new set, not just the added ids: re-sending the
  * same set is exactly how a client cures a mismatch.
  *
@@ -447,6 +449,16 @@ export const syncCore = new SyncCore({
       LOG_SOURCE,
       `applyEvent("${channel}") threw; canonical state skipped this event but ` +
         `delivery continued: ${err instanceof Error ? err.message : String(err)}`
+    ),
+  // DEBUG, not error: every reason here is survivable on a lossy lane (a delta
+  // racing its own seal is routine). What it buys is a named diagnosis instead
+  // of silence when an adapter streams into a target it never opened. The chunk
+  // TEXT is deliberately absent — this line must stay safe to leave on.
+  onItemDropped: (routingId, reason, target) =>
+    logger.debug(
+      LOG_SOURCE,
+      `dropped item delta for "${routingId}" (${reason}), target ` +
+        `${isItemTarget(target) ? itemStreamKey(target) : '<invalid>'}`
     )
 })
 

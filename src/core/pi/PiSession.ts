@@ -1219,7 +1219,11 @@ export class PiSession extends BaseSession {
     switch (output.kind) {
       case 'item_open':
         this.rememberPiMessage(output.message)
-        this.send('session:item-open', { target: output.target, message: output.message })
+        this.send('session:item-open', {
+          target: output.target,
+          message: output.message,
+          ...(output.startedAt === undefined ? {} : { startedAt: output.startedAt })
+        })
         break
 
       case 'item_delta':

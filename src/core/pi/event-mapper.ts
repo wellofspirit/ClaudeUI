@@ -142,7 +142,7 @@ export interface PiSubagentUpdatePayload {
 }
 
 export type PiMapperOutput =
-  | { kind: 'item_open'; target: ItemStreamTarget; message: ChatMessage }
+  | { kind: 'item_open'; target: ItemStreamTarget; message: ChatMessage; startedAt?: number }
   | { kind: 'item_delta'; target: ItemStreamTarget; chunk: string; message: ChatMessage }
   | { kind: 'item_seal'; target?: ItemStreamTarget; message: ChatMessage }
   | { kind: 'message'; message: ChatMessage }
@@ -234,7 +234,15 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
             const block = scaffold.content[blockIndex]
             if (block?.type === kind)
               scaffold.content[blockIndex] = { ...block, text: previous ?? '' }
-            outputs.push({ kind: 'item_open', target, message: scaffold })
+            const startedAt = state.thinkingStartedAt.get(index)
+            outputs.push({
+              kind: 'item_open',
+              target,
+              message: scaffold,
+              // Thinking only — `thinkingStartedAt` was just set above for the
+              // first delta of this block; text blocks never enter that map.
+              ...(startedAt === undefined ? {} : { startedAt })
+            })
             state.openedBlocks.add(index)
           }
         }

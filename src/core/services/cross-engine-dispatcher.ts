@@ -1418,7 +1418,7 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
       abortController: opts.abortController,
       canUseTool: opts.canUseTool,
       // ADR-033 M3: stream_event text/thinking deltas so driveClaudeTurn can
-      // forward them as session:subagent-stream for the dispatch TaskCard.
+      // forward them as item open/delta/seal events under the dispatch TaskCard.
       includePartialMessages: true
     }
   })
@@ -2847,7 +2847,13 @@ export class CrossEngineDispatcher {
       const content = [...message.content]
       content[item.blockIndex] =
         item.kind === 'thinking' ? { type: 'thinking', text: '' } : { type: 'text', text: '' }
-      entry.ctx.emit('session:item-open', { target, message: { ...message, content } })
+      entry.ctx.emit('session:item-open', {
+        target,
+        message: { ...message, content },
+        ...(item.kind === 'thinking'
+          ? { startedAt: acc.parts.get(item.partId)?.time?.start ?? Date.now() }
+          : {})
+      })
       active = { target, ownerSessionId: ownerToolUseId, partId: item.partId }
       entry.activeStreamItems.set(key, active)
     }
@@ -2870,7 +2876,11 @@ export class CrossEngineDispatcher {
     if (!entry.activeStreamItems.has(key)) {
       const block = message.content[item.blockIndex]
       if (item.kind === 'thinking' && block?.type === 'thinking' && !block.text) return
-      entry.ctx.emit('session:item-open', { target, message })
+      entry.ctx.emit('session:item-open', {
+        target,
+        message,
+        ...(item.kind === 'thinking' ? { startedAt: snap?.time?.start ?? Date.now() } : {})
+      })
       entry.activeStreamItems.set(key, {
         target,
         ownerSessionId: ownerToolUseId,
@@ -3346,12 +3356,13 @@ export class CrossEngineDispatcher {
       itemStreams: undefined as unknown as ClaudeItemStreamLifecycle
     }
     entry.itemStreams = new ClaudeItemStreamLifecycle({
-      open: (target, message) => {
+      open: (target, message, startedAt) => {
         const ownerToolUseId = entry.ctx.toolUseId
         if (ownerToolUseId)
           entry.ctx.emit('session:item-open', {
             target: { ...target, ownerToolUseId },
-            message
+            message,
+            ...(startedAt === undefined ? {} : { startedAt })
           })
       },
       delta: (target, chunk) => {
@@ -3997,8 +4008,8 @@ export class CrossEngineDispatcher {
   /**
    * Forward a pi dispatch target's live turn output as engine-neutral
    * subagent events — byte-matches `forwardClaudeTargetMessage`'s /
-   * `handleOpencodeTargetStream`'s payload shapes exactly (subagent-stream /
-   * subagent-message / subagent-tool-result). ALSO owns turn-completion:
+   * `handleOpencodeTargetStream`'s payload shapes exactly (item-open / item-delta /
+   * item-seal, subagent-message, subagent-tool-result). ALSO owns turn-completion:
    * `result`/`error` MapperOutputs settle `entry.settled` (see `drivePiTurn`'s
    * doc comment) and `usage` outputs accumulate this turn's token total.
    * `bash_output`/`ignore` are skipped — the caller's TaskCard doesn't stream
@@ -4029,7 +4040,13 @@ export class CrossEngineDispatcher {
     switch (out.kind) {
       case 'item_open': {
         const target = { ...out.target, ownerToolUseId: toolUseId }
-        entry.ctx.emit('session:item-open', { target, message: out.message })
+        // The mapper already measured the thought's start; forwarding it
+        // unchanged is what makes the child's live timer match the parent's.
+        entry.ctx.emit('session:item-open', {
+          target,
+          message: out.message,
+          ...(out.startedAt === undefined ? {} : { startedAt: out.startedAt })
+        })
         break
       }
       case 'item_delta': {
@@ -4902,6 +4919,7 @@ export class CrossEngineDispatcher {
       entry.activeStreamItems.set(key, active)
       entry.ctx.emit('session:item-open', {
         target,
+        ...(active.startedAt === undefined ? {} : { startedAt: active.startedAt }),
         message: {
           id: messageId,
           role: 'assistant',

@@ -56,12 +56,16 @@ export function ChatPanel(): React.JSX.Element {
     () => overlayItemStreams(focusedData.messages, itemStreams),
     [focusedData.messages, itemStreams]
   )
-  const activeThinkingSlotsByMessage = useMemo(() => {
-    const slots = new Map<string, number[]>()
+  // The item's OWN start clock rides the open (`ActiveItemStream.startedAt`), so
+  // a thinking block that begins after a tool call times from the thought rather
+  // than from message creation. Absent for engines that do not measure it — the
+  // bubble falls back to `message.timestamp`, the pre-existing behaviour.
+  const activeThinkingByMessage = useMemo(() => {
+    const slots = new Map<string, Array<{ index: number; startedAt?: number }>>()
     for (const stream of Object.values(itemStreams)) {
       if (stream.target.ownerToolUseId || stream.target.kind !== 'thinking') continue
       const current = slots.get(stream.target.messageId) ?? []
-      current.push(stream.target.blockIndex)
+      current.push({ index: stream.target.blockIndex, startedAt: stream.startedAt })
       slots.set(stream.target.messageId, current)
     }
     return slots
@@ -321,7 +325,7 @@ export function ChatPanel(): React.JSX.Element {
                         message={msg}
                         pendingApprovals={pendingApprovals}
                         isLastAssistant={msg.id === lastAssistantId}
-                        activeThinkingSlots={activeThinkingSlotsByMessage.get(msg.id)}
+                        activeThinking={activeThinkingByMessage.get(msg.id)}
                       />
                     </div>
                   ))}

@@ -148,8 +148,8 @@ afterEach(() => {
   for (const s of liveSessions.splice(0)) s.cancel()
 })
 
-describe('ClaudeSession — thinking span reaches the emitter (phase 4b)', () => {
-  it('stamps thinkingDurationMs on the assistant message that seals the span', async () => {
+describe('ClaudeSession — thinking span duration lands on the sealed block', () => {
+  it('stamps durationMs on the sealed thinking block', async () => {
     mockQuery.mockImplementation(() =>
       makeFakeQueryHandle([
         streamEvent({ type: 'message_start', message: { id: 'msg_wire_1' } }),

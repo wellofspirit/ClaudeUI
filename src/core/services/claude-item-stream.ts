@@ -27,7 +27,8 @@ interface MessageState {
 }
 
 export interface ClaudeItemStreamSink {
-  open(target: ItemStreamTarget, message: ChatMessage): void
+  /** `startedAt` is the item's own start clock — thinking blocks only. */
+  open(target: ItemStreamTarget, message: ChatMessage, startedAt?: number): void
   delta(target: ItemStreamTarget, chunk: string): void
   seal(target: ItemStreamTarget | undefined, message: ChatMessage, owner: Owner): void
   updateLocal(message: ChatMessage, owner: Owner): void
@@ -94,7 +95,11 @@ export class ClaudeItemStreamLifecycle {
       if ((block.type === 'text' || block.type === 'thinking') && block.text) {
         entry.opened = true
         if (block.type === 'thinking') entry.thinkingStartedAt = Date.now()
-        this.sink.open(this.target(state, event.index, block.type), this.message(state))
+        this.sink.open(
+          this.target(state, event.index, block.type),
+          this.message(state),
+          entry.thinkingStartedAt
+        )
       }
       this.publishLocal(state)
       return
@@ -126,7 +131,8 @@ export class ClaudeItemStreamLifecycle {
       const target = this.target(state, event.index!, kind)
       if (!block.opened) {
         block.opened = true
-        this.sink.open(target, this.message(state))
+        // Undefined for a text block, which carries no item-local clock.
+        this.sink.open(target, this.message(state), block.thinkingStartedAt)
       }
       this.sink.delta(target, chunk)
       if (block.block.type === 'text') {
@@ -182,6 +188,21 @@ export class ClaudeItemStreamLifecycle {
     const key = ownerKey(owner)
     const state = this.messages.get(key)
     if (state) this.finish(key, state, retainForNativeStop)
+    if (owner !== undefined) return
+    // The ROOT turn ended (handleResultMessage). Every `terminalSealed` child
+    // state is already fully sealed and is only being kept for a native
+    // `message_stop` that may never arrive — a background child whose parent
+    // finishes first leaks one per turn otherwise. A straggler arriving after
+    // this finds no state and is a no-op, which is the same outcome as the
+    // guard it used to hit.
+    for (const [childKey, child] of [...this.messages]) {
+      if (child.terminalSealed) this.messages.delete(childKey)
+    }
+  }
+
+  /** Retained per-owner states. Test seam for the terminal-sealed sweep below. */
+  activeOwnerCount(): number {
+    return this.messages.size
   }
 
   sealAll(): void {

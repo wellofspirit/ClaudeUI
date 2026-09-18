@@ -216,14 +216,19 @@ describe('mapPiEvent — thinking deltas', () => {
     const state = createPiMapperState()
     mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
     const messageId = state.currentMessageId!
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000)
     const out = mapPiEvent(
       messageUpdate({ type: 'thinking_delta', contentIndex: 0, delta: 'pondering' }),
       state
     )
+    now.mockRestore()
     expect(out).toEqual([
       {
         kind: 'item_open',
         target: { messageId, blockIndex: 0, kind: 'thinking' },
+        // The thought's own start clock — the renderer's live timer reads it
+        // instead of the message timestamp.
+        startedAt: 1_700_000_000_000,
         message: expect.objectContaining({
           id: messageId,
           content: [{ type: 'thinking', text: '' }]

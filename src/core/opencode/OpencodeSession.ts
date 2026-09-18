@@ -1372,7 +1372,13 @@ export class OpencodeSession extends BaseSession {
       return
     if (!active) {
       this.activeStreamItems.set(key, { target, ownerSessionId, partId: item.partId })
-      this.send('session:item-open', { target, message })
+      this.send('session:item-open', {
+        target,
+        message,
+        // opencode times its own reasoning parts; fall back to now when the
+        // snapshot has no start yet.
+        ...(item.kind === 'thinking' ? { startedAt: snap?.time?.start ?? Date.now() } : {})
+      })
     }
     if (item.completed) {
       this.send('session:item-seal', {
@@ -1398,7 +1404,13 @@ export class OpencodeSession extends BaseSession {
       const content = [...message.content]
       content[item.blockIndex] =
         item.kind === 'thinking' ? { type: 'thinking', text: '' } : { type: 'text', text: '' }
-      this.send('session:item-open', { target, message: { ...message, content } })
+      this.send('session:item-open', {
+        target,
+        message: { ...message, content },
+        ...(item.kind === 'thinking'
+          ? { startedAt: acc.parts.get(item.partId)?.time?.start ?? Date.now() }
+          : {})
+      })
       active = { target, ownerSessionId, partId: item.partId }
       this.activeStreamItems.set(key, active)
     }

@@ -103,18 +103,26 @@ function renderToolBlock(
   )
 }
 
+/** Stable identity so the default never re-renders a memoised bubble. */
+const EMPTY_ACTIVE_THINKING: ReadonlyArray<{ index: number; startedAt?: number }> = []
+
 interface MessageBubbleProps {
   message: ChatMessage
   pendingApprovals: PendingApproval[]
   isLastAssistant: boolean
-  activeThinkingSlots?: readonly number[]
+  /**
+   * The message's currently-streaming thinking slots, each with the item's own
+   * start clock when the engine measured one (`ActiveItemStream.startedAt`).
+   * `undefined` — not `[]` — for a message with none, so `memo` keeps holding.
+   */
+  activeThinking?: ReadonlyArray<{ index: number; startedAt?: number }>
 }
 
 export const MessageBubble = memo(function MessageBubble({
   message,
   pendingApprovals,
   isLastAssistant,
-  activeThinkingSlots = []
+  activeThinking = EMPTY_ACTIVE_THINKING
 }: MessageBubbleProps): React.JSX.Element {
   // Hooks must run unconditionally — declared before the role-based early returns.
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
@@ -364,7 +372,7 @@ export const MessageBubble = memo(function MessageBubble({
         items.push({ kind: 'tool_group', blocks: [{ block, index: i }] })
       }
     } else if (block.type === 'thinking') {
-      if (!block.text && !activeThinkingSlots.includes(i)) continue
+      if (!block.text && !activeThinking.some((slot) => slot.index === i)) continue
       items.push({ kind: 'thinking', block, index: i })
     } else {
       items.push({ kind: 'other', block, index: i })
@@ -379,12 +387,15 @@ export const MessageBubble = memo(function MessageBubble({
     >
       {items.map((item, gi) => {
         if (item.kind === 'thinking') {
+          const active = activeThinking.find((slot) => slot.index === item.index)
           return (
             <ThinkingBlock
               key={item.index}
               text={item.block.text || ''}
-              isActive={activeThinkingSlots.includes(item.index)}
-              startedAt={activeThinkingSlots.includes(item.index) ? message.timestamp : undefined}
+              isActive={!!active}
+              // The item's own clock when the engine measured one; the message
+              // timestamp is only right for a thought that opened the message.
+              startedAt={active ? (active.startedAt ?? message.timestamp) : undefined}
               durationMs={item.block.durationMs}
             />
           )

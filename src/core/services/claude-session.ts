@@ -204,7 +204,12 @@ export class ClaudeSession extends BaseSession {
    */
   private wireUuidToMessageId = new Map<string, string>()
   private readonly itemStreams = new ClaudeItemStreamLifecycle({
-    open: (target, message) => this.send('session:item-open', { target, message }),
+    open: (target, message, startedAt) =>
+      this.send('session:item-open', {
+        target,
+        message,
+        ...(startedAt === undefined ? {} : { startedAt })
+      }),
     delta: (target, chunk) => this.send('session:item-delta', { target, chunk }),
     seal: (target, message, ownerToolUseId) =>
       this.send('session:item-seal', {

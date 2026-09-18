@@ -6,7 +6,8 @@ import { SyncCore } from '../../sync/sync-core'
 function harness() {
   const events: Array<{ kind: string; value: unknown }> = []
   const lifecycle = new ClaudeItemStreamLifecycle({
-    open: (target, message) => events.push({ kind: 'open', value: { target, message } }),
+    open: (target, message, startedAt) =>
+      events.push({ kind: 'open', value: { target, message, startedAt } }),
     delta: (target, chunk) => events.push({ kind: 'delta', value: { target, chunk } }),
     seal: (target, message, owner) =>
       events.push({ kind: 'seal', value: { target, message, owner } }),
@@ -95,6 +96,21 @@ describe('ClaudeItemStreamLifecycle', () => {
     ).toBe('handled')
     lifecycle.handleEvent({ type: 'content_block_stop', index: 1 }, undefined)
     lifecycle.handleEvent({ type: 'message_stop' }, undefined)
+
+    // The thinking item's OWN clock rides its open, so the live timer counts
+    // from the thought rather than from the message.
+    const firstOpen = events.find((event) => event.kind === 'open')!.value as {
+      target: { kind: string }
+      startedAt?: number
+    }
+    expect(firstOpen.target.kind).toBe('thinking')
+    expect(firstOpen.startedAt).toBe(100)
+    const textOpen = events.filter((event) => event.kind === 'open').at(-1)!.value as {
+      target: { kind: string }
+      startedAt?: number
+    }
+    expect(textOpen.target.kind).toBe('text')
+    expect(textOpen.startedAt).toBeUndefined()
 
     const full = events.filter((event) => event.kind === 'seal').at(-1)!.value as {
       message: ChatMessage
@@ -244,6 +260,36 @@ describe('ClaudeItemStreamLifecycle', () => {
       )
     ).toBe('none')
     expect(events.slice(before).filter((event) => event.kind === 'local')).toHaveLength(0)
+  })
+
+  it('frees terminal-sealed child states when the root turn ends', () => {
+    const { lifecycle, events } = harness()
+    for (const owner of [undefined, 'child']) {
+      lifecycle.handleEvent(
+        { type: 'message_start', message: { id: `m-${owner ?? 'root'}` } },
+        owner
+      )
+      lifecycle.handleEvent(
+        { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+        owner
+      )
+      lifecycle.handleEvent(
+        { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'x' } },
+        owner
+      )
+    }
+    // The child finished but its state is RETAINED for a native message_stop
+    // that may never arrive (a background child whose parent turn ends first).
+    lifecycle.sealOwner('child', true)
+    expect(lifecycle.activeOwnerCount()).toBe(2)
+
+    // The root turn ending is the point at which no straggler can still matter.
+    lifecycle.sealOwner(undefined)
+    expect(lifecycle.activeOwnerCount()).toBe(0)
+
+    const afterRoot = events.length
+    lifecycle.handleEvent({ type: 'message_stop' }, 'child')
+    expect(events).toHaveLength(afterRoot)
   })
 
   it('reconciles a final block snapshot after an early child stop seal', () => {

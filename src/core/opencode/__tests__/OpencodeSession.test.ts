@@ -3288,6 +3288,67 @@ describe('OpencodeSession — per-item canonical streaming', () => {
     expect(session.getMessages().find((message) => message.id === messageId)?.timestamp).toBe(1234)
     session.dispose()
   })
+
+  // No existing OpencodeSession test covered a REASONING item open, so this is
+  // the one new case: the thinking item must carry opencode's own part start so
+  // the live "Thinking for Ns" counts the thought, not the message.
+  it('rides the reasoning part start on the thinking item open', async () => {
+    const PARENT_SES = 'ses_item_thinking'
+    const routingId = `r_item_thinking_${Date.now()}`
+    const messageId = 'msg_item_thinking'
+    const partId = 'part_item_thinking'
+    mockSubscribeEvents.mockImplementation(
+      streamOf([
+        {
+          id: 'role',
+          type: 'message.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            info: { id: messageId, role: 'assistant', time: { created: 1234 } }
+          }
+        } as OpencodeEvent,
+        {
+          id: 'open',
+          type: 'message.part.updated',
+          properties: {
+            sessionID: PARENT_SES,
+            part: {
+              id: partId,
+              messageID: messageId,
+              type: 'reasoning',
+              text: 'weighing',
+              time: { start: 4242 }
+            }
+          }
+        } as OpencodeEvent,
+        {
+          id: 'delta',
+          type: 'message.part.delta',
+          properties: {
+            sessionID: PARENT_SES,
+            messageID: messageId,
+            partID: partId,
+            field: 'text',
+            delta: ' it'
+          }
+        } as OpencodeEvent,
+        { id: 'idle', type: 'session.idle', properties: { sessionID: PARENT_SES } } as OpencodeEvent
+      ])
+    )
+    mockCreateSession.mockResolvedValue({ id: PARENT_SES })
+    const win = new MockWindow() as unknown as HostWindowHandle
+    const session = new OpencodeSession(routingId, win, '/tmp')
+    await session.run('go')
+    await vi.waitFor(() => expect(session.status.state).toBe('idle'))
+
+    const opens = (win as unknown as MockWindow).webContents.send.mock.calls.filter(
+      (call) => call[0] === 'session:item-open'
+    )
+    expect(opens).toHaveLength(1)
+    expect(opens[0][2].target.kind).toBe('thinking')
+    expect(opens[0][2].startedAt).toBe(4242)
+    session.dispose()
+  })
 })
 
 describe('OpencodeSession — Phase 8d: subagent dispatch', () => {

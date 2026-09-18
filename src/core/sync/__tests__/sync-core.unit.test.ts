@@ -475,3 +475,64 @@ describe('SyncCore.seedWatchedSession (phase 5 S4)', () => {
     expect(core.getCanonicalState().sessions['watched'].cwd).toBe('/repo')
   })
 })
+
+describe('SyncCore.emit — dropped item deltas are observable', () => {
+  /**
+   * The item lane is lossy by contract, so none of these is an error — but
+   * before `onItemDropped` every one of them was indistinguishable silence,
+   * which is what made "the adapter streams into a target it never opened"
+   * unobservable in the field.
+   */
+  const scaffold = (id: string): ChatMessage => ({
+    id,
+    role: 'assistant',
+    timestamp: 1,
+    content: [{ type: 'text', text: '' }]
+  })
+
+  it('classifies no-open and malformed, stays quiet on a live item, and never carries the chunk', () => {
+    const onItemDropped = vi.fn()
+    const core = new SyncCore({ onItemDropped })
+    const frames: unknown[] = []
+    core.setStreamDelivery((frame) => frames.push(frame))
+    core.emit('session:created', ['rid', { cwd: '/fixture', engineId: 'claude' }], ALL)
+    const target = { messageId: 'm', blockIndex: 0, kind: 'text' as const }
+
+    // 1. A well-formed delta whose item was never opened (or is already sealed).
+    core.emit('session:item-delta', ['rid', { target, chunk: 'unopened-secret' }], ALL)
+    expect(onItemDropped.mock.calls).toEqual([['rid', 'no-open', target]])
+    expect(frames).toEqual([])
+
+    // 2. A payload that fails target validation — a producer bug, named as one.
+    core.emit('session:item-delta', ['rid', { target: { messageId: '' }, chunk: 'bad' }], ALL)
+    expect(onItemDropped).toHaveBeenCalledTimes(2)
+    expect(onItemDropped.mock.calls[1][1]).toBe('malformed')
+
+    // 3. The happy path fires nothing and still delivers its frame.
+    core.emit('session:item-open', ['rid', { target, message: scaffold('m') }], ALL)
+    core.emit('session:item-delta', ['rid', { target, chunk: 'hello' }], ALL)
+    expect(onItemDropped).toHaveBeenCalledTimes(2)
+    expect(frames).toHaveLength(1)
+
+    // The callback is the ONLY thing the host can log, so chunk text being
+    // absent from every argument is what keeps that log line safe to leave on.
+    expect(JSON.stringify(onItemDropped.mock.calls)).not.toContain('unopened-secret')
+    expect(JSON.stringify(onItemDropped.mock.calls)).not.toContain('bad')
+  })
+
+  it('survives a throwing observer', () => {
+    const core = new SyncCore({
+      onItemDropped: () => {
+        throw new Error('observer is broken')
+      }
+    })
+    core.emit('session:created', ['rid', { cwd: '/fixture', engineId: 'claude' }], ALL)
+    expect(() =>
+      core.emit(
+        'session:item-delta',
+        ['rid', { target: { messageId: 'm', blockIndex: 0, kind: 'text' }, chunk: 'x' }],
+        ALL
+      )
+    ).not.toThrow()
+  })
+})

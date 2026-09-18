@@ -15,6 +15,16 @@ export interface ActiveItemStream {
   /** The reliable open's sequence, assigned by core. */
   generation: number
   value: string
+  /**
+   * When the ITEM started, as measured by the adapter that opened it. Set on
+   * thinking opens only, so the renderer's live "Thinking for Ns" counts from
+   * the thought, not from message creation (a thinking block that starts after
+   * a tool call would otherwise be timed from the message's first byte).
+   *
+   * The reducer only ever COPIES this off the open payload — no clock runs in
+   * `src/core/shared/sync/*`.
+   */
+  startedAt?: number
 }
 
 export type ItemStreams = Record<string, ActiveItemStream>
@@ -22,6 +32,8 @@ export type ItemStreams = Record<string, ActiveItemStream>
 export interface ItemStreamOpen {
   target: ItemStreamTarget
   message: ChatMessage
+  /** See {@link ActiveItemStream.startedAt}. Thinking opens only. */
+  startedAt?: number
 }
 
 export interface ItemStreamSeal {
@@ -48,6 +60,9 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === 'object' && !Array.isArray(v)
 const isNonNegativeSafeInteger = (v: unknown): v is number =>
   Number.isSafeInteger(v) && (v as number) >= 0
+/** An adapter-measured epoch millisecond. Absent and invalid both mean "unset". */
+const isStartedAt = (v: unknown): v is number =>
+  typeof v === 'number' && Number.isFinite(v) && v >= 0
 
 /** Validate the collision-safe, block-addressed identity used on both lanes. */
 export function isItemTarget(v: unknown): v is ItemStreamTarget {
@@ -97,7 +112,8 @@ export function isItemStreamFrame(v: unknown): v is ItemStreamFrame {
         isNonNegativeSafeInteger(s.generation) &&
         s.generation > 0 &&
         s.generation <= (v.atSeq as number) &&
-        typeof s.value === 'string'
+        typeof s.value === 'string' &&
+        (s.startedAt === undefined || isStartedAt(s.startedAt))
     )
   )
 }
@@ -226,10 +242,21 @@ export function applyItemLifecycle(
     const value = valueOf(scaffold.content[target.blockIndex], target.kind)
     if (value === null) return s
     const next = upsert(s, scaffold, target.ownerToolUseId)
+    // COPIED, never measured: an invalid value is dropped rather than repaired,
+    // and the renderer falls back to the message timestamp exactly as before.
+    const startedAt = isStartedAt(data.startedAt) ? data.startedAt : undefined
     return {
       ...next,
       itemStreamRevision: seq,
-      itemStreams: { ...s.itemStreams, [key]: { target, generation: seq, value } }
+      itemStreams: {
+        ...s.itemStreams,
+        [key]: {
+          target,
+          generation: seq,
+          value,
+          ...(startedAt === undefined ? {} : { startedAt })
+        }
+      }
     }
   }
   if (
@@ -275,33 +302,60 @@ export function applyItemLifecycle(
     itemStreamRevision: seq
   }
 }
-export function itemAppendFrame(
+/** Why a delta produced no frame. `no-open` is ordinary on a raced seal. */
+export type ItemAppendDrop = 'no-open' | 'malformed'
+
+export type ItemAppendResult =
+  | { frame: Extract<ItemStreamFrame, { op: 'append' }>; reason?: undefined; target?: undefined }
+  | { frame: null; reason: ItemAppendDrop; target: unknown }
+
+/**
+ * {@link itemAppendFrame} with the drop CLASSIFIED, so the host can log a
+ * malformed payload (a producer bug) differently from a delta that lost its
+ * race with the seal (expected).
+ */
+export function itemAppendResult(
   s: CanonicalState,
   routingId: string,
   data: unknown,
   atSeq: number
-): ItemStreamFrame | null {
+): ItemAppendResult {
   if (
     !isRecord(data) ||
     !isItemTarget(data.target) ||
     typeof data.chunk !== 'string' ||
     !data.chunk
   )
-    return null
+    return {
+      frame: null,
+      reason: 'malformed',
+      target: isRecord(data) ? data.target : undefined
+    }
   const stream = s.sessions[routingId]?.itemStreams[itemStreamKey(data.target)]
-  if (!stream) return null
+  if (!stream) return { frame: null, reason: 'no-open', target: data.target }
   return {
-    type: 'item-stream',
-    op: 'append',
-    routingId,
-    atSeq,
-    target: stream.target,
-    generation: stream.generation,
-    // Wire offsets are JavaScript string lengths (UTF-16 code units), matching
-    // the accumulation and every client-side comparison.
-    offset: stream.value.length,
-    chunk: data.chunk
+    frame: {
+      type: 'item-stream',
+      op: 'append',
+      routingId,
+      atSeq,
+      target: stream.target,
+      generation: stream.generation,
+      // Wire offsets are JavaScript string lengths (UTF-16 code units), matching
+      // the accumulation and every client-side comparison.
+      offset: stream.value.length,
+      chunk: data.chunk
+    }
   }
+}
+
+export function itemAppendFrame(
+  s: CanonicalState,
+  routingId: string,
+  data: unknown,
+  atSeq: number
+): ItemStreamFrame | null {
+  return itemAppendResult(s, routingId, data, atSeq).frame
 }
 
 /** Apply a lossy append or an atomic active-set recovery frame. */

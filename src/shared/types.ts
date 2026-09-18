@@ -175,7 +175,13 @@ export interface ChatMessage {
   planContent?: string
   /**
    * Elapsed wall-clock ms of the thinking span this message SEALS, stamped by
-   * the emitter (`BaseSession.send`) — SyncCore phase 4b.
+   * the emitter — SyncCore phase 4b.
+   *
+   * No producer stamps it since 2026-09-17: `BaseSession.send`'s thinking clock
+   * went with the legacy stream lane, and every adapter now puts `durationMs`
+   * on the thinking block it seals. The field and the reducer's move stay so an
+   * old-shape payload (a committed fixture, a ring caught up across the
+   * upgrade) still lands its duration on the block.
    *
    * A transient wire hint, not stored state: the shared reducer moves it onto
    * the sealed thinking block's `durationMs` and drops the field, so canonical

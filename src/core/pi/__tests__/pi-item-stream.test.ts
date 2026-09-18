@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { SyncCore } from '../../sync/sync-core'
 import { createPiMapperState, mapPiEvent, type PiMapperOutput } from '../event-mapper'
 import type { PiAssistantMessage, PiAssistantMessageEvent, PiEvent } from '../pi-protocol'
@@ -29,7 +29,14 @@ const update = (assistantMessageEvent: PiAssistantMessageEvent): PiEvent => ({
 function apply(core: SyncCore, outputs: PiMapperOutput[]): void {
   for (const output of outputs) {
     if (output.kind === 'item_open')
-      core.emit('session:item-open', ['pi', { target: output.target, message: output.message }])
+      core.emit('session:item-open', [
+        'pi',
+        {
+          target: output.target,
+          message: output.message,
+          ...(output.startedAt === undefined ? {} : { startedAt: output.startedAt })
+        }
+      ])
     if (output.kind === 'item_delta')
       core.emit('session:item-delta', ['pi', { target: output.target, chunk: output.chunk }])
     if (output.kind === 'item_seal')
@@ -46,12 +53,24 @@ describe('Pi per-item streaming through SyncCore', () => {
     const core = new SyncCore({ capacity: 20 })
     core.emit('session:created', ['pi', { cwd: '/fixture', engineId: 'pi' }])
     const state = createPiMapperState()
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000)
     apply(core, mapPiEvent({ type: 'message_start', message: assistant() }, state))
-    apply(
-      core,
-      mapPiEvent(update({ type: 'thinking_delta', contentIndex: 0, delta: 'why' }), state)
+    const thinkingOutputs = mapPiEvent(
+      update({ type: 'thinking_delta', contentIndex: 0, delta: 'why' }),
+      state
     )
-    apply(core, mapPiEvent(update({ type: 'text_delta', contentIndex: 1, delta: 'a' }), state))
+    apply(core, thinkingOutputs)
+    const textOutputs = mapPiEvent(
+      update({ type: 'text_delta', contentIndex: 1, delta: 'a' }),
+      state
+    )
+    apply(core, textOutputs)
+    now.mockRestore()
+    // The thought's own clock rides its open; text items carry none.
+    const thinkingOpen = thinkingOutputs.find((output) => output.kind === 'item_open')
+    expect(thinkingOpen?.kind === 'item_open' && thinkingOpen.startedAt).toBe(1_700_000_000_000)
+    const textOpen = textOutputs.find((output) => output.kind === 'item_open')
+    expect(textOpen?.kind === 'item_open' && textOpen.startedAt).toBeUndefined()
     const afterOpens = core.getSnapshot().seq
 
     for (let index = 0; index < 1_000; index += 1)
@@ -61,6 +80,10 @@ describe('Pi per-item streaming through SyncCore', () => {
     const active = Object.values(core.getCanonicalState().sessions.pi.itemStreams)
     expect(active.map((stream) => stream.target.blockIndex).sort()).toEqual([0, 1])
     expect(active.find((stream) => stream.target.kind === 'thinking')?.value).toBe('why')
+    expect(active.find((stream) => stream.target.kind === 'thinking')?.startedAt).toBe(
+      1_700_000_000_000
+    )
+    expect(active.find((stream) => stream.target.kind === 'text')?.startedAt).toBeUndefined()
     expect(active.find((stream) => stream.target.kind === 'text')?.value).toBe(
       `a${'x'.repeat(1_000)}`
     )

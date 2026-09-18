@@ -1,8 +1,9 @@
-import { afterEach, beforeEach, expect, it } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { useSessionStore } from '../../../stores/session-store'
 import { TaskCard } from '../TaskCard'
+import { MessageBubble } from '../MessageBubble'
 import { TaskEntry } from '../../TaskDetailPanel/TaskEntry'
 import type { ChatMessage, ContentBlock } from '../../../../../shared/types'
 
@@ -117,5 +118,46 @@ it('keeps committed text, active thinking, and active text in stable item-slot o
     ).toBeTruthy()
     fireEvent.click(thinkingToggle)
     expect(within(output).getByText('Working it through')).toBeInTheDocument()
+  }
+})
+
+it('seeds the live thinking timer from the item open, not from the message', () => {
+  // A thinking block that starts AFTER a tool call: the message was created
+  // long before the thought, so timing from `message.timestamp` reads minutes
+  // high. The open's own clock is what the bubble must use.
+  vi.useFakeTimers()
+  try {
+    vi.setSystemTime(100_000)
+    const thinker: ChatMessage = {
+      id: 'thinker',
+      role: 'assistant',
+      timestamp: 40_000,
+      content: [
+        { type: 'text', text: 'Preamble' },
+        { type: 'thinking', text: 'weighing it' }
+      ]
+    }
+    const { rerender } = render(
+      <MessageBubble
+        message={thinker}
+        pendingApprovals={[]}
+        isLastAssistant={true}
+        activeThinking={[{ index: 1, startedAt: 95_000 }]}
+      />
+    )
+    expect(screen.getByTestId('ThinkingBlock.toggle').textContent).toContain('(5s)')
+
+    // Without a measured start the old behaviour stands: the message timestamp.
+    rerender(
+      <MessageBubble
+        message={thinker}
+        pendingApprovals={[]}
+        isLastAssistant={true}
+        activeThinking={[{ index: 1 }]}
+      />
+    )
+    expect(screen.getByTestId('ThinkingBlock.toggle').textContent).toContain('(60s)')
+  } finally {
+    vi.useRealTimers()
   }
 })

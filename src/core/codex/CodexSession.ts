@@ -473,6 +473,40 @@ function hostedContentItems(result: ToolResultContent): DynamicToolCallOutputCon
   })
 }
 
+/** Cap for the ended-turn guards below — generous, and still bounded. */
+export const ENDED_TURN_CAP = 512
+
+/**
+ * Insertion-ordered set that evicts its OLDEST member once `cap` is exceeded.
+ *
+ * The ended-turn guards only ever have to answer for the recent past: a turn
+ * old enough to fall out of a 512-deep window cannot still be delivering
+ * notifications, so eviction costs nothing and the set stops growing for the
+ * life of a long-lived thread. Exported for the unit test — driving 513 real
+ * turns through the session would test the fixture, not the eviction.
+ */
+export class BoundedSet {
+  private readonly entries = new Set<string>()
+
+  constructor(private readonly cap: number = ENDED_TURN_CAP) {}
+
+  /** Re-adding an existing member keeps its ORIGINAL position (Set semantics). */
+  add(value: string): void {
+    this.entries.add(value)
+    while (this.entries.size > this.cap) {
+      this.entries.delete(this.entries.values().next().value!)
+    }
+  }
+
+  has(value: string): boolean {
+    return this.entries.has(value)
+  }
+
+  get size(): number {
+    return this.entries.size
+  }
+}
+
 /**
  * One root is one THREAD on its account's host (ADR-069 §2). No process of its
  * own, no native queue, no child adoption.
@@ -508,10 +542,11 @@ export class CodexSession extends BaseSession {
   private settingsUpdating = false
   private deltas = new Map<string, ChatMessage>()
   private deltaTargets = new Map<string, { target: ItemStreamTarget; turnId: string }>()
-  private endedChildTurns = new Set<string>()
+  /** Bounded: a thread can outlive thousands of turns (see {@link BoundedSet}). */
+  private endedChildTurns = new BoundedSet()
   private threadId: string | null = null
   private turnId: string | null = null
-  private endedTurns = new Set<string>()
+  private endedTurns = new BoundedSet()
   private completedItems = new Map<string, string>()
   private catalog: Model[] = []
   private model?: string
@@ -2818,7 +2853,10 @@ export class CodexSession extends BaseSession {
       this.deltaTargets.set(id, { target, turnId })
       this.send('session:item-open', {
         target,
-        message: { id, role: 'assistant', timestamp, content: content('') }
+        message: { id, role: 'assistant', timestamp, content: content('') },
+        // The thought's own start clock. `timestamp` is the MESSAGE's, which for
+        // a reasoning item that follows a tool call is minutes earlier.
+        ...(kind === 'thinking' ? { startedAt: Date.now() } : {})
       })
     }
     const message: ChatMessage = { id, role: 'assistant', timestamp, content: content(value) }

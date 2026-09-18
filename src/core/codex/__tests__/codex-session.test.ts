@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { CodexSession } from '../CodexSession'
+import { BoundedSet, CodexSession, ENDED_TURN_CAP } from '../CodexSession'
 import { CodexHostRegistry, type CodexHostClient } from '../CodexHost'
 import { codexAuthHook, type CodexAuthHook, type CodexAuthSource } from '../codex-auth-hook'
 import { CodexTransportError, type CodexClientOptions } from '../CodexAppServerClient'
@@ -5066,18 +5066,51 @@ describe('Codex item stream lifecycle', () => {
     ).toEqual([{ type: 'text', text: 'corrected' }])
   })
   it('preserves streamed reasoning when the completed summary is empty', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000)
+    try {
+      const f = fixture()
+      await f.session.run('reason')
+      delta(f.notify, 'reason', 'partial reasoning', 'reasoning')
+      // The thinking item carries its own start clock so the renderer's live
+      // timer counts the THOUGHT, not the message it was appended to.
+      expect(sent('session:item-open')[0].startedAt).toBe(1_700_000_000_000)
+      f.notify('item/completed', {
+        threadId: 'root',
+        turnId: 'turn',
+        item: { id: 'reason', type: 'reasoning', summary: [], content: [] }
+      })
+      expect(sent('session:item-seal')[0].message.content).toEqual([
+        { type: 'thinking', text: 'partial reasoning' }
+      ])
+      expect(sent('session:item-seal')[0].target.kind).toBe('thinking')
+    } finally {
+      now.mockRestore()
+    }
+  })
+  it('leaves a text item open without a start clock', async () => {
     const f = fixture()
-    await f.session.run('reason')
-    delta(f.notify, 'reason', 'partial reasoning', 'reasoning')
-    f.notify('item/completed', {
-      threadId: 'root',
-      turnId: 'turn',
-      item: { id: 'reason', type: 'reasoning', summary: [], content: [] }
-    })
-    expect(sent('session:item-seal')[0].message.content).toEqual([
-      { type: 'thinking', text: 'partial reasoning' }
-    ])
-    expect(sent('session:item-seal')[0].target.kind).toBe('thinking')
+    await f.session.run('hello')
+    delta(f.notify, 'answer', 'hello')
+    expect(sent('session:item-open')[0].startedAt).toBeUndefined()
+  })
+  it('bounds the ended-turn guards, evicting the oldest first', () => {
+    // `endedTurns` / `endedChildTurns` are the only unbounded per-turn state on
+    // a thread that can live for thousands of turns; `completedItems` is left
+    // alone deliberately (the authoritative replay reads its fingerprints).
+    const set = new BoundedSet(3)
+    for (const id of ['t1', 't2', 't3']) set.add(id)
+    set.add('t2') // re-adding a member must not move it or grow the set
+    expect(set.size).toBe(3)
+    set.add('t4')
+    expect(set.size).toBe(3)
+    expect(set.has('t1')).toBe(false)
+    expect(['t2', 't3', 't4'].every((id) => set.has(id))).toBe(true)
+
+    const atCap = new BoundedSet()
+    for (let index = 0; index < ENDED_TURN_CAP + 1; index += 1) atCap.add(`turn-${index}`)
+    expect(atCap.size).toBe(ENDED_TURN_CAP)
+    expect(atCap.has('turn-0')).toBe(false)
+    expect(atCap.has(`turn-${ENDED_TURN_CAP}`)).toBe(true)
   })
   it('commits partial text and plan once on interruption, ignoring late tokens', async () => {
     const f = fixture()

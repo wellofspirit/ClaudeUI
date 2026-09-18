@@ -232,6 +232,16 @@ function commitMessage(
     // scaffold, retaining omitted completed/auxiliary blocks. Item lifecycle
     // validation guarantees the target itself occupies its addressed slot.
     merged = [...oldContent]
+    // The scaffold can be SHORTER than the addressed slot: a targeted seal is
+    // accepted with no active entry whenever the message is in the transcript
+    // (item-stream.ts §"A missing active entry"), and that committed message
+    // may carry fewer blocks. Writing only the addressed slot would then leave
+    // array HOLES, which serialize as `null` and crash renderers on
+    // `block.type`. Fill the gap from the payload, which lifecycle validation
+    // guarantees is dense through `blockIndex`.
+    for (let gap = oldContent.length; gap < sealingTarget.blockIndex; gap++) {
+      merged[gap] = content[gap]
+    }
     // The completion is authoritative for its named field only. Other slots may
     // already contain newer committed values than the adapter's item scaffold.
     merged[sealingTarget.blockIndex] = content[sealingTarget.blockIndex]

@@ -503,6 +503,100 @@ describe('per-item volatile streams', () => {
     ])
     expect(f.core.getCanonicalState().sessions.s.itemStreams[itemStreamKey(b)]).toBeUndefined()
   })
+  it('fills the scaffold gap when a targeted seal addresses a slot past the committed end', () => {
+    const f = fixture()
+    // One committed block, no active entry: exactly the shape a targeted seal
+    // takes on a replica whose `replace` was lost. The addressed slot then sits
+    // PAST the committed end, so applying it by slot alone would leave holes.
+    f.core.emit('session:message', [
+      's',
+      { id: 'sparse', role: 'assistant', timestamp: 1, content: [{ type: 'text', text: 'first' }] }
+    ])
+    const late: ItemStreamTarget = { messageId: 'sparse', blockIndex: 2, kind: 'thinking' }
+    f.core.emit('session:item-seal', [
+      's',
+      {
+        target: late,
+        message: {
+          id: 'sparse',
+          role: 'assistant',
+          timestamp: 1,
+          content: [
+            { type: 'text', text: 'first' },
+            { type: 'text', text: 'second' },
+            { type: 'thinking', text: 'late thought' }
+          ]
+        }
+      }
+    ])
+    const content = f.core.getCanonicalState().sessions.s.messages[0].content
+    expect(content).toHaveLength(3)
+    expect(content).toEqual([
+      { type: 'text', text: 'first' },
+      { type: 'text', text: 'second' },
+      { type: 'thinking', text: 'late thought' }
+    ])
+    // A hole is not `undefined` to `toEqual` but it IS `null` after transport.
+    expect(Object.keys(content)).toEqual(['0', '1', '2'])
+    const roundTripped = JSON.parse(JSON.stringify(f.core.getSnapshot())) as ReturnType<
+      typeof f.core.getSnapshot
+    >
+    expect(roundTripped.sessions.s.messages[0].content).toEqual(content)
+  })
+  it('copies a valid open startedAt onto the active entry, and ignores an invalid one', () => {
+    const f = fixture()
+    const thought: ItemStreamTarget = { messageId: 'timed', blockIndex: 0, kind: 'thinking' }
+    const scaffold: ChatMessage = {
+      id: 'timed',
+      role: 'assistant',
+      timestamp: 1,
+      content: [{ type: 'thinking', text: '' }]
+    }
+    f.core.emit('session:item-open', ['s', { target: thought, message: scaffold, startedAt: 4242 }])
+    const key = itemStreamKey(thought)
+    expect(f.core.getCanonicalState().sessions.s.itemStreams[key].startedAt).toBe(4242)
+
+    // Survives the snapshot both ways — a reconnecting client keeps the timer.
+    const snapshot = f.core.getSnapshot()
+    expect(snapshot.sessions.s.itemStreams?.[key].startedAt).toBe(4242)
+    expect(fromSnapshot(snapshot).sessions.s.itemStreams[key].startedAt).toBe(4242)
+
+    // …and the `replace` validator accepts it, so a recovery frame carries it.
+    const replay = f.core.itemStreamReplay('s')
+    expect(isItemStreamFrame(replay)).toBe(true)
+    expect(replay.op === 'replace' && replay.streams[key].startedAt).toBe(4242)
+    for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY, '4242', null]) {
+      expect(
+        isItemStreamFrame({
+          ...replay,
+          streams: {
+            [key]: { ...(replay.op === 'replace' ? replay.streams[key] : {}), startedAt: bad }
+          }
+        })
+      ).toBe(false)
+    }
+
+    // An invalid value on the OPEN is dropped, not repaired: the renderer then
+    // falls back to the message timestamp exactly as it did before.
+    const second: ItemStreamTarget = { messageId: 'timed', blockIndex: 1, kind: 'thinking' }
+    f.core.emit('session:item-open', [
+      's',
+      {
+        target: second,
+        message: {
+          ...scaffold,
+          content: [
+            { type: 'thinking', text: '' },
+            { type: 'thinking', text: '' }
+          ]
+        },
+        startedAt: Number.NaN
+      }
+    ])
+    expect(
+      f.core.getCanonicalState().sessions.s.itemStreams[itemStreamKey(second)].startedAt
+    ).toBeUndefined()
+  })
   it('stamps duration only on the targeted thinking slot', () => {
     const f = fixture()
     const first: ItemStreamTarget = { messageId: 'thoughts', blockIndex: 0, kind: 'thinking' }

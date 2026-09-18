@@ -36,7 +36,8 @@
 
 import {
   applyItemStreamFrame,
-  itemAppendFrame,
+  itemAppendResult,
+  type ItemAppendDrop,
   type ItemStreamFrame
 } from '../shared/sync/item-stream'
 import { EventRing } from './event-ring'
@@ -114,6 +115,25 @@ export interface SyncCoreOptions {
    * a reconnecting client receives.
    */
   onApplyError?: (channel: string, err: unknown) => void
+  /**
+   * Called when an item DELTA never reaches canonical state. Every reason is
+   * survivable — the lane is lossy by contract — but each one is also a
+   * distinct diagnosis, and before this they were indistinguishable silence:
+   *
+   * - `no-open`  the target is well-formed but has no active stream (a delta
+   *              that lost its race with the seal; ordinary).
+   * - `malformed` the payload failed validation (a producer bug).
+   * - `mismatch` / `unknown` the fold refused the frame (offset or generation
+   *              drift — see {@link applyItemStreamFrame}).
+   *
+   * Optional and never fatal: the host wires a logger, tests assert on it, and
+   * a throwing observer is swallowed rather than allowed to break emission.
+   */
+  onItemDropped?: (
+    routingId: string,
+    reason: ItemAppendDrop | 'mismatch' | 'unknown',
+    target?: unknown
+  ) => void
 }
 
 export class SyncCore {
@@ -124,6 +144,11 @@ export class SyncCore {
   private rekeyObservers: RekeyObserver[] = []
   private readonly onUnclassified: (channel: string) => void
   private readonly onApplyError: (channel: string, err: unknown) => void
+  private readonly onItemDropped: (
+    routingId: string,
+    reason: ItemAppendDrop | 'mismatch' | 'unknown',
+    target?: unknown
+  ) => void
 
   /** Reentrancy guard + FIFO queue — see {@link emit}. */
   private inFlight = false
@@ -141,6 +166,19 @@ export class SyncCore {
       (() => {
         /* host wires a logger */
       })
+    const onItemDropped = options.onItemDropped
+    this.onItemDropped = onItemDropped
+      ? (routingId, reason, target) => {
+          // Observability must never be able to break the lane it observes.
+          try {
+            onItemDropped(routingId, reason, target)
+          } catch {
+            /* a broken observer is not a reason to drop the turn */
+          }
+        }
+      : () => {
+          /* host wires a logger */
+        }
   }
 
   // -------------------------------------------------------------------------
@@ -249,11 +287,19 @@ export class SyncCore {
     if (spec.cls === 'volatile') {
       if (spec.volatileFlavor === 'item-stream') {
         if (typeof args[0] !== 'string') return
-        const frame = itemAppendFrame(this.state, args[0], args[1], this.ring.currentSeq())
-        if (!frame) return
+        const routingId = args[0]
+        const append = itemAppendResult(this.state, routingId, args[1], this.ring.currentSeq())
+        if (!append.frame) {
+          this.onItemDropped(routingId, append.reason, append.target)
+          return
+        }
+        const frame = append.frame
         try {
           const outcome = applyItemStreamFrame(this.state, frame)
-          if (outcome.result !== 'applied') return
+          if (outcome.result !== 'applied') {
+            this.onItemDropped(routingId, outcome.result, frame.target)
+            return
+          }
           this.state = outcome.state
         } catch (err) {
           this.onApplyError(channel, err)
