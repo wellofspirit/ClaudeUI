@@ -62,15 +62,17 @@ describe('ClaudeItemStreamLifecycle', () => {
       { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'why' } },
       undefined
     )
-    lifecycle.handleSnapshot(
-      {
-        id: 'msg',
-        role: 'assistant',
-        content: [{ type: 'thinking', text: 'why' }],
-        timestamp: 999
-      },
-      undefined
-    )
+    expect(
+      lifecycle.handleSnapshot(
+        {
+          id: 'msg',
+          role: 'assistant',
+          content: [{ type: 'thinking', text: 'why' }],
+          timestamp: 999
+        },
+        undefined
+      )
+    ).toBe('handled')
     lifecycle.handleEvent({ type: 'content_block_stop', index: 0 }, undefined)
     lifecycle.handleEvent(
       { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } },
@@ -80,10 +82,17 @@ describe('ClaudeItemStreamLifecycle', () => {
       { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'answer' } },
       undefined
     )
-    lifecycle.handleSnapshot(
-      { id: 'msg', role: 'assistant', content: [{ type: 'text', text: 'answer' }], timestamp: 999 },
-      undefined
-    )
+    expect(
+      lifecycle.handleSnapshot(
+        {
+          id: 'msg',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'answer' }],
+          timestamp: 999
+        },
+        undefined
+      )
+    ).toBe('handled')
     lifecycle.handleEvent({ type: 'content_block_stop', index: 1 }, undefined)
     lifecycle.handleEvent({ type: 'message_stop' }, undefined)
 
@@ -173,6 +182,68 @@ describe('ClaudeItemStreamLifecycle', () => {
     )
     expect(full).toHaveLength(1)
     expect((full[0].value as { message: ChatMessage }).message.id).toBe('old')
+  })
+
+  it('falls through when a one-block snapshot matches no live block', () => {
+    const { lifecycle, events } = harness()
+    lifecycle.handleEvent({ type: 'message_start', message: { id: 'msg' } }, undefined)
+    lifecycle.handleEvent(
+      { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
+      undefined
+    )
+    lifecycle.handleEvent(
+      { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'why' } },
+      undefined
+    )
+    lifecycle.handleEvent(
+      { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } },
+      undefined
+    )
+    lifecycle.handleEvent(
+      { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'answer' } },
+      undefined
+    )
+    // No `content_block_start` for a tool_use ever arrived, so the lifecycle has
+    // nowhere to put this block: the caller must emit it the ordinary way.
+    const before = events.length
+    expect(
+      lifecycle.handleSnapshot(
+        {
+          id: 'msg',
+          role: 'assistant',
+          timestamp: 999,
+          content: [{ type: 'tool_use', toolName: 'Bash', toolInput: {}, toolUseId: 'toolu_1' }]
+        },
+        undefined
+      )
+    ).toBe('none')
+    expect(events.slice(before).filter((event) => event.kind === 'local')).toHaveLength(0)
+  })
+
+  it('falls through when every block of an equal-length snapshot mismatches', () => {
+    const { lifecycle, events } = harness()
+    lifecycle.handleEvent({ type: 'message_start', message: { id: 'msg' } }, undefined)
+    lifecycle.handleEvent(
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      undefined
+    )
+    lifecycle.handleEvent(
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'answer' } },
+      undefined
+    )
+    const before = events.length
+    expect(
+      lifecycle.handleSnapshot(
+        {
+          id: 'msg',
+          role: 'assistant',
+          timestamp: 999,
+          content: [{ type: 'thinking', text: 'why' }]
+        },
+        undefined
+      )
+    ).toBe('none')
+    expect(events.slice(before).filter((event) => event.kind === 'local')).toHaveLength(0)
   })
 
   it('reconciles a final block snapshot after an early child stop seal', () => {

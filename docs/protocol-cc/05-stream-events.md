@@ -296,15 +296,29 @@ stream_event message_delta            {delta: {stop_reason:"tool_use"}, usage: {
 stream_event message_stop             {}
 ```
 
-Interleaved with (if partial messages enabled):
+Interleaved with (if partial messages enabled) — one `assistant` line per content block, shown
+here with its neighbouring stream events:
 
 ```
-assistant                             {message: {id, content: [text(partial)], ...}}
-assistant                             {message: {id, content: [text(full), tool_use(partial)], ...}}
-assistant                             {message: {id, content: [text(full), tool_use(full)], stop_reason: "tool_use"}}
+stream_event content_block_delta      {index: 0, delta: {type:"text_delta", text:", world"}}
+assistant                             {message: {id, content: [text(full)], ...}}
+stream_event content_block_stop       {index: 0}
+stream_event content_block_delta      {index: 1, delta: {type:"input_json_delta", partial_json:"cmd\":\"ls\"}"}}
+assistant                             {message: {id, content: [tool_use(input parsed)], stop_reason: null}}
+stream_event content_block_stop       {index: 1}
 ```
 
-The assistant messages upsert by `message.id`. Each carries a progressively fuller snapshot of `content`.
+`content` holds exactly ONE block — the block the line is reporting — every line shares
+`message.id` with `message_start`, and each line arrives after its block's last
+`content_block_delta` but BEFORE that block's `content_block_stop`. The `tool_use` line already
+carries the fully parsed `input`, so a consumer of the snapshots never has to concatenate
+`input_json_delta`. `stop_reason` is `null` on every per-block line — `message_delta` has not
+arrived yet, so the final stop reason is only on that stream event. The same one-line-per-block
+shape holds with `includePartialMessages: false`. Consumers upsert by `message.id` and place each line's single block by
+index/type.
+
+Verified on 2.1.268, 2026-09-18, localhost SSE fixture. `src/integration/sdk-contract/stream-order.integration.test.ts`
+re-checks this on every CLI bump (`12-maintenance.md` §12.1).
 
 ---
 
@@ -312,11 +326,11 @@ The assistant messages upsert by `message.id`. Each carries a progressively full
 
 ### When `includePartialMessages: false`
 
-You'll never see `stream_event` at all. Only `assistant` messages — one per "complete enough" snapshot. Easier to consume, but no token-by-token streaming.
+You'll never see `stream_event` at all. Only `assistant` messages — one per content block. Easier to consume, but no token-by-token streaming.
 
 ### When `includePartialMessages: true`
 
-You'll see both stream events AND periodic `assistant` snapshots. Typical pattern:
+You'll see both stream events AND one `assistant` snapshot per content block. Typical pattern:
 
 1. Show a skeleton on `message_start`.
 2. Append text on `text_delta` for real-time streaming UX.
@@ -327,7 +341,7 @@ You'll see both stream events AND periodic `assistant` snapshots. Typical patter
 
 OR use the `assistant` snapshots as the source of truth and treat stream_events as advisory (only show them for the "typewriter" UX).
 
-ClaudeUI uses a hybrid: stream_events drive the typewriter effect; assistant snapshots provide authoritative content blocks for rendering.
+ClaudeUI uses a hybrid: stream_events drive the typewriter effect; assistant snapshots provide authoritative content blocks for rendering. Because each snapshot is single-block (§5.9), `ClaudeItemStreamLifecycle` places it onto the live block matched by index/type; a snapshot it cannot place falls back to the ordinary `session:message` upsert rather than being dropped.
 
 ### Common mistakes
 

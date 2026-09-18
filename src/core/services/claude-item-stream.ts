@@ -145,19 +145,35 @@ export class ClaudeItemStreamLifecycle {
     if (event.type === 'message_stop') this.finish(key, state)
   }
 
+  /**
+   * Place an `assistant` snapshot onto the live block state.
+   *
+   * The one-block branch relies on cli.js emitting ONE single-block `assistant`
+   * line per content block, sharing `message.id` and arriving after that
+   * block's last delta but BEFORE its `content_block_stop` (verified on 2.1.268
+   * — `docs/protocol-cc/05-stream-events.md` §5.9, guarded by
+   * `src/integration/sdk-contract/stream-order.integration.test.ts`). If a
+   * future cli.js changes that shape, the snapshot matches no block; `'none'`
+   * then hands it back to the caller's ordinary message upsert instead of
+   * swallowing it, and the later targetless seal merges over that upsert.
+   */
   handleSnapshot(message: ChatMessage, owner: Owner): 'handled' | 'drop' | 'none' {
     if (this.invalidated.has(messageKey(owner, message.id))) return 'drop'
     const state = this.messages.get(ownerKey(owner))
     if (!state || state.messageId !== message.id) return 'none'
+    let replaced = false
     if (message.content.length === state.blocks.length) {
-      message.content.forEach((block, index) => this.replaceBlock(state.blocks[index], block))
+      message.content.forEach((block, index) => {
+        if (this.replaceBlock(state.blocks[index], block)) replaced = true
+      })
     } else if (message.content.length === 1) {
       const incoming = message.content[0]
       const index = state.blocks.findLastIndex(
         (entry) => (state.terminalSealed || !entry.stopped) && entry.block.type === incoming.type
       )
-      if (index >= 0) this.replaceBlock(state.blocks[index], incoming)
+      if (index >= 0) replaced = this.replaceBlock(state.blocks[index], incoming)
     }
+    if (!replaced) return 'none'
     this.publishLocal(state)
     return 'handled'
   }
@@ -209,13 +225,15 @@ export class ClaudeItemStreamLifecycle {
     else this.messages.delete(key)
   }
 
-  private replaceBlock(entry: BlockState | undefined, incoming: ContentBlock): void {
-    if (!entry || entry.block.type !== incoming.type) return
+  /** True when the incoming block actually landed on `entry`. */
+  private replaceBlock(entry: BlockState | undefined, incoming: ContentBlock): boolean {
+    if (!entry || entry.block.type !== incoming.type) return false
     if (incoming.type === 'thinking' && entry.block.type === 'thinking') {
       entry.block = { ...incoming, durationMs: entry.block.durationMs }
     } else {
       entry.block = incoming
     }
+    return true
   }
 
   private publishLocal(state: MessageState): void {
