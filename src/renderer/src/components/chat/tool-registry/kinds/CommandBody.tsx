@@ -10,7 +10,8 @@
  * ToolCard FC — the join key is preserved exactly.
  */
 
-import { TerminalView } from '../../TerminalView'
+import { OutputView } from '../../OutputView'
+import { ShellCode } from '../../ShellCode'
 import { trunc } from '../../ToolCallBlock/utils'
 import { LiveBashOutput } from './bash-output'
 import type { KindBodyProps } from './types'
@@ -45,12 +46,12 @@ export function CommandBody({
             Input
           </div>
         )}
-        {/* `$ command` when present; otherwise the generic JSON dump — preserving
-            the old ToolInput's fall-through for a command-less Bash (e.g. mid-stream). */}
+        {/* The command, highlighted — bash, and each heredoc body in its own
+            language. Rendered even under `hideToolInput`, unchanged: what ran is
+            what the user is being asked to trust. A command-less Bash (mid-stream)
+            still falls through to the generic JSON dump, as it always did. */}
         {command ? (
-          <pre className="text-[12px] text-text-primary/70 font-mono whitespace-pre-wrap break-words max-h-32 overflow-y-auto leading-[1.3] bg-bg-primary rounded-md p-2 border border-border">
-            $ {command}
-          </pre>
+          <ShellCode command={command} />
         ) : (
           <pre className="text-[12px] text-text-primary/70 font-mono whitespace-pre-wrap break-words max-h-32 overflow-y-auto leading-[1.3] bg-bg-primary rounded-md p-2 border border-border">
             {JSON.stringify(block.toolInput, null, 2)}
@@ -83,7 +84,9 @@ export function CommandBody({
               {trunc(text, 2000)}
             </pre>
           ) : (
-            <TerminalView text={text} />
+            /* `command` is context for the detector, not display: it is the only
+               evidence that a bare `cat file.ts` printed that file's contents. */
+            <OutputView text={text} command={command} />
           )}
         </div>
       )}

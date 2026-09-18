@@ -138,13 +138,11 @@ describe('ToolCard — command kind', () => {
         })}
       />
     )
-    // The `$ echo hi` input pre — matched via a node-spanning text matcher
-    // (`$ ` and `echo hi` are adjacent text nodes inside the pre).
-    expect(
-      screen.getByText((_content, el) => el?.tagName === 'PRE' && el.textContent === '$ echo hi')
-    ).toBeInTheDocument()
+    // The input block is now syntax-highlighted, so the command is a run of
+    // Prism token spans rather than one text node: assert on the block itself.
+    expect(screen.getByTestId('ShellCode')).toHaveTextContent('$ echo hi')
     // The header summary shows the command too.
-    expect(screen.getByText('echo hi')).toBeInTheDocument()
+    expect(screen.getByTestId('ToolCard.expand')).toHaveTextContent('echo hi')
     expect(screen.getByTestId('TerminalView')).toHaveAttribute('data-text', 'hi')
   })
 

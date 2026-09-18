@@ -14,6 +14,7 @@ import { FileEditBody } from './FileEditBody'
 import { FileWriteBody } from './FileWriteBody'
 import { FileReadBody } from './FileReadBody'
 import { GenericBody } from './GenericBody'
+import { SearchBody } from './SearchBody'
 import { DiagramBody } from './DiagramBody'
 import { MockupBody } from './MockupBody'
 import { WebBody } from './WebBody'
@@ -28,7 +29,7 @@ export const TOOL_RENDERERS: Record<PassiveToolKind, KindRenderer> = {
   fileEdit: { layout: 'standard', Body: FileEditBody },
   fileWrite: { layout: 'standard', Body: FileWriteBody },
   fileRead: { layout: 'standard', Body: FileReadBody },
-  search: { layout: 'standard', Body: GenericBody },
+  search: { layout: 'standard', Body: SearchBody },
   web: { layout: 'standard', Body: WebBody },
   mcp: { layout: 'standard', Body: McpBody },
   image: { layout: 'standard', Body: ImageBody },
