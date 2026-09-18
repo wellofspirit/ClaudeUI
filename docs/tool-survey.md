@@ -1,6 +1,6 @@
 # Cross-harness tool and history-item survey
 
-Written 2026-09-16 for roadmap item 1 of [`codex-integration-handoff.md`](codex-integration-handoff.md): inventory every tool and history item each harness exposes against ClaudeUI's card vocabulary BEFORE writing the Codex history mappers. The mapping proposal is at the end, with one mockup page ([`mockups/f20-history-cards.html`](mockups/f20-history-cards.html)) drawn in the app's own card chrome. The kickoff (F20) followed Daniel's choices in § 6 and landed 2026-09-17; see its Landed paragraph in `codex-followups-spec.md`.
+Written 2026-09-16 for roadmap item 1 of [`codex-integration-handoff.md`](codex-integration-handoff.md): inventory every tool and history item each harness exposes against ClaudeUI's card vocabulary BEFORE writing the Codex history mappers. The mapping proposal is at the end, with one mockup page ([`mockups/f20-history-cards.html`](mockups/f20-history-cards.html)) drawn in the app's own card chrome. The kickoff (F20) followed Daniel's choices in § 6 and landed 2026-09-17 (`git log -p -- docs/codex-followups-spec.md` for the kickoff itself, deleted with the rest of the landed specs).
 
 Sources: `docs/protocol-cc/` (cli.js 2.1.268), `.cache/opencode-fork` (opencode 1.18.29; the ADR-cited `vendor/opencode-src` path does not exist), `vendor/pi-cli/pi/docs/` (pi 0.84.3; one directory deeper than the docs cite), `.cache/codex-src` (Codex 0.154.0) with `src/core/codex/protocol/v2/ThreadItem.ts`, and the renderer's `tool-registry/`. Every claim was verified by reading the code; file:line citations are in the four agent reports this condenses.
 
@@ -111,4 +111,72 @@ Tests: mapper guard tests per kind with wire-shaped fixtures (proven failing fir
 6. `mcpToolCall` joins the slice.
 7. The cross-harness fixes ride the slice.
 
-Kickoff: [`codex-followups-spec.md`](codex-followups-spec.md) § F20.
+Kickoff: § F20 of the follow-ups spec, deleted once landed (`git log -p -- docs/codex-followups-spec.md`).
+
+---
+
+## 7 · Claude rescan (2026-09-18)
+
+§ 1–6 surveyed opencode, pi and Codex against the card vocabulary and left Claude on the reading the vocabulary was originally built from. This section rescans Claude itself against the pinned binary, because that reading had rotted: tools have been added, renamed and gated off since.
+
+### Method
+
+1. **Bundle enumeration** — every tool object in `vendor/claude-cli/cli.js` (2.1.268) located by its `name:` property inside an object that also defines `inputSchema`, with the name constants resolved from their `IDENT="Name"` assignments and the neighbouring `isEnabled` / `isReadOnly` / `shouldDefer` / `userFacingName` members read off the same object. **69 tool objects exist**; most are claude.ai and Desktop surfaces (`Projects`, `ReadNotifications`, `SendFeedback`, `ClaudeDesign`, `Poll`, `REPL`, `ObserverReport`, …) that no CLI spawn enables.
+2. **Init probes** — `bun-claude` spawned in ClaudeUI's own shape (`--output-format stream-json --verbose --input-format stream-json --include-partial-messages`), killed the moment `system/init` arrives, so no request completes and nothing is spent. Four runs: default mode; `CLAUDE_CODE_ENTRYPOINT=claude-desktop` (what `buildEnv` sets); `--permission-prompt-tool stdio` + plan mode (what a `canUseTool` session sends); and the two `CLAUDE_CODE_ENABLE_TASKS` / `CLAUDE_CODE_ENABLE_TODO_TOOLS` combinations.
+
+`system/init`'s `tools` array is the enabled set, not the loaded-schema set: `shouldDefer` tools (WebFetch, WebSearch, NotebookEdit, Monitor, Cron\*, the Task\* family, …) are listed there and reach the model through `ToolSearch` later. Absence from the array therefore means **disabled**, which is what made the gate findings below visible.
+
+### The 32 a ClaudeUI session can receive
+
+Probed with `--permission-prompt-tool stdio` in plan mode; `mcp__*` names are per-install and additional.
+
+| Tool                         | Kind today  | Proposed                                                                                    |
+| ---------------------------- | ----------- | ------------------------------------------------------------------------------------------- |
+| Bash                         | `command`   | redesigned `command` (drop the echoed input, duration + exit-code chips)                    |
+| Read                         | `fileRead`  | redesigned (language + line-window chips, path out of the body)                             |
+| Write                        | `fileWrite` | redesigned (`new file` / size chips, diff when the path existed)                            |
+| Edit                         | `fileEdit`  | redesigned (real line numbers, `+n −m` chip)                                                |
+| Glob, Grep                   | `search`    | new `SearchBody` — file list with per-file hit counts, header carries pattern + root + mode |
+| WebFetch, WebSearch          | `web`       | `WebBody` + snippet and domain rows                                                         |
+| Task                         | `task`      | `TaskCard` (unchanged)                                                                      |
+| AskUserQuestion              | `question`  | `AskUserQuestionBlock` (unchanged)                                                          |
+| ExitPlanMode                 | `plan`      | `ExitPlanModeCard` (unchanged)                                                              |
+| EnterPlanMode                | hidden      | hidden                                                                                      |
+| `mcp__*`                     | `mcp`       | `McpBody` (landed for Codex in F20) applied to Claude's names                               |
+| **Skill**                    | `unknown`   | rich card: skill name, args, the loaded instructions                                        |
+| **ReportFindings**           | `unknown`   | rich card: one row per finding, verdict chip, file:line, failure scenario                   |
+| **Workflow**                 | `unknown`   | rich card: `meta.name`, description, one progress row per phase                             |
+| **Artifact**                 | `unknown`   | rich card: action, title, url, published files                                              |
+| **Monitor**                  | `unknown`   | rich card: the watched command, then one row per event                                      |
+| **NotebookEdit**             | `unknown`   | rich card: cell id + edit mode chips, source diff (it is a file edit)                       |
+| **TaskOutput**               | `unknown`   | rich card: task id header, streamed output body                                             |
+| **CronCreate**               | `unknown`   | detail card: cron, human schedule, prompt, recurring/durable chips                          |
+| **RemoteTrigger**            | `unknown`   | detail card: action, trigger id, url, enabled/next-run                                      |
+| **EnterWorktree**            | `unknown`   | detail card: worktree path, branch, base                                                    |
+| **ScheduleWakeup**           | `unknown`   | detail card: delay, fire time, reason; `noop`/`stop` chips                                  |
+| **ListAgents**               | `unknown`   | detail card: one row per agent with busy/idle and kind                                      |
+| **SendMessage**              | `unknown`   | detail card: recipient header, message body                                                 |
+| **ToolSearch**               | `unknown`   | flat row: "Loaded n tool schemas for \<query\>"                                             |
+| **TaskStop**                 | `unknown`   | flat row: "Stopped background task \<id\>"                                                  |
+| **PushNotification**         | `unknown`   | flat row: the message                                                                       |
+| **CronDelete**, **CronList** | `unknown`   | flat rows                                                                                   |
+| **ExitWorktree**             | `unknown`   | flat row: kept / discarded changes                                                          |
+| **DesignSync**               | `unknown`   | flat row                                                                                    |
+
+A flat row is the Codex `sleep` shape — no border, no chevron, no status dot, one sentence — and promotes itself to an ordinary error card when the call fails. The three shapes are driven by one descriptor table keyed on tool name, not twenty components. Card mockup: [`mockups/claude-tool-cards.html`](mockups/claude-tool-cards.html) (authored through the in-app mockup tool, directory `6268db38`).
+
+Also reachable but gated off in a stock install, so unproven against these cards: `SendUserFile` (has a summary special-case and the Files widget), `ShareOnboardingGuide`, `SuggestSkills`, `ListSkills`, `SearchSkills`, `ListPlugins`, `SearchPlugins`, `SuggestPluginInstall`.
+
+### Gate findings
+
+- **`TodoWrite.isEnabled` is `!z_() && mL()`.** `z_()` is "the Tasks system is on" — true unless `CLAUDE_CODE_ENABLE_TASKS=false` — so TodoWrite is off by default. Its replacement family (`TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`, all `xK() = z_() && mL()`) needs `CLAUDE_CODE_ENABLE_TODO_TOOLS=true`, which `buildEnv` does not set. **A stock Claude session therefore has no checklist tool at all**: `TodoToolBlock`, the `todo` kind and `buildTodosFromMessages`' TaskCreate/TaskUpdate branch are unreachable on Claude (opencode and pi still use the kind). Probed all four combinations: `CLAUDE_CODE_ENABLE_TODO_TOOLS=true` alone brings the Task\* family (already hidden in `HIDDEN_TOOLS` and already folded into the widget by `derive-session.ts`); adding `CLAUDE_CODE_ENABLE_TASKS=false` brings TodoWrite back instead.
+- **`AskUserQuestion` and `ExitPlanMode` share the gate `cCe()`**: `if (jm().length > 0 && Ae()) return false; if (Ae() && !gWe(wH())) return false; return true`, where `Ae()` is "not interactive", `wH()` is the permission-prompt tool name and `gWe(x)` is `x !== undefined && x !== 'none'`. ClaudeUI passes `--permission-prompt-tool stdio` whenever `canUseTool` is set, so both tools exist; a spawn without it loses plan-mode's exit tool and the question card silently. Worth a guard test on `buildArgs`.
+- **`MultiEdit` no longer exists** in 2.1.268 — `ClaudeEngineToolMap.kindOf` still maps it, a dead branch. `BashOutput`/`AgentOutput` are aliases of `TaskOutput`, and `KillShell`/`KillBash` aliases of `TaskStop`; cli.js's own `userFacingName`s for them are "Task Output" and "Stop Task".
+- cli.js carries a `userFacingName` for most tools ("Search" for both Glob and Grep, "Web Search", "Edit Notebook", "Entering worktree" / "Creating worktree" from the input). Claude's `displayName` is a passthrough today; adopting these where they are clearer than the raw name is a cheap consistency win with what the Claude Code TUI shows.
+
+### Card rulings (Daniel, 2026-09-18)
+
+1. **The Bash input block stays.** A command is routinely longer than the header line can hold, and showing exactly what ran is a security affordance — which is why Bash renders its input even when _hide tool input_ is on. What changes is legibility: the command is syntax-highlighted through `prism-react-renderer` (already a dependency, already carrying a `bash` grammar via `CodeView`), and a heredoc is highlighted in its own language — `<<'PY'` after `python` makes the body Python. An unrecognised interpreter falls back to plain bash.
+2. **Bash output is highlighted too.** `TerminalView` renders ANSI and nothing else, so piped `grep`, `rg`, `git diff` and `sed -n` output arrives flat. Four detectors, in order, and only when the text carries no ANSI: grep/rg gutter (muted gutter, content by the path's extension through `EXT_TO_LANG`), unified diff, JSON (`{`/`[` **and** `JSON.parse` succeeds), single-file read (one plain `cat`/`head`/`tail`/`sed -n` of one path). Guards: never re-highlight ANSI; detect on the first ~40 lines; fall back to plain above a 100 KB cap; a detector matching under ~60% of non-empty lines declines rather than half-colouring.
+3. **Cross-harness consistency is a constraint, not a side effect.** Every change above lands in the shared `ToolKind` bodies, so Codex `commandExecution`, opencode `bash` and pi `bash` inherit it and no harness looks like the odd one out. Only the name→kind maps and the per-tool descriptor table are Claude-specific. Metadata chips are opportunistic: each engine fills what its wire carries (Codex `commandExecution` has a real `exitCode`, Claude's Bash result does not), and an absent field renders nothing rather than a placeholder.
+4. The remaining kinds (Read, Write, Edit, Task, plan, question, todo) were reviewed as good enough; they take the header-grammar chips and no body redesign. `search` is the exception — it has no body at all today and gets the file-list renderer the grep detector already builds.
