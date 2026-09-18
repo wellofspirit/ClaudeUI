@@ -1,211 +1,992 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Claude tool cards — proposal v2</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body>
-<style>
-:root{--bg0:#0d1117;--bg1:#111318;--bg2:#1a1d24;--bd:#23272f;--t0:#d1d5db;--t1:#8b929e;--t2:#4b5261;--ac:#6c9eff;--ok:#4ade80;--er:#f87171;--wn:#fbbf24}
-*{box-sizing:border-box}
-body{background:var(--bg0);color:var(--t0);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,sans-serif;font-size:13px;margin:0;padding:24px 16px 64px}
-.wrap{max-width:1000px;margin:0 auto}
-h1{font-size:20px;margin:0 0 6px}
-h2{font-size:15px;margin:34px 0 8px;border-bottom:1px solid var(--bd);padding-bottom:6px}
-h3{font-size:11px;margin:20px 0 8px;color:var(--t1);font-weight:600;text-transform:uppercase;letter-spacing:.09em}
-p.note{color:var(--t1);font-size:12px;line-height:1.6;margin:6px 0 14px}
-code{font-family:'JetBrains Mono',Menlo,Consolas,monospace;font-size:11.5px;color:var(--ac);background:var(--bg2);padding:1px 4px;border-radius:3px}
-.card{border-radius:8px;background:var(--bg1);overflow:hidden;border:1px solid var(--bd);margin-bottom:8px}
-.card.ok{border:2px solid rgba(74,222,128,.3)}
-.card.run{border:2px solid rgba(108,158,255,.3)}
-.card.err{border:2px solid rgba(248,113,113,.3)}
-.card.wn{border:2px solid rgba(251,191,36,.4)}
-.hdr{display:flex;align-items:center;gap:8px;padding:0 12px;height:36px;font-size:13px}
-.name{color:var(--ac);font-weight:500;font-family:'JetBrains Mono',Menlo,monospace;flex:none}
-.sum{color:var(--t1);font-size:12px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:'JetBrains Mono',Menlo,monospace}
-.dot{width:12px;height:12px;border-radius:50%;flex:none}
-.dot.ok{background:rgba(74,222,128,.15);border:2px solid var(--ok)}
-.dot.run{border:2px solid var(--ac);border-top-color:transparent}
-.dot.err{background:rgba(248,113,113,.15);border:2px solid var(--er)}
-.dot.wn{background:rgba(251,191,36,.15);border:2px solid var(--wn)}
-.chev{color:var(--t1);font-size:10px;flex:none}
-.meta{display:flex;gap:6px;flex:none}
-.chip{font-size:10.5px;font-family:'JetBrains Mono',Menlo,monospace;padding:1px 6px;border-radius:4px;background:var(--bg2);color:var(--t1);border:1px solid var(--bd);white-space:nowrap}
-.chip.ok{color:var(--ok);border-color:rgba(74,222,128,.25);background:rgba(74,222,128,.08)}
-.chip.er{color:var(--er);border-color:rgba(248,113,113,.25);background:rgba(248,113,113,.08)}
-.chip.ac{color:var(--ac);border-color:rgba(108,158,255,.25);background:rgba(108,158,255,.08)}
-.chip.wn{color:var(--wn);border-color:rgba(251,191,36,.25);background:rgba(251,191,36,.08)}
-.body{border-top:1px solid var(--bd);padding:10px 12px}
-.pre{font-family:'JetBrains Mono',Menlo,monospace;font-size:11.5px;line-height:1.45;white-space:pre-wrap;word-break:break-word;background:var(--bg0);border:1px solid var(--bd);border-radius:6px;padding:8px;color:#b6bcc6;margin:0;max-height:230px;overflow:auto}
-.lbl{font-size:10.5px;text-transform:uppercase;letter-spacing:.09em;color:var(--t1);margin-bottom:6px}
-.gap{height:10px}
-.kv{display:grid;grid-template-columns:110px 1fr;gap:4px 12px;font-size:12px;margin:0}
-.kv dt{color:var(--t1)}
-.kv dd{margin:0;color:var(--t0);font-family:'JetBrains Mono',Menlo,monospace;font-size:11.5px;word-break:break-word}
-.flat{display:flex;align-items:center;gap:8px;padding:6px 12px;border:1px solid var(--bd);border-radius:8px;background:var(--bg1);margin-bottom:8px;font-size:12px;color:var(--t1)}
-.flat .k{color:var(--t0);font-family:'JetBrains Mono',Menlo,monospace;font-size:11.5px}
-.ico{flex:none;width:16px;text-align:center}
-.two{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
-@media(max-width:780px){.two{grid-template-columns:1fr}}
-.colh{font-size:10.5px;text-transform:uppercase;letter-spacing:.09em;color:var(--t2);margin-bottom:6px}
-.colh.new{color:var(--ok)}
-.fl{display:flex;gap:10px;align-items:baseline;padding:3px 0;font-family:'JetBrains Mono',Menlo,monospace;font-size:11.5px;border-bottom:1px solid rgba(35,39,47,.6)}
-.fl .p{color:var(--ac);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.fl .n{color:var(--t1);flex:none}
-.sn{color:var(--t1);font-size:11px;padding:2px 0 4px}
-.row{display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px}
-.bar{flex:1;height:4px;border-radius:2px;background:var(--bg2);overflow:hidden}
-.bar i{display:block;height:100%;background:var(--ac)}
-ul.plain{margin:4px 0 0;padding-left:16px;color:var(--t1);font-size:12px;line-height:1.65}
-.g{color:var(--t2)}.kw{color:#c792ea}.fn{color:#82aaff}.str{color:#ecc48d}.num{color:#f78c6c}.cmd{color:#c3e88d}.add{color:var(--ok)}.del{color:var(--er)}.key{color:#82aaff}
-</style>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Claude tool cards — proposal v2</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body>
+    <style>
+      :root {
+        --bg0: #0d1117;
+        --bg1: #111318;
+        --bg2: #1a1d24;
+        --bd: #23272f;
+        --t0: #d1d5db;
+        --t1: #8b929e;
+        --t2: #4b5261;
+        --ac: #6c9eff;
+        --ok: #4ade80;
+        --er: #f87171;
+        --wn: #fbbf24;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        background: var(--bg0);
+        color: var(--t0);
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif;
+        font-size: 13px;
+        margin: 0;
+        padding: 24px 16px 64px;
+      }
+      .wrap {
+        max-width: 1000px;
+        margin: 0 auto;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0 0 6px;
+      }
+      h2 {
+        font-size: 15px;
+        margin: 34px 0 8px;
+        border-bottom: 1px solid var(--bd);
+        padding-bottom: 6px;
+      }
+      h3 {
+        font-size: 11px;
+        margin: 20px 0 8px;
+        color: var(--t1);
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.09em;
+      }
+      p.note {
+        color: var(--t1);
+        font-size: 12px;
+        line-height: 1.6;
+        margin: 6px 0 14px;
+      }
+      code {
+        font-family: 'JetBrains Mono', Menlo, Consolas, monospace;
+        font-size: 11.5px;
+        color: var(--ac);
+        background: var(--bg2);
+        padding: 1px 4px;
+        border-radius: 3px;
+      }
+      .card {
+        border-radius: 8px;
+        background: var(--bg1);
+        overflow: hidden;
+        border: 1px solid var(--bd);
+        margin-bottom: 8px;
+      }
+      .card.ok {
+        border: 2px solid rgba(74, 222, 128, 0.3);
+      }
+      .card.run {
+        border: 2px solid rgba(108, 158, 255, 0.3);
+      }
+      .card.err {
+        border: 2px solid rgba(248, 113, 113, 0.3);
+      }
+      .card.wn {
+        border: 2px solid rgba(251, 191, 36, 0.4);
+      }
+      .hdr {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 12px;
+        height: 36px;
+        font-size: 13px;
+      }
+      .name {
+        color: var(--ac);
+        font-weight: 500;
+        font-family: 'JetBrains Mono', Menlo, monospace;
+        flex: none;
+      }
+      .sum {
+        color: var(--t1);
+        font-size: 12px;
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-family: 'JetBrains Mono', Menlo, monospace;
+      }
+      .dot {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        flex: none;
+      }
+      .dot.ok {
+        background: rgba(74, 222, 128, 0.15);
+        border: 2px solid var(--ok);
+      }
+      .dot.run {
+        border: 2px solid var(--ac);
+        border-top-color: transparent;
+      }
+      .dot.err {
+        background: rgba(248, 113, 113, 0.15);
+        border: 2px solid var(--er);
+      }
+      .dot.wn {
+        background: rgba(251, 191, 36, 0.15);
+        border: 2px solid var(--wn);
+      }
+      .chev {
+        color: var(--t1);
+        font-size: 10px;
+        flex: none;
+      }
+      .meta {
+        display: flex;
+        gap: 6px;
+        flex: none;
+      }
+      .chip {
+        font-size: 10.5px;
+        font-family: 'JetBrains Mono', Menlo, monospace;
+        padding: 1px 6px;
+        border-radius: 4px;
+        background: var(--bg2);
+        color: var(--t1);
+        border: 1px solid var(--bd);
+        white-space: nowrap;
+      }
+      .chip.ok {
+        color: var(--ok);
+        border-color: rgba(74, 222, 128, 0.25);
+        background: rgba(74, 222, 128, 0.08);
+      }
+      .chip.er {
+        color: var(--er);
+        border-color: rgba(248, 113, 113, 0.25);
+        background: rgba(248, 113, 113, 0.08);
+      }
+      .chip.ac {
+        color: var(--ac);
+        border-color: rgba(108, 158, 255, 0.25);
+        background: rgba(108, 158, 255, 0.08);
+      }
+      .chip.wn {
+        color: var(--wn);
+        border-color: rgba(251, 191, 36, 0.25);
+        background: rgba(251, 191, 36, 0.08);
+      }
+      .body {
+        border-top: 1px solid var(--bd);
+        padding: 10px 12px;
+      }
+      .pre {
+        font-family: 'JetBrains Mono', Menlo, monospace;
+        font-size: 11.5px;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        word-break: break-word;
+        background: var(--bg0);
+        border: 1px solid var(--bd);
+        border-radius: 6px;
+        padding: 8px;
+        color: #b6bcc6;
+        margin: 0;
+        max-height: 230px;
+        overflow: auto;
+      }
+      .lbl {
+        font-size: 10.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.09em;
+        color: var(--t1);
+        margin-bottom: 6px;
+      }
+      .gap {
+        height: 10px;
+      }
+      .kv {
+        display: grid;
+        grid-template-columns: 110px 1fr;
+        gap: 4px 12px;
+        font-size: 12px;
+        margin: 0;
+      }
+      .kv dt {
+        color: var(--t1);
+      }
+      .kv dd {
+        margin: 0;
+        color: var(--t0);
+        font-family: 'JetBrains Mono', Menlo, monospace;
+        font-size: 11.5px;
+        word-break: break-word;
+      }
+      .flat {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 12px;
+        border: 1px solid var(--bd);
+        border-radius: 8px;
+        background: var(--bg1);
+        margin-bottom: 8px;
+        font-size: 12px;
+        color: var(--t1);
+      }
+      .flat .k {
+        color: var(--t0);
+        font-family: 'JetBrains Mono', Menlo, monospace;
+        font-size: 11.5px;
+      }
+      .ico {
+        flex: none;
+        width: 16px;
+        text-align: center;
+      }
+      .two {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+        align-items: start;
+      }
+      @media (max-width: 780px) {
+        .two {
+          grid-template-columns: 1fr;
+        }
+      }
+      .colh {
+        font-size: 10.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.09em;
+        color: var(--t2);
+        margin-bottom: 6px;
+      }
+      .colh.new {
+        color: var(--ok);
+      }
+      .fl {
+        display: flex;
+        gap: 10px;
+        align-items: baseline;
+        padding: 3px 0;
+        font-family: 'JetBrains Mono', Menlo, monospace;
+        font-size: 11.5px;
+        border-bottom: 1px solid rgba(35, 39, 47, 0.6);
+      }
+      .fl .p {
+        color: var(--ac);
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .fl .n {
+        color: var(--t1);
+        flex: none;
+      }
+      .sn {
+        color: var(--t1);
+        font-size: 11px;
+        padding: 2px 0 4px;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 0;
+        font-size: 12px;
+      }
+      .bar {
+        flex: 1;
+        height: 4px;
+        border-radius: 2px;
+        background: var(--bg2);
+        overflow: hidden;
+      }
+      .bar i {
+        display: block;
+        height: 100%;
+        background: var(--ac);
+      }
+      ul.plain {
+        margin: 4px 0 0;
+        padding-left: 16px;
+        color: var(--t1);
+        font-size: 12px;
+        line-height: 1.65;
+      }
+      .g {
+        color: var(--t2);
+      }
+      .kw {
+        color: #c792ea;
+      }
+      .fn {
+        color: #82aaff;
+      }
+      .str {
+        color: #ecc48d;
+      }
+      .num {
+        color: #f78c6c;
+      }
+      .cmd {
+        color: #c3e88d;
+      }
+      .add {
+        color: var(--ok);
+      }
+      .del {
+        color: var(--er);
+      }
+      .key {
+        color: #82aaff;
+      }
+    </style>
 
-<div class="wrap">
-<h1>Claude tool cards — proposal v2</h1>
-<p class="note">Revised after review: the Bash input block <strong>stays</strong> (long commands, and seeing exactly what ran is a security affordance — it is why Bash renders its input even when <em>hide tool input</em> is on); what changes is legibility, on <strong>both</strong> the input and the output. Everything here is engine-neutral: these are <code>ToolKind</code> bodies shared by Claude, Codex, opencode and pi, so no harness ends up looking like the odd one out. Only the name→kind maps and the per-tool descriptor table are Claude-specific.</p>
+    <div class="wrap">
+      <h1>Claude tool cards — proposal v2</h1>
+      <p class="note">
+        Revised after review: the Bash input block <strong>stays</strong> (long commands, and seeing
+        exactly what ran is a security affordance — it is why Bash renders its input even when
+        <em>hide tool input</em> is on); what changes is legibility, on <strong>both</strong> the
+        input and the output. Everything here is engine-neutral: these are
+        <code>ToolKind</code> bodies shared by Claude, Codex, opencode and pi, so no harness ends up
+        looking like the odd one out. Only the name→kind maps and the per-tool descriptor table are
+        Claude-specific.
+      </p>
 
-<h2>1 · Header grammar — shared by every card, every engine</h2>
-<p class="note">Status dot · tool name · the object of the action · <strong>metadata chips</strong> · chevron. Chips are derived from the result, never echoed input, and are the only thing a collapsed card gains. They are opportunistic: each engine fills what its wire carries and the rest simply do not render — Codex <code>commandExecution</code> has a real <code>exitCode</code>, Claude's Bash result does not, so Claude shows duration and Codex shows both.</p>
-<div class="card ok"><div class="hdr"><span class="dot ok"></span><span class="name">Bash</span><span class="sum">bun run test -- tool-registry</span><span class="meta"><span class="chip">4.2s</span><span class="chip ok">exit 0</span></span><span class="chev">▸</span></div></div>
-<div class="card ok"><div class="hdr"><span class="dot ok"></span><span class="name">Edit</span><span class="sum">src/renderer/.../ToolCard.tsx</span><span class="meta"><span class="chip ok">+18 −4</span><span class="chip ac">tsx</span></span><span class="chev">▸</span></div></div>
-<div class="card ok"><div class="hdr"><span class="dot ok"></span><span class="name">Grep</span><span class="sum">"summarizeTool" in src/</span><span class="meta"><span class="chip">4 files</span><span class="chip">13 hits</span></span><span class="chev">▸</span></div></div>
-<div class="card err"><div class="hdr"><span class="dot err"></span><span class="name">Bash</span><span class="sum">bun run typecheck</span><span class="meta"><span class="chip">1.9s</span><span class="chip er">exit 2</span></span><span class="chev">▸</span></div></div>
-<div class="card run"><div class="hdr"><span class="dot run"></span><span class="name">Command</span><span class="sum">cargo build --release</span><span class="meta"><span class="chip ac">running</span><span class="chip wn">background</span></span><span class="chev">▸</span></div></div>
-<p class="note">Last row is Codex (<code>commandExecution</code>, display name "Command") in the same chrome — the point of doing this at kind level.</p>
+      <h2>1 · Header grammar — shared by every card, every engine</h2>
+      <p class="note">
+        Status dot · tool name · the object of the action · <strong>metadata chips</strong> ·
+        chevron. Chips are derived from the result, never echoed input, and are the only thing a
+        collapsed card gains. They are opportunistic: each engine fills what its wire carries and
+        the rest simply do not render — Codex <code>commandExecution</code> has a real
+        <code>exitCode</code>, Claude's Bash result does not, so Claude shows duration and Codex
+        shows both.
+      </p>
+      <div class="card ok">
+        <div class="hdr">
+          <span class="dot ok"></span><span class="name">Bash</span
+          ><span class="sum">bun run test -- tool-registry</span
+          ><span class="meta"
+            ><span class="chip">4.2s</span><span class="chip ok">exit 0</span></span
+          ><span class="chev">▸</span>
+        </div>
+      </div>
+      <div class="card ok">
+        <div class="hdr">
+          <span class="dot ok"></span><span class="name">Edit</span
+          ><span class="sum">src/renderer/.../ToolCard.tsx</span
+          ><span class="meta"
+            ><span class="chip ok">+18 −4</span><span class="chip ac">tsx</span></span
+          ><span class="chev">▸</span>
+        </div>
+      </div>
+      <div class="card ok">
+        <div class="hdr">
+          <span class="dot ok"></span><span class="name">Grep</span
+          ><span class="sum">"summarizeTool" in src/</span
+          ><span class="meta"
+            ><span class="chip">4 files</span><span class="chip">13 hits</span></span
+          ><span class="chev">▸</span>
+        </div>
+      </div>
+      <div class="card err">
+        <div class="hdr">
+          <span class="dot err"></span><span class="name">Bash</span
+          ><span class="sum">bun run typecheck</span
+          ><span class="meta"
+            ><span class="chip">1.9s</span><span class="chip er">exit 2</span></span
+          ><span class="chev">▸</span>
+        </div>
+      </div>
+      <div class="card run">
+        <div class="hdr">
+          <span class="dot run"></span><span class="name">Command</span
+          ><span class="sum">cargo build --release</span
+          ><span class="meta"
+            ><span class="chip ac">running</span><span class="chip wn">background</span></span
+          ><span class="chev">▸</span>
+        </div>
+      </div>
+      <p class="note">
+        Last row is Codex (<code>commandExecution</code>, display name "Command") in the same chrome
+        — the point of doing this at kind level.
+      </p>
 
-<h2>2 · Bash — input keeps its block, and gets highlighted</h2>
-<div class="two">
-<div><div class="colh">today</div>
-<div class="card ok"><div class="hdr"><span class="dot ok"></span><span class="name">Bash</span><span class="sum">python - &lt;&lt;'PY' import io,os def sub(path, old…</span><span class="chev">▾</span></div>
-<div class="body"><div class="lbl">Input</div><pre class="pre">$ python - &lt;&lt;'PY'
+      <h2>2 · Bash — input keeps its block, and gets highlighted</h2>
+      <div class="two">
+        <div>
+          <div class="colh">today</div>
+          <div class="card ok">
+            <div class="hdr">
+              <span class="dot ok"></span><span class="name">Bash</span
+              ><span class="sum">python - &lt;&lt;'PY' import io,os def sub(path, old…</span
+              ><span class="chev">▾</span>
+            </div>
+            <div class="body">
+              <div class="lbl">Input</div>
+              <pre class="pre">
+$ python - &lt;&lt;'PY'
 import io,os
 def sub(path, old, new, count=1):
     p = os.path.join(r'D:\WorkPlace\ClaudeUI', path)
     s = io.open(p, encoding='utf-8').read()
-    assert s.count(old) &gt;= 1, (path, old[:60])</pre><div class="gap"></div><div class="lbl">Result</div><pre class="pre">ok docs/adr/adr-069_codex-host-per-home-and-account.md
-ok docs/architecture/codex.md</pre></div></div>
-</div>
-<div><div class="colh new">proposed</div>
-<div class="card ok"><div class="hdr"><span class="dot ok"></span><span class="name">Bash</span><span class="sum">python - &lt;&lt;'PY' import io,os def sub(path, old…</span><span class="meta"><span class="chip">0.4s</span><span class="chip ok">exit 0</span><span class="chip ac">sh + py</span></span><span class="chev">▾</span></div>
-<div class="body"><div class="lbl">Input</div><pre class="pre"><span class="g">$</span> <span class="cmd">python</span> <span class="kw">-</span> <span class="num">&lt;&lt;'PY'</span>
+    assert s.count(old) &gt;= 1, (path, old[:60])</pre>
+              <div class="gap"></div>
+              <div class="lbl">Result</div>
+              <pre class="pre">
+ok docs/adr/adr-069_codex-host-per-home-and-account.md
+ok docs/architecture/codex.md</pre>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="colh new">proposed</div>
+          <div class="card ok">
+            <div class="hdr">
+              <span class="dot ok"></span><span class="name">Bash</span
+              ><span class="sum">python - &lt;&lt;'PY' import io,os def sub(path, old…</span
+              ><span class="meta"
+                ><span class="chip">0.4s</span><span class="chip ok">exit 0</span
+                ><span class="chip ac">sh + py</span></span
+              ><span class="chev">▾</span>
+            </div>
+            <div class="body">
+              <div class="lbl">Input</div>
+              <pre
+                class="pre"
+              ><span class="g">$</span> <span class="cmd">python</span> <span class="kw">-</span> <span class="num">&lt;&lt;'PY'</span>
 <span class="kw">import</span> io,os
 <span class="kw">def</span> <span class="fn">sub</span>(path, old, new, count=<span class="num">1</span>):
     p = os.path.<span class="fn">join</span>(<span class="str">r'D:\WorkPlace\ClaudeUI'</span>, path)
     s = io.<span class="fn">open</span>(p, encoding=<span class="str">'utf-8'</span>).<span class="fn">read</span>()
-    <span class="kw">assert</span> s.<span class="fn">count</span>(old) &gt;= <span class="num">1</span>, (path, old[:<span class="num">60</span>])</pre><div class="gap"></div><div class="lbl">Result</div><pre class="pre">ok docs/adr/adr-069_codex-host-per-home-and-account.md
-ok docs/architecture/codex.md</pre></div></div>
-</div>
-</div>
-<p class="note"><code>prism-react-renderer</code> is already a dependency and already carries a <code>bash</code> grammar (<code>CodeView</code> uses it). The one addition is <strong>heredoc awareness</strong>: <code>&lt;&lt;'PY'</code> after <code>python</code> makes the heredoc body Python, <code>&lt;&lt;'JS'</code> after <code>node</code> makes it JavaScript, and the <code>sh + py</code> chip names what was detected. An unknown interpreter falls back to plain bash highlighting — never a guess.</p>
+    <span class="kw">assert</span> s.<span class="fn">count</span>(old) &gt;= <span class="num">1</span>, (path, old[:<span class="num">60</span>])</pre>
+              <div class="gap"></div>
+              <div class="lbl">Result</div>
+              <pre class="pre">
+ok docs/adr/adr-069_codex-host-per-home-and-account.md
+ok docs/architecture/codex.md</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="note">
+        <code>prism-react-renderer</code> is already a dependency and already carries a
+        <code>bash</code> grammar (<code>CodeView</code> uses it). The one addition is
+        <strong>heredoc awareness</strong>: <code>&lt;&lt;'PY'</code> after
+        <code>python</code> makes the heredoc body Python, <code>&lt;&lt;'JS'</code> after
+        <code>node</code> makes it JavaScript, and the <code>sh + py</code> chip names what was
+        detected. An unknown interpreter falls back to plain bash highlighting — never a guess.
+      </p>
 
-<h2>3 · Bash — output colouring</h2>
-<p class="note">Output is flat grey today: <code>TerminalView</code> renders ANSI escapes and nothing else, so a piped <code>grep</code>, <code>rg</code>, <code>git diff</code> or <code>sed -n</code> — none of which emit escapes when piped — arrives uncoloured. Proposal: when the output carries <strong>no</strong> ANSI (if it does, honour it and stop, the tool coloured itself), run four detectors in order.</p>
-<div class="two">
-<div><div class="colh">today</div>
-<div class="card ok"><div class="hdr"><span class="dot ok"></span><span class="name">Bash</span><span class="sum">grep -n "command" -A 14 …/CodexEngineToolMap.ts</span><span class="chev">▾</span></div>
-<div class="body"><pre class="pre">107-        before: '',
+      <h2>3 · Bash — output colouring</h2>
+      <p class="note">
+        Output is flat grey today: <code>TerminalView</code> renders ANSI escapes and nothing else,
+        so a piped <code>grep</code>, <code>rg</code>, <code>git diff</code> or
+        <code>sed -n</code> — none of which emit escapes when piped — arrives uncoloured. Proposal:
+        when the output carries <strong>no</strong> ANSI (if it does, honour it and stop, the tool
+        coloured itself), run four detectors in order.
+      </p>
+      <div class="two">
+        <div>
+          <div class="colh">today</div>
+          <div class="card ok">
+            <div class="hdr">
+              <span class="dot ok"></span><span class="name">Bash</span
+              ><span class="sum">grep -n "command" -A 14 …/CodexEngineToolMap.ts</span
+              ><span class="chev">▾</span>
+            </div>
+            <div class="body">
+              <pre class="pre">
+107-        before: '',
 108-        after: '',
 109-        files:
 110-          result?.fileDiffs ??
 111-          (Array.isArray(input?.files) ? (input.files as FileDiff[]) : undefined)
 113-    if (kind === 'question')
-114-      return { kind, questions: (input?.questions ?? []) as AskUserQuestion[] }</pre></div></div>
-</div>
-<div><div class="colh new">proposed — grep/rg detector</div>
-<div class="card ok"><div class="hdr"><span class="dot ok"></span><span class="name">Bash</span><span class="sum">grep -n "command" -A 14 …/CodexEngineToolMap.ts</span><span class="meta"><span class="chip">0.2s</span><span class="chip ac">grep · ts</span></span><span class="chev">▾</span></div>
-<div class="body"><pre class="pre"><span class="g">107-</span>        before: <span class="str">''</span>,
+114-      return { kind, questions: (input?.questions ?? []) as AskUserQuestion[] }</pre>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="colh new">proposed — grep/rg detector</div>
+          <div class="card ok">
+            <div class="hdr">
+              <span class="dot ok"></span><span class="name">Bash</span
+              ><span class="sum">grep -n "command" -A 14 …/CodexEngineToolMap.ts</span
+              ><span class="meta"
+                ><span class="chip">0.2s</span><span class="chip ac">grep · ts</span></span
+              ><span class="chev">▾</span>
+            </div>
+            <div class="body">
+              <pre
+                class="pre"
+              ><span class="g">107-</span>        before: <span class="str">''</span>,
 <span class="g">108-</span>        after: <span class="str">''</span>,
 <span class="g">109-</span>        files:
 <span class="g">110-</span>          result?.fileDiffs ??
 <span class="g">111-</span>          (<span class="fn">Array</span>.<span class="fn">isArray</span>(input?.files) ? (input.files <span class="kw">as</span> FileDiff[]) : <span class="num">undefined</span>)
 <span class="g">113-</span>    <span class="kw">if</span> (kind === <span class="str">'question'</span>)
-<span class="g">114-</span>      <span class="kw">return</span> { kind, questions: (input?.questions ?? []) <span class="kw">as</span> AskUserQuestion[] }</pre></div></div>
-</div>
-</div>
-<div class="two" style="margin-top:12px">
-<div><div class="colh new">proposed — diff detector</div>
-<div class="card ok"><div class="hdr"><span class="dot ok"></span><span class="name">Bash</span><span class="sum">git diff src/shared/tool-kinds.ts</span><span class="meta"><span class="chip ac">diff</span></span><span class="chev">▾</span></div>
-<div class="body"><pre class="pre"><span class="g">diff --git a/src/shared/tool-kinds.ts b/src/shared/tool-kinds.ts</span>
+<span class="g">114-</span>      <span class="kw">return</span> { kind, questions: (input?.questions ?? []) <span class="kw">as</span> AskUserQuestion[] }</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="two" style="margin-top: 12px">
+        <div>
+          <div class="colh new">proposed — diff detector</div>
+          <div class="card ok">
+            <div class="hdr">
+              <span class="dot ok"></span><span class="name">Bash</span
+              ><span class="sum">git diff src/shared/tool-kinds.ts</span
+              ><span class="meta"><span class="chip ac">diff</span></span
+              ><span class="chev">▾</span>
+            </div>
+            <div class="body">
+              <pre
+                class="pre"
+              ><span class="g">diff --git a/src/shared/tool-kinds.ts b/src/shared/tool-kinds.ts</span>
 <span style="color:var(--ac)">@@ -18,6 +18,7 @@</span>
    | 'todo'
 <span class="add">+  | 'flat'</span>
-<span class="del">-  | 'unknown'</span></pre></div></div>
-</div>
-<div><div class="colh new">proposed — JSON detector</div>
-<div class="card ok"><div class="hdr"><span class="dot ok"></span><span class="name">Bash</span><span class="sum">gh pr view 37 --json state,title,additions</span><span class="meta"><span class="chip">0.9s</span><span class="chip ac">json</span></span><span class="chev">▾</span></div>
-<div class="body"><pre class="pre">{
+<span class="del">-  | 'unknown'</span></pre>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="colh new">proposed — JSON detector</div>
+          <div class="card ok">
+            <div class="hdr">
+              <span class="dot ok"></span><span class="name">Bash</span
+              ><span class="sum">gh pr view 37 --json state,title,additions</span
+              ><span class="meta"
+                ><span class="chip">0.9s</span><span class="chip ac">json</span></span
+              ><span class="chev">▾</span>
+            </div>
+            <div class="body">
+              <pre class="pre">{
   <span class="key">"state"</span>: <span class="str">"MERGED"</span>,
   <span class="key">"title"</span>: <span class="str">"Codex integration"</span>,
   <span class="key">"additions"</span>: <span class="num">18422</span>
-}</pre></div></div>
-</div>
-</div>
-<p class="note"><strong>The four detectors.</strong> 1 · <strong>grep/rg</strong> — a <code>path:line:</code>, <code>path-line-</code> or bare <code>NNN:</code>/<code>NNN-</code> gutter; the gutter renders muted and the content is highlighted by the file's extension through the existing <code>EXT_TO_LANG</code> map. 2 · <strong>unified diff</strong> — <code>diff --git</code> or an <code>@@</code> hunk header, in the same palette the edit card uses. 3 · <strong>JSON</strong> — trimmed output starts <code>{</code> or <code>[</code> <em>and</em> <code>JSON.parse</code> succeeds. 4 · <strong>single-file read</strong> — the command is one plain <code>cat</code>/<code>head</code>/<code>tail</code>/<code>sed -n</code> of one path, so the whole output takes that file's language.<br><br><strong>Guards.</strong> ANSI output is never re-highlighted. Detection reads the first ~40 lines, not the whole buffer. Above a size cap (100 KB proposed) everything falls back to plain — colouring a 5 MB log is not worth the frame. A detector matching under ~60% of non-empty lines declines rather than half-colouring. Colour must never imply structure that is not there. Same treatment reaches Codex <code>commandExecution</code>, opencode <code>bash</code> and pi <code>bash</code> for free: it lives in the shared body, not the Claude map.</p>
+}</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="note">
+        <strong>The four detectors.</strong> 1 · <strong>grep/rg</strong> — a
+        <code>path:line:</code>, <code>path-line-</code> or bare <code>NNN:</code>/<code>NNN-</code>
+        gutter; the gutter renders muted and the content is highlighted by the file's extension
+        through the existing <code>EXT_TO_LANG</code> map. 2 · <strong>unified diff</strong> —
+        <code>diff --git</code> or an <code>@@</code> hunk header, in the same palette the edit card
+        uses. 3 · <strong>JSON</strong> — trimmed output starts <code>{</code> or <code>[</code>
+        <em>and</em> <code>JSON.parse</code> succeeds. 4 · <strong>single-file read</strong> — the
+        command is one plain <code>cat</code>/<code>head</code>/<code>tail</code>/<code
+          >sed -n</code
+        >
+        of one path, so the whole output takes that file's language.<br /><br /><strong
+          >Guards.</strong
+        >
+        ANSI output is never re-highlighted. Detection reads the first ~40 lines, not the whole
+        buffer. Above a size cap (100 KB proposed) everything falls back to plain — colouring a 5 MB
+        log is not worth the frame. A detector matching under ~60% of non-empty lines declines
+        rather than half-colouring. Colour must never imply structure that is not there. Same
+        treatment reaches Codex <code>commandExecution</code>, opencode <code>bash</code> and pi
+        <code>bash</code> for free: it lives in the shared body, not the Claude map.
+      </p>
 
-<h2>4 · The other kinds — confirmations</h2>
-<p class="note">You called these fine as-is; these are the small consistency deltas that ride along with the header grammar, not redesigns.</p>
-<div class="card ok"><div class="hdr"><span class="dot ok"></span><span class="name">Grep</span><span class="sum">"summarizeTool" in src/</span><span class="meta"><span class="chip">4 files</span><span class="chip ac">files_with_matches</span></span><span class="chev">▾</span></div>
-<div class="body"><div class="fl"><span class="p">…/tool-registry/summary.ts</span><span class="n">2</span></div><div class="fl"><span class="p">…/tool-registry/ToolCard.tsx</span><span class="n">1</span></div><div class="fl"><span class="p">…/__tests__/summary.test.ts</span><span class="n">9</span></div><div class="fl"><span class="p">…/chat/ToolCallBlock/utils.ts</span><span class="n">1</span></div></div></div>
-<p class="note">Search is the one body that genuinely has no design today — <code>search</code> shares <code>GenericBody</code>, so Glob and Grep dump their input as JSON and their result as raw text. The file list with per-file hit counts (rows clickable to open the file) is the same structure the grep output detector builds, so they share one renderer.</p>
-<div class="card ok"><div class="hdr"><span class="dot ok"></span><span class="name">lsphub / lsp_references</span><span class="sum">tool-kinds.ts:41</span><span class="meta"><span class="chip ac">read-only</span><span class="chip">0.2s</span></span><span class="chev">▾</span></div>
-<div class="body"><dl class="kv"><dt>file</dt><dd>src/shared/tool-kinds.ts</dd><dt>line</dt><dd>41</dd></dl></div></div>
-<p class="note"><code>McpBody</code> landed for Codex in F20; this is it applied to Claude's own <code>mcp__server__tool</code> names, which today fall to the JSON dump.</p>
+      <h2>4 · The other kinds — confirmations</h2>
+      <p class="note">
+        You called these fine as-is; these are the small consistency deltas that ride along with the
+        header grammar, not redesigns.
+      </p>
+      <div class="card ok">
+        <div class="hdr">
+          <span class="dot ok"></span><span class="name">Grep</span
+          ><span class="sum">"summarizeTool" in src/</span
+          ><span class="meta"
+            ><span class="chip">4 files</span><span class="chip ac">files_with_matches</span></span
+          ><span class="chev">▾</span>
+        </div>
+        <div class="body">
+          <div class="fl">
+            <span class="p">…/tool-registry/summary.ts</span><span class="n">2</span>
+          </div>
+          <div class="fl">
+            <span class="p">…/tool-registry/ToolCard.tsx</span><span class="n">1</span>
+          </div>
+          <div class="fl">
+            <span class="p">…/__tests__/summary.test.ts</span><span class="n">9</span>
+          </div>
+          <div class="fl">
+            <span class="p">…/chat/ToolCallBlock/utils.ts</span><span class="n">1</span>
+          </div>
+        </div>
+      </div>
+      <p class="note">
+        Search is the one body that genuinely has no design today — <code>search</code> shares
+        <code>GenericBody</code>, so Glob and Grep dump their input as JSON and their result as raw
+        text. The file list with per-file hit counts (rows clickable to open the file) is the same
+        structure the grep output detector builds, so they share one renderer.
+      </p>
+      <div class="card ok">
+        <div class="hdr">
+          <span class="dot ok"></span><span class="name">lsphub / lsp_references</span
+          ><span class="sum">tool-kinds.ts:41</span
+          ><span class="meta"
+            ><span class="chip ac">read-only</span><span class="chip">0.2s</span></span
+          ><span class="chev">▾</span>
+        </div>
+        <div class="body">
+          <dl class="kv">
+            <dt>file</dt>
+            <dd>src/shared/tool-kinds.ts</dd>
+            <dt>line</dt>
+            <dd>41</dd>
+          </dl>
+        </div>
+      </div>
+      <p class="note">
+        <code>McpBody</code> landed for Codex in F20; this is it applied to Claude's own
+        <code>mcp__server__tool</code> names, which today fall to the JSON dump.
+      </p>
 
-<h2>5 · The 20 unmapped tools</h2>
-<h3>Rich cards — real content</h3>
-<div class="card ok"><div class="hdr"><span class="dot ok"></span><span class="name">Skill</span><span class="sum">verifier-electron</span><span class="meta"><span class="chip ac">skill</span></span><span class="chev">▾</span></div>
-<div class="body"><dl class="kv"><dt>args</dt><dd>--testid InputBox.send</dd></dl><div class="gap"></div><pre class="pre">Launching skill: verifier-electron
+      <h2>5 · The 20 unmapped tools</h2>
+      <h3>Rich cards — real content</h3>
+      <div class="card ok">
+        <div class="hdr">
+          <span class="dot ok"></span><span class="name">Skill</span
+          ><span class="sum">verifier-electron</span
+          ><span class="meta"><span class="chip ac">skill</span></span
+          ><span class="chev">▾</span>
+        </div>
+        <div class="body">
+          <dl class="kv">
+            <dt>args</dt>
+            <dd>--testid InputBox.send</dd>
+          </dl>
+          <div class="gap"></div>
+          <pre class="pre">
+Launching skill: verifier-electron
 
-Verify ClaudeUI UI changes by launching the REAL Electron app, screenshotting it, and asserting the live DOM…</pre></div></div>
-<div class="card wn"><div class="hdr"><span class="dot wn"></span><span class="name">ReportFindings</span><span class="sum">3 findings · 1 confirmed</span><span class="meta"><span class="chip wn">high</span></span><span class="chev">▾</span></div>
-<div class="body"><div class="fl"><span class="chip er">CONFIRMED</span><span class="p">session-queue.ts:214 — recall drops a boundary signal</span></div><div class="sn">flushQueuedItems() returns before the forward resolves, so a boundary arriving mid-forward is lost.</div><div class="fl"><span class="chip wn">PLAUSIBLE</span><span class="p">ToolCard.tsx:148 — summary recomputed per render</span></div><div class="fl"><span class="chip">PLAUSIBLE</span><span class="p">args.ts:292 — entrypoint override is untested</span></div></div></div>
-<div class="card run"><div class="hdr"><span class="dot run"></span><span class="name">Workflow</span><span class="sum">review-changes · 2 phases</span><span class="meta"><span class="chip ac">8 agents</span></span><span class="chev">▾</span></div>
-<div class="body"><div class="row"><span style="color:var(--t1);width:64px">Review</span><span class="bar"><i style="width:100%"></i></span><span class="chip ok">4/4</span></div><div class="row"><span style="color:var(--t1);width:64px">Verify</span><span class="bar"><i style="width:50%"></i></span><span class="chip ac">2/4</span></div><p class="note" style="margin:8px 0 0">Review changed files across dimensions, verify each finding.</p></div></div>
-<div class="card ok"><div class="hdr"><span class="dot ok"></span><span class="name">Artifact</span><span class="sum">Tool card proposal</span><span class="meta"><span class="chip ac">publish</span><span class="chip">3 files</span></span><span class="chev">▾</span></div>
-<div class="body"><dl class="kv"><dt>url</dt><dd><span style="color:var(--ac)">claude.ai/artifact/…/tool-cards</span></dd><dt>file</dt><dd>docs/mockups/claude-tool-cards.html</dd><dt>favicon</dt><dd>🧰</dd></dl></div></div>
-<div class="card run"><div class="hdr"><span class="dot run"></span><span class="name">Monitor</span><span class="sum">errors in dev.log</span><span class="meta"><span class="chip ac">7 events</span><span class="chip">28m left</span></span><span class="chev">▾</span></div>
-<div class="body"><pre class="pre"><span class="g">$</span> <span class="cmd">tail</span> -f dev.log | <span class="cmd">grep</span> --line-buffered -E <span class="str">"ERROR|Traceback"</span></pre><div class="gap"></div><div class="fl"><span class="n">14:02:11</span><span class="p">ERROR renderer: hydration mismatch on SessionList</span></div><div class="fl"><span class="n">14:06:40</span><span class="p">ERROR main: EBUSY rename out/main.js</span></div></div></div>
-<div class="card ok"><div class="hdr"><span class="dot ok"></span><span class="name">NotebookEdit</span><span class="sum">analysis.ipynb · cell 7</span><span class="meta"><span class="chip ac">insert</span><span class="chip">code</span></span><span class="chev">▾</span></div>
-<div class="body"><div class="fl"><span class="n">7</span><span class="p"><span class="add">+ df = pd.read_parquet("runs.parquet")</span></span></div><div class="fl"><span class="n">7</span><span class="p"><span class="add">+ df.groupby("engine").cost.sum().plot.bar()</span></span></div></div></div>
-<div class="card ok"><div class="hdr"><span class="dot ok"></span><span class="name">TaskOutput</span><span class="sum">bash_01H9 · dev server</span><span class="meta"><span class="chip ac">streaming</span><span class="chip">+412 lines</span></span><span class="chev">▾</span></div>
-<div class="body"><pre class="pre">VITE v7.1.2  ready in 412 ms
+Verify ClaudeUI UI changes by launching the REAL Electron app, screenshotting it, and asserting the live DOM…</pre>
+        </div>
+      </div>
+      <div class="card wn">
+        <div class="hdr">
+          <span class="dot wn"></span><span class="name">ReportFindings</span
+          ><span class="sum">3 findings · 1 confirmed</span
+          ><span class="meta"><span class="chip wn">high</span></span
+          ><span class="chev">▾</span>
+        </div>
+        <div class="body">
+          <div class="fl">
+            <span class="chip er">CONFIRMED</span
+            ><span class="p">session-queue.ts:214 — recall drops a boundary signal</span>
+          </div>
+          <div class="sn">
+            flushQueuedItems() returns before the forward resolves, so a boundary arriving
+            mid-forward is lost.
+          </div>
+          <div class="fl">
+            <span class="chip wn">PLAUSIBLE</span
+            ><span class="p">ToolCard.tsx:148 — summary recomputed per render</span>
+          </div>
+          <div class="fl">
+            <span class="chip">PLAUSIBLE</span
+            ><span class="p">args.ts:292 — entrypoint override is untested</span>
+          </div>
+        </div>
+      </div>
+      <div class="card run">
+        <div class="hdr">
+          <span class="dot run"></span><span class="name">Workflow</span
+          ><span class="sum">review-changes · 2 phases</span
+          ><span class="meta"><span class="chip ac">8 agents</span></span
+          ><span class="chev">▾</span>
+        </div>
+        <div class="body">
+          <div class="row">
+            <span style="color: var(--t1); width: 64px">Review</span
+            ><span class="bar"><i style="width: 100%"></i></span><span class="chip ok">4/4</span>
+          </div>
+          <div class="row">
+            <span style="color: var(--t1); width: 64px">Verify</span
+            ><span class="bar"><i style="width: 50%"></i></span><span class="chip ac">2/4</span>
+          </div>
+          <p class="note" style="margin: 8px 0 0">
+            Review changed files across dimensions, verify each finding.
+          </p>
+        </div>
+      </div>
+      <div class="card ok">
+        <div class="hdr">
+          <span class="dot ok"></span><span class="name">Artifact</span
+          ><span class="sum">Tool card proposal</span
+          ><span class="meta"
+            ><span class="chip ac">publish</span><span class="chip">3 files</span></span
+          ><span class="chev">▾</span>
+        </div>
+        <div class="body">
+          <dl class="kv">
+            <dt>url</dt>
+            <dd><span style="color: var(--ac)">claude.ai/artifact/…/tool-cards</span></dd>
+            <dt>file</dt>
+            <dd>docs/mockups/claude-tool-cards.html</dd>
+            <dt>favicon</dt>
+            <dd>🧰</dd>
+          </dl>
+        </div>
+      </div>
+      <div class="card run">
+        <div class="hdr">
+          <span class="dot run"></span><span class="name">Monitor</span
+          ><span class="sum">errors in dev.log</span
+          ><span class="meta"
+            ><span class="chip ac">7 events</span><span class="chip">28m left</span></span
+          ><span class="chev">▾</span>
+        </div>
+        <div class="body">
+          <pre
+            class="pre"
+          ><span class="g">$</span> <span class="cmd">tail</span> -f dev.log | <span class="cmd">grep</span> --line-buffered -E <span class="str">"ERROR|Traceback"</span></pre>
+          <div class="gap"></div>
+          <div class="fl">
+            <span class="n">14:02:11</span
+            ><span class="p">ERROR renderer: hydration mismatch on SessionList</span>
+          </div>
+          <div class="fl">
+            <span class="n">14:06:40</span
+            ><span class="p">ERROR main: EBUSY rename out/main.js</span>
+          </div>
+        </div>
+      </div>
+      <div class="card ok">
+        <div class="hdr">
+          <span class="dot ok"></span><span class="name">NotebookEdit</span
+          ><span class="sum">analysis.ipynb · cell 7</span
+          ><span class="meta"
+            ><span class="chip ac">insert</span><span class="chip">code</span></span
+          ><span class="chev">▾</span>
+        </div>
+        <div class="body">
+          <div class="fl">
+            <span class="n">7</span
+            ><span class="p"><span class="add">+ df = pd.read_parquet("runs.parquet")</span></span>
+          </div>
+          <div class="fl">
+            <span class="n">7</span
+            ><span class="p"
+              ><span class="add">+ df.groupby("engine").cost.sum().plot.bar()</span></span
+            >
+          </div>
+        </div>
+      </div>
+      <div class="card ok">
+        <div class="hdr">
+          <span class="dot ok"></span><span class="name">TaskOutput</span
+          ><span class="sum">bash_01H9 · dev server</span
+          ><span class="meta"
+            ><span class="chip ac">streaming</span><span class="chip">+412 lines</span></span
+          ><span class="chev">▾</span>
+        </div>
+        <div class="body">
+          <pre class="pre">
+VITE v7.1.2  ready in 412 ms
 ➜  Local:   http://localhost:5173/
-14:06:40 [vite] hmr update /src/renderer/src/components/chat/ToolCard.tsx</pre></div></div>
+14:06:40 [vite] hmr update /src/renderer/src/components/chat/ToolCard.tsx</pre>
+        </div>
+      </div>
 
-<h3>Detail cards — a field list, one spec per tool</h3>
-<div class="card ok"><div class="hdr"><span class="dot ok"></span><span class="name">CronCreate</span><span class="sum">every weekday at 09:00</span><span class="meta"><span class="chip ac">recurring</span><span class="chip">durable</span></span><span class="chev">▾</span></div>
-<div class="body"><dl class="kv"><dt>cron</dt><dd>0 9 * * 1-5</dd><dt>prompt</dt><dd>Check overnight CI and summarise failures.</dd><dt>job id</dt><dd>cron_7fa21c</dd></dl></div></div>
-<div class="card ok"><div class="hdr"><span class="dot ok"></span><span class="name">EnterWorktree</span><span class="sum">feature/tool-cards</span><span class="meta"><span class="chip ok">created</span></span><span class="chev">▾</span></div>
-<div class="body"><dl class="kv"><dt>worktree</dt><dd>D:/WorkPlace/.worktrees/tool-cards</dd><dt>branch</dt><dd>feature/tool-cards</dd><dt>from</dt><dd>pre-release @ 295658cd</dd></dl></div></div>
-<div class="card ok"><div class="hdr"><span class="dot ok"></span><span class="name">ScheduleWakeup</span><span class="sum">in 20 min — watching CI run</span><span class="meta"><span class="chip">1200s</span><span class="chip">noop</span></span><span class="chev">▾</span></div>
-<div class="body"><dl class="kv"><dt>delay</dt><dd>1200s (unclamped)</dd><dt>fires at</dt><dd>2026-09-18 14:26 local</dd><dt>reason</dt><dd>watching CI run</dd></dl></div></div>
-<div class="card ok"><div class="hdr"><span class="dot ok"></span><span class="name">ListAgents</span><span class="sum">3 agents</span><span class="meta"><span class="chip ac">1 busy</span></span><span class="chev">▾</span></div>
-<div class="body"><div class="fl"><span class="chip ac">busy</span><span class="p">reviewer</span><span class="n">subagent</span></div><div class="fl"><span class="chip">idle</span><span class="p">verifier</span><span class="n">subagent</span></div><div class="fl"><span class="chip">idle</span><span class="p">claude [3fa9c1]</span><span class="n">local session</span></div></div></div>
-<div class="card ok"><div class="hdr"><span class="dot ok"></span><span class="name">SendMessage</span><span class="sum">→ reviewer</span><span class="meta"><span class="chip ok">delivered</span></span><span class="chev">▾</span></div>
-<div class="body"><pre class="pre">Start on the ToolCard header grammar; leave the search body to me.</pre></div></div>
-<div class="card ok"><div class="hdr"><span class="dot ok"></span><span class="name">RemoteTrigger</span><span class="sum">create · deploy-webhook</span><span class="meta"><span class="chip ok">enabled</span></span><span class="chev">▾</span></div>
-<div class="body"><dl class="kv"><dt>action</dt><dd>create</dd><dt>trigger id</dt><dd>trg_91ac33</dd><dt>url</dt><dd><span style="color:var(--ac)">https://claude.ai/trigger/91ac33</span></dd></dl></div></div>
+      <h3>Detail cards — a field list, one spec per tool</h3>
+      <div class="card ok">
+        <div class="hdr">
+          <span class="dot ok"></span><span class="name">CronCreate</span
+          ><span class="sum">every weekday at 09:00</span
+          ><span class="meta"
+            ><span class="chip ac">recurring</span><span class="chip">durable</span></span
+          ><span class="chev">▾</span>
+        </div>
+        <div class="body">
+          <dl class="kv">
+            <dt>cron</dt>
+            <dd>0 9 * * 1-5</dd>
+            <dt>prompt</dt>
+            <dd>Check overnight CI and summarise failures.</dd>
+            <dt>job id</dt>
+            <dd>cron_7fa21c</dd>
+          </dl>
+        </div>
+      </div>
+      <div class="card ok">
+        <div class="hdr">
+          <span class="dot ok"></span><span class="name">EnterWorktree</span
+          ><span class="sum">feature/tool-cards</span
+          ><span class="meta"><span class="chip ok">created</span></span
+          ><span class="chev">▾</span>
+        </div>
+        <div class="body">
+          <dl class="kv">
+            <dt>worktree</dt>
+            <dd>D:/WorkPlace/.worktrees/tool-cards</dd>
+            <dt>branch</dt>
+            <dd>feature/tool-cards</dd>
+            <dt>from</dt>
+            <dd>pre-release @ 295658cd</dd>
+          </dl>
+        </div>
+      </div>
+      <div class="card ok">
+        <div class="hdr">
+          <span class="dot ok"></span><span class="name">ScheduleWakeup</span
+          ><span class="sum">in 20 min — watching CI run</span
+          ><span class="meta"><span class="chip">1200s</span><span class="chip">noop</span></span
+          ><span class="chev">▾</span>
+        </div>
+        <div class="body">
+          <dl class="kv">
+            <dt>delay</dt>
+            <dd>1200s (unclamped)</dd>
+            <dt>fires at</dt>
+            <dd>2026-09-18 14:26 local</dd>
+            <dt>reason</dt>
+            <dd>watching CI run</dd>
+          </dl>
+        </div>
+      </div>
+      <div class="card ok">
+        <div class="hdr">
+          <span class="dot ok"></span><span class="name">ListAgents</span
+          ><span class="sum">3 agents</span
+          ><span class="meta"><span class="chip ac">1 busy</span></span
+          ><span class="chev">▾</span>
+        </div>
+        <div class="body">
+          <div class="fl">
+            <span class="chip ac">busy</span><span class="p">reviewer</span
+            ><span class="n">subagent</span>
+          </div>
+          <div class="fl">
+            <span class="chip">idle</span><span class="p">verifier</span
+            ><span class="n">subagent</span>
+          </div>
+          <div class="fl">
+            <span class="chip">idle</span><span class="p">claude [3fa9c1]</span
+            ><span class="n">local session</span>
+          </div>
+        </div>
+      </div>
+      <div class="card ok">
+        <div class="hdr">
+          <span class="dot ok"></span><span class="name">SendMessage</span
+          ><span class="sum">→ reviewer</span
+          ><span class="meta"><span class="chip ok">delivered</span></span
+          ><span class="chev">▾</span>
+        </div>
+        <div class="body">
+          <pre class="pre">Start on the ToolCard header grammar; leave the search body to me.</pre>
+        </div>
+      </div>
+      <div class="card ok">
+        <div class="hdr">
+          <span class="dot ok"></span><span class="name">RemoteTrigger</span
+          ><span class="sum">create · deploy-webhook</span
+          ><span class="meta"><span class="chip ok">enabled</span></span
+          ><span class="chev">▾</span>
+        </div>
+        <div class="body">
+          <dl class="kv">
+            <dt>action</dt>
+            <dd>create</dd>
+            <dt>trigger id</dt>
+            <dd>trg_91ac33</dd>
+            <dt>url</dt>
+            <dd><span style="color: var(--ac)">https://claude.ai/trigger/91ac33</span></dd>
+          </dl>
+        </div>
+      </div>
 
-<h3>Flat rows — one fact, no expander</h3>
-<div class="flat"><span class="ico">⏱</span><span style="flex:1">Loaded <span class="k">9</span> tool schemas for <span class="k">"notebook jupyter"</span></span><span class="meta"><span class="chip">ToolSearch</span></span></div>
-<div class="flat"><span class="ico">⏹</span><span style="flex:1">Stopped background task <span class="k">bash_01H9</span></span><span class="meta"><span class="chip">TaskStop</span><span class="chip ok">stopped</span></span></div>
-<div class="flat"><span class="ico">🔔</span><span style="flex:1">Push notification sent — <span class="k">build finished</span></span><span class="meta"><span class="chip">PushNotification</span></span></div>
-<div class="flat"><span class="ico">🗑</span><span style="flex:1">Deleted schedule <span class="k">cron_7fa21c</span></span><span class="meta"><span class="chip">CronDelete</span></span></div>
-<div class="flat"><span class="ico">📋</span><span style="flex:1"><span class="k">2</span> schedules — weekdays 09:00, Fridays 17:30</span><span class="meta"><span class="chip">CronList</span></span></div>
-<div class="flat"><span class="ico">↩</span><span style="flex:1">Left the worktree and <span class="k">kept</span> its changes</span><span class="meta"><span class="chip">ExitWorktree</span></span></div>
-<div class="flat"><span class="ico">🎨</span><span style="flex:1">Design sync pulled <span class="k">4</span> frames</span><span class="meta"><span class="chip">DesignSync</span></span></div>
-<div class="flat"><span class="ico">🔗</span><span style="flex:1">Onboarding guide shared — <span class="k">claude.ai/g/7fa2</span></span><span class="meta"><span class="chip">ShareOnboardingGuide</span></span></div>
-<p class="note">A flat row is not a <code>ToolCard</code>: no border-2, no chevron, no status dot — the shape the Codex <code>sleep</code> row already uses, which is what keeps the harnesses consistent. It states what happened and stops. A failed call promotes itself to an ordinary error card, so a failure is never a quiet grey line.</p>
+      <h3>Flat rows — one fact, no expander</h3>
+      <div class="flat">
+        <span class="ico">⏱</span
+        ><span style="flex: 1"
+          >Loaded <span class="k">9</span> tool schemas for
+          <span class="k">"notebook jupyter"</span></span
+        ><span class="meta"><span class="chip">ToolSearch</span></span>
+      </div>
+      <div class="flat">
+        <span class="ico">⏹</span
+        ><span style="flex: 1">Stopped background task <span class="k">bash_01H9</span></span
+        ><span class="meta"
+          ><span class="chip">TaskStop</span><span class="chip ok">stopped</span></span
+        >
+      </div>
+      <div class="flat">
+        <span class="ico">🔔</span
+        ><span style="flex: 1">Push notification sent — <span class="k">build finished</span></span
+        ><span class="meta"><span class="chip">PushNotification</span></span>
+      </div>
+      <div class="flat">
+        <span class="ico">🗑</span
+        ><span style="flex: 1">Deleted schedule <span class="k">cron_7fa21c</span></span
+        ><span class="meta"><span class="chip">CronDelete</span></span>
+      </div>
+      <div class="flat">
+        <span class="ico">📋</span
+        ><span style="flex: 1"
+          ><span class="k">2</span> schedules — weekdays 09:00, Fridays 17:30</span
+        ><span class="meta"><span class="chip">CronList</span></span>
+      </div>
+      <div class="flat">
+        <span class="ico">↩</span
+        ><span style="flex: 1">Left the worktree and <span class="k">kept</span> its changes</span
+        ><span class="meta"><span class="chip">ExitWorktree</span></span>
+      </div>
+      <div class="flat">
+        <span class="ico">🎨</span
+        ><span style="flex: 1">Design sync pulled <span class="k">4</span> frames</span
+        ><span class="meta"><span class="chip">DesignSync</span></span>
+      </div>
+      <div class="flat">
+        <span class="ico">🔗</span
+        ><span style="flex: 1"
+          >Onboarding guide shared — <span class="k">claude.ai/g/7fa2</span></span
+        ><span class="meta"><span class="chip">ShareOnboardingGuide</span></span>
+      </div>
+      <p class="note">
+        A flat row is not a <code>ToolCard</code>: no border-2, no chevron, no status dot — the
+        shape the Codex <code>sleep</code> row already uses, which is what keeps the harnesses
+        consistent. It states what happened and stops. A failed call promotes itself to an ordinary
+        error card, so a failure is never a quiet grey line.
+      </p>
 
-<h2>6 · Gate findings — behaviour, not pixels</h2>
-<ul class="plain">
-<li><code>TodoWrite.isEnabled</code> is <code>!z_() &amp;&amp; mL()</code> — off whenever the Tasks system is on, which is the default. Its replacement (<code>TaskCreate/TaskGet/TaskList/TaskUpdate</code>) needs <code>CLAUDE_CODE_ENABLE_TODO_TOOLS=true</code>, which ClaudeUI never sets: <strong>today a Claude session has no checklist tool at all</strong>. Setting it in <code>buildEnv</code> revives the widget with no renderer change — <code>derive-session.ts</code> and <code>HIDDEN_TOOLS</code> already handle the family.</li>
-<li><code>AskUserQuestion</code> and <code>ExitPlanMode</code> are gated on <code>Ae() &amp;&amp; gWe(wH())</code> — non-interactive <em>and</em> a permission-prompt tool configured. ClaudeUI passes <code>--permission-prompt-tool stdio</code>, so both live; a spawn without it loses plan mode's exit tool silently. Worth a <code>buildArgs</code> guard test.</li>
-<li><code>MultiEdit</code> no longer exists in 2.1.268 — <code>ClaudeEngineToolMap</code> still maps it. <code>BashOutput</code>/<code>KillShell</code> are now aliases of <code>TaskOutput</code>/<code>TaskStop</code>.</li>
-</ul>
-</div>
-
-</body>
+      <h2>6 · Gate findings — behaviour, not pixels</h2>
+      <ul class="plain">
+        <li>
+          <code>TodoWrite.isEnabled</code> is <code>!z_() &amp;&amp; mL()</code> — off whenever the
+          Tasks system is on, which is the default. Its replacement
+          (<code>TaskCreate/TaskGet/TaskList/TaskUpdate</code>) needs
+          <code>CLAUDE_CODE_ENABLE_TODO_TOOLS=true</code>, which ClaudeUI never sets:
+          <strong>today a Claude session has no checklist tool at all</strong>. Setting it in
+          <code>buildEnv</code> revives the widget with no renderer change —
+          <code>derive-session.ts</code> and <code>HIDDEN_TOOLS</code> already handle the family.
+        </li>
+        <li>
+          <code>AskUserQuestion</code> and <code>ExitPlanMode</code> are gated on
+          <code>Ae() &amp;&amp; gWe(wH())</code> — non-interactive <em>and</em> a permission-prompt
+          tool configured. ClaudeUI passes <code>--permission-prompt-tool stdio</code>, so both
+          live; a spawn without it loses plan mode's exit tool silently. Worth a
+          <code>buildArgs</code> guard test.
+        </li>
+        <li>
+          <code>MultiEdit</code> no longer exists in 2.1.268 —
+          <code>ClaudeEngineToolMap</code> still maps it. <code>BashOutput</code>/<code
+            >KillShell</code
+          >
+          are now aliases of <code>TaskOutput</code>/<code>TaskStop</code>.
+        </li>
+      </ul>
+    </div>
+  </body>
 </html>

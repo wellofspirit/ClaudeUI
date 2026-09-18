@@ -6,3 +6,6 @@ tsconfig.json
 tsconfig.*.json
 # Exact output from the pinned Codex generator, checked by check-codex-protocol.
 src/core/codex/protocol/
+
+# Scratch git worktrees created by the agent harness — not repo sources.
+.claude/worktrees/
