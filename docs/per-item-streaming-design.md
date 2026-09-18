@@ -1,8 +1,10 @@
 # Per-item volatile streaming
 
-**Status:** Accepted by Daniel and implemented, 2026-09-17. Verification recorded below.
+**Status:** Accepted by Daniel and implemented for **all engines**, 2026-09-17. The legacy
+session stream lane was retired the same day (`7837f7e7`); the Claude snapshot fallback
+landed 2026-09-18 (`79345c43`). Verification recorded below.
 Scope: shared protocol and all clients, with Codex root/direct-child adoption first. Roadmap item 2 in
-[the Codex handoff](codex-integration-handoff.md). Extends
+[the Codex handoff](codex-integration-handoff.md) — now closed. Extends
 [ADR-055](adr/adr-055_volatile-stream-lane.md) and
 [SyncCore contract 3](architecture/sync-core.md#the-four-wire-contracts-closed-set).
 The architecture and ADR-055 now include this extension.
@@ -270,8 +272,7 @@ events, rather than extending the current offset-zero convention.
   from the replica's cold-history cache.
 - Desktop MessagePort and browser WebSocket feed the same SyncClient and reducer.
   Root chat, task cards and task detail panels overlay only the addressed block.
-  Root thinking uses its own start time while active. Legacy session buffers stay
-  in place for Claude, opencode and pi.
+  Root thinking uses its own start time while active.
 - Codex root and direct children use this path for text, reasoning and plans.
   Completion uses the existing mapper, including F19 reasoning normalization;
   an empty reasoning completion retains the accumulated partial. Interruption,
@@ -324,13 +325,9 @@ WebSocket drain APIs. Reliable lifecycle events retain their existing delivery.
   covered by actual WebSocket tests and the shared renderer tests; no standalone
   browser UI drive was performed.
 
-The remaining engine migrations are explicit unfinished steps of roadmap item 2:
-Claude, opencode and pi each require a native identity/lifecycle investigation,
-producer migration and plugin/dispatch-consumer audit. After the last consumer
-migrates, remove the old session text-stream frame family, accumulation fields and
-client plumbing. Independent pass-through tails remain. Metering follows this
-closure. This slice does not add
-unfinished-output disk persistence, grandchild rendering, or new metering behavior.
+This slice does not add unfinished-output disk persistence, grandchild rendering, or
+new metering behavior. The remaining engine migrations and the retirement of the old
+lane landed the same day — §"As built, remaining engines and retirement (2026-09-17)".
 
 ### Review corrections and final gates, 2026-09-17
 
@@ -378,3 +375,147 @@ owns the rebuilt-app drive; the main model reviews its screenshots.
   `f21-reviewed-plan-live.png` and `f21-reviewed-plan-final.png`.
   No standalone browser UI drive or native Claude live drive was performed;
   WebSocket and shared-renderer behavior are covered by the automated suite.
+
+## As built, remaining engines and retirement (2026-09-17)
+
+`83106588` moved Claude, opencode, pi and every cross-engine dispatch target onto the
+same three channels; `7837f7e7` deleted the lane they came from. Each engine kept its
+own native identity — none of them borrowed Codex's.
+
+### Claude
+
+`src/core/services/claude-item-stream.ts` holds the lifecycle as a standalone class
+(`ClaudeItemStreamLifecycle`) so dispatch targets can instantiate their own; the sink
+is wired in `claude-session.ts`. The block target is the wire `message.id` from
+`message_start` plus the `content_block_start` / `content_block_delta` index — the
+native addressing, unchanged.
+
+- `content_block_start` opens immediately only if the block arrives with text already
+  in it; otherwise the first non-empty delta opens it, so an empty thinking block
+  never produces a bare Thought row.
+- `content_block_stop` seals that one block and stamps its `durationMs` from the
+  block's own start time. `message_stop` seals whatever is left, then emits a
+  targetless seal carrying the full message.
+- **Snapshot placement.** An `assistant` line is matched against live block state by
+  `handleSnapshot`: an equal block count replaces block for block; a single-block
+  payload lands on the last not-yet-stopped block of the same type. That branch rests
+  on cli.js emitting one single-block `assistant` line per content block, sharing
+  `message.id`, after that block's last delta but before its `content_block_stop`
+  (verified on 2.1.268 — `docs/protocol-cc/05-stream-events.md` §5.9, guarded by
+  `src/integration/sdk-contract/stream-order.integration.test.ts`).
+- **The 79345c43 fallback.** When no block matches, `handleSnapshot` returns `'none'`
+  and the caller hands the snapshot to the ordinary upsert (`session:message`, or
+  `session:subagent-message` for a subagent) instead of swallowing it; the later
+  targetless seal merges over that upsert. A future cli.js that changes the snapshot
+  shape therefore degrades to message-granularity rendering rather than losing text.
+- `retract()` invalidates message ids so a refused partial cannot be reopened by a
+  late notification.
+
+### opencode
+
+Native identity is message id plus part id. `streamItemOf`
+(`src/core/opencode/event-mapper.ts`) resolves that pair to the **rendered** block
+slot by walking `acc.partOrder` and counting only the part types that become blocks
+(text, reasoning, tool) — the native part order is not the transcript index, so the
+mapping has to be computed rather than assumed.
+
+- opencode publishes `message.part.updated` before the first `message.part.delta` of a
+  text or reasoning part (`text-start` / `reasoning-start` call `updatePart`, the
+  deltas call `updatePartDelta` — vendored source checkout
+  `vendor/opencode-src/packages/opencode/src/session/processor.ts`, 1.18.23), so the
+  scaffold normally exists before the first append. `OpencodeSession.updateStreamItem`
+  opens on that part update, skipping an empty reasoning part; `appendStreamItem`
+  opens on a first delta for the case where no part update preceded it.
+- A part with `time.end` set seals. Reasoning `durationMs` is
+  `time.end - time.start` (`buildChatMessage`); `sealStreamItems` stamps an end time
+  itself when a process exit or child-session end arrives without one.
+
+### pi
+
+The mapper mints the message id (`ensureMessageId`) because pi's wire carries none;
+the native `contentIndex` on `text_delta` / `thinking_delta` is the block slot,
+normalized by `normalizedContentIndex` and mapped to the rendered index by
+`renderedBlockIndex`. `src/core/pi/event-mapper.ts` emits `item_open` / `item_delta` /
+`item_seal` outputs and `PiSession` sends them on the three channels.
+
+- `text_end` / `thinking_end` carry the block's full accumulated value and seal it,
+  opening first if no delta ever did.
+- `finishPiMessage` seals a still-open message when the native process exits before
+  `message_end` — on client exit and on `cancel()`.
+- Thinking durations come from the mapper's own clock (`thinkingStartedAt` →
+  `thinkingDurationMs`, applied by `withThinkingDurations`), not from the session base
+  class.
+
+### Dispatch targets
+
+`src/core/services/cross-engine-dispatcher.ts` reuses each engine's lifecycle with
+`ownerToolUseId` set to the dispatch card's tool-use id, so a dispatched turn renders
+in the card exactly as a native subagent does. Claude targets construct their own
+`ClaudeItemStreamLifecycle` whose sink stamps the owner onto every target; opencode
+targets mirror `updateStreamItem` / `appendStreamItem` / `sealStreamItems`; pi targets
+forward the mapper's three outputs with the owner attached and run `finishPiMessage`
+on teardown; Codex targets accumulate per `(ownerToolUseId, messageId, kind)`.
+
+### What was deleted
+
+`StreamFrame` and the `{type:'stream'}` frame family; the `text-stream` volatile
+flavor; the channels `session:stream` and `session:subagent-stream`; the canonical
+fields `streamingText`, `streamingThinking`, `subagentStreamingText` and
+`subagentStreamingThinking`; the renderer's `thinkingStartedAt`; `ReducerAux` with its
+`thinkingOpen` / `streamTurn` members; `BaseSession`'s thinking-span clock and its
+stamping of `ChatMessage.thinkingDurationMs` from `BaseSession.send` (durations are now
+produced by each adapter on the block itself); `StreamingText.tsx`; and
+`SubagentOutputBody`'s live tails. Canonical carries `itemStreams` and
+`itemStreamRevision` per session, as snapshot and sealed replica fields.
+
+### Plugin compatibility
+
+`src/main/services/plugin-manager.ts` keeps the old channel names alive without a
+producer. From each item append frame it synthesizes `session:stream` for a root text
+or thinking block and `session:subagent-stream` for a child's — plan blocks synthesize
+neither, because the old channels never carried plans — except on a Codex session,
+where a root append synthesizes `session:message` with the growing message, which is
+what that engine emitted before the migration. At every `session:item-seal` it fires
+`session:message` or `session:subagent-message` with the message read back from
+canonical state, overlaid with any still-active sibling block. Nothing reaches a plugin
+that has not subscribed, and a synthesis that would have to read canonical state is
+skipped before that read when nobody is listening. Plugins can also observe
+`session:item-delta` directly; its payload is the `ItemStreamFrame`.
+
+### What the guard test pins
+
+`src/core/shared/sync/__tests__/legacy-producer-guard.unit.test.ts` reads the five
+producer files — `claude-session.ts`, `OpencodeSession.ts`, `PiSession.ts`,
+`CodexSession.ts`, `cross-engine-dispatcher.ts` — and asserts each one mentions all
+three item channels and contains no `send(` or `emitEvent(` of `session:stream` or
+`session:subagent-stream`. It is a source-text guard, so a producer cannot quietly
+reacquire the retired channels.
+
+### Hardening (2026-09-18)
+
+Six low-severity items from the post-migration audit, landed together:
+
+- A targeted seal whose scaffold is shorter than its `blockIndex` fills the gap from
+  the payload (`commitMessage`), so canonical content can never carry an array hole
+  that would serialize as `null`.
+- `SyncCoreOptions.onItemDropped` reports every delta that never reaches canonical
+  (`no-open`, `malformed`, `mismatch`, `unknown`); `sync-host.ts` logs it at debug with
+  the routing id, the reason and the target key, never the chunk text.
+- Thinking opens carry `startedAt`, the adapter-measured start of the thought, copied
+  onto the active entry by the reducer and used by `ChatPanel` / `MessageBubble` for the
+  live timer; the message timestamp remains the fallback. Text and plan opens carry none.
+- `CodexSession.endedTurns` and `endedChildTurns` are bounded (`BoundedSet`, 512,
+  oldest evicted); `completedItems` is left alone because the authoritative replay
+  reads its fingerprints.
+- `ClaudeItemStreamLifecycle.sealOwner(undefined)` frees every `terminalSealed` child
+  state when the root turn ends.
+- Every plugin synthesis in `plugin-manager.ts` is gated on `hasListeners` before any
+  canonical read.
+
+### Still open
+
+- No live drive of the cross-engine dispatch targets since they moved to the item
+  lane; their lifecycles rest on the automated suite.
+- No standalone browser-client drive at any point in the migration, so WebSocket
+  delivery of item frames rests on the e2e suite rather than on a real browser.
+- Metering attribution and grandchild rendering, both outside this design's scope.

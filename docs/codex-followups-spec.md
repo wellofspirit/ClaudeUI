@@ -471,6 +471,10 @@ that could shift block slots after a result arrived. Tests and native-binary fix
 DOM drives are recorded in the design's verification section, including platform
 skips and the absence of a standalone browser UI drive. Other engines keep the
 existing session stream protocol; native history remains authoritative on cold load.
+Claude, opencode, pi and every cross-engine dispatch target migrated to the same lane
+in `83106588`, and the legacy session stream lane was retired in `7837f7e7`
+(both 2026-09-17), closing roadmap item 2 — per-engine detail in the design's
+"As built, remaining engines and retirement (2026-09-17)" section.
 
 **Review decisions, 2026-09-17.** Daniel approved retaining the watermark as a
 read-only dependency on reliable event progress, retaining no-next-token recovery

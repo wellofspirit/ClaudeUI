@@ -169,6 +169,7 @@ it('rekeys session when status has different sessionId', () => {
 // File: src/e2e/flows/my-flow.e2e.test.ts
 
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { appendItem, emitItemDelta, sealItem } from '@test/helpers/item-stream'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
 
 let app: TestApp
@@ -176,7 +177,6 @@ let app: TestApp
 beforeEach(async () => {
   app = await bootTestApp()
   useSessionStore.setState({ activeSessionId: null, sessions: {} })
-  wireEventHandlers(app) // same pattern as component tests
 })
 
 afterEach(() => {
@@ -186,8 +186,13 @@ afterEach(() => {
 it('full conversation flow', () => {
   useSessionStore.getState().createNewSession('r1', '/test')
   app.emit('session:user-message', 'r1', { prompt: 'Hello', queued: false })
-  app.emit('session:stream', 'r1', { type: 'text', text: 'Hi there' })
-  app.emit('session:message', 'r1', makeAssistantMessage('Hi there'))
+
+  // Assistant output is a per-item lifecycle: reliable open, volatile chunks,
+  // reliable seal carrying the resolved final content.
+  const target = emitItemDelta(app, 'r1', 'Hi ', { open: true })
+  appendItem(app, 'r1', target, 'there')
+  sealItem(app, 'r1', target, 'Hi there')
+
   app.emit('session:result', 'r1')
 
   const session = useSessionStore.getState().sessions['r1']
@@ -195,6 +200,13 @@ it('full conversation flow', () => {
   expect(session.status.state).toBe('idle')
 })
 ```
+
+`@test/helpers/item-stream` wraps the three channels with a deterministic transcript
+identity so a flow test does not have to hand-build `ItemStreamTarget`s:
+`emitItemDelta(app, routingId, chunk, { open: true, kind?, messageId?, ownerToolUseId? })`
+returns the target, `appendItem` adds a chunk to it, and `sealItem` commits the final
+text. There is no separate handler-wiring step — `bootTestApp()` installs the real
+replica, so `app.emit` folds through the shared reducer and projects into the store.
 
 **`bootTestApp()`** creates a `TestIpcBridge`, registers stub IPC handlers for internal store calls (`config:save-sessions`, etc.), builds `window.api` backed by the bridge, and returns `{ bridge, api, emit, teardown }`.
 

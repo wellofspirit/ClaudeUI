@@ -10,14 +10,27 @@ Part of [architecture/](README.md).
 - `session:send` is fire-and-forget; results stream back as events:
 
 ```
-User prompt → InputBox → addUserMessage() (Zustand) → window.api.sendPrompt (IPC)
+User prompt → InputBox → window.api.sendPrompt (IPC)
   → session.run(prompt) → engine backend
-    → stream_event   → session:stream          → appendStreamingText()
-    → assistant      → session:message         → addMessage() (upsert by ID)
-    → user (tool_result) → session:tool-result → appendToolResult()
-    → can_use_tool   → session:approval-request → setPendingApproval()
+    → stream_event   → session:item-open       → applyItemLifecycle()   (reliable: block scaffold)
+                     → session:item-delta      → applyItemStreamFrame() (volatile: one chunk)
+                     → session:item-seal       → applyItemLifecycle()   (reliable: final content)
+    → assistant      → session:message         → applyEvent() (upsert by ID)
+    → user (tool_result) → session:tool-result → applyEvent()
+    → can_use_tool   → session:approval-request → applyEvent()
     → result         → session:result           (cost tracking)
 ```
+
+The three item channels are the per-item volatile lane that replaced the session
+text/thinking buffers on 2026-09-17 ([design](../per-item-streaming-design.md)).
+`session:item-open` and `session:item-seal` are ordinary ringed events; only
+`session:item-delta` leaves the event system, and it carries one chunk rather than
+a growing body. All three folds live in `core/shared/sync/item-stream.ts` and run
+in core and in every replica. The accumulated value stays in canonical
+`itemStreams` and is combined with the transcript at render time by
+`overlayItemStreams()` — no client stores a second transcript. Every other arrow
+above lands in the shared reducer (`core/shared/sync/reducer.ts`); the per-channel
+store actions this diagram used to name were deleted in SyncCore phase 4c.
 
 ## Key patterns
 

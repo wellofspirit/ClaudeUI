@@ -477,31 +477,60 @@ During app shutdown (`before-quit`):
 
 These events fire for every active Claude session. All handlers receive a single object with `{ routingId: string, sessionId: string | null, ...eventData }` (see ADR-005).
 
-| Event                          | Data                                           | Description                                               |
-| ------------------------------ | ---------------------------------------------- | --------------------------------------------------------- |
-| `session:message`              | `ChatMessage`                                  | Assistant or user message (upserts by ID)                 |
-| `session:stream`               | `{ type: 'text' \| 'thinking', text: string }` | Streaming text delta                                      |
-| `session:status`               | `{ state: string, ... }`                       | Session state change (active, idle, etc.)                 |
-| `session:result`               | `{ costUsd, durationMs, ... }`                 | Turn completed with cost info                             |
-| `session:error`                | `string`                                       | Error message                                             |
-| `session:approval-request`     | `PendingApproval`                              | Tool use requires user approval                           |
-| `session:tool-result`          | `{ toolUseId, result, isError }`               | Tool execution result                                     |
-| `session:task-progress`        | `{ toolUseId, content }`                       | Background task progress update                           |
-| `session:task-notification`    | `TaskNotification`                             | Background task completed/failed                          |
-| `session:subagent-message`     | `{ toolUseId, message }`                       | Subagent sent a message                                   |
-| `session:subagent-stream`      | `{ toolUseId, type, text }`                    | Subagent streaming delta                                  |
-| `session:subagent-tool-result` | `{ toolUseId, ... }`                           | Subagent tool result                                      |
-| `session:background-output`    | `{ toolUseId, tail, totalSize, done }`         | Background task output chunk                              |
-| `session:permission-mode`      | `string`                                       | Permission mode changed                                   |
-| `session:slash-commands`       | `SlashCommandInfo[]`                           | Available slash commands updated                          |
-| `session:skills`               | `string[]`                                     | Available skill names updated                             |
-| `session:mcp-servers`          | `McpServerInfo[]`                              | MCP server status updated                                 |
-| `session:status-line`          | `StatusLineData`                               | Status line metrics updated                               |
-| `session:teammate-detected`    | `TeammateInfo`                                 | New teammate/subagent detected                            |
-| `session:team-created`         | `{ teamName }`                                 | Team created                                              |
-| `session:team-deleted`         | `{}`                                           | Team deleted                                              |
-| `session:sandbox-violation`    | `string`                                       | Sandbox violation detected                                |
-| `session:queue-changed`        | `{ items: QueuedItem[] }`                      | Queue of record changed (ADR-053) — full list, idempotent |
+| Event                          | Data                                                                                                                       | Description                                                                                                                                                                                                     |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session:message`              | `ChatMessage`                                                                                                              | Assistant or user message (upserts by ID). Also fires at every item seal, carrying the canonical message                                                                                                        |
+| `session:item-open`            | `{ target, message, startedAt? }`                                                                                          | An item started streaming: `target` is `{ messageId, blockIndex, kind, ownerToolUseId? }`, `message` is the transcript scaffold; `startedAt` (thinking opens only) is the adapter-measured start of the thought |
+| `session:item-delta`           | the `ItemStreamFrame` append: `{ type: 'item-stream', op: 'append', routingId, atSeq, target, generation, offset, chunk }` | One chunk appended to the addressed block                                                                                                                                                                       |
+| `session:item-seal`            | `{ target?, message, ownerToolUseId? }`                                                                                    | An item finished. With `target`, only that block is committed; without it, the whole message and all its active blocks                                                                                          |
+| `session:stream`               | `{ type: 'text' \| 'thinking', text: string }`                                                                             | Streaming text delta — **synthesized in process from item frames (legacy compatibility)**                                                                                                                       |
+| `session:status`               | `{ state: string, ... }`                                                                                                   | Session state change (active, idle, etc.)                                                                                                                                                                       |
+| `session:result`               | `{ costUsd, durationMs, ... }`                                                                                             | Turn completed with cost info                                                                                                                                                                                   |
+| `session:error`                | `string`                                                                                                                   | Error message                                                                                                                                                                                                   |
+| `session:approval-request`     | `PendingApproval`                                                                                                          | Tool use requires user approval                                                                                                                                                                                 |
+| `session:tool-result`          | `{ toolUseId, result, isError }`                                                                                           | Tool execution result                                                                                                                                                                                           |
+| `session:task-progress`        | `{ toolUseId, content }`                                                                                                   | Background task progress update                                                                                                                                                                                 |
+| `session:task-notification`    | `TaskNotification`                                                                                                         | Background task completed/failed                                                                                                                                                                                |
+| `session:subagent-message`     | `{ toolUseId, message }`                                                                                                   | Subagent sent a message. Also fires at every subagent item seal                                                                                                                                                 |
+| `session:subagent-stream`      | `{ toolUseId, type, text }`                                                                                                | Subagent streaming delta — **synthesized in process from item frames (legacy compatibility)**                                                                                                                   |
+| `session:subagent-tool-result` | `{ toolUseId, ... }`                                                                                                       | Subagent tool result                                                                                                                                                                                            |
+| `session:background-output`    | `{ toolUseId, tail, totalSize, done }`                                                                                     | Background task output chunk                                                                                                                                                                                    |
+| `session:permission-mode`      | `string`                                                                                                                   | Permission mode changed                                                                                                                                                                                         |
+| `session:slash-commands`       | `SlashCommandInfo[]`                                                                                                       | Available slash commands updated                                                                                                                                                                                |
+| `session:skills`               | `string[]`                                                                                                                 | Available skill names updated                                                                                                                                                                                   |
+| `session:mcp-servers`          | `McpServerInfo[]`                                                                                                          | MCP server status updated                                                                                                                                                                                       |
+| `session:status-line`          | `StatusLineData`                                                                                                           | Status line metrics updated                                                                                                                                                                                     |
+| `session:teammate-detected`    | `TeammateInfo`                                                                                                             | New teammate/subagent detected                                                                                                                                                                                  |
+| `session:team-created`         | `{ teamName }`                                                                                                             | Team created                                                                                                                                                                                                    |
+| `session:team-deleted`         | `{}`                                                                                                                       | Team deleted                                                                                                                                                                                                    |
+| `session:sandbox-violation`    | `string`                                                                                                                   | Sandbox violation detected                                                                                                                                                                                      |
+| `session:queue-changed`        | `{ items: QueuedItem[] }`                                                                                                  | Queue of record changed (ADR-053) — full list, idempotent                                                                                                                                                       |
+
+#### Streaming: the item lane and its legacy compatibility
+
+Assistant text, reasoning and plans travel on the per-item lane as of 2026-09-17
+([design](per-item-streaming-design.md)). `session:item-open` and `session:item-seal`
+are ordinary events; `session:item-delta` is volatile and reaches a plugin through an
+in-process observer, because the lane is keyed by client connection and a plugin
+surface is not one (`src/main/services/plugin-manager.ts`).
+
+The two pre-2026-09-17 delta channels were kept rather than removed, and are
+synthesized from the same append frames:
+
+- `session:stream` fires for a ROOT text or thinking append; `session:subagent-stream`
+  for a child's. Both carry only the new chunk, as they always did.
+- A `plan` item synthesizes neither: the legacy channels never carried plans.
+- On a **Codex** session a root append synthesizes `session:message` with the growing
+  message instead of `session:stream`, which is what that engine emitted before the
+  migration.
+- `session:message` / `session:subagent-message` fire at every `session:item-seal`,
+  carrying the message read back from canonical state (with any still-active sibling
+  block overlaid), not the seal payload.
+
+Nothing reaches a plugin that has not subscribed, and the syntheses that would have to
+read canonical state are skipped before that read when nobody is listening — so a
+machine with no plugin pays nothing for the token firehose. A plugin that wants
+per-block identity should listen to the three item channels directly.
 
 **Example — listening to all assistant messages:**
 

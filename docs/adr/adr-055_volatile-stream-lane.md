@@ -39,6 +39,8 @@ ruling — recorded so nobody re-derives it.
 - **`text-stream`** (`session:stream`, `session:subagent-stream`): offset-carrying
   frames over a canonical accumulation, folded by ONE shared interpretation
   (`applyStreamFrame`) on core and every replica.
+  _Retired 2026-09-17 (`7837f7e7`) — the flavor, both channels and `applyStreamFrame`
+  are deleted; the `item-stream` flavor of the amendment below replaced them._
 - **`pass-through`** (the three tails): the emission verbatim, `{channel, args}`,
   dispatched client-side into the same per-channel listeners the event lane
   used — zero listener rewiring. **Tails are honest-lossy** (owner-ratified with
@@ -183,3 +185,14 @@ Daniel confirmed the following refinements before F21's commit:
    frame family, session accumulation fields and their client plumbing once the
    last producer/consumer has migrated, retaining independent pass-through tails.
    These remain unfinished steps of roadmap item 2 before moving to metering.
+
+   **Closed 2026-09-17.** Claude, opencode, pi and every cross-engine dispatch
+   target migrated in `83106588`; the legacy lane was retired in `7837f7e7` —
+   `StreamFrame`, the `text-stream` flavor, `session:stream`,
+   `session:subagent-stream`, the four `streaming*` canonical fields and their
+   client plumbing are deleted, and `legacy-producer-guard.unit.test.ts` pins that
+   no producer emits the retired channels. Plugin compatibility is synthesized in
+   process. Pass-through tails are untouched. Roadmap item 2 is closed; metering
+   attribution follows. Per-engine as-built detail:
+   [per-item streaming](../per-item-streaming-design.md) §"As built, remaining
+   engines and retirement".

@@ -125,7 +125,7 @@ The model identifier is normalised before lookup: lowercased, date suffixes (`-2
 When thinking is non-disabled, the SDK emits `content_block_start` for a thinking block followed by deltas:
 
 - `signature_delta` — always present. Carries the encrypted signature that lets Claude continue reasoning across turns. No human-readable content.
-- `thinking_delta` — only emitted when `display: "summarized"` is honoured and the model has reasoning to surface. ClaudeUI accumulates these into the session's `streamingThinking` and renders them in the `ThinkingBlock` component.
+- `thinking_delta` — only emitted when `display: "summarized"` is honoured and the model has reasoning to surface. ClaudeUI accumulates these into the reasoning item's active stream on the per-item volatile lane (`session:item-open` / `session:item-delta` / `session:item-seal`, keyed by `message.id` plus the content-block index) and renders them in the `ThinkingBlock` component.
 
 On Opus 4.7 specifically, **summarised is the only way to receive any reasoning text**. The full chain-of-thought is no longer exposed to API consumers — only the encrypted signature comes through if `display` is `omitted`. This is a silent change from Opus 4.6.
 
