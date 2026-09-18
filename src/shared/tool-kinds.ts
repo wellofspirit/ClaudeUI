@@ -27,6 +27,9 @@ export type ToolKind =
   | 'diagram' //   hosted MCP     — mcp__claude-ui__render_mermaid
   | 'mockup' //    hosted MCP     — mcp__claude-ui-mockup__*
   | 'mcp' //       other MCP      — generic render
+  | 'detail' //    a field list   — Claude Skill/Cron*/worktree/… (see claude-tool-specs)
+  | 'findings' //  review rows    — Claude ReportFindings
+  | 'note' //      one-line row   — Claude ToolSearch/TaskStop/… (lifted — routes to ToolNoteRow)
   | 'unknown' //   fallback       — anything not mapped
 
 // ---------------------------------------------------------------------------
@@ -84,6 +87,41 @@ export type ToolView =
   // MCP names are not splittable (opencode's `server_tool`) supplies none.
   | { kind: 'mcp'; input: unknown; server?: string; tool?: string; readOnly?: boolean }
   | { kind: 'image'; prompt?: string; savedPath?: string }
+  /**
+   * A tool whose call is a handful of named facts — a schedule, a worktree, a
+   * wake-up, a message and its recipient. `fields` is what the call SAID (its
+   * input, named and ordered by the engine's spec); `text` is what came back,
+   * rendered as output rather than as another field.
+   */
+  | {
+      kind: 'detail'
+      fields: { label: string; value: string }[]
+      /** Rendered through the output view when the result is worth showing whole. */
+      text?: string
+    }
+  /**
+   * Structured review findings — Claude's `ReportFindings`, and any engine that
+   * later reports a review the same way. `verdict` and `severity` are optional
+   * because a harness may report neither.
+   */
+  | {
+      kind: 'findings'
+      findings: {
+        file?: string
+        line?: number
+        summary: string
+        detail?: string
+        category?: string
+        verdict?: string
+        outcome?: string
+      }[]
+      level?: string
+    }
+  /**
+   * A call whose whole meaning is one sentence. Rendered as a row, not a card:
+   * a header, a chevron and an empty body would be chrome around nothing.
+   */
+  | { kind: 'note'; icon?: string; text: string }
   | { kind: 'sleep'; durationMs: number }
   | { kind: 'unknown'; input: unknown }
 

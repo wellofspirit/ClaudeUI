@@ -13,6 +13,7 @@ import { AskUserQuestionBlock } from './AskUserQuestionBlock'
 import { ThinkingBlock } from './ThinkingBlock'
 import { TodoToolBlock } from './TodoToolBlock'
 import { SleepRow } from './SleepRow'
+import { ToolNoteRow } from './ToolNoteRow'
 import { ContextNoteBlock } from './ContextNoteBlock'
 import { ReviewResultCard } from './ReviewResultCard'
 import { TaskCard } from './TaskCard'
@@ -91,6 +92,17 @@ function renderToolBlock(
   }
   if (kind === 'sleep' && view.kind === 'sleep') {
     return <SleepRow key={key} block={block} result={result} view={view} />
+  }
+  if (kind === 'note' && view.kind === 'note') {
+    return (
+      <ToolNoteRow
+        key={key}
+        block={block}
+        result={result}
+        view={view}
+        displayName={toolMap.displayName(block.toolName)}
+      />
+    )
   }
   if (kind === 'task' && view.kind === 'task') {
     return <TaskCard key={key} block={block} result={result} view={view} approval={approval} />

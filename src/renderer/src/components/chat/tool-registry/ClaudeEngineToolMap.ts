@@ -8,6 +8,7 @@
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
 import { hostedMcpKind } from '../../../../../shared/tool-kinds'
 import { isAgentTool } from '../../../../../shared/types'
+import { claudeToolSpec } from './claude-tool-specs'
 import type { AskUserQuestion, ContentBlock } from '../../../../../shared/types'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -32,8 +33,14 @@ function claudeKindOf(toolName: string): ToolKind {
   switch (toolName) {
     case 'Bash':
       return 'command'
+    // `MultiEdit` was removed upstream (absent from 2.1.268's tool list) but old
+    // transcripts still replay through this map, so it keeps its kind rather than
+    // degrading that history to `unknown`. `NotebookEdit` IS a file edit: it
+    // replaces one cell's source in a file on disk, which is what the diff card
+    // reads.
     case 'Edit':
     case 'MultiEdit':
+    case 'NotebookEdit':
       return 'fileEdit'
     case 'Write':
       return 'fileWrite'
@@ -51,9 +58,14 @@ function claudeKindOf(toolName: string): ToolKind {
       return 'question'
     case 'TodoWrite':
       return 'todo'
-    default:
+    default: {
       if (isAgentTool(toolName)) return 'task'
+      // The twenty tools that used to fall through to `unknown` — each one's
+      // shape is declared in claude-tool-specs.ts (docs/tool-survey.md § 7).
+      const spec = claudeToolSpec(toolName)
+      if (spec) return spec.kind
       return 'unknown'
+    }
   }
 }
 
@@ -106,6 +118,16 @@ function claudeNormalize(
       }
 
     case 'fileEdit':
+      // NotebookEdit names its fields differently (a cell's source rather than a
+      // string in a file), so it is read here rather than in a second kind.
+      if (toolName === 'NotebookEdit') {
+        return {
+          kind: 'fileEdit',
+          path: inp.notebook_path != null ? String(inp.notebook_path) : '',
+          before: inp.old_source != null ? String(inp.old_source) : '',
+          after: inp.new_source != null ? String(inp.new_source) : ''
+        }
+      }
       return {
         kind: 'fileEdit',
         path: inp.file_path != null ? String(inp.file_path) : '',
@@ -233,6 +255,16 @@ function claudeNormalize(
 
     case 'mcp':
       return { kind: 'mcp', input: inp }
+
+    case 'detail':
+    case 'findings':
+    case 'note': {
+      // kindOf only answers these three for a name that HAS a spec, so the
+      // lookup cannot miss here; the fallback keeps the function total anyway.
+      const spec = toolName ? claudeToolSpec(toolName) : null
+      if (spec) return spec.build(inp, result)
+      return { kind: 'unknown', input: inp }
+    }
 
     case 'unknown':
     default:

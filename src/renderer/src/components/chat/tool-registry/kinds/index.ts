@@ -15,6 +15,8 @@ import { FileWriteBody } from './FileWriteBody'
 import { FileReadBody } from './FileReadBody'
 import { GenericBody } from './GenericBody'
 import { SearchBody } from './SearchBody'
+import { DetailBody } from './DetailBody'
+import { FindingsBody } from './FindingsBody'
 import { DiagramBody } from './DiagramBody'
 import { MockupBody } from './MockupBody'
 import { WebBody } from './WebBody'
@@ -22,7 +24,10 @@ import { McpBody } from './McpBody'
 import { ImageBody } from './ImageBody'
 
 /** Passive kinds the registry can render. Lifted kinds are routed elsewhere. */
-export type PassiveToolKind = Exclude<ToolKind, 'plan' | 'question' | 'todo' | 'task' | 'sleep'>
+export type PassiveToolKind = Exclude<
+  ToolKind,
+  'plan' | 'question' | 'todo' | 'task' | 'sleep' | 'note'
+>
 
 export const TOOL_RENDERERS: Record<PassiveToolKind, KindRenderer> = {
   command: { layout: 'standard', Body: CommandBody },
@@ -32,6 +37,8 @@ export const TOOL_RENDERERS: Record<PassiveToolKind, KindRenderer> = {
   search: { layout: 'standard', Body: SearchBody },
   web: { layout: 'standard', Body: WebBody },
   mcp: { layout: 'standard', Body: McpBody },
+  detail: { layout: 'standard', Body: DetailBody },
+  findings: { layout: 'standard', Body: FindingsBody },
   image: { layout: 'standard', Body: ImageBody },
   unknown: { layout: 'standard', Body: GenericBody },
   diagram: { layout: 'custom', Body: DiagramBody },
