@@ -164,7 +164,15 @@ export function mapCodexItem(
             type: 'tool_use',
             toolUseId: id,
             toolName: 'commandExecution',
-            toolInput: { command: item.command, cwd: item.cwd }
+            // `exitCode` rides the INPUT because that is the only half of the
+            // pair the renderer's ToolView sees; it is null while the command
+            // runs and on an interrupted item, so the header chip appears only
+            // once the process actually reported a status.
+            toolInput: {
+              command: item.command,
+              cwd: item.cwd,
+              ...(completed && typeof item.exitCode === 'number' ? { exitCode: item.exitCode } : {})
+            }
           }
         ])
       ]

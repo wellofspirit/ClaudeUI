@@ -695,3 +695,70 @@ describe('ToolCard — review verdict', () => {
     expect(screen.queryByTestId('ToolCard.review')).not.toBeInTheDocument()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Header metadata chips
+// ---------------------------------------------------------------------------
+
+describe('ToolCard — metadata chips', () => {
+  const chipText = (): string[] =>
+    screen.queryAllByTestId('ToolCard.chip').map((el) => el.textContent ?? '')
+
+  it('shows the edit delta and language, and shows them while COLLAPSED', () => {
+    render(
+      <ToolCard
+        {...baseProps({
+          kind: 'fileEdit',
+          view: { kind: 'fileEdit', path: 'src/a.ts', before: 'one', after: 'one\ntwo' },
+          block: block('Edit', { file_path: 'src/a.ts' }),
+          result: result('OK'),
+          expandToolCalls: false
+        })}
+      />
+    )
+    expect(chipText()).toEqual(['+2 −1', 'typescript'])
+  })
+
+  it('shows an exit code for an engine that reports one', () => {
+    render(
+      <ToolCard
+        {...baseProps({
+          kind: 'command',
+          view: { kind: 'command', command: 'cargo build', exitCode: 101 },
+          block: block('commandExecution', { command: 'cargo build', exitCode: 101 }),
+          result: result('error: could not compile', true),
+          displayName: 'Command'
+        })}
+      />
+    )
+    expect(chipText()).toEqual(['exit 101'])
+  })
+
+  it('shows no chips for a Claude Bash card, whose result carries no exit code', () => {
+    render(
+      <ToolCard
+        {...baseProps({
+          kind: 'command',
+          view: { kind: 'command', command: 'ls', output: 'a' },
+          block: block('Bash', { command: 'ls' }),
+          result: result('a')
+        })}
+      />
+    )
+    expect(chipText()).toEqual([])
+  })
+
+  it('shows search counts derived from the result text', () => {
+    render(
+      <ToolCard
+        {...baseProps({
+          kind: 'search',
+          view: { kind: 'search', query: 'needle' },
+          block: block('Grep', { pattern: 'needle' }),
+          result: result('src/a.ts:1:needle\nsrc/a.ts:9:needle\nsrc/b.ts:4:needle')
+        })}
+      />
+    )
+    expect(chipText()).toEqual(['2 files', '3 hits'])
+  })
+})

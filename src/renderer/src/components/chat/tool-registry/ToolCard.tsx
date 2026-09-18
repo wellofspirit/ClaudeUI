@@ -33,6 +33,7 @@ import type { ToolKind, ToolView } from '../../../../../shared/tool-kinds'
 import type { ThemeId } from '../../../stores/session-store'
 import { resolveToolVisualState, TOOL_BORDER_CLASSES } from '../ToolCallBlock/utils'
 import { summarizeTool } from './summary'
+import { toolChips, type ChipTone } from './chips'
 import { ApprovalButtons } from '../ApprovalButtons'
 import { TOOL_RENDERERS, type PassiveToolKind } from './kinds'
 import { GenericBody } from './kinds/GenericBody'
@@ -45,6 +46,17 @@ type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 
 export type { BashOutputSlice, BgOutputSlice }
+
+/** Chip palette, keyed on the tone `toolChips` assigns. Muted by default so the
+ *  strip reads as metadata, not as a second status signal competing with the
+ *  card's own border and icon. */
+const CHIP_TONE_CLASSES: Record<ChipTone, string> = {
+  neutral: 'bg-bg-primary text-text-secondary border-border',
+  ok: 'bg-success/10 text-success border-success/25',
+  error: 'bg-danger/10 text-danger border-danger/25',
+  accent: 'bg-accent/10 text-accent border-accent/25',
+  warn: 'bg-warning/10 text-warning border-warning/25'
+}
 
 export interface ToolCardProps {
   kind: ToolKind
@@ -137,6 +149,7 @@ export function ToolCard({
   }, [bashOutput, bgOutput]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const summary = summarizeTool(kind, view, block.toolName)
+  const chips = toolChips(kind, view, result)
   const headerName = displayName ?? block.toolName
   const hasResult = !!result
   // Producers omit `images` when empty, but normalize defensively — an empty
@@ -273,6 +286,15 @@ export function ToolCard({
         <span className="text-text-secondary truncate flex-1 text-left font-mono text-[12px]">
           {summary}
         </span>
+        {chips.map((chip) => (
+          <span
+            key={chip.label}
+            data-testid="ToolCard.chip"
+            className={`text-[10px] font-mono px-1.5 py-0.5 rounded shrink-0 border ${CHIP_TONE_CLASSES[chip.tone]}`}
+          >
+            {chip.label}
+          </span>
+        ))}
         {review && <ToolReviewChip review={review} />}
         {isPendingApproval && (
           <span className="text-[11px] font-semibold text-warning uppercase tracking-wider mr-1">

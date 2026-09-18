@@ -1,55 +1,14 @@
 import { useMemo } from 'react'
 import { Highlight, themes } from 'prism-react-renderer'
 
-export const EXT_TO_LANG: Record<string, string> = {
-  ts: 'typescript',
-  tsx: 'tsx',
-  js: 'javascript',
-  jsx: 'jsx',
-  mjs: 'javascript',
-  cjs: 'javascript',
-  mts: 'typescript',
-  cts: 'typescript',
-  py: 'python',
-  rb: 'ruby',
-  rs: 'rust',
-  go: 'go',
-  java: 'java',
-  kt: 'kotlin',
-  c: 'c',
-  cpp: 'cpp',
-  h: 'c',
-  hpp: 'cpp',
-  cs: 'csharp',
-  css: 'css',
-  scss: 'scss',
-  html: 'markup',
-  xml: 'markup',
-  json: 'json',
-  yaml: 'yaml',
-  yml: 'yaml',
-  toml: 'toml',
-  md: 'markdown',
-  sh: 'bash',
-  bash: 'bash',
-  zsh: 'bash',
-  sql: 'sql',
-  graphql: 'graphql',
-  swift: 'swift',
-  dockerfile: 'docker',
-  makefile: 'makefile'
-}
-
-/** Exported for tests; CodeView keeps its own (smaller) map — see highlight.ts. */
-export function getLang(filePath?: string): string {
-  if (!filePath) return 'plaintext'
-  // Split on BOTH separators — a Windows path has no `/` (RN11).
-  const name = filePath.split(/[\\/]/).pop()?.toLowerCase() || ''
-  // Handle extensionless files like Dockerfile, Makefile
-  if (EXT_TO_LANG[name]) return EXT_TO_LANG[name]
-  const ext = name.split('.').pop() || ''
-  return EXT_TO_LANG[ext] || 'plaintext'
-}
+/**
+ * The extension→language map and `getLang` now live in `lib/lang.ts` so that
+ * non-rendering consumers (tool-card chips, the Bash output detectors, the
+ * search body) can name a language without importing this component and its
+ * Prism bundle. Re-exported here: every existing import site is unchanged.
+ */
+import { getLang } from '../../lib/lang'
+export { EXT_TO_LANG, getLang } from '../../lib/lang'
 
 /** Strip `cat -n` style line-number prefixes (e.g. "     1→content") */
 export function stripLineNumbers(s: string): string {

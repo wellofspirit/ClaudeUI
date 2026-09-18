@@ -99,7 +99,14 @@ export const CodexEngineToolMap: EngineToolMap = {
   },
   normalize(kind, input, result, toolName) {
     if (kind === 'command')
-      return { kind, command: String(input?.command ?? ''), output: result?.toolResult }
+      return {
+        kind,
+        command: String(input?.command ?? ''),
+        output: result?.toolResult,
+        // Present only on a completed `commandExecution` (event-mapper.ts) —
+        // `0` is a real value, so the guard tests the type, not truthiness.
+        ...(typeof input?.exitCode === 'number' ? { exitCode: input.exitCode } : {})
+      }
     if (kind === 'fileEdit')
       return {
         kind,
