@@ -219,6 +219,17 @@ export class ClaudeSession extends BaseSession {
       }),
     updateLocal: (message, ownerToolUseId) => {
       if (!ownerToolUseId) this.upsertMessage(message)
+    },
+    // Same two sends the ordinary (non-item) assistant path makes, so a block the
+    // item lane does not carry is in the transcript before anything can refer to
+    // it. Upsert-by-id on every client, so a later seal folds over it.
+    publish: (message, ownerToolUseId) => {
+      if (ownerToolUseId) {
+        this.send('session:subagent-message', { toolUseId: ownerToolUseId, message })
+        return
+      }
+      this.upsertMessage(message)
+      this.send('session:message', message)
     }
   })
   private abortController: AbortController | null = null

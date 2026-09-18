@@ -32,6 +32,19 @@ export interface ClaudeItemStreamSink {
   delta(target: ItemStreamTarget, chunk: string): void
   seal(target: ItemStreamTarget | undefined, message: ChatMessage, owner: Owner): void
   updateLocal(message: ChatMessage, owner: Owner): void
+  /**
+   * Publish the message to CLIENTS, outside the item lane.
+   *
+   * Only text and thinking blocks are items, so a `tool_use` block reaches a
+   * client únicamente through the targetless seal at `message_stop` — which is
+   * AFTER cli.js may already have run the tool. `session:tool-result` attaches by
+   * scanning the transcript for the matching `tool_use`, so a result that
+   * arrives before that seal finds nothing and is dropped for good: the card
+   * spins for the rest of the session. Publishing the message when a
+   * non-streaming block appears keeps "the call exists before its result" true
+   * whatever the wire order, and shows the card the moment the call starts.
+   */
+  publish(message: ChatMessage, owner: Owner): void
 }
 
 const ownerKey = (owner: Owner): string => JSON.stringify(owner ?? null)
@@ -92,6 +105,11 @@ export class ClaudeItemStreamLifecycle {
       const block = initialBlock(event.content_block)
       const entry: BlockState = { block, opened: false, stopped: false }
       state.blocks.push(entry)
+      // A block the item lane does not carry (a tool_use) would otherwise be
+      // invisible to clients until `message_stop`. Publish the message now, so
+      // its result has something to attach to no matter when it lands.
+      if (block.type !== 'text' && block.type !== 'thinking')
+        this.sink.publish(this.message(state), state.owner)
       if ((block.type === 'text' || block.type === 'thinking') && block.text) {
         entry.opened = true
         if (block.type === 'thinking') entry.thinkingStartedAt = Date.now()
@@ -181,6 +199,12 @@ export class ClaudeItemStreamLifecycle {
     }
     if (!replaced) return 'none'
     this.publishLocal(state)
+    // The snapshot is where a tool_use's real input arrives (`input_json_delta`
+    // is not an item delta), so a client that already has the empty scaffold
+    // needs this one too — again before any result can reference it.
+    if (message.content.some((block) => block.type !== 'text' && block.type !== 'thinking')) {
+      this.sink.publish(this.message(state), state.owner)
+    }
     return 'handled'
   }
 

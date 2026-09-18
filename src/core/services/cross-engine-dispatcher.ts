@@ -3460,7 +3460,15 @@ export class CrossEngineDispatcher {
             message
           })
       },
-      updateLocal: () => {}
+      updateLocal: () => {},
+      // The dispatched target's transcript reaches the caller's card through the
+      // subagent channel; a tool_use block has to arrive there before its result
+      // does, for the same reason it does on the root session.
+      publish: (message) => {
+        const ownerToolUseId = entry.ctx.toolUseId
+        if (ownerToolUseId)
+          entry.ctx.emit('session:subagent-message', { toolUseId: ownerToolUseId, message })
+      }
     })
     const canUseTool: CanUseTool = async (
       toolName: string,

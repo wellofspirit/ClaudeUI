@@ -11,7 +11,8 @@ function harness() {
     delta: (target, chunk) => events.push({ kind: 'delta', value: { target, chunk } }),
     seal: (target, message, owner) =>
       events.push({ kind: 'seal', value: { target, message, owner } }),
-    updateLocal: (message, owner) => events.push({ kind: 'local', value: { message, owner } })
+    updateLocal: (message, owner) => events.push({ kind: 'local', value: { message, owner } }),
+    publish: (message, owner) => events.push({ kind: 'publish', value: { message, owner } })
   })
   return { lifecycle, events }
 }
@@ -28,7 +29,8 @@ describe('ClaudeItemStreamLifecycle', () => {
           's',
           { ...(target ? { target } : {}), message, ...(ownerToolUseId ? { ownerToolUseId } : {}) }
         ]),
-      updateLocal: () => {}
+      updateLocal: () => {},
+      publish: (message) => core.emit('session:message', ['s', message])
     })
     lifecycle.handleEvent({ type: 'message_start', message: { id: 'm' } }, undefined)
     lifecycle.handleEvent(
