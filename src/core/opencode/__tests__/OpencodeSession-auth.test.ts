@@ -133,17 +133,21 @@ vi.mock('../../shared-providers/chatgpt-route', async (importOriginal) => {
   return {
     ...actual,
     opencodeAuthRequiredProviderId: (vendorId: string): string =>
-      actual.authRequiredProviderId(vendorId, {
-        id: 'chatgpt',
-        name: 'ChatGPT',
-        kind: 'subscription',
-        models: [],
-        managed: true,
-        routes: {
-          pi: { enabled: true, providerId: 'openai-codex' },
-          opencode: { enabled: true, providerId: 'openai' }
-        }
-      })
+      actual.authRequiredProviderId(
+        vendorId,
+        {
+          id: 'chatgpt',
+          name: 'ChatGPT',
+          kind: 'subscription',
+          models: [],
+          managed: true,
+          routes: {
+            pi: { enabled: true, providerId: 'openai-codex' },
+            opencode: { enabled: true, providerId: 'openai' }
+          }
+        },
+        'opencode'
+      )
   }
 })
 

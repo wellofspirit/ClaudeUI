@@ -487,6 +487,115 @@ describe('mapPiEvent — turn error surfacing (M-PI2)', () => {
   })
 })
 
+/**
+ * A rejected credential must raise the SIGN-IN, not a bare turn error
+ * (ADR-068 §4).
+ *
+ * pi has no status field on the wire: it hands the adapter's own error text
+ * through verbatim, so the status arrives in two different shapes depending on
+ * `msg.api`, and one of them can carry no response body at all. Every fixture
+ * below is a string probed off the real vendored pi 0.84.3, which is why they
+ * are asserted literally rather than paraphrased.
+ */
+describe('mapPiEvent — a rejected credential raises auth-required, not a turn error', () => {
+  function endedWith(errorMessage: string, overrides: Partial<PiAssistantMessage> = {}) {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg(overrides) }, state)
+    return mapPiEvent(
+      {
+        type: 'message_end',
+        message: assistantMsg({ content: [], stopReason: 'error', errorMessage, ...overrides })
+      },
+      state
+    )
+  }
+
+  function authOutput(out: ReturnType<typeof mapPiEvent>) {
+    return out.find((o) => o.kind === 'auth-required')
+  }
+
+  it('anthropic-messages 401: status at position 0, JSON body after it', () => {
+    const out = endedWith(
+      '401 {"type":"error","error":{"type":"authentication_error","message":"API key is invalid."},"request_id":null}',
+      { api: 'anthropic-messages', provider: 'anthropic' }
+    )
+    const auth = authOutput(out)
+    expect(auth).toBeDefined()
+    if (auth?.kind !== 'auth-required') throw new Error('expected auth-required')
+    // pi's OWN vendor id rides along — only the session can map it to a provider.
+    expect(auth.vendorId).toBe('anthropic')
+    // The vendor's verbatim words survive, so the session can keep them.
+    expect(auth.message).toContain('API key is invalid.')
+    // …and it is NOT also an ordinary error row (that would double-report).
+    expect(out.some((o) => o.kind === 'error')).toBe(false)
+  })
+
+  it('openai-responses 401: status inside `OpenAI API error (401):`', () => {
+    const out = endedWith(
+      'OpenAI API error (401): {"message":"Missing bearer or basic authentication in header","type":"invalid_request_error","code":"unauthorized"}',
+      { api: 'openai-responses', provider: 'openai-codex' }
+    )
+    const auth = authOutput(out)
+    if (auth?.kind !== 'auth-required') throw new Error('expected auth-required')
+    // The ChatGPT route's pi vendor id (CHATGPT_ROUTE_PROVIDER_IDS.pi).
+    expect(auth.vendorId).toBe('openai-codex')
+    expect(out.some((o) => o.kind === 'error')).toBe(false)
+  })
+
+  it('openai-responses 403 with NO body at all still raises auth-required', () => {
+    // The whole reason this keys on the STATUS and never on body text.
+    const out = endedWith('OpenAI API error (403): 403 status code (no body)', {
+      api: 'openai-responses',
+      provider: 'openai-codex'
+    })
+    expect(authOutput(out)?.kind).toBe('auth-required')
+  })
+
+  it('429 stays an ordinary turn error — the credential is live, the quota is not', () => {
+    const out = endedWith(
+      'OpenAI API error (429): {"message":"Rate limit reached","type":"rate_limit_error"}',
+      { api: 'openai-responses', provider: 'openai-codex' }
+    )
+    expect(authOutput(out)).toBeUndefined()
+    const err = out.find((o) => o.kind === 'error')
+    if (err?.kind !== 'error') throw new Error('expected error')
+    expect(err.message).toContain('Rate limit reached')
+  })
+
+  it('500 stays an ordinary turn error — the vendor broke, not the credential', () => {
+    const out = endedWith('OpenAI API error (500): {"message":"internal","type":"server_error"}', {
+      api: 'openai-responses',
+      provider: 'openai-codex'
+    })
+    expect(authOutput(out)).toBeUndefined()
+    expect(out.some((o) => o.kind === 'error')).toBe(true)
+  })
+
+  it('a bare 401 in the middle of a provider’s prose never raises a sign-in', () => {
+    // Anchoring is the whole defence: an unanchored \d{3} would fire here.
+    const out = endedWith('The model refused: your earlier 401 has since been cleared.')
+    expect(authOutput(out)).toBeUndefined()
+    expect(out.some((o) => o.kind === 'error')).toBe(true)
+  })
+
+  it('a longer leading number is not a status code', () => {
+    const out = endedWith('4011 tokens exceeded the budget')
+    expect(authOutput(out)).toBeUndefined()
+    expect(out.some((o) => o.kind === 'error')).toBe(true)
+  })
+
+  it('no errorMessage at all stays the generic turn error', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+    const out = mapPiEvent(
+      { type: 'message_end', message: assistantMsg({ content: [], stopReason: 'error' }) },
+      state
+    )
+    expect(authOutput(out)).toBeUndefined()
+    expect(out.some((o) => o.kind === 'error')).toBe(true)
+  })
+})
+
 describe('mapPiEvent — compaction_end', () => {
   it('with a result: emits a compact_separator message carrying the WHOLE summary', () => {
     const state = createPiMapperState()

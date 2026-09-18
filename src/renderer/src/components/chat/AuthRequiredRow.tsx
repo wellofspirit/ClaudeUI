@@ -17,9 +17,11 @@ import { NoticeCard } from '../shared/NoticeCard'
  *    the dialog on that provider, in `reauth` mode, carrying the account the
  *    event blamed and the prompt whose turn died (so the done state can offer to
  *    re-send it);
- *  · `opencode:<vendorId>` — an API key or an OAuth credential in opencode's own
- *    store. There is no ClaudeUI flow for it, so the action opens Settings ›
- *    Models & providers instead of a dialog that would have nothing to run.
+ *  · `opencode:<vendorId>` / `pi:<vendorId>` — an API key or an OAuth credential
+ *    in that ENGINE's own store. There is no ClaudeUI flow for either, so the
+ *    action opens Settings › Models & providers instead of a dialog that would
+ *    have nothing to run. The prefix is the engine's, and `provider-registry.ts`
+ *    mints the very same ids for the rows those actions land on.
  *
  * The event carries no message: the emitting engine sends its own words as an
  * ordinary `session:error`, which `FloatingError` already renders below this.
@@ -40,7 +42,7 @@ export function AuthRequiredRow(): React.JSX.Element | null {
       ? 'Claude'
       : providerId === 'chatgpt'
         ? 'ChatGPT'
-        : providerId.replace(/^opencode:/, '')
+        : providerId.replace(/^(?:opencode|pi):/, '')
 
   /** The prompt whose turn the rejection killed, for the dialog's Retry. */
   const lastUserPrompt = (): string | null => {

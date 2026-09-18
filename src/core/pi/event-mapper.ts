@@ -165,6 +165,14 @@ export type PiMapperOutput =
     }
   | { kind: 'result'; totalCostUsd: number; durationMs: number; sessionId: string | null }
   | { kind: 'error'; message: string }
+  /**
+   * A turn that died on a REJECTED CREDENTIAL (401/403) rather than on an
+   * ordinary failure. Mirrors opencode/event-mapper.ts's identical variant:
+   * `vendorId` is pi's own id for the provider (`msg.provider`), which only the
+   * session can translate into the provider the sign-in dialog acts on, and
+   * `message` is the vendor's verbatim words so the session can keep them.
+   */
+  | { kind: 'auth-required'; vendorId: string; message: string }
   | { kind: 'bash_output'; toolUseId: string; output: string }
   // M5b — in-pi subagents (pi-subagent-source.ts). Carries the `subagent`
   // tool's `cuiSubagent` details, validated (never a raw pass-through of
@@ -397,10 +405,15 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
         // empty assistant message with no banner. 'aborted' is a user Stop, NOT
         // an error, so it never raises a banner.
         if (msg.stopReason === 'error') {
-          outputs.push({
-            kind: 'error',
-            message: msg.errorMessage || 'pi reported a turn error'
-          })
+          const message = msg.errorMessage || 'pi reported a turn error'
+          // A REJECTED CREDENTIAL is not an ordinary turn error — it needs a
+          // sign-in, not a banner (ADR-068 §4). 401/403 only: a 429 is a quota
+          // the same credential will serve again, and a 5xx is the vendor's.
+          outputs.push(
+            isPiAuthStatus(piErrorStatusCode(msg.errorMessage))
+              ? { kind: 'auth-required', vendorId: msg.provider, message }
+              : { kind: 'error', message }
+          )
         }
 
         return outputs
@@ -571,6 +584,41 @@ function finalizeActiveThinking(state: PiMapperState): void {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * The HTTP status a failed turn's `errorMessage` opens with, or null.
+ *
+ * pi hands the ADAPTER's own error text through verbatim, so there is no status
+ * field to read and the text's shape depends on `msg.api` (probed against the
+ * vendored pi 0.84.3):
+ *
+ *   anthropic-messages  `401 {"type":"error","error":{…}}`
+ *   openai-responses    `OpenAI API error (401): {…}`
+ *   openai-responses    `OpenAI API error (403): 403 status code (no body)`
+ *
+ * Both alternatives are ANCHORED at the start of the string, and that is the
+ * point: keying on a bare `\d{3}` anywhere would let a provider's own prose
+ * ("the previous 401 has been cleared") raise a sign-in dialog. The 403 row is
+ * also why this keys on the STATUS and never on body text — that body can be
+ * absent entirely.
+ */
+const PI_ERROR_STATUS_RE = /^(?:(\d{3})(?!\d)|[A-Za-z][A-Za-z ]*API error \((\d{3})\))/
+
+function piErrorStatusCode(errorMessage: string | undefined): number | null {
+  if (!errorMessage) return null
+  const match = PI_ERROR_STATUS_RE.exec(errorMessage.trim())
+  if (!match) return null
+  return Number(match[1] ?? match[2])
+}
+
+/**
+ * Which statuses mean "this credential was rejected" (owner's ruling): 401 and
+ * 403, and nothing else. A 429 is a live credential out of quota and a 5xx is
+ * the vendor's own fault — both stay ordinary turn errors.
+ */
+function isPiAuthStatus(code: number | null): boolean {
+  return code === 401 || code === 403
+}
 
 /** Get the in-flight message id, minting (and storing) one defensively if a
  *  message_start was somehow missed — keeps the upsert-by-id contract intact

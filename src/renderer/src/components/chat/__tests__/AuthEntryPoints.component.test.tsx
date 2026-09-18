@@ -169,6 +169,19 @@ describe('AuthRequiredRow — the engine-neutral row', () => {
     expect(useSessionStore.getState().signInDialog).toBeNull()
   })
 
+  it('strips a pi vendor’s namespace for the label, exactly as it does opencode’s', async () => {
+    seedSession()
+    // pi's ChatGPT vendor is `openai-codex`; with the shared route DISABLED the
+    // credential is pi's own, so the id stays namespaced (chatgpt-route.ts) and
+    // this row is what the user reads. It must not say "pi:anthropic".
+    patch({ authRequired: { providerId: 'pi:anthropic' } })
+    render(<AuthRequiredRow />)
+    expect(screen.getByTestId('AuthRequiredRow')).toHaveTextContent('anthropic')
+    expect(screen.getByTestId('AuthRequiredRow').textContent).not.toContain('pi:anthropic')
+    expect(screen.queryByTestId('AuthRequiredRow.signIn')).toBeNull()
+    expect(screen.getByTestId('AuthRequiredRow.settings')).toBeTruthy()
+  })
+
   it('renders nothing without an owed sign-in, and never the deleted card', async () => {
     seedSession()
     render(<AuthRequiredRow />)

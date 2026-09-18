@@ -235,12 +235,14 @@ export interface SyncEventMap {
    * rejected credential apart. Codex raises it when it cannot answer the
    * app-server's `account/chatgptAuthTokens/refresh`, opencode for a
    * `ProviderAuthError` carrying a vendor, Claude for an `authentication`
-   * api_error. pi has no distinguishable auth signal on its wire today.
+   * api_error, and pi for a turn whose `errorMessage` opens with a 401/403 (the
+   * only status it exposes — see `core/pi/event-mapper.ts`'s classifier).
    *
    * `providerId` is what the sign-in dialog acts on: `anthropic`, `chatgpt`, or
-   * `opencode:<vendorId>` for a vendor no shared provider owns (that one has no
-   * flow, so the row opens Settings › Models & providers instead). It carries no
-   * message — the emitting engine sends its own words as `session:error`.
+   * `opencode:<vendorId>` / `pi:<vendorId>` for a vendor no shared provider owns
+   * (those have no flow, so the row opens Settings › Models & providers
+   * instead). It carries no message — the emitting engine sends its own words as
+   * `session:error`.
    */
   'session:auth-required': (
     routingId: string,

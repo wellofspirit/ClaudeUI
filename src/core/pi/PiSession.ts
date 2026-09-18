@@ -116,6 +116,7 @@ import {
 import { PiJudge } from './pi-judge'
 import { loadEngineConfig, loadSharedAutoModeConfig } from '../services/ui-config'
 import { persistAllowSuggestions } from '../opencode/permission-compiler'
+import { piAuthRequiredProviderId } from '../shared-providers/chatgpt-route'
 // Reused AS-IS (not copied/forked — ADR-026 additive-only on shared seams):
 // pure key/value dedup+throttle gate, no opencode-specific assumption baked
 // in (verified — takes a caller-supplied emit callback and ambient
@@ -1336,6 +1337,24 @@ export class PiSession extends BaseSession {
         // now as the next turn's prompt (isProcessing is already false, so
         // run() sends a bare `prompt` rather than a `steer`).
         void this.flushQueuedItems()
+        break
+
+      case 'auth-required':
+        // ADR-068 §4: one event for every engine, naming the PROVIDER the
+        // sign-in dialog can act on rather than pi's own vendor id. The event
+        // carries no text, so pi's verbatim message rides along as an ordinary
+        // error row — dropping it would lose the vendor's own words.
+        //
+        // Deliberately NO processing-state work here, unlike OpencodeSession's
+        // twin: opencode's `session.error` IS the turn's end, while pi's
+        // failed turn still runs on to `agent_settled` → the 'result' case
+        // above, which owns isProcessing/status/inactivity/queue-flush. This
+        // arm therefore does exactly what pi's own 'error' arm below does —
+        // emit, and let the turn end itself.
+        this.send('session:auth-required', {
+          providerId: piAuthRequiredProviderId(output.vendorId)
+        })
+        this.send('session:error', output.message)
         break
 
       case 'error':
