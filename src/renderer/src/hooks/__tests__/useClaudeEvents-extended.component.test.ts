@@ -1505,7 +1505,7 @@ describe('useClaudeEvents extended component tests', () => {
       await vi.waitFor(() => expect(useSessionStore.getState().accountsState).toEqual(BACKFILLED))
     })
 
-    it('chatgpt does not — that arm has its own refresh', async () => {
+    it('chatgpt does not read the ANTHROPIC accounts — the arms are disjoint', async () => {
       useSessionStore.setState({ accountsState: null })
       const getAccounts = vi.fn(async () => BACKFILLED)
       const listProviderRegistry = vi.fn(async () => ({ entries: [], opencodeInstalled: false }))
@@ -1518,6 +1518,51 @@ describe('useClaudeEvents extended component tests', () => {
       await vi.waitFor(() => expect(listProviderRegistry).toHaveBeenCalledTimes(1))
       expect(getAccounts).not.toHaveBeenCalled()
       expect(useSessionStore.getState().accountsState).toBeNull()
+    })
+
+    /**
+     * `providerAccounts` is the ChatGPT twin of `accountsState` and it is
+     * host-local in the same way — nothing publishes a change event for the
+     * vault at all, so the only edge that refreshed it was `SignInDialog`'s own
+     * `collectOutcome`. A SECOND client therefore kept the pre-sign-in list
+     * (the `Account N` placeholder, or no account at all) for the life of the
+     * page, while the `providerAuth` the same handler refreshed said connected.
+     */
+    it('chatgpt re-reads the VAULT account list, so a second client is not stale', async () => {
+      const VAULT = {
+        activeId: 'v1',
+        perSession: false,
+        accounts: [{ id: 'v1', email: 'vault@example.com', expiresAt: 0, needsReauth: false }]
+      }
+      useSessionStore.setState({ providerAccounts: null })
+      const listProviderAccounts = vi.fn(async () => VAULT)
+      const listProviderRegistry = vi.fn(async () => ({ entries: [], opencodeInstalled: false }))
+      Object.assign(window.api, { listProviderAccounts, listProviderRegistry })
+
+      app.emit('provider:auth-resolved', { providerId: 'chatgpt' })
+
+      await vi.waitFor(() => expect(listProviderAccounts).toHaveBeenCalledWith('chatgpt'))
+      await vi.waitFor(() => expect(useSessionStore.getState().providerAccounts).toEqual(VAULT))
+    })
+
+    /**
+     * Another engineer's slice adds an optional `accountId` to this payload.
+     * The handler must not start depending on it — both reads are unconditional
+     * refreshes of host-owned state, not a per-account patch.
+     */
+    it('tolerates an accountId on the payload without changing what it reads', async () => {
+      const listProviderAccounts = vi.fn(async () => ({
+        activeId: 'v1',
+        perSession: false,
+        accounts: []
+      }))
+      const listProviderRegistry = vi.fn(async () => ({ entries: [], opencodeInstalled: false }))
+      Object.assign(window.api, { listProviderAccounts, listProviderRegistry })
+
+      app.emit('provider:auth-resolved', { providerId: 'chatgpt', accountId: 'v9' })
+
+      await vi.waitFor(() => expect(listProviderRegistry).toHaveBeenCalledTimes(1))
+      await vi.waitFor(() => expect(listProviderAccounts).toHaveBeenCalledTimes(1))
     })
 
     it('a failed read keeps the last good answer, exactly like the probe beside it', async () => {

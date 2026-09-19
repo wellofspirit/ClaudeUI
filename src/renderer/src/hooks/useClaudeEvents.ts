@@ -329,6 +329,12 @@ export function useClaudeEvents(): void {
       //  · `providerAuth.chatgpt` comes from `provider-registry:list`, which
       //    publishes no change event, so every moment the answer can have changed
       //    has to re-read it — this is now one of them;
+      //  · `providerAccounts` is the vault's own account LIST, read the same
+      //    way and with no change event either. Its only other refresh is
+      //    `SignInDialog.collectOutcome`, which runs in the client that drove
+      //    the flow — so a second client kept the pre-sign-in list (the
+      //    `Account N` placeholder, or nothing) while the `providerAuth` read
+      //    beside it already said connected;
       //  · `vendorAuth.anthropic` is written only by `session:auth-source`, which
       //    arrives on a cli.js SPAWN, so without a re-probe here the Claude half
       //    stays stale until the next one (ADR-070 Context, "Why nothing clears");
@@ -349,7 +355,11 @@ export function useClaudeEvents(): void {
       // third one. Moving the emit above the loop would make all three race.
       onSyncEvent('provider:auth-resolved', ({ providerId }) => {
         const store = useSessionStore.getState()
-        if (providerId === 'chatgpt') return void store.refreshProviderAuth()
+        if (providerId === 'chatgpt') {
+          void store.refreshProviderAuth()
+          void store.loadProviderAccounts()
+          return
+        }
         if (providerId !== 'anthropic') return
         void window.api
           .vendorAuthProbe('claude')
