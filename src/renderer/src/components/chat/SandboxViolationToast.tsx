@@ -1,6 +1,5 @@
 import { useEffect } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
-import { useIsMobile } from '../../hooks/useIsMobile'
 
 function ViolationCard({
   message,
@@ -56,29 +55,22 @@ function ViolationCard({
 }
 
 export function SandboxViolationToast(): React.JSX.Element | null {
-  const isMobile = useIsMobile()
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const violations = useActiveSession((s) => s.sandboxViolations)
   const removeSandboxViolation = useSessionStore((s) => s.removeSandboxViolation)
 
   if (violations.length === 0) return null
 
+  // Just the cards — `ChatNoticeStack` owns the slot (ADR-070 §4).
   return (
-    <div
-      data-testid="SandboxViolationToast"
-      className="absolute top-12 left-0 right-0 z-20 pointer-events-none"
-    >
-      <div className="pointer-events-auto px-4 pt-2">
-        <div className={`${isMobile ? 'max-w-full' : 'max-w-[740px]'} mx-auto flex flex-col gap-2`}>
-          {violations.map((message, index) => (
-            <ViolationCard
-              key={`${index}-${message}`}
-              message={message}
-              onDismiss={() => activeSessionId && removeSandboxViolation(activeSessionId, index)}
-            />
-          ))}
-        </div>
-      </div>
+    <div data-testid="SandboxViolationToast" className="pointer-events-auto flex flex-col gap-2">
+      {violations.map((message, index) => (
+        <ViolationCard
+          key={`${index}-${message}`}
+          message={message}
+          onDismiss={() => activeSessionId && removeSandboxViolation(activeSessionId, index)}
+        />
+      ))}
     </div>
   )
 }

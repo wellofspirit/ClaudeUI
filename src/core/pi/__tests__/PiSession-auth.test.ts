@@ -223,7 +223,7 @@ beforeEach(() => {
 })
 
 describe('PiSession — a 401/403 turn raises session:auth-required', () => {
-  it('emits the MAPPED provider id and keeps pi’s own words as an error row', async () => {
+  it('emits the MAPPED provider id, pi’s words ON the event, and no duplicate error', async () => {
     const { session, calls } = await runFailedTurn(
       'rid-auth-1',
       erroredMessage({
@@ -232,16 +232,33 @@ describe('PiSession — a 401/403 turn raises session:auth-required', () => {
       })
     )
 
+    // THE GUARD, asserted first because it is the regression: pi used to re-send
+    // its own words as an ordinary error beside the event, giving one rejected
+    // credential two separately dismissable cards (ADR-070 §1).
+    expect(calls.filter((c) => c[0] === 'session:error')).toEqual([])
+
     const authCall = calls.find((c) => c[0] === 'session:auth-required')
     expect(authCall).toBeDefined()
     // pi's vendor id is `openai-codex`; the PROVIDER is what the dialog acts on.
-    expect(authCall![2]).toEqual({ providerId: 'chatgpt' })
+    // ADR-070 §1: pi's verbatim message rides ON the event.
+    expect((authCall![2] as { providerId: string }).providerId).toBe('chatgpt')
+    expect(String((authCall![2] as { message?: string }).message)).toContain(
+      'Missing bearer or basic authentication in header'
+    )
 
-    // The event carries no text, so the vendor's verbatim message must survive
-    // as an ordinary error row — otherwise the words are simply lost.
-    const errorCall = calls.find((c) => c[0] === 'session:error')
-    expect(errorCall).toBeDefined()
-    expect(String(errorCall![2])).toContain('Missing bearer or basic authentication in header')
+    // The engine-neutral transcript block, which pi never had.
+    const authRows = (calls as Array<[string, string, { content: Array<Record<string, unknown>> }]>)
+      .filter((c) => c[0] === 'session:message')
+      .map((c) => c[2])
+      .filter((message) => message.content?.some((block) => block.type === 'api_error'))
+    expect(authRows).toHaveLength(1)
+    expect(authRows[0].content[0]).toMatchObject({
+      type: 'api_error',
+      errorType: 'authentication',
+      // The SAME provider the event named — the block outlives the event
+      // (ADR-070 §4).
+      providerId: 'chatgpt'
+    })
 
     session.cancel()
   })
@@ -257,7 +274,7 @@ describe('PiSession — a 401/403 turn raises session:auth-required', () => {
       })
     )
 
-    expect(calls.find((c) => c[0] === 'session:auth-required')![2]).toEqual({
+    expect(calls.find((c) => c[0] === 'session:auth-required')![2]).toMatchObject({
       providerId: 'pi:anthropic'
     })
 

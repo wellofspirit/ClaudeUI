@@ -1,6 +1,6 @@
 # ADR-057 — Remote vendor OAuth: the host exchanges, the browser returns the code by paste
 
-**Status:** **Implemented** — headless-arc series S4 backend (`a30286c`, 2026-08-18) and the paste-field UI in S4-UI (`3f84331`, 2026-08-18; see Consequences). Normative as-built record: [security.md](../architecture/security.md) §"The vendor-credential surface (S4, ADR-057)".
+**Status:** **Implemented** — headless-arc series S4 backend (`a30286c`, 2026-08-18) and the paste-field UI in S4-UI (`3f84331`, 2026-08-18; see Consequences). **Corrected 2026-09-19** (ADR-070 slice D): the Claude flow's §1 claim that skipping `openExternal` was "the whole change" was wrong, and a successful remote sign-in reported `idle` — see §1's _As built / correction_. Normative as-built record: [security.md](../architecture/security.md) §"The vendor-credential surface (S4, ADR-057)".
 **Relates to:** ADR-014 (native Claude OAuth — cli.js owns the flow), ADR-036 (the unified Codex auth vault this drives), ADR-051 (the command registry the shared declarations ride on), ADR-056 (the admission model + the `admin`→`config` reclassification that made these verbs base-grantable).
 **Scope:** the BACKEND — the flow the paste-field UI will call, and its tests. It does not build the renderer UI, the headless server (S3), or any admission/step-up change.
 
@@ -27,6 +27,27 @@ The invariant that makes this tractable: **the host always performs the token EX
 cli.js's `claude_authenticate` already returns a `manualUrl` whose claude.ai page displays a code, and `claude_oauth_callback(code, state)` already exchanges it host-side (ADR-014's manual fallback). Remote just needed the verbs registered and `manualUrl` surfaced, plus one behavioural change: **the host must not open its own browser for a remote-initiated sign-in.**
 
 `AuthManager.signIn({ remote })` is the whole change. `remote` is derived, not asserted: the shared handler reads `connection.identity.method` — the host's own in-process connection is `'host'` (opens the host browser, byte-identical to before; the value was spelled `'desktop'` until the 2026-08-20 rename — see ADR-058's amendment), any other method is remote (skips `shell.openExternal`, returns `manualUrl` on the `AuthFlowState`). This is the "origin-derived flag": ONE handler body whose behaviour follows WHO called, never a second copy. `account:add` threads the same flag (it kicks off a login for the new account). The code returns via `auth:submit-code`.
+
+#### As built / correction (2026-09-19, ADR-070 slice D): `openExternal` was NOT the whole change
+
+"`signIn({ remote })` is the whole change" was wrong by one line, and the owner paid for it: a remote Claude sign-in that **succeeded host-side** reported neither success nor failure, and they had to RDP into the machine to sign in.
+
+Skipping `shell.openExternal` was necessary but not sufficient. `signIn` also armed `claudeOAuthWaitForCompletion()` on both paths, with a comment calling that **harmless** on the remote path. It is not harmless, for two compounding reasons:
+
+- **The wait can never fire remotely.** A remote browser's redirect goes to `localhost` on the _remote user's own device_, so the host's loopback listener is unreachable from there. Arming it buys nothing.
+- **It is not inert while it waits.** cli.js serves `claude_oauth_callback` and `claude_oauth_wait_for_completion` from **one branch** attached to the **same `Ls.flow` promise** (`vendor/claude-cli/cli.js` 2.1.268 — locate the branch by the literal `No active claude_authenticate flow`; documented in `docs/protocol-cc/07-control-outbound.md` §7.5). Both requests therefore settle **together** when the exchange succeeds, running their continuations in registration order. The wait was registered first, at `signIn` time, so it settled the very flow the paste was trying to complete: it set `settled` and nulled `pendingState`, and `submitOAuthCode`'s own `finalize()` then hit `if (flow !== this.flowId || this.settled) return IDLE`.
+
+The consequence lands precisely on the delivery decision this ADR made in its Consequences: because `auth:state` is deliberately host-local, and there is no auth-state **query** a client can poll (`auth:sign-in` / `auth:submit-code` / `auth:cancel` are all `kind: 'command'`), that invoke return is a remote caller's **only** channel for the outcome — and it returned `idle`. Neither a success nor an error to render. The same race had a second mouth: if the flow rejected or timed out _before_ the paste, `fail()` nulled `pendingState` and the paste was refused with "No active login flow."
+
+Two changes, both in `AuthManager`:
+
+1. The loopback wait is armed **desktop-only** (`if (!remote)`). The desktop keeps the wait/paste race it has always had; what changes for it is (2).
+
+2. `finalize` and `fail` are idempotent **with their result**, not just in their side effects. A flow's terminal state is cached under its id and replayed when that _same_ flow settles twice, so a duplicate completion reports the real answer instead of erasing it — and a late `fail()` can no longer downgrade an already-succeeded flow to an error. A settle for a _different_, stale flow still reads `IDLE`, which is the right answer for a login the user cancelled or restarted. The replay returns before every side effect, so it cannot re-run `invalidateLiveSessions`, re-broadcast, or stomp a newer flow's state.
+
+**The swallow was never remote-only.** Written as a remote bug and found to be broader while the fix was being tested: the desktop guard for (2) also failed against the pre-fix code. On the desktop the manual fallback — "Open the link manually", then paste — races the armed wait exactly the same way, and `session-store.ts`'s `submitOAuthCode` assigns the invoke return straight onto `authState`. So the wait's `finalize` broadcast `success`, the store rendered it, and then the paste's `IDLE` return overwrote it — a dialog dropping out of its own success state. `auth:state` masked the symptom on the desktop rather than preventing the defect. That is what makes (2) the load-bearing half: unarming alone would have fixed one host's visible bug and left the other's latent.
+
+**ADR-070 §2's `provider:auth-resolved` does not make this moot.** That event is replicated, so it now reaches remote clients too and is what clears the owed-sign-in surfaces. But it is not a substitute for the invoke return: it says _a credential for this provider was stored_, not **which account** signed in, and not that **this** flow — the one whose code the caller just pasted — is the one that succeeded. The flow's own outcome still has exactly one channel, so that channel must not lie.
 
 ### 2. Codex vault — paste the whole callback URL
 

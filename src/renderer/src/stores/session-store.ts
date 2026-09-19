@@ -5,6 +5,7 @@ import { codexPublishesEffort, resolveClaudeCapabilities } from '../../../shared
 import type { EffortLevel } from '../../../shared/model-capabilities'
 import type { SharedProviderAccountList } from '../../../shared/shared-provider'
 import type { ProviderRegistrySnapshot } from '../../../shared/provider-registry'
+import type { AuthRequiredState } from '../../../shared/remote-protocol'
 import type { ItemStreams } from '../../../core/shared/sync/item-stream'
 import {
   anthropicAuthState,
@@ -273,17 +274,18 @@ export function resolveEngineDefaultModel(
 }
 
 /**
- * The Codex-discovery banner when the identity Codex runs under is what was
- * refused (ADR-068 §4).
+ * What model discovery says when the identity Codex runs under is what was
+ * refused (ADR-070 §1).
  *
- * A distinct STRING rather than a flag, because a session's errors are a list of
- * strings in the store and on the wire; `FloatingError` matches this one to
- * attach the Sign in action. The generic hint below stays for every other cause
- * — a missing binary, a native model/provider misconfiguration — because those
- * are not fixed by signing in and must not be told to.
+ * It used to be an exported CONSTANT pushed onto `errors[]`, with `FloatingError`
+ * matching the exact string to attach a Sign in button — a third card for the
+ * same fact the auth event already carries, and a renderer-side rule coupled to
+ * an engine-authored string. Now it is the `message` of one `authRequired`, so
+ * discovery and a failed turn produce the same one row with the same one action.
+ * The engine's words stop at the fact; the ACTION is the UI's.
  */
-export const CODEX_SIGN_IN_REQUIRED_ERROR =
-  'ChatGPT rejected the credential Codex runs under, so no Codex models could be read. Sign in again to continue.'
+const CODEX_DISCOVERY_REFUSED_MESSAGE =
+  'ChatGPT rejected the credential Codex runs under, so no Codex models could be read.'
 
 /**
  * Banner the missing default model, asking WHY first when the answer changes the
@@ -296,6 +298,10 @@ export const CODEX_SIGN_IN_REQUIRED_ERROR =
  * (`CodexAuthProvider` reports `unauthenticated` when the stored account cannot
  * read the catalog). A probe that fails or says nothing keeps the generic hint:
  * an unanswered question is not evidence.
+ *
+ * The two causes now take two different ROUTES, not two strings on one list: a
+ * refused credential is the auth fact (ADR-070 §1), and everything else stays an
+ * ordinary error, because "check the installation" is not fixed by signing in.
  */
 function reportStaleDefaultModel(routingId: string, engineId: EngineId, model: string): void {
   const generic = staleDefaultModelMessage(engineId, model)
@@ -303,11 +309,19 @@ function reportStaleDefaultModel(routingId: string, engineId: EngineId, model: s
   if (engineId !== 'codex' || model) return addError(generic)
   void window.api
     .vendorAuthProbe('codex')
-    .then((probe) =>
-      addError(
-        probe.openai?.authState === 'unauthenticated' ? CODEX_SIGN_IN_REQUIRED_ERROR : generic
-      )
-    )
+    .then((probe) => {
+      if (probe.openai?.authState !== 'unauthenticated') return addError(generic)
+      // `authRequired` is SEALED: the reducer owns it, and `patchLocalSession` is
+      // the one sanctioned local write (the same escape hatch `clearAuthRequired`
+      // uses). Local-only is honest here — this is THIS client's own discovery
+      // read, not a host event, and the host raises the replicated fact itself the
+      // moment a turn actually tries to run.
+      patchLocalSession(routingId, {
+        // The literal, as every other renderer sign-in site spells it: the core
+        // constant lives beside `AuthVault`, which reaches `node:fs`.
+        authRequired: { providerId: 'chatgpt', message: CODEX_DISCOVERY_REFUSED_MESSAGE }
+      })
+    })
     .catch(() => addError(generic))
 }
 
@@ -841,10 +855,12 @@ export interface PerSessionState {
   btwResponse: string | null
   btwLoading: boolean
   /**
-   * The sign-in this session owes (ADR-068 §4) — SEALED: `session:auth-required`
-   * folds into it and a running turn clears it, both in the reducer.
+   * The sign-in this session owes (ADR-068 §4, three lifetimes as of ADR-070 §2)
+   * — SEALED: `session:auth-required` and `provider:auth-resolved` fold into it
+   * and a running turn clears it, all three in the reducer. Shape declared once
+   * on the wire type, so canonical, the snapshot and this cannot drift.
    */
-  authRequired: { providerId: string; accountId?: string } | null
+  authRequired: AuthRequiredState | null
 }
 
 /** Exported so the replica can build a store entry for a session it learns of first. */
@@ -1156,20 +1172,42 @@ export interface VendorOAuthState {
 }
 
 /**
- * What the sign-in dialog is open ON (ADR-068 §3).
+ * What the sign-in dialog is open ON (ADR-068 §3) — ONE provider's flow.
  *
  * `mode` is the ENTRY's intent, not a stage: `reauth` opens the chooser on the
  * account that failed, `switch` opens it to pick a different stored one, `add`
  * skips the chooser and starts a new sign-in. `retry` carries the prompt whose
- * turn the rejection killed, so the done state can offer to re-send it.
+ * turn the rejection killed, so the done state can offer to re-send it — a
+ * FALLBACK since ADR-070 §3, which parks the prompt on the session instead, so
+ * an entry point that knows no prompt still offers the retry.
  */
-export interface SignInRequest {
+export interface SignInProviderRequest {
+  /**
+   * The discriminant, and optional on this variant alone (ADR-070 §5): a dozen
+   * entry points already open a provider request and none of them can grow the
+   * list branch by accident, whereas the list variant has to say so explicitly.
+   */
+  kind?: 'provider'
   providerId: SignInProviderId
   mode: 'reauth' | 'add' | 'switch'
   /** The stored account the entry point blames, when it knows one. */
   accountId?: string
   retry?: { routingId: string; prompt: string }
 }
+
+/**
+ * The pill's aggregate entry point (ADR-070 §5): several providers are down and
+ * there is no single flow to start, so the dialog lists them.
+ *
+ * It carries no payload. The rows are derived LIVE from `useAuthSummary`, which
+ * is what lets a row leave the list the moment its provider resolves and the
+ * stopped-prompt row arm itself when the retry becomes takeable.
+ */
+export interface SignInListRequest {
+  kind: 'list'
+}
+
+export type SignInRequest = SignInProviderRequest | SignInListRequest
 
 /** The two providers ClaudeUI can actually drive a sign-in for. */
 export type SignInProviderId = 'anthropic' | 'chatgpt'
@@ -1490,8 +1528,17 @@ export interface SessionState {
   closeGitPanel: (routingId: string) => void
   // Account usage
   setAccountUsage: (data: AccountUsage) => void
-  /** Re-read the ChatGPT account list. Safe to call repeatedly; failures leave the slice alone. */
-  loadProviderAccounts: () => Promise<void>
+  /**
+   * Re-read the ChatGPT account list. Safe to call repeatedly; failures leave
+   * the slice alone.
+   *
+   * `list` short-circuits the read for a caller that has just made it and needs
+   * the failure itself — `SignInDialog` renders a rejected `provider-account:list`
+   * as an error row, which this action deliberately swallows. Same shape as
+   * {@link SessionState.refreshProviderAuth}'s `snapshot`, and for the same
+   * reason: one writer of the field, no second copy at the call site.
+   */
+  loadProviderAccounts: (list?: SharedProviderAccountList) => Promise<void>
   /** Re-read the per-account rate limits; `refresh` asks the host to fetch first. */
   loadChatgptLimits: (refresh?: boolean) => Promise<void>
   // Native OAuth (ADR-014)
@@ -2756,9 +2803,9 @@ export const useSessionStore = create<SessionState>((set) => ({
   // ADR-068 §2. Both are plain READS of host-owned state — the store never
   // derives either, and a failure leaves the previous answer in place rather
   // than blanking a picker or a usage block mid-use.
-  loadProviderAccounts: async () => {
+  loadProviderAccounts: async (list) => {
     try {
-      set({ providerAccounts: await window.api.listProviderAccounts('chatgpt') })
+      set({ providerAccounts: list ?? (await window.api.listProviderAccounts('chatgpt')) })
     } catch {
       /* the host has no vault yet, or the read failed — keep what we have */
     }

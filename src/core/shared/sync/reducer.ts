@@ -287,6 +287,35 @@ function dismissCompletedTodos(s: CanonicalSessionState): Partial<CanonicalSessi
 }
 
 /**
+ * The prompt whose turn a failure killed — this session's last user message, as
+ * plain text (ADR-070 §3).
+ *
+ * ONE copy, here, on purpose. `AuthRequiredRow` and `MessageBubble`'s
+ * `AuthErrorBlock` each grew their own walk of the same messages for the same
+ * sign-in dialog, and the two DISAGREED — one took the first text block, the
+ * other joined all of them — so the retry offered depended on which surface the
+ * user happened to click. Joining all of them is the right answer (a prompt with
+ * an attachment plus text is one prompt), and capturing it in the reducer at
+ * failure time is what lets the retry survive closing the dialog and a resync.
+ *
+ * `undefined` rather than `''` when there is nothing to retry, so the caller can
+ * omit the field instead of storing an empty string that reads as a real prompt.
+ */
+function lastUserPrompt(s: CanonicalSessionState): string | undefined {
+  for (let i = s.messages.length - 1; i >= 0; i--) {
+    const message = s.messages[i]
+    if (message.role !== 'user') continue
+    const text = message.content
+      .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n')
+      .trim()
+    return text || undefined
+  }
+  return undefined
+}
+
+/**
  * The transcript a watched external session's file re-read produced.
  *
  * Named so the ONE rule for folding it lives in one place. Three callers apply
@@ -902,16 +931,51 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
 
     case 'session:auth-required': {
       const routingId = routingIdOf(event)
-      const data = arg<{ providerId?: string; accountId?: string }>(event, 1)
+      const data = arg<{ providerId?: string; accountId?: string; message?: string }>(event, 1)
       if (!routingId || !data?.providerId || !state.sessions[routingId]) return state
       const providerId = data.providerId
       const accountId = data.accountId
-      return withSession(state, routingId, () => ({
-        authRequired: {
-          providerId,
-          ...(typeof accountId === 'string' && accountId ? { accountId } : {})
+      const message = data.message
+      // `resolved` is left ABSENT rather than written `false`: absent IS lifetime 1
+      // (ADR-070 §2), and an omitted optional keeps the object byte-identical to
+      // the pre-ADR-070 shape for a failure nothing has fixed yet — which is what
+      // the snapshot-parity comparison between canonical and a replica rests on.
+      return withSession(state, routingId, (s) => {
+        const retryPrompt = lastUserPrompt(s)
+        return {
+          authRequired: {
+            providerId,
+            ...(typeof accountId === 'string' && accountId ? { accountId } : {}),
+            ...(typeof message === 'string' && message ? { message } : {}),
+            ...(retryPrompt ? { retryPrompt } : {})
+          }
         }
-      }))
+      })
+    }
+
+    case 'provider:auth-resolved': {
+      // App-level: no routingId, because the fact is about a PROVIDER. Every
+      // session that was blaming this provider moves to lifetime 2 — resolved,
+      // retry still owed — keeping `retryPrompt` so the retry outlives the dialog.
+      const data = arg<{ providerId?: string }>(event, 0)
+      const providerId = data?.providerId
+      if (!providerId) return state
+      let sessions: CanonicalState['sessions'] | undefined
+      for (const [id, session] of Object.entries(state.sessions)) {
+        if (session.authRequired?.providerId !== providerId) continue
+        if (session.authRequired.resolved === true) continue
+        sessions ??= { ...state.sessions }
+        sessions[id] = {
+          ...session,
+          authRequired: { ...session.authRequired, resolved: true }
+        }
+      }
+      // IDENTITY when nothing matched — `replica.ts` identity-diffs the projection
+      // ("Projection is identity-diffed, and that is load-bearing"), so a new
+      // object here would re-write every session on a sign-in that fixed none of
+      // them and revert any in-flight local write.
+      if (!sessions) return state
+      return { ...state, sessions }
     }
 
     // -----------------------------------------------------------------------

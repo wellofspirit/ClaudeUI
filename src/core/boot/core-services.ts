@@ -54,6 +54,8 @@ import { followCodexActiveAccount } from '../codex/codex-account-switch'
 import { scanCodexLineage } from '../codex/history'
 import { refreshCanonicalDirectories } from '../services/sync-seed'
 import { credentialSync } from '../auth/vault/CredentialSync'
+import { CHATGPT_PROVIDER_ID } from '../auth/auth-providers'
+import { emitEvent } from '../services/sync-host'
 import { sharedProviderService } from '../shared-providers'
 import { logger } from '../services/logger'
 import { createHostAnchor, type HostAnchor } from './host-anchor'
@@ -179,7 +181,14 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
       // "no account is active" and move every follower off its host for nothing.
       if (activeId === undefined) return
       await followCodexActiveAccount(sessionManager, activeId)
-    }
+    },
+    // A stored ChatGPT credential -> the ONE resolution signal (ADR-070 §2),
+    // replicated so a sign-in taken here clears the owed sign-in on every other
+    // client too. Wired at the SAME seam as the hook above, for the same reason:
+    // `CredentialSync` must not import `sync-host` (its unit tests mock almost
+    // nothing and would pull in the whole service graph), and both hosts need it.
+    onCredentialStored: () =>
+      emitEvent('provider:auth-resolved', [{ providerId: CHATGPT_PROVIDER_ID }])
   })
 
   // Recompile the user's Bash permission rules into `$CODEX_HOME/rules/

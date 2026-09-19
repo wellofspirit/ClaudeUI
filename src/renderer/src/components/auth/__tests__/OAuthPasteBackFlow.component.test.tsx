@@ -26,26 +26,34 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('OAuthPasteBackFlow — the two variants', () => {
-  it('the url variant explains the failed page and offers the address-bar paste', () => {
+  it('the url variant keeps the failed-page warning, trimmed and under the field', () => {
     render(
       <OAuthPasteBackFlow variant="url" url="https://auth.example/authorize" onSubmit={vi.fn()} />
     )
     const flow = screen.getByTestId('OAuthPasteBackFlow')
     expect(flow).toHaveAttribute('data-variant', 'url')
-    expect(flow).toHaveTextContent('Sign in with your browser')
-    expect(flow).toHaveTextContent('Paste what you got back')
-    expect(flow).toHaveTextContent('fails to load')
+    // One verb per row (ADR-070 §5 rule 4) — the step titles and step 1's
+    // "Opens on this device…" caption are gone.
+    expect(flow).toHaveTextContent('OPEN')
+    expect(flow).toHaveTextContent('PASTE')
+    expect(flow).not.toHaveTextContent('Sign in with your browser')
+    expect(flow).not.toHaveTextContent('Opens on this device')
+    expect(flow).not.toHaveTextContent('Paste what you got back')
+    // The ONE paragraph ADR-070 keeps: without it a page that fails to load
+    // reads as a broken app.
+    expect(flow).toHaveTextContent('That page fails to load — expected. Copy its address.')
+    // "A code works too" moved into the placeholder, where the user looks when
+    // deciding what to type.
     expect(screen.getByTestId('OAuthPasteBackFlow.input')).toHaveAttribute(
       'placeholder',
-      'http://localhost:1455/auth/callback?code=… or the code'
+      'the address you land on, or a code'
     )
   })
 
-  it('the code variant names claude.ai and drops the failed-URL language', () => {
+  it('the code variant drops the failed-URL language and keeps its own placeholder', () => {
     render(<OAuthPasteBackFlow variant="code" url="https://claude.ai/oauth" onSubmit={vi.fn()} />)
     const flow = screen.getByTestId('OAuthPasteBackFlow')
     expect(flow).toHaveAttribute('data-variant', 'code')
-    expect(flow).toHaveTextContent('Paste the code claude.ai shows you')
     expect(flow).not.toHaveTextContent('fails to load')
     expect(screen.getByTestId('OAuthPasteBackFlow.input')).toHaveAttribute(
       'placeholder',

@@ -164,10 +164,18 @@ export function CredentialChip({
 export function EngineChip({
   engine,
   enabled,
+  label,
   testid
 }: {
   engine: EngineId
   enabled: boolean
+  /**
+   * Overrides the WORD, never the engine: `data-id` stays the `EngineId`, so
+   * nothing downstream has to parse prose. Its one caller is `SignInDialog`'s
+   * header, where the Claude chip names the PRODUCT the credential feeds
+   * ("Claude Code") beside a title that already says "Claude".
+   */
+  label?: string
   testid: string
 }): React.JSX.Element {
   return (
@@ -181,7 +189,7 @@ export function EngineChip({
           : 'border-border/50 text-text-muted opacity-50'
       }`}
     >
-      {engineMeta(engine).label}
+      {label ?? engineMeta(engine).label}
     </span>
   )
 }

@@ -24,6 +24,7 @@ import { useSessionStore } from '../../stores/session-store'
 import type { ProviderAccounts } from '../../../../shared/provider-registry'
 import { Button, SettingRow, ToggleSwitch } from './settings-controls'
 import { CredentialChip } from './ProviderSheet'
+import { accountDisplayName } from '../../utils/sign-in-provider'
 
 /** Testid namespace (ADR-027 tier 1/2). */
 const PANE = 'ChatgptAccounts'
@@ -149,7 +150,7 @@ export function ChatgptAccountsSetting(): React.JSX.Element | null {
                 as="label"
                 testid={`${PANE}.account`}
                 dataId={account.id}
-                label={account.email || 'Account'}
+                label={accountDisplayName(account.email)}
                 description={accountDescription(account)}
                 className={active ? 'bg-accent/5' : 'hover:bg-bg-hover/40'}
                 leading={

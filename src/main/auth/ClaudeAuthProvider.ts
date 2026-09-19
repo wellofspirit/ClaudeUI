@@ -51,6 +51,17 @@ class ClaudeAuthProvider implements EngineAuthProvider {
     // Intercept successful logins to keep cachedAccount fresh.
     authManager.onLoginSuccess((account) => {
       if (account) this.cachedAccount = account
+      // …and the auth STATE, not just the label (ADR-070 §2). `cachedAuthSource`
+      // was fed only by `session:auth-source`, which arrives on a cli.js spawn,
+      // so between a successful login and the next spawn `probe()` still answered
+      // `unauthenticated` — and the `provider:auth-resolved` re-probe would have
+      // read that stale answer back. A login that succeeded IS authentication;
+      // the next `session:auth-source` overwrites this with cli.js's own word.
+      //
+      // `AuthManager.finalize` emits `provider:auth-resolved` AFTER this loop for
+      // exactly this reason — the event is what makes a client call `probe()`, so
+      // it must not precede this write. See the note beside that emit.
+      this.cachedAuthSource = 'authenticated'
     })
     // AccountManager needs the window for broadcasts — already called by main/index.ts.
     // We call it here only if it hasn't been wired yet (idempotent on win reference).

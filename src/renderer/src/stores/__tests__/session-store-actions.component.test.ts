@@ -6,12 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import {
-  useSessionStore,
-  OPENCODE_DEFAULT_MODEL,
-  PI_DEFAULT_MODEL,
-  CODEX_SIGN_IN_REQUIRED_ERROR
-} from '../session-store'
+import { useSessionStore, OPENCODE_DEFAULT_MODEL, PI_DEFAULT_MODEL } from '../session-store'
 import { claudeModel } from '../../../../shared/types'
 import {
   resolveClaudeCapabilities,
@@ -2209,14 +2204,21 @@ describe('stale CONFIGURED default model errors instead of substituting (Item 3b
   })
 
   /**
-   * ADR-068 §4, the SERVICE path. An empty Codex catalog has two causes needing
-   * opposite advice, and only the probe can tell them apart — so the banner asks
-   * before it advises, and keeps the installation hint whenever it has no answer.
+   * ADR-068 §4, the SERVICE path, re-routed by ADR-070 §1. An empty Codex catalog
+   * has two causes needing opposite advice, and only the probe can tell them
+   * apart — so it asks before it advises, and keeps the installation hint
+   * whenever it has no answer.
+   *
+   * What changed: a REFUSED credential no longer joins `errors[]` as a string
+   * with a bespoke Sign in button matched on its exact text. It raises the same
+   * `authRequired` a failed turn does, so discovery and a turn produce one row
+   * with one action. The generic hint is still an ordinary error, because
+   * "check the installation" is not fixed by signing in.
    */
-  it('an empty Codex catalog blames the ChatGPT sign-in only when the probe does', async () => {
+  it('an empty Codex catalog raises the auth fact only when the probe blames the credential', async () => {
     // The banner's real producer is switching a not-yet-spawned session to Codex
     // and finding nothing to run — `setSelectedEngine`'s no-resolved-model branch.
-    const stage = async (probe: () => Promise<unknown>, routingId: string): Promise<string[]> => {
+    const stage = async (probe: () => Promise<unknown>, routingId: string): Promise<void> => {
       ;(window.api as any).vendorAuthProbe = vi.fn(probe)
       useSessionStore.setState({
         activeSessionId: null,
@@ -2226,30 +2228,35 @@ describe('stale CONFIGURED default model errors instead of substituting (Item 3b
       store().createNewSession(routingId, '/proj')
       useSessionStore.setState({ activeSessionId: routingId, availableModels: [] })
       store().setSelectedEngine('codex')
-      await vi.waitFor(() => expect(store().sessions[routingId].errors).toHaveLength(1))
-      return store().sessions[routingId].errors
     }
 
-    expect(
-      await stage(
-        async () => ({ openai: { authState: 'unauthenticated', requiresLogin: true } }),
-        'r-codex-refused'
-      )
-    ).toEqual([CODEX_SIGN_IN_REQUIRED_ERROR])
+    await stage(
+      async () => ({ openai: { authState: 'unauthenticated', requiresLogin: true } }),
+      'r-codex-refused'
+    )
+    await vi.waitFor(() =>
+      expect(store().sessions['r-codex-refused'].authRequired).toEqual({
+        providerId: 'chatgpt',
+        message:
+          'ChatGPT rejected the credential Codex runs under, so no Codex models could be read.'
+      })
+    )
+    // …and NOT as a card on the error list as well. One fact, one surface.
+    expect(store().sessions['r-codex-refused'].errors).toEqual([])
 
-    expect(
-      (
-        await stage(async () => ({ openai: { authState: 'authenticated' } }), 'r-codex-healthy')
-      ).join(' ')
-    ).toContain('Check installation')
+    await stage(async () => ({ openai: { authState: 'authenticated' } }), 'r-codex-healthy')
+    await vi.waitFor(() =>
+      expect(store().sessions['r-codex-healthy'].errors.join(' ')).toContain('Check installation')
+    )
+    expect(store().sessions['r-codex-healthy'].authRequired).toBeNull()
 
-    expect(
-      (
-        await stage(async () => {
-          throw new Error('probe failed')
-        }, 'r-codex-unknown')
-      ).join(' ')
-    ).toContain('Check installation')
+    await stage(async () => {
+      throw new Error('probe failed')
+    }, 'r-codex-unknown')
+    await vi.waitFor(() =>
+      expect(store().sessions['r-codex-unknown'].errors.join(' ')).toContain('Check installation')
+    )
+    expect(store().sessions['r-codex-unknown'].authRequired).toBeNull()
   })
 
   it('an EMPTY engine model list cannot validate, so the configured value passes through', () => {

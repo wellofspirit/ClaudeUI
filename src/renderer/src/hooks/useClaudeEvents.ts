@@ -321,6 +321,49 @@ export function useClaudeEvents(): void {
           }
         })
       }),
+      // ADR-070 §2: a credential for this provider was stored successfully. The
+      // REPLICA already folded it into every matching session's `authRequired`
+      // (the reducer owns that); this subscription exists for the provider views
+      // the fold cannot reach, all of which are read-back caches rather than
+      // replicated state:
+      //  · `providerAuth.chatgpt` comes from `provider-registry:list`, which
+      //    publishes no change event, so every moment the answer can have changed
+      //    has to re-read it — this is now one of them;
+      //  · `vendorAuth.anthropic` is written only by `session:auth-source`, which
+      //    arrives on a cli.js SPAWN, so without a re-probe here the Claude half
+      //    stays stale until the next one (ADR-070 Context, "Why nothing clears");
+      //  · `accountsState` is written by `account:changed`, which is HOST-LOCAL
+      //    (`channels.ts`; `AccountManager.broadcast` sends it straight to the
+      //    desktop window, bypassing SyncCore). So a REMOTE client never hears
+      //    the backfill — `AccountManager.addAccount` persists `Account N` as the
+      //    placeholder email before the OAuth completes, `noteLogin` replaces it
+      //    with the real one afterwards — and every surface derived from that
+      //    field kept the placeholder for the life of the page (Slice I).
+      //
+      // The backfill is already WRITTEN when this arrives: `AuthManager.finalize`
+      // emits `provider:auth-resolved` as its LAST statement, after the
+      // `onSuccessCbs` loop that runs `noteLogin`. That ordering is deliberate
+      // (Slice D) and its emit site carries a "LAST in this function,
+      // deliberately — do not move it up" note for a second reason: a client's
+      // reaction is a read of state those callbacks refresh. This read is now a
+      // third one. Moving the emit above the loop would make all three race.
+      onSyncEvent('provider:auth-resolved', ({ providerId }) => {
+        const store = useSessionStore.getState()
+        if (providerId === 'chatgpt') return void store.refreshProviderAuth()
+        if (providerId !== 'anthropic') return
+        void window.api
+          .vendorAuthProbe('claude')
+          .then((map) => useSessionStore.getState().setVendorAuth(map))
+          .catch(() => {
+            /* No host for this engine (claudeui-server) or the read failed — keep the last answer. */
+          })
+        void window.api
+          .getAccounts()
+          .then((state) => useSessionStore.getState().setAccountsState(state))
+          .catch(() => {
+            /* Same posture as above — a failed read keeps the last good answer. */
+          })
+      }),
       onSyncEvent('voice:error', (routingId, error) => {
         useSessionStore.getState().addError(routingId, error)
       }),

@@ -3547,17 +3547,35 @@ describe('Codex sessions under an injected ChatGPT account', () => {
     source.injectionTokenFor = vi.fn(async () => null)
     events.mockClear()
     await expect(ask()).rejects.toThrow()
+    // ADR-070 §1: the words ride ON the event…
     expect(events).toHaveBeenCalledWith('session:auth-required', [
       'temporary',
-      { providerId: 'chatgpt', accountId: 'acct-fixture' }
+      {
+        providerId: 'chatgpt',
+        accountId: 'acct-fixture',
+        message: 'ChatGPT rejected the credential Codex runs under.'
+      }
     ])
-    const errors = events.mock.calls.filter(([channel]) => channel === 'session:error')
-    expect(errors).toEqual([
-      [
-        'session:error',
-        ['temporary', 'ChatGPT sign-in expired; sign in again from Settings › Models & providers']
-      ]
-    ])
+    // …and NOTHING sends them again as an ordinary error. This is the guard: the
+    // duplicate is what made one rejected credential produce two separately
+    // dismissable cards, and it was sanctioned by the event's own doc comment,
+    // so nothing but a test stops it coming back.
+    expect(events.mock.calls.filter(([channel]) => channel === 'session:error')).toEqual([])
+    // The neutral transcript block every engine now emits — a permanent,
+    // correctly-anchored record rather than a card that vanishes.
+    const authRows = events.mock.calls
+      .filter(([channel]) => channel === 'session:message')
+      .map(([, args]) => (args as [string, { content: Array<Record<string, unknown>> }])[1])
+      .filter((message) => message.content.some((block) => block.type === 'api_error'))
+    expect(authRows).toHaveLength(1)
+    // …carrying the PROVIDER, so the row still names ChatGPT once the failure
+    // has settled and the event's copy of the fact is gone (ADR-070 §4).
+    expect(authRows[0].content[0]).toEqual({
+      type: 'api_error',
+      errorType: 'authentication',
+      errorMessage: 'ChatGPT rejected the credential Codex runs under.',
+      providerId: 'chatgpt'
+    })
   })
 
   it('registers the refresh method on the host that runs this session', async () => {

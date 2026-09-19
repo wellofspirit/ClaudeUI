@@ -14,6 +14,7 @@ import {
 import type { EngineId, VendorId } from '../../../../shared/types'
 import { ENGINE_META, engineMeta } from '../../../../shared/engine-meta'
 import {
+  accountDisplayName,
   SIGN_IN_PROVIDER_LABEL,
   signInProviderFor,
   type ProviderAuthView
@@ -571,9 +572,16 @@ export interface AccountChoice {
   planType?: string
 }
 
-/** The label a stored account shows. Email when the JWT carried one. */
+/**
+ * The label a stored account shows. Email when the JWT carried one.
+ *
+ * Routed through {@link accountDisplayName} rather than spelling the fallback
+ * again — this is the label the pickers and the mobile config sheet share, so
+ * while it kept its own `??` an empty email rendered BLANK here and on the phone
+ * while Settings named the same account `Account`.
+ */
 export function accountLabel(account: AccountChoice | undefined): string {
-  return account?.email ?? 'Account'
+  return accountDisplayName(account?.email)
 }
 
 /**

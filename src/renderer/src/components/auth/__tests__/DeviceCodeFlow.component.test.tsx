@@ -45,7 +45,18 @@ describe('DeviceCodeFlow', () => {
     // The vendor page has no business holding a handle on this one.
     expect(link.getAttribute('rel')).toContain('noopener')
     expect(screen.getByTestId('DeviceCodeFlow.code')).toHaveTextContent('ABCD-1234')
-    expect(screen.getByTestId('DeviceCodeFlow.waiting')).toHaveTextContent('Expires in 15 min')
+    // ADR-070 §5 rule 4: the expiry joined the waiting line instead of being a
+    // sentence of its own. It is still there — a code with no expiry is a code
+    // the user retypes forever.
+    expect(screen.getByTestId('DeviceCodeFlow.waiting')).toHaveTextContent(
+      'Waiting · expires in 15 min'
+    )
+    // The step captions are gone; one verb per row is the instruction.
+    const panel = screen.getByTestId('DeviceCodeFlow')
+    expect(panel).toHaveTextContent('OPEN')
+    expect(panel).toHaveTextContent('ENTER')
+    expect(panel).not.toHaveTextContent('Open this link on any device')
+    expect(panel).not.toHaveTextContent('anything with a browser')
     expect(screen.getByTestId('DeviceCodeFlow.cancel')).toBeTruthy()
     expect(screen.getByTestId('DeviceCodeFlow.pasteInstead')).toBeTruthy()
     expect(screen.getByTestId('DeviceCodeFlow')).toHaveAttribute('data-id', 'chatgpt')
@@ -57,7 +68,8 @@ describe('DeviceCodeFlow', () => {
     expect(screen.getByTestId('DeviceCodeFlow.copy')).toBeDisabled()
     expect(screen.getByTestId('DeviceCodeFlow')).toHaveAttribute('data-ready', 'false')
     // The expiry is omitted rather than guessed at.
-    expect(screen.getByTestId('DeviceCodeFlow.waiting').textContent).not.toContain('Expires')
+    expect(screen.getByTestId('DeviceCodeFlow.waiting').textContent).not.toContain('expires')
+    expect(screen.getByTestId('DeviceCodeFlow.waiting').textContent).toBe('Waiting')
   })
 
   it('Copy writes the code and says so, without a token ever being involved', async () => {
@@ -88,6 +100,10 @@ describe('DeviceCodeFlow', () => {
     const onCancel = vi.fn()
     const onPasteInstead = vi.fn()
     render(<DeviceCodeFlow userCode="AB-12" onCancel={onCancel} onPasteInstead={onPasteInstead} />)
+    // ADR-030's escape hatch keeps its handler under a shorter label.
+    expect(screen.getByTestId('DeviceCodeFlow.pasteInstead')).toHaveTextContent(
+      'Paste a URL instead'
+    )
     fireEvent.click(screen.getByTestId('DeviceCodeFlow.cancel'))
     fireEvent.click(screen.getByTestId('DeviceCodeFlow.pasteInstead'))
     expect(onCancel).toHaveBeenCalledTimes(1)

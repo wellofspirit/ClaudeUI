@@ -94,4 +94,22 @@ describe('AccountPicker', () => {
     open({ accounts: [{ id: 'acct-x' }], activeAccountId: 'acct-x' })
     expect(screen.getByTestId('AccountPicker.trigger').textContent).toContain('Active · Account')
   })
+
+  // Slice J: `accountLabel` read `account?.email ?? 'Account'`, so an EMPTY
+  // email — which every wire type can carry — reached the trigger and the row
+  // as a blank string while Settings named the same account `Account`. The
+  // assertion is on the rendered label, not on the helper, because a helper
+  // test passes whether or not this call site was converted.
+  it('falls back for an EMPTY email too, on the trigger and in the row', () => {
+    open({
+      accounts: [{ id: 'acct-blank', email: '' }],
+      activeAccountId: 'acct-blank',
+      pinned: 'acct-blank'
+    })
+    expect(screen.getByTestId('AccountPicker.trigger').textContent).toContain('Account')
+    fireEvent.click(screen.getByTestId('AccountPicker.trigger'))
+    expect(
+      options().find((option) => option.getAttribute('data-value') === 'acct-blank')?.textContent
+    ).toContain('Account')
+  })
 })
