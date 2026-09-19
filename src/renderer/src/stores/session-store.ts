@@ -1175,8 +1175,8 @@ export interface VendorOAuthState {
  * What the sign-in dialog is open ON (ADR-068 §3) — ONE provider's flow.
  *
  * `mode` is the ENTRY's intent, not a stage: `reauth` opens the chooser on the
- * account that failed, `switch` opens it to pick a different stored one, `add`
- * skips the chooser and starts a new sign-in. `retry` carries the prompt whose
+ * account that failed (switching to another stored one is a row action there,
+ * not a mode), `add` skips the chooser and starts a new sign-in. `retry` carries the prompt whose
  * turn the rejection killed, so the done state can offer to re-send it — a
  * FALLBACK since ADR-070 §3, which parks the prompt on the session instead, so
  * an entry point that knows no prompt still offers the retry.
