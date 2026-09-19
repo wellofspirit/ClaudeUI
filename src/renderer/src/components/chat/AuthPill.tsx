@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
-import { useShallow } from 'zustand/react/shallow'
-import type { AuthRequiredState } from '../../../../shared/remote-protocol'
-import { useSessionStore, type SessionState } from '../../stores/session-store'
-import { summarizeAuthIssues, type AuthSummary, type AuthTone } from '../../stores/auth-issues'
+import { useEffect, useState } from 'react'
+import { useSessionStore } from '../../stores/session-store'
+import type { AuthSummary, AuthTone } from '../../stores/auth-issues'
+import { useAuthSummary } from '../../stores/use-auth-summary'
 import { isDrivableProvider, providerDisplayName } from '../../utils/sign-in-provider'
 import { useSidebarCollapsed } from '../SessionView'
 
@@ -10,46 +9,18 @@ import { useSidebarCollapsed } from '../SessionView'
 const RESOLVED_LINGER_MS = 15_000
 
 /**
- * Every session whose `authRequired` is set, keyed by routingId.
+ * Settings › Models & providers, the app-wide deep-link channel (`{ page,
+ * group }`). The one answer for a credential ClaudeUI cannot drive a flow for
+ * (ADR-030): an engine-native `opencode:*` / `pi:*` token lives in that
+ * engine's own store, so a dialog here would have nothing to run.
  *
- * Shaped as a RECORD on purpose: `useShallow` compares its values with
- * `Object.is`, and `authRequired` objects are reducer-owned and only re-minted
- * when the fact changes, so the RESULT is stable across every token of every
- * stream and the top bar does not re-render on one. Returning tuples or
- * freshly-built objects here would defeat that and re-render the bar
- * continuously — the mistake this comment exists to prevent.
- *
- * It is the result that is stable, not the work: the walk itself runs on every
- * store update, so it allocates one small record per update. Accepted
- * deliberately — sessions are tens, not thousands, and the allocation is a cost
- * paid off the render path, whereas a re-render of the whole bar is not.
+ * Exported because the dialog's provider-LIST mode offers the same escape for
+ * the same rows, and the two must not drift into sending the user to different
+ * pages.
  */
-function blamedSessions(state: SessionState): Record<string, AuthRequiredState> {
-  const blamed: Record<string, AuthRequiredState> = {}
-  for (const [routingId, session] of Object.entries(state.sessions))
-    if (session.authRequired) blamed[routingId] = session.authRequired
-  return blamed
-}
-
-/** The app-wide auth answer, memoised on inputs that are stable between facts. */
-export function useAuthSummary(): AuthSummary {
-  const providerAuth = useSessionStore((s) => s.providerAuth)
-  const blamed = useSessionStore(useShallow(blamedSessions))
-  const anthropicAuthorizing = useSessionStore((s) => s.authState?.status === 'authorizing')
-  // A `vendorOAuth` parked at `error` is a FAILED flow, not a running one — it
-  // lingers until the dialog is reopened or cancelled, and calling that "Signing
-  // in…" forever is precisely the stale-state bug this pill replaces.
-  const chatgptAuthorizing = useSessionStore(
-    (s) => s.vendorOAuth !== null && s.vendorOAuth.stage !== 'error'
-  )
-  return useMemo(
-    () =>
-      summarizeAuthIssues({
-        providerAuth,
-        blamed,
-        authorizing: { anthropic: anthropicAuthorizing, chatgpt: chatgptAuthorizing }
-      }),
-    [providerAuth, blamed, anthropicAuthorizing, chatgptAuthorizing]
+export function openProviderSettings(): void {
+  window.dispatchEvent(
+    new CustomEvent('open-settings', { detail: { page: 'models', group: 'providers' } })
   )
 }
 
@@ -149,12 +120,6 @@ export function AuthPill(): React.JSX.Element | null {
   if (summary.tone === 'none' || retired) return null
   const tone = summary.tone
 
-  const openProviderSettings = (): void => {
-    window.dispatchEvent(
-      new CustomEvent('open-settings', { detail: { page: 'models', group: 'providers' } })
-    )
-  }
-
   const act = (): void => {
     if (tone === 'resolved') {
       const owed = summary.retryable[0]
@@ -169,9 +134,14 @@ export function AuthPill(): React.JSX.Element | null {
       openSignIn({ providerId: summary.authorizing, mode: 'reauth' })
       return
     }
-    // TODO(ADR-070 Slice C): with several issues this should open the dialog in
-    // provider-LIST mode, which Slice C adds. Until then it opens on the first
-    // drivable issue rather than growing a second dialog here.
+    // Several providers are down and the pill aggregates them, so it has no
+    // single sign-in to offer: the dialog's provider-LIST mode (ADR-070 §5) is
+    // the one that can name them all. It reads the same `useAuthSummary`, so
+    // the list cannot disagree with the pill that opened it.
+    if (summary.issues.length > 1) {
+      openSignIn({ kind: 'list' })
+      return
+    }
     const target = summary.issues.find((issue) => issue.drivable) ?? summary.issues[0]
     if (!target) return
     if (!isDrivableProvider(target.providerId)) return openProviderSettings()

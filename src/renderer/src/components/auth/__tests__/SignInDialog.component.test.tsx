@@ -18,6 +18,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useSessionStore, type SignInRequest } from '../../../stores/session-store'
+import type { AuthRequiredState } from '../../../../../shared/remote-protocol'
+import { UNKNOWN_PROVIDER_AUTH } from '../../../utils/sign-in-provider'
 import { SignInDialog } from '../SignInDialog'
 
 vi.mock('electron', async () => await import('../../../../../test/stubs/electron-shim'))
@@ -141,8 +143,38 @@ async function open(request: SignInRequest): Promise<void> {
   })
 }
 
+/** Re-authorize → paste → success, the shortest route to the done state on web. */
+async function signInOnWeb(): Promise<void> {
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('SignInDialog.reauth'))
+  })
+  fireEvent.change(screen.getByTestId('OAuthPasteBackFlow.input'), { target: { value: 'x' } })
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('OAuthPasteBackFlow.submit'))
+  })
+}
+
+/**
+ * Seal a session's `authRequired` the way the reducer would. Tests are exempt
+ * from the sealed-field lint rule; this is the fixture seam.
+ */
+function blame(routingId: string, authRequired: AuthRequiredState | null): void {
+  useSessionStore.setState((s) => ({
+    sessions: { ...s.sessions, [routingId]: { ...s.sessions[routingId], authRequired } }
+  }))
+}
+
 beforeEach(() => {
-  useSessionStore.setState({ signInDialog: null, authState: null, vendorOAuth: null })
+  // `providerAuth` and `sessions` are the live inputs the retry latch and the
+  // provider-list mode read (ADR-070 §3/§5), so they are reset per case.
+  useSessionStore.setState({
+    signInDialog: null,
+    authState: null,
+    vendorOAuth: null,
+    sessions: {},
+    activeSessionId: null,
+    providerAuth: UNKNOWN_PROVIDER_AUTH
+  })
   ;(globalThis as unknown as { window: { innerWidth: number } }).window.innerWidth = 1280
 })
 afterEach(cleanup)
@@ -204,7 +236,7 @@ describe('SignInDialog — Anthropic', () => {
     expect(screen.getByTestId('SignInDialog.done')).toHaveTextContent('one@example.com')
   })
 
-  it('Retry last prompt re-sends the captured prompt through retrySend', async () => {
+  it('Retry re-sends the captured prompt through retrySend, from the body', async () => {
     installApi('web')
     useSessionStore.setState({ sessions: {}, activeSessionId: null })
     useSessionStore.getState().createNewSession('r-retry', '/tmp/proj')
@@ -213,13 +245,13 @@ describe('SignInDialog — Anthropic', () => {
       mode: 'reauth',
       retry: { routingId: 'r-retry', prompt: 'do the thing' }
     })
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('SignInDialog.reauth'))
-    })
-    fireEvent.change(screen.getByTestId('OAuthPasteBackFlow.input'), { target: { value: 'x' } })
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('OAuthPasteBackFlow.submit'))
-    })
+    await signInOnWeb()
+    // The ONE primary action on the screen, in the body, naming the prompt
+    // (ADR-070 §5 rule 6) — no longer a tinted button in a deleted footer.
+    expect(screen.getByTestId('SignInDialog.done')).toContainElement(
+      screen.getByTestId('SignInDialog.retry')
+    )
+    expect(screen.getByTestId('SignInDialog.retryRow')).toHaveTextContent('do the thing')
     await act(async () => {
       fireEvent.click(screen.getByTestId('SignInDialog.retry'))
     })
@@ -289,12 +321,32 @@ describe('SignInDialog — ChatGPT', () => {
     expect(window.api.vendorAuthOauthCallback).toHaveBeenCalledWith('pi', 'openai-codex', 0, pasted)
 
     const done = screen.getByTestId('SignInDialog.done')
-    expect(done).toHaveTextContent('Signed in as one@example.com')
-    // One line per ENABLED route, plus Codex — which is fed by injection, not by
-    // a route, and only on its next request.
+    // ADR-070 §5: "Signed in as …" is a check and the address.
+    expect(screen.getByTestId('SignInDialog.signedIn')).toHaveTextContent('one@example.com')
+    expect(done).not.toHaveTextContent('Signed in as')
+    // One CHIP per enabled route, plus Codex — which is fed by injection, not by
+    // a route, and only on its next request. Three sentences became one row
+    // (ADR-070 §5 rule 5); the per-engine testids did not move.
     expect(
       screen.getAllByTestId('SignInDialog.fanOut').map((el) => el.getAttribute('data-id'))
     ).toEqual(['pi', 'codex'])
+    expect(done).not.toHaveTextContent('picks it up on its next server start')
+    expect(done).toHaveTextContent('next request')
+  })
+
+  it('the header names the engines the credential feeds, derived from the routes', async () => {
+    installApi('darwin')
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+    // The SAME derivation the done state's fan-out uses: pi's route is on,
+    // opencode's is off, and Codex is unconditional (ADR-068 §1).
+    expect(
+      screen.getAllByTestId('SignInDialog.engineChip').map((el) => el.getAttribute('data-id'))
+    ).toEqual(['pi', 'codex'])
+    // The blurb it replaces is gone — a caption nobody re-reads on the fourth
+    // sign-in (ADR-070 §5 rule 1).
+    const dialog = screen.getByTestId('SignInDialog')
+    expect(dialog).not.toHaveTextContent('shared with pi, opencode and Codex')
+    expect(dialog).not.toHaveTextContent('Sign in to ChatGPT')
   })
 })
 
@@ -318,9 +370,7 @@ describe('SignInDialog — ChatGPT device code', () => {
     expect(screen.getByTestId('DeviceCodeFlow.code')).toHaveTextContent('ABCD-1234')
     expect(screen.getByTestId('DeviceCodeFlow.copy')).toBeTruthy()
     expect(screen.getByTestId('DeviceCodeFlow.cancel')).toBeTruthy()
-    expect(screen.getByTestId('DeviceCodeFlow.waiting')).toHaveTextContent(
-      'Waiting for you to enter the code'
-    )
+    expect(screen.getByTestId('DeviceCodeFlow.waiting')).toHaveTextContent('Waiting')
     // The WAIT is the host-owned status poll, never a long `oauth-callback`
     // invoke — that one dies at 30 s on the web (Slice 7 review).
     expect(window.api.vendorAuthOauthCallback).not.toHaveBeenCalled()
@@ -343,7 +393,7 @@ describe('SignInDialog — ChatGPT device code', () => {
     expect(writeText).toHaveBeenCalledWith('ABCD-1234')
   })
 
-  it('"Paste the callback URL instead" cancels the device flow and starts the PKCE one', async () => {
+  it('"Paste a URL instead" cancels the device flow and starts the PKCE one', async () => {
     installApi('web')
     await open({ providerId: 'chatgpt', mode: 'reauth' })
     await act(async () => {
@@ -515,5 +565,312 @@ describe('SignInDialog — Cancel with nothing to choose between', () => {
     // The reauth path (signIn), never addAccount.
     expect(window.api.signIn).toHaveBeenCalledTimes(2)
     expect(window.api.addAccount).not.toHaveBeenCalled()
+  })
+})
+
+// ── The trim (ADR-070 §5, mockup 4ed195a3) ──────────────────────────────────
+//
+// Word budgets are deliberately NOT asserted — a count is brittle and would
+// fail on a rewording that reads better. What is asserted is the six specific
+// deletions, and that nothing which carried information went with them.
+describe('SignInDialog — what ADR-070 deleted', () => {
+  it('has no footer at all: no Close/Done row, and `×` is still the close', async () => {
+    installApi('darwin')
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+    expect(screen.queryByTestId('SignInDialog.close2')).toBeNull()
+    expect(screen.getByTestId('SignInDialog')).not.toHaveTextContent('Done')
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.close'))
+    })
+    expect(useSessionStore.getState().signInDialog).toBeNull()
+  })
+
+  it('the add row is the button and nothing else — all three descriptions are gone', async () => {
+    installApi('darwin')
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+    const addRow = screen.getByTestId('SignInDialog.addRow')
+    expect(addRow).toHaveTextContent('+ Add account')
+    expect(addRow).not.toHaveTextContent('adds it to the list')
+    expect(addRow).not.toHaveTextContent('Signs in to')
+  })
+
+  it('the active account is a dot and two chips, not a tinted band and a sentence', async () => {
+    installApi('darwin', {
+      listProviderAccounts: vi.fn(async () => ({
+        ...CHATGPT_ACCOUNTS,
+        accounts: [{ ...CHATGPT_ACCOUNTS.accounts[0], planType: 'Plus', needsReauth: true }]
+      }))
+    })
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+    const row = screen.getByTestId('SignInDialog.account')
+    expect(row.className).not.toContain('bg-accent/5')
+    expect(screen.getByTestId('SignInDialog.activeDot')).toHaveAttribute('data-active', 'true')
+    // Both facts survive the split: the plan is neutral, the dead credential is
+    // danger, and neither is a joined `Plus · sign-in expired` string.
+    expect(screen.getByTestId('SignInDialog.plan')).toHaveTextContent('Plus')
+    expect(screen.getByTestId('SignInDialog.expired')).toHaveTextContent('expired')
+    expect(row).not.toHaveTextContent('Plus · sign-in expired')
+  })
+
+  it('the desktop wait is one line: the spinner label, no paragraph under it', async () => {
+    installApi('darwin')
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.reauth'))
+    })
+    const panel = screen.getByTestId('SignInDialog.waiting')
+    expect(panel).toHaveTextContent('Waiting for the browser…')
+    expect(panel).not.toHaveTextContent('It completes on its own')
+    expect(panel).not.toHaveTextContent('browser window we opened')
+    // The manual link is still gated on there BEING a url (desktop has none).
+    expect(screen.queryByTestId('SignInDialog.manualLink')).toBeNull()
+    expect(screen.getByTestId('SignInDialog.cancel')).toBeTruthy()
+  })
+})
+
+// ── The error the footer used to hold (ADR-070 §5 rule 6) ───────────────────
+describe('SignInDialog — an error can never be silently dropped', () => {
+  it('a failed switch renders in the BODY, where the footer span used to be', async () => {
+    installApi('darwin', {
+      switchProviderAccount: vi.fn(async () => {
+        throw new Error('the vault refused to switch account')
+      })
+    })
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.switch'))
+    })
+    expect(screen.getByTestId('SignInDialog.error')).toHaveTextContent(
+      'the vault refused to switch account'
+    )
+    // Still on the chooser, so the user can try the other account.
+    expect(screen.getAllByTestId('SignInDialog.account')).toHaveLength(2)
+  })
+
+  it('a failed account read renders in the body too', async () => {
+    installApi('darwin', {
+      listProviderAccounts: vi.fn(async () => {
+        throw new Error('provider-account:list failed')
+      })
+    })
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+    expect(screen.getByTestId('SignInDialog.error')).toHaveTextContent(
+      'provider-account:list failed'
+    )
+  })
+
+  it('does not print the same failure twice when the flow already shows it', async () => {
+    installApi('web', {
+      vendorAuthDeviceCodeStart: vi.fn(async () => {
+        throw new Error('device code login is not enabled for this Codex server.')
+      })
+    })
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.reauth'))
+    })
+    // `authorizeVendorDeviceCode` parks the message on `vendorOAuth` AND returns
+    // it, so the outcome notice owns it and the body error row stands down.
+    expect(screen.getByTestId('OAuthOutcomeNotice')).toHaveTextContent('not enabled for this Codex')
+    expect(screen.queryByTestId('SignInDialog.error')).toBeNull()
+  })
+
+  it('suppression needs the notice ON SCREEN, not merely the same words in the store', async () => {
+    const SAME = 'the vault refused to switch account'
+    installApi('darwin', {
+      switchProviderAccount: vi.fn(async () => {
+        throw new Error(SAME)
+      })
+    })
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.switch'))
+    })
+    // A stale flow error with the SAME text: `vendorOAuth` survives a stage
+    // change, but the outcome notice that renders it only exists in the `flow`
+    // stage — and we are on the chooser.
+    await act(async () => {
+      useSessionStore.setState({
+        vendorOAuth: {
+          engineId: 'pi',
+          vendorId: 'openai-codex',
+          stage: 'error',
+          instructions: '',
+          error: SAME
+        }
+      })
+    })
+    expect(screen.queryByTestId('OAuthOutcomeNotice')).toBeNull()
+    expect(screen.getByTestId('SignInDialog.error')).toHaveTextContent(SAME)
+  })
+})
+
+// ── The retry belongs to the SESSION (ADR-070 §3) ───────────────────────────
+describe('SignInDialog — the retry outlives the dialog', () => {
+  const SESSION = 'r-session-retry'
+
+  function seedBlamedSession(): void {
+    useSessionStore.getState().createNewSession(SESSION, '/tmp/proj')
+    blame(SESSION, { providerId: 'anthropic', retryPrompt: 'fix the flaky test' })
+  }
+
+  it('offers the session’s stopped prompt even when the entry point knew none', async () => {
+    installApi('web')
+    seedBlamedSession()
+    // No `retry` on the request — the Settings / picker entry point, which is
+    // exactly the case that used to offer no retry at all.
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    await signInOnWeb()
+    expect(screen.getByTestId('SignInDialog.retryRow')).toHaveTextContent('fix the flaky test')
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.retry'))
+    })
+    expect(window.api.sendPrompt).toHaveBeenCalledWith(SESSION, 'fix the flaky test')
+    // Performing the retry settles the lifetime, like the pill and the row.
+    expect(useSessionStore.getState().sessions[SESSION].authRequired).toBeNull()
+  })
+
+  it('closing the dialog does not destroy it — that is why `Done` could go', async () => {
+    installApi('web')
+    seedBlamedSession()
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    await signInOnWeb()
+    expect(screen.getByTestId('SignInDialog.retry')).toBeTruthy()
+
+    await act(async () => {
+      useSessionStore.getState().closeSignIn()
+    })
+    expect(screen.queryByTestId('SignInDialog')).toBeNull()
+
+    await act(async () => {
+      useSessionStore.getState().openSignIn({ providerId: 'anthropic', mode: 'reauth' })
+    })
+    await signInOnWeb()
+    expect(screen.getByTestId('SignInDialog.retryRow')).toHaveTextContent('fix the flaky test')
+  })
+
+  it('survives the resolution that drops the issue out of the live summary', async () => {
+    installApi('web')
+    seedBlamedSession()
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    // Lifetime 2 (ADR-070 §2): the credential is good, the prompt is still
+    // un-sent — and `summarizeAuthIssues` no longer reports an ISSUE for it.
+    await act(async () => {
+      blame(SESSION, {
+        providerId: 'anthropic',
+        retryPrompt: 'fix the flaky test',
+        resolved: true
+      })
+    })
+    await signInOnWeb()
+    expect(screen.getByTestId('SignInDialog.retryRow')).toHaveTextContent('fix the flaky test')
+  })
+})
+
+// ── Provider-list mode (ADR-070 §5) ────────────────────────────────────────
+//
+// The pill aggregates, so with several providers down it has no single flow to
+// open. The list reads the SAME `useAuthSummary` the pill does, which is what
+// keeps the two from disagreeing about which credentials are broken.
+describe('SignInDialog — provider-list mode', () => {
+  const DRIVABLE = 'r-list-chatgpt'
+  const NATIVE = 'r-list-opencode'
+
+  function seedTwoIssues(): void {
+    useSessionStore.getState().createNewSession(DRIVABLE, '/tmp/a')
+    useSessionStore.getState().createNewSession(NATIVE, '/tmp/b')
+    blame(DRIVABLE, {
+      providerId: 'chatgpt',
+      accountId: 'v1',
+      retryPrompt: 'refactor the dispatcher'
+    })
+    blame(NATIVE, { providerId: 'opencode:openrouter' })
+  }
+
+  it('lists one row per issue, drivable first, with what each blocks', async () => {
+    installApi('darwin')
+    seedTwoIssues()
+    await open({ kind: 'list' })
+    expect(screen.getByTestId('SignInDialog')).toHaveTextContent('Sign-ins')
+    // No provider mark in this mode — there is no single provider.
+    expect(screen.queryByTestId('SignInDialog.mark')).toBeNull()
+    expect(
+      screen.getAllByTestId('SignInDialog.issue').map((el) => el.getAttribute('data-id'))
+    ).toEqual(['chatgpt', 'opencode:openrouter'])
+    expect(screen.getAllByTestId('SignInDialog.issueState')[0]).toHaveTextContent('sign-in expired')
+    // `blocks` is route-dependent (ADR-030) — with no route enabled the ChatGPT
+    // credential only blocks Codex.
+    expect(screen.getAllByTestId('SignInDialog.issueBlocks').map((el) => el.textContent)).toEqual([
+      'Codex',
+      'opencode'
+    ])
+  })
+
+  it('a drivable row switches this dialog into that provider’s normal flow', async () => {
+    installApi('darwin')
+    seedTwoIssues()
+    await open({ kind: 'list' })
+    await act(async () => {
+      fireEvent.click(screen.getAllByTestId('SignInDialog.issueSignIn')[0])
+    })
+    // The same request shape every other entry point builds, retry included.
+    expect(useSessionStore.getState().signInDialog).toEqual({
+      providerId: 'chatgpt',
+      mode: 'reauth',
+      accountId: 'v1',
+      retry: { routingId: DRIVABLE, prompt: 'refactor the dispatcher' }
+    })
+    // And it remounted into that flow rather than staying on the list.
+    expect(screen.getAllByTestId('SignInDialog.account')).toHaveLength(2)
+  })
+
+  it('a non-drivable row opens provider settings, never a dialog with nothing to run', async () => {
+    installApi('darwin')
+    seedTwoIssues()
+    await open({ kind: 'list' })
+    const deepLink = vi.fn()
+    window.addEventListener('open-settings', deepLink)
+    await act(async () => {
+      fireEvent.click(screen.getAllByTestId('SignInDialog.issueSignIn')[1])
+    })
+    window.removeEventListener('open-settings', deepLink)
+    expect(deepLink).toHaveBeenCalledTimes(1)
+    expect((deepLink.mock.calls[0][0] as CustomEvent).detail).toEqual({
+      page: 'models',
+      group: 'providers'
+    })
+    expect(useSessionStore.getState().signInDialog).toEqual({ kind: 'list' })
+  })
+
+  it('names the stopped prompts, and arms the retry only once one is takeable', async () => {
+    installApi('darwin')
+    seedTwoIssues()
+    await open({ kind: 'list' })
+    expect(screen.getByTestId('SignInDialog.retryRow')).toHaveTextContent('refactor the dispatcher')
+    expect(screen.getByTestId('SignInDialog.retry')).toBeDisabled()
+    expect(screen.getByTestId('SignInDialog.retry')).toHaveTextContent('Retry after sign-in')
+
+    // A resolution for that provider is what makes the prompt sendable.
+    await act(async () => {
+      blame(DRIVABLE, {
+        providerId: 'chatgpt',
+        retryPrompt: 'refactor the dispatcher',
+        resolved: true
+      })
+    })
+    expect(screen.getByTestId('SignInDialog.retry')).not.toBeDisabled()
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.retry'))
+    })
+    expect(window.api.sendPrompt).toHaveBeenCalledWith(DRIVABLE, 'refactor the dispatcher')
+    expect(useSessionStore.getState().sessions[DRIVABLE].authRequired).toBeNull()
+  })
+
+  it('a settled list says so and offers nothing, rather than an empty box', async () => {
+    installApi('darwin')
+    await open({ kind: 'list' })
+    expect(screen.getByTestId('SignInDialog.settled')).toHaveTextContent('Nothing needs a sign-in.')
+    expect(screen.queryByTestId('SignInDialog.issue')).toBeNull()
+    expect(screen.queryByTestId('SignInDialog.retryRow')).toBeNull()
   })
 })

@@ -25,9 +25,17 @@
  * the desktop opens the host browser and waits on the host loopback exactly as
  * before, which is why this component has no "waiting" state at all.
  *
- * Copy is the owner-approved mockup's, verbatim, with one deliberate change:
- * the mockup's "Opens on this phone" reads "Opens on this device" because the
- * web client is also served to laptops.
+ * ONE VERB PER ROW (ADR-070 §5 rule 4, mockup `4ed195a3`): `OPEN ‹sign-in
+ * page›` / `PASTE ‹field›`. The step titles and step 1's "Opens on this device.
+ * Finish the sign-in there, then come back." are deleted — the user came back;
+ * they are reading this.
+ *
+ * ONE PARAGRAPH SURVIVES, and deliberately (ADR-070 §5, kept list): "That page
+ * fails to load — expected. Copy its address." A page that fails to load looks
+ * like a broken app, and this is the only genuinely surprising step in any
+ * flow, so it is trimmed (29 words to 9) and MOVED under the field, where the
+ * surprise happens. "A code works too" moved into the placeholder, which is
+ * where the user looks when deciding what to type.
  */
 import { useState } from 'react'
 
@@ -153,7 +161,6 @@ export function OAuthPasteBackFlow({
   // Claude's flow is the app's amber "you are signed out" area; the vendor
   // flows are the ordinary accent. Matches the mockup's sky/amber split.
   const tone = variant === 'code' ? 'warning' : 'accent'
-  const badge = tone === 'warning' ? 'bg-warning/15 text-warning' : 'bg-accent/15 text-accent'
   const submitClass =
     tone === 'warning'
       ? 'bg-warning/80 hover:bg-warning text-bg-primary'
@@ -171,18 +178,11 @@ export function OAuthPasteBackFlow({
       {...(id ? { 'data-id': id } : {})}
       className="space-y-3"
     >
-      <div className="flex items-start gap-2.5">
-        <div
-          className={`h-5 w-5 rounded-full flex items-center justify-center text-[10px] font-semibold shrink-0 ${badge}`}
-          aria-hidden="true"
-        >
-          1
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="text-[12px] font-medium text-text-primary">Sign in with your browser</div>
-          <div className="text-[11px] text-text-muted mt-0.5 leading-relaxed">
-            Opens on this device. Finish the sign-in there, then come back.
-          </div>
+      <div className="flex items-center gap-2.5">
+        <span className="shrink-0 w-[38px] text-[10px] font-semibold tracking-wide text-text-muted">
+          OPEN
+        </span>
+        <span className="min-w-0">
           <button
             data-testid="OAuthPasteBackFlow.open"
             {...(id ? { 'data-id': id } : {})}
@@ -193,38 +193,24 @@ export function OAuthPasteBackFlow({
             onClick={() => {
               if (url) window.open(url, '_blank', 'noopener,noreferrer')
             }}
-            className="mt-1.5 text-[11px] px-2.5 py-1 rounded-md bg-bg-tertiary hover:bg-bg-hover text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            className="text-[11px] px-2.5 py-1.5 rounded-md bg-bg-tertiary hover:bg-bg-hover text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            Open sign-in page ↗
+            Sign-in page ↗
           </button>
           {!url && (
-            <div className="mt-1 text-[10px] text-text-muted/70">
+            <span className="block mt-1 text-[10px] text-text-muted/70">
               The host did not return a sign-in link. Start again.
-            </div>
+            </span>
           )}
-        </div>
+        </span>
       </div>
 
       <div className="flex items-start gap-2.5">
-        <div
-          className={`h-5 w-5 rounded-full flex items-center justify-center text-[10px] font-semibold shrink-0 ${badge}`}
-          aria-hidden="true"
-        >
-          2
-        </div>
+        <span className="shrink-0 w-[38px] mt-1.5 text-[10px] font-semibold tracking-wide text-text-muted">
+          PASTE
+        </span>
         <div className="flex-1 min-w-0">
-          <div className="text-[12px] font-medium text-text-primary">
-            {variant === 'code' ? 'Paste the code claude.ai shows you' : 'Paste what you got back'}
-          </div>
-          {variant === 'url' && (
-            <div className="text-[11px] text-text-muted mt-0.5 leading-relaxed">
-              After sign-in you&rsquo;ll land on a page that{' '}
-              <span className="text-text-secondary">fails to load</span> — that&rsquo;s expected.
-              Copy its <span className="text-text-secondary">address</span> from the address bar and
-              paste it here. A code works too.
-            </div>
-          )}
-          <div className="mt-1.5 flex gap-1.5">
+          <div className="flex gap-1.5">
             <input
               data-testid="OAuthPasteBackFlow.input"
               {...(id ? { 'data-id': id } : {})}
@@ -240,7 +226,7 @@ export function OAuthPasteBackFlow({
               placeholder={
                 variant === 'code'
                   ? 'Paste authorization code'
-                  : 'http://localhost:1455/auth/callback?code=… or the code'
+                  : 'the address you land on, or a code'
               }
               className="flex-1 min-w-0 px-2 py-1.5 text-[11px] font-mono rounded-md bg-bg-input border border-border/40 text-text-primary placeholder:text-text-muted/50 focus:outline-none focus:border-accent/60 disabled:opacity-50"
             />
@@ -254,6 +240,14 @@ export function OAuthPasteBackFlow({
               {busy ? 'Finishing…' : 'Finish'}
             </button>
           </div>
+          {/* The one kept paragraph, under the field where the surprise happens.
+              The `code` variant never had it and still does not — claude.ai
+              shows the code on a page that loads. */}
+          {variant === 'url' && (
+            <div className="mt-1.5 text-[11px] text-text-muted leading-relaxed">
+              That page fails to load — expected. Copy its address.
+            </div>
+          )}
         </div>
       </div>
 

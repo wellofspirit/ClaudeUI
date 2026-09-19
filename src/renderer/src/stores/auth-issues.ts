@@ -35,6 +35,26 @@ export interface AuthRetry {
   prompt: string
 }
 
+/**
+ * An owed retry as it appears on an APP-WIDE list, which has to say whose
+ * credential stopped it.
+ *
+ * {@link AuthIssue.retry} needs no such field — it is reached through an issue
+ * that already names the provider — and neither does `SignInRequest.retry`,
+ * whose request names it. {@link AuthSummary.retryable} is the one list that
+ * spans providers, and a consumer filtering it by provider (the dialog's done
+ * state) cannot do that from `routingId` alone.
+ *
+ * A separate type rather than an optional field on `AuthRetry`, so "every
+ * app-wide retry names its provider" is a compile-time guarantee instead of a
+ * convention, and so the request shape the pill and the transcript row build
+ * stays byte-identical (`AuthEntryPoints` pins that the two agree).
+ */
+export interface OwedRetry extends AuthRetry {
+  /** `anthropic` | `chatgpt` | `opencode:<vendorId>` | `pi:<vendorId>`. */
+  providerId: string
+}
+
 export interface AuthIssue {
   /** `anthropic` | `chatgpt` | `opencode:<vendorId>` | `pi:<vendorId>`. */
   providerId: string
@@ -42,7 +62,7 @@ export interface AuthIssue {
   /** Sessions whose `authRequired` blames this provider and is not yet resolved. */
   routingIds: string[]
   /** Sessions resolved but still owing a retry. */
-  retryable: AuthRetry[]
+  retryable: OwedRetry[]
   /**
    * What to hand the dialog as its retry target — the first still-broken session
    * that captured a prompt. Distinct from {@link AuthIssue.retryable}, which is
@@ -66,9 +86,10 @@ export interface AuthSummary {
   /**
    * Every owed retry in the app, whatever provider it belongs to — including one
    * whose provider no longer has an issue at all, which is the whole point of
-   * lifetime 2 (the credential is good, the prompt is still un-sent).
+   * lifetime 2 (the credential is good, the prompt is still un-sent) — and why
+   * each entry names its provider.
    */
-  retryable: AuthRetry[]
+  retryable: OwedRetry[]
   /** Sessions a resolution has fixed, retry owed or not. */
   resolved: string[]
   /** The provider whose sign-in flow is alive, when one is. */
@@ -112,7 +133,7 @@ function blockedEngines(providerId: string, routes: Partial<Record<EngineId, boo
 
 interface Draft {
   routingIds: string[]
-  retryable: AuthRetry[]
+  retryable: OwedRetry[]
   retry?: AuthRetry
   accountId?: string
   /** A turn actually died on this provider — `expired` rather than `needed`. */
@@ -156,14 +177,18 @@ export function summarizeAuthIssues(input: AuthIssuesInput): AuthSummary {
   // `retry`/`accountId` need to be stable across renders, but deliberately NOT
   // claimed to be age-ordered: the caller builds the record from the sessions
   // map, whose order is its own business.
-  const retryable: AuthRetry[] = []
+  const retryable: OwedRetry[] = []
   const resolved: string[] = []
   for (const [routingId, state] of Object.entries(input.blamed)) {
     const draft = draftFor(state.providerId)
     if (state.resolved === true) {
       resolved.push(routingId)
       if (state.retryPrompt) {
-        const owed: AuthRetry = { routingId, prompt: state.retryPrompt }
+        const owed: OwedRetry = {
+          routingId,
+          prompt: state.retryPrompt,
+          providerId: state.providerId
+        }
         draft.retryable.push(owed)
         retryable.push(owed)
       }

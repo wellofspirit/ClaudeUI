@@ -138,7 +138,13 @@ describe('auth-issues — the resolved lifetime', () => {
     // Not counted as an issue: the credential is fine and all that is left is
     // the retry, so the pill must not say "1 sign-in needed".
     expect(summary.issues).toEqual([])
-    expect(summary.retryable).toEqual([{ routingId: 'r1', prompt: 'refactor it' }])
+    // The app-wide list names the provider whose credential stopped each prompt
+    // (`OwedRetry`): this entry outlives its own issue, so `routingId` alone
+    // would leave a per-provider consumer — the dialog's done state — unable to
+    // tell whose retry it is holding.
+    expect(summary.retryable).toEqual([
+      { routingId: 'r1', prompt: 'refactor it', providerId: 'chatgpt' }
+    ])
     expect(summary.resolved).toEqual(['r1'])
   })
 
@@ -162,7 +168,28 @@ describe('auth-issues — the resolved lifetime', () => {
     )
     expect(summary.tone).toBe('expired')
     expect(summary.issues[0].routingIds).toEqual(['r2'])
-    expect(summary.issues[0].retryable).toEqual([{ routingId: 'r1', prompt: 'fixed one' }])
+    expect(summary.issues[0].retryable).toEqual([
+      { routingId: 'r1', prompt: 'fixed one', providerId: 'chatgpt' }
+    ])
+  })
+
+  it('two providers owing retries stay tellable apart on the app-wide list', () => {
+    const summary = summarizeAuthIssues(
+      input({
+        blamed: {
+          r1: { providerId: 'chatgpt', resolved: true, retryPrompt: 'refactor it' },
+          r2: { providerId: 'anthropic', resolved: true, retryPrompt: 'fix the test' }
+        }
+      })
+    )
+    // Neither provider is an ISSUE any more — both credentials are good — so
+    // the provider on each entry is the only thing left that says which
+    // sign-in unblocked which prompt.
+    expect(summary.issues).toEqual([])
+    expect(summary.retryable.map((owed) => [owed.providerId, owed.prompt])).toEqual([
+      ['chatgpt', 'refactor it'],
+      ['anthropic', 'fix the test']
+    ])
   })
 })
 

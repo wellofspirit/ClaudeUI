@@ -193,17 +193,16 @@ describe('AuthPill — what a click does', () => {
     expect(useSessionStore.getState().signInDialog).toBeNull()
   })
 
-  it('several issues open on the first DRIVABLE one (list mode is Slice C)', async () => {
+  it('several issues open the dialog in provider-LIST mode — the pill has no single flow', async () => {
     blame(ACTIVE, { providerId: 'opencode:openrouter' })
     blame(BACKGROUND, { providerId: 'chatgpt' })
     renderPill()
     await act(async () => {
       fireEvent.click(screen.getByTestId('AuthPill'))
     })
-    expect(useSessionStore.getState().signInDialog).toMatchObject({
-      providerId: 'chatgpt',
-      mode: 'reauth'
-    })
+    // No provider on the request: the dialog reads the same `useAuthSummary`
+    // and renders a row per issue (ADR-070 §5).
+    expect(useSessionStore.getState().signInDialog).toEqual({ kind: 'list' })
   })
 
   it('a running flow reopens its dialog rather than starting another', async () => {

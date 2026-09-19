@@ -1172,20 +1172,42 @@ export interface VendorOAuthState {
 }
 
 /**
- * What the sign-in dialog is open ON (ADR-068 §3).
+ * What the sign-in dialog is open ON (ADR-068 §3) — ONE provider's flow.
  *
  * `mode` is the ENTRY's intent, not a stage: `reauth` opens the chooser on the
  * account that failed, `switch` opens it to pick a different stored one, `add`
  * skips the chooser and starts a new sign-in. `retry` carries the prompt whose
- * turn the rejection killed, so the done state can offer to re-send it.
+ * turn the rejection killed, so the done state can offer to re-send it — a
+ * FALLBACK since ADR-070 §3, which parks the prompt on the session instead, so
+ * an entry point that knows no prompt still offers the retry.
  */
-export interface SignInRequest {
+export interface SignInProviderRequest {
+  /**
+   * The discriminant, and optional on this variant alone (ADR-070 §5): a dozen
+   * entry points already open a provider request and none of them can grow the
+   * list branch by accident, whereas the list variant has to say so explicitly.
+   */
+  kind?: 'provider'
   providerId: SignInProviderId
   mode: 'reauth' | 'add' | 'switch'
   /** The stored account the entry point blames, when it knows one. */
   accountId?: string
   retry?: { routingId: string; prompt: string }
 }
+
+/**
+ * The pill's aggregate entry point (ADR-070 §5): several providers are down and
+ * there is no single flow to start, so the dialog lists them.
+ *
+ * It carries no payload. The rows are derived LIVE from `useAuthSummary`, which
+ * is what lets a row leave the list the moment its provider resolves and the
+ * stopped-prompt row arm itself when the retry becomes takeable.
+ */
+export interface SignInListRequest {
+  kind: 'list'
+}
+
+export type SignInRequest = SignInProviderRequest | SignInListRequest
 
 /** The two providers ClaudeUI can actually drive a sign-in for. */
 export type SignInProviderId = 'anthropic' | 'chatgpt'
