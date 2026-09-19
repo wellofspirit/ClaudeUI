@@ -1189,7 +1189,7 @@ export interface SignInProviderRequest {
    */
   kind?: 'provider'
   providerId: SignInProviderId
-  mode: 'reauth' | 'add' | 'switch'
+  mode: 'reauth' | 'add'
   /** The stored account the entry point blames, when it knows one. */
   accountId?: string
   retry?: { routingId: string; prompt: string }
@@ -1563,7 +1563,12 @@ export interface SessionState {
   submitOAuthCode: (code: string) => Promise<void>
   cancelSignIn: () => Promise<void>
   setVendorOAuth(state: VendorOAuthState | null): void
-  cancelVendorOAuth(): void
+  /**
+   * Drop the flow locally NOW; the promise settles once the HOST has released
+   * it. Only a caller about to start another flow needs to wait — the vault
+   * holds one login slot, and a start that overtakes the cancel is refused.
+   */
+  cancelVendorOAuth(): Promise<void>
   /** Open the one sign-in dialog. Replaces whatever it was open on. */
   openSignIn(request: SignInRequest): void
   /** Close it. The flow underneath keeps running — see {@link SessionState.signInDialog}. */
@@ -2896,8 +2901,8 @@ export const useSessionStore = create<SessionState>((set) => ({
     // otherwise an abandoned (never-completed) flow leaks the opencode process.
     // Killing it also unblocks the pending callback long-poll.
     const engineId = useSessionStore.getState().vendorOAuth?.engineId as EngineId | undefined
-    if (engineId) void window.api.vendorAuthOauthCancel(engineId).catch(() => {})
     set({ vendorOAuth: null })
+    return engineId ? window.api.vendorAuthOauthCancel(engineId).catch(() => {}) : Promise.resolve()
   },
   clearAuthRequired: (routingId) => patchLocalSession(routingId, { authRequired: null }),
   authorizeVendorOAuth: async (engineId, vendorId) => {

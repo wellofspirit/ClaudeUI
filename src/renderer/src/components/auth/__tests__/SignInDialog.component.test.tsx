@@ -218,7 +218,7 @@ describe('SignInDialog — Anthropic', () => {
 
   it('switching a stored account calls switchAccount and closes', async () => {
     installApi('darwin')
-    await open({ providerId: 'anthropic', mode: 'switch' })
+    await open({ providerId: 'anthropic', mode: 'reauth' })
     await act(async () => {
       fireEvent.click(screen.getByTestId('SignInDialog.switch'))
     })
@@ -315,7 +315,7 @@ describe('SignInDialog — ChatGPT', () => {
 
   it('switch calls provider-account:switch and closes', async () => {
     installApi('darwin')
-    await open({ providerId: 'chatgpt', mode: 'switch' })
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
     await act(async () => {
       fireEvent.click(screen.getByTestId('SignInDialog.switch'))
     })
@@ -948,6 +948,13 @@ describe('SignInDialog — the accounts are the store’s, not a snapshot', () =
     expect(screen.queryAllByTestId('SignInDialog.account')).toEqual([])
     expect(screen.queryByTestId('SignInDialog.empty')).toBeNull()
     expect(screen.queryByTestId('SignInDialog.confirm')).toBeNull()
+    // And no add row either: `canAdd` is an answer ABOUT the accounts, so before
+    // they are known it has none. Offering it anyway put `+ Add account` in
+    // front of an Anthropic host with multi-account off — where `addAccount()`
+    // silently flips the host to multi-account — and made an empty host take
+    // `add` rather than the plain sign-in.
+    expect(screen.queryByTestId('SignInDialog.addRow')).toBeNull()
+    expect(screen.queryByTestId('SignInDialog.addAccount')).toBeNull()
     // And nothing started on a stage nobody has decided yet.
     expect(window.api.signIn).not.toHaveBeenCalled()
     expect(window.api.addAccount).not.toHaveBeenCalled()
@@ -1223,6 +1230,10 @@ describe('SignInDialog — provider-list mode', () => {
    */
   it('names a `needed` state the way every other surface names it', async () => {
     installApi('darwin')
+    // ADR-070 §4: the proactive half only reports a provider something is
+    // routed to, so the `needed` row needs a session on that engine. A
+    // default-engine session is Claude/anthropic.
+    useSessionStore.getState().createNewSession('r-list-needed', '/tmp/a')
     useSessionStore.setState({
       providerAuth: { ...UNKNOWN_PROVIDER_AUTH, anthropic: 'unauthenticated' }
     })
@@ -1298,5 +1309,260 @@ describe('SignInDialog — provider-list mode', () => {
     expect(screen.getByTestId('SignInDialog.settled')).toHaveTextContent('Nothing needs a sign-in.')
     expect(screen.queryByTestId('SignInDialog.issue')).toBeNull()
     expect(screen.queryByTestId('SignInDialog.retryRow')).toBeNull()
+  })
+})
+
+// ── What the ADR-070 review found ───────────────────────────────────────────
+//
+// Every case below is one the suite as written could not reach: `open()` clears
+// `authState`, the fixtures list one account per assertion, and the retry rows
+// were only ever asked for a count of one.
+
+describe('SignInDialog — a previous sign-in cannot finish this one', () => {
+  const OLD_SUCCESS = {
+    status: 'success' as const,
+    account: { email: 'old@example.com', organization: null, subscriptionType: 'Claude Max' },
+    error: null
+  }
+
+  it('`add` does not land on done because the LAST login succeeded', async () => {
+    installApi('darwin')
+    await act(async () => {
+      render(<SignInDialog />)
+    })
+    // Nothing resets `authState` when the dialog opens — `openSignIn` only sets
+    // `signInDialog` — so the store still holds the previous login's terminal
+    // state, and `addAccount()`'s await is a window for the success effect to
+    // fire in. The reauth arm was safe only because `signIn()` writes
+    // `authorizing` synchronously.
+    await act(async () => {
+      useSessionStore.setState({ authState: OLD_SUCCESS })
+      useSessionStore.getState().openSignIn({ providerId: 'anthropic', mode: 'add' })
+    })
+    await confirmStart()
+
+    expect(window.api.addAccount).toHaveBeenCalledTimes(1)
+    expect(screen.queryByTestId('SignInDialog.done')).toBeNull()
+    expect(screen.getByTestId('SignInDialog.waiting')).toBeTruthy()
+
+    // The success that belongs to THIS attempt is what finishes it.
+    await act(async () => {
+      useSessionStore.getState().setAuthState({
+        status: 'success',
+        account: { email: 'new@example.com', organization: null, subscriptionType: 'Claude Pro' },
+        error: null
+      })
+    })
+    expect(screen.getByTestId('SignInDialog.signedIn')).toHaveTextContent('new@example.com')
+  })
+
+  it('an `add` that throws does not leave the store claiming a sign-in is running', async () => {
+    installApi('darwin')
+    ;(window.api.addAccount as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('boom'))
+    await act(async () => {
+      render(<SignInDialog />)
+    })
+    await act(async () => {
+      useSessionStore.getState().openSignIn({ providerId: 'anthropic', mode: 'add' })
+    })
+    await confirmStart()
+
+    // `authorizing` is what the top-bar pill reads as "Signing in…", and nothing
+    // else would ever clear it once the dialog is back on the chooser.
+    expect(useSessionStore.getState().authState?.status).not.toBe('authorizing')
+  })
+})
+
+describe('SignInDialog — the blamed row is not the row that gets re-authorized', () => {
+  it('a blamed NON-active account keeps its Switch, and the primary stays on the active one', async () => {
+    installApi('darwin')
+    // What `session:auth-required` named (ADR-070 §2) — here, the account that
+    // is not the active one.
+    await open({ providerId: 'anthropic', mode: 'reauth', accountId: 'a2' })
+
+    // `start('reauth')` takes no account and always acts on the ACTIVE one, so a
+    // second Re-authorize on a2 would re-authorise a1's credential under a2's
+    // label — and leave the screen with two primaries.
+    const primaries = screen.getAllByTestId('SignInDialog.reauth')
+    expect(primaries).toHaveLength(1)
+    expect(primaries[0]).toHaveAttribute('data-id', 'a1')
+    expect(screen.getByTestId('SignInDialog.switch')).toHaveAttribute('data-id', 'a2')
+    // The blame is not thrown away: it is the chip the vault's own dead
+    // credentials already use, on the row it belongs to.
+    expect(
+      screen.getAllByTestId('SignInDialog.expired').map((el) => el.getAttribute('data-id'))
+    ).toEqual(['a2'])
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.switch'))
+    })
+    expect(window.api.switchAccount).toHaveBeenCalledWith('a2')
+    expect(window.api.signIn).not.toHaveBeenCalled()
+  })
+})
+
+describe('SignInDialog — the count and the click are one list', () => {
+  it('the done state re-sends every prompt it counted', async () => {
+    installApi('web')
+    useSessionStore.getState().createNewSession('r-a', '/tmp/a')
+    useSessionStore.getState().createNewSession('r-b', '/tmp/b')
+    // Lifetime 2 for both (ADR-070 §2): the credential is good, two prompts are
+    // still un-sent.
+    blame('r-a', { providerId: 'anthropic', retryPrompt: 'first prompt', resolved: true })
+    blame('r-b', { providerId: 'anthropic', retryPrompt: 'second prompt', resolved: true })
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    await signInOnWeb()
+
+    expect(screen.getByTestId('SignInDialog.retryRow')).toHaveTextContent('2 prompts were stopped')
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.retry'))
+    })
+    expect(window.api.sendPrompt).toHaveBeenCalledWith('r-a', 'first prompt')
+    expect(window.api.sendPrompt).toHaveBeenCalledWith('r-b', 'second prompt')
+    const after = useSessionStore.getState().sessions
+    expect(after['r-a'].authRequired).toBeNull()
+    expect(after['r-b'].authRequired).toBeNull()
+  })
+
+  it('the list re-sends every prompt it counted', async () => {
+    installApi('darwin')
+    useSessionStore.getState().createNewSession('r-c', '/tmp/c')
+    useSessionStore.getState().createNewSession('r-d', '/tmp/d')
+    blame('r-c', { providerId: 'chatgpt', retryPrompt: 'third prompt', resolved: true })
+    blame('r-d', { providerId: 'chatgpt', retryPrompt: 'fourth prompt', resolved: true })
+    await open({ kind: 'list' })
+
+    expect(screen.getByTestId('SignInDialog.retryRow')).toHaveTextContent('2 prompts were stopped')
+    expect(screen.getByTestId('SignInDialog.retry')).not.toBeDisabled()
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.retry'))
+    })
+    expect(window.api.sendPrompt).toHaveBeenCalledWith('r-c', 'third prompt')
+    expect(window.api.sendPrompt).toHaveBeenCalledWith('r-d', 'fourth prompt')
+  })
+})
+
+describe('SignInDialog — a repeated testid carries a discriminator (ADR-027)', () => {
+  it('two accounts: the dot and the plan chip each name their account', async () => {
+    installApi('darwin')
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    // Without the `data-id` both of these are a `getByTestId` that throws on the
+    // second row — which is why every case in this file listed one account.
+    expect(
+      screen.getAllByTestId('SignInDialog.activeDot').map((el) => el.getAttribute('data-id'))
+    ).toEqual(['a1', 'a2'])
+    expect(
+      screen.getAllByTestId('SignInDialog.plan').map((el) => el.getAttribute('data-id'))
+    ).toEqual(['a1', 'a2'])
+    cleanup()
+
+    // The other two sites are one per stage, so they name the stage.
+    installApi('web')
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    await signInOnWeb()
+    expect(screen.getByTestId('SignInDialog.plan')).toHaveAttribute('data-id', 'done')
+  })
+
+  it('the confirm screen’s dot names its subject', async () => {
+    installApi('darwin')
+    await open({ providerId: 'anthropic', mode: 'add' })
+    expect(screen.getByTestId('SignInDialog.activeDot')).toHaveAttribute('data-id', 'confirm')
+  })
+})
+
+describe('SignInDialog — a dead flow has a way out', () => {
+  /** A live flow that failed WITHOUT a url — what `AuthManager.fail()` leaves. */
+  const DEAD = {
+    signIn: vi.fn(async () => ({ status: 'error', account: null, error: 'the login flow died' }))
+  }
+
+  it('the paste panel owns the paste-path error, and offers a real Start again', async () => {
+    installApi('web', DEAD)
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.reauth'))
+    })
+
+    // ONE owner: the panel renders the flow error itself (the prop it has always
+    // had), so the dialog does not print a second copy beside it.
+    expect(screen.getAllByTestId('OAuthOutcomeNotice')).toHaveLength(1)
+    expect(screen.getByTestId('OAuthPasteBackFlow')).toContainElement(
+      screen.getByTestId('OAuthOutcomeNotice')
+    )
+
+    // Without this the only way out of "The host did not return a sign-in link"
+    // was Cancel → chooser → Re-authorize.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('OAuthPasteBackFlow.restart'))
+    })
+    expect(window.api.signIn).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('SignInDialog — the paste fallback cannot race the start', () => {
+  it('"Paste a URL instead" is dead while the device start is still in flight', async () => {
+    installApi('web', { vendorAuthDeviceCodeStart: vi.fn(() => new Promise(() => {})) })
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.reauth'))
+    })
+
+    // `cancelVendorOAuth()` reads `engineId` off `vendorOAuth`, which the start
+    // has not written yet — so a click here cancels NOTHING host-side and then
+    // starts PKCE against a live device flow.
+    expect(screen.getByTestId('DeviceCodeFlow.pasteInstead')).toBeDisabled()
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('DeviceCodeFlow.pasteInstead'))
+    })
+    expect(window.api.vendorAuthOauthAuthorize).not.toHaveBeenCalled()
+  })
+
+  it('a superseded start cannot clear the busy of the one that replaced it', async () => {
+    installApi('web')
+    const store = useSessionStore.getState()
+    const realDevice = store.authorizeVendorDeviceCode
+    const realOAuth = store.authorizeVendorOAuth
+    let endDevice: (result: { ok: false }) => void = () => {}
+    useSessionStore.setState({
+      // The device start outlives the flow it started: its poll is still parked
+      // when the user drops to the paste panel.
+      authorizeVendorDeviceCode: vi.fn(
+        () => new Promise<{ ok: false }>((resolve) => (endDevice = resolve))
+      ),
+      // The PKCE start that replaces it never settles, so `busy` belongs to it.
+      authorizeVendorOAuth: vi.fn(() => new Promise<{ ok: false }>(() => {}))
+    })
+    try {
+      await open({ providerId: 'chatgpt', mode: 'reauth' })
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('SignInDialog.reauth'))
+      })
+      // The code arrived, so the panel is live and the fallback is clickable.
+      await act(async () => {
+        useSessionStore.getState().setVendorOAuth({
+          engineId: 'pi',
+          vendorId: 'openai-codex',
+          stage: 'device-code',
+          instructions: '',
+          ...DEVICE_CODE
+        })
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('DeviceCodeFlow.pasteInstead'))
+      })
+      expect(screen.getByTestId('OAuthPasteBackFlow.input')).toBeDisabled()
+
+      // The abandoned start finally answers. Its `finally` belongs to a flow
+      // nobody is on, and must not unlock the panel of the one that replaced it.
+      await act(async () => {
+        endDevice({ ok: false })
+      })
+      expect(screen.getByTestId('OAuthPasteBackFlow.input')).toBeDisabled()
+    } finally {
+      useSessionStore.setState({
+        authorizeVendorDeviceCode: realDevice,
+        authorizeVendorOAuth: realOAuth
+      })
+    }
   })
 })

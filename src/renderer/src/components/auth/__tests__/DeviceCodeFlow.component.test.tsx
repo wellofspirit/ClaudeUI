@@ -8,7 +8,7 @@
  * plain http), where the code must stay readable rather than the panel breaking.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { DeviceCodeFlow, minutesUntil } from '../DeviceCodeFlow'
 
 afterEach(cleanup)
@@ -22,8 +22,13 @@ describe('minutesUntil', () => {
     // ceiling, because the browser clock trailed the host by seconds.
     expect(minutesUntil(15 * 60_000 + 2_000, 0)).toBe(15)
     expect(minutesUntil(61_000, 0)).toBe(1)
-    expect(minutesUntil(0, 60_000)).toBe(0)
+    expect(minutesUntil(60_001, 60_000)).toBe(0)
     expect(minutesUntil(undefined, 0)).toBeUndefined()
+    // A non-positive expiry is an ABSENT one, not an expired one: `0` is what a
+    // host that reports no deadline sends, and treating it as a wall-clock
+    // instant rendered "expires in 0 min" on a code that had just been issued.
+    expect(minutesUntil(0, 60_000)).toBeUndefined()
+    expect(minutesUntil(-1, 0)).toBeUndefined()
   })
 })
 
@@ -66,6 +71,9 @@ describe('DeviceCodeFlow', () => {
     render(<DeviceCodeFlow busy onCancel={vi.fn()} onPasteInstead={vi.fn()} />)
     expect(screen.queryByTestId('DeviceCodeFlow.url')).toBeNull()
     expect(screen.getByTestId('DeviceCodeFlow.copy')).toBeDisabled()
+    // The escape hatch locks too: it cancels the flow this start has not
+    // registered yet, so a click here would leave a live device flow behind.
+    expect(screen.getByTestId('DeviceCodeFlow.pasteInstead')).toBeDisabled()
     expect(screen.getByTestId('DeviceCodeFlow')).toHaveAttribute('data-ready', 'false')
     // The expiry is omitted rather than guessed at.
     expect(screen.getByTestId('DeviceCodeFlow.waiting').textContent).not.toContain('expires')
@@ -94,6 +102,43 @@ describe('DeviceCodeFlow', () => {
     render(<DeviceCodeFlow userCode="ABCD-1234" onCancel={vi.fn()} onPasteInstead={vi.fn()} />)
     expect(() => fireEvent.click(screen.getByTestId('DeviceCodeFlow.copy'))).not.toThrow()
     expect(screen.getByTestId('DeviceCodeFlow.code')).toHaveTextContent('ABCD-1234')
+  })
+
+  it('a host that reports no deadline gets no expiry line', () => {
+    // `expiresAt: 0` is the shape the device-code start sends when it has no
+    // deadline to report; keyed on `!== undefined`, it rendered as a wall-clock
+    // instant in 1970 and the line read "expires in 0 min".
+    render(
+      <DeviceCodeFlow userCode="AB-12" expiresAt={0} onCancel={vi.fn()} onPasteInstead={vi.fn()} />
+    )
+    expect(screen.getByTestId('DeviceCodeFlow.waiting').textContent).toBe('Waiting')
+  })
+
+  it('the Copied timer is cleared when the panel unmounts', async () => {
+    const writeText = vi.fn(async () => {})
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true
+    })
+    const setSpy = vi.spyOn(globalThis, 'setTimeout')
+    const { unmount } = render(
+      <DeviceCodeFlow userCode="AB-12" onCancel={vi.fn()} onPasteInstead={vi.fn()} />
+    )
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('DeviceCodeFlow.copy'))
+    })
+    expect(screen.getByTestId('DeviceCodeFlow.copy')).toHaveTextContent('Copied')
+
+    // The reset is scheduled on a promise continuation, so it outlives a panel
+    // the user closed a moment after copying — and nothing was cancelling it.
+    const index = setSpy.mock.calls.findIndex(([, ms]) => ms === 1500)
+    expect(index).toBeGreaterThanOrEqual(0)
+    const timer = setSpy.mock.results[index]?.value
+    const clearSpy = vi.spyOn(globalThis, 'clearTimeout')
+    unmount()
+    expect(clearSpy).toHaveBeenCalledWith(timer)
+    setSpy.mockRestore()
+    clearSpy.mockRestore()
   })
 
   it('the two exits call their handlers', () => {

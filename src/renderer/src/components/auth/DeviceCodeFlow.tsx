@@ -31,20 +31,27 @@
  * line rather than being a sentence of its own, but it is KEPT: a code with no
  * expiry is a code the user retypes forever.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 /** Re-rendered on this cadence so "expires in N min" does not go stale on an open dialog. */
 const EXPIRY_TICK_MS = 20_000
 
+/** How long `Copied` stays on the button before it says `Copy` again. */
+const COPIED_MS = 1500
+
 /**
  * Whole minutes left, rounded to the nearest minute and floored at 0.
- * `undefined` when the host has not answered yet. Rounded rather than ceiled:
+ * `undefined` when there is no deadline to report. Rounded rather than ceiled:
  * a fifteen-minute code read "Expires in 16 min" the moment it arrived, because
  * the browser's clock trails the host's by a few seconds and the ceiling of
  * 15.02 is 16 (seen on the hermetic drive).
+ *
+ * A NON-POSITIVE `expiresAt` is an absent deadline, not an epoch instant: `0` is
+ * what a host with nothing to report sends, and keyed on `!== undefined` it
+ * rendered "expires in 0 min" on a code that had just been issued.
  */
 export function minutesUntil(expiresAt: number | undefined, now: number): number | undefined {
-  if (expiresAt === undefined) return undefined
+  if (expiresAt === undefined || expiresAt <= 0) return undefined
   return Math.max(0, Math.round((expiresAt - now) / 60_000))
 }
 
@@ -75,12 +82,22 @@ export function DeviceCodeFlow({
 }: DeviceCodeFlowProps): React.JSX.Element {
   const [now, setNow] = useState(() => Date.now())
   const [copied, setCopied] = useState(false)
+  /** The pending `Copied` reset — scheduled off a promise, so it outlives a close. */
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
-    if (expiresAt === undefined) return
+    // Same rule as `minutesUntil`: no deadline, nothing to tick.
+    if (expiresAt === undefined || expiresAt <= 0) return
     const timer = setInterval(() => setNow(Date.now()), EXPIRY_TICK_MS)
     return () => clearInterval(timer)
   }, [expiresAt])
+
+  useEffect(
+    () => () => {
+      if (copiedTimer.current) clearTimeout(copiedTimer.current)
+    },
+    []
+  )
 
   const minutes = minutesUntil(expiresAt, now)
   const ready = Boolean(userCode)
@@ -94,7 +111,8 @@ export function DeviceCodeFlow({
       ?.writeText(userCode)
       .then(() => {
         setCopied(true)
-        setTimeout(() => setCopied(false), 1500)
+        if (copiedTimer.current) clearTimeout(copiedTimer.current)
+        copiedTimer.current = setTimeout(() => setCopied(false), COPIED_MS)
       })
       .catch(() => {})
   }
@@ -170,13 +188,19 @@ export function DeviceCodeFlow({
       </div>
 
       {/* ADR-030's escape hatch: a server with device code off must still have a
-          path, and this is it. Same handler, shorter label. */}
+          path, and this is it. Same handler, shorter label.
+
+          Locked while the start is in flight, like Copy: the fallback cancels
+          the device flow before starting the PKCE one, and until the start has
+          answered there is no flow on record to cancel — so the click would
+          leave a live device flow behind and race a second one against it. */}
       <button
         type="button"
         data-testid="DeviceCodeFlow.pasteInstead"
         {...(id ? { 'data-id': id } : {})}
+        disabled={busy}
         onClick={onPasteInstead}
-        className="text-[11px] text-text-muted hover:text-text-secondary underline underline-offset-2"
+        className="text-[11px] text-text-muted hover:text-text-secondary underline underline-offset-2 disabled:opacity-40 disabled:cursor-not-allowed"
       >
         Paste a URL instead
       </button>

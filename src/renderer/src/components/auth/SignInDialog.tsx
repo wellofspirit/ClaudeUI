@@ -64,7 +64,7 @@
  * edge, and this dialog opens over the chat.
  */
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import {
   useSessionStore,
@@ -178,15 +178,19 @@ type ChatgptFlowKind = 'device' | 'paste'
 function StateChip({
   text,
   tone,
-  testid
+  testid,
+  dataId
 }: {
   text: string
   tone: 'neutral' | 'danger'
   testid: string
+  /** ADR-027: every one of these testids repeats — per row, or per stage. */
+  dataId?: string
 }): React.JSX.Element {
   return (
     <span
       data-testid={testid}
+      {...(dataId ? { 'data-id': dataId } : {})}
       className={`shrink-0 rounded-full px-[7px] text-[10.5px] leading-4 font-medium ${
         tone === 'danger'
           ? 'border border-danger/40 text-danger'
@@ -398,6 +402,8 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
    */
   const [unreadable, setUnreadable] = useState(false)
   const [busy, setBusy] = useState(false)
+  /** Which attempt owns `busy` and the screen — see {@link start}. */
+  const attemptRef = useRef(0)
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [signedInAs, setSignedInAs] = useState<string | null>(null)
@@ -421,10 +427,21 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
    */
   const summary = useAuthSummary()
   const owed = summary.issues.find((issue) => issue.providerId === providerId)
-  const retry: AuthRetry | undefined =
-    summary.retryable.find((candidate) => candidate.providerId === providerId) ??
-    owed?.retry ??
-    request.retry
+  /**
+   * ONE list, counted and re-sent. The row used to say "1 prompt was stopped"
+   * from a hardcoded count while the click re-sent whatever the single `retry`
+   * happened to be, so two prompts stopped by one dead credential read as one.
+   */
+  const unblocked = summary.retryable.filter((candidate) => candidate.providerId === providerId)
+  const retries: AuthRetry[] =
+    unblocked.length > 0
+      ? unblocked
+      : owed?.retry
+        ? [owed.retry]
+        : request.retry
+          ? [request.retry]
+          : []
+  const retry: AuthRetry | undefined = retries[0]
 
   /**
    * The rows this dialog renders — DERIVED, never stored (Slice I).
@@ -446,8 +463,16 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
 
   /** null while the account read is in flight — the chooser must not flash empty. */
   const accounts: AccountRow[] | null = view ? view.rows : null
-  /** True while the answer is unknown: the add row is the chooser's one live affordance. */
-  const canAdd = view?.canAdd ?? true
+  /**
+   * FALSE while the answer is unknown. `canAdd` is a fact about the accounts
+   * (`anthropicAccountsView` says no with multi-account off), so before they are
+   * known there is no honest answer and the row cannot render: offering it
+   * anyway put `+ Add account` in front of a single-account Anthropic host,
+   * where `addAccount()` silently flips the host to file-based multi-account —
+   * a Settings decision — and in front of an empty host, where the button takes
+   * `start('add')` instead of the plain sign-in `isEmptyList` would have chosen.
+   */
+  const canAdd = view?.canAdd ?? false
 
   /**
    * Populate the store, once per open — and NOT to answer anything locally.
@@ -528,14 +553,29 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
 
   const start = useCallback(
     async (mode: 'reauth' | 'add', flowKind?: ChatgptFlowKind): Promise<void> => {
+      // One attempt owns the screen at a time. `start` holds `busy` across an
+      // await that can last a whole device-code poll, and the paste fallback
+      // starts a second flow from inside that wait — so an abandoned attempt
+      // reaching its `finally` would unlock the panel of the one that replaced
+      // it, and its late error would land on a flow nobody is on.
+      const attempt = ++attemptRef.current
+      const current = (): boolean => attemptRef.current === attempt
       setError(null)
       setBusy(true)
       setStage('flow')
       setFlowMode(mode)
       try {
         if (providerId === 'anthropic') {
+          // THIS attempt's state, before the first await. `signIn()` writes
+          // `authorizing` synchronously and so was already safe; `addAccount()`
+          // awaits with the PREVIOUS login's `success` still standing, and the
+          // success effect below fires on it — a fresh dialog jumping straight
+          // to "done" for a credential it never touched. Nothing resets
+          // `authState` on open, so the reset belongs here, to both arms.
+          setAuthState({ status: 'authorizing', account: null, error: null })
           if (mode === 'add') {
             const next = await window.api.addAccount()
+            if (!current()) return
             setAccountsState(next)
             // Only a REMOTE `account:add` carries it; it is the flow's manualUrl.
             if (next.pendingSignIn) setAuthState(next.pendingSignIn)
@@ -550,20 +590,27 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
         // the desktop both stay on the PKCE flow.
         if (isWeb && (flowKind ?? chatgptFlow) === 'device') {
           const device = await authorizeVendorDeviceCode('pi', CODEX_VENDOR_ID)
+          if (!current()) return
           if (device.ok) await finish()
           else if (device.error) setError(device.error)
           return
         }
         const result = await authorizeVendorOAuth('pi', CODEX_VENDOR_ID)
+        if (!current()) return
         // Desktop resolves ok once the loopback completed; web parks the store's
         // flow at `paste` (or `error`) and the panel below takes over.
         if (result.ok) await finish()
         else if (result.error) setError(result.error)
       } catch (e) {
+        if (!current()) return
+        // The `authorizing` written above is this attempt's own, so a throw has
+        // to take it back: the pill reads it as "Signing in…", and with the
+        // dialog on the chooser again nothing else ever would.
+        if (providerId === 'anthropic') setAuthState({ status: 'idle', account: null, error: null })
         setError(message(e))
         setStage('choose')
       } finally {
-        setBusy(false)
+        if (current()) setBusy(false)
       }
     },
     [
@@ -675,7 +722,7 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
 
   const cancelFlow = (): void => {
     if (providerId === 'anthropic') void cancelSignIn()
-    else cancelVendorOAuth()
+    else void cancelVendorOAuth()
     // ALWAYS back to the chooser (F3, owner ruling 2026-09-14). Staying on the
     // flow panel left a cancelled sign-in still showing its pre-code look —
     // "Requesting a code…" for a request nobody is making — and the chooser is
@@ -688,14 +735,15 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
   }
 
   const retryPrompt = (): void => {
-    if (!retry) return
-    const { routingId, prompt } = retry
+    if (retries.length === 0) return
     closeSignIn()
-    void retrySend(routingId, prompt)
-    // Performing the retry IS lifetime 3 (ADR-070 §2) — the same pair the pill
-    // and the transcript row run, so the session settles from whichever surface
-    // the user reached for rather than waiting out the respawn.
-    clearAuthRequired(routingId)
+    for (const { routingId, prompt } of retries) {
+      void retrySend(routingId, prompt)
+      // Performing the retry IS lifetime 3 (ADR-070 §2) — the same pair the pill
+      // and the transcript row run, so the session settles from whichever surface
+      // the user reached for rather than waiting out the respawn.
+      clearAuthRequired(routingId)
+    }
   }
 
   // ── The flow panel ───────────────────────────────────────────────────────
@@ -727,12 +775,15 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
    * hatch for a server with device code turned off, or a user who would rather
    * copy a URL. Cancels host-side first (that flow holds the vault's single
    * login slot; a PKCE start would otherwise be refused as "already in
-   * progress"), then restarts in the SAME mode the user chose.
+   * progress"), then restarts in the SAME mode the user chose. "First" is
+   * AWAITED: the cancel is an invoke of its own, and a start that overtook it
+   * was the refusal this exists to avoid. `busy` spans the gap so the paste
+   * panel cannot be acted on before its flow exists.
    */
   const pasteInstead = (): void => {
-    cancelVendorOAuth()
     setChatgptFlow('paste')
-    void start(flowMode, 'paste')
+    setBusy(true)
+    void cancelVendorOAuth().then(() => start(flowMode, 'paste'))
   }
 
   /** The live device-code flow, when that is what is running (web + ChatGPT only). */
@@ -741,6 +792,15 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
       ? vendorOAuth
       : undefined
   const onDeviceFlow = isWeb && providerId === 'chatgpt' && chatgptFlow === 'device'
+  /**
+   * The paste panel is on screen, and therefore OWNS the flow error.
+   *
+   * It has always had the `error` prop and rendered it itself; this surface
+   * rendered `flowError` its own way beside it instead, so one component said
+   * the same thing in two places depending on who mounted it. One owner: the
+   * panel when it is up, this dialog for the two panels that have no such prop.
+   */
+  const pasteOwnsError = isWeb && !onDeviceFlow
 
   const flowPanel = onDeviceFlow ? (
     <DeviceCodeFlow
@@ -760,9 +820,15 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
       variant={providerId === 'anthropic' ? 'code' : 'url'}
       id={providerId}
       url={flowUrl}
+      error={flowError}
       busy={submitting || busy}
       onSubmit={submitPaste}
       onCancel={cancelFlow}
+      // A flow that died carries no url any more, so step 1 has nothing to open
+      // and the panel can only say so. Restarting the SAME mode is what the
+      // sentence was asking for; Cancel → chooser → Re-authorize was the only
+      // way to do it.
+      onRestart={() => void start(flowMode)}
     />
   ) : (
     // Rule 3: a spinner labelled "Waiting for the browser…" does not also need
@@ -878,6 +944,9 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
             // which is exactly how the unstyled `add` case looked.
             <span
               data-testid={`${DIALOG}.activeDot`}
+              // The account when there is one; otherwise the stage, because the
+              // testid repeats on the account rows (ADR-027).
+              data-id={confirmAccount?.id ?? 'confirm'}
               data-active={confirmAccount ? 'true' : 'false'}
               className={`shrink-0 w-1.5 h-1.5 rounded-full ${
                 confirmAccount ? 'bg-accent' : 'border border-text-muted'
@@ -886,7 +955,12 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
           }
           labelBadge={
             confirmAccount?.plan ? (
-              <StateChip text={confirmAccount.plan} tone="neutral" testid={`${DIALOG}.plan`} />
+              <StateChip
+                text={confirmAccount.plan}
+                tone="neutral"
+                testid={`${DIALOG}.plan`}
+                dataId={confirmAccount.id}
+              />
             ) : undefined
           }
         >
@@ -912,7 +986,7 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
           >
             {signedInAs ?? 'Signed in'}
           </span>
-          {plan && <StateChip text={plan} tone="neutral" testid={`${DIALOG}.plan`} />}
+          {plan && <StateChip text={plan} tone="neutral" testid={`${DIALOG}.plan`} dataId="done" />}
         </div>
         {feeds.length > 0 && (
           <div className="rounded-lg border border-border px-3 py-2.5 flex items-center flex-wrap gap-x-4 gap-y-1.5 text-[11px]">
@@ -935,12 +1009,19 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
             ))}
           </div>
         )}
-        {retry && <RetryRow count={1} prompt={retry.prompt} action="Retry" onRetry={retryPrompt} />}
+        {retry && (
+          <RetryRow
+            count={retries.length}
+            prompt={retry.prompt}
+            action="Retry"
+            onRetry={retryPrompt}
+          />
+        )}
       </div>
     ) : stage === 'flow' ? (
       <div className="space-y-3">
         {flowPanel}
-        {flowError && (
+        {flowError && !pasteOwnsError && (
           <OAuthOutcomeNotice
             kind={classifyOAuthError(flowError)}
             message={flowError}
@@ -973,6 +1054,7 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
             leading={
               <span
                 data-testid={`${DIALOG}.activeDot`}
+                data-id={account.id}
                 data-active={account.active ? 'true' : 'false'}
                 className={`shrink-0 w-1.5 h-1.5 rounded-full ${account.active ? 'bg-accent' : ''}`}
               />
@@ -980,15 +1062,31 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
             labelBadge={
               <>
                 {account.plan && (
-                  <StateChip text={account.plan} tone="neutral" testid={`${DIALOG}.plan`} />
+                  <StateChip
+                    text={account.plan}
+                    tone="neutral"
+                    testid={`${DIALOG}.plan`}
+                    dataId={account.id}
+                  />
                 )}
-                {account.expired && (
-                  <StateChip text="expired" tone="danger" testid={`${DIALOG}.expired`} />
+                {/* The vault's own dead credential, or the one this request was
+                    opened about — both are "this one was refused", and the chip
+                    is where that belongs. It used to be a second Re-authorize on
+                    the blamed row, which lied twice: two primaries on one
+                    screen, and `start('reauth')` takes no account and always
+                    acts on the ACTIVE credential. */}
+                {(account.expired || account.id === request.accountId) && (
+                  <StateChip
+                    text="expired"
+                    tone="danger"
+                    testid={`${DIALOG}.expired`}
+                    dataId={account.id}
+                  />
                 )}
               </>
             }
           >
-            {account.active || account.id === request.accountId ? (
+            {account.active ? (
               <Button
                 variant="primary"
                 testid={`${DIALOG}.reauth`}
@@ -1128,12 +1226,23 @@ function SignInIssueList(): React.JSX.Element {
     ...summary.retryable,
     ...summary.issues.flatMap((issue) => (issue.retry ? [issue.retry] : []))
   ]
-  const takeable = summary.retryable[0]
+  /** The ones a resolution has unblocked — the only ones a click can send. */
+  const takeable = summary.retryable
+
+  /**
+   * ONE list per render, counted and re-sent. The count was `stopped` while the
+   * click sent `takeable[0]`, so "3 prompts were stopped · Retry" re-sent one
+   * and left two parked with no surface left saying so. Once anything is
+   * takeable the row names exactly what the click will send; before that it
+   * names what is parked, and the button is disabled.
+   */
+  const named: AuthRetry[] = takeable.length > 0 ? takeable : stopped
 
   const retry = (): void => {
-    if (!takeable) return
-    void retrySend(takeable.routingId, takeable.prompt)
-    clearAuthRequired(takeable.routingId)
+    for (const owed of takeable) {
+      void retrySend(owed.routingId, owed.prompt)
+      clearAuthRequired(owed.routingId)
+    }
   }
 
   return (
@@ -1193,12 +1302,12 @@ function SignInIssueList(): React.JSX.Element {
             ))}
           </SheetGroup>
         )}
-        {stopped.length > 0 && stopped[0] && (
+        {named.length > 0 && named[0] && (
           <RetryRow
-            count={stopped.length}
-            prompt={(takeable ?? stopped[0]).prompt}
+            count={named.length}
+            prompt={named[0].prompt}
             action="Retry after sign-in"
-            disabled={!takeable}
+            disabled={takeable.length === 0}
             onRetry={retry}
           />
         )}

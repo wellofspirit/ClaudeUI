@@ -83,6 +83,21 @@ describe('OAuthPasteBackFlow — step 1 opens on the CLIENT', () => {
     expect(screen.getByTestId('OAuthPasteBackFlow')).toHaveTextContent(
       'The host did not return a sign-in link.'
     )
+    // A surface that cannot restart the flow still only gets the sentence.
+    expect(screen.queryByTestId('OAuthPasteBackFlow.restart')).toBeNull()
+  })
+
+  it('"Start again" is a real action when the surface can restart the flow', () => {
+    const onRestart = vi.fn()
+    render(<OAuthPasteBackFlow variant="code" onSubmit={vi.fn()} onRestart={onRestart} />)
+    fireEvent.click(screen.getByTestId('OAuthPasteBackFlow.restart'))
+    expect(onRestart).toHaveBeenCalledTimes(1)
+  })
+
+  it('a restart cannot be asked for while a submit is in flight', () => {
+    const onRestart = vi.fn()
+    render(<OAuthPasteBackFlow variant="code" busy onSubmit={vi.fn()} onRestart={onRestart} />)
+    expect(screen.getByTestId('OAuthPasteBackFlow.restart')).toBeDisabled()
   })
 })
 

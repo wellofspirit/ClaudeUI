@@ -140,6 +140,11 @@ export interface OAuthPasteBackFlowProps {
   onSubmit: (pasted: string) => void
   /** Omitted → no Cancel affordance (a surface that owns its own dismiss). */
   onCancel?: () => void
+  /**
+   * Start the same flow over. Omitted → step 1 can only STATE that a dead flow
+   * has to be started again; with it, it offers the action.
+   */
+  onRestart?: () => void
 }
 
 /**
@@ -154,7 +159,8 @@ export function OAuthPasteBackFlow({
   error,
   busy = false,
   onSubmit,
-  onCancel
+  onCancel,
+  onRestart
 }: OAuthPasteBackFlowProps): React.JSX.Element {
   const [pasted, setPasted] = useState('')
   const trimmed = pasted.trim()
@@ -198,8 +204,25 @@ export function OAuthPasteBackFlow({
             Sign-in page ↗
           </button>
           {!url && (
+            // A dead flow carries no url (its `manualUrl` goes with it), and
+            // "Start again" used to be a sentence with no way to do it: the only
+            // route back was Cancel → chooser → Re-authorize.
             <span className="block mt-1 text-[10px] text-text-muted/70">
-              The host did not return a sign-in link. Start again.
+              The host did not return a sign-in link.{' '}
+              {onRestart ? (
+                <button
+                  type="button"
+                  data-testid="OAuthPasteBackFlow.restart"
+                  {...(id ? { 'data-id': id } : {})}
+                  disabled={busy}
+                  onClick={onRestart}
+                  className="text-text-secondary hover:text-text-primary underline underline-offset-2 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Start again
+                </button>
+              ) : (
+                'Start again.'
+              )}
             </span>
           )}
         </span>
