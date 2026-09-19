@@ -571,6 +571,46 @@ describe('CredentialSync route policy', () => {
     }
   })
 
+  /**
+   * GUARD — the signal names WHICH account was stored, in the vault-account
+   * id-space `session:auth-required` reports (`CodexInjectionToken.vaultAccountId`
+   * is the same `key` this hands over). Without it, adding ChatGPT account B
+   * announced "chatgpt works now" and the reducer cleared every session broken
+   * on account A.
+   */
+  it('rings onCredentialStored with the VAULT account id the credential landed on', async () => {
+    const other: VaultCredential = {
+      type: 'oauth',
+      access: 'a',
+      refresh: 'a-ref',
+      expires: Date.now() + 3_600_000
+    }
+    const added: VaultCredential = {
+      type: 'oauth',
+      access: 'b',
+      refresh: 'b-ref',
+      expires: Date.now() + 3_600_000
+    }
+    const { vault, state } = makeFakeVault(other)
+    // An accounts-capable vault holding A (active) and the B this login adds.
+    vault.listAccounts = vi.fn(async () => [
+      { id: 'acct-a', credential: other, addedAt: 1 },
+      { id: 'acct-b', credential: added, addedAt: 2 }
+    ])
+    vault.getActiveAccountId = vi.fn(async () => 'acct-a')
+    vault.completeLogin = vi.fn(async () => {
+      state.current = added
+      return added
+    })
+    const onCredentialStored = vi.fn()
+    const sync = new CredentialSync({ vault, onCredentialStored })
+
+    await sync.completeLogin()
+
+    expect(onCredentialStored).toHaveBeenCalledWith('acct-b')
+    sync.stop()
+  })
+
   it('a THROWING onCredentialStored still returns the stored credential', async () => {
     // The credential is stored and vended before the listener rings, so letting a
     // listener throw would report a login that genuinely succeeded as a failure —

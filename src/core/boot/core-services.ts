@@ -187,8 +187,13 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     // client too. Wired at the SAME seam as the hook above, for the same reason:
     // `CredentialSync` must not import `sync-host` (its unit tests mock almost
     // nothing and would pull in the whole service graph), and both hosts need it.
-    onCredentialStored: () =>
-      emitEvent('provider:auth-resolved', [{ providerId: CHATGPT_PROVIDER_ID }])
+    //
+    // The account id rides along so the fan-out is narrowed to the credential
+    // that was actually stored: it is the vault key, the same id-space Codex
+    // puts on `session:auth-required`, so adding account B leaves the sessions
+    // broken on account A owing their sign-in.
+    onCredentialStored: (accountId) =>
+      emitEvent('provider:auth-resolved', [{ providerId: CHATGPT_PROVIDER_ID, accountId }])
   })
 
   // Recompile the user's Bash permission rules into `$CODEX_HOME/rules/

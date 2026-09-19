@@ -309,12 +309,24 @@ export interface SyncEventMap {
    * `authRequired.providerId` matches and marks them resolved — one fold, so a
    * desktop sign-in clears the owed sign-in on the phone too.
    *
+   * `accountId` is the VAULT account id the credential landed on — the same
+   * id-space `session:auth-required` reports (`CodexInjectionToken.vaultAccountId`
+   * on one side, `CredentialSync.keyForCredential` on the other). It narrows the
+   * fan-out: a provider can hold several accounts, so adding ChatGPT account B
+   * must not announce that the sessions broken on account A are fixed. The
+   * reducer skips a session only when BOTH ids are present and differ, so absent
+   * on either side still matches — which is what Anthropic (one credential, no
+   * id) and every older emitter rely on.
+   *
    * Emitted by Anthropic's own success transition (`AuthManager.finalize`) and
    * by the vault's one post-completion tail
    * (`CredentialSync.applyCompletedLogin`, which covers the desktop loopback,
    * the ADR-057 paste-back and the device-code flow alike).
+   *
+   * Still no token, no URL and no flow state: it is replicated to every remote
+   * client, and a vault account id is an opaque local handle.
    */
-  'provider:auth-resolved': (data: { providerId: string }) => void
+  'provider:auth-resolved': (data: { providerId: string; accountId?: string }) => void
 
   // -------------------------------------------------------------------------
   // Automation

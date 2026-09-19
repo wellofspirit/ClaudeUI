@@ -941,7 +941,15 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
       // the pre-ADR-070 shape for a failure nothing has fixed yet — which is what
       // the snapshot-parity comparison between canonical and a replica rests on.
       return withSession(state, routingId, (s) => {
-        const retryPrompt = lastUserPrompt(s)
+        // The retry belongs to a turn this failure actually KILLED, and the
+        // canonical status is the only thing here that knows whether there was
+        // one: Codex's host fans a failed refresh to every session attached to
+        // the process (ADR-069 §8), so a session idle for hours hears about a
+        // credential it was not using, and offering to retry its last prompt
+        // offers to re-run a turn that completed. Every emitter still reads
+        // `running` at this point — each one sends this event BEFORE the
+        // `sendStatus()` that reports the turn over — so a real failure keeps it.
+        const retryPrompt = s.status.state === 'running' ? lastUserPrompt(s) : undefined
         return {
           authRequired: {
             providerId,
@@ -957,13 +965,24 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
       // App-level: no routingId, because the fact is about a PROVIDER. Every
       // session that was blaming this provider moves to lifetime 2 — resolved,
       // retry still owed — keeping `retryPrompt` so the retry outlives the dialog.
-      const data = arg<{ providerId?: string }>(event, 0)
+      const data = arg<{ providerId?: string; accountId?: string }>(event, 0)
       const providerId = data?.providerId
       if (!providerId) return state
+      const accountId = data.accountId
       let sessions: CanonicalState['sessions'] | undefined
       for (const [id, session] of Object.entries(state.sessions)) {
         if (session.authRequired?.providerId !== providerId) continue
         if (session.authRequired.resolved === true) continue
+        // A provider can hold several accounts (ADR-068 §2), so ADDING account B
+        // is not evidence about account A. Both ids must be present to disagree:
+        // absent on either side matches, which keeps Anthropic (it names none)
+        // and every pre-ADR-070 emitter folding exactly as they did.
+        if (
+          accountId &&
+          session.authRequired.accountId &&
+          session.authRequired.accountId !== accountId
+        )
+          continue
         sessions ??= { ...state.sessions }
         sessions[id] = {
           ...session,

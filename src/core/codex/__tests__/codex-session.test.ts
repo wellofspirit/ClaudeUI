@@ -3526,10 +3526,17 @@ describe('Codex sessions under an injected ChatGPT account', () => {
     })
   })
 
+  /** Every transcript row carrying an `api_error` block, newest last. */
+  const authRows = (): Array<{ content: Array<Record<string, unknown>> }> =>
+    events.mock.calls
+      .filter(([channel]) => channel === 'session:message')
+      .map(([, args]) => (args as [string, { content: Array<Record<string, unknown>> }])[1])
+      .filter((message) => message.content.some((block) => block.type === 'api_error'))
+
   it('answers the native refresh request, and asks for a sign-in when it cannot', async () => {
     const source = authSource('fake-access-jwt')
     const { session, serverRequest } = fixture({}, codexAuthHook({ source }), source)
-    await session.run(null)
+    await session.run('go')
 
     // The HOST answers this one (ADR-069 §8) and fans its failure out to every
     // session attached to it, which is what the sign-in notice below proves.
@@ -3563,19 +3570,68 @@ describe('Codex sessions under an injected ChatGPT account', () => {
     expect(events.mock.calls.filter(([channel]) => channel === 'session:error')).toEqual([])
     // The neutral transcript block every engine now emits — a permanent,
     // correctly-anchored record rather than a card that vanishes.
-    const authRows = events.mock.calls
-      .filter(([channel]) => channel === 'session:message')
-      .map(([, args]) => (args as [string, { content: Array<Record<string, unknown>> }])[1])
-      .filter((message) => message.content.some((block) => block.type === 'api_error'))
-    expect(authRows).toHaveLength(1)
+    expect(authRows()).toHaveLength(1)
     // …carrying the PROVIDER, so the row still names ChatGPT once the failure
     // has settled and the event's copy of the fact is gone (ADR-070 §4).
-    expect(authRows[0].content[0]).toEqual({
+    expect(authRows()[0].content[0]).toEqual({
       type: 'api_error',
       errorType: 'authentication',
       errorMessage: 'ChatGPT rejected the credential Codex runs under.',
       providerId: 'chatgpt'
     })
+  })
+
+  /**
+   * GUARD — the host rings this on EVERY attached session (ADR-069 §8), which is
+   * right for the event (an idle session's credential really is broken and the
+   * pill must say so) and wrong for the transcript: a row saying a turn died
+   * lands in a session where no turn was running, and the retry it offers is of
+   * a prompt that completed.
+   */
+  it('tells an IDLE session about the rejection without writing it a row', async () => {
+    const source = authSource('fake-access-jwt')
+    const { session, serverRequest } = fixture({}, codexAuthHook({ source }), source)
+    await session.run(null)
+
+    source.injectionTokenFor = vi.fn(async () => null)
+    events.mockClear()
+    await expect(
+      serverRequest('account/chatgptAuthTokens/refresh', { reason: 'unauthorized' })
+    ).rejects.toThrow()
+
+    expect(events).toHaveBeenCalledWith('session:auth-required', [
+      'temporary',
+      {
+        providerId: 'chatgpt',
+        accountId: 'acct-fixture',
+        message: 'ChatGPT rejected the credential Codex runs under.'
+      }
+    ])
+    expect(authRows()).toEqual([])
+  })
+
+  /**
+   * GUARD — `codexAuthHook.onRefreshRequest` rings on every failed refresh
+   * REQUEST, and Codex retries within one turn, so an unlatched dispatch stacked
+   * identical "credential rejected" rows in a single transcript.
+   */
+  it('writes ONE row per turn however many refreshes fail', async () => {
+    const source = authSource('fake-access-jwt')
+    const { session, serverRequest } = fixture({}, codexAuthHook({ source }), source)
+    await session.run('go')
+
+    source.injectionTokenFor = vi.fn(async () => null)
+    events.mockClear()
+    const ask = (): Promise<unknown> =>
+      serverRequest('account/chatgptAuthTokens/refresh', { reason: 'unauthorized' })
+    await expect(ask()).rejects.toThrow()
+    await expect(ask()).rejects.toThrow()
+
+    // Both failures are still REPORTED — only the transcript row is latched.
+    expect(
+      events.mock.calls.filter(([channel]) => channel === 'session:auth-required')
+    ).toHaveLength(2)
+    expect(authRows()).toHaveLength(1)
   })
 
   it('registers the refresh method on the host that runs this session', async () => {

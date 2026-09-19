@@ -1087,7 +1087,8 @@ export interface PerSessionSnapshot {
  *
  *  1. **broken** — `session:auth-required` set it and `resolved` is absent/false;
  *  2. **resolved, retry owed** — `provider:auth-resolved` for this `providerId`
- *     set `resolved: true` and kept `retryPrompt`;
+ *     (and, when both sides name one, this `accountId`) set `resolved: true`
+ *     and kept `retryPrompt`;
  *  3. **settled** — the field is `null`, which the `status.state === 'running'`
  *     rule does (a turn that runs is the proof the credential works).
  */
@@ -1098,7 +1099,11 @@ export interface AuthRequiredState {
   accountId?: string
   /** The emitting engine's verbatim words. Rendered as in-place disclosure, never paraphrased. */
   message?: string
-  /** The prompt whose turn this killed, captured by the reducer at failure time. */
+  /**
+   * The prompt whose turn this killed, captured by the reducer at failure time.
+   * Absent when no turn was running — an idle session told about a dead
+   * credential has nothing to retry.
+   */
   retryPrompt?: string
   /** The credential is good again but the retry has not been taken yet (ADR-070 §2 lifetime 2). */
   resolved?: boolean
