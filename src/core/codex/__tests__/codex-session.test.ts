@@ -1132,22 +1132,55 @@ describe('Codex first session', () => {
   })
 
   it('gates the wire string byte for byte, however it is displayed', async () => {
+    rules.deny = ['Bash(rm -rf:*)']
     const { session, approval } = fixture()
     await session.run('hello')
     // A Windows pwsh exec, as the app server joins it: the `\` separators arrive
-    // DOUBLED. The renderer undoes that quoting for the card
-    // (`renderer/src/lib/present-shell-command.ts`) because no human types the
-    // doubled form — but the gated string and the rule built from it must stay
-    // the wire bytes. A display transform that reached here would change what a
-    // `Bash(...)` rule matches, widening or narrowing it.
-    const wire = '"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe" -Command ls'
-    const pending = approval({ command: wire })
-    // pwsh is not one of the three shells `unwrapShellCommand` accepts
-    // (codex-rs/shell-command/src/bash.rs `extract_bash_command`), so there is no
-    // unwrapping and no `rawCommand`: what arrived is what is gated.
-    expect(pending.card.input).toEqual({ command: wire, cwd: '/isolated' })
+    // DOUBLED. Two things must hold at once here.
+    //
+    // 1. The WRAPPER COMES OFF. `derive_exec_args` wraps with PowerShell on
+    //    Windows (`-Command`, or `-NoProfile -Command` off a login shell), so
+    //    gating the join verbatim left every Windows deny rule dead on this
+    //    engine — the security defect this pins shut.
+    const denied = approval({
+      command: '"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe" -NoProfile -Command "rm -rf x"'
+    })
+    expect(denied.card).toBeUndefined()
+    expect(await denied.result).toEqual({ decision: 'decline' })
+    expect(events).toHaveBeenCalledWith('session:error', [
+      'temporary',
+      'Denied by permission rule: Bash(rm -rf:*)'
+    ])
+
+    // 2. What is gated is the script Codex will exec, with exactly one level of
+    //    the join's quoting removed and NOTHING else. The renderer re-renders
+    //    the same wire string for the card
+    //    (`renderer/src/lib/present-shell-command.ts`) because no human types
+    //    the doubled form; that transform must never reach gating. It REMOVES
+    //    escaping, so on the script below — which was never escaped — it would
+    //    yield `type C:a bf.txt`: a different string, and a different rule.
+    const wire =
+      '"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe" -Command "type C:\\\\a b\\\\f.txt"'
+    const pending = approval({ command: wire, itemId: 'two' })
+    expect(pending.card.input).toEqual({
+      command: 'type C:\\a b\\f.txt',
+      rawCommand: wire,
+      cwd: '/isolated'
+    })
     expect(pending.card.suggestions[0].rules).toEqual([
-      { toolName: 'Bash', ruleContent: `${wire}:*` }
+      { toolName: 'Bash', ruleContent: 'type C:\\a b\\f.txt:*' }
+    ])
+
+    // 3. And the suggested rule for the ordinary case is one a human would
+    //    write, with no machine-specific `pwsh.exe` path in it.
+    const clean = approval({
+      command: '"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe" -Command ls',
+      itemId: 'three'
+    })
+    expect(clean.card.suggestions.map((s) => s.rules)).toEqual([
+      [{ toolName: 'Bash', ruleContent: 'ls:*' }],
+      [{ toolName: 'Bash', ruleContent: 'ls:*' }],
+      [{ toolName: 'Bash', ruleContent: 'ls:*' }]
     ])
   })
 
