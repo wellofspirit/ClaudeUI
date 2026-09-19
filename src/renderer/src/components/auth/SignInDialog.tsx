@@ -147,7 +147,19 @@ interface AccountRow {
   active: boolean
 }
 
-type Stage = 'choose' | 'flow' | 'done'
+/**
+ * `confirm` is the screen a one-click sign-in used to skip (ADR-070 Ruling 1,
+ * owner 2026-09-19).
+ *
+ * Every path that has nothing to CHOOSE — Anthropic with multi-account off, a
+ * provider with no stored account, `mode: 'add'` — used to run the flow from
+ * the open-time effect, so opening the dialog was itself `shell.openExternal`.
+ * ADR-068 §3 was right that a chooser of one is ceremony, but the screen it
+ * deleted was also the confirmation, and the pill that replaced the dismissible
+ * banner is permanently on screen. So the flow now starts on a click on THIS
+ * screen and nowhere earlier.
+ */
+type Stage = 'choose' | 'confirm' | 'flow' | 'done'
 
 /** The two ChatGPT flows a WEB client can run — see `chatgptFlow` below. */
 type ChatgptFlowKind = 'device' | 'paste'
@@ -533,11 +545,12 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
   )
 
   /**
-   * Start the flow when the chooser has nothing to offer — the open-time skip,
-   * and the one button an EMPTY chooser shows. One helper rather than two copies
-   * of the condition, because the two modes are different calls for Anthropic:
-   * `add` goes through `addAccount()` (a SECOND credential), `reauth` through
-   * `signIn()`, and an empty list has nothing to add alongside.
+   * Start the flow when the chooser has nothing to offer — the confirm screen's
+   * primary, and the one button an EMPTY chooser shows. One helper rather than
+   * two copies of the condition, because the two modes are different calls for
+   * Anthropic: `add` goes through `addAccount()` (a SECOND credential),
+   * `reauth` through `signIn()`, and an empty list has nothing to add
+   * alongside.
    */
   const startWithoutChoosing = useCallback(
     (): Promise<void> => start(request.mode === 'add' ? 'add' : 'reauth'),
@@ -556,7 +569,11 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
         if (cancelled) return
         setAccounts(rows)
         setCanAdd(canAdd)
-        if (request.mode === 'add' || autoStart) void startWithoutChoosing()
+        // Ruling 1: the confirm SCREEN, never the flow. `add` is not exempt —
+        // "Add another account" says what the dialog is for, not that a
+        // browser is about to take the screen, and one rule with no exception
+        // is the only version of this that stays true.
+        if (request.mode === 'add' || autoStart) setStage('confirm')
       })
       .catch((e: unknown) => {
         if (cancelled) return
@@ -724,8 +741,70 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
   /** The account read has SETTLED on nothing — the chooser has to say so. */
   const isEmptyList = accounts !== null && accounts.length === 0
 
+  /**
+   * What the confirm screen's one primary button PROMISES, per host.
+   *
+   * ADR-057: the host never `openExternal`s for a remote caller, so a web
+   * client must not be told a browser is about to open — nothing opens; the
+   * host hands back a link to copy, or a device code to type. Naming the wrong
+   * one is the same defect as the missing screen, one step further along.
+   */
+  const confirmAction = !isWeb
+    ? 'Open browser'
+    : providerId === 'chatgpt' && chatgptFlow === 'device'
+      ? 'Get a code'
+      : 'Get a sign-in link'
+
+  /**
+   * The credential the confirm screen NAMES, when it knows one.
+   *
+   * Only the single-row case: `readAccounts` collapses Anthropic-with-
+   * multi-account-off to exactly the credential the flow will re-authorise, so
+   * naming it is the difference between "sign in" and "sign in as this". An
+   * `add` names nobody by construction — that is the point of adding — and a
+   * host with no stored account has nobody to name.
+   */
+  const confirmAccount = request.mode === 'add' ? null : accounts?.length === 1 ? accounts[0] : null
+
   const body =
-    stage === 'done' ? (
+    stage === 'confirm' ? (
+      <SheetGroup
+        testid={`${DIALOG}.group`}
+        id="confirm"
+        label={request.mode === 'add' ? 'Add account' : 'Sign in'}
+      >
+        {/* One row, one primary (rule 6), and no sentence: the header names the
+            provider, the row names the account, and the button names what
+            happens next. There is deliberately no Cancel — `×`, the scrim and
+            Escape are the three closes this dialog has, and a screen that has
+            started nothing has nothing to cancel. */}
+        <SettingRow
+          testid={`${DIALOG}.confirm`}
+          {...(confirmAccount ? { label: confirmAccount.label, dataId: confirmAccount.id } : {})}
+          leading={
+            <span
+              data-testid={`${DIALOG}.activeDot`}
+              data-active={confirmAccount ? 'true' : 'false'}
+              className={`shrink-0 w-1.5 h-1.5 rounded-full ${confirmAccount ? 'bg-accent' : ''}`}
+            />
+          }
+          labelBadge={
+            confirmAccount?.plan ? (
+              <StateChip text={confirmAccount.plan} tone="neutral" testid={`${DIALOG}.plan`} />
+            ) : undefined
+          }
+        >
+          <Button
+            variant="primary"
+            testid={`${DIALOG}.confirmStart`}
+            disabled={busy}
+            onClick={() => void startWithoutChoosing()}
+          >
+            {confirmAction}
+          </Button>
+        </SettingRow>
+      </SheetGroup>
+    ) : stage === 'done' ? (
       <div data-testid={`${DIALOG}.done`} className="space-y-3">
         <div className="flex items-center gap-2.5">
           <span className="text-success text-[14px]" aria-hidden="true">

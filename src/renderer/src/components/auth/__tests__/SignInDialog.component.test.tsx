@@ -144,6 +144,17 @@ async function open(request: SignInRequest): Promise<void> {
   })
 }
 
+/**
+ * Take the confirm screen's one primary (ADR-070 Ruling 1). Every path that
+ * has nothing to choose between now stops here, so a test that wants the flow
+ * has to ask for it — which is the whole point of the screen.
+ */
+async function confirmStart(): Promise<void> {
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('SignInDialog.confirmStart'))
+  })
+}
+
 /** Re-authorize → paste → success, the shortest route to the done state on web. */
 async function signInOnWeb(): Promise<void> {
   await act(async () => {
@@ -208,11 +219,17 @@ describe('SignInDialog — Anthropic', () => {
     expect(useSessionStore.getState().signInDialog).toBeNull()
   })
 
-  it('add mode skips the chooser and calls addAccount()', async () => {
+  it('add mode skips the chooser, confirms, and only then calls addAccount()', async () => {
     installApi('darwin')
     await open({ providerId: 'anthropic', mode: 'add' })
-    expect(window.api.addAccount).toHaveBeenCalledTimes(1)
+    // Ruling 1 applies to `add` too: the entry-point button said what the
+    // dialog is FOR, not that a browser was about to take the screen.
+    expect(window.api.addAccount).not.toHaveBeenCalled()
     expect(screen.queryAllByTestId('SignInDialog.account')).toEqual([])
+    // Nobody to name — that is what adding means.
+    expect(screen.getByTestId('SignInDialog.confirm')).not.toHaveTextContent('one@example.com')
+    await confirmStart()
+    expect(window.api.addAccount).toHaveBeenCalledTimes(1)
   })
 
   it('on web: the code-variant paste panel carries manualUrl and submits verbatim', async () => {
@@ -297,6 +314,9 @@ describe('SignInDialog — ChatGPT', () => {
     await act(async () => {
       useSessionStore.getState().openSignIn({ providerId: 'chatgpt', mode: 'add' })
     })
+    // `add` confirms first (Ruling 1), then runs the same PKCE authorize.
+    expect(window.api.vendorAuthOauthAuthorize).toHaveBeenCalledTimes(1)
+    await confirmStart()
     expect(window.api.vendorAuthOauthAuthorize).toHaveBeenCalledTimes(2)
   })
 
@@ -472,6 +492,135 @@ describe('SignInDialog — on a phone (390px)', () => {
   })
 })
 
+// ── Ruling 1: no browser opens without a click that asked for it ───────────
+//
+// ADR-070's second residual, ruled 2026-09-19. `readAccounts` reports
+// `autoStart` for Anthropic whenever multi-account is OFF — the default, and
+// the owner's own machine — so opening the dialog used to call `signIn()` and
+// with it `shell.openExternal`, with no screen in between. ChatGPT had the
+// same shape with no stored account, and its web device-code start makes a
+// live request to the vendor. Every one of those paths now stops on a confirm.
+//
+// These assert the DRIVER, not the markup: "no `window.api` call happened" is
+// the only form of this that a rendering change cannot quietly satisfy.
+describe('SignInDialog — the confirm before the browser', () => {
+  const NO_CHATGPT_ACCOUNTS = { activeId: null, perSession: true, accounts: [] }
+  const ONE_CLAUDE_ACCOUNT = {
+    ...CLAUDE_ACCOUNTS,
+    enabled: false,
+    accounts: [CLAUDE_ACCOUNTS.accounts[0]]
+  }
+
+  it('Anthropic with multi-account OFF: opening calls no signIn, the click calls exactly one', async () => {
+    installApi('darwin', { getAccounts: vi.fn(async () => ONE_CLAUDE_ACCOUNT) })
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+
+    expect(screen.getByTestId('SignInDialog.confirm')).toBeTruthy()
+    expect(window.api.signIn).not.toHaveBeenCalled()
+    expect(window.api.addAccount).not.toHaveBeenCalled()
+    // And nothing is pretending the flow is already running.
+    expect(screen.queryByTestId('SignInDialog.waiting')).toBeNull()
+    expect(screen.queryByTestId('OAuthPasteBackFlow')).toBeNull()
+
+    await confirmStart()
+    expect(window.api.signIn).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('SignInDialog.waiting')).toBeTruthy()
+  })
+
+  it('names the credential it will use, when readAccounts knows one', async () => {
+    installApi('darwin', { getAccounts: vi.fn(async () => ONE_CLAUDE_ACCOUNT) })
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    // The half of ADR-068 §3 that was right: with one credential there is
+    // nothing to choose. The half that was wrong: the user still has to be
+    // told WHICH one, and asked.
+    const row = screen.getByTestId('SignInDialog.confirm')
+    expect(row).toHaveTextContent('one@example.com')
+    expect(row).toHaveAttribute('data-id', 'a1')
+    expect(screen.getByTestId('SignInDialog.plan')).toHaveTextContent('Claude Max')
+  })
+
+  it('ChatGPT with an empty account list: no vendor call until the click', async () => {
+    installApi('darwin', { listProviderAccounts: vi.fn(async () => NO_CHATGPT_ACCOUNTS) })
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+
+    expect(screen.getByTestId('SignInDialog.confirm')).toBeTruthy()
+    expect(window.api.vendorAuthOauthAuthorize).not.toHaveBeenCalled()
+    await confirmStart()
+    expect(window.api.vendorAuthOauthAuthorize).toHaveBeenCalledTimes(1)
+  })
+
+  it('on web the device-code start is a live vendor request, so it waits too', async () => {
+    installApi('web', { listProviderAccounts: vi.fn(async () => NO_CHATGPT_ACCOUNTS) })
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+
+    expect(window.api.vendorAuthDeviceCodeStart).not.toHaveBeenCalled()
+    await confirmStart()
+    expect(window.api.vendorAuthDeviceCodeStart).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not promise a browser the host will not open (ADR-057)', async () => {
+    // Desktop opens one; a remote host never `openExternal`s for a remote
+    // caller, so the web labels name what actually arrives instead.
+    installApi('darwin', { getAccounts: vi.fn(async () => ONE_CLAUDE_ACCOUNT) })
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    expect(screen.getByTestId('SignInDialog.confirmStart')).toHaveTextContent('Open browser')
+    cleanup()
+
+    installApi('web', { getAccounts: vi.fn(async () => ONE_CLAUDE_ACCOUNT) })
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    const claude = screen.getByTestId('SignInDialog.confirmStart')
+    expect(claude).toHaveTextContent('Get a sign-in link')
+    expect(claude).not.toHaveTextContent('browser')
+    cleanup()
+
+    installApi('web', { listProviderAccounts: vi.fn(async () => NO_CHATGPT_ACCOUNTS) })
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+    const chatgpt = screen.getByTestId('SignInDialog.confirmStart')
+    expect(chatgpt).toHaveTextContent('Get a code')
+    expect(chatgpt).not.toHaveTextContent('browser')
+  })
+
+  it('the chooser does NOT grow a second confirmation — the list already is one', async () => {
+    installApi('darwin')
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    // Two stored accounts: there IS something to choose between, so the list
+    // renders and Re-authorize still drives the flow on its own click.
+    expect(screen.getAllByTestId('SignInDialog.account')).toHaveLength(2)
+    expect(screen.queryByTestId('SignInDialog.confirm')).toBeNull()
+    expect(window.api.signIn).not.toHaveBeenCalled()
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.reauth'))
+    })
+    expect(screen.queryByTestId('SignInDialog.confirm')).toBeNull()
+    expect(window.api.signIn).toHaveBeenCalledTimes(1)
+  })
+
+  it('the same holds for the ChatGPT chooser', async () => {
+    installApi('darwin')
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+    expect(screen.getAllByTestId('SignInDialog.account')).toHaveLength(2)
+    expect(screen.queryByTestId('SignInDialog.confirm')).toBeNull()
+    expect(window.api.vendorAuthOauthAuthorize).not.toHaveBeenCalled()
+  })
+
+  it('Cancel from a confirmed flow lands on a chooser that can act, not a dead end', async () => {
+    installApi('darwin', { getAccounts: vi.fn(async () => ONE_CLAUDE_ACCOUNT) })
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    await confirmStart()
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.cancel'))
+    })
+    // F3's ruling, unchanged by the new stage: the chooser, naming the one
+    // credential, with a live Re-authorize on it.
+    expect(screen.queryByTestId('SignInDialog.confirm')).toBeNull()
+    expect(screen.getByTestId('SignInDialog.reauth')).toHaveAttribute('data-id', 'a1')
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('SignInDialog.reauth'))
+    })
+    expect(window.api.signIn).toHaveBeenCalledTimes(2)
+  })
+})
+
 // ── Cancel when there was nothing to choose between (F3) ────────────────────
 //
 // The dialog skips the chooser whenever the list has nothing to offer — no
@@ -486,7 +635,10 @@ describe('SignInDialog — Cancel with nothing to choose between', () => {
   it('web ChatGPT with no account: Cancel returns to a chooser that says so', async () => {
     installApi('web', { listProviderAccounts: vi.fn(async () => NO_CHATGPT_ACCOUNTS) })
     await open({ providerId: 'chatgpt', mode: 'reauth' })
-    // No rows, so the device flow starts on its own — unchanged.
+    // No rows, so there is nothing to choose — but the flow waits for the
+    // confirm's primary (Ruling 1) before it asks the vendor for anything.
+    expect(window.api.vendorAuthDeviceCodeStart).not.toHaveBeenCalled()
+    await confirmStart()
     expect(window.api.vendorAuthDeviceCodeStart).toHaveBeenCalledTimes(1)
     expect(screen.getByTestId('DeviceCodeFlow.code')).toHaveTextContent('ABCD-1234')
 
@@ -506,6 +658,7 @@ describe('SignInDialog — Cancel with nothing to choose between', () => {
   it('web ChatGPT with no account: the empty chooser’s Sign in starts the flow again', async () => {
     installApi('web', { listProviderAccounts: vi.fn(async () => NO_CHATGPT_ACCOUNTS) })
     await open({ providerId: 'chatgpt', mode: 'reauth' })
+    await confirmStart()
     await act(async () => {
       fireEvent.click(screen.getByTestId('DeviceCodeFlow.cancel'))
     })
@@ -526,7 +679,10 @@ describe('SignInDialog — Cancel with nothing to choose between', () => {
       }))
     })
     await open({ providerId: 'anthropic', mode: 'reauth' })
-    // Nothing to choose between, so the flow still starts without the chooser.
+    // Nothing to choose between, so the chooser is still skipped — but the
+    // confirm screen holds the flow until the user asks for it (Ruling 1).
+    expect(window.api.signIn).not.toHaveBeenCalled()
+    await confirmStart()
     expect(window.api.signIn).toHaveBeenCalledTimes(1)
     expect(screen.getByTestId('SignInDialog.waiting')).toBeTruthy()
 
@@ -551,6 +707,7 @@ describe('SignInDialog — Cancel with nothing to choose between', () => {
       getAccounts: vi.fn(async () => ({ ...CLAUDE_ACCOUNTS, enabled: false, accounts: [] }))
     })
     await open({ providerId: 'anthropic', mode: 'reauth' })
+    await confirmStart()
     expect(window.api.signIn).toHaveBeenCalledTimes(1)
     await act(async () => {
       fireEvent.click(screen.getByTestId('SignInDialog.cancel'))

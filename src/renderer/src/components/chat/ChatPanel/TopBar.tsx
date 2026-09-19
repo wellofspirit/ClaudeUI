@@ -6,6 +6,7 @@ import { WorktreePill } from '../../git/WorktreePill'
 import { GitBranchPill } from '../../git/GitBranchPill'
 import { GitChangesPill } from '../../git/GitChangesPill'
 import { AuthPill } from '../AuthPill'
+import { OVERFLOW_HIDE, TIER1_HIDE, TIER2_HIDE } from './top-bar-tiers'
 import { PermissionsDialog } from '../../PermissionsDialog'
 import { SkillsDialog } from '../../SkillsDialog'
 import { McpDialog } from '../../McpDialog'
@@ -155,213 +156,6 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const [ideError, setIdeError] = useState<string | null>(null)
 
   /**
-   * Mobile overflow ("⋯") menu contents. The desktop right-side buttons don't
-   * fit a phone bar, so the ones that still make sense there live behind this
-   * menu, in the same left-to-right order the desktop bar shows them. Each
-   * entry carries EXACTLY the gate its desktop button uses (Skills: capSkills;
-   * MCP: canUseMcp && engineId==='claude' — see the desktop button's comment
-   * for why the engine scope is load-bearing), so the two surfaces can never
-   * disagree about what this session can do. An empty list hides the ⋯ button
-   * entirely rather than opening an empty popover.
-   */
-  const overflowItems = useMemo(() => {
-    if (!cwd) return []
-    const items: Array<{
-      id: string
-      label: string
-      testId: string
-      icon: React.JSX.Element
-      onSelect: () => void
-    }> = []
-    // Terminal leads, matching the desktop bar's left-to-right order. Its gate
-    // is the desktop button's, verbatim — the host's own availability answer
-    // (`allowed === true`, so a null "still asking" renders nothing). The extra
-    // condition it inherits from this menu is `cwd`, and it is load-bearing:
-    // with no active directory, toggle-terminal.ts opens the panel but creates
-    // nothing, so a phone would land in the empty state whose `+` button spawns
-    // into TerminalPanel's `cwd || '.'` fallback — an invisible orphan pty with
-    // no second entry point to reach it from afterwards.
-    if (terminalAvailability?.allowed === true) {
-      items.push({
-        id: 'terminal',
-        label: 'Terminal',
-        testId: 'TopBar.overflowMenuTerminal',
-        icon: (
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="shrink-0"
-          >
-            <path d="M4 17l6-6-6-6" />
-            <path d="M12 19h8" />
-          </svg>
-        ),
-        // The same single source of truth the desktop button and the keybinding
-        // call — the takeover opens off `terminalPanelOpen` like the panel does.
-        onSelect: toggleTerminalPanel
-      })
-    }
-    if (capSkills) {
-      items.push({
-        id: 'skills',
-        label: 'Skills',
-        testId: 'TopBar.overflowMenuSkills',
-        icon: (
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="shrink-0"
-          >
-            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-          </svg>
-        ),
-        onSelect: () => setSkillsOpen(true)
-      })
-    }
-    if (canUseMcp && engineId === 'claude') {
-      items.push({
-        id: 'mcp',
-        label: 'MCP Servers',
-        testId: 'TopBar.overflowMenuMcp',
-        icon: (
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="shrink-0"
-          >
-            <path d="M12 22v-5" />
-            <path d="M9 8V2" />
-            <path d="M15 8V2" />
-            <path d="M18 8v5a6 6 0 0 1-6 6v0a6 6 0 0 1-6-6V8Z" />
-          </svg>
-        ),
-        onSelect: () => setMcpOpen(true)
-      })
-    }
-    items.push({
-      id: 'permissions',
-      label: 'Permissions',
-      testId: 'TopBar.overflowMenuPermissions',
-      icon: (
-        <svg
-          width="13"
-          height="13"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.8"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="shrink-0"
-        >
-          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-        </svg>
-      ),
-      onSelect: () => setPermissionsOpen(true)
-    })
-    return items
-  }, [cwd, capSkills, canUseMcp, engineId, terminalAvailability])
-
-  // Dismiss on outside pointerdown / Escape. pointerdown (not click) so a tap
-  // that starts outside never lands on whatever the menu was covering.
-  useEffect(() => {
-    if (!overflowOpen) return
-    const onPointerDown = (e: PointerEvent): void => {
-      if (overflowRef.current && !overflowRef.current.contains(e.target as Node)) {
-        setOverflowOpen(false)
-      }
-    }
-    const onKeyDown = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') setOverflowOpen(false)
-    }
-    document.addEventListener('pointerdown', onPointerDown)
-    document.addEventListener('keydown', onKeyDown)
-    return () => {
-      document.removeEventListener('pointerdown', onPointerDown)
-      document.removeEventListener('keydown', onKeyDown)
-    }
-  }, [overflowOpen])
-
-  const infoMouseEnter = useCallback(() => {
-    if (infoLeaveTimer.current) clearTimeout(infoLeaveTimer.current)
-    setInfoHover(true)
-  }, [])
-  const infoMouseLeave = useCallback(() => {
-    infoLeaveTimer.current = setTimeout(() => setInfoHover(false), 150)
-  }, [])
-
-  const displaySessionId = sdkSessionId || activeSessionId
-  // null = the engine could not price this session (never "free" — see
-  // SessionStatus.totalCostUsd). Kept nullable all the way to the render so
-  // the tooltip can say so instead of printing a fabricated $0.00.
-  const cost: number | null = statusLine ? statusLine.totalCostUsd : fallbackCost
-  const costUnknown = cost === null
-  const totalDurationMs = statusLine?.totalDurationMs ?? 0
-  const totalApiDurationMs = statusLine?.totalApiDurationMs ?? 0
-  const turnStartedAtMs = statusLine?.turnStartedAtMs ?? null
-  const rawModelCosts = statusLine?.modelCosts ?? []
-  // A single-model session's breakdown is redundant with the headline Cost
-  // figure — only show it when there's actually more than one line, or a
-  // dispatched (cross-engine, Slice C) row is present.
-  const showCostBreakdown = rawModelCosts.length >= 2 || rawModelCosts.some((m) => m.dispatched)
-  const sortedModelCosts = showCostBreakdown
-    ? [...rawModelCosts].sort((a, b) => b.costUsd - a.costUsd)
-    : []
-  // "Total incl. dispatched" (Slice C): headline own-engine cost + dispatched
-  // spend, NEVER sum(breakdown rows) — the headline is the authoritative
-  // own-engine figure, so summing rows instead could disagree with it if a
-  // per-model recompute ever drifts from the engine's own cumulative total.
-  const hasDispatchedCost = rawModelCosts.some((m) => m.dispatched)
-  const dispatchedCostUsd = rawModelCosts
-    .filter((m) => m.dispatched)
-    .reduce((acc, m) => acc + m.costUsd, 0)
-  // An unknown headline + a known dispatched figure is still worth showing:
-  // the dispatched spend is real money and the row says the rest is unknown,
-  // rather than silently reporting the dispatched part as the whole total.
-  const totalInclDispatchedUsd = (cost ?? 0) + dispatchedCostUsd
-  // Show the Cost tile when there is something to say: a real figure, a
-  // dispatched figure, or an explicit "we could not price this".
-  const showCost = cost === null || cost > 0 || hasDispatchedCost
-
-  // Tick every second while the tooltip is open and a turn is in flight, so
-  // "Session time" keeps counting up live instead of freezing until the next
-  // status-line event.
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    if (!infoHover || !turnStartedAtMs) return
-    setNow(Date.now())
-    const id = setInterval(() => setNow(Date.now()), 1000)
-    return () => clearInterval(id)
-  }, [infoHover, turnStartedAtMs])
-
-  const sessionDurationMs =
-    totalDurationMs + (turnStartedAtMs ? Math.max(0, now - turnStartedAtMs) : 0)
-
-  const handleCopy = useCallback((text: string, field: string) => {
-    navigator.clipboard.writeText(text)
-    setCopiedField(field)
-    setTimeout(() => setCopiedField(null), 1500)
-  }, [])
-
-  /**
    * The VSCode button's two completely different jobs (ADR-064 §5).
    *
    * DESKTOP is unchanged and stays unchanged: `vscode://file/…` handed to the
@@ -484,495 +278,807 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
     }
   }, [cwd, isWeb, ideAvailability, ideThemeKind, refreshIdeAvailability])
 
-  return (
-    <div
-      style={{
-        paddingLeft: leftPadding,
-        paddingRight: isMobileCtx ? 8 : 13,
-        paddingTop: isMobileCtx ? 'env(safe-area-inset-top)' : undefined
-      }}
-      data-testid="TopBar"
-      className="shrink-0 h-12 flex items-center justify-between [-webkit-app-region:drag] border-b border-border relative"
-    >
-      {/* `flex-1`, so this group's width is the space the right cluster leaves
-          rather than the width of its own contents. That makes it a DEFINITE
-          size its children can be laid out against — which is what lets
-          `AuthPill`'s slot take the remainder and answer "does the full label
-          fit?" from available width (the sidebar moves it by ~276px at a
-          constant window size) instead of a window breakpoint. */}
-      <div data-testid="TopBar.leftGroup" className="flex flex-1 items-center min-w-0">
-        {/* Mobile: always show hamburger + new session */}
-        {isMobileCtx && (
-          <div className="[-webkit-app-region:no-drag] flex items-center gap-1 mr-2">
-            <button
-              data-testid="TopBar.toggleSidebar"
-              onClick={toggleSidebar}
-              className="w-[30px] h-[30px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
-              title="Menu"
-            >
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-              >
-                <path d="M3 12h18" />
-                <path d="M3 6h18" />
-                <path d="M3 18h18" />
-              </svg>
-            </button>
-            <button
-              data-testid="TopBar.newSession"
-              onClick={showWelcome}
-              className="w-[30px] h-[30px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
-              title="New session"
-            >
-              <svg
-                width="15"
-                height="15"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-              >
-                <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
-                <path d="M18.5 2.5a2.12 2.12 0 013 3L12 15l-4 1 1-4z" />
-              </svg>
-            </button>
-          </div>
-        )}
-        {/* Desktop: show sidebar toggle when collapsed */}
-        {!isMobileCtx && sidebarCollapsed && (
-          <div
-            style={
-              isMac
-                ? {
-                    position: 'absolute',
-                    left: 82 / uiFontScale,
-                    top: 22 / uiFontScale,
-                    transform: 'translateY(-50%)'
-                  }
-                : { marginRight: 8 }
-            }
-            className="[-webkit-app-region:no-drag] flex items-center gap-1"
+  /**
+   * Overflow ("⋯") menu contents — tier 2's destination.
+   *
+   * The five tool buttons do not fit a narrow bar, so below `TIER2_HIDE` they
+   * live behind this menu, in the same left-to-right order the desktop bar
+   * shows them. A phone is simply the narrowest case of that, not a branch of
+   * its own. Each entry carries EXACTLY the gate its desktop button uses
+   * (Skills: capSkills; MCP: canUseMcp && engineId==='claude' — see the desktop
+   * button's comment for why the engine scope is load-bearing), so the two
+   * surfaces can never disagree about what this session can do. An empty list
+   * hides the ⋯ button entirely rather than opening an empty popover.
+   */
+  const overflowItems = useMemo(() => {
+    if (!cwd) return []
+    const items: Array<{
+      id: string
+      label: string
+      testId: string
+      icon: React.JSX.Element
+      onSelect: () => void
+    }> = []
+    // VS Code leads, as it does on the bar. Its gate is the desktop button's
+    // verbatim, minus the `cwd` this menu has already required: on the desktop
+    // the `vscode://` deep link is always available, and on web only once the
+    // host says the owner turned the remote IDE on. `!isMobileCtx` is NOT
+    // carried across — that condition was the old device branch, and tier 2 is
+    // the width rule that replaces it (the same reason Terminal's entry below
+    // never carried it either).
+    if (!isWeb || ideAvailability?.allowed === true) {
+      items.push({
+        id: 'vscode',
+        label: 'Open in VS Code',
+        testId: 'TopBar.overflowMenuVSCode',
+        icon: (
+          <svg width="13" height="13" viewBox="0 0 100 100" fill="none" className="shrink-0">
+            <path
+              fillRule="evenodd"
+              clipRule="evenodd"
+              d="M70.912 99.317a6.223 6.223 0 004.96-.19l20.589-9.907A6.25 6.25 0 00100 83.587V16.413a6.25 6.25 0 00-3.539-5.633L75.872.873a6.226 6.226 0 00-7.109 1.318L29.355 38.044 12.187 25.02a4.162 4.162 0 00-5.318.27L1.382 30.308a4.168 4.168 0 00-.005 6.146L16.674 50 1.377 63.546a4.168 4.168 0 00.005 6.146l5.487 5.018a4.162 4.162 0 005.318.27l17.168-13.024 39.408 35.853a6.213 6.213 0 002.149 1.508zM75.015 27.3L45.11 50l29.906 22.7V27.3z"
+              fill="currentColor"
+            />
+          </svg>
+        ),
+        // The SAME handler the bar's button calls, so the two entry points
+        // cannot drift in what a click actually does.
+        onSelect: () => void handleOpenVSCode()
+      })
+    }
+    // Terminal follows, matching the desktop bar's left-to-right order. Its gate
+    // is the desktop button's, verbatim — the host's own availability answer
+    // (`allowed === true`, so a null "still asking" renders nothing). The extra
+    // condition it inherits from this menu is `cwd`, and it is load-bearing:
+    // with no active directory, toggle-terminal.ts opens the panel but creates
+    // nothing, so a phone would land in the empty state whose `+` button spawns
+    // into TerminalPanel's `cwd || '.'` fallback — an invisible orphan pty with
+    // no second entry point to reach it from afterwards.
+    if (terminalAvailability?.allowed === true) {
+      items.push({
+        id: 'terminal',
+        label: 'Terminal',
+        testId: 'TopBar.overflowMenuTerminal',
+        icon: (
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="shrink-0"
           >
+            <path d="M4 17l6-6-6-6" />
+            <path d="M12 19h8" />
+          </svg>
+        ),
+        // The same single source of truth the desktop button and the keybinding
+        // call — the takeover opens off `terminalPanelOpen` like the panel does.
+        onSelect: toggleTerminalPanel
+      })
+    }
+    if (capSkills) {
+      items.push({
+        id: 'skills',
+        label: 'Skills',
+        testId: 'TopBar.overflowMenuSkills',
+        icon: (
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="shrink-0"
+          >
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+          </svg>
+        ),
+        onSelect: () => setSkillsOpen(true)
+      })
+    }
+    if (canUseMcp && engineId === 'claude') {
+      items.push({
+        id: 'mcp',
+        label: 'MCP Servers',
+        testId: 'TopBar.overflowMenuMcp',
+        icon: (
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="shrink-0"
+          >
+            <path d="M12 22v-5" />
+            <path d="M9 8V2" />
+            <path d="M15 8V2" />
+            <path d="M18 8v5a6 6 0 0 1-6 6v0a6 6 0 0 1-6-6V8Z" />
+          </svg>
+        ),
+        onSelect: () => setMcpOpen(true)
+      })
+    }
+    items.push({
+      id: 'permissions',
+      label: 'Permissions',
+      testId: 'TopBar.overflowMenuPermissions',
+      icon: (
+        <svg
+          width="13"
+          height="13"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="shrink-0"
+        >
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        </svg>
+      ),
+      onSelect: () => setPermissionsOpen(true)
+    })
+    return items
+  }, [
+    cwd,
+    capSkills,
+    canUseMcp,
+    engineId,
+    terminalAvailability,
+    isWeb,
+    ideAvailability,
+    handleOpenVSCode
+  ])
+
+  // Dismiss on outside pointerdown / Escape. pointerdown (not click) so a tap
+  // that starts outside never lands on whatever the menu was covering.
+  useEffect(() => {
+    if (!overflowOpen) return
+    const onPointerDown = (e: PointerEvent): void => {
+      if (overflowRef.current && !overflowRef.current.contains(e.target as Node)) {
+        setOverflowOpen(false)
+      }
+    }
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setOverflowOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [overflowOpen])
+
+  const infoMouseEnter = useCallback(() => {
+    if (infoLeaveTimer.current) clearTimeout(infoLeaveTimer.current)
+    setInfoHover(true)
+  }, [])
+  const infoMouseLeave = useCallback(() => {
+    infoLeaveTimer.current = setTimeout(() => setInfoHover(false), 150)
+  }, [])
+
+  const displaySessionId = sdkSessionId || activeSessionId
+  // null = the engine could not price this session (never "free" — see
+  // SessionStatus.totalCostUsd). Kept nullable all the way to the render so
+  // the tooltip can say so instead of printing a fabricated $0.00.
+  const cost: number | null = statusLine ? statusLine.totalCostUsd : fallbackCost
+  const costUnknown = cost === null
+  const totalDurationMs = statusLine?.totalDurationMs ?? 0
+  const totalApiDurationMs = statusLine?.totalApiDurationMs ?? 0
+  const turnStartedAtMs = statusLine?.turnStartedAtMs ?? null
+  const rawModelCosts = statusLine?.modelCosts ?? []
+  // A single-model session's breakdown is redundant with the headline Cost
+  // figure — only show it when there's actually more than one line, or a
+  // dispatched (cross-engine, Slice C) row is present.
+  const showCostBreakdown = rawModelCosts.length >= 2 || rawModelCosts.some((m) => m.dispatched)
+  const sortedModelCosts = showCostBreakdown
+    ? [...rawModelCosts].sort((a, b) => b.costUsd - a.costUsd)
+    : []
+  // "Total incl. dispatched" (Slice C): headline own-engine cost + dispatched
+  // spend, NEVER sum(breakdown rows) — the headline is the authoritative
+  // own-engine figure, so summing rows instead could disagree with it if a
+  // per-model recompute ever drifts from the engine's own cumulative total.
+  const hasDispatchedCost = rawModelCosts.some((m) => m.dispatched)
+  const dispatchedCostUsd = rawModelCosts
+    .filter((m) => m.dispatched)
+    .reduce((acc, m) => acc + m.costUsd, 0)
+  // An unknown headline + a known dispatched figure is still worth showing:
+  // the dispatched spend is real money and the row says the rest is unknown,
+  // rather than silently reporting the dispatched part as the whole total.
+  const totalInclDispatchedUsd = (cost ?? 0) + dispatchedCostUsd
+  // Show the Cost tile when there is something to say: a real figure, a
+  // dispatched figure, or an explicit "we could not price this".
+  const showCost = cost === null || cost > 0 || hasDispatchedCost
+
+  // Tick every second while the tooltip is open and a turn is in flight, so
+  // "Session time" keeps counting up live instead of freezing until the next
+  // status-line event.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!infoHover || !turnStartedAtMs) return
+    setNow(Date.now())
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [infoHover, turnStartedAtMs])
+
+  const sessionDurationMs =
+    totalDurationMs + (turnStartedAtMs ? Math.max(0, now - turnStartedAtMs) : 0)
+
+  const handleCopy = useCallback((text: string, field: string) => {
+    navigator.clipboard.writeText(text)
+    setCopiedField(field)
+    setTimeout(() => setCopiedField(null), 1500)
+  }, [])
+
+  return (
+    <>
+      {/* `@container/bar` is what makes `top-bar-tiers.ts` a question about
+          AVAILABLE width. The fragment and the `z-30` are its price, and both
+          are deliberately paid whether or not this engine charges it.
+
+          CSS Containment 3 says `container-type: inline-size` applies LAYOUT
+          containment, and layout containment makes an element (a) the
+          containing block for `position: fixed` / `absolute` descendants and
+          (b) a stacking context. Both would matter here: the four dialogs
+          below are `fixed inset-0` and would collapse into a 48px bar, and the
+          info tooltip's and the ⋯ menu's `z-50` would be scoped below
+          `ChatNoticeStack`'s `z-20` — over exactly the band they hang into.
+
+          MEASURED, and the spec loses. In Chromium 151 a `fixed inset-0` child
+          of this element still resolves to the viewport, an `absolute` child
+          still finds the nearest positioned ancestor, and the menu still paints
+          over a `z-20` sibling: `getComputedStyle().contain` reports `none`, so
+          none of the side effects fire. But the measuring browser is not the
+          app's (Electron 43 ships a much older Chromium) and an engine that
+          reads the spec literally is conforming, not broken — so neither is
+          relied on. The dialogs sit OUTSIDE the container (hence the fragment;
+          they were already `z-[100]` under a non-stacking `relative` parent, so
+          their paint order is unchanged), and `z-30` keeps the bar's own
+          overlays above the notice stack and the `z-10` widget stack either
+          way, while staying below the mobile sidebar scrim's `z-40` and every
+          `z-[100]` dialog. Both invariants are pinned by test. */}
+      <div
+        style={{
+          paddingLeft: leftPadding,
+          paddingRight: isMobileCtx ? 8 : 13,
+          paddingTop: isMobileCtx ? 'env(safe-area-inset-top)' : undefined
+        }}
+        data-testid="TopBar"
+        className="@container/bar shrink-0 h-12 flex items-center justify-between [-webkit-app-region:drag] border-b border-border relative"
+      >
+        {/* `flex-1`, so this group's width is the space the right cluster leaves
+            rather than the width of its own contents. That makes it a DEFINITE
+            size its children can be laid out against — which is what lets
+            `AuthPill`'s slot take the remainder and answer "does the full label
+            fit?" from available width (the sidebar moves it by ~276px at a
+            constant window size) instead of a window breakpoint. */}
+        <div data-testid="TopBar.leftGroup" className="flex flex-1 items-center min-w-0">
+          {/* Mobile: always show hamburger + new session */}
+          {isMobileCtx && (
+            <div className="[-webkit-app-region:no-drag] flex items-center gap-1 mr-2">
+              <button
+                data-testid="TopBar.toggleSidebar"
+                onClick={toggleSidebar}
+                className="w-[30px] h-[30px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+                title="Menu"
+              >
+                <svg
+                  width="18"
+                  height="18"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                >
+                  <path d="M3 12h18" />
+                  <path d="M3 6h18" />
+                  <path d="M3 18h18" />
+                </svg>
+              </button>
+              <button
+                data-testid="TopBar.newSession"
+                onClick={showWelcome}
+                className="w-[30px] h-[30px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+                title="New session"
+              >
+                <svg
+                  width="15"
+                  height="15"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                >
+                  <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+                  <path d="M18.5 2.5a2.12 2.12 0 013 3L12 15l-4 1 1-4z" />
+                </svg>
+              </button>
+            </div>
+          )}
+          {/* Desktop: show sidebar toggle when collapsed */}
+          {!isMobileCtx && sidebarCollapsed && (
+            <div
+              style={
+                isMac
+                  ? {
+                      position: 'absolute',
+                      left: 82 / uiFontScale,
+                      top: 22 / uiFontScale,
+                      transform: 'translateY(-50%)'
+                    }
+                  : { marginRight: 8 }
+              }
+              className="[-webkit-app-region:no-drag] flex items-center gap-1"
+            >
+              <button
+                data-testid="TopBar.toggleSidebar"
+                onClick={toggleSidebar}
+                className="w-[26px] h-[26px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+                title="Show sidebar"
+              >
+                <svg
+                  width="18"
+                  height="18"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <rect x="3" y="3" width="18" height="18" rx="2" />
+                  <path d="M9 3v18" />
+                  <path d="M14 9l3 3-3 3" />
+                </svg>
+              </button>
+              <button
+                data-testid="TopBar.newSession"
+                onClick={showWelcome}
+                className="w-[26px] h-[26px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+                title="New session"
+              >
+                <svg
+                  width="15"
+                  height="15"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                >
+                  <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+                  <path d="M18.5 2.5a2.12 2.12 0 013 3L12 15l-4 1 1-4z" />
+                </svg>
+              </button>
+            </div>
+          )}
+          {/* Title and pill are ONE unit (ADR-070 §4: the pill sits immediately
+              after the title, and after the two icons when the sidebar is
+              collapsed). It is a unit here because the title's reservation below
+              is a percentage, so it needs a containing block that is exactly
+              "what the icons left" — against the whole left group it would
+              promise the pill room the icons had already taken. */}
+          <div data-testid="TopBar.titleGroup" className="flex flex-1 items-center min-w-0">
+            {/* `max-w-[calc(100%-34px)]` — everything except one compact pill
+                (22px) plus its 8px gutter. Both halves matter: the title can
+                never be squeezed to zero while the pill is shown (ADR-070 §4
+                promised the pill "never permanently costs the title its space";
+                before this it cost it ALL of it), and a long custom title can
+                never starve the alarm down to nothing either. */}
+            <div
+              data-testid="TopBar.info"
+              className="flex items-center min-w-0 max-w-[calc(100%-34px)] [-webkit-app-region:no-drag] relative"
+              onMouseEnter={infoMouseEnter}
+              onMouseLeave={infoMouseLeave}
+            >
+              <span className="flex items-center gap-1 text-[13px] text-text-secondary font-normal truncate cursor-default">
+                {cwd && hasContent && engineId && engineId !== 'claude' && (
+                  <EngineLogo engineId={engineId} size={11} className="shrink-0 opacity-75" />
+                )}
+                {!cwd ? 'New session' : hasContent ? customTitle || 'Session' : 'New session'}
+              </span>
+              {(cwd || displaySessionId) && (
+                <>
+                  <svg
+                    width="10"
+                    height="10"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="shrink-0 ml-1 text-text-muted/40 relative top-px"
+                  >
+                    <circle cx="12" cy="12" r="10" />
+                    <path d="M12 16v-4" />
+                    <path d="M12 8h.01" />
+                  </svg>
+                  {infoHover && (
+                    <div
+                      className="absolute top-full left-0 pt-1 z-50"
+                      onMouseEnter={infoMouseEnter}
+                      onMouseLeave={infoMouseLeave}
+                    >
+                      <div className="bg-bg-primary border border-border rounded-lg shadow-lg py-2 px-3 space-y-2 min-w-[200px] max-w-[400px] animate-fade-in">
+                        {cwd && (
+                          <button
+                            onClick={() => handleCopy(cwd, 'cwd')}
+                            className="w-full text-left cursor-default group/row"
+                          >
+                            <div className="text-[10px] text-text-muted mb-0.5">
+                              Working Directory
+                            </div>
+                            <div className="text-[11px] text-text-secondary font-mono truncate group-hover/row:text-text-primary transition-colors">
+                              {copiedField === 'cwd' ? 'Copied!' : cwd}
+                            </div>
+                          </button>
+                        )}
+                        {displaySessionId && (
+                          <button
+                            onClick={() => handleCopy(displaySessionId, 'sid')}
+                            className="w-full text-left cursor-default group/row"
+                          >
+                            <div className="text-[10px] text-text-muted mb-0.5">Session ID</div>
+                            <div className="text-[11px] text-text-secondary font-mono truncate group-hover/row:text-text-primary transition-colors">
+                              {copiedField === 'sid' ? 'Copied!' : displaySessionId}
+                            </div>
+                          </button>
+                        )}
+                        {(showCost || sessionDurationMs > 0 || totalApiDurationMs > 0) && (
+                          <div className="flex gap-4">
+                            {showCost && (
+                              <div>
+                                <div className="text-[10px] text-text-muted mb-0.5">Cost</div>
+                                <div
+                                  data-testid="TopBar.cost"
+                                  className="text-[11px] text-text-secondary font-mono"
+                                >
+                                  {formatCostOrUnknown(cost)}
+                                </div>
+                                {showCostBreakdown && (
+                                  <div
+                                    data-testid="TopBar.costBreakdown"
+                                    className="mt-1 space-y-0.5"
+                                  >
+                                    {sortedModelCosts.map((m) => (
+                                      <div
+                                        key={`${m.engineId}:${m.modelId}`}
+                                        data-testid="TopBar.costBreakdownRow"
+                                        data-model={m.modelId}
+                                        {...(m.dispatched ? { 'data-dispatched': 'true' } : {})}
+                                        className="flex items-center justify-between gap-3"
+                                      >
+                                        <span className="text-[10px] text-text-muted truncate">
+                                          {m.dispatched
+                                            ? `${dispatchedModelLabel(m.modelId)} · dispatched`
+                                            : shortModelName(m.modelId)}
+                                        </span>
+                                        <span className="text-[10px] text-text-secondary font-mono shrink-0">
+                                          {formatCostUsd(m.costUsd)}
+                                        </span>
+                                      </div>
+                                    ))}
+                                    {hasDispatchedCost && (
+                                      <div
+                                        data-testid="TopBar.costTotalInclDispatched"
+                                        {...(costUnknown ? { 'data-cost-unknown': 'true' } : {})}
+                                        className="flex items-center justify-between gap-3 pt-0.5 mt-0.5 border-t border-border/50"
+                                      >
+                                        <span className="text-[10px] text-text-muted truncate">
+                                          Total incl. dispatched
+                                        </span>
+                                        <span className="text-[10px] text-text-secondary font-mono shrink-0">
+                                          {costUnknown
+                                            ? `${formatCostUsd(dispatchedCostUsd)} + ${COST_UNKNOWN}`
+                                            : formatCostUsd(totalInclDispatchedUsd)}
+                                        </span>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                            {sessionDurationMs > 0 && (
+                              <div data-testid="TopBar.sessionTime">
+                                <div className="text-[10px] text-text-muted mb-0.5">
+                                  Session time
+                                </div>
+                                <div className="text-[11px] text-text-secondary font-mono">
+                                  {formatDuration(sessionDurationMs)}
+                                </div>
+                              </div>
+                            )}
+                            {totalApiDurationMs > 0 && (
+                              <div data-testid="TopBar.apiTime">
+                                <div className="text-[10px] text-text-muted mb-0.5">API time</div>
+                                <div className="text-[11px] text-text-secondary font-mono">
+                                  {formatDuration(totalApiDurationMs)}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+            {/* ADR-070 §4: the app's one auth indicator, in the LEFT group right
+                after the title — not in the already-full right cluster, and never
+                with the engine or model beside it (those stay in the composer).
+                It renders nothing while every credential is healthy or
+                unprobed. */}
+            <AuthPill />
+          </div>
+        </div>
+        <div
+          data-testid="TopBar.rightGroup"
+          className="flex items-center gap-3 [-webkit-app-region:no-drag]"
+        >
+          {/* The ONE shrinkable child of this cluster, and deliberately in no
+              tier (ADR-070 residual 1, Slice F decision).
+
+              It could not simply collapse WITH the VS Code button: below tier 2
+              the button's click has moved into the ⋯ menu, so hiding the line
+              too would turn a refused pop-up into silence — the user taps
+              "Open in VS Code", the menu closes and nothing at all happens.
+              Keeping it in the cluster instead costs nothing, because it is the
+              one text node here: `min-w-0 shrink` + `truncate` let it give up
+              every pixel it has before the bar overflows, with the full text on
+              its own `title`. `!isMobileCtx` went with the device branch — the
+              phone can now reach VS Code through the menu, so it can now get
+              this failure too. */}
+          {ideError && (
+            <span
+              data-testid="TopBar.openVSCodeError"
+              title={ideError}
+              className="min-w-0 shrink text-[11px] text-red-400 max-w-[220px] truncate"
+            >
+              {ideError}
+            </span>
+          )}
+          {/* Desktop: always, and it is the `vscode://` deep link — a host-physical
+              act the remote toggle has no say over. Web: only once the host's own
+              `ide:availability` says the owner turned the remote IDE on, the
+              terminal-button precedent verbatim (toggle off ⇒ no affordance, and a
+              null "still asking" renders nothing rather than flashing in and out).
+              Origin/CLI refusals deliberately do NOT hide it: those are the states
+              ADR-064 rules must be EXPLAINED, so the button stays and opens the
+              dialog.
+
+              TIER 2: the WIDTH rule decides whether this renders as a button or
+              as the ⋯ menu's first row. The gate itself is unchanged and is the
+              one `overflowItems` carries verbatim. */}
+          {cwd && (!isWeb || ideAvailability?.allowed === true) && (
             <button
-              data-testid="TopBar.toggleSidebar"
-              onClick={toggleSidebar}
-              className="w-[26px] h-[26px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
-              title="Show sidebar"
+              data-testid="TopBar.openVSCode"
+              onClick={() => void handleOpenVSCode()}
+              className={`group ${TIER2_HIDE} flex items-baseline gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default`}
+              title="Open in VS Code"
             >
               <svg
-                width="18"
-                height="18"
+                width="11"
+                height="11"
+                viewBox="0 0 100 100"
+                fill="none"
+                className="shrink-0 relative top-[1px] transition-opacity"
+              >
+                <mask id="vsc" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100">
+                  <path
+                    fillRule="evenodd"
+                    clipRule="evenodd"
+                    d="M70.912 99.317a6.223 6.223 0 004.96-.19l20.589-9.907A6.25 6.25 0 00100 83.587V16.413a6.25 6.25 0 00-3.539-5.633L75.872.873a6.226 6.226 0 00-7.109 1.318L29.355 38.044 12.187 25.02a4.162 4.162 0 00-5.318.27L1.382 30.308a4.168 4.168 0 00-.005 6.146L16.674 50 1.377 63.546a4.168 4.168 0 00.005 6.146l5.487 5.018a4.162 4.162 0 005.318.27l17.168-13.024 39.408 35.853a6.213 6.213 0 002.149 1.508zM75.015 27.3L45.11 50l29.906 22.7V27.3z"
+                    fill="#fff"
+                  />
+                </mask>
+                <g mask="url(#vsc)">
+                  <path
+                    d="M96.461 10.796L75.857.873a6.23 6.23 0 00-7.108 1.318l-67.37 61.354a4.167 4.167 0 00.006 6.146l5.487 5.018a4.163 4.163 0 005.318.27L96.47 10.87l-.009-.073z"
+                    className="fill-current group-hover:fill-[#0065A9] transition-colors"
+                  />
+                  <path
+                    d="M96.461 89.204L75.857 99.127a6.23 6.23 0 01-7.108-1.318L1.38 36.455a4.167 4.167 0 01.006-6.146l5.487-5.018a4.163 4.163 0 015.318-.27L96.47 89.13l-.009.073z"
+                    className="fill-current group-hover:fill-[#007ACC] transition-colors"
+                  />
+                  <path
+                    d="M75.857 99.127a6.226 6.226 0 01-7.108-1.318C73.952 102.61 81.25 98.28 81.25 91.667V8.333c0-6.614-7.298-10.943-12.5-6.142a6.226 6.226 0 017.108-1.318l20.604 9.923A6.25 6.25 0 01100 16.43v67.14a6.25 6.25 0 01-3.538 5.634l-20.605 9.923z"
+                    className="fill-current group-hover:fill-[#1F9CF0] transition-colors"
+                  />
+                </g>
+              </svg>
+              <span>VSCode</span>
+            </button>
+          )}
+          {/* The only *visible* way into the terminal panel. The Ctrl/Cmd+` and
+              Alt+` keybindings stay, but Ctrl/Cmd+` is unreachable in a browser
+              (macOS owns Cmd+`, Edge swallows Ctrl+`), so web needs a button.
+              Gated on the host's own answer: on desktop the hook resolves
+              "allowed" synchronously with no IPC (the remote toggle governs
+              remote access, never the local shell), while on web the button only
+              appears once `terminal:availability` says yes — no affordance for a
+              shell this client cannot get. Null (web, first query in flight)
+              renders nothing: appearing a beat late beats flashing out. The panel
+              re-asks the same question itself — defense in depth. Mobile reaches
+              the same helper from the ⋯ menu (the bar has no room for it), which
+              carries this exact gate — and TIER 2 is now the only thing that
+              decides which of the two surfaces the user sees. */}
+          {terminalAvailability?.allowed === true && (
+            <button
+              data-testid="TopBar.terminal"
+              onClick={toggleTerminalPanel}
+              className={`${TIER2_HIDE} flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default`}
+              title={isMacKeyboard ? 'Terminal (⌥`)' : 'Terminal (Ctrl+`)'}
+            >
+              <svg
+                width="13"
+                height="13"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
                 strokeWidth="1.8"
                 strokeLinecap="round"
                 strokeLinejoin="round"
+                className="shrink-0"
               >
-                <rect x="3" y="3" width="18" height="18" rx="2" />
-                <path d="M9 3v18" />
-                <path d="M14 9l3 3-3 3" />
+                <path d="M4 17l6-6-6-6" />
+                <path d="M12 19h8" />
               </svg>
             </button>
+          )}
+          {cwd && capSkills && (
             <button
-              data-testid="TopBar.newSession"
-              onClick={showWelcome}
-              className="w-[26px] h-[26px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
-              title="New session"
+              data-testid="TopBar.skills"
+              onClick={() => setSkillsOpen(true)}
+              className={`${TIER2_HIDE} flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default`}
+              title="Skills"
             >
               <svg
-                width="15"
-                height="15"
+                width="12"
+                height="12"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
                 strokeWidth="1.8"
                 strokeLinecap="round"
+                strokeLinejoin="round"
+                className="shrink-0"
               >
-                <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
-                <path d="M18.5 2.5a2.12 2.12 0 013 3L12 15l-4 1 1-4z" />
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
               </svg>
             </button>
-          </div>
-        )}
-        {/* Title and pill are ONE unit (ADR-070 §4: the pill sits immediately
-            after the title, and after the two icons when the sidebar is
-            collapsed). It is a unit here because the title's reservation below
-            is a percentage, so it needs a containing block that is exactly
-            "what the icons left" — against the whole left group it would
-            promise the pill room the icons had already taken. */}
-        <div data-testid="TopBar.titleGroup" className="flex flex-1 items-center min-w-0">
-          {/* `max-w-[calc(100%-34px)]` — everything except one compact pill
-              (22px) plus its 8px gutter. Both halves matter: the title can
-              never be squeezed to zero while the pill is shown (ADR-070 §4
-              promised the pill "never permanently costs the title its space";
-              before this it cost it ALL of it), and a long custom title can
-              never starve the alarm down to nothing either. */}
-          <div
-            data-testid="TopBar.info"
-            className="flex items-center min-w-0 max-w-[calc(100%-34px)] [-webkit-app-region:no-drag] relative"
-            onMouseEnter={infoMouseEnter}
-            onMouseLeave={infoMouseLeave}
-          >
-            <span className="flex items-center gap-1 text-[13px] text-text-secondary font-normal truncate cursor-default">
-              {cwd && hasContent && engineId && engineId !== 'claude' && (
-                <EngineLogo engineId={engineId} size={11} className="shrink-0 opacity-75" />
-              )}
-              {!cwd ? 'New session' : hasContent ? customTitle || 'Session' : 'New session'}
-            </span>
-            {(cwd || displaySessionId) && (
-              <>
-                <svg
-                  width="10"
-                  height="10"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  className="shrink-0 ml-1 text-text-muted/40 relative top-px"
-                >
-                  <circle cx="12" cy="12" r="10" />
-                  <path d="M12 16v-4" />
-                  <path d="M12 8h.01" />
-                </svg>
-                {infoHover && (
-                  <div
-                    className="absolute top-full left-0 pt-1 z-50"
-                    onMouseEnter={infoMouseEnter}
-                    onMouseLeave={infoMouseLeave}
-                  >
-                    <div className="bg-bg-primary border border-border rounded-lg shadow-lg py-2 px-3 space-y-2 min-w-[200px] max-w-[400px] animate-fade-in">
-                      {cwd && (
-                        <button
-                          onClick={() => handleCopy(cwd, 'cwd')}
-                          className="w-full text-left cursor-default group/row"
-                        >
-                          <div className="text-[10px] text-text-muted mb-0.5">
-                            Working Directory
-                          </div>
-                          <div className="text-[11px] text-text-secondary font-mono truncate group-hover/row:text-text-primary transition-colors">
-                            {copiedField === 'cwd' ? 'Copied!' : cwd}
-                          </div>
-                        </button>
-                      )}
-                      {displaySessionId && (
-                        <button
-                          onClick={() => handleCopy(displaySessionId, 'sid')}
-                          className="w-full text-left cursor-default group/row"
-                        >
-                          <div className="text-[10px] text-text-muted mb-0.5">Session ID</div>
-                          <div className="text-[11px] text-text-secondary font-mono truncate group-hover/row:text-text-primary transition-colors">
-                            {copiedField === 'sid' ? 'Copied!' : displaySessionId}
-                          </div>
-                        </button>
-                      )}
-                      {(showCost || sessionDurationMs > 0 || totalApiDurationMs > 0) && (
-                        <div className="flex gap-4">
-                          {showCost && (
-                            <div>
-                              <div className="text-[10px] text-text-muted mb-0.5">Cost</div>
-                              <div
-                                data-testid="TopBar.cost"
-                                className="text-[11px] text-text-secondary font-mono"
-                              >
-                                {formatCostOrUnknown(cost)}
-                              </div>
-                              {showCostBreakdown && (
-                                <div
-                                  data-testid="TopBar.costBreakdown"
-                                  className="mt-1 space-y-0.5"
-                                >
-                                  {sortedModelCosts.map((m) => (
-                                    <div
-                                      key={`${m.engineId}:${m.modelId}`}
-                                      data-testid="TopBar.costBreakdownRow"
-                                      data-model={m.modelId}
-                                      {...(m.dispatched ? { 'data-dispatched': 'true' } : {})}
-                                      className="flex items-center justify-between gap-3"
-                                    >
-                                      <span className="text-[10px] text-text-muted truncate">
-                                        {m.dispatched
-                                          ? `${dispatchedModelLabel(m.modelId)} · dispatched`
-                                          : shortModelName(m.modelId)}
-                                      </span>
-                                      <span className="text-[10px] text-text-secondary font-mono shrink-0">
-                                        {formatCostUsd(m.costUsd)}
-                                      </span>
-                                    </div>
-                                  ))}
-                                  {hasDispatchedCost && (
-                                    <div
-                                      data-testid="TopBar.costTotalInclDispatched"
-                                      {...(costUnknown ? { 'data-cost-unknown': 'true' } : {})}
-                                      className="flex items-center justify-between gap-3 pt-0.5 mt-0.5 border-t border-border/50"
-                                    >
-                                      <span className="text-[10px] text-text-muted truncate">
-                                        Total incl. dispatched
-                                      </span>
-                                      <span className="text-[10px] text-text-secondary font-mono shrink-0">
-                                        {costUnknown
-                                          ? `${formatCostUsd(dispatchedCostUsd)} + ${COST_UNKNOWN}`
-                                          : formatCostUsd(totalInclDispatchedUsd)}
-                                      </span>
-                                    </div>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          )}
-                          {sessionDurationMs > 0 && (
-                            <div data-testid="TopBar.sessionTime">
-                              <div className="text-[10px] text-text-muted mb-0.5">Session time</div>
-                              <div className="text-[11px] text-text-secondary font-mono">
-                                {formatDuration(sessionDurationMs)}
-                              </div>
-                            </div>
-                          )}
-                          {totalApiDurationMs > 0 && (
-                            <div data-testid="TopBar.apiTime">
-                              <div className="text-[10px] text-text-muted mb-0.5">API time</div>
-                              <div className="text-[11px] text-text-secondary font-mono">
-                                {formatDuration(totalApiDurationMs)}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-          {/* ADR-070 §4: the app's one auth indicator, in the LEFT group right
-              after the title — not in the already-full right cluster, and never
-              with the engine or model beside it (those stay in the composer).
-              It renders nothing while every credential is healthy or
-              unprobed. */}
-          <AuthPill />
-        </div>
-      </div>
-      <div
-        data-testid="TopBar.rightGroup"
-        className="flex items-center gap-3 [-webkit-app-region:no-drag]"
-      >
-        {!isMobileCtx && ideError && (
-          <span
-            data-testid="TopBar.openVSCodeError"
-            title={ideError}
-            className="text-[11px] text-red-400 max-w-[220px] truncate"
-          >
-            {ideError}
-          </span>
-        )}
-        {/* Desktop: always, and it is the `vscode://` deep link — a host-physical
-            act the remote toggle has no say over. Web: only once the host's own
-            `ide:availability` says the owner turned the remote IDE on, the
-            terminal-button precedent verbatim (toggle off ⇒ no affordance, and a
-            null "still asking" renders nothing rather than flashing in and out).
-            Origin/CLI refusals deliberately do NOT hide it: those are the states
-            ADR-064 rules must be EXPLAINED, so the button stays and opens the
-            dialog. */}
-        {!isMobileCtx && cwd && (!isWeb || ideAvailability?.allowed === true) && (
-          <button
-            data-testid="TopBar.openVSCode"
-            onClick={() => void handleOpenVSCode()}
-            className="group flex items-baseline gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
-            title="Open in VS Code"
-          >
-            <svg
-              width="11"
-              height="11"
-              viewBox="0 0 100 100"
-              fill="none"
-              className="shrink-0 relative top-[1px] transition-opacity"
-            >
-              <mask id="vsc" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100">
-                <path
-                  fillRule="evenodd"
-                  clipRule="evenodd"
-                  d="M70.912 99.317a6.223 6.223 0 004.96-.19l20.589-9.907A6.25 6.25 0 00100 83.587V16.413a6.25 6.25 0 00-3.539-5.633L75.872.873a6.226 6.226 0 00-7.109 1.318L29.355 38.044 12.187 25.02a4.162 4.162 0 00-5.318.27L1.382 30.308a4.168 4.168 0 00-.005 6.146L16.674 50 1.377 63.546a4.168 4.168 0 00.005 6.146l5.487 5.018a4.162 4.162 0 005.318.27l17.168-13.024 39.408 35.853a6.213 6.213 0 002.149 1.508zM75.015 27.3L45.11 50l29.906 22.7V27.3z"
-                  fill="#fff"
-                />
-              </mask>
-              <g mask="url(#vsc)">
-                <path
-                  d="M96.461 10.796L75.857.873a6.23 6.23 0 00-7.108 1.318l-67.37 61.354a4.167 4.167 0 00.006 6.146l5.487 5.018a4.163 4.163 0 005.318.27L96.47 10.87l-.009-.073z"
-                  className="fill-current group-hover:fill-[#0065A9] transition-colors"
-                />
-                <path
-                  d="M96.461 89.204L75.857 99.127a6.23 6.23 0 01-7.108-1.318L1.38 36.455a4.167 4.167 0 01.006-6.146l5.487-5.018a4.163 4.163 0 015.318-.27L96.47 89.13l-.009.073z"
-                  className="fill-current group-hover:fill-[#007ACC] transition-colors"
-                />
-                <path
-                  d="M75.857 99.127a6.226 6.226 0 01-7.108-1.318C73.952 102.61 81.25 98.28 81.25 91.667V8.333c0-6.614-7.298-10.943-12.5-6.142a6.226 6.226 0 017.108-1.318l20.604 9.923A6.25 6.25 0 01100 16.43v67.14a6.25 6.25 0 01-3.538 5.634l-20.605 9.923z"
-                  className="fill-current group-hover:fill-[#1F9CF0] transition-colors"
-                />
-              </g>
-            </svg>
-            <span>VSCode</span>
-          </button>
-        )}
-        {/* The only *visible* way into the terminal panel. The Ctrl/Cmd+` and
-            Alt+` keybindings stay, but Ctrl/Cmd+` is unreachable in a browser
-            (macOS owns Cmd+`, Edge swallows Ctrl+`), so web needs a button.
-            Gated on the host's own answer: on desktop the hook resolves
-            "allowed" synchronously with no IPC (the remote toggle governs
-            remote access, never the local shell), while on web the button only
-            appears once `terminal:availability` says yes — no affordance for a
-            shell this client cannot get. Null (web, first query in flight)
-            renders nothing: appearing a beat late beats flashing out. The panel
-            re-asks the same question itself — defense in depth. Mobile reaches
-            the same helper from the ⋯ menu (the bar has no room for it), which
-            carries this exact gate. */}
-        {!isMobileCtx && terminalAvailability?.allowed === true && (
-          <button
-            data-testid="TopBar.terminal"
-            onClick={toggleTerminalPanel}
-            className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
-            title={isMacKeyboard ? 'Terminal (⌥`)' : 'Terminal (Ctrl+`)'}
-          >
-            <svg
-              width="13"
-              height="13"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="shrink-0"
-            >
-              <path d="M4 17l6-6-6-6" />
-              <path d="M12 19h8" />
-            </svg>
-          </button>
-        )}
-        {!isMobileCtx && cwd && capSkills && (
-          <button
-            data-testid="TopBar.skills"
-            onClick={() => setSkillsOpen(true)}
-            className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
-            title="Skills"
-          >
-            <svg
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="shrink-0"
-            >
-              <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-            </svg>
-          </button>
-        )}
-        {/* MCP config dialog manages Claude's .mcp.json servers — Claude-native
-            config, not "hosted tools". Scoped to engineId==='claude' so flipping
-            opencode's hostedMcp capability (Phase 5c, for our injected plugin
-            tools) does NOT surface this Claude-only config UI for opencode. */}
-        {!isMobileCtx && cwd && canUseMcp && engineId === 'claude' && (
-          <button
-            data-testid="TopBar.mcp"
-            onClick={() => setMcpOpen(true)}
-            className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
-            title="MCP Servers"
-          >
-            <svg
-              width="13"
-              height="13"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="shrink-0"
-            >
-              <path d="M12 22v-5" />
-              <path d="M9 8V2" />
-              <path d="M15 8V2" />
-              <path d="M18 8v5a6 6 0 0 1-6 6v0a6 6 0 0 1-6-6V8Z" />
-            </svg>
-          </button>
-        )}
-        {!isMobileCtx && cwd && (
-          <button
-            data-testid="TopBar.permissions"
-            onClick={() => setPermissionsOpen(true)}
-            className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
-            title="Project permissions"
-          >
-            <svg
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="shrink-0"
-            >
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-            </svg>
-          </button>
-        )}
-        {!isMobileCtx && <WorktreePill />}
-        {!isMobileCtx && <GitBranchPill />}
-        {/* Mobile keeps the changes pill — it doubles as the git-panel entry
-            point (MobileGitView) and self-hides outside a git repo. */}
-        <GitChangesPill />
-        {!isMobileCtx && <WindowControls />}
-        {/* The dropdown below deliberately has no positioned wrapper: it anchors
-            to the TopBar itself (the nearest positioned ancestor), so it hangs
-            below the whole bar right-aligned instead of mid-bar off the button. */}
-        {isMobileCtx && overflowItems.length > 0 && (
-          <div ref={overflowRef}>
+          )}
+          {/* MCP config dialog manages Claude's .mcp.json servers — Claude-native
+              config, not "hosted tools". Scoped to engineId==='claude' so flipping
+              opencode's hostedMcp capability (Phase 5c, for our injected plugin
+              tools) does NOT surface this Claude-only config UI for opencode. */}
+          {cwd && canUseMcp && engineId === 'claude' && (
             <button
-              data-testid="TopBar.overflowMenu"
-              onClick={() => setOverflowOpen((o) => !o)}
-              className="w-[30px] h-[30px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
-              title="More"
+              data-testid="TopBar.mcp"
+              onClick={() => setMcpOpen(true)}
+              className={`${TIER2_HIDE} flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default`}
+              title="MCP Servers"
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                <circle cx="12" cy="5" r="1.6" />
-                <circle cx="12" cy="12" r="1.6" />
-                <circle cx="12" cy="19" r="1.6" />
+              <svg
+                width="13"
+                height="13"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="shrink-0"
+              >
+                <path d="M12 22v-5" />
+                <path d="M9 8V2" />
+                <path d="M15 8V2" />
+                <path d="M18 8v5a6 6 0 0 1-6 6v0a6 6 0 0 1-6-6V8Z" />
               </svg>
             </button>
-            {overflowOpen && (
-              <div className="absolute top-full right-0 mt-1 z-50 min-w-[180px] bg-bg-primary border border-border rounded-lg shadow-lg py-1 animate-fade-in">
-                {overflowItems.map((item) => (
-                  <button
-                    key={item.id}
-                    data-testid={item.testId}
-                    onClick={() => {
-                      setOverflowOpen(false)
-                      item.onSelect()
-                    }}
-                    className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-[13px] text-text-secondary hover:bg-bg-hover transition-colors"
-                  >
-                    {item.icon}
-                    <span>{item.label}</span>
-                  </button>
-                ))}
-              </div>
-            )}
+          )}
+          {cwd && (
+            <button
+              data-testid="TopBar.permissions"
+              onClick={() => setPermissionsOpen(true)}
+              className={`${TIER2_HIDE} flex items-center gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default`}
+              title="Project permissions"
+            >
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="shrink-0"
+              >
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+              </svg>
+            </button>
+          )}
+          {/* TIER 1 — the first 344px the bar gives back, and the only tier
+              whose contents have nowhere else to go: the branch and worktree
+              are STATE, not actions, so there is no menu row to move them to.
+              `contents` rather than a wrapper box, because both pills render
+              null outside a repo / worktree and a wrapper would leave an empty
+              flex item behind, paying the cluster's 12px gap for nothing. */}
+          <div className={`contents ${TIER1_HIDE}`}>
+            <WorktreePill />
           </div>
-        )}
+          <div className={`contents ${TIER1_HIDE}`}>
+            <GitBranchPill />
+          </div>
+          {/* Never dropped: the changes pill doubles as the git-panel entry
+              point (MobileGitView) and self-hides outside a git repo. */}
+          <GitChangesPill />
+          {/* Never dropped either, and no longer device-gated: `WindowControls`
+              renders only on win32, where it is the frameless window's ONLY
+              minimise / maximise / close. The old `!isMobileCtx` took them away
+              from a narrow Electron window — `minWidth: 600` is well inside the
+              mobile breakpoint — leaving no way to close the app from the bar. */}
+          <WindowControls />
+          {/* The dropdown below deliberately has no positioned wrapper: it anchors
+              to the TopBar itself (the nearest positioned ancestor), so it hangs
+              below the whole bar right-aligned instead of mid-bar off the button.
+
+              The trigger is the exact complement of TIER 2, so the five tools
+              and this button are never both present and never both absent. It
+              is in the DOM at every width — CSS, not JS, decides — because the
+              bar has no measurement of its own and must not grow one. */}
+          {overflowItems.length > 0 && (
+            <div ref={overflowRef} className={OVERFLOW_HIDE}>
+              <button
+                data-testid="TopBar.overflowMenu"
+                onClick={() => setOverflowOpen((o) => !o)}
+                className="w-[30px] h-[30px] flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+                title="More"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                  <circle cx="12" cy="5" r="1.6" />
+                  <circle cx="12" cy="12" r="1.6" />
+                  <circle cx="12" cy="19" r="1.6" />
+                </svg>
+              </button>
+              {overflowOpen && (
+                <div className="absolute top-full right-0 mt-1 z-50 min-w-[180px] bg-bg-primary border border-border rounded-lg shadow-lg py-1 animate-fade-in">
+                  {overflowItems.map((item) => (
+                    <button
+                      key={item.id}
+                      data-testid={item.testId}
+                      onClick={() => {
+                        setOverflowOpen(false)
+                        item.onSelect()
+                      }}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 text-left text-[13px] text-text-secondary hover:bg-bg-hover transition-colors"
+                    >
+                      {item.icon}
+                      <span>{item.label}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
       <SkillsDialog open={skillsOpen} onClose={() => setSkillsOpen(false)} cwd={cwd} />
       <McpDialog
@@ -993,6 +1099,6 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
           onClose={() => setIdeDialog(null)}
         />
       )}
-    </div>
+    </>
   )
 }

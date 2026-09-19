@@ -143,29 +143,46 @@ This corrects an assumption of [ADR-057](adr-057_remote-vendor-oauth-paste-back.
 - Remote-access authentication is untouched and stays in Settings › Remote.
 - No commit or push is authorized by this ADR; ADR-026's loop applies to every slice.
 
-### Residuals the real-app drive found, not fixed here
+### Residuals the real-app drive found
 
 Verified by a separate agent driving the real Electron app and a hermetic web client (screenshots
 reviewed), then confirmed in the code. None is introduced by this arc; all three were made visible
-by it.
+by it. **Two were ruled on by the owner (2026-09-19) and closed by slice F; the third stands.**
 
-- **The top bar cannot fit itself.** `TopBar.rightGroup` has no `min-w-0` and no shrinkable child, so
-  it never yields a pixel: with `minWidth: 600` and a 280px sidebar the bar can be ~320px while the
-  right cluster wants ~668px. The pill was merely the first child to make that visible, and §4's fix
-  contains the pill rather than making the bar fit. The cluster IS bounded (every text child
-  truncates), so this is a layout decision — let the git/IDE cluster truncate, or collapse it into
-  the overflow menu below a width — not a leak.
-- **A one-click sign-in can open a browser with no intervening screen.** `SignInDialog`'s open-time
-  effect auto-starts the flow whenever `readAccounts` reports `autoStart`, which for Anthropic is
-  _whenever multi-account is off_. So opening it on Anthropic calls `signIn()` → `shell.openExternal`
-  with nothing in between. Pre-existing ADR-068 §3 behaviour and unchanged here, but the calculus
-  moved: the banner it replaced could be dismissed with "Later", and the pill deliberately cannot, so
-  the entry point is now permanently on screen. Whether that path deserves a confirm step is an open
-  owner decision.
-- **Notice legibility.** The stacked cards sit over transcript text and read poorly, and the band is
-  still shared with `TodoWidget` (`top-14 z-10` against the stack's `top-12 z-20`). §4's claim is only
-  that the three _notices_ no longer overlap each other, which holds and was measured; this is a
-  separate pre-existing issue.
+- **The top bar cannot fit itself. — FIXED, slice F.** `TopBar.rightGroup` had no `min-w-0` and no
+  shrinkable child, so it never yielded a pixel: with `minWidth: 600` and a 280px sidebar the bar can
+  be ~320px while the right cluster wants 852px (measured worst case, uiFontScale 1, win32). The pill
+  was merely the first child to make that visible, and §4's fix contained the pill rather than making
+  the bar fit. Owner ruling: collapse in **tiers**, by container query on the bar, with the phone as a
+  case of the width rule rather than a device branch beside it —
+  1. `WorktreePill`, `GitBranchPill` (−344px, below 1000px of bar content);
+  2. VS Code, Terminal, Skills, MCP, Permissions → the ⋯ menu (−206.6px net, below 768px);
+  3. never: `GitChangesPill`, `WindowControls`.
+
+  The thresholds are the measured cost of each tier plus a 96px floor for the title and the pill's
+  34px reservation (948.4 and 604.4), rounded up; tier 2's is raised to `MOBILE_BREAKPOINT` (768) so
+  that every phone viewport is inside the collapsed tier by construction. `src/layout/` sweeps the
+  real bar in Chromium and pins all of it. What remains bounded rather than solved: the three "never"
+  children still want 302px of content in the worst case (~275px typically), so at `minWidth: 600`
+  with a 280px sidebar the bar is ~8px short — an owner decision about that row, not a leak.
+
+- **A one-click sign-in can open a browser with no intervening screen. — FIXED, slice F.**
+  `SignInDialog`'s open-time effect auto-started the flow whenever `readAccounts` reported
+  `autoStart`, which for Anthropic is _whenever multi-account is off_. So opening it on Anthropic
+  called `signIn()` → `shell.openExternal` with nothing in between. ADR-068 §3's reasoning was right
+  about the CONTENT — with one credential there is nothing to choose between — but the screen it
+  removed was also the confirmation, and the pill that replaced the dismissible banner is permanently
+  on screen. Owner ruling: a **confirm stage**, showing the provider, the account the flow will use
+  when one is known, and a single primary naming what happens — `Open browser` on the desktop, and on
+  web the thing that actually arrives (`Get a sign-in link` / `Get a code`), because ADR-057's host
+  never `openExternal`s for a remote caller. It covers every auto-start path, `mode: 'add'` included:
+  the entry-point button says what the dialog is _for_, not that a browser is about to take the
+  screen, and a rule with an exception is a rule that rots. The chooser is unchanged — when there IS
+  something to choose between, the account list already is the confirmation.
+- **Notice legibility. — stands.** The stacked cards sit over transcript text and read poorly, and the
+  band is still shared with `TodoWidget` (`top-14 z-10` against the stack's `top-12 z-20`). §4's claim
+  is only that the three _notices_ no longer overlap each other, which holds and was measured; this is
+  a separate pre-existing issue.
 
 ## Phases
 
@@ -173,6 +190,9 @@ by it.
 2. **Slice B — the pill and the row.** §4: the `authIssues` selector, `AuthPill` and its variants, `AuthTranscriptRow`, the three deletions, the ordered stack container, retry from both surfaces.
 3. **Slice C — the dialog.** §5: the copy cuts, the retry relocation, the provider-list mode.
 4. **Slice D — the remote Claude sign-in.** §6.
+5. **Slice E — the pill must not eat the title.** §4's containment, plus the `src/layout/` measuring
+   harness the geometry claims are pinned by.
+6. **Slice F — the two owner rulings above.** The confirm stage, and the bar that collapses in tiers.
 
 ## Alternatives considered
 
