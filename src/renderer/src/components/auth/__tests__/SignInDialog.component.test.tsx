@@ -537,6 +537,91 @@ describe('SignInDialog — the confirm before the browser', () => {
     expect(row).toHaveTextContent('one@example.com')
     expect(row).toHaveAttribute('data-id', 'a1')
     expect(screen.getByTestId('SignInDialog.plan')).toHaveTextContent('Claude Max')
+    // Slice H: the step joins the named account, so both confirm modes are the
+    // same screen — dot, subject, step, button.
+    expect(row).toHaveTextContent('Your browser opens')
+    expect(screen.getByTestId('SignInDialog.activeDot')).toHaveAttribute('data-active', 'true')
+  })
+
+  // ── Slice H: the confirm needs a SUBJECT (mockup `ebde050f` option C) ──────
+  //
+  // The owner opened the `add` confirm and got an invisible dot, an empty
+  // `flex-1` and a floating button: the row was designed to name a credential
+  // and `add` has none by construction. What it does have is the one it is
+  // about to create, so the row names that.
+  it('with no credential to name, the confirm still has a subject and a step', async () => {
+    installApi('darwin')
+    await open({ providerId: 'anthropic', mode: 'add' })
+
+    const row = screen.getByTestId('SignInDialog.confirm')
+    const primary = screen.getByTestId('SignInDialog.confirmStart')
+    // Named off the shared provider table, never hardcoded here.
+    expect(row).toHaveTextContent('A new Claude account')
+    expect(row).toHaveTextContent('Your browser opens')
+    // The defect itself: everything in the row that is NOT the button used to
+    // be an invisible dot and an empty flex-1, i.e. no visible text at all.
+    expect(row.textContent?.replace(primary.textContent ?? '', '').trim()).toBeTruthy()
+    // And Slice F's safety property is untouched by the cosmetics: the screen
+    // has still started nothing.
+    expect(window.api.addAccount).not.toHaveBeenCalled()
+    expect(window.api.signIn).not.toHaveBeenCalled()
+    await confirmStart()
+    expect(window.api.addAccount).toHaveBeenCalledTimes(1)
+  })
+
+  it('the dot says which of the two it is: a credential, or one that does not exist yet', async () => {
+    installApi('darwin', { getAccounts: vi.fn(async () => ONE_CLAUDE_ACCOUNT) })
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    const named = screen.getByTestId('SignInDialog.activeDot')
+    expect(named).toHaveAttribute('data-active', 'true')
+    const namedClass = named.className
+    cleanup()
+
+    installApi('darwin')
+    await open({ providerId: 'anthropic', mode: 'add' })
+    const unnamed = screen.getByTestId('SignInDialog.activeDot')
+    expect(unnamed).toHaveAttribute('data-active', 'false')
+    // A hollow ring, not a fill — and not the unstyled span that read as a
+    // failed render. The two states have to LOOK different, not just carry
+    // different attributes.
+    expect(unnamed.className).not.toEqual(namedClass)
+    expect(unnamed.className).toContain('border')
+    expect(unnamed.className).not.toContain('bg-accent')
+  })
+
+  /**
+   * The step sentence and the button label are the SAME promise, so they are
+   * chosen in one branch. Asserted as PAIRS: an edit that reworded one and left
+   * the other behind would pass two separate assertions, and the failure mode
+   * that matters is a web client promised a browser the host will not open for
+   * it (ADR-057) — in prose rather than on a button.
+   */
+  it('the step and the label are one choice, per host', async () => {
+    installApi('darwin', { getAccounts: vi.fn(async () => ONE_CLAUDE_ACCOUNT) })
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    expect(screen.getByTestId('SignInDialog.confirmStart')).toHaveTextContent('Open browser')
+    expect(screen.getByTestId('SignInDialog.confirm')).toHaveTextContent(
+      'Your browser opens; the sign-in finishes there.'
+    )
+    cleanup()
+
+    // Web, paste-back: the host hands back a link and takes a code.
+    installApi('web', { getAccounts: vi.fn(async () => ONE_CLAUDE_ACCOUNT) })
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    expect(screen.getByTestId('SignInDialog.confirmStart')).toHaveTextContent('Get a sign-in link')
+    const paste = screen.getByTestId('SignInDialog.confirm')
+    expect(paste).toHaveTextContent('paste a code back here')
+    // The whole row, not just the button: nothing here opens a host browser.
+    expect(paste).not.toHaveTextContent('browser')
+    cleanup()
+
+    // Web, device code: the default ChatGPT flow, which opens its own page.
+    installApi('web', { listProviderAccounts: vi.fn(async () => NO_CHATGPT_ACCOUNTS) })
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+    expect(screen.getByTestId('SignInDialog.confirmStart')).toHaveTextContent('Get a code')
+    const device = screen.getByTestId('SignInDialog.confirm')
+    expect(device).toHaveTextContent('enter the code on the page it opens')
+    expect(device).not.toHaveTextContent('browser')
   })
 
   it('ChatGPT with an empty account list: no vendor call until the click', async () => {
