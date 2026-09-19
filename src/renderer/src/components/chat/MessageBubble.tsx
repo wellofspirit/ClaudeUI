@@ -1,4 +1,4 @@
-import { memo, useState } from 'react'
+import { createContext, memo, useContext, useState } from 'react'
 import type {
   ChatMessage,
   ContentBlock,
@@ -115,6 +115,30 @@ function renderToolBlock(
   return (
     <ToolCallBlock key={key} block={block} result={result} approval={approval} review={review} />
   )
+}
+
+/**
+ * WHICH session's transcript these bubbles belong to — the chat message list
+ * provides its own routing id; every other host leaves it `null`.
+ *
+ * `MessageBubble` is not the chat's alone: automation-run history replays a
+ * recorded run through it. Anything inside a bubble that needs a session was
+ * therefore reading `activeSessionId`, which for a replayed run is an unrelated
+ * chat — so its auth row showed that session's lifetime and its Retry re-sent
+ * the prompt into a session the user was not looking at.
+ *
+ * `null` is a real answer, not a missing one: a transcript that belongs to no
+ * open session has no live fact to read and nothing it could correctly act on.
+ * Consumers render history.
+ */
+const TranscriptSessionContext = createContext<string | null>(null)
+
+/** Mounted by a message list that IS a session's transcript. */
+export const TranscriptSessionProvider = TranscriptSessionContext.Provider
+
+/** The routing id of the transcript this bubble is in, or `null`. */
+export function useTranscriptSessionId(): string | null {
+  return useContext(TranscriptSessionContext)
 }
 
 /** Stable identity so the default never re-renders a memoised bubble. */
@@ -696,13 +720,30 @@ function AuthTranscriptRow({
 }: {
   block: Extract<ContentBlock, { type: 'api_error' }>
 }): React.JSX.Element {
-  const authRequired = useActiveSession((s) => s.authRequired)
-  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  // The session whose TRANSCRIPT this is — never the active one. See
+  // {@link TranscriptSessionContext}: `null` (automation-run history, or any
+  // other host) has no live fact and gets the settled row.
+  const routingId = useTranscriptSessionId()
+  const sessionFact = useSessionStore((s) =>
+    routingId ? (s.sessions[routingId]?.authRequired ?? null) : null
+  )
   const providerAccounts = useSessionStore((s) => s.providerAccounts)
   const openSignIn = useSessionStore((s) => s.openSignIn)
   const retrySend = useSessionStore((s) => s.retrySend)
   const clearAuthRequired = useSessionStore((s) => s.clearAuthRequired)
   const [expanded, setExpanded] = useState(false)
+
+  // The session's fact is THIS row's lifetime only while the two are about the
+  // same credential. ADR-070 §4 matches per session rather than per block and
+  // accepts the resulting duplication — but only between rows that name the
+  // SAME provider. A session that failed on Anthropic and later on ChatGPT
+  // otherwise rendered its Anthropic row saying "Claude rejected the
+  // credential" above a Sign in that opened ChatGPT: named one, acted on
+  // another. A block that names nobody predates the field and still defers.
+  const authRequired =
+    sessionFact && (block.providerId === undefined || block.providerId === sessionFact.providerId)
+      ? sessionFact
+      : null
 
   const lifetime = !authRequired
     ? 'settled'
@@ -717,16 +758,12 @@ function AuthTranscriptRow({
   // session's live fact is the fallback, for blocks written before the field
   // existed (it is optional exactly so those stay valid).
   const named = block.providerId ?? authRequired?.providerId
-  // The ACTION, though, still belongs to the SESSION: ADR-070 §4 matches the
-  // lifetime per session rather than per block, so a session holding two
-  // failures offers the sign-in the session currently owes — not the one this
-  // particular row recorded.
   const providerId = authRequired?.providerId
   const drivable = providerId !== undefined && isDrivableProvider(providerId)
-  // Verbatim, and the engine's own words win: the event carries them now, and
-  // this block's text is the same sentence for every engine but Claude, whose
-  // block predates the event and says whatever the API said.
-  const detail = authRequired?.message || block.errorMessage
+  // Verbatim, and THIS block's words win: they are per-block correct, while the
+  // event's message describes whatever the session failed on last. The message
+  // is the fallback for a block that carried no text of its own.
+  const detail = block.errorMessage || authRequired?.message
   const sentence = named
     ? `Turn stopped — ${providerDisplayName(named)} rejected the credential.`
     : 'Turn stopped — the credential was rejected.'
@@ -750,18 +787,18 @@ function AuthTranscriptRow({
       providerId,
       mode: 'reauth',
       ...(authRequired?.accountId ? { accountId: authRequired.accountId } : {}),
-      ...(authRequired?.retryPrompt && activeSessionId
-        ? { retry: { routingId: activeSessionId, prompt: authRequired.retryPrompt } }
+      ...(authRequired?.retryPrompt && routingId
+        ? { retry: { routingId, prompt: authRequired.retryPrompt } }
         : {})
     })
   }
 
   const retry = (): void => {
-    if (!activeSessionId || !authRequired?.retryPrompt) return
-    void retrySend(activeSessionId, authRequired.retryPrompt)
+    if (!routingId || !authRequired?.retryPrompt) return
+    void retrySend(routingId, authRequired.retryPrompt)
     // Performing the retry IS lifetime 3 (ADR-070 §2) — don't wait for the
     // respawned turn to start running before the row stops offering it.
-    clearAuthRequired(activeSessionId)
+    clearAuthRequired(routingId)
   }
 
   /** The account a resolution signed in as, when the vault's list names one. */

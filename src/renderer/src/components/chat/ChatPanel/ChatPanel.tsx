@@ -5,7 +5,7 @@ import {
   useSessionStore,
   useFocusedAgentData
 } from '../../../stores/session-store'
-import { MessageBubble } from '../MessageBubble'
+import { MessageBubble, TranscriptSessionProvider } from '../MessageBubble'
 import { InputBox } from '../InputBox'
 import { TodoWidget } from '../../TodoWidget'
 import { SentFilesWidget } from '../../SentFilesWidget'
@@ -314,20 +314,26 @@ export function ChatPanel(): React.JSX.Element {
                   layout of the message list is untouched. They own the two
                   full-screen viewers: a thumbnail click opens the image gallery,
                   expanding a diagram card opens the diagram gallery. */}
-              <ImageGalleryProvider messages={messages}>
-                <DiagramGalleryProvider messages={messages}>
-                  {messages.map((msg) => (
-                    <div key={msg.id} className="cv-auto">
-                      <MessageBubble
-                        message={msg}
-                        pendingApprovals={pendingApprovals}
-                        isLastAssistant={msg.id === lastAssistantId}
-                        activeThinking={activeThinkingByMessage.get(msg.id)}
-                      />
-                    </div>
-                  ))}
-                </DiagramGalleryProvider>
-              </ImageGalleryProvider>
+              {/* WHOSE transcript this is. A bubble that needs a session must
+                  read it from here, not from `activeSessionId` — the same
+                  component also replays automation-run history, where that
+                  pointer names an unrelated chat. */}
+              <TranscriptSessionProvider value={activeSessionId}>
+                <ImageGalleryProvider messages={messages}>
+                  <DiagramGalleryProvider messages={messages}>
+                    {messages.map((msg) => (
+                      <div key={msg.id} className="cv-auto">
+                        <MessageBubble
+                          message={msg}
+                          pendingApprovals={pendingApprovals}
+                          isLastAssistant={msg.id === lastAssistantId}
+                          activeThinking={activeThinkingByMessage.get(msg.id)}
+                        />
+                      </div>
+                    ))}
+                  </DiagramGalleryProvider>
+                </ImageGalleryProvider>
+              </TranscriptSessionProvider>
               <div className="flex flex-col gap-5">
                 {!hasItemStreams && status.state === 'running' && <TypingIndicator />}
               </div>

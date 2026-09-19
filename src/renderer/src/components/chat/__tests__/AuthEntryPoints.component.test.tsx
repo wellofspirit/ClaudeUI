@@ -26,7 +26,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useSessionStore } from '../../../stores/session-store'
 import { AuthPill } from '../AuthPill'
-import { MessageBubble } from '../MessageBubble'
+import { MessageBubble, TranscriptSessionProvider } from '../MessageBubble'
 import { SidebarContext } from '../../SessionView'
 import type { ChatMessage } from '../../../../../shared/types'
 
@@ -87,28 +87,30 @@ function renderPill(): ReturnType<typeof render> {
   )
 }
 
+const AUTH_MESSAGE: ChatMessage = {
+  id: 'err-1',
+  role: 'system',
+  content: [{ type: 'api_error', errorType: 'authentication', errorMessage: 'API Error: 401' }],
+  timestamp: 0
+} as ChatMessage
+
+/** The chat message list's host — the row is in THIS session's transcript. */
 function renderRow(): ReturnType<typeof render> {
-  const message: ChatMessage = {
-    id: 'err-1',
-    role: 'system',
-    content: [{ type: 'api_error', errorType: 'authentication', errorMessage: 'API Error: 401' }],
-    timestamp: 0
-  } as ChatMessage
-  return render(<MessageBubble message={message} pendingApprovals={[]} isLastAssistant={false} />)
+  return render(
+    <TranscriptSessionProvider value={ROUTING_ID}>
+      <MessageBubble message={AUTH_MESSAGE} pendingApprovals={[]} isLastAssistant={false} />
+    </TranscriptSessionProvider>
+  )
 }
 
 /** Both surviving surfaces at once, for the host-parity case below. */
 function renderBoth(): ReturnType<typeof render> {
-  const message: ChatMessage = {
-    id: 'err-1',
-    role: 'system',
-    content: [{ type: 'api_error', errorType: 'authentication', errorMessage: 'API Error: 401' }],
-    timestamp: 0
-  } as ChatMessage
   return render(
     <SidebarContext.Provider value={{ collapsed: false, toggle: () => {}, isMobile: false }}>
       <AuthPill />
-      <MessageBubble message={message} pendingApprovals={[]} isLastAssistant={false} />
+      <TranscriptSessionProvider value={ROUTING_ID}>
+        <MessageBubble message={AUTH_MESSAGE} pendingApprovals={[]} isLastAssistant={false} />
+      </TranscriptSessionProvider>
     </SidebarContext.Provider>
   )
 }

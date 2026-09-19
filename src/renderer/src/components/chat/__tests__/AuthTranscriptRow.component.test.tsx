@@ -16,12 +16,14 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useSessionStore } from '../../../stores/session-store'
-import { MessageBubble } from '../MessageBubble'
+import { MessageBubble, TranscriptSessionProvider } from '../MessageBubble'
 import type { ChatMessage } from '../../../../../shared/types'
 
 vi.mock('electron', async () => await import('../../../../../test/stubs/electron-shim'))
 
 const ROUTING_ID = 'r-auth-row'
+/** A second, unrelated chat session — the one the ACTIVE pointer is parked on. */
+const OTHER_ID = 'r-auth-row-other'
 
 function installApi(over: Record<string, unknown> = {}): void {
   ;(globalThis as unknown as { window: Record<string, unknown> }).window.api = {
@@ -66,7 +68,24 @@ function authBlockMessage(
   } as ChatMessage
 }
 
+/** The chat message list's host: the row is in THIS session's transcript. */
 function renderRow(errorMessage?: string, providerId?: string): ReturnType<typeof render> {
+  return render(
+    <TranscriptSessionProvider value={ROUTING_ID}>
+      <MessageBubble
+        message={authBlockMessage(errorMessage, providerId)}
+        pendingApprovals={[]}
+        isLastAssistant={false}
+      />
+    </TranscriptSessionProvider>
+  )
+}
+
+/**
+ * Any OTHER host — automation run history is the real one. No provider, so the
+ * context's `null` default is what the row sees.
+ */
+function renderInHistory(errorMessage?: string, providerId?: string): ReturnType<typeof render> {
   return render(
     <MessageBubble
       message={authBlockMessage(errorMessage, providerId)}
@@ -194,18 +213,17 @@ describe('AuthTranscriptRow — broken', () => {
     expect(screen.queryByTestId('AuthTranscriptRow.message')).toBeNull()
     fireEvent.click(screen.getByTestId('AuthTranscriptRow.disclose'))
     expect(screen.getByTestId('AuthTranscriptRow.message')).toHaveTextContent(
-      'ChatGPT rejected the credential Codex runs under.'
+      'API Error: 401 invalid authentication'
     )
     // No navigation, no dialog — pure in-place disclosure.
     expect(useSessionStore.getState().signInDialog).toBeNull()
   })
 
-  it("falls back to the block's own text when the event carried no message", () => {
-    patch({ authRequired: { providerId: 'anthropic' } })
-    renderRow('API Error: 401 invalid authentication')
+  it("falls back to the event's message for a block that carried no text", () => {
+    renderRow('')
     fireEvent.click(screen.getByTestId('AuthTranscriptRow.disclose'))
     expect(screen.getByTestId('AuthTranscriptRow.message')).toHaveTextContent(
-      'API Error: 401 invalid authentication'
+      'ChatGPT rejected the credential Codex runs under.'
     )
   })
 
@@ -277,6 +295,170 @@ describe('AuthTranscriptRow — resolved, retry owed', () => {
 
   it('keeps the disclosure, so the words survive the fix', () => {
     renderRow()
+    fireEvent.click(screen.getByTestId('AuthTranscriptRow.disclose'))
+    expect(screen.getByTestId('AuthTranscriptRow.message')).toHaveTextContent(
+      'API Error: 401 invalid authentication'
+    )
+  })
+})
+
+/**
+ * WHICH session's transcript the row is in, rather than which session is
+ * active. `MessageBubble` also renders automation-run history, so a replayed
+ * run's auth block was reading the unrelated chat session's lifetime and its
+ * Retry re-sent the stopped prompt into `activeSessionId` — a session the user
+ * was not even looking at.
+ */
+describe('AuthTranscriptRow — the row belongs to ITS transcript', () => {
+  beforeEach(() => {
+    useSessionStore.getState().createNewSession(OTHER_ID, '/tmp/other')
+    // The active pointer is parked somewhere else entirely, and that session
+    // has an auth failure of its own to be tempting.
+    useSessionStore.setState({ activeSessionId: OTHER_ID })
+    useSessionStore.setState((s) => ({
+      sessions: {
+        ...s.sessions,
+        [OTHER_ID]: {
+          ...s.sessions[OTHER_ID],
+          authRequired: { providerId: 'anthropic', retryPrompt: 'the other prompt' }
+        }
+      }
+    }))
+  })
+
+  it("reads the hosting session's fact, not the active session's", () => {
+    patch({
+      authRequired: {
+        providerId: 'chatgpt',
+        accountId: 'acct-1',
+        retryPrompt: 'refactor the dispatcher'
+      }
+    })
+    renderRow()
+    const row = screen.getByTestId('AuthTranscriptRow')
+    expect(row).toHaveAttribute('data-lifetime', 'broken')
+    expect(row).toHaveAttribute('data-id', 'chatgpt')
+  })
+
+  it('retries on ITS session, never on the active one', async () => {
+    const retrySend = vi.fn(async () => {})
+    useSessionStore.setState({ retrySend })
+    patch({
+      authRequired: {
+        providerId: 'chatgpt',
+        retryPrompt: 'refactor the dispatcher',
+        resolved: true
+      }
+    })
+    renderRow()
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('AuthTranscriptRow.retry'))
+    })
+    expect(retrySend).toHaveBeenCalledWith(ROUTING_ID, 'refactor the dispatcher')
+    expect(useSessionStore.getState().sessions[ROUTING_ID].authRequired).toBeNull()
+    // Untouched: the row never had anything to do with this session.
+    expect(useSessionStore.getState().sessions[OTHER_ID].authRequired).not.toBeNull()
+  })
+
+  it("names the hosting session's retry on the Sign in request", async () => {
+    patch({
+      authRequired: { providerId: 'chatgpt', retryPrompt: 'refactor the dispatcher' }
+    })
+    renderRow()
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('AuthTranscriptRow.signIn'))
+    })
+    expect(useSessionStore.getState().signInDialog).toEqual({
+      providerId: 'chatgpt',
+      mode: 'reauth',
+      retry: { routingId: ROUTING_ID, prompt: 'refactor the dispatcher' }
+    })
+  })
+
+  /**
+   * Automation-run history replays a transcript that belongs to no open chat
+   * session, so there is no lifetime to read and nothing the row could
+   * correctly act on. Settled is the honest answer — and it is also the safe
+   * one, since the only alternative was acting on `activeSessionId`.
+   */
+  it('a host with no routing id renders settled with no action', () => {
+    patch({
+      authRequired: { providerId: 'chatgpt', retryPrompt: 'refactor the dispatcher' }
+    })
+    const { container } = renderInHistory('API Error: 401', 'chatgpt')
+    const row = screen.getByTestId('AuthTranscriptRow')
+    expect(row).toHaveAttribute('data-lifetime', 'settled')
+    // Still self-describing — the provider rides on the block.
+    expect(row).toHaveAttribute('data-id', 'chatgpt')
+    expect(
+      [...container.querySelectorAll('button, a, [role="button"]')].map((node) =>
+        node.getAttribute('data-testid')
+      )
+    ).toEqual(['AuthTranscriptRow.disclose'])
+  })
+})
+
+/**
+ * The row named one provider and acted on another: the sentence came from the
+ * BLOCK, the action from the session's current `authRequired`. A session that
+ * failed on Anthropic and later on ChatGPT rendered its Anthropic row saying
+ * "Claude rejected the credential" above a Sign in that opened ChatGPT.
+ */
+describe('AuthTranscriptRow — a row acts only for the provider it names', () => {
+  beforeEach(() => {
+    // Failed on anthropic first, then on chatgpt — the session's fact is the
+    // LATEST failure, and this row records the earlier one.
+    patch({
+      authRequired: {
+        providerId: 'chatgpt',
+        accountId: 'acct-1',
+        message: 'ChatGPT rejected the credential Codex runs under.',
+        retryPrompt: 'refactor the dispatcher'
+      }
+    })
+  })
+
+  it('the anthropic row is inert, and still names Claude', () => {
+    const { container } = renderRow('API Error: 401 invalid authentication', 'anthropic')
+    const row = screen.getByTestId('AuthTranscriptRow')
+    expect(row).toHaveAttribute('data-lifetime', 'settled')
+    expect(row).toHaveTextContent('Turn stopped — Claude rejected the credential.')
+    expect(
+      [...container.querySelectorAll('button, a, [role="button"]')].map((node) =>
+        node.getAttribute('data-testid')
+      )
+    ).toEqual(['AuthTranscriptRow.disclose'])
+  })
+
+  it("discloses its OWN text, not the other provider's message", () => {
+    renderRow('API Error: 401 invalid authentication', 'anthropic')
+    fireEvent.click(screen.getByTestId('AuthTranscriptRow.disclose'))
+    const disclosed = screen.getByTestId('AuthTranscriptRow.message')
+    expect(disclosed).toHaveTextContent('API Error: 401 invalid authentication')
+    expect(disclosed.textContent).not.toContain('Codex runs under')
+  })
+
+  it('the matching row keeps the live lifetime and the action', () => {
+    renderRow('API Error: 401', 'chatgpt')
+    const row = screen.getByTestId('AuthTranscriptRow')
+    expect(row).toHaveAttribute('data-lifetime', 'broken')
+    expect(screen.getByTestId('AuthTranscriptRow.signIn')).toBeTruthy()
+  })
+
+  /**
+   * The block's own text is per-block correct; the event's message describes
+   * the session's CURRENT failure. So the block wins where it has one, and the
+   * message is the fallback for a block that carried none.
+   */
+  it("the block's own words win the disclosure, the event's are the fallback", () => {
+    renderRow('API Error: 401 the block said this', 'chatgpt')
+    fireEvent.click(screen.getByTestId('AuthTranscriptRow.disclose'))
+    expect(screen.getByTestId('AuthTranscriptRow.message')).toHaveTextContent(
+      'API Error: 401 the block said this'
+    )
+
+    cleanup()
+    renderRow('', 'chatgpt')
     fireEvent.click(screen.getByTestId('AuthTranscriptRow.disclose'))
     expect(screen.getByTestId('AuthTranscriptRow.message')).toHaveTextContent(
       'ChatGPT rejected the credential Codex runs under.'
