@@ -320,7 +320,7 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     cls: 'replicated',
     ring: true,
     canonical: true,
-    why: 'ADR-068 §4: the session remembers which provider/account was rejected until the next turn starts, so a client that reconnects mid-outage still knows a sign-in is owed. Carried on PerSessionSnapshot as `authRequired`; it replaced `session:vendor-auth-required` in slice 3.'
+    why: 'ADR-068 §4: the session remembers which provider/account was rejected until the next turn starts, so a client that reconnects mid-outage still knows a sign-in is owed. Carried on PerSessionSnapshot as `authRequired`; it replaced `session:vendor-auth-required` in slice 3. ADR-070 §1 put the engine’s verbatim `message` ON this event and FORBADE the companion `session:error` every engine used to send beside it — one rejected credential produced two separately-dismissable cards.'
   },
   'session:auth-source': {
     cls: 'replicated',
@@ -404,6 +404,18 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     ring: true,
     canonical: false,
     why: 'ADR-068 §2: per-account ChatGPT rate limits moved — a bare nudge with NO payload, because the map is read through `usage:chatgpt-limits` and a fan-out carrying it would be a second copy of state the query already owns. No snapshot field, like the two usage channels above it.'
+  },
+  'provider:auth-resolved': {
+    cls: 'replicated',
+    ring: true,
+    // `canonical: true` because this flag means exactly "does `applyEvent` change
+    // canonical state?" (see ChannelSpec.canonical) and this one does: the fold
+    // marks every matching session's `authRequired.resolved`. It needs NO snapshot
+    // field OF ITS OWN — the effect lands in `authRequired`, which PerSessionSnapshot
+    // already carries — which is what ADR-070's Consequences meant by calling it
+    // non-canonical. Recorded here because the two readings differ.
+    canonical: true,
+    why: 'ADR-070 §2: the ONE resolution signal — a credential for this provider was successfully stored. Folded into `authRequired.resolved` on every session that was blaming that provider, so nothing needs a snapshot field of its own (`authRequired` is already snapshot-carried and the fold survives a resync). Replicated, NOT host-local like `auth:state` (channels.ts §auth:state, the CSRF reason): this payload is one provider id — no token, no URL, no flow state — so fanning it out gives nobody a flow to hijack, and it MUST fan out, because a sign-in taken on the desktop has to clear the owed sign-in on the phone.'
   },
 
   // -------------------------------------------------------------------------

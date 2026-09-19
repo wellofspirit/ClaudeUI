@@ -50,6 +50,7 @@ import type { ThreadTokenUsage } from './protocol/v2/ThreadTokenUsage'
 import type { TokenUsageBreakdown } from './protocol/v2/TokenUsageBreakdown'
 import { resolveCodexCapabilities } from '../../shared/model-capabilities'
 import { logger } from '../services/logger'
+import { authErrorTranscriptMessage } from '../services/api-error'
 import { CodexTransportError, type CodexClientOptions } from './CodexAppServerClient'
 import {
   codexHostRegistry,
@@ -712,14 +713,22 @@ export class CodexSession extends BaseSession {
    */
   private authRequired(accountId: string | null): void {
     if (this.closed) return
+    // ADR-070 §1: the words ride ON the event and there is NO companion
+    // `session:error` — the pair used to produce two separately-dismissable
+    // cards for one rejected credential. The text also drops "sign in again from
+    // Settings › Models & providers": the UI owns the action now (the pill and
+    // the transcript row both open the one dialog), so naming a route the user
+    // no longer has to take would be wrong advice rather than helpful advice.
+    const message = 'ChatGPT rejected the credential Codex runs under.'
     this.send('session:auth-required', {
       providerId: CODEX_AUTH_PROVIDER_ID,
-      ...(accountId ? { accountId } : {})
+      ...(accountId ? { accountId } : {}),
+      message
     })
-    this.send(
-      'session:error',
-      'ChatGPT sign-in expired; sign in again from Settings › Models & providers'
-    )
+    // …and the same text as the neutral transcript block Claude already emitted,
+    // so the failure has a permanent, correctly-anchored home. Through `dispatch`
+    // so it lands in `messageHistory` like every other row this class produces.
+    this.dispatch({ kind: 'message', message: authErrorTranscriptMessage(randomUUID(), message) })
   }
 
   get willQueue(): boolean {

@@ -1,20 +1,17 @@
-import {
-  useSessionStore,
-  useActiveSession,
-  CODEX_SIGN_IN_REQUIRED_ERROR
-} from '../../stores/session-store'
+import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { NoticeCard } from '../shared/NoticeCard'
 
 /**
- * ONE error in this list is actionable rather than merely informative: Codex
- * discovering no models because the vault's ChatGPT credential was refused
- * (ADR-068 §4). It used to read as an installation problem, which is unfixable
- * advice for a sign-in problem, so it gets the Sign in button that opens the one
- * dialog. Matched on the exact string the store emits — the error list is
- * strings, here and on the wire.
+ * Ordinary errors and warnings, with no special case in them.
+ *
+ * There used to be exactly one: Codex discovering no models because the vault's
+ * ChatGPT credential was refused got a Sign in button, attached by matching the
+ * EXACT string the store pushed onto `errors[]`. ADR-070 §1 routes that through
+ * the one auth fact instead — a renderer rule keyed on an engine-authored string
+ * is the fragile coupling, and an auth failure now has one row and one action
+ * wherever it comes from.
  */
-
 export function FloatingError(): React.JSX.Element | null {
   const isMobile = useIsMobile()
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
@@ -22,7 +19,6 @@ export function FloatingError(): React.JSX.Element | null {
   const warnings = useActiveSession((s) => s.warnings)
   const removeError = useSessionStore((s) => s.removeError)
   const removeWarning = useSessionStore((s) => s.removeWarning)
-  const openSignIn = useSessionStore((s) => s.openSignIn)
 
   if (errors.length === 0 && warnings.length === 0) return null
 
@@ -39,21 +35,6 @@ export function FloatingError(): React.JSX.Element | null {
               text={error}
               variant="error"
               onDismiss={() => activeSessionId && removeError(activeSessionId, index)}
-              actions={
-                error === CODEX_SIGN_IN_REQUIRED_ERROR ? (
-                  <button
-                    type="button"
-                    data-testid="FloatingError.signIn"
-                    onClick={() => {
-                      if (activeSessionId) removeError(activeSessionId, index)
-                      openSignIn({ providerId: 'chatgpt', mode: 'reauth' })
-                    }}
-                    className="text-[12px] font-medium rounded-md px-3 py-1 bg-accent text-bg-primary hover:bg-accent-hover transition-colors cursor-pointer"
-                  >
-                    Sign in
-                  </button>
-                ) : undefined
-              }
             />
           ))}
           {warnings.map((warning, index) => (

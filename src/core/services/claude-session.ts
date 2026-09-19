@@ -1179,12 +1179,21 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         // SIGN-IN is a separate fact every engine now reports the same way, so
         // the one row and the one dialog serve Claude too. Only the
         // `authentication` class — a rate limit is not a sign-in problem.
-        if (
-          errMsg.content.some(
-            (block) => block.type === 'api_error' && block.errorType === 'authentication'
-          )
-        ) {
-          this.send('session:auth-required', { providerId: ANTHROPIC_AUTH_PROVIDER_ID })
+        //
+        // ADR-070 §1: the block's own `errorMessage` also rides on the event, so
+        // the row's disclosure reads cli.js's words on Claude exactly as it reads
+        // the vendor's on the other three. The BLOCK is untouched — it is the
+        // shape a reloaded transcript renders and `session-history.ts` writes.
+        const authBlock = errMsg.content.find(
+          (block) => block.type === 'api_error' && block.errorType === 'authentication'
+        )
+        if (authBlock) {
+          this.send('session:auth-required', {
+            providerId: ANTHROPIC_AUTH_PROVIDER_ID,
+            ...(authBlock.type === 'api_error' && authBlock.errorMessage
+              ? { message: authBlock.errorMessage }
+              : {})
+          })
         }
         return
       }

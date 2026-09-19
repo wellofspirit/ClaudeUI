@@ -168,11 +168,14 @@ describe('setSelectedEngine — switching TO codex', () => {
     expect(store().sessions['cx-5']?.codexModelExplicit).toBe(true)
   })
 
-  it('an empty catalog keeps the DISCOVERY banner, not the stale-model one', async () => {
+  it('an empty catalog raises the auth fact, not the stale-model banner', async () => {
     // Codex owns this failure: an empty catalog is a broken install or a
     // refused ChatGPT credential, and only `vendorAuthProbe` tells them apart.
     // A configured default must not be named here — that advice ("pick another
     // model") is wrong when the catalog itself never arrived.
+    //
+    // ADR-070 §1: a refused credential is no longer a string on `errors[]` with
+    // its own Sign in button; it is the same `authRequired` a failed turn raises.
     const probe = vi.fn(async () => ({ openai: { authState: 'unauthenticated' } }))
     ;(window as unknown as { api: Record<string, unknown> }).api = {
       ...(window as unknown as { api: Record<string, unknown> }).api,
@@ -189,8 +192,12 @@ describe('setSelectedEngine — switching TO codex', () => {
     store().setSelectedEngine('codex')
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(probe).toHaveBeenCalledWith('codex')
+    expect(store().sessions['cx-7']?.authRequired).toEqual({
+      providerId: 'chatgpt',
+      message: 'ChatGPT rejected the credential Codex runs under, so no Codex models could be read.'
+    })
     const errors = store().sessions['cx-7']?.errors.join(' ') ?? ''
-    expect(errors).toContain('Sign in again')
+    expect(errors).toBe('')
     expect(errors).not.toContain('gpt-5.6-codex')
   })
 

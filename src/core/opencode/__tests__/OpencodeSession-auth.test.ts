@@ -4,9 +4,9 @@
  * Unit tests for OpencodeSession.dispatchMapperOutput auth-required routing.
  * A session.error event carrying a ProviderAuthError + providerID raises the one
  * engine-neutral `session:auth-required` (ADR-068 §4) under the PROVIDER the
- * vendor belongs to, plus the vendor's verbatim message as a session error —
- * the event itself carries no text, so dropping the message would lose opencode's
- * own words.
+ * vendor belongs to, carrying opencode's verbatim message ON the event and a
+ * neutral `api_error`/`authentication` transcript block beside it — and NO
+ * companion `session:error`, which is the duplicate ADR-070 §1 deleted.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
@@ -289,15 +289,30 @@ describe('OpencodeSession — auth-required dispatch', () => {
 
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
 
+    // THE GUARD, asserted first because it is the regression: opencode used to
+    // re-send its own words as an ordinary error beside the event, which turned
+    // one rejected credential into two separately dismissable cards — and the
+    // event's own doc comment sanctioned it (ADR-070 §1).
+    expect(calls.filter((c) => c[0] === 'session:error')).toEqual([])
+
     const authRequiredCall = calls.find((c) => c[0] === 'session:auth-required')
     expect(authRequiredCall).toBeDefined()
-    // The vendor id is opencode's; the PROVIDER is what the sign-in dialog acts on.
-    expect(authRequiredCall![2]).toEqual({ providerId: 'chatgpt' })
+    // The vendor id is opencode's; the PROVIDER is what the sign-in dialog acts
+    // on. ADR-070 §1: the vendor's own words ride ON the event.
+    expect(authRequiredCall![2]).toEqual({ providerId: 'chatgpt', message: 'Token expired' })
 
-    // The vendor's own words survive as an error row — the event carries none.
-    const errorCall = calls.find((c) => c[0] === 'session:error')
-    expect(errorCall).toBeDefined()
-    expect(errorCall![2]).toBe('Token expired')
+    // The engine-neutral transcript block, which opencode never had — the words
+    // now have a permanent home instead of only a card that vanishes.
+    const authRows = (calls as Array<[string, string, { content: Array<Record<string, unknown>> }]>)
+      .filter((c) => c[0] === 'session:message')
+      .map((c) => c[2])
+      .filter((message) => message.content.some((block) => block.type === 'api_error'))
+    expect(authRows).toHaveLength(1)
+    expect(authRows[0].content[0]).toEqual({
+      type: 'api_error',
+      errorType: 'authentication',
+      errorMessage: 'Token expired'
+    })
 
     // The renamed channel is gone.
     expect(calls.find((c) => c[0] === 'session:vendor-auth-required')).toBeUndefined()
@@ -335,7 +350,8 @@ describe('OpencodeSession — auth-required dispatch', () => {
 
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
     expect(calls.find((c) => c[0] === 'session:auth-required')![2]).toEqual({
-      providerId: 'opencode:anthropic'
+      providerId: 'opencode:anthropic',
+      message: 'Token expired'
     })
 
     session.dispose()

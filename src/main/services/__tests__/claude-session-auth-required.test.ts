@@ -162,7 +162,18 @@ describe('ClaudeSession — authentication api_error rings session:auth-required
 
     const authRequired = sent.filter(([c]) => c === 'session:auth-required')
     expect(authRequired).toHaveLength(1)
-    expect(authRequired[0][2]).toEqual({ providerId: 'anthropic' })
+    // ADR-070 §1: the block's own words ride on the event too, so the row's
+    // disclosure reads cli.js's text on Claude exactly as it reads the vendor's
+    // on the other three engines.
+    expect(authRequired[0][2]).toEqual({
+      providerId: 'anthropic',
+      message: 'API Error: 401 {"type":"error","error":{"type":"authentication_error"}}'
+    })
+
+    // And no companion `session:error` — the duplicate ADR-070 §1 forbids. Claude
+    // never sent one on THIS path (its duplicate was the api_error block, which is
+    // transcript DATA and stays), so this arm pins that it does not acquire one.
+    expect(sent.filter(([c]) => c === 'session:error')).toEqual([])
 
     // The block itself is unchanged — the transcript still carries the error.
     const messages = sent

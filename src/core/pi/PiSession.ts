@@ -21,6 +21,7 @@ import type {
 import { engineMeta } from '../../shared/engine-meta'
 import { PI_DEFAULT_MODEL } from '../../shared/engine-meta'
 import { logger } from '../services/logger'
+import { authErrorTranscriptMessage } from '../services/api-error'
 import { piAuthProvider } from '../auth/PiAuthProvider'
 import { locatePiBinary } from './pi-locate'
 import { PiRpcClient } from './PiRpcClient'
@@ -1339,11 +1340,15 @@ export class PiSession extends BaseSession {
         void this.flushQueuedItems()
         break
 
-      case 'auth-required':
+      case 'auth-required': {
         // ADR-068 §4: one event for every engine, naming the PROVIDER the
-        // sign-in dialog can act on rather than pi's own vendor id. The event
-        // carries no text, so pi's verbatim message rides along as an ordinary
-        // error row — dropping it would lose the vendor's own words.
+        // sign-in dialog can act on rather than pi's own vendor id.
+        //
+        // ADR-070 §1: pi's verbatim message rides ON the event and the companion
+        // `session:error` is GONE — it was a second, separately dismissable card
+        // for the same fact. The words survive twice over: as the row's in-place
+        // disclosure, and as the neutral transcript block below, which is the
+        // permanent record a floating card never was.
         //
         // Deliberately NO processing-state work here, unlike OpencodeSession's
         // twin: opencode's `session.error` IS the turn's end, while pi's
@@ -1352,10 +1357,14 @@ export class PiSession extends BaseSession {
         // arm therefore does exactly what pi's own 'error' arm below does —
         // emit, and let the turn end itself.
         this.send('session:auth-required', {
-          providerId: piAuthRequiredProviderId(output.vendorId)
+          providerId: piAuthRequiredProviderId(output.vendorId),
+          message: output.message
         })
-        this.send('session:error', output.message)
+        const message = authErrorTranscriptMessage(uuid(), output.message)
+        this.rememberPiMessage(message)
+        this.send('session:message', message)
         break
+      }
 
       case 'error':
         this.send('session:error', output.message)

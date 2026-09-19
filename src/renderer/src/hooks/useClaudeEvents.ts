@@ -321,6 +321,28 @@ export function useClaudeEvents(): void {
           }
         })
       }),
+      // ADR-070 §2: a credential for this provider was stored successfully. The
+      // REPLICA already folded it into every matching session's `authRequired`
+      // (the reducer owns that); this subscription exists for the two provider
+      // views the fold cannot reach, both of which are read-back caches rather
+      // than replicated state:
+      //  · `providerAuth.chatgpt` comes from `provider-registry:list`, which
+      //    publishes no change event, so every moment the answer can have changed
+      //    has to re-read it — this is now one of them;
+      //  · `vendorAuth.anthropic` is written only by `session:auth-source`, which
+      //    arrives on a cli.js SPAWN, so without a re-probe here the Claude half
+      //    stays stale until the next one (ADR-070 Context, "Why nothing clears").
+      onSyncEvent('provider:auth-resolved', ({ providerId }) => {
+        const store = useSessionStore.getState()
+        if (providerId === 'chatgpt') return void store.refreshProviderAuth()
+        if (providerId !== 'anthropic') return
+        void window.api
+          .vendorAuthProbe('claude')
+          .then((map) => useSessionStore.getState().setVendorAuth(map))
+          .catch(() => {
+            /* No host for this engine (claudeui-server) or the read failed — keep the last answer. */
+          })
+      }),
       onSyncEvent('voice:error', (routingId, error) => {
         useSessionStore.getState().addError(routingId, error)
       }),

@@ -28,6 +28,7 @@ import { serviceSession } from '../../core/services/service-session'
 import { invalidateLiveSessions } from './session-invalidation'
 import { logger } from '../../core/services/logger'
 import { emitEvent } from '../../core/services/sync-host'
+import { ANTHROPIC_AUTH_PROVIDER_ID } from '../../core/auth/auth-providers'
 
 interface AuthorizeUrls {
   manualUrl?: string
@@ -232,6 +233,25 @@ class AuthManager {
         /* listener errors must not break the flow */
       }
     }
+    // ADR-070 §2: the ONE resolution signal. Replicated, so every client — not
+    // just the desktop that signed in — clears the sign-in this login fixed;
+    // before it, `authRequired` was cleared only by a turn that RAN again, which
+    // meant a successful sign-in left every owed-sign-in surface lit.
+    //
+    // An import-based emit rather than one more `onSuccessCbs` subscriber:
+    // `setWindow` resets that list on every window generation (see its note), so
+    // a callback registered from another module is not reliably present — and
+    // this function already reaches core the same way, via
+    // `invalidateLiveSessions` above.
+    //
+    // **LAST in this function, deliberately — do not move it up.** A client's
+    // reaction to this event is `vendorAuthProbe('claude')`, which reads
+    // `ClaudeAuthProvider.cachedAuthSource`, and that field is refreshed by one of
+    // the `onSuccessCbs` above. Emitting before the loop would publish the fact
+    // before the state it makes clients read, and the only thing hiding it would
+    // be that the renderer is two async IPC hops away while the loop is
+    // synchronous. Ordering by luck on the Claude login path is not ordering.
+    emitEvent('provider:auth-resolved', [{ providerId: ANTHROPIC_AUTH_PROVIDER_ID }])
     return state
   }
 

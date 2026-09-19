@@ -5,6 +5,7 @@ import { codexPublishesEffort, resolveClaudeCapabilities } from '../../../shared
 import type { EffortLevel } from '../../../shared/model-capabilities'
 import type { SharedProviderAccountList } from '../../../shared/shared-provider'
 import type { ProviderRegistrySnapshot } from '../../../shared/provider-registry'
+import type { AuthRequiredState } from '../../../shared/remote-protocol'
 import type { ItemStreams } from '../../../core/shared/sync/item-stream'
 import {
   anthropicAuthState,
@@ -273,17 +274,18 @@ export function resolveEngineDefaultModel(
 }
 
 /**
- * The Codex-discovery banner when the identity Codex runs under is what was
- * refused (ADR-068 §4).
+ * What model discovery says when the identity Codex runs under is what was
+ * refused (ADR-070 §1).
  *
- * A distinct STRING rather than a flag, because a session's errors are a list of
- * strings in the store and on the wire; `FloatingError` matches this one to
- * attach the Sign in action. The generic hint below stays for every other cause
- * — a missing binary, a native model/provider misconfiguration — because those
- * are not fixed by signing in and must not be told to.
+ * It used to be an exported CONSTANT pushed onto `errors[]`, with `FloatingError`
+ * matching the exact string to attach a Sign in button — a third card for the
+ * same fact the auth event already carries, and a renderer-side rule coupled to
+ * an engine-authored string. Now it is the `message` of one `authRequired`, so
+ * discovery and a failed turn produce the same one row with the same one action.
+ * The engine's words stop at the fact; the ACTION is the UI's.
  */
-export const CODEX_SIGN_IN_REQUIRED_ERROR =
-  'ChatGPT rejected the credential Codex runs under, so no Codex models could be read. Sign in again to continue.'
+const CODEX_DISCOVERY_REFUSED_MESSAGE =
+  'ChatGPT rejected the credential Codex runs under, so no Codex models could be read.'
 
 /**
  * Banner the missing default model, asking WHY first when the answer changes the
@@ -296,6 +298,10 @@ export const CODEX_SIGN_IN_REQUIRED_ERROR =
  * (`CodexAuthProvider` reports `unauthenticated` when the stored account cannot
  * read the catalog). A probe that fails or says nothing keeps the generic hint:
  * an unanswered question is not evidence.
+ *
+ * The two causes now take two different ROUTES, not two strings on one list: a
+ * refused credential is the auth fact (ADR-070 §1), and everything else stays an
+ * ordinary error, because "check the installation" is not fixed by signing in.
  */
 function reportStaleDefaultModel(routingId: string, engineId: EngineId, model: string): void {
   const generic = staleDefaultModelMessage(engineId, model)
@@ -303,11 +309,19 @@ function reportStaleDefaultModel(routingId: string, engineId: EngineId, model: s
   if (engineId !== 'codex' || model) return addError(generic)
   void window.api
     .vendorAuthProbe('codex')
-    .then((probe) =>
-      addError(
-        probe.openai?.authState === 'unauthenticated' ? CODEX_SIGN_IN_REQUIRED_ERROR : generic
-      )
-    )
+    .then((probe) => {
+      if (probe.openai?.authState !== 'unauthenticated') return addError(generic)
+      // `authRequired` is SEALED: the reducer owns it, and `patchLocalSession` is
+      // the one sanctioned local write (the same escape hatch `clearAuthRequired`
+      // uses). Local-only is honest here — this is THIS client's own discovery
+      // read, not a host event, and the host raises the replicated fact itself the
+      // moment a turn actually tries to run.
+      patchLocalSession(routingId, {
+        // The literal, as every other renderer sign-in site spells it: the core
+        // constant lives beside `AuthVault`, which reaches `node:fs`.
+        authRequired: { providerId: 'chatgpt', message: CODEX_DISCOVERY_REFUSED_MESSAGE }
+      })
+    })
     .catch(() => addError(generic))
 }
 
@@ -841,10 +855,12 @@ export interface PerSessionState {
   btwResponse: string | null
   btwLoading: boolean
   /**
-   * The sign-in this session owes (ADR-068 §4) — SEALED: `session:auth-required`
-   * folds into it and a running turn clears it, both in the reducer.
+   * The sign-in this session owes (ADR-068 §4, three lifetimes as of ADR-070 §2)
+   * — SEALED: `session:auth-required` and `provider:auth-resolved` fold into it
+   * and a running turn clears it, all three in the reducer. Shape declared once
+   * on the wire type, so canonical, the snapshot and this cannot drift.
    */
-  authRequired: { providerId: string; accountId?: string } | null
+  authRequired: AuthRequiredState | null
 }
 
 /** Exported so the replica can build a store entry for a session it learns of first. */

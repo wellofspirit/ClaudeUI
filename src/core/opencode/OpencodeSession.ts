@@ -33,6 +33,7 @@ import {
 } from './model-discovery'
 import { equivalentCostUsd } from '../../shared/pricing'
 import { logger } from '../services/logger'
+import { authErrorTranscriptMessage } from '../services/api-error'
 import {
   mapEvent,
   buildChatMessage,
@@ -1098,6 +1099,19 @@ export class OpencodeSession extends BaseSession {
     }
   }
 
+  /**
+   * Put one row THIS class authored (not the mapper) into history and on the
+   * wire — the same upsert-by-id the mapper's `message` case does, minus the
+   * tool-part accumulator bookkeeping, which only applies to a message opencode
+   * itself produced.
+   */
+  private rememberAndSend(message: ChatMessage): void {
+    const index = this.messageHistory.findIndex((entry) => entry.id === message.id)
+    if (index >= 0) this.messageHistory[index] = message
+    else this.messageHistory.push(message)
+    this.send('session:message', message)
+  }
+
   private dispatchMapperOutput(output: MapperOutput): void {
     switch (output.kind) {
       case 'stream':
@@ -1250,19 +1264,25 @@ export class OpencodeSession extends BaseSession {
         this.sendStatusLine()
         break
 
-      case 'auth-required':
+      case 'auth-required': {
         this.isProcessing = false
         // ADR-068 §4: one event for every engine, naming the PROVIDER the
-        // sign-in dialog can act on rather than opencode's own vendor id. The
-        // event carries no text, so opencode's verbatim message rides along as
-        // an ordinary error row — dropping it would lose the vendor's own words.
+        // sign-in dialog can act on rather than opencode's own vendor id.
+        //
+        // ADR-070 §1: opencode's verbatim message rides ON the event and the
+        // companion `session:error` is GONE — it was a second, separately
+        // dismissable card for the same fact. The words are not lost: the row
+        // discloses them in place, and the neutral transcript block below gives
+        // them a permanent home the floating card never had.
         this.send('session:auth-required', {
-          providerId: opencodeAuthRequiredProviderId(output.vendorId)
+          providerId: opencodeAuthRequiredProviderId(output.vendorId),
+          message: output.message
         })
-        this.send('session:error', output.message)
+        this.rememberAndSend(authErrorTranscriptMessage(uuid(), output.message))
         this.sendStatus()
         this.resetInactivityTimer()
         break
+      }
 
       case 'error':
         this.sealStreamItems(this.openSessionId ?? undefined)
