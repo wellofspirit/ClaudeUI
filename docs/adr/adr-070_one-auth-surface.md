@@ -119,6 +119,18 @@ Net: worst path 111 words → 19. No stage loses an affordance.
 
 The dialog also gains a **provider-list mode** for the pill's entry point, since the pill aggregates and may have several providers to offer.
 
+### 6. The remote Claude sign-in must report its own success
+
+Found while this arc was in flight, from the owner's report (2026-09-19) that a web sign-in to Claude by pasted code appeared to fail and needed an RDP session to recover. The login had **succeeded host-side**; the remote client was never told.
+
+`claude_oauth_callback` and `claude_oauth_wait_for_completion` are one branch in cli.js and both attach a continuation to the same `Ls.flow` promise. `AuthManager.signIn` arms the loopback wait on the remote path too, calling it "harmless" — it is not. The wait's continuation is registered first, so when the pasted code completes the exchange the wait's response lands first, `finalize` marks the flow settled, and `submitOAuthCode`'s own `finalize` returns `IDLE`. Since `auth:state` is host-local by design (the CSRF reason in `channels.ts`) and no auth-state query exists for a client to poll, that invoke return is the remote client's only outcome channel — so the UI reports neither success nor failure, and the old banner went on claiming nobody was signed in. The same race in the other order (the flow rejecting before the paste) nulls `pendingState` and refuses the paste with "No active login flow."
+
+Two changes: the host loopback wait is **not armed** for a remote sign-in — a remote browser redirects to `localhost` on the _user's_ device, so it can never be hit from there and arming it only creates the race — and `finalize` becomes idempotent **with its result**, returning the cached terminal state when the same flow settles twice rather than erasing it. The second is the general fix: returning `IDLE` on a double-settle is what swallowed the outcome, and removing today's route to it does not remove the class. A settle belonging to a _different_, restarted flow still returns `IDLE`, which is the correct answer for a login the user abandoned.
+
+**And the swallow was not remote-only**, which only surfaced once the fix had a guard to fail against. The desktop's manual fallback — open the link by hand, then paste — races the armed wait identically, and the renderer assigns `submitOAuthCode`'s return straight onto `authState` (`session-store.ts`): the wait's `finalize` broadcast `success`, the store rendered it, then the paste's `IDLE` overwrote it, dropping the dialog out of its own success state. `auth:state` masked the symptom on the desktop instead of preventing the defect. So the idempotent `finalize` is the load-bearing half of this slice rather than the belt-and-braces one: unarming alone would have fixed the host with the visible bug and left the other's latent.
+
+This corrects an assumption of [ADR-057](adr-057_remote-vendor-oauth-paste-back.md), amended there too. `provider:auth-resolved` from §2 does now reach remote clients, but it does not substitute for the invoke return: it says a credential was stored, not which account or that _this_ flow is the one that succeeded.
+
 ## Consequences
 
 - ADR-068 §4 is satisfied for the first time: one event, one card. Its `events.ts` comment sanctioning the companion `session:error` is corrected, and a guard test pins the absence of the duplicate so it cannot come back.
@@ -134,6 +146,7 @@ The dialog also gains a **provider-list mode** for the pill's entry point, since
 1. **Slice A — one fact on the wire.** §1 + §2 + §3: the event's `message`, the four emitters de-duplicated, the neutral transcript block, `provider:auth-resolved`, the widened `authRequired` and its three lifetimes, snapshot and state carriers, guard tests.
 2. **Slice B — the pill and the row.** §4: the `authIssues` selector, `AuthPill` and its variants, `AuthTranscriptRow`, the three deletions, the ordered stack container, retry from both surfaces.
 3. **Slice C — the dialog.** §5: the copy cuts, the retry relocation, the provider-list mode.
+4. **Slice D — the remote Claude sign-in.** §6.
 
 ## Alternatives considered
 

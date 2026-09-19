@@ -10,9 +10,13 @@
  *   claude_oauth_callback(code,state) → { account }  (manual paste fallback)
  *
  * The IPC `signIn()` resolves as soon as the browser is opened (status
- * "authorizing"); the terminal result arrives via the `auth:state` broadcast,
- * so the loopback wait and an optional manual paste race the same flow without
- * blocking the renderer.
+ * "authorizing") without blocking the renderer. On the DESKTOP the terminal
+ * result arrives via the `auth:state` broadcast, and the loopback wait races an
+ * optional manual paste for the same flow. A REMOTE sign-in (ADR-057) arms no
+ * loopback wait — see `signIn` — and `auth:state` is host-local by design, so
+ * its terminal result is carried by the `submitOAuthCode` invoke RETURN and
+ * nothing else. That is why settling a flow twice must not erase its outcome
+ * (`replaySettled`).
  *
  * We deliberately never read cli.js's credential store ourselves — doing so via
  * the `security` CLI triggers macOS Keychain trust prompts (the item's ACL does
@@ -56,6 +60,12 @@ class AuthManager {
   private flowId = 0
   /** Guards against finalizing the same flow twice (loopback + manual race). */
   private settled = false
+  /**
+   * Terminal state of the last flow that settled, keyed by its id. Replayed
+   * when the SAME flow settles again so the second caller is told the real
+   * outcome instead of `IDLE` — see `replaySettled`.
+   */
+  private settledFlow: { flow: number; state: AuthFlowState } | null = null
 
   /** Listeners notified with the account on a successful login (ADR-015). */
   private onSuccessCbs: ((account: OAuthAccount | null) => void)[] = []
@@ -153,12 +163,30 @@ class AuthManager {
     }
 
     // Await the loopback redirect in the background — do not block the caller.
-    // On the remote path the host loopback still arms (harmless); completion
-    // will normally arrive via `auth:submit-code` instead.
-    handle
-      .claudeOAuthWaitForCompletion()
-      .then((res) => this.finalize(myFlow, res as OAuthResult))
-      .catch((err) => this.fail(myFlow, err))
+    //
+    // DESKTOP ONLY, and not as an optimisation: arming this on the remote path
+    // is what made a SUCCESSFUL remote sign-in report nothing at all. A remote
+    // browser's redirect goes to `localhost` on the REMOTE USER'S OWN device,
+    // so the host loopback listener can never be hit from there — the wait can
+    // only ever settle off the paste. And cli.js serves
+    // `claude_oauth_wait_for_completion` and `claude_oauth_callback` from ONE
+    // branch attached to the SAME `Ls.flow` promise (vendor/claude-cli/cli.js
+    // 2.1.268 — find it by the literal `No active claude_authenticate flow`;
+    // docs/protocol-cc/07-control-outbound.md §7.5), so both continuations run
+    // when the exchange succeeds, in registration order. This one was
+    // registered first, so it settled the very flow the paste was trying to
+    // complete, and `submitOAuthCode`'s own finalize() then hit the
+    // already-settled guard and returned IDLE. `auth:state` is host-local by
+    // design (a flow's `state` param is its CSRF token — see the `why` in
+    // core/shared/sync/channels.ts) and there is no auth-state QUERY to poll,
+    // so that invoke return is a remote caller's only outcome channel: the
+    // login had actually succeeded host-side and the web UI was told `idle`.
+    if (!remote) {
+      handle
+        .claudeOAuthWaitForCompletion()
+        .then((res) => this.finalize(myFlow, res as OAuthResult))
+        .catch((err) => this.fail(myFlow, err))
+    }
 
     const authorizing: AuthFlowState = {
       status: 'authorizing',
@@ -198,7 +226,31 @@ class AuthManager {
   // Internal
   // ---------------------------------------------------------------------------
 
+  /**
+   * A flow can settle twice — cli.js hangs the loopback wait and the manual
+   * paste off one shared promise, so on the desktop both continuations fire on
+   * a successful exchange. The second one used to read `IDLE`, which is how a
+   * login that succeeded reported neither success nor failure to the caller
+   * whose invoke return was the only channel it had. Replay that flow's real
+   * terminal state instead.
+   *
+   * Scope is deliberately per flow ID: a settle for a DIFFERENT flow is not a
+   * duplicate — it belongs to a login the user cancelled or restarted — and
+   * still reads `IDLE`, which is the correct answer for it.
+   *
+   * Side-effect free on purpose. It returns BEFORE `invalidateLiveSessions`,
+   * the `auth:state` broadcast, the `onSuccessCbs` loop and the
+   * `provider:auth-resolved` emit, so a replay cannot re-run any of them and
+   * cannot stomp the state of a newer flow. Answering a duplicate is all it
+   * does.
+   */
+  private replaySettled(flow: number): AuthFlowState | null {
+    return this.settledFlow?.flow === flow ? this.settledFlow.state : null
+  }
+
   private finalize(flow: number, res: OAuthResult): AuthFlowState {
+    const replay = this.replaySettled(flow)
+    if (replay) return replay
     if (flow !== this.flowId || this.settled) return IDLE
     this.settled = true
     this.pendingState = null
@@ -215,6 +267,9 @@ class AuthManager {
       : null
 
     const state: AuthFlowState = { status: 'success', account, error: null }
+    // Remembered BEFORE the side effects below, so even a re-entrant settle
+    // (from one of the `onSuccessCbs`) replays this instead of erasing it.
+    this.settledFlow = { flow, state }
     logger.info('AuthManager', `Login succeeded${account?.email ? ` (${account.email})` : ''}`)
     // Every live engine process cached the credential this login just replaced,
     // so stop them main-side. Before this the ONLY reaction was the desktop
@@ -256,10 +311,16 @@ class AuthManager {
   }
 
   private fail(flow: number, err: unknown): AuthFlowState {
+    // Same replay, and it matters most here: the loopback wait rejecting after
+    // the paste already succeeded must NOT turn that success into an error.
+    const replay = this.replaySettled(flow)
+    if (replay) return replay
     if (flow !== this.flowId || this.settled) return IDLE
     this.settled = true
     this.pendingState = null
-    return this.broadcastError(errText(err))
+    const state = this.broadcastError(errText(err))
+    this.settledFlow = { flow, state }
+    return state
   }
 
   private broadcastError(message: string): AuthFlowState {
