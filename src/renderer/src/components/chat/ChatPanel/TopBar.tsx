@@ -497,7 +497,9 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
       {
         id: 'permissions',
         tier: 2,
-        label: 'Project permissions',
+        // "Permissions", not "Project permissions": the dialog manages the
+        // GLOBAL rules as well as this project's.
+        label: 'Permissions',
         menuTestId: 'TopBar.overflowMenuPermissions',
         menuIcon: strokeIcon(13, PERMISSIONS_MARK),
         bar: { testId: 'TopBar.permissions', content: strokeIcon(12, PERMISSIONS_MARK) },
