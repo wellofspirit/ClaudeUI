@@ -521,4 +521,28 @@ describe('GitBranchDropdown FC — rendered', () => {
     // No upstream push IPC was called
     expect(ipcCalls['git:push-with-upstream']).toBeUndefined()
   })
+
+  // ── Escape ────────────────────────────────────────────────────────────────
+  // Below tier 1 the top bar's menu row is the ONLY way to this panel, so it has
+  // to answer the key like every other overlay — through the app's one stack.
+  const pressEscape = (): void => {
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    })
+  }
+
+  it('Escape closes the dropdown', async () => {
+    await renderFC()
+    pressEscape()
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('Escape while naming a new branch cancels the naming, not the dropdown', async () => {
+    await renderFC()
+    act(() => viewProps.onStartCreating())
+    expect(viewProps.creating).toBe(true)
+    pressEscape()
+    expect(viewProps.creating).toBe(false)
+    expect(onClose).not.toHaveBeenCalled()
+  })
 })

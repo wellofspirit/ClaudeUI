@@ -249,6 +249,27 @@ describe('AuthPill — what a click does', () => {
     expect(retrySend).toHaveBeenCalledWith(BACKGROUND, 'refactor it')
     expect(useSessionStore.getState().sessions[BACKGROUND].authRequired).toBeNull()
   })
+
+  /**
+   * The pill is app-wide, so the retry it owes routinely belongs to a session
+   * the user is not looking at — and `retrySend` RESPAWNS that session. One
+   * click therefore restarted a backend somewhere off-screen with nothing on
+   * screen to show for it. Switching first makes the click's effect the thing
+   * the user is now looking at.
+   */
+  it('shows the user what the click did: the owed session becomes the active one', async () => {
+    const retrySend = vi.fn(async () => {})
+    useSessionStore.setState({ retrySend })
+    blame(BACKGROUND, { providerId: 'chatgpt', resolved: true, retryPrompt: 'refactor it' })
+    renderPill()
+    expect(useSessionStore.getState().activeSessionId).toBe(ACTIVE)
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('AuthPill'))
+    })
+    expect(useSessionStore.getState().activeSessionId).toBe(BACKGROUND)
+    expect(retrySend).toHaveBeenCalledWith(BACKGROUND, 'refactor it')
+  })
 })
 
 describe('AuthPill — the resolved pill is transient, unless it owes a retry', () => {

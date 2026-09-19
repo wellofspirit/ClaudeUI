@@ -124,6 +124,8 @@ export function AuthPill(): React.JSX.Element | null {
   const openSignIn = useSessionStore((s) => s.openSignIn)
   const retrySend = useSessionStore((s) => s.retrySend)
   const clearAuthRequired = useSessionStore((s) => s.clearAuthRequired)
+  const activeSessionId = useSessionStore((s) => s.activeSessionId)
+  const switchSession = useSessionStore((s) => s.switchSession)
   const [retired, setRetired] = useState(false)
 
   // Transient only when nothing is owed: a pill offering a Retry has to wait for
@@ -148,6 +150,11 @@ export function AuthPill(): React.JSX.Element | null {
     if (tone === 'resolved') {
       const owed = summary.retryable[0]
       if (!owed) return setRetired(true)
+      // The pill is app-wide, so the owed prompt routinely belongs to a session
+      // the user is not looking at — and `retrySend` RESPAWNS it. Switch first,
+      // so one click does not restart a backend off-screen with nothing on
+      // screen to show for it.
+      if (owed.routingId !== activeSessionId) switchSession(owed.routingId)
       void retrySend(owed.routingId, owed.prompt)
       clearAuthRequired(owed.routingId)
       return
@@ -226,6 +233,41 @@ export function AuthPill(): React.JSX.Element | null {
           </span>
         )}
       </button>
+    </div>
+  )
+}
+
+/**
+ * The pill's RESERVATION — the 34px of title `TopBar` gives up so a compact
+ * pill (22px) plus its 8px gutter always has somewhere to go.
+ *
+ * It is charged HERE, and only while a pill is actually on screen. ADR-070 §4's
+ * promise is that the pill "never permanently costs the title its space"; as a
+ * `max-w-[calc(100%-34px)]` on `TopBar.info` it cost exactly that — every
+ * healthy session's title gave up 34px to a pill rendering `null`. `:has()`
+ * asks the rendered DOM instead of re-deriving the pill's own visibility (which
+ * includes a linger timer), so the two answers cannot drift. It keys on the
+ * pill's `data-tone` — state the pill publishes — not on a testid, which is the
+ * tests' vocabulary and must stay free to change.
+ *
+ * `min-w-0` is the base and the reservation overrides it: without it this flex
+ * item's automatic minimum is the pill's min-content width (~123px at the
+ * widest label), which is the shape that painted over the VS Code button.
+ *
+ * `min(34px, 100%)` and not a flat 34px: on a bar so narrow that the title
+ * group is a couple of pixels wide, a hard minimum would push the pill straight
+ * back out of the group it is supposed to stay inside. Capped at the group, the
+ * slot narrows with it and the pill's own `@max-[23px]:hidden` backstop takes
+ * over — one sliced dot is the one thing here that would be ambiguous rather
+ * than merely cramped.
+ */
+export function AuthPillSlot(): React.JSX.Element {
+  return (
+    <div
+      data-testid="TopBar.pillSlot"
+      className="flex flex-1 items-center min-w-0 has-[[data-tone]]:min-w-[min(34px,100%)]"
+    >
+      <AuthPill />
     </div>
   )
 }

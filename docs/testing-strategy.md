@@ -30,6 +30,7 @@ Tests are organized into four layers that target different concerns:
 | **Component**   | Business logic (events → state)          | Electron IPC transport, SDK           | Yes        |
 | **E2E**         | Full pipeline (action → state → outcome) | Electron IPC transport, SDK           | Yes        |
 | **Integration** | SDK event contracts                      | Nothing (real SDK)                    | No (gated) |
+| **Layout**      | Geometry (flex, container queries, z)    | Nothing (real CSS, real Chromium)     | No (gated) |
 
 ## Layer 1: Unit Tests
 
@@ -267,6 +268,30 @@ describe('factory validation', () => {
 
 **The Codex fixture provider.** The real-binary Codex suites (`src/integration/codex/*.integration.test.ts`, gated by `CODEX_INTEGRATION=1`) never talk to a paid provider: they run against one shared localhost Responses server, `src/integration/codex/fixture-provider.ts`, which also writes the isolated `CODEX_HOME` (`config.toml`, `auth.json`) the child reads. `scripts/codex-fixture-provider.mjs` is a thin CLI wrapper around the same module, so a real-app drive and the integration suites exercise the identical fixture — there is deliberately no second copy. Its `chatgpt` mode serves a drive under an INJECTED ChatGPT identity (ADR-068 §1): `chatgpt_base_url` is pointed at the fixture, the binary's own backend calls are answered 404 and recorded, any bearer is accepted, and `writeFabricatedVault()` mints the scratch vault it comes from (it refuses `os.homedir()`). On the CLI: `--chatgpt --vault-home <home> --accounts <n>`, or `scripts/codex-render-stress.mjs --accounts <n>`. The module's own guards are `src/integration/codex/__tests__/fixture-provider.test.ts`, which runs everywhere — the suites it serves do not.
 
+## Layer 5: Layout Tests
+
+**Purpose:** Answer the questions jsdom cannot hold an opinion about. Every other layer runs in jsdom, which has **no layout engine**: `getBoundingClientRect()` is a 0×0 box, and flex shrinking, `min-width`, `truncate`, container queries and stacking order are never resolved. That is how `TopBar`'s and `AuthPill`'s component tests stayed green while the real bar visibly overlapped itself (ADR-070 residual 1).
+
+**What to test:** things that are a fact about geometry, and only those — an element staying inside its group, a title that must not be squeezed to zero, which of two forms a container query selects, at which width a collapse tier fires, whether an overlay actually receives a click where it overlaps a sibling. Nothing here should duplicate an assertion a jsdom test could make.
+
+**How it works:** the component is rendered normally (React + jsdom + the real store), its markup is handed to a real Chromium through Playwright, and it is paired with the app's **own** compiled stylesheet — `src/renderer/src/assets/main.css` built through the same `@tailwindcss/vite` plugin the app ships with, so a class nobody has used yet is genuinely absent from the sheet. `src/layout/harness.ts` (`openBar`, `measure`, `contains`) and `src/layout/global-setup.ts` carry the details and the reasons.
+
+**Prerequisite — not installed for you:** the project needs Playwright's Chromium.
+
+```bash
+bunx playwright install chromium
+```
+
+Nothing in `bun install` or `postinstall` provisions it. The global setup checks for the binary and fails with that command before it does anything else, rather than surfacing a launch error from inside a test.
+
+**What it is NOT:** it is **not** in `bun run test` or `bun run test:ci` — it needs a browser binary and takes seconds per file, so it is gated exactly like `integration`. And it measures **Playwright's Chromium, not the shipped Electron build**, which runs a different Chromium version; a claim that depends on engine-specific behaviour has to hold in both readings (see the `container-type` stacking-context case in `TopBar.layout.test.tsx`) rather than being settled by what this browser happens to do.
+
+**File naming:** `*.layout.test.tsx`
+
+**File location:** `src/layout/`
+
+**Running:** `bun run test:layout`
+
 ## Test Infrastructure
 
 ### TestIpcBridge (`src/test/bridges/test-ipc-bridge.ts`)
@@ -303,6 +328,7 @@ bun run test:unit      # Layer 1 — unit tests only
 bun run test:component # Layer 2 — component tests only
 bun run test:e2e       # Layer 3 — e2e tests only
 bun run test:integration # Layer 4 — integration tests (needs CLAUDE_INTEGRATION_TESTS=1)
+bun run test:layout    # Layer 5 — geometry in real Chromium (needs `bunx playwright install chromium`)
 bun run test:ci        # Layers 1+2+3 — what runs in CI pipeline
 bun run test:watch     # Unit tests in watch mode
 ```
@@ -317,12 +343,14 @@ bun run test:watch     # Unit tests in watch mode
 | Component   | `*.component.test.ts`            | `useClaudeEvents.component.test.ts`   |
 | E2E         | `*.e2e.test.ts`                  | `basic-conversation.e2e.test.ts`      |
 | Integration | `*.integration.test.ts`          | `event-sequences.integration.test.ts` |
+| Layout      | `*.layout.test.tsx`              | `TopBar.layout.test.tsx`              |
 
 ### File location
 
 - Unit and component tests: `src/**/__tests__/` (near the code they test)
 - E2E tests: `src/e2e/flows/`
 - Integration tests: `src/integration/`
+- Layout tests: `src/layout/`
 - Shared infrastructure: `src/test/`
 
 ### Store setup in tests
@@ -353,6 +381,7 @@ Or use `bootTestApp()` which registers stub IPC handlers for these channels auto
 - **New store action or event handler** → Component test
 - **New React component** → Unit test
 - **Bug that spans multiple subsystems** → E2E test
+- **A claim about geometry** (fits, overlaps, truncates, collapses at width N, paints above) → Layout test; jsdom cannot evaluate it
 - **SDK upgrade** → Run integration tests, update factories if event shapes changed
 - **New patch** → Integration test verifying the patched behavior
 

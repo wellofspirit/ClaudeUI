@@ -16,6 +16,8 @@
  */
 import { build } from 'vite'
 import tailwindcss from '@tailwindcss/vite'
+import { chromium } from 'playwright'
+import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type { TestProject } from 'vitest/node'
 
@@ -28,7 +30,35 @@ declare module 'vitest' {
   }
 }
 
+/**
+ * Nothing in this repo provisions a browser: `bun install` does not run
+ * `playwright install`, and CI does not run this project at all. On a clean
+ * checkout the first symptom was `chromium.launch()`'s own error, raised from
+ * inside a test after the ~10s stylesheet build below — so the fix says which
+ * command to run, and says it before anything else happens.
+ *
+ * Deliberately NOT installed from here: a test run that downloads ~150MB
+ * unasked is worse than one that stops and tells you.
+ */
+function requireChromium(): void {
+  let executable: string
+  try {
+    executable = chromium.executablePath()
+  } catch {
+    throw new Error(
+      "The `layout` project needs Playwright's Chromium, which this checkout has no record of.\n" +
+        'Run: bunx playwright install chromium'
+    )
+  }
+  if (existsSync(executable)) return
+  throw new Error(
+    `The \`layout\` project needs Playwright's Chromium, which is not installed (looked for ${executable}).\n` +
+      'Run: bunx playwright install chromium'
+  )
+}
+
 export async function setup(project: TestProject): Promise<void> {
+  requireChromium()
   const result = await build({
     root: REPO_ROOT,
     configFile: false,

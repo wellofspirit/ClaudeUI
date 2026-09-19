@@ -31,8 +31,10 @@
  *   5. each tier drops exactly its own children, at the width the numbers in
  *      `top-bar-tiers.ts` claim — thresholds PARSED from the shipped class
  *      strings, never retyped here;
- *   6. the ⋯ button is present exactly when the five tools are gone — never
- *      both, never neither;
+ *   6. every collapsible control has EXACTLY ONE surface at every width — its
+ *      bar form or its ⋯ row, never both and never neither — and the ⋯ button
+ *      itself arrives with the first tier that has a row to offer (tier 1 in a
+ *      repo, where the branch pill is the app's only fetch/pull/push/switch);
  *   7. `GitChangesPill` and `WindowControls` survive every width;
  *   8. a phone viewport is inside the collapsed tier BY CONSTRUCTION, so
  *      "mobile" is a case of the width rule rather than a second rule.
@@ -52,9 +54,12 @@ import { useSessionStore } from '../renderer/src/stores/session-store'
 import { SidebarContext } from '../renderer/src/components/SessionView'
 import { TopBar } from '../renderer/src/components/chat/ChatPanel/TopBar'
 import {
-  OVERFLOW_HIDE,
+  OVERFLOW_FROM_TIER1,
+  OVERFLOW_FROM_TIER2,
   TIER1_HIDE,
-  TIER2_HIDE
+  TIER1_ROW_HIDE,
+  TIER2_HIDE,
+  TIER2_ROW_HIDE
 } from '../renderer/src/components/chat/ChatPanel/top-bar-tiers'
 import { MOBILE_BREAKPOINT } from '../renderer/src/hooks/useIsMobile'
 import { resolveClaudeCapabilities } from '../shared/model-capabilities'
@@ -72,7 +77,9 @@ const CWD = '/d/WorkPlace/ClaudeUI'
 const SELECTORS = {
   bar: '[data-testid="TopBar"]',
   leftGroup: '[data-testid="TopBar.leftGroup"]',
+  titleGroup: '[data-testid="TopBar.titleGroup"]',
   info: '[data-testid="TopBar.info"]',
+  pillSlot: '[data-testid="TopBar.pillSlot"]',
   pill: '[data-testid="AuthPill"]',
   label: '[data-testid="AuthPill.label"]',
   count: '[data-testid="AuthPill.count"]',
@@ -90,12 +97,35 @@ const SELECTORS = {
   changes: '[data-testid="GitChangesPill"]',
   windowControls: '[data-testid="WindowControls"]',
   overflow: '[data-testid="TopBar.overflowMenu"]',
-  overflowPermissions: '[data-testid="TopBar.overflowMenuPermissions"]'
+  // Every control's ⋯ row, in the same order — the other half of each pair.
+  rowVscode: '[data-testid="TopBar.overflowMenuVSCode"]',
+  rowTerminal: '[data-testid="TopBar.overflowMenuTerminal"]',
+  rowSkills: '[data-testid="TopBar.overflowMenuSkills"]',
+  rowMcp: '[data-testid="TopBar.overflowMenuMcp"]',
+  rowPermissions: '[data-testid="TopBar.overflowMenuPermissions"]',
+  rowWorktree: '[data-testid="TopBar.overflowMenuWorktree"]',
+  rowBranch: '[data-testid="TopBar.overflowMenuBranch"]'
 }
 
 const TIER2 = ['vscode', 'terminal', 'skills', 'mcp', 'permissions'] as const
 const TIER1 = ['worktree', 'branch'] as const
 const NEVER = ['changes', 'windowControls'] as const
+
+/**
+ * Every control that has BOTH a bar form and a ⋯ row: the pair must never be on
+ * screen together and never both absent, at any width (ADR-070 residual 1, the
+ * tier-1 ruling). Written as pairs rather than as two lists so a control added
+ * to one surface and not the other has nowhere to hide.
+ */
+const PAIRS = [
+  ['vscode', 'rowVscode'],
+  ['terminal', 'rowTerminal'],
+  ['skills', 'rowSkills'],
+  ['mcp', 'rowMcp'],
+  ['permissions', 'rowPermissions'],
+  ['worktree', 'rowWorktree'],
+  ['branch', 'rowBranch']
+] as const
 
 /**
  * The thresholds, read out of the class strings the bar actually ships.
@@ -217,6 +247,22 @@ async function barAt(collapsed: boolean, zoom = 1, isMobile = false): Promise<Pa
     </SidebarContext.Provider>
   )
   return await openBar(container.innerHTML, zoom)
+}
+
+/**
+ * The same bar with the ⋯ menu already open, so both surfaces of every control
+ * are in the markup and the BROWSER decides which one has a box. Clicked in
+ * jsdom, where the trigger is always reachable — its own visibility is a
+ * container query, which is exactly what is under test.
+ */
+async function barWithMenuOpen(): Promise<Page> {
+  const { container } = render(
+    <SidebarContext.Provider value={{ collapsed: false, toggle: () => {}, isMobile: false }}>
+      <TopBar hasContent />
+    </SidebarContext.Provider>
+  )
+  fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+  return await openBar(container.innerHTML)
 }
 
 interface Violation {
@@ -341,13 +387,14 @@ async function sweep(page: Page, zoom = 1): Promise<{ violations: Violation[]; r
         width,
         reason: `tier 2 ${tier2 ? 'shown' : 'dropped'} at ${container}px of container (T2 ${T2})`
       })
-    // The ⋯ is the tools' replacement, not an extra: never both, never neither.
-    if (overflowButton === tier2)
+    // The ⋯ arrives with the FIRST tier that takes something away — tier 1, in
+    // this fixture, which is in a repo and a worktree — and never before it.
+    if (overflowButton === tier1)
       violations.push({
         width,
         reason: overflowButton
-          ? 'the ⋯ menu and the five tool buttons are on screen together'
-          : 'the tools are gone and nothing replaced them'
+          ? 'the ⋯ menu is on screen while every control still has its own bar form'
+          : 'a tier has collapsed and nothing replaced it'
       })
     for (const id of NEVER)
       if (!m[id].box) violations.push({ width, reason: `${id} was dropped — it is in no tier` })
@@ -533,11 +580,41 @@ describe('TopBar left group — real geometry', () => {
     }
   })
 
-  it('leaves the title alone when there is no pill at all — the control', async () => {
+  it('leaves the title the WHOLE group when there is no pill at all — the control', async () => {
+    // A title long enough to want every pixel, so "the reservation is not
+    // charged" is a question with an answer. ADR-070 §4's promise is that the
+    // pill "never permanently costs the title its space"; a reservation paid on
+    // every healthy session is exactly that cost, 34px of it, forever.
+    useSessionStore.setState((s) => ({
+      customTitles: { ...s.customTitles, [ROUTE]: 'x'.repeat(200) }
+    }))
     const page = await barAt(false)
     const m = await measure(page, 1098, SELECTORS)
     expect(m.pill.box, 'a healthy, unprobed host shows no pill').toBeNull()
     expect(m.info.box!.width).toBeGreaterThan(0)
+    expect(
+      m.titleGroup.box!.right - m.info.box!.right,
+      `title ${fmt(m.info.box)} stops short of its group ${fmt(m.titleGroup.box)}`
+    ).toBeLessThanOrEqual(0.5)
+    await page.close()
+  })
+
+  it('charges the 34px reservation only while a pill is actually there', async () => {
+    // The other side of the control: the same long title, one broken provider.
+    // The title yields exactly the pill's slot and no more, which is the
+    // guarantee Slice E measured — it is the UNCONDITIONAL part that was wrong.
+    useSessionStore.setState((s) => ({
+      customTitles: { ...s.customTitles, [ROUTE]: 'x'.repeat(200) }
+    }))
+    useSessionStore.setState({
+      providerAuth: { anthropic: 'unauthenticated', chatgpt: 'unknown', chatgptRoutes: {} }
+    })
+    const page = await barAt(false)
+    const m = await measure(page, 1098, SELECTORS)
+    expect(m.pill.box, 'the fixture must actually produce a pill').not.toBeNull()
+    expect(m.titleGroup.box!.right - m.info.box!.right).toBeGreaterThanOrEqual(33.5)
+    // And the pill is inside what the title gave up, not painting past it.
+    expect(contains(m.titleGroup.box!, m.pill.box!)).toBe(true)
     await page.close()
   })
 
@@ -557,21 +634,60 @@ describe('TopBar left group — real geometry', () => {
       expect(above[id].box, `${id} above T1`).not.toBeNull()
       expect(below[id].box, `${id} below T1`).not.toBeNull()
     }
-    expect(above.rightGroup.box!.width - below.rightGroup.box!.width).toBeCloseTo(344, 0)
+    // The ⋯ arrives here, because the two pills it replaces are actions (fetch /
+    // pull / push / switch; copy path) and not inert state. It costs 42.0 of the
+    // 344.0 the tier hands back, which is why carrying it does not move T1.
+    expect(above.overflow.box, 'nothing is hidden at T1 — the ⋯ has nothing to offer').toBeNull()
+    expect(below.overflow.box, 'the pills went somewhere — the ⋯ has to be there').not.toBeNull()
+    expect(above.rightGroup.box!.width - below.rightGroup.box!.width).toBeCloseTo(302, 0)
+    await page.close()
+  })
+
+  it('reaches the branch dropdown from the ⋯ between the two thresholds', async () => {
+    // The band the ruling exists for: below T1 the branch pill — the app's only
+    // fetch / pull / push / switch surface — is gone, and above T2 its tools are
+    // all still on the bar, so the menu here holds the git rows and nothing else.
+    const page = await barWithMenuOpen()
+    const band = await measure(page, barWidthFor(T1 - 1), SELECTORS)
+    expect(band.overflow.box, 'the ⋯ must appear as soon as tier 1 takes the pills').not.toBeNull()
+    expect(band.rowBranch.box, 'branch is unreachable in this band without its row').not.toBeNull()
+    expect(band.rowWorktree.box).not.toBeNull()
+    for (const id of ['rowVscode', 'rowTerminal', 'rowSkills', 'rowMcp', 'rowPermissions'] as const)
+      expect(band[id].box, `${id} while its own button is still on the bar`).toBeNull()
+
+    const above = await measure(page, barWidthFor(T1), SELECTORS)
+    expect(above.overflow.box, 'no ⋯ while every control has its own bar form').toBeNull()
+    await page.close()
+  })
+
+  it('never shows a control and its ⋯ row together, and never neither', async () => {
+    const page = await barWithMenuOpen()
+    for (const width of SWEEP_WIDTHS) {
+      const m = await measure(page, width, SELECTORS)
+      for (const [bar, row] of PAIRS) {
+        expect(!!m[bar].box && !!m[row].box, `${bar}: bar form AND ⋯ row at ${width}px`).toBe(false)
+        expect(!!m[bar].box || !!m[row].box, `${bar}: no surface at all at ${width}px`).toBe(true)
+      }
+    }
     await page.close()
   })
 
   it('drops tier 2 — the five tools — into the ⋯ menu at its stated width', async () => {
-    const page = await barAt(false)
+    // With the menu OPEN, so "the tools moved" is measured on both surfaces
+    // rather than only on the one they left.
+    const page = await barWithMenuOpen()
     const above = await measure(page, barWidthFor(T2), SELECTORS)
     const below = await measure(page, barWidthFor(T2 - 1), SELECTORS)
     for (const id of TIER2) {
       expect(above[id].box, `${id} must survive ${T2}px of container`).not.toBeNull()
       expect(below[id].box, `${id} must be gone at ${T2 - 1}px of container`).toBeNull()
     }
-    // The ⋯ is the replacement, not an addition.
-    expect(above.overflow.box, 'the ⋯ must not sit beside the buttons it replaces').toBeNull()
-    expect(below.overflow.box, 'the tools went somewhere — the ⋯ has to be there').not.toBeNull()
+    expect(below.rowPermissions.box, 'the tools have to land somewhere').not.toBeNull()
+    // The ⋯ is already here for tier 1's rows; what changes at T2 is that the
+    // five tools join it. The rows, not the button, are the replacement.
+    expect(above.overflow.box, 'the ⋯ is tier 1’s too — it does not wait for T2').not.toBeNull()
+    expect(below.overflow.box).not.toBeNull()
+    expect(above.rowPermissions.box, 'a tool row beside the button it replaces').toBeNull()
     for (const id of NEVER) expect(below[id].box, `${id} below T2`).not.toBeNull()
 
     // …and the ⋯ sits LEFT of the window controls. They are the frameless
@@ -614,12 +730,16 @@ describe('TopBar left group — real geometry', () => {
       rows.some((r) => !r.tier1 && !r.tier2),
       'never saw tier 2 collapsed'
     ).toBe(true)
-    // And the floor is a real edge, not a number that is simply never reached.
-    const floor = rows.find(
-      (r) => Math.round(r.group.width) >= 0 && r.width === barWidthFor(CLUSTER_FLOOR)
-    )
-    expect(floor, `the sweep must visit the ${CLUSTER_FLOOR}px floor`).toBeDefined()
-    expect(floor!.overflow).toBeLessThanOrEqual(0.5)
+    // And the floor is a real edge: the three never-dropped children fit the
+    // width they are said to need, measured there directly rather than looked up
+    // in a sweep the fixture had already been told to visit.
+    const m = await measure(page, barWidthFor(CLUSTER_FLOOR), SELECTORS)
+    const spill = m.rightGroup.box!.right - (m.bar.box!.right - 13)
+    expect(
+      spill,
+      `the cluster wants ${fmt(m.rightGroup.box)} on a ${CLUSTER_FLOOR}px container`
+    ).toBeLessThanOrEqual(0.5)
+    for (const id of NEVER) expect(m[id].box, `${id} at the floor`).not.toBeNull()
     await page.close()
   })
 
@@ -652,24 +772,29 @@ describe('TopBar left group — real geometry', () => {
     const m = await measure(page, barWidthFor(T2 - 1), SELECTORS)
 
     const bar = m.bar.box!
-    const menu = m.overflowPermissions.box
+    const menu = m.rowPermissions.box
     expect(menu, 'the open menu must render').not.toBeNull()
     // Below the bar, not inside it, and every pixel of it visible.
     expect(menu!.top).toBeGreaterThanOrEqual(bar.bottom - 0.5)
-    expect(m.overflowPermissions.visible!.width).toBeCloseTo(menu!.width, 1)
-    expect(m.overflowPermissions.visible!.height).toBeCloseTo(menu!.height, 1)
+    expect(m.rowPermissions.visible!.width).toBeCloseTo(menu!.width, 1)
+    expect(m.rowPermissions.visible!.height).toBeCloseTo(menu!.height, 1)
     await page.close()
   })
 
-  it('keeps the ⋯ menu above the notice band it hangs over', async () => {
-    // The other half of the containment bill. If `container-type` makes the
-    // bar a stacking context — the spec says it does; Chromium 151 does not,
-    // and the app's Electron is neither — the menu's `z-50` is scoped to the
-    // bar, and the bar is a `z-auto` box EARLIER in DOM order than
-    // `ChatNoticeStack`'s `absolute top-12 z-20`, so the menu would paint
-    // UNDER any live notice card, over exactly the band it drops into. `z-30`
-    // makes the answer the same in both engines, and a hit test is the only
-    // way to say so: a box on top is not a fact about class names.
+  it('keeps the ⋯ menu above the notice band, in BOTH readings of the containment', async () => {
+    // The other half of the containment bill. `container-type: inline-size` is
+    // SPECIFIED to apply layout containment, which makes the bar a stacking
+    // context — and then the menu's `z-50` is scoped inside a `z-auto` box that
+    // comes EARLIER in DOM order than `ChatNoticeStack`'s `absolute top-12
+    // z-20`, so the menu would paint under any live notice card, over exactly
+    // the band it drops into.
+    //
+    // This Chromium does not apply it, and `getComputedStyle().contain` cannot
+    // tell you either way — `contain` is a different property, which is why the
+    // first pass below passed before `z-30` existed and pinned nothing. So the
+    // second pass writes the same containment the one way every engine honours
+    // (`contain: layout`) and asks again: that is the conforming engine's
+    // answer, and without the bar's own `z-30` it is the notice card.
     const { container } = render(
       <SidebarContext.Provider value={{ collapsed: false, toggle: () => {}, isMobile: false }}>
         <TopBar hasContent />
@@ -678,24 +803,46 @@ describe('TopBar left group — real geometry', () => {
     fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
     // `ChatPanel`'s shape: the bar and the notice slot are siblings inside one
     // `relative` box, and the slot starts at the bar's own height.
+    // 400px of notice, so the band covers the WHOLE menu: at 120px it reached
+    // only the first rows, and the row the old test probed hung below it —
+    // which is the second reason that assertion could not fail.
     const page = await openBar(
       `<div class="relative">${container.innerHTML}` +
         `<div data-testid="FakeNotice" class="absolute top-12 left-0 right-0 z-20" ` +
-        `style="height:120px;background:#f00"></div></div>`
+        `style="height:400px;background:#f00"></div></div>`
     )
-    const hit = await page.evaluate(
-      (width: number) => {
-        const host = document.getElementById('bar-host')!
-        host.style.width = `${width}px`
-        void host.offsetWidth
-        const row = document.querySelector('[data-testid="TopBar.overflowMenuPermissions"]')!
-        const box = row.getBoundingClientRect()
-        const at = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)
-        return at?.closest('[data-testid]')?.getAttribute('data-testid') ?? null
-      },
-      barWidthFor(T2 - 1)
-    )
-    expect(hit).toBe('TopBar.overflowMenuPermissions')
+    /** What a click on the centre of each menu row would actually land on. */
+    const hitsUnder = async (containment: boolean): Promise<string[]> =>
+      await page.evaluate(
+        ({ width, containment }) => {
+          const host = document.getElementById('bar-host')!
+          host.style.width = `${width}px`
+          const bar = document.querySelector('[data-testid="TopBar"]') as HTMLElement
+          // `contain: layout` is the same containment written the one way every
+          // engine honours — `container-type`'s own is invisible to
+          // `getComputedStyle`, so this is how the conforming engine is asked.
+          bar.style.contain = containment ? 'layout' : ''
+          void host.offsetWidth
+          const rows = [
+            ...document.querySelectorAll('[data-testid^="TopBar.overflowMenu"]')
+          ].filter((el) => el.getAttribute('data-testid') !== 'TopBar.overflowMenu')
+          return rows.map((row) => {
+            const box = row.getBoundingClientRect()
+            const at = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)
+            return at?.closest('[data-testid]')?.getAttribute('data-testid') ?? 'nothing'
+          })
+        },
+        { width: barWidthFor(T2 - 1), containment }
+      )
+
+    const plain = await hitsUnder(false)
+    expect(plain.length, 'the open menu must have rows to probe').toBeGreaterThan(0)
+    for (const hit of plain)
+      expect(hit, 'this Chromium, which applies no containment').toMatch(/^TopBar\.overflowMenu/)
+    for (const hit of await hitsUnder(true))
+      expect(hit, 'an engine that applies the containment the spec mandates').toMatch(
+        /^TopBar\.overflowMenu/
+      )
     await page.close()
   })
 
@@ -707,9 +854,14 @@ describe('TopBar left group — real geometry', () => {
     // a member of tier 2 by construction. Drop T2 below 768 and the phone
     // needs its device branch back.
     expect(T2).toBeGreaterThanOrEqual(MOBILE_BREAKPOINT)
-    // The ⋯ trigger's threshold must be tier 2's, or there is a band with both
-    // surfaces or neither. (The sweep proves the behaviour; this names the
-    // reason a reader would otherwise have to rediscover.)
-    expect(thresholdOf(OVERFLOW_HIDE)).toBe(T2)
+    // Every row's gate must be the exact complement of the bar form it stands
+    // in for, or there is a band showing both surfaces or neither — and the ⋯
+    // trigger must arrive with whichever tier this session actually has rows
+    // in. (The sweep proves the behaviour; this names the reasons a reader
+    // would otherwise have to rediscover.)
+    expect(thresholdOf(TIER1_ROW_HIDE)).toBe(T1)
+    expect(thresholdOf(TIER2_ROW_HIDE)).toBe(T2)
+    expect(thresholdOf(OVERFLOW_FROM_TIER1)).toBe(T1)
+    expect(thresholdOf(OVERFLOW_FROM_TIER2)).toBe(T2)
   })
 })
