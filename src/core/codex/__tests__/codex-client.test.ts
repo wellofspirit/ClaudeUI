@@ -2,6 +2,7 @@
 import { EventEmitter } from 'node:events'
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -125,8 +126,12 @@ afterEach(() => {
 describe('Codex JSONL client', () => {
   it('initializes once, validates executable version and replaces caller environment', async () => {
     await start({ env: { HOME: '/isolated' } })
-    expect(mocks.spawn.mock.calls[0][2].env).toEqual({ HOME: '/isolated' })
-    expect(mocks.spawn.mock.calls[1][2].env).toEqual({ HOME: '/isolated' })
+    // REPLACEMENT, not a merge: the caller's env is the whole environment, plus
+    // the one key the transport pins (see `childEnv`). Nothing of `process.env`
+    // rides along — an exact equality, so a future merge cannot pass this.
+    const replaced = { HOME: '/isolated', CODEX_HOME: join('/isolated', '.codex') }
+    expect(mocks.spawn.mock.calls[0][2].env).toEqual(replaced)
+    expect(mocks.spawn.mock.calls[1][2].env).toEqual(replaced)
     await expect(client.start(init)).rejects.toMatchObject({ code: 'one-shot-client' })
     client.dispose()
     client.dispose()
@@ -810,6 +815,75 @@ describe('app-server death reporting', () => {
       assertNoFileHoldsMarker()
     } finally {
       if (saved !== undefined) process.env.CLAUDEUI_CODEX_STDERR = saved
+    }
+  })
+})
+
+/**
+ * ClaudeUI and the process it spawns must not each resolve the Codex home for
+ * themselves. `codexHomeForEnv` follows `homedir()`, which honours `USERPROFILE`
+ * on Windows; Codex's own `find_codex_home` falls back to the Win32
+ * known-folder API, which does not. Under a redirected home the two disagreed —
+ * a `claudeui-server` on an isolated `HOME` listed the real threads while the
+ * isolated `.codex` did not exist — so the child is told its home outright.
+ */
+describe('explicit CODEX_HOME on every spawned child', () => {
+  /** The env each codex child got, keyed by which child it is. */
+  const childEnvs = (): Record<string, NodeJS.ProcessEnv> =>
+    Object.fromEntries(
+      mocks.spawn.mock.calls
+        .filter((call) => call[0] === '/vendor/codex')
+        .map((call) => [call[1][0] === '--version' ? 'version' : 'app-server', call[2].env])
+    )
+
+  it('derives it from a replacement USERPROFILE on Windows', async () => {
+    vi.stubGlobal('process', { ...process, platform: 'win32' })
+    await start({ env: { USERPROFILE: 'C:/isolated' } })
+    const home = join('C:/isolated', '.codex')
+    // Both children, one value: `--version` does not need a home, but the two
+    // must not be able to drift apart.
+    expect(childEnvs()).toEqual({
+      version: { USERPROFILE: 'C:/isolated', CODEX_HOME: home },
+      'app-server': { USERPROFILE: 'C:/isolated', CODEX_HOME: home }
+    })
+  })
+
+  it("carries an operator's own CODEX_HOME through verbatim", async () => {
+    // The first branch of `codexHomeForEnv`: a home someone set explicitly is
+    // never recomputed from the home directory beside it.
+    const env = { CODEX_HOME: '/chosen', HOME: '/isolated' }
+    await start({ env })
+    expect(childEnvs()).toEqual({ version: env, 'app-server': env })
+  })
+
+  it('falls back to this process home when the caller replaces nothing', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'codex-process-home-'))
+    mkdirSync(join(dir, '.codex'))
+    // An initialised home: this test is about the env, not the first-run gate.
+    writeFileSync(join(dir, '.codex', 'state_5.sqlite'), '')
+    const saved = { home: process.env.HOME, profile: process.env.USERPROFILE }
+    // `homedir()` reads USERPROFILE on Windows and HOME elsewhere; both are set
+    // so the expected value is the same on either.
+    delete process.env.CODEX_HOME
+    process.env.HOME = dir
+    process.env.USERPROFILE = dir
+    process.env.CODEX_CHILD_MARKER = 'inherited'
+    try {
+      await start()
+      const home = join(dir, '.codex')
+      for (const env of Object.values(childEnvs())) {
+        expect(env.CODEX_HOME).toBe(home)
+        // Inheritance is intact: an absent `options.env` still means process.env.
+        expect(env.CODEX_CHILD_MARKER).toBe('inherited')
+      }
+      expect(Object.keys(childEnvs())).toEqual(['version', 'app-server'])
+    } finally {
+      delete process.env.CODEX_CHILD_MARKER
+      if (saved.home === undefined) delete process.env.HOME
+      else process.env.HOME = saved.home
+      if (saved.profile === undefined) delete process.env.USERPROFILE
+      else process.env.USERPROFILE = saved.profile
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 })

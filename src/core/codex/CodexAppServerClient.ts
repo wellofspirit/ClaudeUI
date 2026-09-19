@@ -289,6 +289,31 @@ export class CodexAppServerClient {
   }
 
   /**
+   * The environment BOTH children get: this client's, plus an explicit
+   * `CODEX_HOME`.
+   *
+   * Without it the child resolves its own home, and on Windows that answer can
+   * differ from ours: {@link codexHomeForEnv} follows `homedir()`, which honours
+   * `USERPROFILE`, while Codex's `find_codex_home` falls back to the Win32
+   * known-folder API, which does not. So under a redirected home — a hermetic
+   * server run, a drive, a test — ClaudeUI and its own child looked at different
+   * directories, and `rules-sync.ts` wrote the execpolicy file where the binary
+   * never read it. Passing the home we already computed removes the possibility
+   * of disagreement; with no redirection it is the same `~/.codex` the child
+   * would have found, and an operator's own `CODEX_HOME` survives verbatim
+   * because that is the first branch of {@link codexHomeForEnv}.
+   *
+   * The spread keeps {@link CodexClientOptions.env}'s REPLACEMENT semantics: a
+   * supplied env is the whole environment, never merged with `process.env`.
+   */
+  private get childEnv(): NodeJS.ProcessEnv {
+    return {
+      ...(this.options.env ?? process.env),
+      CODEX_HOME: codexHomeForEnv(this.options.env)
+    }
+  }
+
+  /**
    * Every error this client mints, stamped with its caller label. Only that
    * field is added: `message` and the payload-free arguments are unchanged, so
    * nothing a caller reads today moves.
@@ -321,7 +346,7 @@ export class CodexAppServerClient {
       await this.awaitFirstRun()
       const child = spawn(binary, ['app-server', '--listen', 'stdio://'], {
         cwd: this.options.cwd,
-        env: this.options.env ?? process.env,
+        env: this.childEnv,
         detached: process.platform !== 'win32',
         stdio: 'pipe',
         windowsHide: true
@@ -426,7 +451,7 @@ export class CodexAppServerClient {
     return new Promise((resolve, reject) => {
       const child = spawn(binary, ['--version'], {
         cwd: this.options.cwd,
-        env: this.options.env ?? process.env,
+        env: this.childEnv,
         detached: process.platform !== 'win32',
         stdio: 'pipe',
         windowsHide: true

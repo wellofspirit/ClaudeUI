@@ -378,10 +378,14 @@ const CODEX_TARGET_SERVER_METHODS = [
  * belongs to, and which ChatGPT identity its host runs as.
  *
  * No `env` and no `serverMethods`. The host owns both — it inherits
- * `process.env` like every other Codex process (the integration test points a
- * real binary at an isolated CODEX_HOME through its own injected attach
- * function; NEVER set CODEX_HOME here), and its registered server-method list is
- * the union of what its owners answer.
+ * `process.env` like every other Codex process, and the TRANSPORT then pins an
+ * explicit `CODEX_HOME` onto whatever it inherited
+ * (`CodexAppServerClient.childEnv`), so the child can never resolve a different
+ * home than the one ClaudeUI computed. NEVER set `CODEX_HOME` here: an env on
+ * these opts REPLACES inheritance wholesale, and the integration test already
+ * points a real binary at an isolated home through its own injected attach
+ * function. The registered server-method list is the union of what its owners
+ * answer.
  */
 export type CodexTargetAttachOpts = {
   cwd: string
