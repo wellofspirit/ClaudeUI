@@ -1274,11 +1274,11 @@ export class OpencodeSession extends BaseSession {
         // dismissable card for the same fact. The words are not lost: the row
         // discloses them in place, and the neutral transcript block below gives
         // them a permanent home the floating card never had.
-        this.send('session:auth-required', {
-          providerId: opencodeAuthRequiredProviderId(output.vendorId),
-          message: output.message
-        })
-        this.rememberAndSend(authErrorTranscriptMessage(uuid(), output.message))
+        const providerId = opencodeAuthRequiredProviderId(output.vendorId)
+        this.send('session:auth-required', { providerId, message: output.message })
+        // The SAME providerId on the block, so the row still names the provider
+        // once the live `authRequired` has settled (ADR-070 §4).
+        this.rememberAndSend(authErrorTranscriptMessage(uuid(), output.message, providerId))
         this.sendStatus()
         this.resetInactivityTimer()
         break

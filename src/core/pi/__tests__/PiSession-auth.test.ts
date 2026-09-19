@@ -254,7 +254,10 @@ describe('PiSession — a 401/403 turn raises session:auth-required', () => {
     expect(authRows).toHaveLength(1)
     expect(authRows[0].content[0]).toMatchObject({
       type: 'api_error',
-      errorType: 'authentication'
+      errorType: 'authentication',
+      // The SAME provider the event named — the block outlives the event
+      // (ADR-070 §4).
+      providerId: 'chatgpt'
     })
 
     session.cancel()

@@ -47,19 +47,29 @@ function seedSession(): void {
 }
 
 /** The transcript block every engine now emits for a rejected credential. */
-function authBlockMessage(errorMessage = 'API Error: 401 invalid authentication'): ChatMessage {
+function authBlockMessage(
+  errorMessage = 'API Error: 401 invalid authentication',
+  providerId?: string
+): ChatMessage {
   return {
     id: 'err-1',
     role: 'system',
-    content: [{ type: 'api_error', errorType: 'authentication', errorMessage }],
+    content: [
+      {
+        type: 'api_error',
+        errorType: 'authentication',
+        errorMessage,
+        ...(providerId ? { providerId } : {})
+      }
+    ],
     timestamp: 0
   } as ChatMessage
 }
 
-function renderRow(errorMessage?: string): ReturnType<typeof render> {
+function renderRow(errorMessage?: string, providerId?: string): ReturnType<typeof render> {
   return render(
     <MessageBubble
-      message={authBlockMessage(errorMessage)}
+      message={authBlockMessage(errorMessage, providerId)}
       pendingApprovals={[]}
       isLastAssistant={false}
     />
@@ -102,6 +112,34 @@ describe('AuthTranscriptRow — settled (history)', () => {
   it('opens no dialog, because there is nothing there to open one', () => {
     renderRow()
     expect(useSessionStore.getState().signInDialog).toBeNull()
+  })
+
+  /**
+   * Permanent history has to be self-describing. `authRequired` is null here —
+   * that is what settled MEANS — so a row that learned the provider only from
+   * the session said "Turn stopped — the credential was rejected." about a
+   * Claude failure, forever, while the broken and resolved rows above it named
+   * the provider. The name now rides on the block (ADR-070 §4).
+   */
+  it('names the provider from the BLOCK, with no session fact left to read', () => {
+    renderRow('API Error: 401 invalid authentication', 'anthropic')
+    const row = screen.getByTestId('AuthTranscriptRow')
+    expect(row).toHaveAttribute('data-lifetime', 'settled')
+    expect(row).toHaveAttribute('data-id', 'anthropic')
+    expect(row).toHaveTextContent('Turn stopped — Claude rejected the credential.')
+    // Still no action: naming the provider is not offering to fix it.
+    const clickable = [...row.querySelectorAll('button, a, [role="button"]')]
+    expect(clickable.map((node) => node.getAttribute('data-testid'))).toEqual([
+      'AuthTranscriptRow.disclose'
+    ])
+  })
+
+  it('keeps the generic sentence for a block that names nobody', () => {
+    renderRow()
+    expect(screen.getByTestId('AuthTranscriptRow')).toHaveTextContent(
+      'Turn stopped — the credential was rejected.'
+    )
+    expect(screen.getByTestId('AuthTranscriptRow')).not.toHaveAttribute('data-id')
   })
 })
 

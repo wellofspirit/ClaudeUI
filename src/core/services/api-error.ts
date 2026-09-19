@@ -19,12 +19,30 @@ import type { ChatMessage } from '../../shared/types'
  * its own way (`randomUUID` in Codex, `uuid()` in opencode/pi) and its history
  * upsert is keyed on them — a second id scheme in here would produce duplicate
  * rows on the replay paths.
+ *
+ * `providerId` is the same one the caller puts on `session:auth-required`, and
+ * it is on the block because the block outlives the event: `authRequired` is
+ * nulled as soon as the failure settles, and the row was reading the provider's
+ * name from there, so a settled row lost the name permanently (ADR-070 §4).
+ * Optional for callers that genuinely do not know — the row keeps its generic
+ * sentence for those.
  */
-export function authErrorTranscriptMessage(id: string, errorMessage: string): ChatMessage {
+export function authErrorTranscriptMessage(
+  id: string,
+  errorMessage: string,
+  providerId?: string
+): ChatMessage {
   return {
     id,
     role: 'system',
-    content: [{ type: 'api_error', errorType: 'authentication', errorMessage }],
+    content: [
+      {
+        type: 'api_error',
+        errorType: 'authentication',
+        errorMessage,
+        ...(providerId ? { providerId } : {})
+      }
+    ],
     timestamp: Date.now()
   }
 }

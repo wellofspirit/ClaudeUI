@@ -66,7 +66,7 @@ ClaudeUI's own remote-access authentication (`NoAuthBanner`, `SessionExpiredNoti
 
 Every engine also emits the engine-neutral transcript block Claude already emits (`api_error` with `errorType: 'authentication'`). That gives each failure a correctly-anchored place in the transcript on **every** engine, instead of Claude having history and the other three having a floating card that vanishes.
 
-**Known limitation, accepted for now:** the block is permanent only on Claude. `session-history.ts` reconstructs `api_error` blocks from cli.js's JSONL, so a reloaded Claude session still shows the row; Codex, opencode and pi replay through their own loaders against their own formats, so on those three the row survives the live session but not a reload. Carrying it would need each loader to persist a ClaudeUI-authored block its native format has no slot for — plausibly a sidecar — which is a larger change than this ADR, and one whose cost falls on three unrelated history paths. It is recorded here rather than left to be discovered as a contradiction of the paragraph above. The pill is unaffected: it derives from `authRequired`, which is snapshot-carried and survives a resync on every engine.
+**Known limitation, accepted for now — and this paragraph was wrong when first written.** It claimed `session-history.ts` reconstructs the block from cli.js's JSONL "so a reloaded Claude session still shows the row". It does not. That path writes `errorType: (obj.error as string) || 'unknown'` — cli.js's RAW wire code, `authentication_failed` — and never calls `classifyApiError`, while `MessageBubble` switches on `errorType === 'authentication'`. So a reloaded Claude auth error falls through to the generic `ApiErrorBlock`: the fact survives, the auth row does not. On Codex, opencode and pi the block is not reconstructed at all. The honest statement is therefore that the row is permanent on **no** engine — it lives for the rest of the live session and no longer. Correcting it needs the history path to classify (a one-line change that alters rendering for every reloaded Claude transcript, so it is a decision, not a tidy-up), and the other three loaders to persist a ClaudeUI-authored block their native formats have no slot for. Carrying it would need each loader to persist a ClaudeUI-authored block its native format has no slot for — plausibly a sidecar — which is a larger change than this ADR, and one whose cost falls on three unrelated history paths. It is recorded here rather than left to be discovered as a contradiction of the paragraph above. The pill is unaffected: it derives from `authRequired`, which is snapshot-carried and survives a resync on every engine.
 
 `CODEX_SIGN_IN_REQUIRED_ERROR` stops being an `errors[]` string with a bespoke button match in `FloatingError` and is routed through the same auth fact.
 
@@ -88,7 +88,7 @@ The reducer stays the only writer, so the answer survives a resync and is the sa
 
 ### 4. Direction B: one pill, one row, no cards over the chat
 
-**The pill.** One indicator for every provider and every session, in `TopBar`'s **left** flex group immediately after `TopBar.info`. Left, not right, for four reasons: the right cluster is already five icons plus branch plus dirty-state plus window controls and still growing; the pill is a property of _this session's_ engine, which is what the title names, whereas on the right it reads as another tool button; left-of-centre is in the reading path from the transcript row; and it exists only while something is wrong, so it never permanently costs the title its space. The engine and model are **not** added to the bar — they stay in the composer.
+**The pill.** One indicator for every provider and every session, in `TopBar`'s **left** flex group immediately after `TopBar.info`. Left, not right, for four reasons: the right cluster is already five icons plus branch plus dirty-state plus window controls and still growing; the pill is a property of _this session's_ engine, which is what the title names, whereas on the right it reads as another tool button; left-of-centre is in the reading path from the transcript row; and it exists only while something is wrong. That last reason was originally offered as grounds for letting the pill take whatever room it needed, and the real-app drive proved it wrong: as `shrink-0` in a `min-w-0` group with a fixed ~668px right cluster, the pill squeezed the session title to **zero** width and painted 10–25px over the VS Code button, making that slice of itself unclickable. Transient is not the same as free. The title now holds a hard reservation and the pill takes only the remainder, dropping to its compact dot-with-count form — by container query, so the trigger is available width rather than a window breakpoint, which matters because the sidebar moves it by ~276px at a constant window size. The engine and model are **not** added to the bar — they stay in the composer.
 
 States: amber "Sign-in needed" (will fail), red "Sign-in expired" / "N sign-ins needed" (has failed), accent "Signing in…" (a flow is alive with the dialog closed — the fact today's banner had to stay visible for), green transient "Signed in · Retry" (sticks while a retry is owed), and **nothing** when healthy or unprobed. An unprobed host is not a signed-out one, so a cold boot shows no pill.
 
@@ -112,6 +112,8 @@ The lifetime is matched **per session, not per block**: `authRequired` names a p
 4. **Step captions → one verb per row.** `OPEN ‹link›` / `ENTER ‹code›`; the link and the code are the instruction.
 5. **Parallel sentences → one row of chips.** The fan-out's three sentences differ in exactly one dimension — when the change takes effect — so: `✓ pi`, `⟳ opencode next start`, `⟳ Codex next request`. 26 words to 4.
 6. **One primary action per screen.** The footer `Close`/`Done` is deleted everywhere; `×` closes. That frees the primary slot for **Retry**, which moves into the body and names the prompt.
+
+   Scope, clarified after the drive: this governs the **single-provider stages**. Provider-list mode renders one primary per actionable row, which is what a list of N independent actions is — forcing one primary there would mean picking a provider on the user's behalf.
 
 **Deliberately kept:** "That page fails to load — expected. Copy its address." (29 words to 9, moved under the field). It is the only genuinely surprising step in any flow, and without it the user reads a broken app and abandons. Also kept: the device-code ⇄ paste-back escape hatch (ADR-030 — a server with device code off must still have a path), the code expiry, and the engine's verbatim error text, never paraphrased.
 
@@ -140,6 +142,30 @@ This corrects an assumption of [ADR-057](adr-057_remote-vendor-oauth-paste-back.
 - Claude is the daily driver and the live login path; an auth-detection regression is a lockout. Every slice is verified against the real Electron app **and** a web client before it is committed, per ADR-026.
 - Remote-access authentication is untouched and stays in Settings › Remote.
 - No commit or push is authorized by this ADR; ADR-026's loop applies to every slice.
+
+### Residuals the real-app drive found, not fixed here
+
+Verified by a separate agent driving the real Electron app and a hermetic web client (screenshots
+reviewed), then confirmed in the code. None is introduced by this arc; all three were made visible
+by it.
+
+- **The top bar cannot fit itself.** `TopBar.rightGroup` has no `min-w-0` and no shrinkable child, so
+  it never yields a pixel: with `minWidth: 600` and a 280px sidebar the bar can be ~320px while the
+  right cluster wants ~668px. The pill was merely the first child to make that visible, and §4's fix
+  contains the pill rather than making the bar fit. The cluster IS bounded (every text child
+  truncates), so this is a layout decision — let the git/IDE cluster truncate, or collapse it into
+  the overflow menu below a width — not a leak.
+- **A one-click sign-in can open a browser with no intervening screen.** `SignInDialog`'s open-time
+  effect auto-starts the flow whenever `readAccounts` reports `autoStart`, which for Anthropic is
+  _whenever multi-account is off_. So opening it on Anthropic calls `signIn()` → `shell.openExternal`
+  with nothing in between. Pre-existing ADR-068 §3 behaviour and unchanged here, but the calculus
+  moved: the banner it replaced could be dismissed with "Later", and the pill deliberately cannot, so
+  the entry point is now permanently on screen. Whether that path deserves a confirm step is an open
+  owner decision.
+- **Notice legibility.** The stacked cards sit over transcript text and read poorly, and the band is
+  still shared with `TodoWidget` (`top-14 z-10` against the stack's `top-12 z-20`). §4's claim is only
+  that the three _notices_ no longer overlap each other, which holds and was measured; this is a
+  separate pre-existing issue.
 
 ## Phases
 

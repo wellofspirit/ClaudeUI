@@ -20,6 +20,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useSessionStore, type SignInRequest } from '../../../stores/session-store'
 import type { AuthRequiredState } from '../../../../../shared/remote-protocol'
 import { UNKNOWN_PROVIDER_AUTH } from '../../../utils/sign-in-provider'
+import { AUTH_ISSUE_NAME } from '../../../stores/auth-issues'
 import { SignInDialog } from '../SignInDialog'
 
 vi.mock('electron', async () => await import('../../../../../test/stubs/electron-shim'))
@@ -797,13 +798,32 @@ describe('SignInDialog — provider-list mode', () => {
     expect(
       screen.getAllByTestId('SignInDialog.issue').map((el) => el.getAttribute('data-id'))
     ).toEqual(['chatgpt', 'opencode:openrouter'])
-    expect(screen.getAllByTestId('SignInDialog.issueState')[0]).toHaveTextContent('sign-in expired')
+    expect(screen.getAllByTestId('SignInDialog.issueState')[0]).toHaveTextContent(
+      AUTH_ISSUE_NAME.expired
+    )
     // `blocks` is route-dependent (ADR-030) — with no route enabled the ChatGPT
     // credential only blocks Codex.
     expect(screen.getAllByTestId('SignInDialog.issueBlocks').map((el) => el.textContent)).toEqual([
       'Codex',
       'opencode'
     ])
+  })
+
+  /**
+   * The state's ONE name (ADR-070 §4). This row read "not signed in" for the
+   * very state the pill beside it was calling "Sign-in needed" — one
+   * credential, two phrasings, on two surfaces visible at the same time. Read
+   * off `AUTH_ISSUE_NAME` so a reworded state cannot leave this surface behind.
+   */
+  it('names a `needed` state the way every other surface names it', async () => {
+    installApi('darwin')
+    useSessionStore.setState({
+      providerAuth: { ...UNKNOWN_PROVIDER_AUTH, anthropic: 'unauthenticated' }
+    })
+    await open({ kind: 'list' })
+    const states = screen.getAllByTestId('SignInDialog.issueState')
+    expect(states).toHaveLength(1)
+    expect(states[0]).toHaveTextContent(AUTH_ISSUE_NAME.needed)
   })
 
   it('a drivable row switches this dialog into that provider’s normal flow', async () => {

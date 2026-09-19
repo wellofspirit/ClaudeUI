@@ -3568,10 +3568,13 @@ describe('Codex sessions under an injected ChatGPT account', () => {
       .map(([, args]) => (args as [string, { content: Array<Record<string, unknown>> }])[1])
       .filter((message) => message.content.some((block) => block.type === 'api_error'))
     expect(authRows).toHaveLength(1)
+    // …carrying the PROVIDER, so the row still names ChatGPT once the failure
+    // has settled and the event's copy of the fact is gone (ADR-070 §4).
     expect(authRows[0].content[0]).toEqual({
       type: 'api_error',
       errorType: 'authentication',
-      errorMessage: 'ChatGPT rejected the credential Codex runs under.'
+      errorMessage: 'ChatGPT rejected the credential Codex runs under.',
+      providerId: 'chatgpt'
     })
   })
 

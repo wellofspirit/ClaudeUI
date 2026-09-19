@@ -1182,8 +1182,9 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
         //
         // ADR-070 §1: the block's own `errorMessage` also rides on the event, so
         // the row's disclosure reads cli.js's words on Claude exactly as it reads
-        // the vendor's on the other three. The BLOCK is untouched — it is the
-        // shape a reloaded transcript renders and `session-history.ts` writes.
+        // the vendor's on the other three. The block carries the provider too
+        // (see `transformApiErrorMessage`) — the event's copy is nulled when the
+        // failure settles and the block's is not.
         const authBlock = errMsg.content.find(
           (block) => block.type === 'api_error' && block.errorType === 'authentication'
         )
@@ -2500,11 +2501,21 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     }
     if (!text) text = (msg.error as string) || 'API error'
 
+    const errorType = classifyApiError(text, msg.error)
     return {
       id: (betaMessage?.id as string) || (msg.uuid as string) || `error-${uuid()}`,
       role: 'system',
       content: [
-        { type: 'api_error', errorType: classifyApiError(text, msg.error), errorMessage: text }
+        {
+          type: 'api_error',
+          errorType,
+          errorMessage: text,
+          // ADR-070 §4: the refused credential's provider rides on the BLOCK,
+          // so the row still names Claude once the failure has settled — which
+          // is the state every reloaded transcript restores to. Only for the
+          // auth class; a rate limit is nobody's credential.
+          ...(errorType === 'authentication' ? { providerId: ANTHROPIC_AUTH_PROVIDER_ID } : {})
+        }
       ],
       timestamp: Date.now()
     }

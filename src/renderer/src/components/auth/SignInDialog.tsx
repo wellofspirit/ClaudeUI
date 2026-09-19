@@ -65,6 +65,7 @@ import {
   type SignInProviderRequest,
   type SignInRequest
 } from '../../stores/session-store'
+import { AUTH_ISSUE_NAME } from '../../stores/auth-issues'
 import type { AuthIssue, AuthRetry } from '../../stores/auth-issues'
 import { useAuthSummary } from '../../stores/use-auth-summary'
 import {
@@ -984,7 +985,10 @@ function SignInIssueList(): React.JSX.Element {
                 labelBadge={
                   <>
                     <StateChip
-                      text={issue.kind === 'expired' ? 'sign-in expired' : 'not signed in'}
+                      // The state's one name (ADR-070 §4) — this row said "not
+                      // signed in" for the state the pill above it was calling
+                      // "Sign-in needed".
+                      text={AUTH_ISSUE_NAME[issue.kind]}
                       tone={issue.kind === 'expired' ? 'danger' : 'neutral'}
                       testid={`${DIALOG}.issueState`}
                     />

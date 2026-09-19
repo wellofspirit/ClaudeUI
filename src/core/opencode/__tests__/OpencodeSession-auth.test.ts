@@ -308,10 +308,13 @@ describe('OpencodeSession — auth-required dispatch', () => {
       .map((c) => c[2])
       .filter((message) => message.content.some((block) => block.type === 'api_error'))
     expect(authRows).toHaveLength(1)
+    // The SAME provider the event named, on the block — history has to stay
+    // self-describing after `authRequired` settles (ADR-070 §4).
     expect(authRows[0].content[0]).toEqual({
       type: 'api_error',
       errorType: 'authentication',
-      errorMessage: 'Token expired'
+      errorMessage: 'Token expired',
+      providerId: 'chatgpt'
     })
 
     // The renamed channel is gone.

@@ -29,6 +29,29 @@ import type { SignInProviderId } from './session-store'
 /** `needed` = will fail (no usable credential); `expired` = has failed (a turn died). */
 export type AuthIssueKind = 'needed' | 'expired'
 
+/**
+ * The ONE human name for each kind. Every surface reads it from here.
+ *
+ * The same `needed` issue used to read three ways at once — the pill said
+ * "Sign-in needed", its own hover said "sign-in needed" and the dialog's list
+ * said "not signed in" — which is precisely the disagreement ADR-070 exists to
+ * end: the arc's premise is that every surface says the same thing about a
+ * credential, and three phrasings of one state are three surfaces the user has
+ * to reconcile. Lowercase, because these read inside a sentence ("Claude —
+ * sign-in expired") and as a chip; {@link authIssueLabel} is the one caller
+ * that starts a line with it.
+ */
+export const AUTH_ISSUE_NAME: Record<AuthIssueKind, string> = {
+  needed: 'sign-in needed',
+  expired: 'sign-in expired'
+}
+
+/** {@link AUTH_ISSUE_NAME} as a standalone label — the pill's own text. */
+export function authIssueLabel(kind: AuthIssueKind): string {
+  const name = AUTH_ISSUE_NAME[kind]
+  return name.charAt(0).toUpperCase() + name.slice(1)
+}
+
 /** A stopped prompt, and the session it has to be re-sent on. */
 export interface AuthRetry {
   routingId: string

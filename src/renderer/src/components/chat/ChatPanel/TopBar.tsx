@@ -494,7 +494,13 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
       data-testid="TopBar"
       className="shrink-0 h-12 flex items-center justify-between [-webkit-app-region:drag] border-b border-border relative"
     >
-      <div className="flex items-center min-w-0">
+      {/* `flex-1`, so this group's width is the space the right cluster leaves
+          rather than the width of its own contents. That makes it a DEFINITE
+          size its children can be laid out against — which is what lets
+          `AuthPill`'s slot take the remainder and answer "does the full label
+          fit?" from available width (the sidebar moves it by ~276px at a
+          constant window size) instead of a window breakpoint. */}
+      <div data-testid="TopBar.leftGroup" className="flex flex-1 items-center min-w-0">
         {/* Mobile: always show hamburger + new session */}
         {isMobileCtx && (
           <div className="[-webkit-app-region:no-drag] flex items-center gap-1 mr-2">
@@ -596,146 +602,169 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
             </button>
           </div>
         )}
-        <div
-          data-testid="TopBar.info"
-          className="flex items-center min-w-0 [-webkit-app-region:no-drag] relative"
-          onMouseEnter={infoMouseEnter}
-          onMouseLeave={infoMouseLeave}
-        >
-          <span className="flex items-center gap-1 text-[13px] text-text-secondary font-normal truncate cursor-default">
-            {cwd && hasContent && engineId && engineId !== 'claude' && (
-              <EngineLogo engineId={engineId} size={11} className="shrink-0 opacity-75" />
-            )}
-            {!cwd ? 'New session' : hasContent ? customTitle || 'Session' : 'New session'}
-          </span>
-          {(cwd || displaySessionId) && (
-            <>
-              <svg
-                width="10"
-                height="10"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className="shrink-0 ml-1 text-text-muted/40 relative top-px"
-              >
-                <circle cx="12" cy="12" r="10" />
-                <path d="M12 16v-4" />
-                <path d="M12 8h.01" />
-              </svg>
-              {infoHover && (
-                <div
-                  className="absolute top-full left-0 pt-1 z-50"
-                  onMouseEnter={infoMouseEnter}
-                  onMouseLeave={infoMouseLeave}
-                >
-                  <div className="bg-bg-primary border border-border rounded-lg shadow-lg py-2 px-3 space-y-2 min-w-[200px] max-w-[400px] animate-fade-in">
-                    {cwd && (
-                      <button
-                        onClick={() => handleCopy(cwd, 'cwd')}
-                        className="w-full text-left cursor-default group/row"
-                      >
-                        <div className="text-[10px] text-text-muted mb-0.5">Working Directory</div>
-                        <div className="text-[11px] text-text-secondary font-mono truncate group-hover/row:text-text-primary transition-colors">
-                          {copiedField === 'cwd' ? 'Copied!' : cwd}
-                        </div>
-                      </button>
-                    )}
-                    {displaySessionId && (
-                      <button
-                        onClick={() => handleCopy(displaySessionId, 'sid')}
-                        className="w-full text-left cursor-default group/row"
-                      >
-                        <div className="text-[10px] text-text-muted mb-0.5">Session ID</div>
-                        <div className="text-[11px] text-text-secondary font-mono truncate group-hover/row:text-text-primary transition-colors">
-                          {copiedField === 'sid' ? 'Copied!' : displaySessionId}
-                        </div>
-                      </button>
-                    )}
-                    {(showCost || sessionDurationMs > 0 || totalApiDurationMs > 0) && (
-                      <div className="flex gap-4">
-                        {showCost && (
-                          <div>
-                            <div className="text-[10px] text-text-muted mb-0.5">Cost</div>
-                            <div
-                              data-testid="TopBar.cost"
-                              className="text-[11px] text-text-secondary font-mono"
-                            >
-                              {formatCostOrUnknown(cost)}
-                            </div>
-                            {showCostBreakdown && (
-                              <div data-testid="TopBar.costBreakdown" className="mt-1 space-y-0.5">
-                                {sortedModelCosts.map((m) => (
-                                  <div
-                                    key={`${m.engineId}:${m.modelId}`}
-                                    data-testid="TopBar.costBreakdownRow"
-                                    data-model={m.modelId}
-                                    {...(m.dispatched ? { 'data-dispatched': 'true' } : {})}
-                                    className="flex items-center justify-between gap-3"
-                                  >
-                                    <span className="text-[10px] text-text-muted truncate">
-                                      {m.dispatched
-                                        ? `${dispatchedModelLabel(m.modelId)} · dispatched`
-                                        : shortModelName(m.modelId)}
-                                    </span>
-                                    <span className="text-[10px] text-text-secondary font-mono shrink-0">
-                                      {formatCostUsd(m.costUsd)}
-                                    </span>
-                                  </div>
-                                ))}
-                                {hasDispatchedCost && (
-                                  <div
-                                    data-testid="TopBar.costTotalInclDispatched"
-                                    {...(costUnknown ? { 'data-cost-unknown': 'true' } : {})}
-                                    className="flex items-center justify-between gap-3 pt-0.5 mt-0.5 border-t border-border/50"
-                                  >
-                                    <span className="text-[10px] text-text-muted truncate">
-                                      Total incl. dispatched
-                                    </span>
-                                    <span className="text-[10px] text-text-secondary font-mono shrink-0">
-                                      {costUnknown
-                                        ? `${formatCostUsd(dispatchedCostUsd)} + ${COST_UNKNOWN}`
-                                        : formatCostUsd(totalInclDispatchedUsd)}
-                                    </span>
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                        {sessionDurationMs > 0 && (
-                          <div data-testid="TopBar.sessionTime">
-                            <div className="text-[10px] text-text-muted mb-0.5">Session time</div>
-                            <div className="text-[11px] text-text-secondary font-mono">
-                              {formatDuration(sessionDurationMs)}
-                            </div>
-                          </div>
-                        )}
-                        {totalApiDurationMs > 0 && (
-                          <div data-testid="TopBar.apiTime">
-                            <div className="text-[10px] text-text-muted mb-0.5">API time</div>
-                            <div className="text-[11px] text-text-secondary font-mono">
-                              {formatDuration(totalApiDurationMs)}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </div>
+        {/* Title and pill are ONE unit (ADR-070 §4: the pill sits immediately
+            after the title, and after the two icons when the sidebar is
+            collapsed). It is a unit here because the title's reservation below
+            is a percentage, so it needs a containing block that is exactly
+            "what the icons left" — against the whole left group it would
+            promise the pill room the icons had already taken. */}
+        <div data-testid="TopBar.titleGroup" className="flex flex-1 items-center min-w-0">
+          {/* `max-w-[calc(100%-34px)]` — everything except one compact pill
+              (22px) plus its 8px gutter. Both halves matter: the title can
+              never be squeezed to zero while the pill is shown (ADR-070 §4
+              promised the pill "never permanently costs the title its space";
+              before this it cost it ALL of it), and a long custom title can
+              never starve the alarm down to nothing either. */}
+          <div
+            data-testid="TopBar.info"
+            className="flex items-center min-w-0 max-w-[calc(100%-34px)] [-webkit-app-region:no-drag] relative"
+            onMouseEnter={infoMouseEnter}
+            onMouseLeave={infoMouseLeave}
+          >
+            <span className="flex items-center gap-1 text-[13px] text-text-secondary font-normal truncate cursor-default">
+              {cwd && hasContent && engineId && engineId !== 'claude' && (
+                <EngineLogo engineId={engineId} size={11} className="shrink-0 opacity-75" />
               )}
-            </>
-          )}
+              {!cwd ? 'New session' : hasContent ? customTitle || 'Session' : 'New session'}
+            </span>
+            {(cwd || displaySessionId) && (
+              <>
+                <svg
+                  width="10"
+                  height="10"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="shrink-0 ml-1 text-text-muted/40 relative top-px"
+                >
+                  <circle cx="12" cy="12" r="10" />
+                  <path d="M12 16v-4" />
+                  <path d="M12 8h.01" />
+                </svg>
+                {infoHover && (
+                  <div
+                    className="absolute top-full left-0 pt-1 z-50"
+                    onMouseEnter={infoMouseEnter}
+                    onMouseLeave={infoMouseLeave}
+                  >
+                    <div className="bg-bg-primary border border-border rounded-lg shadow-lg py-2 px-3 space-y-2 min-w-[200px] max-w-[400px] animate-fade-in">
+                      {cwd && (
+                        <button
+                          onClick={() => handleCopy(cwd, 'cwd')}
+                          className="w-full text-left cursor-default group/row"
+                        >
+                          <div className="text-[10px] text-text-muted mb-0.5">
+                            Working Directory
+                          </div>
+                          <div className="text-[11px] text-text-secondary font-mono truncate group-hover/row:text-text-primary transition-colors">
+                            {copiedField === 'cwd' ? 'Copied!' : cwd}
+                          </div>
+                        </button>
+                      )}
+                      {displaySessionId && (
+                        <button
+                          onClick={() => handleCopy(displaySessionId, 'sid')}
+                          className="w-full text-left cursor-default group/row"
+                        >
+                          <div className="text-[10px] text-text-muted mb-0.5">Session ID</div>
+                          <div className="text-[11px] text-text-secondary font-mono truncate group-hover/row:text-text-primary transition-colors">
+                            {copiedField === 'sid' ? 'Copied!' : displaySessionId}
+                          </div>
+                        </button>
+                      )}
+                      {(showCost || sessionDurationMs > 0 || totalApiDurationMs > 0) && (
+                        <div className="flex gap-4">
+                          {showCost && (
+                            <div>
+                              <div className="text-[10px] text-text-muted mb-0.5">Cost</div>
+                              <div
+                                data-testid="TopBar.cost"
+                                className="text-[11px] text-text-secondary font-mono"
+                              >
+                                {formatCostOrUnknown(cost)}
+                              </div>
+                              {showCostBreakdown && (
+                                <div
+                                  data-testid="TopBar.costBreakdown"
+                                  className="mt-1 space-y-0.5"
+                                >
+                                  {sortedModelCosts.map((m) => (
+                                    <div
+                                      key={`${m.engineId}:${m.modelId}`}
+                                      data-testid="TopBar.costBreakdownRow"
+                                      data-model={m.modelId}
+                                      {...(m.dispatched ? { 'data-dispatched': 'true' } : {})}
+                                      className="flex items-center justify-between gap-3"
+                                    >
+                                      <span className="text-[10px] text-text-muted truncate">
+                                        {m.dispatched
+                                          ? `${dispatchedModelLabel(m.modelId)} · dispatched`
+                                          : shortModelName(m.modelId)}
+                                      </span>
+                                      <span className="text-[10px] text-text-secondary font-mono shrink-0">
+                                        {formatCostUsd(m.costUsd)}
+                                      </span>
+                                    </div>
+                                  ))}
+                                  {hasDispatchedCost && (
+                                    <div
+                                      data-testid="TopBar.costTotalInclDispatched"
+                                      {...(costUnknown ? { 'data-cost-unknown': 'true' } : {})}
+                                      className="flex items-center justify-between gap-3 pt-0.5 mt-0.5 border-t border-border/50"
+                                    >
+                                      <span className="text-[10px] text-text-muted truncate">
+                                        Total incl. dispatched
+                                      </span>
+                                      <span className="text-[10px] text-text-secondary font-mono shrink-0">
+                                        {costUnknown
+                                          ? `${formatCostUsd(dispatchedCostUsd)} + ${COST_UNKNOWN}`
+                                          : formatCostUsd(totalInclDispatchedUsd)}
+                                      </span>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          {sessionDurationMs > 0 && (
+                            <div data-testid="TopBar.sessionTime">
+                              <div className="text-[10px] text-text-muted mb-0.5">Session time</div>
+                              <div className="text-[11px] text-text-secondary font-mono">
+                                {formatDuration(sessionDurationMs)}
+                              </div>
+                            </div>
+                          )}
+                          {totalApiDurationMs > 0 && (
+                            <div data-testid="TopBar.apiTime">
+                              <div className="text-[10px] text-text-muted mb-0.5">API time</div>
+                              <div className="text-[11px] text-text-secondary font-mono">
+                                {formatDuration(totalApiDurationMs)}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+          {/* ADR-070 §4: the app's one auth indicator, in the LEFT group right
+              after the title — not in the already-full right cluster, and never
+              with the engine or model beside it (those stay in the composer).
+              It renders nothing while every credential is healthy or
+              unprobed. */}
+          <AuthPill />
         </div>
-        {/* ADR-070 §4: the app's one auth indicator, in the LEFT group right
-            after the title — not in the already-full right cluster, and never
-            with the engine or model beside it (those stay in the composer). It
-            renders nothing while every credential is healthy or unprobed. */}
-        <AuthPill />
       </div>
-      <div className="flex items-center gap-3 [-webkit-app-region:no-drag]">
+      <div
+        data-testid="TopBar.rightGroup"
+        className="flex items-center gap-3 [-webkit-app-region:no-drag]"
+      >
         {!isMobileCtx && ideError && (
           <span
             data-testid="TopBar.openVSCodeError"

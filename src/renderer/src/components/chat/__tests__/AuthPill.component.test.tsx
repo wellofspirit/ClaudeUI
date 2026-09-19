@@ -12,6 +12,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useSessionStore } from '../../../stores/session-store'
 import { SidebarContext } from '../../SessionView'
 import { AuthPill } from '../AuthPill'
+import { AUTH_ISSUE_NAME, authIssueLabel } from '../../../stores/auth-issues'
 import type { AuthRequiredState } from '../../../../../shared/remote-protocol'
 
 vi.mock('electron', async () => await import('../../../../../test/stubs/electron-shim'))
@@ -88,6 +89,24 @@ describe('AuthPill — tones and labels', () => {
     expect(pill).toHaveAttribute('data-tone', 'needed')
     expect(pill).toHaveTextContent('Sign-in needed')
     expect(pill).not.toHaveAttribute('data-count')
+  })
+
+  /**
+   * The pill's label and the pill's own hover must be the same words about the
+   * same state — and so must the dialog's list row, which said "not signed in"
+   * for the state this pill calls "Sign-in needed"
+   * (`SignInDialog.component.test.tsx` pins that end). Read off
+   * `AUTH_ISSUE_NAME` rather than typed out again here, so a reworded state
+   * cannot leave one surface behind.
+   */
+  it('the label and the hover name the state identically (ADR-070 §4)', () => {
+    useSessionStore.setState({
+      providerAuth: { anthropic: 'unauthenticated', chatgpt: 'unknown', chatgptRoutes: {} }
+    })
+    renderPill()
+    const pill = screen.getByTestId('AuthPill')
+    expect(pill).toHaveTextContent(authIssueLabel('needed'))
+    expect(pill.getAttribute('title') ?? '').toContain(`Claude — ${AUTH_ISSUE_NAME.needed}`)
   })
 
   it('red `expired` once a turn has actually died', () => {

@@ -728,7 +728,10 @@ export class CodexSession extends BaseSession {
     // …and the same text as the neutral transcript block Claude already emitted,
     // so the failure has a permanent, correctly-anchored home. Through `dispatch`
     // so it lands in `messageHistory` like every other row this class produces.
-    this.dispatch({ kind: 'message', message: authErrorTranscriptMessage(randomUUID(), message) })
+    this.dispatch({
+      kind: 'message',
+      message: authErrorTranscriptMessage(randomUUID(), message, CODEX_AUTH_PROVIDER_ID)
+    })
   }
 
   get willQueue(): boolean {

@@ -708,14 +708,26 @@ function AuthTranscriptRow({
     : authRequired.resolved === true
       ? 'resolved'
       : 'broken'
+  // WHOSE credential was refused is a property of the BLOCK, not of the
+  // session: `authRequired` is nulled the moment the failure settles, and
+  // settled is what a reloaded session always restores to — so reading the name
+  // from the session alone made a Claude failure read "the credential was
+  // rejected", provider unknown, for the rest of that transcript's life. The
+  // session's live fact is the fallback, for blocks written before the field
+  // existed (it is optional exactly so those stay valid).
+  const named = block.providerId ?? authRequired?.providerId
+  // The ACTION, though, still belongs to the SESSION: ADR-070 §4 matches the
+  // lifetime per session rather than per block, so a session holding two
+  // failures offers the sign-in the session currently owes — not the one this
+  // particular row recorded.
   const providerId = authRequired?.providerId
   const drivable = providerId !== undefined && isDrivableProvider(providerId)
   // Verbatim, and the engine's own words win: the event carries them now, and
   // this block's text is the same sentence for every engine but Claude, whose
   // block predates the event and says whatever the API said.
   const detail = authRequired?.message || block.errorMessage
-  const sentence = providerId
-    ? `Turn stopped — ${providerDisplayName(providerId)} rejected the credential.`
+  const sentence = named
+    ? `Turn stopped — ${providerDisplayName(named)} rejected the credential.`
     : 'Turn stopped — the credential was rejected.'
 
   const rule =
@@ -764,7 +776,7 @@ function AuthTranscriptRow({
     <div
       data-testid="AuthTranscriptRow"
       data-lifetime={lifetime}
-      {...(providerId ? { 'data-id': providerId } : {})}
+      {...(named ? { 'data-id': named } : {})}
       className={`border-l-2 ${rule} pl-3 py-0.5 animate-fade-in`}
     >
       <div

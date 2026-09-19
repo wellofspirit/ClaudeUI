@@ -175,13 +175,20 @@ describe('ClaudeSession — authentication api_error rings session:auth-required
     // transcript DATA and stays), so this arm pins that it does not acquire one.
     expect(sent.filter(([c]) => c === 'session:error')).toEqual([])
 
-    // The block itself is unchanged — the transcript still carries the error.
+    // The block carries the error AND the provider: `authRequired` is nulled as
+    // soon as the failure settles, so a row reading the name only from the
+    // session said "the credential was rejected" about Claude for the rest of
+    // that transcript's life (ADR-070 §4).
     const messages = sent
       .filter(([c]) => c === 'session:message')
-      .map(([, , d]) => d as { content: Array<{ type: string; errorType?: string }> })
+      .map(
+        ([, , d]) =>
+          d as { content: Array<{ type: string; errorType?: string; providerId?: string }> }
+      )
     expect(messages.at(-1)!.content[0]).toMatchObject({
       type: 'api_error',
-      errorType: 'authentication'
+      errorType: 'authentication',
+      providerId: 'anthropic'
     })
   })
 
@@ -196,5 +203,12 @@ describe('ClaudeSession — authentication api_error rings session:auth-required
     await session.run('hello')
 
     expect(sent.filter(([c]) => c === 'session:auth-required')).toEqual([])
+
+    // And the block names no provider: a rate limit is nobody's credential, so
+    // the row must not start claiming Claude rejected one.
+    const messages = sent
+      .filter(([c]) => c === 'session:message')
+      .map(([, , d]) => d as { content: Array<{ type: string; providerId?: string }> })
+    expect(messages.at(-1)!.content[0]).not.toHaveProperty('providerId')
   })
 })

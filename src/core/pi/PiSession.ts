@@ -1356,11 +1356,11 @@ export class PiSession extends BaseSession {
         // above, which owns isProcessing/status/inactivity/queue-flush. This
         // arm therefore does exactly what pi's own 'error' arm below does —
         // emit, and let the turn end itself.
-        this.send('session:auth-required', {
-          providerId: piAuthRequiredProviderId(output.vendorId),
-          message: output.message
-        })
-        const message = authErrorTranscriptMessage(uuid(), output.message)
+        const providerId = piAuthRequiredProviderId(output.vendorId)
+        this.send('session:auth-required', { providerId, message: output.message })
+        // The SAME providerId on the block, so the row still names the provider
+        // once the live `authRequired` has settled (ADR-070 §4).
+        const message = authErrorTranscriptMessage(uuid(), output.message, providerId)
         this.rememberPiMessage(message)
         this.send('session:message', message)
         break

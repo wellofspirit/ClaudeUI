@@ -9,7 +9,13 @@
  * disagree.
  */
 import { describe, it, expect } from 'vitest'
-import { summarizeAuthIssues, type AuthIssuesInput } from '../auth-issues'
+import {
+  AUTH_ISSUE_NAME,
+  authIssueLabel,
+  summarizeAuthIssues,
+  type AuthIssueKind,
+  type AuthIssuesInput
+} from '../auth-issues'
 import { UNKNOWN_PROVIDER_AUTH, type ProviderAuthView } from '../../utils/sign-in-provider'
 import type { AuthRequiredState } from '../../../../shared/remote-protocol'
 
@@ -237,5 +243,30 @@ describe('auth-issues — what a credential blocks', () => {
   it('Anthropic blocks Claude', () => {
     const summary = summarizeAuthIssues(input({ providerAuth: { anthropic: 'unauthenticated' } }))
     expect(summary.issues[0].blocks).toEqual(['Claude'])
+  })
+})
+
+describe('auth-issues — one state, one name', () => {
+  /**
+   * The same `needed` issue used to read three ways at once: the pill said
+   * "Sign-in needed", the pill's own hover said "sign-in needed" and the
+   * dialog's list said "not signed in". Three phrasings of one state is three
+   * facts for the user to reconcile, which is the disagreement the whole arc
+   * exists to end — so the name lives here and every surface reads it.
+   */
+  it('names every kind, and every kind is named', () => {
+    const kinds: AuthIssueKind[] = ['needed', 'expired']
+    expect(Object.keys(AUTH_ISSUE_NAME).sort()).toEqual([...kinds].sort())
+    expect(AUTH_ISSUE_NAME.needed).toBe('sign-in needed')
+    // `expired` was already consistent everywhere; keep it that way.
+    expect(AUTH_ISSUE_NAME.expired).toBe('sign-in expired')
+  })
+
+  it('the standalone label is the same words, capitalised — not a second phrasing', () => {
+    for (const kind of ['needed', 'expired'] as AuthIssueKind[]) {
+      const name = AUTH_ISSUE_NAME[kind]
+      expect(authIssueLabel(kind).toLowerCase()).toBe(name)
+      expect(authIssueLabel(kind)).toBe(name[0].toUpperCase() + name.slice(1))
+    }
   })
 })
