@@ -538,6 +538,19 @@ describe('AuthManager.submitOAuthCode — the paste is `code#state` (slice G)', 
     expect(handle.claudeOAuthCallback).toHaveBeenCalledWith('CODE', 'ST#ATE')
   })
 
+  /**
+   * GUARD — trimming the whole paste is not trimming its halves. A user who
+   * hand-assembles the two parts around the separator posted `"CODE "` and
+   * `" STATE"`, which claude.ai answers exactly as it answered the unsplit blob.
+   */
+  it('trims BOTH halves, not just the paste', async () => {
+    const handle = await startRemoteFlow()
+
+    await authManager.submitOAuthCode('  CODE # STATE  ')
+
+    expect(handle.claudeOAuthCallback).toHaveBeenCalledWith('CODE', 'STATE')
+  })
+
   it.each([['#STATE'], ['CODE#'], ['#']])(
     'refuses %j without posting an empty half',
     async (pasted) => {
@@ -569,6 +582,10 @@ describe('AuthManager.submitOAuthCode — the paste is `code#state` (slice G)', 
  * `authState`, and the panel reads `authState.manualUrl` — so one bad paste
  * left it saying "The host did not return a sign-in link. Start again." with
  * the link gone and `Sign-in page ↗` disabled.
+ *
+ * The link rides on errors that leave the flow LIVE. `fail()` is the other
+ * kind: it settles the flow and nulls `pendingState`, so the link it used to
+ * carry addressed a flow whose only remaining answer is "No active login flow."
  */
 describe('AuthManager — an error on a LIVE flow carries its sign-in link (slice G)', () => {
   beforeEach(() => {
@@ -591,8 +608,13 @@ describe('AuthManager — an error on a LIVE flow carries its sign-in link (slic
     }
   }
 
-  /** GUARD — fails pre-fix: the error state dropped the URL the panel needs. */
-  it('a failed submit on a live remote flow still returns manualUrl', async () => {
+  /**
+   * GUARD — a settled flow must NOT carry the link. `fail()` nulls
+   * `pendingState`, so the panel it handed a live `Sign-in page ↗` and Finish to
+   * was offering a flow that can only answer "No active login flow. Start login
+   * again." The renderer offers "Start again" for a link-less error instead.
+   */
+  it('a failed submit SETTLES the flow, so it carries no manualUrl', async () => {
     hoisted.handle.current = remoteFlowHandle(
       vi.fn(async () => {
         throw new Error('Request failed with status code 400')
@@ -605,7 +627,11 @@ describe('AuthManager — an error on a LIVE flow carries its sign-in link (slic
 
     expect(state.status).toBe('error')
     expect(state.error).toBe('Request failed with status code 400')
-    expect(state.manualUrl).toBe('https://claude.ai/oauth?state=s')
+    expect(state.manualUrl).toBeUndefined()
+    // …and the flow really is dead, which is what makes the link dead too.
+    expect(((await authManager.submitOAuthCode('CODE#STATE')) as AuthFlowState).error).toBe(
+      'No active login flow. Start login again.'
+    )
   })
 
   it('a refused half-copy carries the link too', async () => {

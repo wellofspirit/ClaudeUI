@@ -69,12 +69,16 @@ class AuthManager {
   /** `state` param parsed from the active flow's login URL (for manual paste). */
   private pendingState: string | null = null
   /**
-   * The active REMOTE flow's `manualUrl`, so an error raised while that flow is
-   * live can carry it forward — the remote paste panel reads the URL off
+   * The active REMOTE flow's `manualUrl`, so an error that leaves that flow
+   * LIVE can carry it forward — the remote paste panel reads the URL off
    * `authState`, and an error state without it is what turned one bad paste
    * into "The host did not return a sign-in link. Start again." Set only on the
    * remote path, exactly like the `manualUrl` on `signIn`'s own return: the
    * desktop has no paste panel to serve, and its payloads stay untouched.
+   *
+   * "Live" is the whole rule: {@link fail} settles the flow and must NOT pass it
+   * on, or the panel keeps an enabled link and Finish for a login that can only
+   * answer "No active login flow."
    */
   private pendingManualUrl: string | null = null
   /** Monotonic flow id — stale completions (after cancel/restart) are ignored. */
@@ -257,8 +261,10 @@ class AuthManager {
     // belongs to it. (cli.js's destructuring `split("#")` would silently drop a
     // third segment; keeping it whole can only ever be more correct.)
     const sep = pasted.indexOf('#')
-    const authorizationCode = sep === -1 ? pasted : pasted.slice(0, sep)
-    const state = sep === -1 ? this.pendingState : pasted.slice(sep + 1)
+    // BOTH halves, not just the paste: a user who assembles the two parts by
+    // hand types `code # state`, and the spaces would go into the POST body.
+    const authorizationCode = sep === -1 ? pasted : pasted.slice(0, sep).trim()
+    const state = sep === -1 ? this.pendingState : pasted.slice(sep + 1).trim()
     if (!authorizationCode || !state) {
       // Half a paste is a copy that stopped short, not a dead flow: report it
       // WITHOUT settling, so the same flow accepts the next attempt. Posting an
@@ -380,12 +386,15 @@ class AuthManager {
     if (replay) return replay
     if (flow !== this.flowId || this.settled) return IDLE
     this.settled = true
-    // Read BEFORE clearing: this failure happened ON that flow, so its error
-    // state is exactly the one that has to carry the flow's sign-in link.
-    const manualUrl = this.pendingManualUrl ?? undefined
     this.pendingState = null
     this.pendingManualUrl = null
-    const state = this.broadcastError(errText(err), manualUrl)
+    // NO `manualUrl`: this settles the flow, and a link to a flow whose only
+    // remaining answer is "No active login flow" is a dead affordance (ADR-030)
+    // — the panel showed an enabled `Sign-in page ↗` and Finish for a login that
+    // could not complete. A link-less error is what the renderer's "Start again"
+    // reads. The HALF_COPIED path is the other kind and keeps its link: it
+    // reports without settling, so that flow is still live.
+    const state = this.broadcastError(errText(err))
     this.settledFlow = { flow, state }
     return state
   }
