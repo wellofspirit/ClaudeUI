@@ -1,3 +1,4 @@
+import { presentShellCommand } from '../../../lib/present-shell-command'
 import type { EngineToolMap } from '../../../../../shared/tool-kinds'
 import type { AskUserQuestion, ContentBlock, FileDiff } from '../../../../../shared/types'
 
@@ -101,7 +102,17 @@ export const CodexEngineToolMap: EngineToolMap = {
     if (kind === 'command')
       return {
         kind,
-        command: String(input?.command ?? ''),
+        // Codex is the one engine whose command arrives as a shell-quoted JOIN
+        // of the argv it will exec, so on Windows every path separator reaches
+        // us doubled. Undo that one level of quoting for DISPLAY only — this
+        // string feeds the card header (`summary.ts`) and body (`ShellCode`),
+        // never a permission decision: the gated command is built in
+        // `CodexSession` and rides `PendingApproval.input.command`. The helper
+        // fails closed, returning the wire string untouched when it cannot
+        // re-render it truthfully. It is deliberately NOT applied in the shared
+        // card components: an engine whose command was never escaped would be
+        // CORRUPTED by unescaping it (see present-shell-command.ts).
+        command: presentShellCommand(String(input?.command ?? '')),
         output: result?.toolResult,
         // Present only on a completed `commandExecution` (event-mapper.ts) —
         // `0` is a real value, so the guard tests the type, not truthiness.

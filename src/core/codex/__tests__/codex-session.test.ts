@@ -1131,6 +1131,26 @@ describe('Codex first session', () => {
     expect(pending.card.suggestions[0].rules).toEqual([{ toolName: 'Bash', ruleContent: 'ls:*' }])
   })
 
+  it('gates the wire string byte for byte, however it is displayed', async () => {
+    const { session, approval } = fixture()
+    await session.run('hello')
+    // A Windows pwsh exec, as the app server joins it: the `\` separators arrive
+    // DOUBLED. The renderer undoes that quoting for the card
+    // (`renderer/src/lib/present-shell-command.ts`) because no human types the
+    // doubled form — but the gated string and the rule built from it must stay
+    // the wire bytes. A display transform that reached here would change what a
+    // `Bash(...)` rule matches, widening or narrowing it.
+    const wire = '"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe" -Command ls'
+    const pending = approval({ command: wire })
+    // pwsh is not one of the three shells `unwrapShellCommand` accepts
+    // (codex-rs/shell-command/src/bash.rs `extract_bash_command`), so there is no
+    // unwrapping and no `rawCommand`: what arrived is what is gated.
+    expect(pending.card.input).toEqual({ command: wire, cwd: '/isolated' })
+    expect(pending.card.suggestions[0].rules).toEqual([
+      { toolName: 'Bash', ruleContent: `${wire}:*` }
+    ])
+  })
+
   it('validates model/effort selections and sends native effort on the next turn', async () => {
     const { session, request } = fixture()
     await session.run(null)
