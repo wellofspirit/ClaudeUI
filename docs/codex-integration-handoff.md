@@ -15,19 +15,53 @@ The build specs that carried the landed work (`codex-integration-spec.md`, `code
 
 Not sequenced.
 
-- pi raises no `session:auth-required` (no distinguishable auth error on its wire); a rejected ChatGPT credential on pi is a generic turn failure. Needs a pi wire probe (`docs/protocol-pi/`, `vendor/pi-cli/docs/`).
-- pi's PKCE fallback still binds port 1455 on a headless server for its timeout (F2 fixed the Codex path only, in `src/core/auth/vault/codex-oauth.ts`); two concurrent fallbacks collide.
-- The fork sweep has no negative cache: permanently deleted Codex ids are re-probed on every refresh until delete prunes `session_meta`.
 - Metering attribution (child vs dispatch, a pinned account's identity, double counting after rekey/resume, failed-turn spend, whether an estimated USD cap can gate dispatch) — folded into the usage-dashboard revamp.
 - Images in a dynamic-tool result are not rendered. Grandchildren are not rendered on any harness (not urgent).
 - Render loss is instrumented (F4 turn-end audit, F5 stress loop), not root-caused; nothing seen since.
 - Same-engine dispatch for opencode → opencode (and possibly pi → pi) is a later candidate; Codex → Codex stays refused (native children cover it).
-- Item-lane verification gaps: no live drive of the cross-engine dispatch targets since they moved to the item lane (`83106588`) — their lifecycles are covered by the automated suite only; and no standalone browser-client drive at any point in the migration, so WebSocket delivery of item frames rests on the e2e suite rather than on a real browser.
-- Windows: acquisition, packaging, app-server spawn, account and catalog reads and the protocol check are verified; a signed-in turn, the Windows sandbox path and process-tree cleanup under load are not.
-- Latent from the Linux arc: the JSON-null-vs-`undefined` class fixed in `remote-handlers.ts` (`opt()`) may still exist in the command modules shared by both transports (`configCommands`, `authCommands`, `codexCommands`, …), which were out of scope then. A web-client `invoke` marshals an omitted optional argument as `null`; Electron IPC preserves `undefined`, so the desktop never sees it.
-- Known flakes — rerun alone before blaming a diff: the Codex delete integration suite fails only under parallel load (`-32600` on a source with a loaded fork); the policy probe's `untrusted` matrix is load-sensitive; `remote-*.test.ts` port collisions; `SettingsDialogView.component.test.tsx` fails `format:check` since before the branch; `src/web/__tests__/provider-auth-hydration.component.test.tsx` throws three `EnvironmentTeardownError` unhandled rejections when `bun run test` runs beside a build or an Electron drive (passes alone).
+- Item-lane verification gap, remaining half: no standalone browser-client drive at any point in the migration, so WebSocket delivery of item frames still rests on the e2e suite rather than on a real browser. (The cross-engine dispatch half is CLOSED — see below.)
+- Known flakes — rerun alone before blaming a diff: the Codex delete integration suite fails only under parallel load (`-32600` on a source with a loaded fork); the policy probe's `untrusted` matrix is load-sensitive; `remote-*.test.ts` port collisions; `src/web/__tests__/provider-auth-hydration.component.test.tsx` throws three `EnvironmentTeardownError` unhandled rejections when `bun run test` runs beside a build or an Electron drive (passes alone).
 
-**Roadmap (Daniel, 2026-09-14), remaining:** (3) metering attribution inside the usage revamp; (4) grandchild rendering. Items (1) history mappers + cross-harness tool survey and (2) per-item volatile streaming are closed — see [`tool-survey.md`](tool-survey.md) and [`per-item-streaming-design.md`](per-item-streaming-design.md). Then the Rename → Orrery arc.
+## Closed on 2026-09-19 — four of these were never open
+
+This list had gone stale, and a session that trusts it re-derives work that is already done. What
+was checked, and what it turned out to be:
+
+- **pi `session:auth-required` — was REAL, now built.** The premise that pi's wire carries no
+  distinguishable auth error is false. A rejected turn ends `stopReason:'error'` with the HTTP
+  status at the head of `errorMessage`, in an adapter-specific shape: `anthropic-messages` writes
+  `401 {json}`, `openai-responses` writes `OpenAI API error (401): {json}`, and a 403 can arrive
+  with no body at all. Probed against the vendored 0.84.3 binary; see the classifier in
+  `core/pi/event-mapper.ts`.
+- **pi's PKCE port 1455 — was never open.** pi has no PKCE path of its own; its only driven login
+  is `openai-codex`, which delegates to the same `CodexLoginFlow` F2 fixed. Pinned by
+  `src/main/auth/vault/__tests__/PiLoginLoopback.test.ts`.
+- **The fork sweep's negative cache — was never open.** The db v17 lineage cache already
+  tombstones a twice-refused id as `(null, null)`, `listCodexLineage()` returns tombstones, and
+  `cache.has(id)` therefore suppresses re-probing in the `new` and `changed` modes; `all` runs
+  only after a refused delete. Pinned by `codex-app-server.integration.test.ts`.
+- **The JSON-null class in the command modules — was REAL, now fixed.** Two of twenty optional
+  parameters actually broke. `shared-provider:set-default` was live and user-visible: clearing a
+  default model from the web client threw `Invalid shared provider routes` and cleared nothing.
+- **Cross-engine dispatch on the item lane — verified live.** Claude→opencode, Claude→pi,
+  Claude→codex and pi→Claude all stream incrementally; replica canonical never ran ahead of the
+  store. `TaskCard.sendToBackground` is absent on dispatch cards BY DESIGN (`canBackground` ends
+  in `&& !isDispatch`), and `TaskCard.openInPanel` renders only in the collapsed footer — neither
+  is a drop.
+- **Windows signed-in turn / sandbox / process tree — already recorded in
+  [`architecture/codex.md`](architecture/codex.md), and re-confirmed.** That file has carried the
+  2026-09-14 Windows x64 result all along: there is no Windows sandbox in 0.154.0, so every
+  command runs unsandboxed. Re-confirmed 2026-09-19 on GPT-5.6-Luna, including process-tree
+  cleanup with one and with three concurrent sessions — nothing orphaned either time, detached
+  grandchildren included. **Note ClaudeUI logs no sandbox or turn-policy line on the codex path**,
+  so the sandbox question cannot be answered from the log today; `WireLog` exists only for the
+  Claude SDK.
+- **The `SettingsDialogView` `format:check` flake — was a misdiagnosis.** That file is clean. The
+  failure came from an untracked scratch worktree under `.claude/worktrees/` leaking into
+  prettier's scan, plus one tracked mockup committed unformatted. Both fixed; the directory is now
+  ignored.
+
+**Roadmap, remaining:** (3) metering attribution inside the usage revamp; (4) grandchild rendering. Items (1) history mappers + cross-harness tool survey and (2) per-item volatile streaming are closed — see [`tool-survey.md`](tool-survey.md) and [`per-item-streaming-design.md`](per-item-streaming-design.md). Then the Rename → Orrery arc.
 
 ## Rulings that still bind
 
@@ -54,7 +88,7 @@ Not sequenced.
 
 ## Real-provider testing
 
-Daniel authorized real Codex turns on his signed-in ChatGPT account, light usage: a few short turns per check, GPT-5.6 Luna by default, GPT 6 only for what Luna lacks. Run them in `/private/tmp/claudeui-codex-scratch` (`README.txt`, `hello.py`; recreate if gone), never in this repo; default mode unless the slice is about Auto; one benign command per check; never read `~/.codex` files or echo tokens; no login or logout while an account is signed in. Harness drives inherit the global default mode and Codex's default model, so pin the model through the picker when the rules call for Luna. Real-turn drive (about 45 s):
+Real provider turns run only under the maintainer's own explicit authorization, which is deliberately not recorded here. When they are authorized, these are the rules: light usage — a few short turns per check, GPT-5.6 Luna by default, GPT 6 only for what Luna lacks. Run them in a scratch directory outside this repo (`README.txt`, `hello.py`; recreate if gone), never in the repo itself; default mode unless the slice is about Auto; one benign command per check; never read `~/.codex` files or echo tokens; no login or logout while an account is signed in. Harness drives inherit the global default mode and Codex's default model, so pin the model through the picker when the rules call for Luna. Real-turn drive (about 45 s):
 
 ```sh
 bun run build
