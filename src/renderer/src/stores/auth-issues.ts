@@ -124,6 +124,14 @@ export interface AuthIssuesInput {
   providerAuth: ProviderAuthView
   /** Every session whose `authRequired` is set, keyed by routingId. */
   blamed: Record<string, AuthRequiredState>
+  /**
+   * Providers some open session's selected engine/model actually routes to,
+   * under `signInProviderFor` — the scope of the PROACTIVE half below.
+   *
+   * Required rather than optional: an omitted set would read as "nothing is in
+   * use" and silence the pill, which is the failure mode hardest to notice.
+   */
+  inUse: ReadonlySet<string>
   /** A live flow: `authState.status === 'authorizing'` / a non-error `vendorOAuth`. */
   authorizing: { anthropic: boolean; chatgpt: boolean }
 }
@@ -168,8 +176,14 @@ interface Draft {
  *
  * The rules, and each of them is load-bearing:
  *
- *  - `'unauthenticated'` with no failed session → `needed` (amber, "will fail").
- *  - any session with an unresolved `authRequired` → `expired` (red, "has failed").
+ *  - `'unauthenticated'` with no failed session → `needed` (amber, "will fail"),
+ *    but ONLY for a provider something is routed to (`inUse`). The vault
+ *    answers `'unauthenticated'` for an empty store and the ChatGPT row is
+ *    always listed, so without that scope a Claude-only install carried a
+ *    permanent "Blocks Codex" pill it could never dismiss — and, since `needed`
+ *    outranks `resolved`, never saw "Signed in · Retry" either.
+ *  - any session with an unresolved `authRequired` → `expired` (red, "has
+ *    failed"). NOT scoped: a turn that died on a credential is proof of use.
  *  - **`'unknown'` contributes NOTHING.** An unprobed host is not a signed-out
  *    one, so a cold boot shows no pill — the old banner's boot-time false alarm
  *    is half of what ADR-070 was written to fix.
@@ -191,9 +205,14 @@ export function summarizeAuthIssues(input: AuthIssuesInput): AuthSummary {
     return fresh
   }
 
+  /** Known to be missing AND routed to by something — the proactive rule. */
+  const missing = (providerId: string): boolean =>
+    isDrivableProvider(providerId) &&
+    input.providerAuth[providerId] === 'unauthenticated' &&
+    input.inUse.has(providerId)
+
   // Proactive half: a provider whose credential is known to be missing.
-  for (const providerId of DRIVABLE_PROVIDERS)
-    if (input.providerAuth[providerId] === 'unauthenticated') draftFor(providerId)
+  for (const providerId of DRIVABLE_PROVIDERS) if (missing(providerId)) draftFor(providerId)
 
   // Reactive half: every session an auth fact blames. The iteration order is
   // the `blamed` record's own insertion order — DETERMINISTIC, which is all
@@ -225,13 +244,13 @@ export function summarizeAuthIssues(input: AuthIssuesInput): AuthSummary {
 
   const issues: AuthIssue[] = []
   for (const [providerId, draft] of drafts) {
-    const unauthenticated =
-      isDrivableProvider(providerId) && input.providerAuth[providerId] === 'unauthenticated'
     // A provider that only appears here because a session of its was RESOLVED is
     // not an issue: its credential is fine and all that is left is the retry,
     // which rides on `retryable`. Counting it would make the pill say "2
-    // sign-ins needed" when one of them is already done.
-    if (!draft.failed && !unauthenticated) continue
+    // sign-ins needed" when one of them is already done. Same `missing` rule as
+    // the proactive half — one scope, so a provider cannot be filtered out up
+    // there and let back in here.
+    if (!draft.failed && !missing(providerId)) continue
     issues.push({
       providerId,
       kind: draft.failed ? 'expired' : 'needed',

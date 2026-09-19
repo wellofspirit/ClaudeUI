@@ -19,14 +19,21 @@ import {
 import { UNKNOWN_PROVIDER_AUTH, type ProviderAuthView } from '../../utils/sign-in-provider'
 import type { AuthRequiredState } from '../../../../shared/remote-protocol'
 
+/**
+ * `inUse` defaults to BOTH drivable providers, so the cases below that are not
+ * about it read as they did before it existed. The proactive half's own tests
+ * pass it explicitly.
+ */
 function input(over: {
   providerAuth?: Partial<ProviderAuthView>
   blamed?: Record<string, AuthRequiredState>
+  inUse?: readonly string[]
   authorizing?: Partial<AuthIssuesInput['authorizing']>
 }): AuthIssuesInput {
   return {
     providerAuth: { ...UNKNOWN_PROVIDER_AUTH, ...over.providerAuth },
     blamed: over.blamed ?? {},
+    inUse: new Set(over.inUse ?? ['anthropic', 'chatgpt']),
     authorizing: { anthropic: false, chatgpt: false, ...over.authorizing }
   }
 }
@@ -54,9 +61,69 @@ describe("auth-issues — 'unknown' contributes nothing", () => {
   })
 })
 
+/**
+ * The proactive half is scoped to providers something is actually ROUTED to
+ * (ADR-070 §4). `chatgptAuthFromRegistry` answers `'unauthenticated'` for an
+ * empty vault, the ChatGPT row is always listed and `refreshProviderAuth` runs
+ * at boot — so counting every unauthenticated drivable provider put a
+ * permanent, non-dismissible amber pill on a Claude-only install, and because
+ * `needed` outranks `resolved` it also swallowed "Signed in · Retry" after a
+ * Claude sign-in. The hint this replaced was scoped by `signInProviderFor` to
+ * the engine actually selected; `inUse` is that same rule, applied app-wide.
+ */
+describe('auth-issues — the proactive half is scoped to providers IN USE', () => {
+  it('an unauthenticated provider nothing routes to is not an issue at all', () => {
+    const summary = summarizeAuthIssues(
+      input({ providerAuth: { chatgpt: 'unauthenticated' }, inUse: ['anthropic'] })
+    )
+    expect(summary.issues).toEqual([])
+    expect(summary.tone).toBe('none')
+  })
+
+  it('a session on an engine that routes to it brings the issue back', () => {
+    const summary = summarizeAuthIssues(
+      input({ providerAuth: { chatgpt: 'unauthenticated' }, inUse: ['chatgpt'] })
+    )
+    expect(summary.issues.map((i) => i.providerId)).toEqual(['chatgpt'])
+    expect(summary.tone).toBe('needed')
+  })
+
+  /**
+   * The compound failure the owner actually saw: a Claude-only install signs in
+   * to Claude, and the pill stays amber "Sign-in needed · Blocks Codex" instead
+   * of going green, because the unused ChatGPT row outranked the resolution.
+   */
+  it('an unused unauthenticated provider does not outrank a resolution', () => {
+    const summary = summarizeAuthIssues(
+      input({
+        providerAuth: { anthropic: 'authenticated', chatgpt: 'unauthenticated' },
+        blamed: { r1: { providerId: 'anthropic', resolved: true, retryPrompt: 'fix the test' } },
+        inUse: ['anthropic']
+      })
+    )
+    expect(summary.issues).toEqual([])
+    expect(summary.tone).toBe('resolved')
+  })
+
+  /** A failed TURN is proof of use, so the reactive half is not scoped. */
+  it('a session that already failed on it is an issue whatever `inUse` says', () => {
+    const summary = summarizeAuthIssues(
+      input({
+        providerAuth: { chatgpt: 'unauthenticated' },
+        blamed: { r1: { providerId: 'chatgpt' } },
+        inUse: []
+      })
+    )
+    expect(summary.issues.map((i) => i.providerId)).toEqual(['chatgpt'])
+    expect(summary.tone).toBe('expired')
+  })
+})
+
 describe('auth-issues — needed vs expired', () => {
   it("'unauthenticated' with nothing failed is amber `needed`", () => {
-    const summary = summarizeAuthIssues(input({ providerAuth: { chatgpt: 'unauthenticated' } }))
+    const summary = summarizeAuthIssues(
+      input({ providerAuth: { chatgpt: 'unauthenticated' }, inUse: ['chatgpt'] })
+    )
     expect(summary.issues[0]).toMatchObject({
       providerId: 'chatgpt',
       kind: 'needed',
