@@ -26,13 +26,13 @@ import { EngineLogo } from '../../shared/EngineLogo'
 import { useEscapeLayer } from '../../shared/use-escape-layer'
 import {
   ADAPTIVE_UNSUPPORTED_TOOLTIP,
-  accountLabel,
   deriveModelGroups,
   groupSignIn,
   unsupportedTooltip,
   type AccountChoice,
   type ModelDisplay
 } from '../../shared/InlinePickers'
+import { accountDisplayName } from '../../../utils/sign-in-provider'
 
 const ENGINE_LOCKED_TOOLTIP =
   'Engine cannot change after session initialization or for historical sessions'
@@ -521,7 +521,9 @@ function AccountPage({
         <div className="min-w-0 flex flex-col gap-0.5">
           <span className="text-[13px] truncate">Follow active account</span>
           {active && (
-            <span className="text-[11px] text-text-muted truncate">{accountLabel(active)}</span>
+            <span className="text-[11px] text-text-muted truncate">
+              {accountDisplayName(active.email)}
+            </span>
           )}
         </div>
       </OptionButton>
@@ -534,7 +536,7 @@ function AccountPage({
           onClick={() => onSelect(account.id)}
         >
           <div className="min-w-0 flex flex-col gap-0.5">
-            <span className="text-[13px] truncate">{accountLabel(account)}</span>
+            <span className="text-[13px] truncate">{accountDisplayName(account.email)}</span>
             {account.planType && (
               <span className="text-[11px] text-text-muted truncate">{account.planType}</span>
             )}
@@ -819,10 +821,12 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
                       label="ChatGPT account"
                       value={
                         pinnedAccountId === null
-                          ? `Active · ${accountLabel(
-                              accounts.find((account) => account.id === activeAccountId)
+                          ? `Active · ${accountDisplayName(
+                              accounts.find((account) => account.id === activeAccountId)?.email
                             )}`
-                          : accountLabel(accounts.find((account) => account.id === pinnedAccountId))
+                          : accountDisplayName(
+                              accounts.find((account) => account.id === pinnedAccountId)?.email
+                            )
                       }
                       onClick={() => {
                         onAccountMenuOpen?.()
