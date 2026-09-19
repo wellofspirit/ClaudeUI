@@ -88,11 +88,11 @@ The reducer stays the only writer, so the answer survives a resync and is the sa
 
 ### 4. Direction B: one pill, one row, no cards over the chat
 
-**The pill.** One indicator for every provider and every session, in `TopBar`'s **left** flex group immediately after `TopBar.info`. Left, not right, for four reasons: the right cluster is already five icons plus branch plus dirty-state plus window controls and still growing; the pill is a property of _this session's_ engine, which is what the title names, whereas on the right it reads as another tool button; left-of-centre is in the reading path from the transcript row; and it exists only while something is wrong. That last reason was originally offered as grounds for letting the pill take whatever room it needed, and the real-app drive proved it wrong: as `shrink-0` in a `min-w-0` group with a fixed ~668px right cluster, the pill squeezed the session title to **zero** width and painted 10–25px over the VS Code button, making that slice of itself unclickable. Transient is not the same as free. The title now holds a hard reservation and the pill takes only the remainder, dropping to its compact dot-with-count form — by container query, so the trigger is available width rather than a window breakpoint, which matters because the sidebar moves it by ~276px at a constant window size. The engine and model are **not** added to the bar — they stay in the composer.
+**The pill.** One indicator for every provider and every session, in `TopBar`'s **left** flex group immediately after `TopBar.info`. Left, not right, for four reasons: the right cluster is already five icons plus branch plus dirty-state plus window controls and still growing; the pill is a property of _this session's_ engine, which is what the title names, whereas on the right it reads as another tool button; left-of-centre is in the reading path from the transcript row; and it exists only while something is wrong. That last reason was originally offered as grounds for letting the pill take whatever room it needed, and the real-app drive proved it wrong: as `shrink-0` in a `min-w-0` group with a fixed ~668px right cluster, the pill squeezed the session title to **zero** width and painted 10–25px over the VS Code button, making that slice of itself unclickable. Transient is not the same as free. The title now holds a hard reservation and the pill takes only the remainder, dropping to its compact form (the pill itself becomes the dot: a 22px disc in the tone's colour, carrying the count; a bare glyph when there is no count) — by container query, so the trigger is available width rather than a window breakpoint, which matters because the sidebar moves it by ~276px at a constant window size. The engine and model are **not** added to the bar — they stay in the composer.
 
 States: amber "Sign-in needed" (will fail), red "Sign-in expired" / "N sign-ins needed" (has failed), accent "Signing in…" (a flow is alive with the dialog closed — the fact today's banner had to stay visible for), green transient "Signed in · Retry" (sticks while a retry is owed), and **nothing** when healthy or unprobed. An unprobed host is not a signed-out one, so a cold boot shows no pill.
 
-Collapsed sidebar: the pill follows the title after the two icons. Mobile: a bare dot with a count.
+Collapsed sidebar: the pill follows the title after the two icons. Mobile: the same compact disc.
 
 **The row.** `AuthErrorBlock` becomes an engine-neutral `AuthTranscriptRow` with exactly two hit areas and no whole-row target: **Sign in** (the same `openSignIn()` call the pill makes — one code path, so the two cannot drift) and **▾ what the engine said** (pure in-place disclosure of the event's `message`; this is where the deleted second card's text goes). The sentence itself is inert, selectable text: a whole-row target beside two real actions is how a user gets an accidental dialog while trying to copy an error, and this row is permanent history. The row renders the three lifetimes of §2 — and in the settled state it has **no action at all**, which is the specific bug that made a fixed credential keep offering a sign-in.
 
@@ -269,9 +269,23 @@ earlier text stands as the record and this section is the current truth.
   session with no working directory had no terminal entry at all. Terminal's gate is availability
   alone on both surfaces — a deliberate reversal of the old menu-side `cwd` requirement, safe now
   that the ⋯ is the second entry point whose absence that requirement was guarding against.
-- **Verification.** `src/layout` fails fast, naming `bunx playwright install chromium`, when the
+- **§2 — no placeholder on the wire.** A vault with no named account files its credential under an
+  internal slot key (`__active__`). That is bookkeeping, not an account, so the resolution names an
+  account only when there is one; with nothing to tell apart, there is nothing to name.
+- **§4 — the compact pill, stated precisely.** "Dot-with-count" read as a glyph beside a number; what
+  ships, and what was approved in the mockup, is the pill collapsing INTO the dot. A glyph and a
+  count do not fit 22px past one digit, and a wider disc widens the 34px the title gives up for it.
+- **Slice F — "Permissions", not "Project permissions".** One label on both surfaces, and the
+  shorter one: the dialog manages the global rules as well as the project's (owner, 2026-09-20).
+- **Deep links are checked at the boundary.** An `open-settings` event's detail is untyped at
+  runtime and the page lookup throws from inside render, so one unknown page id took the whole
+  window to the error boundary. `settingsTargetFromEvent` now accepts only a known page; anything
+  else opens Settings where it was.
+- **Verification.** `src/layout` now runs in CI, as its own `windows-2022` job — the platform its
+  thresholds were measured on — and its one absolute-pixel assertion became relational so host fonts
+  cannot fail it. `src/layout` fails fast, naming `bunx playwright install chromium`, when the
   browser is missing, and is documented as a layer in `docs/testing-strategy.md`. It still measures
-  Playwright's Chromium rather than the shipped Electron, and CI still does not run it.
+  Playwright's Chromium rather than the shipped Electron.
 - **Pre-existing, fixed alongside:** a stale `authState: success` finished `mode: 'add'` before it
   began; the add row was live before the account read answered; a blamed non-active account got a
   second Re-authorize that acted on the active credential; the ⋯ menu dismissed itself outside the

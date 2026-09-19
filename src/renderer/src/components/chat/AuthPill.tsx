@@ -221,8 +221,12 @@ export function AuthPill(): React.JSX.Element | null {
         {...shared}
         className={`shrink-0 inline-flex items-center gap-1.5 rounded-full border px-2.5 py-[3px] text-[11px] font-medium ${COMPACT} [-webkit-app-region:no-drag] cursor-default ${TONE_CLASS[tone]}`}
       >
-        {/* The count REPLACES the dot in the compact form — it is the part that
-            has to survive (ADR-070 §4), and it is what the mobile pill shows. */}
+        {/* Compact form: the pill itself becomes the dot — a 22px disc in the
+            tone's colour — and the count is what it carries, so the inner glyph
+            steps aside for it. A glyph AND a count do not fit 22px past one
+            digit, and widening the disc widens the 34px the title gives up for
+            it. With no count (authorizing, resolved) the glyph is all there is
+            and stays. Same form as the mobile pill. */}
         <span className={count > 0 ? '@max-[140px]:hidden' : ''}>{glyph}</span>
         <span data-testid="AuthPill.label" className="@max-[140px]:hidden">
           {pillLabel(summary)}
