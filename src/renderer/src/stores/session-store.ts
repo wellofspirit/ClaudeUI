@@ -1528,8 +1528,17 @@ export interface SessionState {
   closeGitPanel: (routingId: string) => void
   // Account usage
   setAccountUsage: (data: AccountUsage) => void
-  /** Re-read the ChatGPT account list. Safe to call repeatedly; failures leave the slice alone. */
-  loadProviderAccounts: () => Promise<void>
+  /**
+   * Re-read the ChatGPT account list. Safe to call repeatedly; failures leave
+   * the slice alone.
+   *
+   * `list` short-circuits the read for a caller that has just made it and needs
+   * the failure itself — `SignInDialog` renders a rejected `provider-account:list`
+   * as an error row, which this action deliberately swallows. Same shape as
+   * {@link SessionState.refreshProviderAuth}'s `snapshot`, and for the same
+   * reason: one writer of the field, no second copy at the call site.
+   */
+  loadProviderAccounts: (list?: SharedProviderAccountList) => Promise<void>
   /** Re-read the per-account rate limits; `refresh` asks the host to fetch first. */
   loadChatgptLimits: (refresh?: boolean) => Promise<void>
   // Native OAuth (ADR-014)
@@ -2794,9 +2803,9 @@ export const useSessionStore = create<SessionState>((set) => ({
   // ADR-068 §2. Both are plain READS of host-owned state — the store never
   // derives either, and a failure leaves the previous answer in place rather
   // than blanking a picker or a usage block mid-use.
-  loadProviderAccounts: async () => {
+  loadProviderAccounts: async (list) => {
     try {
-      set({ providerAccounts: await window.api.listProviderAccounts('chatgpt') })
+      set({ providerAccounts: list ?? (await window.api.listProviderAccounts('chatgpt')) })
     } catch {
       /* the host has no vault yet, or the read failed — keep what we have */
     }

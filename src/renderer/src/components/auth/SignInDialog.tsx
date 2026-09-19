@@ -25,6 +25,13 @@
  * dialog mid-flight therefore leaves the flow RUNNING — the pill keeps
  * reporting it — which is what makes "close it and keep working" safe.
  *
+ * AND NO SECOND COPY OF THE ACCOUNTS EITHER (Slice I). The rows are derived
+ * from `accountsState` / `providerAccounts` on every change — see
+ * {@link ./account-rows}, which carries the story — so an account whose email
+ * and plan arrive AFTER the dialog opened renders them. The open-time read
+ * stays, but only to make sure the store has been populated at all; its answer
+ * goes into the store and is read back from there like everyone else's.
+ *
  * THE HOST VARIANT IS DERIVED, NEVER CHOSEN (ADR-057). A web client has no host
  * browser to wait on; the desktop opens its own browser and gets "Waiting for
  * the browser…" with a manual link. A user cannot pick the wrong one because
@@ -57,7 +64,7 @@
  * edge, and this dialog opens over the chat.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import {
   useSessionStore,
@@ -83,6 +90,13 @@ import { EngineChip } from '../SettingsDialog/ProviderSheet'
 import { openProviderSettings } from '../chat/AuthPill'
 import { OAuthOutcomeNotice, OAuthPasteBackFlow, classifyOAuthError } from './OAuthPasteBackFlow'
 import { DeviceCodeFlow } from './DeviceCodeFlow'
+import {
+  UNREADABLE_ACCOUNTS,
+  anthropicAccountsView,
+  chatgptAccountsView,
+  type AccountRow,
+  type AccountsView
+} from './account-rows'
 
 const DIALOG = 'SignInDialog'
 
@@ -135,17 +149,6 @@ const ANTHROPIC_FEEDS: readonly EngineFeed[] = [
 ]
 
 const feedLabel = (feed: EngineFeed): string => feed.label ?? engineMeta(feed.engineId).label
-
-/** One stored account, flattened out of the two providers' different shapes. */
-interface AccountRow {
-  id: string
-  label: string
-  /** The subscription tier, as a neutral chip. */
-  plan?: string
-  /** The vault gave up on this credential — a danger chip, not prose. */
-  expired?: boolean
-  active: boolean
-}
 
 /**
  * `confirm` is the screen a one-click sign-in used to skip (ADR-070 Ruling 1,
@@ -334,7 +337,9 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
     setAccountsState,
     loadProviderAccounts,
     retrySend,
-    clearAuthRequired
+    clearAuthRequired,
+    accountsState,
+    providerAccounts
   } = useSessionStore(
     useShallow((s) => ({
       closeSignIn: s.closeSignIn,
@@ -351,14 +356,29 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
       setAccountsState: s.setAccountsState,
       loadProviderAccounts: s.loadProviderAccounts,
       retrySend: s.retrySend,
-      clearAuthRequired: s.clearAuthRequired
+      clearAuthRequired: s.clearAuthRequired,
+      // The accounts THEMSELVES, not a snapshot of them (Slice I). Both are
+      // read-back caches of a host list; `accountsState` is kept current by
+      // `account:changed`, which is what makes a backfilled email arrive here.
+      accountsState: s.accountsState,
+      providerAccounts: s.providerAccounts
     }))
   )
 
   const { providerId } = request
   const isWeb = window.api.platform === 'web'
 
-  const [stage, setStage] = useState<Stage>('choose')
+  /**
+   * Null until the accounts are KNOWN: which screen this dialog opens on is a
+   * question about them (is there anything to choose between?), and it cannot be
+   * answered before the answer exists. It renders as `choose` while undecided,
+   * which is the same in-flight chooser the dialog has always shown.
+   *
+   * Latched once — see the layout effect below — so it is the opening decision
+   * and nothing more. Every later change is an explicit `setStage` from an
+   * action the user took.
+   */
+  const [decidedStage, setStage] = useState<Stage | null>(null)
   /**
    * Which ChatGPT flow the web client is on (Slice 7). Device code is the
    * DEFAULT — "open this link, type this code" is the step a phone can finish —
@@ -368,9 +388,15 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
   const [chatgptFlow, setChatgptFlow] = useState<ChatgptFlowKind>('device')
   /** Which mode the live flow was started in, so the paste fallback restarts the same one. */
   const [flowMode, setFlowMode] = useState<'reauth' | 'add'>('reauth')
-  /** null while the account read is in flight — the chooser must not flash empty. */
-  const [accounts, setAccounts] = useState<AccountRow[] | null>(null)
-  const [canAdd, setCanAdd] = useState(true)
+  /**
+   * The open-time read REJECTED and no copy of the answer exists in the store,
+   * so there is nothing to derive from and never will be for this open. The one
+   * thing the store cannot tell us: it keeps the last good answer rather than
+   * recording the failure (both slices' documented posture), so a surface that
+   * has to distinguish "still reading" from "settled on nothing" has to
+   * remember the rejection itself.
+   */
+  const [unreadable, setUnreadable] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
@@ -401,56 +427,49 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
     request.retry
 
   /**
-   * The stored accounts, plus whether there is anything to CHOOSE between.
+   * The rows this dialog renders — DERIVED, never stored (Slice I).
    *
-   * The two answers are separate on purpose (F3). "No rows" used to mean both
-   * "start the flow, there is nothing to pick" and "this host has no account",
-   * and Anthropic with multi-account off is the case where they disagree: one
-   * credential is signed in, but there is no alternative to switch to. It
-   * auto-starts like an empty list AND names its account like a full one, so the
-   * chooser the user lands on after Cancel tells the truth either way.
+   * Null means the answer is not known yet, which is the only honest thing to
+   * render before it arrives; `UNREADABLE_ACCOUNTS` is a read that settled on
+   * nothing. The mapping and the ADR-068 rulings inside it live in
+   * {@link ./account-rows} and are unit-tested there, so this component has no
+   * mapping logic of its own to drift from the store.
    */
-  const readAccounts = useCallback(async (): Promise<{
-    rows: AccountRow[]
-    autoStart: boolean
-    /** Whether "+ Add account" is offered. False for Anthropic with
-     *  multi-account OFF: `addAccount()` would silently switch the host to
-     *  file-based multi-account, a Settings decision, not a side effect of
-     *  cancelling a sign-in. */
-    canAdd: boolean
-  }> => {
+  const view: AccountsView | null = useMemo(() => {
+    const stored =
+      providerId === 'anthropic'
+        ? accountsState && anthropicAccountsView(accountsState)
+        : providerAccounts && chatgptAccountsView(providerAccounts)
+    if (stored) return stored
+    return unreadable ? UNREADABLE_ACCOUNTS : null
+  }, [providerId, accountsState, providerAccounts, unreadable])
+
+  /** null while the account read is in flight — the chooser must not flash empty. */
+  const accounts: AccountRow[] | null = view ? view.rows : null
+  /** True while the answer is unknown: the add row is the chooser's one live affordance. */
+  const canAdd = view?.canAdd ?? true
+
+  /**
+   * Populate the store, once per open — and NOT to answer anything locally.
+   *
+   * Both fields are read-back caches with no boot read of their own on every
+   * host, so the dialog cannot assume someone else has already asked. It hands
+   * what it gets to the store's own writer and then reads it back from there,
+   * like Settings does.
+   *
+   * ChatGPT is read here rather than through `loadProviderAccounts()` alone
+   * because that action SWALLOWS the failure by design (a failed re-read must
+   * not blank a list someone is looking at), and this dialog owes the user the
+   * error — so it takes the rejection and passes the success on to the one
+   * writer of the field.
+   */
+  const populateAccounts = useCallback(async (): Promise<void> => {
     if (providerId === 'anthropic') {
-      const state = await window.api.getAccounts()
-      setAccountsState(state)
-      const rows = state.accounts.map((account) => ({
-        id: account.id,
-        label: account.email || 'Account',
-        plan: account.subscriptionType ?? undefined,
-        active: account.id === state.activeId
-      }))
-      if (!state.enabled) {
-        // Multi-account off means ONE credential and nothing to choose between;
-        // the chooser would be a list of one with no alternative. Report that
-        // one — the active row, or the only one on file — rather than an empty
-        // list that would read as "nobody is signed in".
-        const one = rows.find((row) => row.active) ?? rows[0]
-        return { rows: one ? [{ ...one, active: true }] : [], autoStart: true, canAdd: false }
-      }
-      return { rows, autoStart: rows.length === 0, canAdd: true }
+      setAccountsState(await window.api.getAccounts())
+      return
     }
-    const list = await window.api.listProviderAccounts(CHATGPT_ID)
-    const rows = list.accounts.map((account) => ({
-      id: account.id,
-      label: account.email || 'Account',
-      // Two facts, two chips (rule: no sentence that restates its own state).
-      // `Plus · sign-in expired` was one string and the danger half of it read
-      // as a footnote.
-      plan: account.planType ?? undefined,
-      expired: account.needsReauth === true,
-      active: account.id === list.activeId
-    }))
-    return { rows, autoStart: rows.length === 0, canAdd: true }
-  }, [providerId, setAccountsState])
+    await loadProviderAccounts(await window.api.listProviderAccounts(CHATGPT_ID))
+  }, [providerId, setAccountsState, loadProviderAccounts])
 
   /**
    * Which engines the ChatGPT credential feeds, and when.
@@ -471,7 +490,19 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
     return list
   }, [])
 
-  /** Who the credential belongs to, read AFTER it was written. */
+  /**
+   * Who the credential belongs to, read AFTER it was written.
+   *
+   * This is also the edge that refreshes the ChatGPT rows, and it has to be:
+   * Anthropic's `noteLogin` broadcasts `account:changed` when it backfills the
+   * new credential's email and plan, and the vault publishes nothing at all, so
+   * without a re-read here one half of the dialog would update itself on a
+   * successful sign-in and the other would not.
+   *
+   * ONE read feeding both — the outcome line and the store — rather than the
+   * two round trips this used to make, now that the rows come from the store
+   * and the two answers cannot be allowed to differ.
+   */
   const collectOutcome = useCallback(async (): Promise<void> => {
     if (providerId === 'anthropic') {
       const account = useSessionStore.getState().authState?.account
@@ -483,7 +514,7 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
     const active = list?.accounts.find((account) => account.id === list.activeId)
     setSignedInAs(active?.email ?? null)
     setPlan(active?.planType ?? null)
-    void loadProviderAccounts()
+    if (list) void loadProviderAccounts(list)
   }, [providerId, loadProviderAccounts])
 
   const finish = useCallback(async (): Promise<void> => {
@@ -557,29 +588,21 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
     [start, request.mode]
   )
 
-  // Open: read the accounts, then decide whether there is anything to choose
-  // between. `add` never has anything to choose; neither does a provider with no
-  // stored account (or Anthropic with multi-account off), so both go straight to
-  // the flow. The header's engine chips are read here too — one read per open,
-  // and the SAME one the done state's fan-out renders.
+  // Open: make sure the accounts have been read. WHICH screen that lands on is
+  // decided from the store by the layout effect below, not here — the stage and
+  // the rows must answer to the same copy of the accounts, and deciding it here
+  // would mean deciding it from a value other than the one being rendered,
+  // which is the two-copies defect this slice removes, in miniature.
+  //
+  // The header's engine chips are read here too — one read per open, and the
+  // SAME one the done state's fan-out renders.
   useEffect(() => {
     let cancelled = false
-    void readAccounts()
-      .then(({ rows, autoStart, canAdd }) => {
-        if (cancelled) return
-        setAccounts(rows)
-        setCanAdd(canAdd)
-        // Ruling 1: the confirm SCREEN, never the flow. `add` is not exempt —
-        // "Add another account" says what the dialog is for, not that a
-        // browser is about to take the screen, and one rule with no exception
-        // is the only version of this that stays true.
-        if (request.mode === 'add' || autoStart) setStage('confirm')
-      })
-      .catch((e: unknown) => {
-        if (cancelled) return
-        setAccounts([])
-        setError(message(e))
-      })
+    void populateAccounts().catch((e: unknown) => {
+      if (cancelled) return
+      setUnreadable(true)
+      setError(message(e))
+    })
     if (providerId === 'chatgpt')
       // A failed route read costs the header its chips and nothing else, so it
       // is deliberately NOT an error row: the sign-in still works.
@@ -594,6 +617,32 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
     // Once per open — the dialog is remounted (keyed) for every new request.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  /**
+   * The opening screen, decided the FIRST moment the accounts are known and
+   * never again.
+   *
+   * Ruling 1: the confirm SCREEN, never the flow. `add` is not exempt — "Add
+   * another account" says what the dialog is for, not that a browser is about to
+   * take the screen, and one rule with no exception is the only version of this
+   * that stays true.
+   *
+   * A LAYOUT effect, so a store that already holds the accounts (Settings read
+   * them, or `account:changed` landed) decides before the first paint instead of
+   * showing a chooser for one frame and then replacing it.
+   *
+   * Latched rather than derived: after this the screen belongs to the user. An
+   * account appearing on the list must not pull the confirm screen out from
+   * under a click, and `switchAccount` / `addAccount` both write the very field
+   * this reads.
+   */
+  useLayoutEffect(() => {
+    if (decidedStage !== null || !view) return
+    setStage(request.mode === 'add' || view.autoStart ? 'confirm' : 'choose')
+  }, [decidedStage, view, request.mode])
+
+  /** What the body renders. `choose` while the accounts are still unknown. */
+  const stage: Stage = decidedStage ?? 'choose'
 
   // Anthropic's flow finishes OUT OF BAND: the host drives the browser and the
   // terminal transition arrives on `auth:state`, so success is a state edge here,
@@ -768,7 +817,7 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
   /**
    * The credential the confirm screen NAMES, when it knows one.
    *
-   * Only the single-row case: `readAccounts` collapses Anthropic-with-
+   * Only the single-row case: `anthropicAccountsView` collapses Anthropic-with-
    * multi-account-off to exactly the credential the flow will re-authorise, so
    * naming it is the difference between "sign in" and "sign in as this". An
    * `add` names nobody by construction — that is the point of adding — and a

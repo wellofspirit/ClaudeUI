@@ -1472,6 +1472,68 @@ describe('useClaudeEvents extended component tests', () => {
     })
   })
 
+  // ── ADR-070 §2 / Slice I: the one resolution signal, and the reads it owes ──
+  //
+  // `account:changed` is HOST-LOCAL — `AccountManager.broadcast` sends it
+  // straight to the desktop window, bypassing SyncCore — so a remote client
+  // never hears the backfill that turns the `Account N` placeholder into the
+  // real email. `provider:auth-resolved` is replicated and lands AFTER
+  // `noteLogin` has written it (it is `finalize`'s last statement, deliberately),
+  // so it is the edge a web client can learn from.
+  describe('provider:auth-resolved', () => {
+    const BACKFILLED = {
+      enabled: true,
+      activeId: 'a2',
+      accounts: [
+        {
+          id: 'a2',
+          email: 'two@example.com',
+          subscriptionType: 'Claude Pro',
+          organization: null,
+          createdAt: 0
+        }
+      ]
+    }
+
+    it('anthropic re-reads the accounts, so a remote client sees the backfill', async () => {
+      const getAccounts = vi.fn(async () => BACKFILLED)
+      Object.assign(window.api, { getAccounts })
+
+      app.emit('provider:auth-resolved', { providerId: 'anthropic' })
+
+      await vi.waitFor(() => expect(getAccounts).toHaveBeenCalledTimes(1))
+      await vi.waitFor(() => expect(useSessionStore.getState().accountsState).toEqual(BACKFILLED))
+    })
+
+    it('chatgpt does not — that arm has its own refresh', async () => {
+      useSessionStore.setState({ accountsState: null })
+      const getAccounts = vi.fn(async () => BACKFILLED)
+      const listProviderRegistry = vi.fn(async () => ({ entries: [], opencodeInstalled: false }))
+      Object.assign(window.api, { getAccounts, listProviderRegistry })
+
+      app.emit('provider:auth-resolved', { providerId: 'chatgpt' })
+
+      // The ChatGPT arm ran — so "no account read" is an assertion about the
+      // arms being disjoint, not about the event having been missed.
+      await vi.waitFor(() => expect(listProviderRegistry).toHaveBeenCalledTimes(1))
+      expect(getAccounts).not.toHaveBeenCalled()
+      expect(useSessionStore.getState().accountsState).toBeNull()
+    })
+
+    it('a failed read keeps the last good answer, exactly like the probe beside it', async () => {
+      useSessionStore.setState({ accountsState: BACKFILLED })
+      const getAccounts = vi.fn(async () => {
+        throw new Error('account:get failed')
+      })
+      Object.assign(window.api, { getAccounts })
+
+      app.emit('provider:auth-resolved', { providerId: 'anthropic' })
+
+      await vi.waitFor(() => expect(getAccounts).toHaveBeenCalledTimes(1))
+      expect(useSessionStore.getState().accountsState).toEqual(BACKFILLED)
+    })
+  })
+
   describe('multi-session isolation', () => {
     it('bash output for one session does not affect another', () => {
       useSessionStore.getState().createNewSession('route-1', '/proj1')

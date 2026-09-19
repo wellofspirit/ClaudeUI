@@ -167,8 +167,9 @@ by it. **Two were ruled on by the owner (2026-09-19) and closed by slice F; the 
   with a 280px sidebar the bar is ~8px short — an owner decision about that row, not a leak.
 
 - **A one-click sign-in can open a browser with no intervening screen. — FIXED, slice F.**
-  `SignInDialog`'s open-time effect auto-started the flow whenever `readAccounts` reported
-  `autoStart`, which for Anthropic is _whenever multi-account is off_. So opening it on Anthropic
+  `SignInDialog`'s open-time effect auto-started the flow whenever the account read reported
+  `autoStart`, which for Anthropic is _whenever multi-account is off_ (that read was
+  `readAccounts`; slice I replaced it with a pure mapping over the store's own accounts). So opening it on Anthropic
   called `signIn()` → `shell.openExternal` with nothing in between. ADR-068 §3's reasoning was right
   about the CONTENT — with one credential there is nothing to choose between — but the screen it
   removed was also the confirmation, and the pill that replaced the dismissible banner is permanently
@@ -193,6 +194,30 @@ by it. **Two were ruled on by the owner (2026-09-19) and closed by slice F; the 
 5. **Slice E — the pill must not eat the title.** §4's containment, plus the `src/layout/` measuring
    harness the geometry claims are pinned by.
 6. **Slice F — the two owner rulings above.** The confirm stage, and the bar that collapses in tiers.
+7. **Slice G — the pasted code is `code#state`.** The owner's own re-auth attempt, not a test, found
+   it: claude.ai joins the authorization code and the CSRF state with a `#`, cli.js splits that in
+   both of its own manual entries but NOT on the control path we drive, and we posted the whole blob
+   as the code — a 400 on every remote Claude sign-in. Also: an error on a live flow now carries
+   `manualUrl` forward, because losing it left the panel claiming the host returned no sign-in link.
+8. **Slice H — the confirm screen needs a subject.** With no account to name it rendered an
+   invisible dot and a floating button. Both modes are now one shape, and the step sentence and the
+   button label are one branch so a web client cannot be promised a browser the host will not open.
+9. **Slice I — the dialog's second copy of the accounts.** A freshly added account read `Account N`
+   until the dialog was reopened: `SignInDialog` snapshotted the account list into local state once
+   per open, while the store's copy was already being refreshed. The mapping is now a pure function
+   over the store's own fields, so there is one copy. `account:changed` is **host-local**, so the
+   remote dialog had the same staleness by another route; `provider:auth-resolved` closes it, on the
+   edge §6's ordering already guarantees is late enough.
+
+### What the slices after the drive have in common
+
+E, F, H and I are all one shape: **a fact with more than one copy, or an assumption that only held
+where it was written.** The duplicate `session:error` (§1), two divergent last-user-prompt walks
+(§3), three names for one state (§4), a pill that assumed room, a confirm that assumed an account,
+an overflow menu that assumed nothing to its right, and a dialog holding its own account list. Only
+the first of those was found by reading code; the rest needed the app, and two needed the owner.
+That is the honest cost record of this ADR, and the reason its verification section is written the
+way it is.
 
 ## Alternatives considered
 

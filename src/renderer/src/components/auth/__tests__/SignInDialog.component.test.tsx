@@ -179,13 +179,20 @@ function blame(routingId: string, authRequired: AuthRequiredState | null): void 
 beforeEach(() => {
   // `providerAuth` and `sessions` are the live inputs the retry latch and the
   // provider-list mode read (ADR-070 §3/§5), so they are reset per case.
+  //
+  // `accountsState` / `providerAccounts` joined them in Slice I: the dialog
+  // DERIVES its rows from those two fields, so a case that did not clear them
+  // would open on the previous case's accounts — and the opening stage is
+  // decided from the first answer the store has, which is exactly the leak.
   useSessionStore.setState({
     signInDialog: null,
     authState: null,
     vendorOAuth: null,
     sessions: {},
     activeSessionId: null,
-    providerAuth: UNKNOWN_PROVIDER_AUTH
+    providerAuth: UNKNOWN_PROVIDER_AUTH,
+    accountsState: null,
+    providerAccounts: null
   })
   ;(globalThis as unknown as { window: { innerWidth: number } }).window.innerWidth = 1280
 })
@@ -494,7 +501,7 @@ describe('SignInDialog — on a phone (390px)', () => {
 
 // ── Ruling 1: no browser opens without a click that asked for it ───────────
 //
-// ADR-070's second residual, ruled 2026-09-19. `readAccounts` reports
+// ADR-070's second residual, ruled 2026-09-19. The accounts view reports
 // `autoStart` for Anthropic whenever multi-account is OFF — the default, and
 // the owner's own machine — so opening the dialog used to call `signIn()` and
 // with it `shell.openExternal`, with no screen in between. ChatGPT had the
@@ -527,7 +534,7 @@ describe('SignInDialog — the confirm before the browser', () => {
     expect(screen.getByTestId('SignInDialog.waiting')).toBeTruthy()
   })
 
-  it('names the credential it will use, when readAccounts knows one', async () => {
+  it('names the credential it will use, when the accounts view knows one', async () => {
     installApi('darwin', { getAccounts: vi.fn(async () => ONE_CLAUDE_ACCOUNT) })
     await open({ providerId: 'anthropic', mode: 'reauth' })
     // The half of ADR-068 §3 that was right: with one credential there is
@@ -808,6 +815,147 @@ describe('SignInDialog — Cancel with nothing to choose between', () => {
     // The reauth path (signIn), never addAccount.
     expect(window.api.signIn).toHaveBeenCalledTimes(2)
     expect(window.api.addAccount).not.toHaveBeenCalled()
+  })
+})
+
+// ── Slice I: the dialog has no second copy of the accounts ──────────────────
+//
+// The owner added a Claude account and the dialog showed "Account 2" with no
+// plan until they switched accounts, which closed it. "Account 2" is the
+// placeholder `AccountManager.addAccount` persists BEFORE the OAuth completes —
+// the email is not knowable until it does — so it was correct when written; the
+// backfill that replaces it (`noteLogin`, then the `account:changed` broadcast)
+// landed in the store, and the store was the one copy the dialog did not read.
+// It mapped `account:get` into its own `useState` on open, so the only way to
+// see the real email was to close the dialog and open it again.
+//
+// These cases move the STORE and assert the dialog followed. Nothing reopens
+// it and nothing asks the host again — which is the point: a fix that merely
+// re-read at one more moment would pass a reopen test and fail every one of
+// these.
+describe('SignInDialog — the accounts are the store’s, not a snapshot', () => {
+  /** What the host holds between `addAccount()` and the login landing. */
+  const PLACEHOLDER = {
+    enabled: true,
+    activeId: 'a1',
+    accounts: [
+      CLAUDE_ACCOUNTS.accounts[0],
+      { id: 'a2', email: 'Account 2', subscriptionType: null, organization: null, createdAt: 0 }
+    ]
+  }
+
+  const accountRow = (id: string): HTMLElement => {
+    const found = screen
+      .getAllByTestId('SignInDialog.account')
+      .find((el) => el.getAttribute('data-id') === id)
+    if (!found) throw new Error(`no account row for ${id}`)
+    return found
+  }
+
+  it('a backfilled email and plan reach the OPEN dialog, with no reopen', async () => {
+    installApi('darwin', { getAccounts: vi.fn(async () => PLACEHOLDER) })
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    // The placeholder IS the stored label, so the dialog shows it. That is the
+    // honest state of a credential whose login has not landed yet, and the fix
+    // is that it stops being the truth — not that the renderer hides it.
+    expect(accountRow('a2')).toHaveTextContent('Account 2')
+
+    // Exactly what `useClaudeEvents` does with the `account:changed` broadcast
+    // `noteLogin` sends after writing the email, the plan and the organization.
+    await act(async () => {
+      useSessionStore.getState().setAccountsState({
+        ...PLACEHOLDER,
+        accounts: [
+          PLACEHOLDER.accounts[0],
+          { ...PLACEHOLDER.accounts[1], email: 'two@example.com', subscriptionType: 'Claude Pro' }
+        ]
+      })
+    })
+
+    expect(accountRow('a2')).toHaveTextContent('two@example.com')
+    expect(accountRow('a2')).not.toHaveTextContent('Account 2')
+    expect(accountRow('a2')).toHaveTextContent('Claude Pro')
+    // Same open dialog, and it never went back to the host for this.
+    expect(useSessionStore.getState().signInDialog).not.toBeNull()
+    expect(window.api.getAccounts).toHaveBeenCalledTimes(1)
+  })
+
+  it('the ChatGPT half follows its own store copy the same way', async () => {
+    const REAUTHED = {
+      ...CHATGPT_ACCOUNTS,
+      accounts: [
+        CHATGPT_ACCOUNTS.accounts[0],
+        { ...CHATGPT_ACCOUNTS.accounts[1], email: 'renamed@example.com', planType: 'pro' }
+      ]
+    }
+    installApi('darwin')
+    await open({ providerId: 'chatgpt', mode: 'reauth' })
+    expect(accountRow('v2')).toHaveTextContent('two@example.com')
+
+    // The vault publishes no change event, so its store copy moves only when
+    // something re-reads it — through the one writer of the field.
+    ;(window.api.listProviderAccounts as ReturnType<typeof vi.fn>).mockResolvedValue(REAUTHED)
+    await act(async () => {
+      await useSessionStore.getState().loadProviderAccounts()
+    })
+
+    expect(accountRow('v2')).toHaveTextContent('renamed@example.com')
+    expect(useSessionStore.getState().signInDialog).not.toBeNull()
+  })
+
+  it('a switch is not what refreshes it — the store is', async () => {
+    // The owner's workaround was to switch accounts, which CLOSES the dialog and
+    // re-opens it. The point of the derivation is that neither is needed.
+    installApi('darwin', { getAccounts: vi.fn(async () => PLACEHOLDER) })
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    await act(async () => {
+      useSessionStore.getState().setAccountsState({
+        ...PLACEHOLDER,
+        accounts: [
+          PLACEHOLDER.accounts[0],
+          { ...PLACEHOLDER.accounts[1], email: 'two@example.com', subscriptionType: 'Claude Pro' }
+        ]
+      })
+    })
+    expect(window.api.switchAccount).not.toHaveBeenCalled()
+    expect(screen.getByTestId('SignInDialog.switch')).toHaveAttribute('data-id', 'a2')
+    expect(accountRow('a2')).toHaveTextContent('two@example.com')
+  })
+
+  it('an unanswered read is still in flight, never an empty list', async () => {
+    // The honesty rule the local snapshot also had: `null` is "the read has not
+    // answered", and claiming "no account is signed in" before it does would be
+    // a guess — the wrong one on most hosts.
+    installApi('darwin', { getAccounts: vi.fn(() => new Promise(() => {})) })
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+
+    expect(screen.queryAllByTestId('SignInDialog.account')).toEqual([])
+    expect(screen.queryByTestId('SignInDialog.empty')).toBeNull()
+    expect(screen.queryByTestId('SignInDialog.confirm')).toBeNull()
+    // And nothing started on a stage nobody has decided yet.
+    expect(window.api.signIn).not.toHaveBeenCalled()
+    expect(window.api.addAccount).not.toHaveBeenCalled()
+  })
+
+  it('a stage that was decided stays decided when the accounts move under it', async () => {
+    // Multi-account off collapses to one row and confirms (Ruling 1). An
+    // account arriving on the list must not pull that screen out from under the
+    // click the user is making.
+    installApi('darwin', {
+      getAccounts: vi.fn(async () => ({
+        ...CLAUDE_ACCOUNTS,
+        enabled: false,
+        accounts: [CLAUDE_ACCOUNTS.accounts[0]]
+      }))
+    })
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    expect(screen.getByTestId('SignInDialog.confirm')).toHaveTextContent('one@example.com')
+
+    await act(async () => {
+      useSessionStore.getState().setAccountsState(CLAUDE_ACCOUNTS)
+    })
+    expect(screen.getByTestId('SignInDialog.confirm')).toBeTruthy()
+    expect(screen.queryAllByTestId('SignInDialog.account')).toEqual([])
   })
 })
 
