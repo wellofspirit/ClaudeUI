@@ -635,11 +635,23 @@ describe('TopBar left group — real geometry', () => {
       expect(below[id].box, `${id} below T1`).not.toBeNull()
     }
     // The ⋯ arrives here, because the two pills it replaces are actions (fetch /
-    // pull / push / switch; copy path) and not inert state. It costs 42.0 of the
-    // 344.0 the tier hands back, which is why carrying it does not move T1.
+    // pull / push / switch; copy path) and not inert state. It costs less than
+    // the tier hands back (42.0 of 344.0 where this was measured), which is why
+    // carrying it does not move T1.
     expect(above.overflow.box, 'nothing is hidden at T1 — the ⋯ has nothing to offer').toBeNull()
     expect(below.overflow.box, 'the pills went somewhere — the ⋯ has to be there').not.toBeNull()
-    expect(above.rightGroup.box!.width - below.rightGroup.box!.width).toBeCloseTo(302, 0)
+    // RELATIONAL, not the 302 it came to on the measuring machine: the pills'
+    // widths are text, and text is as wide as the host's fonts make it. What has
+    // to hold everywhere is the bookkeeping — the cluster shrinks by exactly
+    // what left minus what arrived, each with its `gap-3`.
+    const GAP = 12
+    const handedBack = above.worktree.box!.width + above.branch.box!.width + 2 * GAP
+    const cost = below.overflow.box!.width + GAP
+    expect(handedBack, 'the ⋯ must cost less than tier 1 frees').toBeGreaterThan(cost)
+    expect(above.rightGroup.box!.width - below.rightGroup.box!.width).toBeCloseTo(
+      handedBack - cost,
+      0
+    )
     await page.close()
   })
 
