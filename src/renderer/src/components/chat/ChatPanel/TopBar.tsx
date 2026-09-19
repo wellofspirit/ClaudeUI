@@ -1030,12 +1030,6 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
           {/* Never dropped: the changes pill doubles as the git-panel entry
               point (MobileGitView) and self-hides outside a git repo. */}
           <GitChangesPill />
-          {/* Never dropped either, and no longer device-gated: `WindowControls`
-              renders only on win32, where it is the frameless window's ONLY
-              minimise / maximise / close. The old `!isMobileCtx` took them away
-              from a narrow Electron window — `minWidth: 600` is well inside the
-              mobile breakpoint — leaving no way to close the app from the bar. */}
-          <WindowControls />
           {/* The dropdown below deliberately has no positioned wrapper: it anchors
               to the TopBar itself (the nearest positioned ancestor), so it hangs
               below the whole bar right-aligned instead of mid-bar off the button.
@@ -1078,6 +1072,12 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
               )}
             </div>
           )}
+          {/* Never dropped either, and no longer device-gated: `WindowControls`
+              renders only on win32, where it is the frameless window's ONLY
+              minimise / maximise / close. The old `!isMobileCtx` took them away
+              from a narrow Electron window — `minWidth: 600` is well inside the
+              mobile breakpoint — leaving no way to close the app from the bar. */}
+          <WindowControls />
         </div>
       </div>
       <SkillsDialog open={skillsOpen} onClose={() => setSkillsOpen(false)} cwd={cwd} />

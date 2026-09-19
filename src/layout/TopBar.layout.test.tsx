@@ -573,6 +573,20 @@ describe('TopBar left group — real geometry', () => {
     expect(above.overflow.box, 'the ⋯ must not sit beside the buttons it replaces').toBeNull()
     expect(below.overflow.box, 'the tools went somewhere — the ⋯ has to be there').not.toBeNull()
     for (const id of NEVER) expect(below[id].box, `${id} below T2`).not.toBeNull()
+
+    // …and the ⋯ sits LEFT of the window controls. They are the frameless
+    // window's only minimise / maximise / close, so they stay the rightmost
+    // thing in the bar — the OS convention. This is what made the menu's old
+    // mobile-only home safe: on a phone `WindowControls` renders nothing, so
+    // the ⋯ being last in DOM order never showed. On a narrow DESKTOP window it
+    // showed immediately (owner, 2026-09-19), which is why the order is
+    // measured here rather than left to JSX sequence.
+    const controls = below.windowControls.box
+    const overflow = below.overflow.box
+    expect(
+      overflow!.right,
+      `the ⋯ (${fmt(overflow)}) must sit left of the window controls (${fmt(controls)})`
+    ).toBeLessThanOrEqual(controls!.left)
     await page.close()
   })
 
