@@ -54,6 +54,20 @@ export function settingsTargetFromEvent(event: Event): SettingsTarget | undefine
   return detail?.page ? { page: detail.page, group: detail.group } : undefined
 }
 
+/**
+ * Open Settings › Models & providers — the one answer for a credential ClaudeUI
+ * cannot drive a flow for (ADR-030): an engine-native `opencode:*` / `pi:*`
+ * token lives in that engine's own store, so a sign-in dialog would have
+ * nothing to run. The pill, the transcript row and the dialog's provider list
+ * all offer this escape for the same rows, so it has one definition — here,
+ * beside the event shape it dispatches, in a leaf every one of them can import
+ * without closing a cycle.
+ */
+export function openProviderSettings(): void {
+  const detail: SettingsTarget = { page: 'models', group: 'providers' }
+  window.dispatchEvent(new CustomEvent('open-settings', { detail }))
+}
+
 export interface VersionInfo {
   appVersion: string
   cliVersion: string

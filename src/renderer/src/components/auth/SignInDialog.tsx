@@ -87,7 +87,7 @@ import { useEscapeLayer } from '../shared/use-escape-layer'
 import { SettingRow, Button } from '../SettingsDialog/settings-controls'
 import { SheetGroup } from '../SettingsDialog/SheetFrame'
 import { EngineChip } from '../SettingsDialog/ProviderSheet'
-import { openProviderSettings } from '../chat/AuthPill'
+import { openProviderSettings } from '../SettingsDialog/settings-target'
 import { OAuthOutcomeNotice, OAuthPasteBackFlow, classifyOAuthError } from './OAuthPasteBackFlow'
 import { DeviceCodeFlow } from './DeviceCodeFlow'
 import {

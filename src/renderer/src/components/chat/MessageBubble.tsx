@@ -22,6 +22,7 @@ import type { EngineToolMap } from '../../../../shared/tool-kinds'
 import { engineToolMap } from './tool-registry/engine-tool-maps'
 import { useImageGallery } from '../shared/ImageViewer'
 import { isDrivableProvider, providerDisplayName } from '../../utils/sign-in-provider'
+import { openProviderSettings } from '../SettingsDialog/settings-target'
 
 // ---------------------------------------------------------------------------
 // Unified tool-block dispatch
@@ -741,11 +742,8 @@ function AuthTranscriptRow({
     if (!providerId) return
     if (!drivable) {
       // No ClaudeUI flow owns an engine-native credential, so offering a dialog
-      // would be a dead affordance (ADR-030). Copied verbatim out of the deleted
-      // `AuthRequiredRow` rather than re-invented.
-      window.dispatchEvent(
-        new CustomEvent('open-settings', { detail: { page: 'models', group: 'providers' } })
-      )
+      // would be a dead affordance (ADR-030).
+      openProviderSettings()
       return
     }
     openSignIn({

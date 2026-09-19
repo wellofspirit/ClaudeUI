@@ -5,25 +5,10 @@ import type { AuthSummary, AuthTone } from '../../stores/auth-issues'
 import { useAuthSummary } from '../../stores/use-auth-summary'
 import { isDrivableProvider, providerDisplayName } from '../../utils/sign-in-provider'
 import { useSidebarCollapsed } from '../SessionView'
+import { openProviderSettings } from '../SettingsDialog/settings-target'
 
 /** The green "Signed in" pill is good news, not a problem — it retires itself. */
 const RESOLVED_LINGER_MS = 15_000
-
-/**
- * Settings › Models & providers, the app-wide deep-link channel (`{ page,
- * group }`). The one answer for a credential ClaudeUI cannot drive a flow for
- * (ADR-030): an engine-native `opencode:*` / `pi:*` token lives in that
- * engine's own store, so a dialog here would have nothing to run.
- *
- * Exported because the dialog's provider-LIST mode offers the same escape for
- * the same rows, and the two must not drift into sending the user to different
- * pages.
- */
-export function openProviderSettings(): void {
-  window.dispatchEvent(
-    new CustomEvent('open-settings', { detail: { page: 'models', group: 'providers' } })
-  )
-}
 
 /**
  * The pill's SLOT: a shrinkable, clipping box holding nothing but the pill,
