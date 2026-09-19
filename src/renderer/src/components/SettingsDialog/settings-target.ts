@@ -8,21 +8,31 @@
  * here imports anything.
  */
 
-/** The 12 settings pages (ADR-065). Order is defined by `PAGES`. */
-export type SettingsPageId =
-  | 'appearance'
-  | 'chat'
-  | 'sessions'
-  | 'advanced'
-  | 'about'
-  | 'models'
-  | 'dispatch'
-  | 'mockups'
-  | 'remote'
-  | 'claude'
-  | 'opencode'
-  | 'pi'
-  | 'codex'
+/**
+ * Every settings page id (ADR-065). Display ORDER is `PAGES`'s business; this
+ * list exists so an id arriving from OUTSIDE the type system — an
+ * `open-settings` event's detail — can be checked before it is trusted.
+ */
+export const SETTINGS_PAGE_IDS = [
+  'appearance',
+  'chat',
+  'sessions',
+  'advanced',
+  'about',
+  'models',
+  'dispatch',
+  'mockups',
+  'remote',
+  'claude',
+  'opencode',
+  'pi',
+  'codex'
+] as const
+
+export type SettingsPageId = (typeof SETTINGS_PAGE_IDS)[number]
+
+const isSettingsPageId = (value: unknown): value is SettingsPageId =>
+  (SETTINGS_PAGE_IDS as readonly unknown[]).includes(value)
 
 /** A place in the settings dialog: a page, optionally a group inside it. */
 export interface SettingsTarget {
@@ -48,10 +58,16 @@ export const groupKey = (page: SettingsPageId, group: string): string => `${page
  * parse the same event, and a detail without a `page` must NOT become a target
  * — `{ page: undefined }` would navigate the dialog to a page that does not
  * exist instead of leaving it on the last one.
+ *
+ * Nor must an UNKNOWN page: a `CustomEvent` detail is untyped at runtime, and
+ * the page lookup throws on an id it does not know — from inside render, so one
+ * mistyped deep link took the whole window to the error boundary. An unknown
+ * id opens Settings where it was, which is what the bare form does.
  */
 export function settingsTargetFromEvent(event: Event): SettingsTarget | undefined {
   const detail = (event as CustomEvent<Partial<SettingsTarget> | undefined>).detail
-  return detail?.page ? { page: detail.page, group: detail.group } : undefined
+  if (!isSettingsPageId(detail?.page)) return undefined
+  return { page: detail.page, group: typeof detail.group === 'string' ? detail.group : undefined }
 }
 
 /**
