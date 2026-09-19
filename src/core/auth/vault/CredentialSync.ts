@@ -198,10 +198,12 @@ export interface CredentialSyncDeps {
    * id-space {@link CodexInjectionToken.vaultAccountId} reports, so the two
    * halves of ADR-070 §2 compare on one id. It matters because a provider holds
    * several accounts: adding account B must not announce that the sessions
-   * broken on account A are fixed. An account-less vault reports
-   * {@link LEGACY_ACCOUNT_KEY}, which is exactly what it injects under too.
+   * broken on account A are fixed. `undefined` for a vault with no named
+   * account: {@link LEGACY_ACCOUNT_KEY} is this class's own slot key, not an
+   * account, and the listener's event is replicated — with nothing to tell
+   * apart there is nothing to name.
    */
-  onCredentialStored?: (accountId: string) => void
+  onCredentialStored?: (accountId: string | undefined) => void
 }
 
 /**
@@ -302,7 +304,7 @@ export class CredentialSync {
    */
   private activeKey: string = LEGACY_ACCOUNT_KEY
   private onActiveAccountChanged: () => void | Promise<void>
-  private onCredentialStored: (accountId: string) => void
+  private onCredentialStored: (accountId: string | undefined) => void
 
   // -- watcher state --
   private watchers = new Map<EngineKey, fs.FSWatcher>()
@@ -342,7 +344,7 @@ export class CredentialSync {
     opencode?: CodexFeedTarget
     getEnabledRoutes?: () => CodexEnabledRoutes
     onActiveAccountChanged?: () => void | Promise<void>
-    onCredentialStored?: (accountId: string) => void
+    onCredentialStored?: (accountId: string | undefined) => void
   }): void {
     if (targets.pi) this.piTarget = targets.pi
     if (targets.opencode) this.opencodeTarget = targets.opencode
@@ -627,7 +629,7 @@ export class CredentialSync {
     // user their working credential is broken, which is the exact failure mode
     // this whole ADR exists to remove.
     try {
-      this.onCredentialStored(key)
+      this.onCredentialStored(key === LEGACY_ACCOUNT_KEY ? undefined : key)
     } catch (err) {
       logger.warn(
         'CredentialSync',

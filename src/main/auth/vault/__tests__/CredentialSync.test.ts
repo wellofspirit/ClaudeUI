@@ -611,6 +611,31 @@ describe('CredentialSync route policy', () => {
     sync.stop()
   })
 
+  it('names NO account for a vault that has none — the internal slot key stays internal', async () => {
+    // With no named accounts the credential lives under a placeholder key. That
+    // key is bookkeeping, not an account: it must not travel on a replicated
+    // event as if it identified one, and there is nothing to disambiguate anyway.
+    const stored: VaultCredential = {
+      type: 'oauth',
+      access: 'solo',
+      refresh: 'solo-ref',
+      expires: Date.now() + 3_600_000
+    }
+    const { vault, state } = makeFakeVault(null)
+    vault.completeLogin = vi.fn(async () => {
+      state.current = stored
+      return stored
+    })
+    const onCredentialStored = vi.fn()
+    const sync = new CredentialSync({ vault, onCredentialStored })
+
+    await sync.completeLogin()
+
+    expect(onCredentialStored).toHaveBeenCalledTimes(1)
+    expect(onCredentialStored).toHaveBeenCalledWith(undefined)
+    sync.stop()
+  })
+
   it('a THROWING onCredentialStored still returns the stored credential', async () => {
     // The credential is stored and vended before the listener rings, so letting a
     // listener throw would report a login that genuinely succeeded as a failure —

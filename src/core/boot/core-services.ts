@@ -193,7 +193,9 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     // puts on `session:auth-required`, so adding account B leaves the sessions
     // broken on account A owing their sign-in.
     onCredentialStored: (accountId) =>
-      emitEvent('provider:auth-resolved', [{ providerId: CHATGPT_PROVIDER_ID, accountId }])
+      emitEvent('provider:auth-resolved', [
+        { providerId: CHATGPT_PROVIDER_ID, ...(accountId ? { accountId } : {}) }
+      ])
   })
 
   // Recompile the user's Bash permission rules into `$CODEX_HOME/rules/
