@@ -1,27 +1,33 @@
 /**
- * The chat's three auth ENTRY POINTS after ADR-068 §3.
+ * The chat's auth entry points after ADR-070 §4 — and, just as importantly, the
+ * ones that must never come back.
  *
- * None of them carries a flow any more — each one's only job is to open
- * `SignInDialog` with the right request — so what is pinned here is (a) the
- * absence of any flow UI, and (b) the exact request each entry produces:
+ * ADR-068 §3 left SIX surfaces able to report one rejected credential, and a
+ * single Codex token-refresh failure lit four of them at once. Two remain in the
+ * chat, and neither carries a flow:
  *
- *  · `AuthBanner`         — one line; Sign in → `{ anthropic, reauth }`;
- *  · `AuthErrorBlock`     — the transcript row for a rejected Claude turn;
- *                           Sign in captures the last user prompt as `retry`;
- *  · `AuthRequiredRow`    — engine-neutral, rendered from `session.authRequired`.
- *                           A provider ClaudeUI can drive opens the dialog; an
- *                           `opencode:<vendor>` one has no flow to offer, so it
- *                           opens Settings › Models & providers instead.
+ *  · `AuthPill`           — app-wide, in the top bar's left group. One indicator
+ *                           for every provider and every session;
+ *  · `AuthTranscriptRow`  — engine-neutral, anchored where the turn died, with
+ *                           three lifetimes and no action once settled.
  *
- * The deleted surfaces are pinned by their testids: `VendorAuthRequiredCard` and
- * the banner's paste field must not come back through some other component.
+ * Both open the SAME `openSignIn()` request for the same failure, which is what
+ * stops the pill and the row from drifting — pinned here by comparing the two
+ * requests rather than by asserting each one separately.
+ *
+ * The deleted surfaces are pinned by TESTID ABSENCE, the way ADR-068 §3 pinned
+ * `VendorAuthRequiredCard`, so they cannot return through another component:
+ * `AuthBanner` (the boot-time yellow line), `AuthRequiredRow` (the floating
+ * card), `InputBox.signInHint` (the composer hint) and `AuthErrorBlock` (the
+ * pre-rewrite transcript row, with its stale Sign in and its component-local
+ * Dismiss).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useSessionStore } from '../../../stores/session-store'
-import { AuthBanner } from '../AuthBanner'
-import { AuthRequiredRow } from '../AuthRequiredRow'
+import { AuthPill } from '../AuthPill'
 import { MessageBubble } from '../MessageBubble'
+import { SidebarContext } from '../../SessionView'
 import type { ChatMessage } from '../../../../../shared/types'
 
 vi.mock('electron', async () => await import('../../../../../test/stubs/electron-shim'))
@@ -35,12 +41,13 @@ function installApi(over: Record<string, unknown> = {}): void {
     signIn: vi.fn(async () => ({ status: 'authorizing', account: null, error: null })),
     submitOAuthCode: vi.fn(async () => ({ status: 'success', account: null, error: null })),
     cancelSignIn: vi.fn(async () => {}),
+    createSession: vi.fn(async () => ({ ok: true })),
     ...over
   }
   ;(globalThis as unknown as { window: Record<string, unknown> }).window.open = vi.fn()
 }
 
-/** A session with one user prompt, so the retry capture has something to find. */
+/** A session with one user prompt, so the reducer's retry capture has a subject. */
 function seedSession(): void {
   useSessionStore.setState({ activeSessionId: null, sessions: {}, signInDialog: null })
   useSessionStore.getState().createNewSession(ROUTING_ID, '/tmp/proj')
@@ -64,138 +71,226 @@ function patch(fields: Record<string, unknown>): void {
   }))
 }
 
+/** The auth fact, as the reducer writes it for a ChatGPT rejection. */
+const CHATGPT_REJECTED = {
+  providerId: 'chatgpt',
+  accountId: 'v2',
+  message: 'ChatGPT rejected the credential Codex runs under.',
+  retryPrompt: 'do the thing'
+}
+
+function renderPill(): ReturnType<typeof render> {
+  return render(
+    <SidebarContext.Provider value={{ collapsed: false, toggle: () => {}, isMobile: false }}>
+      <AuthPill />
+    </SidebarContext.Provider>
+  )
+}
+
+function renderRow(): ReturnType<typeof render> {
+  const message: ChatMessage = {
+    id: 'err-1',
+    role: 'system',
+    content: [{ type: 'api_error', errorType: 'authentication', errorMessage: 'API Error: 401' }],
+    timestamp: 0
+  } as ChatMessage
+  return render(<MessageBubble message={message} pendingApprovals={[]} isLastAssistant={false} />)
+}
+
+/** Both surviving surfaces at once, for the host-parity case below. */
+function renderBoth(): ReturnType<typeof render> {
+  const message: ChatMessage = {
+    id: 'err-1',
+    role: 'system',
+    content: [{ type: 'api_error', errorType: 'authentication', errorMessage: 'API Error: 401' }],
+    timestamp: 0
+  } as ChatMessage
+  return render(
+    <SidebarContext.Provider value={{ collapsed: false, toggle: () => {}, isMobile: false }}>
+      <AuthPill />
+      <MessageBubble message={message} pendingApprovals={[]} isLastAssistant={false} />
+    </SidebarContext.Provider>
+  )
+}
+
+/** Anthropic's remote paste-back carrier (ADR-014 `manualUrl`). */
+const MANUAL_URL = 'https://claude.ai/oauth/authorize?state=abc'
+/** The vault's remote paste-back carrier (ADR-057 `vendorOAuth.url`). */
+const VENDOR_URL = 'https://auth.openai.com/authorize?code_challenge=xyz'
+
 beforeEach(() => {
   installApi()
   useSessionStore.setState({
     signInDialog: null,
     authState: null,
+    vendorOAuth: null,
+    providerAuth: { anthropic: 'unknown', chatgpt: 'unknown', chatgptRoutes: {} },
     vendorAuth: { anthropic: { authState: 'unauthenticated', billingType: 'unknown' } }
   })
 })
 afterEach(cleanup)
 
-describe('AuthBanner — one line, no flow', () => {
-  it('Sign in opens the dialog and the banner never grows a paste field', async () => {
-    render(<AuthBanner />)
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('AuthBanner.login'))
-    })
-    expect(useSessionStore.getState().signInDialog).toEqual({
-      providerId: 'anthropic',
-      mode: 'reauth'
-    })
-    expect(window.api.signIn).not.toHaveBeenCalled()
-    expect(screen.queryByTestId('OAuthPasteBackFlow')).toBeNull()
-    expect(screen.getByTestId('AuthBanner').querySelector('input')).toBeNull()
-    expect(screen.getByTestId('AuthBanner').textContent).not.toContain('http')
-  })
-
-  it('reports a running flow and offers Cancel, still with no flow UI', async () => {
-    act(() =>
-      useSessionStore.getState().setAuthState({
-        status: 'authorizing',
-        account: null,
-        error: null,
-        manualUrl: 'https://claude.ai/oauth/authorize?state=abc'
-      })
-    )
-    render(<AuthBanner />)
-    expect(screen.getByTestId('AuthBanner')).toHaveTextContent('Signing in')
-    expect(screen.getByTestId('AuthBanner.cancel')).toBeTruthy()
-    expect(screen.queryByTestId('OAuthPasteBackFlow')).toBeNull()
-    expect(screen.getByTestId('AuthBanner').textContent).not.toContain('claude.ai')
-  })
-})
-
-describe('AuthErrorBlock — the transcript row', () => {
-  it('Sign in opens the dialog carrying the last user prompt as retry', async () => {
+describe('the two surviving entry points agree', () => {
+  it('the pill and the row produce the identical openSignIn request', async () => {
     seedSession()
-    const message: ChatMessage = {
-      id: 'err-1',
-      role: 'system',
-      content: [{ type: 'api_error', errorType: 'authentication', errorMessage: 'API Error: 401' }],
-      timestamp: 0
-    } as ChatMessage
-    render(<MessageBubble message={message} pendingApprovals={[]} isLastAssistant={false} />)
-    expect(screen.getByTestId('AuthErrorBlock')).toHaveTextContent(
-      'Turn stopped: Claude rejected the credential'
-    )
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('AuthErrorBlock.signIn'))
-    })
-    expect(useSessionStore.getState().signInDialog).toEqual({
-      providerId: 'anthropic',
-      mode: 'reauth',
-      retry: { routingId: ROUTING_ID, prompt: 'do the thing' }
-    })
-    // The inline flow states are gone — no waiting card, no code box.
-    expect(screen.queryByPlaceholderText('authorization code')).toBeNull()
-  })
-})
+    patch({ authRequired: CHATGPT_REJECTED })
 
-describe('AuthRequiredRow — the engine-neutral row', () => {
-  it('opens the dialog for a provider ClaudeUI drives, with retry and account', async () => {
-    seedSession()
-    patch({ authRequired: { providerId: 'chatgpt', accountId: 'v2' } })
-    render(<AuthRequiredRow />)
-    expect(screen.getByTestId('AuthRequiredRow')).toHaveAttribute('data-id', 'chatgpt')
+    const pill = renderPill()
     await act(async () => {
-      fireEvent.click(screen.getByTestId('AuthRequiredRow.signIn'))
+      fireEvent.click(screen.getByTestId('AuthPill'))
     })
-    expect(useSessionStore.getState().signInDialog).toEqual({
+    const fromPill = useSessionStore.getState().signInDialog
+    pill.unmount()
+    useSessionStore.setState({ signInDialog: null })
+
+    renderRow()
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('AuthTranscriptRow.signIn'))
+    })
+    const fromRow = useSessionStore.getState().signInDialog
+
+    expect(fromPill).toEqual({
       providerId: 'chatgpt',
       mode: 'reauth',
       accountId: 'v2',
       retry: { routingId: ROUTING_ID, prompt: 'do the thing' }
     })
+    expect(fromRow).toEqual(fromPill)
   })
 
-  it('an opencode vendor has no flow, so it opens the provider settings instead', async () => {
+  it('both route an engine-native credential to Settings, and neither opens a dialog', async () => {
     seedSession()
     patch({ authRequired: { providerId: 'opencode:openrouter' } })
     const deepLink = vi.fn()
     window.addEventListener('open-settings', deepLink)
-    render(<AuthRequiredRow />)
-    expect(screen.queryByTestId('AuthRequiredRow.signIn')).toBeNull()
+
+    const pill = renderPill()
     await act(async () => {
-      fireEvent.click(screen.getByTestId('AuthRequiredRow.settings'))
+      fireEvent.click(screen.getByTestId('AuthPill'))
+    })
+    pill.unmount()
+
+    renderRow()
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('AuthTranscriptRow.settings'))
     })
     window.removeEventListener('open-settings', deepLink)
-    expect(deepLink).toHaveBeenCalledTimes(1)
-    expect((deepLink.mock.calls[0][0] as CustomEvent).detail).toEqual({
-      page: 'models',
-      group: 'providers'
-    })
+
+    expect(deepLink).toHaveBeenCalledTimes(2)
+    for (const call of deepLink.mock.calls)
+      expect((call[0] as CustomEvent).detail).toEqual({ page: 'models', group: 'providers' })
     expect(useSessionStore.getState().signInDialog).toBeNull()
   })
+})
 
-  it('strips a pi vendor’s namespace for the label, exactly as it does opencode’s', async () => {
+describe('the deleted surfaces stay deleted', () => {
+  it('nothing renders AuthBanner, AuthRequiredRow, the composer hint or AuthErrorBlock', () => {
     seedSession()
-    // pi's ChatGPT vendor is `openai-codex`; with the shared route DISABLED the
-    // credential is pi's own, so the id stays namespaced (chatgpt-route.ts) and
-    // this row is what the user reads. It must not say "pi:anthropic".
-    patch({ authRequired: { providerId: 'pi:anthropic' } })
-    render(<AuthRequiredRow />)
-    expect(screen.getByTestId('AuthRequiredRow')).toHaveTextContent('anthropic')
-    expect(screen.getByTestId('AuthRequiredRow').textContent).not.toContain('pi:anthropic')
-    expect(screen.queryByTestId('AuthRequiredRow.signIn')).toBeNull()
-    expect(screen.getByTestId('AuthRequiredRow.settings')).toBeTruthy()
-  })
-
-  it('renders nothing without an owed sign-in, and never the deleted card', async () => {
-    seedSession()
-    render(<AuthRequiredRow />)
-    expect(screen.queryByTestId('AuthRequiredRow')).toBeNull()
-    expect(screen.queryByTestId('VendorAuthRequiredCard')).toBeNull()
-  })
-
-  it('Dismiss clears the owed sign-in for this client', async () => {
-    seedSession()
-    patch({ authRequired: { providerId: 'anthropic' } })
-    render(<AuthRequiredRow />)
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('AuthRequiredRow.dismiss'))
+    patch({ authRequired: CHATGPT_REJECTED })
+    // A boot-time state the old banner fired on: the probe says signed-out.
+    useSessionStore.setState({
+      providerAuth: { anthropic: 'unauthenticated', chatgpt: 'unknown', chatgptRoutes: {} }
     })
-    expect(useSessionStore.getState().sessions[ROUTING_ID].authRequired).toBeNull()
+    renderPill()
+    renderRow()
+
+    for (const testId of [
+      'AuthBanner',
+      'AuthBanner.login',
+      'AuthBanner.dismiss',
+      'AuthRequiredRow',
+      'AuthRequiredRow.card',
+      'AuthRequiredRow.signIn',
+      'AuthRequiredRow.dismiss',
+      'InputBox.signInHint',
+      'InputBox.signInHint.action',
+      'AuthErrorBlock',
+      'AuthErrorBlock.signIn',
+      'AuthErrorBlock.dismiss',
+      'VendorAuthRequiredCard'
+    ])
+      expect(screen.queryByTestId(testId)).toBeNull()
+
+    // And the one pill that replaced them is there, once.
+    expect(screen.getAllByTestId('AuthPill')).toHaveLength(1)
+  })
+
+  it('no surviving surface can be dismissed — nothing hides a real blocker', () => {
+    seedSession()
+    patch({ authRequired: CHATGPT_REJECTED })
+    renderPill()
+    renderRow()
+    // `AuthBanner`'s "Later" and `AuthErrorBlock`'s "Dismiss" both let a live
+    // blocker be hidden, and the transcript row's dismiss could not survive the
+    // reload it needed to (ADR-070 §4). Neither exists now.
+    expect(screen.queryByText('Later')).toBeNull()
+    expect(screen.queryByText('Dismiss')).toBeNull()
+  })
+})
+
+describe('host parity — no surface grows a second home for the flow', () => {
+  /**
+   * INHERITED HAZARD. This case replaces
+   * `chat/__tests__/AuthBanner.remote.component.test.tsx`, deleted with
+   * `AuthBanner` in this slice. That file's own header explains why it outlived
+   * the web-vs-desktop branch it was originally written for: *"the hazard it was
+   * written for — a sign-in growing a second home — is exactly what a future
+   * edit to this component would look like."*
+   *
+   * The hazard did not go away, it TRANSFERRED: `AuthPill` and
+   * `AuthTranscriptRow` are the two chat surfaces a paste field or a manual URL
+   * would now grow on, and on web there is a real reason to reach for one
+   * (ADR-057's paste-back is the remote default). So both are rendered on both
+   * hosts, with both URL carriers a flow would have to read populated —
+   * Anthropic's `authState.manualUrl` and the vault's `vendorOAuth.url`, the
+   * latter parked at the `paste` stage that only ever exists remotely.
+   *
+   * Two properties: the two hosts render the SAME markup, and neither host
+   * mounts flow UI or leaks an authorize URL. The flows themselves live in
+   * `SignInDialog`, per host, per provider, and
+   * `auth/__tests__/SignInDialog.component.test.tsx` pins them there.
+   */
+  it('renders identically on desktop and web, and neither host mounts flow UI', () => {
+    const markup: Record<string, string> = {}
+
+    for (const platform of ['darwin', 'web'] as const) {
+      installApi({ platform })
+      seedSession()
+      patch({ authRequired: CHATGPT_REJECTED })
+      useSessionStore.setState({
+        authState: { status: 'authorizing', account: null, error: null, manualUrl: MANUAL_URL },
+        vendorOAuth: {
+          engineId: 'codex',
+          vendorId: 'openai',
+          stage: 'paste',
+          instructions: 'That page fails to load — expected. Copy its address.',
+          url: VENDOR_URL,
+          method: 0
+        }
+      })
+
+      const { container } = renderBoth()
+      // Both surfaces are actually up, so the assertions below are about their
+      // content rather than about an empty tree.
+      expect(screen.getByTestId('AuthPill')).toBeTruthy()
+      expect(screen.getByTestId('AuthTranscriptRow')).toBeTruthy()
+
+      // No field to type a code or a pasted address into.
+      expect(container.querySelector('input')).toBeNull()
+      expect(container.querySelector('textarea')).toBeNull()
+      expect(screen.queryByTestId('OAuthPasteBackFlow')).toBeNull()
+      expect(screen.queryByTestId('OAuthOutcomeNotice')).toBeNull()
+      // And no authorize URL, in text or in an attribute (a `title` or an href
+      // would leak it just as effectively as a visible link).
+      expect(container.textContent ?? '').not.toContain('http')
+      expect(container.innerHTML).not.toContain(MANUAL_URL)
+      expect(container.innerHTML).not.toContain(VENDOR_URL)
+      expect(container.innerHTML).not.toContain('claude.ai')
+
+      markup[platform] = container.innerHTML
+      cleanup()
+    }
+
+    expect(markup.web).toBe(markup.darwin)
   })
 })

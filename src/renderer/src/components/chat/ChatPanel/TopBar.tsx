@@ -5,6 +5,7 @@ import { WindowControls } from '../../WindowControls'
 import { WorktreePill } from '../../git/WorktreePill'
 import { GitBranchPill } from '../../git/GitBranchPill'
 import { GitChangesPill } from '../../git/GitChangesPill'
+import { AuthPill } from '../AuthPill'
 import { PermissionsDialog } from '../../PermissionsDialog'
 import { SkillsDialog } from '../../SkillsDialog'
 import { McpDialog } from '../../McpDialog'
@@ -728,6 +729,11 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
             </>
           )}
         </div>
+        {/* ADR-070 §4: the app's one auth indicator, in the LEFT group right
+            after the title — not in the already-full right cluster, and never
+            with the engine or model beside it (those stay in the composer). It
+            renders nothing while every credential is healthy or unprobed. */}
+        <AuthPill />
       </div>
       <div className="flex items-center gap-3 [-webkit-app-region:no-drag]">
         {!isMobileCtx && ideError && (

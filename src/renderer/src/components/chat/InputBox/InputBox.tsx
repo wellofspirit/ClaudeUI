@@ -18,8 +18,6 @@ import { useFileMention } from '../../../hooks/useFileMention'
 import { useIsMobile } from '../../../hooks/useIsMobile'
 import { InputBoxView } from './View'
 import { autoModeAvailableForEngine } from '../../../../../shared/permission-modes'
-import { engineMeta } from '../../../../../shared/engine-meta'
-import { SIGN_IN_PROVIDER_LABEL, signInProviderFor } from '../../../utils/sign-in-provider'
 import type { PermissionMode } from '../../../../../shared/types'
 import {
   claudeModelCapabilities,
@@ -404,30 +402,6 @@ export function InputBox(): React.JSX.Element {
         : undefined,
     [activeSessionId, codexModelExplicit, isHistorical, selectedModelValue, startedSessionId]
   )
-
-  // Pre-spawn sign-in hint (ADR-068 §3, Slice 6). A session that has not
-  // reached a backend is the one moment a missing credential is still cheap to
-  // fix; once it spawns, the reactive AuthRequiredRow owns the problem. A fork
-  // carries seeded messages before its first send, hence the message gate.
-  const messageCount = useActiveSession((s) => s.messages.length)
-  const providerAuth = useSessionStore((s) => s.providerAuth)
-  const signInHint = useMemo(() => {
-    if (startedSessionId || isHistorical || messageCount > 0) return null
-    const resolved = signInProviderFor(effectiveEngineId, selectedModel.vendorId, providerAuth)
-    if (!resolved || resolved.state !== 'unauthenticated') return null
-    return {
-      providerId: resolved.providerId,
-      engineLabel: engineMeta(effectiveEngineId).label,
-      providerLabel: SIGN_IN_PROVIDER_LABEL[resolved.providerId]
-    }
-  }, [
-    startedSessionId,
-    isHistorical,
-    messageCount,
-    effectiveEngineId,
-    selectedModel.vendorId,
-    providerAuth
-  ])
 
   const statusLine = useActiveSession((s) => s.statusLine)
   const billingType = useActiveSession((s) => s.status?.account?.billingType)
@@ -1271,7 +1245,6 @@ export function InputBox(): React.JSX.Element {
       voiceEnabled={voiceEnabled && capabilities.voice}
       voiceState={voiceState}
       statusLine={statusLine}
-      signInHint={signInHint}
       onSend={handleSend}
       onCancel={handleCancel}
       onInput={handleInput}

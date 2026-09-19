@@ -131,3 +131,31 @@ export function signInProviderFor(
       : null
   return null
 }
+
+/**
+ * Can ClaudeUI drive this provider's sign-in at all?
+ *
+ * The two shared providers can (`SignInDialog` has a driver for each); an
+ * `opencode:<vendorId>` / `pi:<vendorId>` credential lives in that ENGINE's own
+ * store and has no flow here, so its entry point opens Settings › Models &
+ * providers rather than a dialog with nothing to run (ADR-030).
+ */
+export function isDrivableProvider(providerId: string): providerId is SignInProviderId {
+  return providerId === 'anthropic' || providerId === 'chatgpt'
+}
+
+/**
+ * How a provider an auth fact blamed is NAMED to the user — the pill, the
+ * transcript row and the dialog all read this one table (ADR-070 §4), so the
+ * three cannot drift into calling the same credential different things.
+ *
+ * A non-drivable id is engine-namespaced on the wire (`provider-registry.ts`
+ * mints `pi:anthropic`, `opencode:openrouter`) and the namespace is noise to the
+ * reader, who is looking at that engine's session: strip it. This replaces the
+ * copy that lived inside the deleted `AuthRequiredRow`.
+ */
+export function providerDisplayName(providerId: string): string {
+  return isDrivableProvider(providerId)
+    ? SIGN_IN_PROVIDER_LABEL[providerId]
+    : providerId.replace(/^(?:opencode|pi):/, '')
+}

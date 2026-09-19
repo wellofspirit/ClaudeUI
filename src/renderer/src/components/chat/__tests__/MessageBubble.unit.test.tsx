@@ -433,11 +433,12 @@ describe('MessageBubble', () => {
     })
 
     /**
-     * ADR-068 §3: the card is a ROW now, not a flow. The three states it used to
-     * walk (waiting, manual paste, signed-in + Retry) live in `SignInDialog`,
-     * and `AuthEntryPoints.component.test.tsx` pins what this row hands it.
+     * ADR-070 §4: the selection point, and that the SETTLED row (no owed sign-in
+     * on the session, which is what a reloaded transcript always restores to) has
+     * no action on it. The three lifetimes and every action live in
+     * `AuthTranscriptRow.component.test.tsx`.
      */
-    it('renders the compact auth row, not the generic API-error card', () => {
+    it('renders the engine-neutral auth row, not the generic API-error card', () => {
       useSessionStore.setState({ authState: null, signInDialog: null })
       const msg = makeChatMessage({
         role: 'system',
@@ -450,36 +451,28 @@ describe('MessageBubble', () => {
         ]
       })
       render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={false} />)
-      expect(screen.getByTestId('AuthErrorBlock')).toHaveTextContent(
-        'Turn stopped: Claude rejected the credential'
-      )
-      expect(screen.getByTestId('AuthErrorBlock.signIn')).toBeInTheDocument()
+      expect(screen.getByTestId('AuthTranscriptRow')).toHaveTextContent('Turn stopped')
       expect(screen.queryByText('API Error')).not.toBeInTheDocument()
     })
 
-    it('Sign in opens the dialog and starts no flow of its own', () => {
-      const signIn = vi.fn().mockResolvedValue(undefined)
-      ;(globalThis as any).window.api.signIn = signIn
+    it('a settled row offers no sign-in and nothing to dismiss', () => {
       useSessionStore.setState({ authState: null, signInDialog: null })
       const msg = makeChatMessage({
         role: 'system',
         content: [{ type: 'api_error', errorType: 'authentication', errorMessage: '401' } as any]
       })
       render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={false} />)
-      act(() => {
-        screen.getByTestId('AuthErrorBlock.signIn').click()
-      })
-      expect(signIn).not.toHaveBeenCalled()
-      expect(useSessionStore.getState().signInDialog).toMatchObject({
-        providerId: 'anthropic',
-        mode: 'reauth'
-      })
+      const row = screen.getByTestId('AuthTranscriptRow')
+      expect(row).toHaveAttribute('data-lifetime', 'settled')
+      expect(screen.queryByTestId('AuthTranscriptRow.signIn')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('AuthTranscriptRow.retry')).not.toBeInTheDocument()
+      expect(screen.queryByText('Dismiss')).not.toBeInTheDocument()
     })
 
     it('a global flow state cannot turn this row into a success card (no retry loop)', () => {
       // The card used to mirror `authState`, which is how a freshly arrived
       // error could inherit someone else's "success" and offer a Retry that
-      // re-failed. It renders the FACT of the rejection now, and nothing else.
+      // re-failed. It renders the session's own auth fact now, and nothing else.
       useSessionStore.setState({
         authState: {
           status: 'success',
@@ -492,22 +485,9 @@ describe('MessageBubble', () => {
         content: [{ type: 'api_error', errorType: 'authentication', errorMessage: '401' } as any]
       })
       render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={false} />)
-      expect(screen.getByTestId('AuthErrorBlock')).toBeInTheDocument()
+      expect(screen.getByTestId('AuthTranscriptRow')).toBeInTheDocument()
       expect(screen.queryByText('Signed in as user@example.com')).not.toBeInTheDocument()
-      expect(screen.queryByText('Retry message')).not.toBeInTheDocument()
-    })
-
-    it('Dismiss removes the row', () => {
-      useSessionStore.setState({ authState: null, signInDialog: null })
-      const msg = makeChatMessage({
-        role: 'system',
-        content: [{ type: 'api_error', errorType: 'authentication', errorMessage: '401' } as any]
-      })
-      render(<MessageBubble message={msg} pendingApprovals={[]} isLastAssistant={false} />)
-      act(() => {
-        screen.getByTestId('AuthErrorBlock.dismiss').click()
-      })
-      expect(screen.queryByTestId('AuthErrorBlock')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('AuthTranscriptRow.retry')).not.toBeInTheDocument()
     })
   })
 
