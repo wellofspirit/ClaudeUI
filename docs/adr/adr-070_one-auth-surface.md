@@ -219,6 +219,64 @@ the first of those was found by reading code; the rest needed the app, and two n
 That is the honest cost record of this ADR, and the reason its verification section is written the
 way it is.
 
+### Corrections from the branch review (slice J, 2026-09-19)
+
+A line-by-line review of the branch before merge found defects the slices above introduced, and one
+gap in an owner ruling. Each is fixed; where a fix changes a statement made earlier in this ADR, the
+earlier text stands as the record and this section is the current truth.
+
+- **§2 — the resolution names its account.** `provider:auth-resolved` carries an optional
+  `accountId` (the vault key, the same id-space Codex puts on `session:auth-required`). The reducer
+  skips a session only when BOTH sides name an account and they differ, so Anthropic, which names
+  none, folds as before. Without it, adding ChatGPT account B marked every session broken on
+  account A as "Signed in · Retry", and the retry failed again.
+- **§3 — a retry belongs to a turn that died.** `retryPrompt` is captured only while the session's
+  canonical status is `running`. Codex's host fans a failed refresh to every session on the process
+  (ADR-069 §8), so an idle session was offered a "retry" of a prompt that had completed hours
+  earlier. Every emitter sends `session:auth-required` BEFORE the status that ends the turn; that
+  ordering is now load-bearing and is commented at opencode's emit, the one site where the two are
+  adjacent. For the same reason Codex writes the transcript block only for a session with a turn in
+  flight, and once per turn; the EVENT still reaches idle sessions, because their credential really
+  is broken.
+- **§4 — the proactive pill is scoped to providers in use.** The vault answers `unauthenticated`
+  for an empty store and the ChatGPT row is always listed, so a Claude-only install carried a
+  permanent, undismissable amber "Blocks Codex" pill, which also outranked "Signed in · Retry". A
+  provider now counts proactively only when some open session routes to it under
+  `signInProviderFor` — the rule that scoped the deleted composer hint, applied app-wide. A turn
+  that died on a credential is still reported unconditionally.
+- **§4 — the row is bound to ITS transcript and ITS provider.** `MessageBubble` also replays
+  automation-run history, where "the active session" is an unrelated chat, so the row reads its
+  session from a `TranscriptSessionContext` (absent = history = settled, no action). And the
+  per-session lifetime is adopted only when the block names the same provider as the session's
+  fact: the "cosmetic duplication of a correct action" argument above holds only between rows about
+  one credential — across two providers the row named Claude and opened ChatGPT. The disclosure
+  prefers the block's own text for the same reason.
+- **§4 — the pill's reservation is conditional.** The 34px lived on `TopBar.info` as a `max-w`, so
+  every healthy session paid it. It is now a `:has()` minimum on the pill's slot, charged only while
+  a pill renders. The `z-30` this section cites existed only in comments; it is on the bar now, and
+  the stacking test asserts both readings of `container-type` containment by hit test.
+- **§6 / slice G — a settled flow carries no link.** `fail()` no longer forwards `manualUrl`: the
+  flow is dead, so the link and Finish were dead affordances (ADR-030). Only the half-copy refusal,
+  which does not settle, keeps it. The paste panel gains a real **Start again**, and owns the
+  paste-path error.
+- **Slice F, tier 1 — owner ruling (2026-09-19): the ⋯ arrives with tier 1.** The branch pill is
+  the app's only fetch / pull / push / switch surface, and tier 1 hid it from 1000px while the ⋯
+  waited for 768px, so nothing in between could reach it. Tier membership and both thresholds are
+  unchanged (re-derived with the ⋯ in the band: 550.4 + 96 = 646.4, still under 768; measured).
+  Branch and Worktree gain menu-only rows that open the pills' OWN dropdown and popover. Every
+  collapsible control is now one descriptor rendered on both surfaces, which also removed a gate
+  that had already drifted: the menu required a `cwd` for Terminal and the bar did not, so a narrow
+  session with no working directory had no terminal entry at all. Terminal's gate is availability
+  alone on both surfaces — a deliberate reversal of the old menu-side `cwd` requirement, safe now
+  that the ⋯ is the second entry point whose absence that requirement was guarding against.
+- **Verification.** `src/layout` fails fast, naming `bunx playwright install chromium`, when the
+  browser is missing, and is documented as a layer in `docs/testing-strategy.md`. It still measures
+  Playwright's Chromium rather than the shipped Electron, and CI still does not run it.
+- **Pre-existing, fixed alongside:** a stale `authState: success` finished `mode: 'add'` before it
+  began; the add row was live before the account read answered; a blamed non-active account got a
+  second Re-authorize that acted on the active credential; the ⋯ menu dismissed itself outside the
+  app's Escape stack.
+
 ## Alternatives considered
 
 - **Direction A — one card in one slot.** Keep today's `NoticeCard` geometry with a single engine-neutral owner. Cheapest, and impossible to miss because it is where the failure happened. Rejected: it is still a dismissible card covering the transcript, it recurs once per open session for one broken provider, and "Later" can still hide a real blocker.
