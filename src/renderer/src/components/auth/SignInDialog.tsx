@@ -504,15 +504,19 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
    * and the two answers cannot be allowed to differ.
    */
   const collectOutcome = useCallback(async (): Promise<void> => {
+    // `|| null`, not `?? null` (ADR-070 Slice J): an empty or whitespace-only
+    // email is as absent as a missing one, and `??` let it through as a
+    // truthy `''` that beat the outcome line's own `?? 'Signed in'` fallback —
+    // a successful sign-in rendering as a bare tick with nothing beside it.
     if (providerId === 'anthropic') {
       const account = useSessionStore.getState().authState?.account
-      setSignedInAs(account?.email ?? null)
+      setSignedInAs(account?.email?.trim() || null)
       setPlan(account?.subscriptionType ?? null)
       return
     }
     const list = await window.api.listProviderAccounts(CHATGPT_ID).catch(() => null)
     const active = list?.accounts.find((account) => account.id === list.activeId)
-    setSignedInAs(active?.email ?? null)
+    setSignedInAs(active?.email?.trim() || null)
     setPlan(active?.planType ?? null)
     if (list) void loadProviderAccounts(list)
   }, [providerId, loadProviderAccounts])

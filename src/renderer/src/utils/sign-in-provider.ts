@@ -159,3 +159,24 @@ export function providerDisplayName(providerId: string): string {
     ? SIGN_IN_PROVIDER_LABEL[providerId]
     : providerId.replace(/^(?:opencode|pi):/, '')
 }
+
+/**
+ * How a stored ACCOUNT is named to the user — its email when the credential
+ * carried one, a neutral fallback when it did not.
+ *
+ * Six renderer sites spelled this rule inline and two of them spelled it
+ * differently (`email ?? 'Account'` rather than `email || 'Account'`), so an
+ * account whose email is `''` — representable on every one of the wire types,
+ * which declare it `string | null` or `string?` — named itself `Account` in four
+ * places and rendered BLANK in the other two. Unified on the `||` reading:
+ * missing, null, empty and whitespace-only all render the fallback, because an
+ * empty label is never the useful answer.
+ *
+ * A placeholder label such as `Account 2` IS the account's stored email until
+ * the login lands, so it passes through untouched — see `account-rows.ts`: the
+ * fix for the placeholder is that it stops being the truth, not that the
+ * renderer second-guesses it.
+ */
+export function accountDisplayName(email: string | null | undefined): string {
+  return email?.trim() || 'Account'
+}

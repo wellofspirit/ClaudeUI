@@ -237,7 +237,14 @@ export function UsagePanel({
         <div data-testid="UsagePanel.chatgpt" className="mt-2 pt-1.5 border-t border-border/30">
           <div className="text-[9px] text-text-muted mb-1">ChatGPT</div>
           {chatgptAccounts.map(([accountId, limits]) => (
-            <ChatgptUsageBlock key={accountId} label={limits.email ?? accountId} limits={limits} />
+            // The account id is the deliberate fallback — two accounts have to stay
+            // distinguishable — but reach it with `||`, not `??` (ADR-070 Slice J):
+            // an empty email is absent, and `??` handed this heading a blank string.
+            <ChatgptUsageBlock
+              key={accountId}
+              label={limits.email?.trim() || accountId}
+              limits={limits}
+            />
           ))}
         </div>
       )}

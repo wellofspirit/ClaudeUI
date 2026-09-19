@@ -22,6 +22,7 @@
 
 import type { AccountsState } from '../../../../shared/types'
 import type { SharedProviderAccountList } from '../../../../shared/shared-provider'
+import { accountDisplayName } from '../../utils/sign-in-provider'
 
 /** One stored account, flattened out of the two providers' different shapes. */
 export interface AccountRow {
@@ -74,7 +75,7 @@ export const UNREADABLE_ACCOUNTS: AccountsView = { rows: [], autoStart: false, c
 /**
  * `account:get`'s answer as rows (ADR-015 / ADR-068).
  *
- * `label: account.email || 'Account'` keeps the fallback deliberately. A
+ * `label: accountDisplayName(account.email)` keeps the fallback deliberately. A
  * placeholder label such as `Account 2` is the account's stored `email` — it is
  * the honest state of a credential whose login has not landed yet — so this
  * must NOT try to detect one and hide it. The fix for the placeholder is that it
@@ -83,7 +84,7 @@ export const UNREADABLE_ACCOUNTS: AccountsView = { rows: [], autoStart: false, c
 export function anthropicAccountsView(state: AccountsState): AccountsView {
   const rows = state.accounts.map((account) => ({
     id: account.id,
-    label: account.email || 'Account',
+    label: accountDisplayName(account.email),
     plan: account.subscriptionType ?? undefined,
     active: account.id === state.activeId
   }))
@@ -102,7 +103,7 @@ export function anthropicAccountsView(state: AccountsState): AccountsView {
 export function chatgptAccountsView(list: SharedProviderAccountList): AccountsView {
   const rows = list.accounts.map((account) => ({
     id: account.id,
-    label: account.email || 'Account',
+    label: accountDisplayName(account.email),
     // Two facts, two chips (rule: no sentence that restates its own state).
     // `Plus · sign-in expired` was one string and the danger half of it read as
     // a footnote.

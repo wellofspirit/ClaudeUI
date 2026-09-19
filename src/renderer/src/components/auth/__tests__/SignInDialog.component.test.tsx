@@ -261,6 +261,22 @@ describe('SignInDialog — Anthropic', () => {
     expect(screen.getByTestId('SignInDialog.done')).toHaveTextContent('one@example.com')
   })
 
+  // Slice J: `setSignedInAs(account?.email ?? null)` let an empty email
+  // through as a truthy `''`, which beat the outcome line's own
+  // `?? 'Signed in'` — so a sign-in that worked rendered as a bare ✓.
+  it('falls back to Signed in when the credential came back with no email', async () => {
+    installApi('web', {
+      submitOAuthCode: vi.fn(async () => ({
+        status: 'success',
+        account: { email: '   ', subscriptionType: null },
+        error: null
+      }))
+    })
+    await open({ providerId: 'anthropic', mode: 'reauth' })
+    await signInOnWeb()
+    expect(screen.getByTestId('SignInDialog.signedIn').textContent).toBe('Signed in')
+  })
+
   it('Retry re-sends the captured prompt through retrySend, from the body', async () => {
     installApi('web')
     useSessionStore.setState({ sessions: {}, activeSessionId: null })

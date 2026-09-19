@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { CodexAuthStatus } from '../../../../shared/codex-types'
 import type { SharedProviderAccountList } from '../../../../shared/shared-provider'
 import { SettingRow } from './settings-controls'
+import { accountDisplayName } from '../../utils/sign-in-provider'
 
 /**
  * The Codex page's account row — a REPORT, not a flow (ADR-068 §1).
@@ -63,7 +64,9 @@ export function CodexAccount(): React.JSX.Element {
     <SettingRow
       testid="CodexAccount"
       layout="stacked"
-      label={active ? `ChatGPT · ${active.email ?? 'Account'}` : 'Not signed in through ClaudeUI'}
+      label={
+        active ? `ChatGPT · ${accountDisplayName(active.email)}` : 'Not signed in through ClaudeUI'
+      }
       labelBadge={
         active?.planType ? (
           <span
