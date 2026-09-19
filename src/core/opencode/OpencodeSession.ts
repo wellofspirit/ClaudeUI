@@ -757,23 +757,14 @@ export class OpencodeSession extends BaseSession {
         // Compaction parts ride an ordinary message but render as their own
         // system row (see storedCompactionMessages); replayed ahead of it.
         for (const separator of storedCompactionMessages(stored)) {
-          const at = this.messageHistory.findIndex((m) => m.id === separator.id)
-          if (at >= 0) this.messageHistory[at] = separator
-          else this.messageHistory.push(separator)
+          this.rememberOpencodeMessage(separator)
           this.send('session:message', separator)
         }
         const msg = convertStoredMessage(stored)
         if (!msg) continue
 
-        // Add to local history (for getMessages() and future turns)
-        const idx = this.messageHistory.findIndex((m) => m.id === msg.id)
-        if (idx >= 0) {
-          this.messageHistory[idx] = msg
-        } else {
-          this.messageHistory.push(msg)
-        }
-
-        // Emit to renderer
+        // Add to local history (for getMessages() and future turns), then emit.
+        this.rememberOpencodeMessage(msg)
         this.send('session:message', msg)
 
         // Emit tool_result events for completed tool parts so the renderer
@@ -1100,15 +1091,25 @@ export class OpencodeSession extends BaseSession {
   }
 
   /**
+   * Upsert one row into `messageHistory` by id — the ONE copy of that rule for
+   * this class (mirrors `PiSession.rememberPiMessage`). It had grown five
+   * identical hand-written copies, which is four chances for the next one to
+   * push a duplicate instead.
+   */
+  private rememberOpencodeMessage(message: ChatMessage): void {
+    const index = this.messageHistory.findIndex((entry) => entry.id === message.id)
+    if (index >= 0) this.messageHistory[index] = message
+    else this.messageHistory.push(message)
+  }
+
+  /**
    * Put one row THIS class authored (not the mapper) into history and on the
    * wire — the same upsert-by-id the mapper's `message` case does, minus the
    * tool-part accumulator bookkeeping, which only applies to a message opencode
    * itself produced.
    */
   private rememberAndSend(message: ChatMessage): void {
-    const index = this.messageHistory.findIndex((entry) => entry.id === message.id)
-    if (index >= 0) this.messageHistory[index] = message
-    else this.messageHistory.push(message)
+    this.rememberOpencodeMessage(message)
     this.send('session:message', message)
   }
 
@@ -1120,13 +1121,7 @@ export class OpencodeSession extends BaseSession {
 
       case 'message': {
         const msg = output.message
-        // Upsert into local history
-        const idx = this.messageHistory.findIndex((m) => m.id === msg.id)
-        if (idx >= 0) {
-          this.messageHistory[idx] = msg
-        } else {
-          this.messageHistory.push(msg)
-        }
+        this.rememberOpencodeMessage(msg)
         if (output.item) this.updateStreamItem(output.item, msg)
         else this.send('session:message', msg)
 
@@ -1274,6 +1269,9 @@ export class OpencodeSession extends BaseSession {
         // dismissable card for the same fact. The words are not lost: the row
         // discloses them in place, and the neutral transcript block below gives
         // them a permanent home the floating card never had.
+        //
+        // ORDER: before `sendStatus()` below. The reducer captures the retry only
+        // while the canonical status still reads `running`.
         const providerId = opencodeAuthRequiredProviderId(output.vendorId)
         this.send('session:auth-required', { providerId, message: output.message })
         // The SAME providerId on the block, so the row still names the provider
@@ -1436,12 +1434,7 @@ export class OpencodeSession extends BaseSession {
     }
     if (!active) return
     this.send('session:item-delta', { target: active.target, chunk })
-    if (acc && !ownerToolUseId) {
-      const message = buildChatMessage(item.messageId, acc)
-      const index = this.messageHistory.findIndex((entry) => entry.id === message.id)
-      if (index >= 0) this.messageHistory[index] = message
-      else this.messageHistory.push(message)
-    }
+    if (acc && !ownerToolUseId) this.rememberOpencodeMessage(buildChatMessage(item.messageId, acc))
   }
 
   private sealStreamItems(ownerSessionId?: string): void {
