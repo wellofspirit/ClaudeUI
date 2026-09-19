@@ -22,6 +22,7 @@ vi.mock('../../../core/services/logger', () => ({
 import { authManager } from '../auth-manager'
 import { serviceSession } from '../../../core/services/service-session'
 import { setLiveSessionCanceller } from '../session-invalidation'
+import type { AuthFlowState } from '../../../shared/types'
 
 function makeWindow(): {
   sent: Array<[string, unknown[]]>
@@ -447,5 +448,212 @@ describe('AuthManager terminal-state replay — scope and side effects (slice D)
     } finally {
       setLiveSessionCanceller(null)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-070 slice G — claude.ai hands back `code#state` as ONE string, and we
+// posted the whole blob as the authorization code (the owner's 400).
+// ---------------------------------------------------------------------------
+
+/**
+ * cli.js splits the pasted string in BOTH of its own manual entries and does
+ * NOT split it on the control path we drive (vendor/claude-cli/cli.js 2.1.268):
+ *
+ *   REPL   @21948712: `let[I,ae]=Q.split("#");if(!I||!ae){…"Invalid code.
+ *                      Please make sure the full code was copied"…}` then
+ *                     `handleManualAuthCodeInput({authorizationCode:I,state:ae})`
+ *   stdin  @23375467: the same split and the same guard, per input line.
+ *   control@23904052: `claude_oauth_callback` →
+ *                     `Ls.service.handleManualAuthCodeInput({
+ *                        authorizationCode:d.request.authorizationCode,
+ *                        state:d.request.state})` — straight through, no split.
+ *
+ * Splitting is therefore the CALLER's job over the control channel, and we are
+ * the caller. The whole blob reached the token exchange's POST body as `code`,
+ * which is the 400 the owner saw.
+ */
+describe('AuthManager.submitOAuthCode — the paste is `code#state` (slice G)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    hoisted.handle.current = undefined
+  })
+
+  function makePasteHandle(): {
+    claudeAuthenticate: ReturnType<typeof vi.fn>
+    claudeOAuthWaitForCompletion: ReturnType<typeof vi.fn>
+    claudeOAuthCallback: ReturnType<typeof vi.fn>
+  } {
+    return {
+      claudeAuthenticate: vi.fn(async () => ({
+        manualUrl: 'https://claude.ai/oauth?state=s',
+        automaticUrl: 'https://claude.ai/oauth/auto'
+      })),
+      claudeOAuthWaitForCompletion: vi.fn(() => new Promise(() => {})),
+      claudeOAuthCallback: vi.fn(async () => ACCOUNT)
+    }
+  }
+
+  async function startRemoteFlow(): Promise<ReturnType<typeof makePasteHandle>> {
+    const handle = makePasteHandle()
+    hoisted.handle.current = handle
+    authManager.setWindow(makeWindow().win as never)
+    await authManager.signIn({ remote: true })
+    return handle
+  }
+
+  /** GUARD — fails pre-fix: the blob went out whole and the server answered 400. */
+  it('splits `CODE#STATE` into the two control-request fields', async () => {
+    const handle = await startRemoteFlow()
+
+    const state = (await authManager.submitOAuthCode('CODE#STATE')) as AuthFlowStateish
+
+    expect(handle.claudeOAuthCallback).toHaveBeenCalledWith('CODE', 'STATE')
+    expect(state.status).toBe('success')
+  })
+
+  /**
+   * The fallback, pinned so it cannot rot: a paste with no `#` is the code, and
+   * the state is the one parsed off this flow's own authorize URL. This is
+   * today's behaviour exactly — the fix is strictly additive.
+   */
+  it('a paste with no `#` still sends the whole string plus the flow state', async () => {
+    const handle = await startRemoteFlow()
+
+    await authManager.submitOAuthCode('  just-the-code  ')
+
+    expect(handle.claudeOAuthCallback).toHaveBeenCalledWith('just-the-code', 's')
+  })
+
+  /**
+   * The state is opaque. cli.js's own `split("#")` destructure silently drops
+   * anything past a second `#`; splitting on the FIRST one keeps the state
+   * whole, which can only ever be more correct.
+   */
+  it('splits on the FIRST `#` only — the state is opaque', async () => {
+    const handle = await startRemoteFlow()
+
+    await authManager.submitOAuthCode('CODE#ST#ATE')
+
+    expect(handle.claudeOAuthCallback).toHaveBeenCalledWith('CODE', 'ST#ATE')
+  })
+
+  it.each([['#STATE'], ['CODE#'], ['#']])(
+    'refuses %j without posting an empty half',
+    async (pasted) => {
+      const handle = await startRemoteFlow()
+
+      const state = (await authManager.submitOAuthCode(pasted)) as AuthFlowStateish
+
+      expect(handle.claudeOAuthCallback).not.toHaveBeenCalled()
+      expect(state.status).toBe('error')
+      expect(state.error).toBe('Invalid code. Please make sure the full code was copied.')
+    }
+  )
+
+  /** A half-copied paste is a typo, not a dead flow: the next one must work. */
+  it('a refused half-copy leaves the flow live, so a good paste still completes it', async () => {
+    const handle = await startRemoteFlow()
+
+    expect(((await authManager.submitOAuthCode('CODE#')) as AuthFlowStateish).status).toBe('error')
+    const state = (await authManager.submitOAuthCode('CODE#STATE')) as AuthFlowStateish
+
+    expect(handle.claudeOAuthCallback).toHaveBeenCalledWith('CODE', 'STATE')
+    expect(state.status).toBe('success')
+  })
+})
+
+/**
+ * G2 — a failed paste must not destroy the sign-in link. `broadcastError`
+ * returned no `manualUrl`, the store assigns the invoke return straight onto
+ * `authState`, and the panel reads `authState.manualUrl` — so one bad paste
+ * left it saying "The host did not return a sign-in link. Start again." with
+ * the link gone and `Sign-in page ↗` disabled.
+ */
+describe('AuthManager — an error on a LIVE flow carries its sign-in link (slice G)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    hoisted.handle.current = undefined
+  })
+
+  function remoteFlowHandle(callback: ReturnType<typeof vi.fn>): {
+    claudeAuthenticate: ReturnType<typeof vi.fn>
+    claudeOAuthWaitForCompletion: ReturnType<typeof vi.fn>
+    claudeOAuthCallback: ReturnType<typeof vi.fn>
+  } {
+    return {
+      claudeAuthenticate: vi.fn(async () => ({
+        manualUrl: 'https://claude.ai/oauth?state=s',
+        automaticUrl: 'https://claude.ai/oauth/auto'
+      })),
+      claudeOAuthWaitForCompletion: vi.fn(() => new Promise(() => {})),
+      claudeOAuthCallback: callback
+    }
+  }
+
+  /** GUARD — fails pre-fix: the error state dropped the URL the panel needs. */
+  it('a failed submit on a live remote flow still returns manualUrl', async () => {
+    hoisted.handle.current = remoteFlowHandle(
+      vi.fn(async () => {
+        throw new Error('Request failed with status code 400')
+      })
+    )
+    authManager.setWindow(makeWindow().win as never)
+    await authManager.signIn({ remote: true })
+
+    const state = (await authManager.submitOAuthCode('CODE#STATE')) as AuthFlowState
+
+    expect(state.status).toBe('error')
+    expect(state.error).toBe('Request failed with status code 400')
+    expect(state.manualUrl).toBe('https://claude.ai/oauth?state=s')
+  })
+
+  it('a refused half-copy carries the link too', async () => {
+    hoisted.handle.current = remoteFlowHandle(vi.fn())
+    authManager.setWindow(makeWindow().win as never)
+    await authManager.signIn({ remote: true })
+
+    const state = (await authManager.submitOAuthCode('#STATE')) as AuthFlowState
+
+    expect(state.manualUrl).toBe('https://claude.ai/oauth?state=s')
+  })
+
+  /** Failures from BEFORE a flow exists have no link to carry — unchanged. */
+  it('signIn early failures still carry no manualUrl', async () => {
+    authManager.setWindow(makeWindow().win as never)
+    hoisted.handle.current = null
+
+    const state = (await authManager.signIn({ remote: true })) as AuthFlowState
+
+    expect(state.status).toBe('error')
+    expect(state.manualUrl).toBeUndefined()
+  })
+
+  it('a submit with no live flow still carries no manualUrl', async () => {
+    authManager.setWindow(makeWindow().win as never)
+    await authManager.cancelSignIn()
+    hoisted.handle.current = remoteFlowHandle(vi.fn())
+
+    const state = (await authManager.submitOAuthCode('CODE#STATE')) as AuthFlowState
+
+    expect(state.status).toBe('error')
+    expect(state.error).toBe('No active login flow. Start login again.')
+    expect(state.manualUrl).toBeUndefined()
+  })
+
+  /** Slice D's invariant: a replayed terminal state still wins, unaltered. */
+  it('a late failure on a flow that already succeeded replays the success, link-free', async () => {
+    hoisted.handle.current = remoteFlowHandle(vi.fn(async () => ACCOUNT))
+    authManager.setWindow(makeWindow().win as never)
+    await authManager.signIn({ remote: true })
+    const thisLogin = internals().flowId
+
+    expect(((await authManager.submitOAuthCode('CODE#STATE')) as AuthFlowStateish).status).toBe(
+      'success'
+    )
+
+    const late = internals().fail(thisLogin, new Error('late failure')) as AuthFlowState
+    expect(late.status).toBe('success')
+    expect(late.manualUrl).toBeUndefined()
   })
 })
