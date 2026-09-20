@@ -237,7 +237,15 @@ export function sanitizeUsageWindowQuery(raw: unknown): UsageWindowQuery {
  * without losing a row.
  */
 export function usageWindowSummary(opts: UsageWindowQuery = {}): UsageWindowSummaryRow[] {
-  return listUsageWindows(opts).map((row) => {
+  const rows = listUsageWindows(opts)
+  // The dashboard read logs its own line; this is the only trace the window read
+  // leaves, so a surface that shows nothing can be told apart from one that
+  // asked for nothing.
+  logger.debug(
+    'UsageWindows',
+    `${rows.length} window(s) read (kind ${opts.kind ?? 'any'}, account ${opts.accountKey ?? 'any'}, since ${opts.sinceTs ?? 0})`
+  )
+  return rows.map((row) => {
     const rate =
       row.peakPercent >= MIN_PEAK_PERCENT_FOR_VALUE ? row.apiCostUsd / row.peakPercent : null
     return {
