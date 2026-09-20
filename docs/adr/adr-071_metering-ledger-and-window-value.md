@@ -138,10 +138,10 @@ ADR-011's WLS projection stays as it is and stays Claude-only. It answers a diff
 
 Layout ruled by the owner from mockup `140549af`, top to bottom:
 
-1. Header: range (7d, 30d, 90d), group-by (provider, account, engine, model, machine), the scope switch and sync chip from ADR-072.
+1. Header: two tabs (Spend, Plan value), range (7d, 30d, 90d), group-by (provider, account, engine, model, machine; Spend tab only), the scope switch and sync chip from ADR-072.
 2. Summary: one hero figure for API-equivalent spend, with a bar splitting it into covered and billed and then by provider (variant B). Below roughly 600px it collapses to the one-line strip (variant D).
-3. Accounts: grouped by provider, subtotal on the provider header, one row per account with its window meters inline (variant C), and beside it the reset timeline placing every window on a shared seven-day axis (variant D).
-4. Window value: the subscription comparison as range bars (B), then per-window columns for the selected account (A), then the scatter of peak percent against dollars delivered (C).
+3. Accounts: grouped by provider, subtotal on the provider header, one row per account with its window meters inline (variant C). The reset timeline (variant D) was built beside it and removed on 2026-09-21: on real data it repeated every meter of the accounts panel row for row, and the reset time is already on each meter.
+4. Window value, on the Plan value tab (moved out of the Spend page on 2026-09-21: it is plan analysis, not a glance at spend): the subscription comparison as range bars (B), then per-window columns for the selected account (A), then the scatter of peak percent against dollars delivered (C). It follows the shared range.
 5. Spend over time: stacked columns, 130px tall, bars capped at 14px (A), with a toggle to one row per provider on independent scales (B). Providers here differ by about 30×, which flattens the small ones in a shared scale.
 6. Breakdown: a tree table of provider, account and model with tokens, both costs and share. Dispatched rows are marked inline and counted in every subtotal (A).
 

@@ -11,7 +11,9 @@
  *
  * What is left here is the shell's own job — the reads, the guard, the controls
  * — plus one assertion per widget that it is mounted and given what it needs.
- * Each widget's own behaviour is tested beside it.
+ * Each widget's own behaviour is tested beside it. S4c split the widgets across
+ * two tabs and dropped `ResetTimeline`, so "which widgets are up" is now a
+ * question about the tab, and the tab strip has its own section at the bottom.
  *
  * The rule this file exists to guard is the refresh grant (ADR-071 §6): NOTHING
  * automatic may send `fetchAccountLimits(true)`.
@@ -103,7 +105,6 @@ describe('UsageView — load', () => {
     expect(screen.queryByTestId('UsageView.loading')).not.toBeInTheDocument()
     expect(screen.getByTestId('Summary.hero')).toHaveTextContent('$12.50')
     expect(screen.getByTestId('AccountsPanel')).toBeInTheDocument()
-    expect(screen.getByTestId('ResetTimeline')).toBeInTheDocument()
   })
 
   it('asks for the default 30-day range and the stored limits on mount', async () => {
@@ -260,17 +261,6 @@ describe('UsageView — limits refresh', () => {
 // ---------------------------------------------------------------------------
 
 describe('UsageView — the composed widgets', () => {
-  it('mounts all five dashboard widgets once the query answers', async () => {
-    render(<UsageView onClose={vi.fn()} />)
-
-    await waitFor(() => expect(screen.getByTestId('Summary')).toBeInTheDocument())
-    expect(screen.getByTestId('AccountsPanel')).toBeInTheDocument()
-    expect(screen.getByTestId('ResetTimeline')).toBeInTheDocument()
-    expect(screen.getByTestId('WindowValue')).toBeInTheDocument()
-    expect(screen.getByTestId('SpendChart')).toBeInTheDocument()
-    expect(screen.getByTestId('BreakdownTable')).toBeInTheDocument()
-  })
-
   it('mounts none of them while the query is still in flight', async () => {
     let resolve!: (d: unknown) => void
     mockFetchDashboard.mockReturnValue(new Promise((r) => (resolve = r)))
@@ -280,7 +270,7 @@ describe('UsageView — the composed widgets', () => {
     // the contract, not a nicety: one of them rendered against `null` would
     // throw rather than show a placeholder.
     expect(screen.getByTestId('UsageView.loading')).toBeInTheDocument()
-    for (const id of ['WindowValue', 'SpendChart', 'BreakdownTable']) {
+    for (const id of ['Summary', 'AccountsPanel', 'SpendChart', 'BreakdownTable']) {
       expect(screen.queryByTestId(id)).not.toBeInTheDocument()
     }
 
@@ -301,8 +291,26 @@ describe('UsageView — the composed widgets', () => {
     expect(screen.getByTestId('SpendChart.subtitle')).toHaveTextContent('Stacked by provider')
   })
 
+  it('guards the window value too: it waits for the query on the plans tab', async () => {
+    window.localStorage.setItem('claudeui.usage.tab', 'plans')
+    let resolve!: (d: unknown) => void
+    mockFetchDashboard.mockReturnValue(new Promise((r) => (resolve = r)))
+    render(<UsageView onClose={vi.fn()} />)
+
+    expect(screen.getByTestId('UsageView.loading')).toBeInTheDocument()
+    expect(screen.queryByTestId('WindowValue')).not.toBeInTheDocument()
+
+    resolve(makeDashboard())
+    await waitFor(() => expect(screen.getByTestId('WindowValue')).toBeInTheDocument())
+  })
+
   it('lets the window-value widget do its own read, from the shell range', async () => {
     render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(screen.getByTestId('Summary')).toBeInTheDocument())
+    // It is the plans tab's only widget, and it reads when it mounts.
+    expect(mockFetchWindows).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByTestId('UsageView.tab.plans'))
     await waitFor(() => expect(mockFetchWindows).toHaveBeenCalled())
     expect(mockFetchWindows).toHaveBeenCalledWith({ sinceTs: makeDashboard().fromTs })
   })
@@ -328,5 +336,106 @@ describe('UsageView — chrome', () => {
     } as any)
     render(<UsageView onClose={vi.fn()} />)
     await waitFor(() => expect(screen.getByTestId('UsageView.accountFilter')).toBeInTheDocument())
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Tabs (S4c)
+// ---------------------------------------------------------------------------
+
+describe('UsageView — tabs', () => {
+  const SPEND_WIDGETS = ['Summary', 'AccountsPanel', 'SpendChart', 'BreakdownTable']
+
+  it('opens on Spend: the ledger widgets, and no plan analysis', async () => {
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(screen.getByTestId('Summary')).toBeInTheDocument())
+
+    expect(screen.getByTestId('UsageView.panel')).toHaveAttribute('data-tab', 'spend')
+    expect(screen.getByTestId('UsageView.tab')).toHaveAttribute('data-value', 'spend')
+    for (const id of SPEND_WIDGETS) expect(screen.getByTestId(id)).toBeInTheDocument()
+    expect(screen.queryByTestId('WindowValue')).not.toBeInTheDocument()
+  })
+
+  it('shows the window value alone on Plan value', async () => {
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(screen.getByTestId('Summary')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('UsageView.tab.plans'))
+
+    await waitFor(() => expect(screen.getByTestId('WindowValue')).toBeInTheDocument())
+    expect(screen.getByTestId('UsageView.panel')).toHaveAttribute('data-tab', 'plans')
+    for (const id of SPEND_WIDGETS) expect(screen.queryByTestId(id)).not.toBeInTheDocument()
+  })
+
+  it('keeps the range and the refresh button on both tabs, the group-by on Spend only', async () => {
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(screen.getByTestId('UsageView.groupBy')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('UsageView.tab.plans'))
+
+    // Nothing on the plans tab reads the group-by, so it goes; the range and the
+    // refresh grant still belong to the whole screen.
+    expect(screen.queryByTestId('UsageView.groupBy')).not.toBeInTheDocument()
+    expect(screen.getByTestId('UsageView.range')).toBeInTheDocument()
+    expect(screen.getByTestId('UsageView.refreshLimits')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('UsageView.tab.spend'))
+    expect(screen.getByTestId('UsageView.groupBy')).toBeInTheDocument()
+  })
+
+  it('never refetches on a tab switch: the shell holds both reads', async () => {
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledTimes(1))
+
+    fireEvent.click(screen.getByTestId('UsageView.tab.plans'))
+    await waitFor(() => expect(screen.getByTestId('WindowValue')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('UsageView.tab.spend'))
+    await waitFor(() => expect(screen.getByTestId('Summary')).toBeInTheDocument())
+
+    expect(mockFetchDashboard).toHaveBeenCalledTimes(1)
+    expect(mockFetchLimits).toHaveBeenCalledTimes(1)
+  })
+
+  it('remembers the tab for next time', async () => {
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(screen.getByTestId('Summary')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('UsageView.tab.plans'))
+    expect(window.localStorage.getItem('claudeui.usage.tab')).toBe('plans')
+  })
+
+  it('opens on the stored tab', async () => {
+    window.localStorage.setItem('claudeui.usage.tab', 'plans')
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(screen.getByTestId('WindowValue')).toBeInTheDocument())
+    expect(screen.getByTestId('UsageView.tab.plans')).toHaveAttribute('data-active', 'true')
+  })
+
+  it('ignores a stored value that is not a tab', async () => {
+    window.localStorage.setItem('claudeui.usage.tab', 'resets')
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(screen.getByTestId('Summary')).toBeInTheDocument())
+    expect(screen.getByTestId('UsageView.panel')).toHaveAttribute('data-tab', 'spend')
+  })
+
+  it('still refetches when the range changes on the Plan value tab', async () => {
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('30d'))
+
+    fireEvent.click(screen.getByTestId('UsageView.tab.plans'))
+    fireEvent.click(screen.getByTestId('UsageView.range.7d'))
+
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('7d'))
+    expect(screen.getByTestId('UsageView.panel')).toHaveAttribute('data-tab', 'plans')
+  })
+
+  it('switches from the keyboard: the tabs are real buttons', async () => {
+    // jsdom does not implement a button's default keyboard activation, so what
+    // is assertable here is the element type that gives it for free.
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(screen.getByTestId('UsageView.tab')).toBeInTheDocument())
+    for (const id of ['UsageView.tab.spend', 'UsageView.tab.plans']) {
+      expect(screen.getByTestId(id).tagName).toBe('BUTTON')
+    }
   })
 })

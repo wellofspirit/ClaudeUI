@@ -4,10 +4,17 @@
  * It owns the three things every widget needs and none of them should fetch for
  * itself: the range, the group-by, and the two reads — `usage:dashboard` for the
  * ledger and `usage:limits` for what each account has left. The widgets below
- * are pure functions of what lands here, in ADR-071 §8's order: `Summary`, then
- * `AccountsPanel` beside `ResetTimeline`, then `WindowValue`, `SpendChart` and
- * `BreakdownTable`. All five live under the `dashboard !== null` guard, because
- * every one of them takes the dashboard data as a required prop.
+ * are pure functions of what lands here, split across two tabs (S4c): `Spend`
+ * carries `Summary`, `AccountsPanel`, `SpendChart` and `BreakdownTable`, and
+ * `Plan value` carries `WindowValue` alone — asking whether a subscription pays
+ * for itself is an analysis you sit down to, not a glance at what a week cost.
+ * Every one of them lives under the `dashboard !== null` guard, because every
+ * one takes the dashboard data as a required prop.
+ *
+ * The tab decides what is MOUNTED, never what is read: both reads and all their
+ * state stay here, so switching costs nothing and comes back to the same
+ * numbers. The one thing a switch does move is `WindowValue`'s own read, which
+ * runs when it mounts.
  *
  * `WindowValue` is the one exception to "the shell does the reading": windows
  * are a second, differently-shaped query that only it consumes, so it makes its
@@ -32,7 +39,6 @@ import { onSyncEvent } from '../../../../core/shared/sync/client-registry'
 import type { AccountLimits, DashboardRange, UsageDashboardData } from '../../../../shared/types'
 import { Summary } from './Summary'
 import { AccountsPanel } from './AccountsPanel'
-import { ResetTimeline } from './ResetTimeline'
 import { WindowValue } from './WindowValue'
 import { SpendChart } from './SpendChart'
 import { BreakdownTable } from './BreakdownTable'
@@ -72,6 +78,37 @@ function storeRange(range: DashboardRange): void {
   }
 }
 
+/** Which half of the dashboard is on screen (S4c). */
+type DashboardTab = 'spend' | 'plans'
+
+const TABS: ReadonlyArray<{ id: DashboardTab; label: string }> = [
+  { id: 'spend', label: 'Spend' },
+  { id: 'plans', label: 'Plan value' }
+]
+
+const DEFAULT_TAB: DashboardTab = 'spend'
+
+/** Per-viewer for the same reason the range is. */
+const TAB_STORAGE_KEY = 'claudeui.usage.tab'
+
+function readStoredTab(): DashboardTab {
+  try {
+    const raw = window.localStorage.getItem(TAB_STORAGE_KEY)
+    if (TABS.some((t) => t.id === raw)) return raw as DashboardTab
+  } catch {
+    // As above.
+  }
+  return DEFAULT_TAB
+}
+
+function storeTab(tab: DashboardTab): void {
+  try {
+    window.localStorage.setItem(TAB_STORAGE_KEY, tab)
+  } catch {
+    // As above.
+  }
+}
+
 /** What the breakdown's hierarchy is rooted on; the chart only explains itself by it. */
 export type DashboardGroupBy = 'provider' | 'account' | 'engine' | 'model'
 
@@ -96,6 +133,7 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
   const blockUsage = useSessionStore((s) => s.blockUsage)
   const isMobile = useIsMobile()
 
+  const [tab, setTab] = useState<DashboardTab>(readStoredTab)
   const [range, setRange] = useState<DashboardRange>(readStoredRange)
   const [groupBy, setGroupBy] = useState<DashboardGroupBy>('provider')
   const [dashboard, setDashboard] = useState<UsageDashboardData | null>(null)
@@ -175,6 +213,11 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
     storeRange(next)
   }, [])
 
+  const handleTab = useCallback((next: DashboardTab) => {
+    setTab(next)
+    storeTab(next)
+  }, [])
+
   const refreshInFlight = useRef(false)
   const handleRefreshLimits = useCallback(async () => {
     // The one caller in the app that spends a refresh grant. Re-entrancy would
@@ -212,6 +255,8 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
           )}
         </Header>
         <div className="flex flex-wrap items-center gap-2 px-4 pb-2">
+          <TabStrip tab={tab} onSelect={handleTab} />
+
           <PillGroup testid="UsageView.range" label="Range">
             {RANGES.map((r) => (
               <Pill
@@ -225,18 +270,22 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
             ))}
           </PillGroup>
 
-          <PillGroup testid="UsageView.groupBy" label="Group by" value={groupBy}>
-            {GROUP_BY.map((g) => (
-              <Pill
-                key={g}
-                testid={`UsageView.groupBy.${g}`}
-                active={g === groupBy}
-                onClick={() => setGroupBy(g)}
-              >
-                {g}
-              </Pill>
-            ))}
-          </PillGroup>
+          {/* Nothing on the plans tab is grouped, so the control that would say
+              so is not offered there. */}
+          {tab === 'spend' && (
+            <PillGroup testid="UsageView.groupBy" label="Group by" value={groupBy}>
+              {GROUP_BY.map((g) => (
+                <Pill
+                  key={g}
+                  testid={`UsageView.groupBy.${g}`}
+                  active={g === groupBy}
+                  onClick={() => setGroupBy(g)}
+                >
+                  {g}
+                </Pill>
+              ))}
+            </PillGroup>
+          )}
 
           <button
             data-testid="UsageView.refreshLimits"
@@ -260,7 +309,7 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
         </div>
       </div>
 
-      <div className="p-4 space-y-4">
+      <div data-testid="UsageView.panel" data-tab={tab} className="p-4 space-y-4">
         {error !== null && (
           <div
             data-testid="UsageView.error"
@@ -279,34 +328,30 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
           </div>
         )}
 
-        {dashboard !== null && (
+        {dashboard !== null && tab === 'spend' && (
           <>
             <Summary data={dashboard} compact={isMobile} providerColors={providerColors} />
 
-            {/* The accounts panel carries rows of meters and a spend column; the
-                resets card is one axis. An even split squeezed the first into
-                three wrapped lines while the second sat mostly empty. */}
-            <div className="grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-4 items-start">
-              <AccountsPanel
-                data={dashboard}
-                limits={limits}
-                blockUsage={blockUsage}
-                providerColors={providerColors}
-              />
-              <ResetTimeline limits={limits} providerColors={providerColors} />
-            </div>
-
-            <WindowValue
+            <AccountsPanel
               data={dashboard}
               limits={limits}
+              blockUsage={blockUsage}
               providerColors={providerColors}
-              range={range}
             />
 
             <SpendChart data={dashboard} providerColors={providerColors} groupBy={groupBy} />
 
             <BreakdownTable data={dashboard} groupBy={groupBy} providerColors={providerColors} />
           </>
+        )}
+
+        {dashboard !== null && tab === 'plans' && (
+          <WindowValue
+            data={dashboard}
+            limits={limits}
+            providerColors={providerColors}
+            range={range}
+          />
         )}
       </div>
     </div>
@@ -316,6 +361,51 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
 // ---------------------------------------------------------------------------
 // Header controls
 // ---------------------------------------------------------------------------
+
+/**
+ * Deliberately NOT a third `PillGroup`. The row already carries two labelled
+ * pill rows that narrow what is shown; a third identical one would read as a
+ * third filter, and this is not a filter — it chooses which question the screen
+ * answers. Underlined text, sitting left of a divider, says that instead.
+ *
+ * Plain buttons, so the keyboard works without a roving-tabindex tab list this
+ * screen has no other use for.
+ */
+function TabStrip({
+  tab,
+  onSelect
+}: {
+  tab: DashboardTab
+  onSelect: (next: DashboardTab) => void
+}): React.JSX.Element {
+  return (
+    <div
+      data-testid="UsageView.tab"
+      data-value={tab}
+      className="flex items-center gap-3 pr-3 mr-1 border-r border-border/50"
+    >
+      {TABS.map(({ id, label }) => {
+        const active = id === tab
+        return (
+          <button
+            key={id}
+            data-testid={`UsageView.tab.${id}`}
+            data-active={active}
+            aria-pressed={active}
+            onClick={() => onSelect(id)}
+            className={`[-webkit-app-region:no-drag] text-[11px] font-medium pb-0.5 border-b-2 transition-colors cursor-default ${
+              active
+                ? 'border-accent text-text-primary'
+                : 'border-transparent text-text-muted hover:text-text-secondary'
+            }`}
+          >
+            {label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
 
 function PillGroup({
   testid,
