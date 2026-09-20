@@ -335,7 +335,10 @@ function AccountRow({
           <span className="w-4 shrink-0" />
         )}
 
-        <div className="w-[190px] shrink-0 min-w-0 flex items-center gap-1.5">
+        {/* Proportional, not fixed: a fixed column truncated every long label beside
+            free space once the panel took the full width. A percentage keeps the
+            meters aligned across rows; the floor keeps a narrow window readable. */}
+        <div className="w-[28%] min-w-[190px] shrink-0 flex items-center gap-1.5">
           <span className="text-[11px] text-text-primary truncate" title={rowLabel(row)}>
             {rowLabel(row)}
           </span>
@@ -529,7 +532,9 @@ function Meter({ limitWindow: w }: { limitWindow: AccountLimitWindow }): React.J
       className="flex items-center gap-1 min-w-0"
       title={`${w.label} · ${pct}% used · resets ${reset}${relative === reset ? '' : ` (${relative})`}`}
     >
-      <span className="text-[9px] text-text-muted w-[40px] shrink-0 truncate">{w.label}</span>
+      <span className="text-[9px] text-text-muted min-w-[40px] shrink-0 whitespace-nowrap">
+        {w.label}
+      </span>
       <div className="w-[44px] h-[6px] shrink-0 rounded-full bg-bg-tertiary overflow-hidden">
         <div
           className={`h-full rounded-full ${SEVERITY_FILL_CLASS[severity]}`}
