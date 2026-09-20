@@ -981,6 +981,82 @@ export const MIGRATIONS: Migration[] = [
           ON usage_window_sample(account_key, window_kind, ts);
       `)
     }
+  },
+  {
+    // v22 — ADR-071 §7: the window-value ledger.
+    //
+    // One row per `(account_key, window_kind, canonical_end)`: the highest
+    // utilization the account ever reported for that window, beside what the
+    // ledger saw the account spend INSIDE it. Dividing the two is how the
+    // dashboard answers what a subscription is worth, and the ADR states the
+    // bias up front — the percent is the account's GLOBAL utilization while the
+    // dollars are only what this machine saw, so usage on another machine or in
+    // claude.ai pushes the percent up without adding dollars and the implied
+    // value reads low.
+    //
+    // NOT BUILT ON `usage_bucket`. The buckets are hourly; a canonical window
+    // end is not hour-aligned (ends at :40 past the hour are ordinary — see
+    // `usage-windows.ts`), so the bucket containing a boundary straddles it and
+    // cannot be split. The numerator sums `usage_event` directly, which v18's
+    // `(account_key, ts)` index serves.
+    //
+    // THE SEED. Every window the persisted samples already name gets a row with
+    // its peak, OPEN and with zero sums: the first recompute fills the sums, and
+    // closes only the windows whose end is more than `WINDOW_CLOSE_GRACE_MS`
+    // past — turns arrive with historical timestamps. `unknown` is excluded — it is the
+    // shared bucket every pre-v21 sample landed in, so a peak taken over it
+    // would be the maximum across all accounts at once, and its ledger sum
+    // would be everything nothing could attribute.
+    //
+    // `window_start` is restated as SQL here because a migration cannot call
+    // into TypeScript. `windowDurationMs` in `usage-window-ledger.ts` is the one
+    // statement of the rule, and every seeded row's start is rewritten from it
+    // by the first recompute, since seeded rows are open.
+    version: 22,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS usage_window (
+          account_key        TEXT    NOT NULL,
+          window_kind        TEXT    NOT NULL,
+          canonical_end      INTEGER NOT NULL,
+          window_start       INTEGER NOT NULL,
+          peak_percent       REAL    NOT NULL DEFAULT 0,
+          api_cost_usd       REAL    NOT NULL DEFAULT 0,
+          billed_cost_usd    REAL    NOT NULL DEFAULT 0,
+          unknown_cost_count INTEGER NOT NULL DEFAULT 0,
+          input_tokens       INTEGER NOT NULL DEFAULT 0,
+          output_tokens      INTEGER NOT NULL DEFAULT 0,
+          cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+          sample_count       INTEGER NOT NULL DEFAULT 0,
+          closed             INTEGER NOT NULL DEFAULT 0,
+          updated_at         INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (account_key, window_kind, canonical_end)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_usage_window_open
+          ON usage_window(closed, canonical_end);
+        CREATE INDEX IF NOT EXISTS idx_usage_window_end
+          ON usage_window(canonical_end);
+
+        INSERT OR IGNORE INTO usage_window (
+          account_key, window_kind, canonical_end, window_start,
+          peak_percent, sample_count, closed, updated_at
+        )
+        SELECT
+          account_key,
+          window_kind,
+          canonical_end,
+          canonical_end - CASE WHEN window_kind = '5h' THEN 18000000 ELSE 604800000 END,
+          MAX(used_percent),
+          COUNT(*),
+          0,
+          0
+        FROM usage_window_sample
+        WHERE account_key <> 'unknown'
+        GROUP BY account_key, window_kind, canonical_end;
+      `)
+    }
   }
 ]
 
@@ -2173,6 +2249,310 @@ export function deleteSeedUsageBuckets(hourUtcs: number[]): void {
     db.prepare('ROLLBACK').run()
     throw err
   }
+}
+
+// ---------------------------------------------------------------------------
+// Window-value repository (ADR-071 §7)
+//
+// The SQL half of `usage-window-ledger.ts`, which owns the RULE: what a window
+// spans, which windows a recompute touches, when one closes, and what the
+// derived figures are. Nothing here decides any of that — these are the four
+// statements the rule needs, kept beside every other repository because `getDb`
+// is module-private.
+// ---------------------------------------------------------------------------
+
+/** One window's value row, as ADR-071 §7 defines it. */
+export interface UsageWindowRow {
+  accountKey: string
+  /** `5h`, `7d`, `7d:<slug>` — the same vocabulary `usage_window_sample` uses. */
+  windowKind: string
+  canonicalEnd: number
+  /** `canonicalEnd - windowDurationMs(windowKind)`, stored so a reader need not restate the rule. */
+  windowStart: number
+  /** The highest utilization ever OBSERVED for the window, not the highest still on disk. */
+  peakPercent: number
+  /**
+   * `Σ usage_event.api_cost_usd` over the window's rows — API-EQUIVALENT dollars,
+   * what the tokens were worth at list price, whatever they were actually
+   * charged. That is the numerator ADR-071 §7's implied window value divides,
+   * and it is a different question from what the turns COST, which is the
+   * dashboard's own total and is not stored here.
+   */
+  apiCostUsd: number
+  /** The known part of what those turns were actually charged (`Σ` finite `billed_cost_usd`). */
+  billedCostUsd: number
+  /**
+   * Turns inside the window with no known API-equivalent — never added as zeros
+   * (ADR-030). It qualifies {@link apiCostUsd} and nothing else: this many of
+   * the window's turns are MISSING from that sum.
+   */
+  unknownCostCount: number
+  inputTokens: number
+  outputTokens: number
+  cacheWriteTokens: number
+  cacheReadTokens: number
+  sampleCount: number
+  /** The end passed more than the grace period ago and a recompute summed it since. Final. */
+  closed: boolean
+  updatedAt: number
+}
+
+interface UsageWindowDbRow {
+  account_key: string
+  window_kind: string
+  canonical_end: number
+  window_start: number
+  peak_percent: number
+  api_cost_usd: number
+  billed_cost_usd: number
+  unknown_cost_count: number
+  input_tokens: number
+  output_tokens: number
+  cache_write_tokens: number
+  cache_read_tokens: number
+  sample_count: number
+  closed: number
+  updated_at: number
+}
+
+function rowToUsageWindow(row: UsageWindowDbRow): UsageWindowRow {
+  return {
+    accountKey: row.account_key,
+    windowKind: row.window_kind,
+    canonicalEnd: row.canonical_end,
+    windowStart: row.window_start,
+    peakPercent: row.peak_percent,
+    apiCostUsd: row.api_cost_usd,
+    billedCostUsd: row.billed_cost_usd,
+    unknownCostCount: row.unknown_cost_count,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    cacheWriteTokens: row.cache_write_tokens,
+    cacheReadTokens: row.cache_read_tokens,
+    sampleCount: row.sample_count,
+    closed: row.closed !== 0,
+    updatedAt: row.updated_at
+  }
+}
+
+/** The identity of a window, plus what its samples say about it. */
+export interface WindowSampleGroup {
+  accountKey: string
+  windowKind: string
+  canonicalEnd: number
+  peakPercent: number
+  sampleCount: number
+}
+
+/**
+ * Every window the samples since `sinceTs` name, with the peak each one saw.
+ *
+ * `unknown` is excluded for the reason migration v22 gives: it is one bucket
+ * shared by every account whose identity was never captured, so a peak over it
+ * belongs to no account.
+ */
+export function windowSampleGroups(sinceTs: number): WindowSampleGroup[] {
+  const db = getDb()
+  const rows = db
+    .prepare(
+      `SELECT account_key, window_kind, canonical_end,
+              MAX(used_percent) AS peak_percent,
+              COUNT(*) AS sample_count
+         FROM usage_window_sample
+        WHERE account_key <> 'unknown' AND ts >= ?
+        GROUP BY account_key, window_kind, canonical_end`
+    )
+    .all(sinceTs) as Array<{
+    account_key: string
+    window_kind: string
+    canonical_end: number
+    peak_percent: number
+    sample_count: number
+  }>
+  return rows.map((r) => ({
+    accountKey: r.account_key,
+    windowKind: r.window_kind,
+    canonicalEnd: r.canonical_end,
+    peakPercent: r.peak_percent,
+    sampleCount: r.sample_count
+  }))
+}
+
+/**
+ * Create rows for windows that have none, leaving every existing row alone.
+ *
+ * `OR IGNORE` is the whole point: a window already in the table keeps the sums
+ * it has, and a CLOSED one is not resurrected by a late sample.
+ */
+export function insertMissingUsageWindows(
+  windows: ReadonlyArray<
+    Pick<UsageWindowRow, 'accountKey' | 'windowKind' | 'canonicalEnd' | 'windowStart'>
+  >
+): number {
+  if (windows.length === 0) return 0
+  const db = getDb()
+  const stmt = db.prepare(
+    `INSERT OR IGNORE INTO usage_window
+       (account_key, window_kind, canonical_end, window_start)
+     VALUES (?, ?, ?, ?)`
+  )
+  let inserted = 0
+  db.prepare('BEGIN').run()
+  try {
+    for (const w of windows) {
+      inserted += stmt.run(w.accountKey, w.windowKind, w.canonicalEnd, w.windowStart).changes
+    }
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+  return inserted
+}
+
+/** Every window still open — the set a recompute is allowed to touch. */
+export function getOpenUsageWindows(): UsageWindowRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT * FROM usage_window WHERE closed = 0 ORDER BY canonical_end ASC')
+    .all() as UsageWindowDbRow[]
+  return rows.map(rowToUsageWindow)
+}
+
+/** Windows matching the filter, newest end first. Closed windows included — they ARE the history. */
+export function listUsageWindows(
+  opts: { accountKey?: string; kind?: string; sinceTs?: number } = {}
+): UsageWindowRow[] {
+  const db = getDb()
+  const clauses: string[] = ['canonical_end >= ?']
+  const params: Array<string | number> = [opts.sinceTs ?? 0]
+  if (opts.accountKey !== undefined) {
+    clauses.push('account_key = ?')
+    params.push(opts.accountKey)
+  }
+  if (opts.kind !== undefined) {
+    clauses.push('window_kind = ?')
+    params.push(opts.kind)
+  }
+  const rows = db
+    .prepare(
+      `SELECT * FROM usage_window
+        WHERE ${clauses.join(' AND ')}
+        ORDER BY canonical_end DESC, account_key ASC, window_kind ASC`
+    )
+    .all(...params) as UsageWindowDbRow[]
+  return rows.map(rowToUsageWindow)
+}
+
+/** Replace the value rows a recompute has just rebuilt. */
+export function upsertUsageWindows(rows: ReadonlyArray<UsageWindowRow>): void {
+  if (rows.length === 0) return
+  const db = getDb()
+  const stmt = db.prepare(
+    `INSERT INTO usage_window (
+       account_key, window_kind, canonical_end, window_start, peak_percent,
+       api_cost_usd, billed_cost_usd, unknown_cost_count,
+       input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+       sample_count, closed, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(account_key, window_kind, canonical_end) DO UPDATE SET
+       window_start       = excluded.window_start,
+       peak_percent       = excluded.peak_percent,
+       api_cost_usd       = excluded.api_cost_usd,
+       billed_cost_usd    = excluded.billed_cost_usd,
+       unknown_cost_count = excluded.unknown_cost_count,
+       input_tokens       = excluded.input_tokens,
+       output_tokens      = excluded.output_tokens,
+       cache_write_tokens = excluded.cache_write_tokens,
+       cache_read_tokens  = excluded.cache_read_tokens,
+       sample_count       = excluded.sample_count,
+       closed             = excluded.closed,
+       updated_at         = excluded.updated_at`
+  )
+  db.prepare('BEGIN').run()
+  try {
+    for (const r of rows) {
+      stmt.run(
+        r.accountKey,
+        r.windowKind,
+        r.canonicalEnd,
+        r.windowStart,
+        r.peakPercent,
+        r.apiCostUsd,
+        r.billedCostUsd,
+        r.unknownCostCount,
+        r.inputTokens,
+        r.outputTokens,
+        r.cacheWriteTokens,
+        r.cacheReadTokens,
+        r.sampleCount,
+        r.closed ? 1 : 0,
+        r.updatedAt
+      )
+    }
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+/** The cost and token columns of one account's turns, for a half-open `[startTs, endTs)` span. */
+export interface LedgerCostRow {
+  apiCostUsd: number | null
+  billedCostUsd: number | null
+  inputTokens: number
+  outputTokens: number
+  cacheWriteTokens: number
+  cacheReadTokens: number
+}
+
+/**
+ * One account's ledger rows inside a window, ALL origins (ADR-071 §1): a
+ * dispatched turn and a subagent's turn spend the same subscription as the
+ * session's own, so all three count toward what the window delivered.
+ *
+ * HALF-OPEN on purpose. `canonical_end` is the next window's start, so a row
+ * exactly at it belongs to that window and to this one it would be a double
+ * count.
+ *
+ * ROWS, NOT `SUM()`. A SQL sum skips a NULL silently, so it cannot tell "no
+ * turns" from "no turn could be priced", and it would absorb a non-finite REAL
+ * as if it were a figure. The caller adds the finite values and COUNTS the rest
+ * (ADR-030), which needs the rows one at a time.
+ *
+ * `cache_write_1h_tokens` is deliberately absent: it is the 1h-TTL SUBSET of
+ * `cache_write_tokens`, so summing both would count those tokens twice.
+ */
+export function getLedgerCostRows(
+  accountKey: string,
+  startTs: number,
+  endTs: number
+): LedgerCostRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare(
+      `SELECT api_cost_usd, billed_cost_usd,
+              input_tokens, output_tokens, cache_write_tokens, cache_read_tokens
+         FROM usage_event
+        WHERE account_key = ? AND ts >= ? AND ts < ?`
+    )
+    .all(accountKey, startTs, endTs) as Array<{
+    api_cost_usd: number | null
+    billed_cost_usd: number | null
+    input_tokens: number
+    output_tokens: number
+    cache_write_tokens: number
+    cache_read_tokens: number
+  }>
+  return rows.map((r) => ({
+    apiCostUsd: r.api_cost_usd,
+    billedCostUsd: r.billed_cost_usd,
+    inputTokens: r.input_tokens,
+    outputTokens: r.output_tokens,
+    cacheWriteTokens: r.cache_write_tokens,
+    cacheReadTokens: r.cache_read_tokens
+  }))
 }
 
 // ---------------------------------------------------------------------------

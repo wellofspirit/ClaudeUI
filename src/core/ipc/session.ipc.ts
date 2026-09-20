@@ -44,6 +44,7 @@ import { gitWatchRegistry } from '../services/git-watch-registry'
 import { usageFetcher } from '../services/usage-fetcher'
 import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
 import { readAccountLimits } from '../services/usage-provider'
+import { sanitizeUsageWindowQuery, usageWindowSummary } from '../services/usage-window-ledger'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
@@ -393,6 +394,7 @@ const SESSION_IPC_CHANNELS = [
   'usage:fetch-block',
   'usage:chatgpt-limits',
   'usage:limits',
+  'usage:windows',
   'usage:set-account-filter',
   'usage:refresh-prices',
   'usage:fetch-dispatched',
@@ -1708,6 +1710,21 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     kind: 'query',
     handler: async (refresh?: boolean) => {
       return readAccountLimits({ refresh: !!refresh })
+    }
+  })
+
+  /**
+   * ADR-071 §7 — the window-value ledger. Read-only: one row per limit window
+   * with the peak percent, what the ledger saw inside it, and the two derived
+   * figures. Closed windows are in the answer and are most of it — the samples
+   * behind them are pruned at 30 days, these rows are not.
+   */
+  handleIpc({
+    channel: 'usage:windows',
+    capability: 'config',
+    kind: 'query',
+    handler: async (opts?: unknown) => {
+      return usageWindowSummary(sanitizeUsageWindowQuery(opts))
     }
   })
 

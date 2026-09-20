@@ -53,6 +53,7 @@ import {
   type UsageBucketWrite
 } from './db'
 import { claudeTranscriptRow } from './usage-recorder'
+import { recomputeUsageWindows } from './usage-window-ledger'
 import { ANTHROPIC_MODEL_PRICING, type ModelPricing } from '../../shared/pricing'
 import { emitEvent } from './sync-host'
 
@@ -715,6 +716,14 @@ export class BlockUsageService {
       : entries
     const filteredDailyHistory = await this.loadDailyHistory(entries, jsonlViewEntries)
     this.rollupUsageBucketsFromDb(now)
+    // The window-value ledger (ADR-071 §7), from the SAME `now` the rollup just
+    // used, so an hour and the window containing it can never disagree about
+    // when this pass ran. It is here and nowhere else: "usage moved" is the only
+    // trigger either projection needs, and a second listener on the limits
+    // readings would buy nothing but a race — a reading that lands between two
+    // rebuilds is on disk and the next pass reads it, so the only cost is that a
+    // window's peak can lag a reading by one recalculation.
+    recomputeUsageWindows(now)
     // Account-filtered views can't read the all-account buckets (the filter is
     // ADR-011's time-based attribution, not the row's own account key — S3
     // closes that gap), so they use the entry-derived history; unfiltered views

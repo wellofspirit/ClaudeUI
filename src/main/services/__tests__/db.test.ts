@@ -184,7 +184,7 @@ describe('migration framework — user_version guard', () => {
     }
   })
 
-  it('applies the real production migration set (v1–v21)', () => {
+  it('applies the real production migration set (v1–v22)', () => {
     const db = openRawDb()
     try {
       // Default migration list (production MIGRATIONS).
@@ -210,7 +210,7 @@ describe('migration framework — user_version guard', () => {
       //      dispatched_usage is dropped — the ledger is the only store
       // v21: an account remembers the identity it was active under, and a window
       //      sample names its account key and its window kind
-      expect(userVersion(db)).toBe(21)
+      expect(userVersion(db)).toBe(22)
       expect(db.prepare('SELECT * FROM codex_session_overrides').all()).toEqual([])
       expect(db.prepare('SELECT * FROM codex_forks').all()).toEqual([])
       // session_meta must exist and be queryable.
@@ -299,7 +299,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(21)
+      expect(userVersion(db)).toBe(22)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',
@@ -443,7 +443,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(21)
+      expect(userVersion(db)).toBe(22)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         auth_policy: null,
         step_up_tier: 'medium',

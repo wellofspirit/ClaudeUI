@@ -66,6 +66,7 @@ const REQUIRED_TABLES = [
   'usage_window_sample',
   'usage_bucket',
   'usage_bucket_rev',
+  'usage_window',
   'remote_config',
   'audit_log',
   'webauthn_credential',
