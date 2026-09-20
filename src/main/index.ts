@@ -58,7 +58,6 @@ import { LogViewer } from './services/log-viewer'
 import { logger } from '../core/services/logger'
 import { getCliVersion } from '../core/services/claude-session'
 import { registerMockupAssetScheme, registerMockupAssetHandler } from './services/mockup-protocol'
-import { loadPersistedPrices, refreshPricesIfStale } from '../core/services/opencode-pricing'
 import { QuitCoordinator } from './quit-coordinator'
 import {
   isAllowedExternalUrl,
@@ -694,14 +693,6 @@ app.whenReady().then(() => {
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
   })
-
-  // Phase 9b: register any previously-fetched pricing entries so
-  // equivalentCostUsd resolves non-built-in model costs from the very first recalc.
-  // No network — reads the persisted ~/.claude/ui/opencode-prices.json if present.
-  loadPersistedPrices()
-  // ADR-071 §5: top the catalog up from models.dev once a day, in the background.
-  // Never throws, and leaves the prices above in place if the fetch fails.
-  void refreshPricesIfStale()
 
   // ── Core, BEFORE any window decision (SyncCore phase 4d) ───────────
   // Sessions, canonical state, the remote HTTP+WS server, watchers, seeds. None

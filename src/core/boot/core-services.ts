@@ -58,6 +58,7 @@ import { CHATGPT_PROVIDER_ID } from '../auth/auth-providers'
 import { emitEvent } from '../services/sync-host'
 import { sharedProviderService } from '../shared-providers'
 import { logger } from '../services/logger'
+import { loadPersistedPrices, refreshPricesIfStale } from '../services/opencode-pricing'
 import { createHostAnchor, type HostAnchor } from './host-anchor'
 import type { CommandConnection } from '../ipc/command-registry'
 import type { HostNotifier } from '../host'
@@ -130,6 +131,16 @@ export interface CoreServicesOptions {
 export function startCoreServices(options: CoreServicesOptions): CoreServices {
   const { remoteAccessDisabled, authDeps, notifier, autostart, hostActor, afterSessionGraph } =
     options
+
+  // Prices BEFORE sessions: `equivalentCostUsd` must resolve non-built-in
+  // models from the first recalc, on every host. No network here: this reads
+  // the persisted ~/.claude/ui/opencode-prices.json if present. The daily top-up
+  // from models.dev (ADR-071 §5) runs in the background, never throws, and
+  // leaves the loaded prices in place if the fetch fails. This used to live in
+  // the desktop's main only, so the headless server priced nothing it had not
+  // built in (metering S2d).
+  loadPersistedPrices()
+  void refreshPricesIfStale()
 
   // Sessions, config, git, usage, the canonical seeds and the file watchers.
   // Takes no window since 4d — see registerSessionIpc's doc comment.
