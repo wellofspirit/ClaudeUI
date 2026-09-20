@@ -10,7 +10,7 @@ import {
 import { resolveRekeyed } from '../../../stores/replica'
 import type { FileAttachment, VoiceState as VoiceStateType } from '../../../../../shared/types'
 import { v4 as uuid } from 'uuid'
-import { resolveSendAction, filterModelsForEngine } from './utils'
+import { resolveSendAction, filterModelsForEngine, dedupeResolvedModels } from './utils'
 import { recallQueuedInto } from './recall-queued'
 import { useSlashMenu } from '../../../hooks/useSlashMenu'
 import { mergeSlashCommands } from '../SlashCommandMenu'
@@ -290,9 +290,14 @@ export function InputBox(): React.JSX.Element {
   // Once a session exists, it always reflects that session's own engine instead.
   const effectiveEngineId = activeSessionId ? sessionEngineId : lastSelectedEngineId
   const engineLocked = sdkActive || !!startedSessionId || !!isHistorical
+  // Deduped: cli.js lists `default` and its concrete equivalent (`opus[1m]`)
+  // as two rows with the same description, which the shortName derivation above
+  // renders identically. The `selectedModel` memo below deliberately resolves
+  // against the UNDEDUPED `models`, so a session pinned to a collapsed row is
+  // still resolvable.
   const pickerModels = useMemo(
-    () => filterModelsForEngine(models, effectiveEngineId),
-    [models, effectiveEngineId]
+    () => dedupeResolvedModels(filterModelsForEngine(models, effectiveEngineId), selectedModelValue),
+    [models, effectiveEngineId, selectedModelValue]
   )
   // Memoized so its identity is stable across renders (it feeds several
   // downstream useMemo dependency lists). The fallback MUST stay within the

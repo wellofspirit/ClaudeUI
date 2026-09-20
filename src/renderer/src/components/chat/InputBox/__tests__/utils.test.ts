@@ -7,6 +7,7 @@ import { describe, it, expect } from 'vitest'
 import {
   resolveSendAction,
   filterModelsForEngine,
+  dedupeResolvedModels,
   type SendContext,
   type ModelEntry
 } from '../utils'
@@ -195,5 +196,108 @@ describe('filterModelsForEngine', () => {
     const onlyOpencode = [opencodeModel]
     const result = filterModelsForEngine(onlyOpencode, 'claude')
     expect(result).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// dedupeResolvedModels
+// ---------------------------------------------------------------------------
+
+describe('dedupeResolvedModels', () => {
+  /**
+   * cli.js 2.1.268's real Claude catalog, in its own preference order. The
+   * first two rows resolve to the SAME model and carry an IDENTICAL
+   * description, which is what the picker labels rows from — so pre-fix the
+   * picker showed two rows reading "Opus 5 with 1M context".
+   */
+  const catalog: ModelEntry[] = [
+    { value: 'default', engineId: 'claude', resolvedModel: 'claude-opus-5[1m]' },
+    { value: 'opus[1m]', engineId: 'claude', resolvedModel: 'claude-opus-5[1m]' },
+    { value: 'claude-fable-5-1[1m]', engineId: 'claude', resolvedModel: 'claude-fable-5-1' },
+    { value: 'sonnet', engineId: 'claude', resolvedModel: 'claude-sonnet-5' },
+    { value: 'haiku', engineId: 'claude', resolvedModel: 'claude-haiku-4-5-20251001' }
+  ]
+
+  it('collapses the five-row catalog to four, `default` surviving', () => {
+    const result = dedupeResolvedModels(catalog)
+    expect(result.map((m) => m.value)).toEqual([
+      'default',
+      'claude-fable-5-1[1m]',
+      'sonnet',
+      'haiku'
+    ])
+  })
+
+  it('keeps the SELECTED row when the selection is a later member of the group', () => {
+    // A session already pinned to opus[1m] must keep seeing its own row rather
+    // than being silently relabelled `default`.
+    const result = dedupeResolvedModels(catalog, 'opus[1m]')
+    expect(result.map((m) => m.value)).toEqual([
+      'opus[1m]',
+      'claude-fable-5-1[1m]',
+      'sonnet',
+      'haiku'
+    ])
+    expect(result).toHaveLength(4)
+  })
+
+  it('keeps `default` when `default` is itself the selection', () => {
+    expect(dedupeResolvedModels(catalog, 'default').map((m) => m.value)).toEqual([
+      'default',
+      'claude-fable-5-1[1m]',
+      'sonnet',
+      'haiku'
+    ])
+  })
+
+  it('a selection outside the list changes nothing', () => {
+    expect(dedupeResolvedModels(catalog, 'not-in-catalog').map((m) => m.value)).toEqual([
+      'default',
+      'claude-fable-5-1[1m]',
+      'sonnet',
+      'haiku'
+    ])
+  })
+
+  it('preserves input order rather than grouping survivors together', () => {
+    const interleaved: ModelEntry[] = [
+      { value: 'a', resolvedModel: 'X' },
+      { value: 'b', resolvedModel: 'Y' },
+      { value: 'c', resolvedModel: 'X' },
+      { value: 'd', resolvedModel: 'Y' }
+    ]
+    expect(dedupeResolvedModels(interleaved).map((m) => m.value)).toEqual(['a', 'b'])
+    // The later-selected member wins its own group, in place.
+    expect(dedupeResolvedModels(interleaved, 'c').map((m) => m.value)).toEqual(['b', 'c'])
+  })
+
+  it('never merges rows that carry no resolvedModel (every non-Claude engine)', () => {
+    const noResolved: ModelEntry[] = [
+      { value: 'gpt-4o', engineId: 'opencode' },
+      { value: 'gpt-4o-mini', engineId: 'opencode' },
+      { value: 'legacy' }
+    ]
+    expect(dedupeResolvedModels(noResolved)).toEqual(noResolved)
+  })
+
+  it('does not merge rows whose resolvedModel is an empty string', () => {
+    const blank: ModelEntry[] = [
+      { value: 'p', resolvedModel: '' },
+      { value: 'q', resolvedModel: '' }
+    ]
+    expect(dedupeResolvedModels(blank).map((m) => m.value)).toEqual(['p', 'q'])
+  })
+
+  it('leaves a mixed list alone apart from the genuine duplicate', () => {
+    const mixed: ModelEntry[] = [
+      ...catalog,
+      { value: 'gpt-4o', engineId: 'opencode' },
+      { value: 'legacy' }
+    ]
+    expect(dedupeResolvedModels(mixed)).toHaveLength(6)
+  })
+
+  it('returns an empty list unchanged', () => {
+    expect(dedupeResolvedModels([])).toEqual([])
   })
 })

@@ -26,6 +26,10 @@ import { useEscapeLayer } from './use-escape-layer'
 
 export interface ModelDisplay {
   value: string
+  /** See `ModelInfo.resolvedModel` — the concrete id `value` resolves to.
+   *  Rides through on the `...m` spread that builds these rows; read by
+   *  `dedupeResolvedModels`. Claude rows only. */
+  resolvedModel?: string
   displayName: string
   description?: string
   shortName: string
