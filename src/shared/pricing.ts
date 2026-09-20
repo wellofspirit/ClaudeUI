@@ -587,30 +587,74 @@ const GOOGLE_PRICING: PricingEntry[] = [
 
 const PRICING_TABLE: PricingEntry[] = [...ANTHROPIC_PRICING, ...OPENAI_PRICING, ...GOOGLE_PRICING]
 
+/** The vendors this file prices itself. Derived — never a second hand-kept list. */
+const BUILTIN_VENDOR_IDS: ReadonlySet<VendorId> = new Set(PRICING_TABLE.map((e) => e.vendorId))
+
 // ---------------------------------------------------------------------------
 // Supplemental pricing (registered at runtime by main — pure; no I/O here)
 // ---------------------------------------------------------------------------
 
 /**
  * Runtime-registered supplemental entries, populated by opencode-pricing.ts
- * from the opencode /config/providers price table (models.dev data).
- * Replace-all semantics: each registerSupplementalPricing() call replaces the
- * previous batch (one source of truth per refresh).
+ * from models.dev. Replace-all semantics: each registerSupplementalPricing()
+ * call replaces the previous batch (one source of truth per refresh).
  * Built-in PRICING_TABLE entries take precedence — supplemental is consulted
  * only when the built-in table returns null.
+ *
+ * Held as maps, not as the raw array: the batch is the whole models.dev catalog
+ * (~7,400 entries across 222 providers) and findPricing runs per usage row, so
+ * a linear scan cost ~30 µs a lookup. The maps are built once per registration.
+ *
+ * `supplementalByVendor` doubles as the set of recognised supplemental vendors:
+ * a vendor is recognised when it is a KEY here, whatever its map contains.
  */
-let supplementalPricing: PricingEntry[] = []
+let supplementalByVendor: ReadonlyMap<VendorId, ReadonlyMap<string, ModelPricing>> = new Map()
+/** Index for findPricing's cross-vendor fallback (step 3a) — see that doc comment. */
+let supplementalAnyVendor: ReadonlyMap<string, ModelPricing> = new Map()
+
+/** A free listing says nothing about what some other provider charges. */
+function isFreeListing(pricing: ModelPricing): boolean {
+  return pricing.inputPerMTok === 0 && pricing.outputPerMTok === 0
+}
 
 /**
- * Register opencode-sourced (or any external) pricing entries.
- * Called by main/services/opencode-pricing.ts after fetching + persisting prices.
+ * Register models.dev-sourced (or any external) pricing entries.
+ * Called by core/services/opencode-pricing.ts after fetching + persisting prices.
  * Pure: no I/O, no electron — main owns file persistence and calls this.
  *
  * Replace-all semantics: the entire supplemental batch is replaced on each call.
  * Built-in Anthropic/OpenAI/Google entries remain authoritative and are never replaced.
+ *
+ * Within a vendor, the FIRST entry for a model id wins, matching the scan order
+ * this replaced. The cross-vendor index is built deliberately rather than in
+ * plain registration order, because the batch now spans every provider
+ * models.dev knows — resellers and free tiers included — and the fallback it
+ * serves is a guess for a vendor we do not recognise at all. Its order is:
+ * entries under a built-in vendor id first, then the rest in registration
+ * order, first insert wins, and a free listing is never indexed.
  */
 export function registerSupplementalPricing(entries: PricingEntry[]): void {
-  supplementalPricing = entries
+  const byVendor = new Map<VendorId, Map<string, ModelPricing>>()
+  for (const entry of entries) {
+    let models = byVendor.get(entry.vendorId)
+    if (!models) {
+      models = new Map()
+      byVendor.set(entry.vendorId, models)
+    }
+    if (!models.has(entry.match)) models.set(entry.match, entry.pricing)
+  }
+
+  const anyVendor = new Map<string, ModelPricing>()
+  for (const firstParty of [true, false]) {
+    for (const entry of entries) {
+      if (BUILTIN_VENDOR_IDS.has(entry.vendorId) !== firstParty) continue
+      if (isFreeListing(entry.pricing)) continue
+      if (!anyVendor.has(entry.match)) anyVendor.set(entry.match, entry.pricing)
+    }
+  }
+
+  supplementalByVendor = byVendor
+  supplementalAnyVendor = anyVendor
 }
 
 /**
@@ -619,8 +663,8 @@ export function registerSupplementalPricing(entries: PricingEntry[]): void {
  *   1. Built-in PRICING_TABLE (authoritative — Anthropic/OpenAI/Google).
  *      Matched by SUBSTRING (entry.match) so a single family entry (`sonnet`)
  *      covers every dated variant (`claude-sonnet-4-6`).
- *   2. Supplemental table (opencode /config/providers prices, registered at runtime).
- *      Matched by EXACT equality — entries are full opencode model ids, so a
+ *   2. Supplemental table (models.dev prices, registered at runtime).
+ *      Matched by EXACT equality — entries are full models.dev model ids, so a
  *      shorter id (`claude-haiku-4-5`) must NOT shadow a longer variant
  *      (`claude-haiku-4-5-20251001`) the way substring matching would.
  *   3. Vendor-agnostic fallback — ONLY when vendorId itself is unrecognized (no
@@ -631,9 +675,13 @@ export function registerSupplementalPricing(entries: PricingEntry[]): void {
  *      run for a known vendor with an unpriced model (e.g. `openai` + a brand-new
  *      model id) — that stays a genuine miss, preserving existing vendor-scoped
  *      resolution:
- *        a. Exact modelId match across ALL supplemental entries (any vendor) —
- *           models.dev ids are specific enough that a cross-vendor exact match
- *           is safe.
+ *        a. Exact modelId match in the cross-vendor supplemental index. The
+ *           supplemental batch is the whole models.dev catalog, so one model id
+ *           is often listed by a first-party vendor AND by resellers at their
+ *           own margins, and by free tiers at 0. The index therefore prefers a
+ *           built-in vendor's listing (see BUILTIN_VENDOR_IDS), then falls back
+ *           to registration order, and never indexes a free listing — a gateway
+ *           we cannot identify is not billing us at somebody else's free rate.
  *        b. Substring match across ALL built-in tables, in PRICING_TABLE's
  *           declared order (anthropic → openai → google). If the same match
  *           string existed under multiple vendors this picks the first
@@ -649,17 +697,16 @@ function findPricing(vendorId: VendorId, modelId: string): ModelPricing | null {
       if (lower.includes(entry.match)) return entry.pricing
     }
   }
-  for (const entry of supplementalPricing) {
-    if (entry.vendorId === vendorId) {
-      vendorRecognized = true
-      if (lower === entry.match) return entry.pricing
-    }
+  const vendorModels = supplementalByVendor.get(vendorId)
+  if (vendorModels) {
+    vendorRecognized = true
+    const hit = vendorModels.get(lower)
+    if (hit) return hit
   }
   if (vendorRecognized) return null
 
-  for (const entry of supplementalPricing) {
-    if (lower === entry.match) return entry.pricing
-  }
+  const crossVendor = supplementalAnyVendor.get(lower)
+  if (crossVendor) return crossVendor
   for (const entry of PRICING_TABLE) {
     if (lower.includes(entry.match)) return entry.pricing
   }
