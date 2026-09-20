@@ -246,6 +246,16 @@ describe('ClaudeSession system/init capture (behind queued_command_consumed)', (
     // produced while the init branch sat behind the sessionId latch.
     await vi.waitFor(() => expect(lastUsedPercentage(sent)).toBe(60))
 
+    // Both halves of the field, not just the percentage derived from them.
+    // `contextWindowSize` used to carry the CONSUMPTION under a name that says
+    // window — here, 600_000 under the spelling that promised 1_000_000. The
+    // pair is now stated explicitly, in the one place the ambiguity was most
+    // dangerous: an alias whose real window is five times the fallback.
+    expect(statusLines(sent).at(-1)!.contextWindow).toEqual({
+      used: 600_000,
+      size: 1_000_000
+    })
+
     // The rest of the init payload reached the renderer too.
     const slash = sent.find(([c]) => c === 'session:slash-commands')
     expect(slash).toBeDefined()

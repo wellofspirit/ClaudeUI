@@ -467,7 +467,7 @@ describe('useClaudeEvents extended component tests', () => {
         totalOutputTokens: 500,
         cachedTokens: 200,
         totalTokens: 1500,
-        contextWindowSize: 200000,
+        contextWindow: { used: 1500, size: 200000 },
         usedPercentage: 0.75,
         remainingPercentage: 99.25
       }
@@ -489,7 +489,7 @@ describe('useClaudeEvents extended component tests', () => {
         totalOutputTokens: 50,
         cachedTokens: 0,
         totalTokens: 150,
-        contextWindowSize: 200000,
+        contextWindow: { used: 200, size: 200000 },
         usedPercentage: 0.1,
         remainingPercentage: 99.9
       }
@@ -657,7 +657,7 @@ describe('useClaudeEvents extended component tests', () => {
         totalOutputTokens: 100,
         cachedTokens: 50,
         totalTokens: 300,
-        contextWindowSize: 200000,
+        contextWindow: { used: 300, size: 200000 },
         usedPercentage: 0.15,
         remainingPercentage: 99.85
       }

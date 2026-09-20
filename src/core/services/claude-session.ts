@@ -1700,7 +1700,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.accOutputTokens = metrics.totalOutputTokens
       this.accCachedTokens = metrics.cachedTokens
       this.accTotalDurationMs = Math.max(this.accTotalDurationMs, metrics.totalDurationMs)
-      this.lastContextLength = metrics.contextWindowSize
+      this.lastContextLength = metrics.contextWindow.used
       if (seedCost) {
         // The transcript recompute always yields a figure (StatusLineData's
         // cost is nullable for engines that cannot price a turn; this one
@@ -2206,7 +2206,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       totalOutputTokens: this.accOutputTokens,
       cachedTokens: this.accCachedTokens,
       totalTokens: this.accInputTokens + this.accOutputTokens + this.accCachedTokens,
-      contextWindowSize: this.lastContextLength,
+      contextWindow: { used: this.lastContextLength, size: ctxWindow },
       usedPercentage: usedPct,
       remainingPercentage: usedPct !== null ? 100 - usedPct : null,
       turnStartedAtMs: this.turnStartedAtMs,

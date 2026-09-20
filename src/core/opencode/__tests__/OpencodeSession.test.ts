@@ -4772,7 +4772,7 @@ describe('OpencodeSession — status-line emission', () => {
     expect(data.totalInputTokens).toBe(0)
     expect(data.totalOutputTokens).toBe(0)
     expect(data.totalTokens).toBe(0)
-    expect(data.contextWindowSize).toBe(0)
+    expect(data.contextWindow).toEqual({ used: 0, size: 0 })
     expect(data.usedPercentage).toBeNull()
     session.dispose()
   })
@@ -4858,8 +4858,8 @@ describe('OpencodeSession — status-line emission', () => {
     expect(finalSl.cachedTokens).toBe(210)
     // totalTokens = input + output + cached = 1000 + 100 + 210 = 1310
     expect(finalSl.totalTokens).toBe(1310)
-    // contextWindowSize = 128000 (from mock)
-    expect(finalSl.contextWindowSize).toBe(128000)
+    // contextWindow = { used: lastContextLength, size: 128000 (from mock) }
+    expect(finalSl.contextWindow).toEqual({ used: 1200, size: 128000 })
     // usedPercentage = round(lastContextLength / 128000 * 100)
     // lastContextLength = input + cacheRead = 1000 + 200 = 1200
     expect(finalSl.usedPercentage).toBe(Math.round((1200 / 128000) * 100))
@@ -4957,7 +4957,7 @@ describe('OpencodeSession — status-line emission', () => {
     session.dispose()
   })
 
-  it('usedPercentage is null when contextWindowSize is 0 (unknown model)', async () => {
+  it('usedPercentage is null when the context window size is 0 (unknown model)', async () => {
     // mock returns 0 = unknown
     mockGetOpencodeModelContextWindow.mockReturnValue(0)
     mockCreateSession.mockResolvedValue({ id: SES })
@@ -4993,7 +4993,9 @@ describe('OpencodeSession — status-line emission', () => {
     const calls = (win as unknown as MockWindow).webContents.send.mock.calls
     const slCalls = calls.filter((c) => c[0] === 'session:status-line')
     const finalSl = slCalls[slCalls.length - 1]![2]
-    expect(finalSl.contextWindowSize).toBe(0)
+    // size 0 is "window unknown", NOT a zero-sized window — the used half is
+    // still a real figure, and usedPercentage is the thing that goes null.
+    expect(finalSl.contextWindow).toEqual({ used: 1000, size: 0 })
     expect(finalSl.usedPercentage).toBeNull()
     expect(finalSl.remainingPercentage).toBeNull()
 
@@ -5199,7 +5201,7 @@ describe('OpencodeSession — status-line emission', () => {
     // usedPercentage must be non-null (the regression value was null → "–")
     expect(finalSl.usedPercentage).not.toBeNull()
     expect(finalSl.usedPercentage).toBe(Math.round((1500 / 64000) * 100))
-    expect(finalSl.contextWindowSize).toBe(64000)
+    expect(finalSl.contextWindow).toEqual({ used: 1500, size: 64000 })
 
     session.dispose()
   })

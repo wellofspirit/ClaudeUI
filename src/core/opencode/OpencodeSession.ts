@@ -2377,7 +2377,7 @@ export class OpencodeSession extends BaseSession {
       totalOutputTokens: sum.output,
       cachedTokens,
       totalTokens,
-      contextWindowSize: ctx,
+      contextWindow: { used: this.lastContextLength, size: ctx },
       usedPercentage,
       remainingPercentage,
       turnStartedAtMs: this.isProcessing && this.startTimeMs > 0 ? this.startTimeMs : null,

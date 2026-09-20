@@ -2880,7 +2880,17 @@ export interface StatusLineData {
   totalOutputTokens: number
   cachedTokens: number
   totalTokens: number
-  contextWindowSize: number
+  /** Context consumed and the model's window, both in tokens — the same
+   *  vocabulary as {@link MeteringSnapshot.contextWindow}, deliberately, so one
+   *  reading serves both payloads. `size: 0` means the window is unknown for
+   *  this engine/model, in which case the engine also sends
+   *  `usedPercentage: null`; it never means a zero-sized window.
+   *
+   *  Replaced a flat `contextWindowSize` that three engines filled with the
+   *  window and Claude filled with the consumption — the name said window, so
+   *  Claude was the one lying, and the field was one careless read away from a
+   *  context meter that sat near 100%. */
+  contextWindow: { used: number; size: number }
   usedPercentage: number | null
   remainingPercentage: number | null
   /** Epoch ms when the currently in-flight turn started; null/undefined when idle. */

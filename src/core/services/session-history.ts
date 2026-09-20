@@ -306,7 +306,7 @@ export async function computeTokenMetrics(
     totalOutputTokens: 0,
     cachedTokens: 0,
     totalTokens: 0,
-    contextWindowSize: 0,
+    contextWindow: { used: 0, size: 0 },
     usedPercentage: null,
     remainingPercentage: null,
     modelCosts: []
@@ -437,7 +437,7 @@ export async function computeTokenMetrics(
         totalOutputTokens: outputTokens,
         cachedTokens,
         totalTokens,
-        contextWindowSize: contextLength,
+        contextWindow: { used: contextLength, size: ctxWindow },
         usedPercentage,
         remainingPercentage,
         modelCosts

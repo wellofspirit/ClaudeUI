@@ -122,7 +122,7 @@ const FIXTURE_METRICS: StatusLineData = {
   totalOutputTokens: 200,
   cachedTokens: 300,
   totalTokens: 600,
-  contextWindowSize: 5_000,
+  contextWindow: { used: 5_000, size: 200_000 },
   usedPercentage: 3,
   remainingPercentage: 97
 }
@@ -154,7 +154,7 @@ describe('ClaudeSession — resume seeding of accumulators', () => {
     expect(data.totalInputTokens).toBe(100)
     expect(data.totalOutputTokens).toBe(200)
     expect(data.cachedTokens).toBe(300)
-    expect(data.contextWindowSize).toBe(5_000)
+    expect(data.contextWindow.used).toBe(5_000)
     // No turn in flight at construction.
     expect(data.turnStartedAtMs).toBeNull()
   })

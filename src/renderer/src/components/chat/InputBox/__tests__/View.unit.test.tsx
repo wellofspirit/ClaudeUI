@@ -454,7 +454,7 @@ describe('StatusLine — {cost} placeholder', () => {
             totalOutputTokens: 0,
             cachedTokens: 0,
             totalTokens: 0,
-            contextWindowSize: 0,
+            contextWindow: { used: 0, size: 0 },
             usedPercentage: null,
             remainingPercentage: null
           }

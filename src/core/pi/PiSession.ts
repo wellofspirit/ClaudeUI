@@ -2755,7 +2755,7 @@ export class PiSession extends BaseSession {
       totalOutputTokens: this.sumOutputTokens,
       cachedTokens,
       totalTokens,
-      contextWindowSize: ctx,
+      contextWindow: { used: this.lastContextLength, size: ctx },
       usedPercentage,
       remainingPercentage,
       turnStartedAtMs:

@@ -2209,7 +2209,7 @@ export class CodexSession extends BaseSession {
       totalOutputTokens: output,
       cachedTokens: cacheRead,
       totalTokens: total,
-      contextWindowSize: usage.modelContextWindow ?? 0,
+      contextWindow: { used: usage.last.totalTokens, size: usage.modelContextWindow ?? 0 },
       usedPercentage: usage.modelContextWindow
         ? (usage.last.totalTokens / usage.modelContextWindow) * 100
         : null,

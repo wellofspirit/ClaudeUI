@@ -36,7 +36,7 @@ const DEFAULT_STATUS_LINE: StatusLineData = {
   totalOutputTokens: 0,
   cachedTokens: 0,
   totalTokens: 0,
-  contextWindowSize: 0,
+  contextWindow: { used: 0, size: 0 },
   usedPercentage: 0,
   remainingPercentage: 100
 }
