@@ -16,9 +16,11 @@ import {
 } from '../../../core/services/db'
 import {
   backfillAttribution,
+  claudeTranscriptRow,
   recordUsageEvent,
   type UsageTurnEvent
 } from '../../../core/services/usage-recorder'
+import type { ClaudeAccountAttribution } from '../../../core/services/usage-windows'
 
 beforeEach(() => closeDb())
 afterEach(() => closeDb())
@@ -290,5 +292,91 @@ describe('renameUsageEventParent', () => {
     recordUsageEvent(turn({ messageId: 'msg_rekey_none' }))
     expect(() => renameUsageEventParent('never-used', 'stable-x')).not.toThrow()
     expect(getUsageEventByMessageId('msg_rekey_none')!.parentRoutingId).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The Claude transcript row (S2a2) — ONE builder behind both Claude paths
+// ---------------------------------------------------------------------------
+
+describe('claudeTranscriptRow', () => {
+  const entry = {
+    timestamp: 5000,
+    model: 'claude-opus-4-8',
+    inputTokens: 1000,
+    outputTokens: 500,
+    cacheCreationTokens: 100,
+    cacheReadTokens: 50,
+    costUsd: 0.0123,
+    messageId: 'msg_transcript',
+    sessionId: 'ses_from_path'
+  }
+  const attributed: ClaudeAccountAttribution = {
+    email: 'a@example.test',
+    accountUuid: 'acc_1',
+    accountKey: 'anthropic:org_personal:acc_1',
+    accountLabel: 'a@example.test (Personal)',
+    billingType: 'subscription'
+  }
+
+  it('names the subscription the transcript entry ran under', () => {
+    const row = claudeTranscriptRow({ entry, account: attributed, sessionId: entry.sessionId })
+    expect(row.accountKey).toBe('anthropic:org_personal:acc_1')
+    expect(row.accountLabel).toBe('a@example.test (Personal)')
+    expect(row.billingType).toBe('subscription')
+    expect(row.accountUuid).toBe('acc_1')
+  })
+
+  it('bills a subscription nothing and keeps the list price as the API cost', () => {
+    // cli.js reports a list price, never a charge (engineCostIsEquivalent).
+    const row = claudeTranscriptRow({ entry, account: attributed, sessionId: null })
+    expect(row.billedCostUsd).toBe(0)
+    expect(row.apiCostUsd).toBeCloseTo(0.0123)
+  })
+
+  it('bills pay-per-token billing the list price', () => {
+    const row = claudeTranscriptRow({
+      entry,
+      account: { ...attributed, billingType: 'apiKey' },
+      sessionId: null
+    })
+    expect(row.billedCostUsd).toBeCloseTo(0.0123)
+  })
+
+  it('leaves an unattributed entry in the unknown bucket with no bill', () => {
+    const row = claudeTranscriptRow({
+      entry,
+      account: {
+        email: null,
+        accountUuid: null,
+        accountKey: 'unknown',
+        accountLabel: null,
+        billingType: 'unknown'
+      },
+      sessionId: null
+    })
+    expect(row.accountKey).toBe('unknown')
+    expect(row.accountLabel).toBeNull()
+    expect(row.billingType).toBe('unknown')
+    // Unknown is not free: null, never a zero a total would absorb (ADR-030).
+    expect(row.billedCostUsd).toBeNull()
+  })
+
+  it('differs between its two callers ONLY in the session id', () => {
+    const fromBlockUsage = claudeTranscriptRow({
+      entry,
+      account: attributed,
+      sessionId: entry.sessionId
+    })
+    const fromReconciler = claudeTranscriptRow({ entry, account: attributed, sessionId: null })
+    // The two race for one message_id; whichever wins the dedup must store the
+    // same row. `id` is a fresh uuid per call by construction.
+    expect({ ...fromBlockUsage, id: '', sessionId: null }).toEqual({
+      ...fromReconciler,
+      id: '',
+      sessionId: null
+    })
+    expect(fromBlockUsage.sessionId).toBe('ses_from_path')
+    expect(fromReconciler.sessionId).toBeNull()
   })
 })

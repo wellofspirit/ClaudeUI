@@ -106,6 +106,35 @@ function liveRow(overrides: Partial<UsageEventInsert> = {}): UsageEventInsert {
   }
 }
 
+/**
+ * ADR-011's time-based attribution as block-usage now hands it over. A
+ * transcript entry older than the account log's first record, or one resolved
+ * to a record written before ADR-071 §3, has no subscription to name.
+ */
+const UNATTRIBUTED = {
+  email: null,
+  accountUuid: null,
+  accountKey: 'unknown',
+  accountLabel: null,
+  billingType: 'unknown'
+} as const
+
+function attributed(): {
+  email: string
+  accountUuid: string
+  accountKey: string
+  accountLabel: string
+  billingType: 'subscription'
+} {
+  return {
+    email: 'me@x.com',
+    accountUuid: 'uuid_me',
+    accountKey: 'anthropic:org_1:uuid_me',
+    accountLabel: 'me@x.com (Org One)',
+    billingType: 'subscription'
+  }
+}
+
 beforeEach(() => {
   closeDb()
   mockGetClaudeEntries.mockReset()
@@ -146,8 +175,7 @@ describe('reconcileClaude', () => {
         cacheReadTokens: 50,
         costUsd: 0.0123,
         messageId: 'msg_claude_a',
-        accountEmail: 'me@x.com',
-        accountUuid: 'uuid_me'
+        account: attributed()
       }
     ])
     await usageReconciler.reconcileClaude()
@@ -161,6 +189,11 @@ describe('reconcileClaude', () => {
     expect(row!.cacheWriteTokens).toBe(100)
     expect(row!.cacheReadTokens).toBe(50)
     expect(row!.accountUuid).toBe('uuid_me')
+    // ADR-071 §3: the subscription the transcript's entry ran under, resolved
+    // by time from the account log (S2a2).
+    expect(row!.accountKey).toBe('anthropic:org_1:uuid_me')
+    expect(row!.accountLabel).toBe('me@x.com (Org One)')
+    expect(row!.billingType).toBe('subscription')
     expect(row!.source).toBe('backfill')
     // engine_cost carries block-usage's calculateCostFromTokens figure
     expect(row!.engineCostUsd).toBeCloseTo(0.0123)
@@ -181,8 +214,7 @@ describe('reconcileClaude', () => {
         cacheReadTokens: 0,
         costUsd: 0.001,
         messageId: '',
-        accountEmail: null,
-        accountUuid: null
+        account: UNATTRIBUTED
       }
     ])
     await usageReconciler.reconcileClaude()
@@ -202,8 +234,7 @@ describe('reconcileClaude', () => {
         cacheReadTokens: 0,
         costUsd: 0.5,
         messageId: 'msg_shared',
-        accountEmail: null,
-        accountUuid: null
+        account: UNATTRIBUTED
       }
     ])
     await usageReconciler.reconcileClaude()
@@ -224,8 +255,7 @@ describe('reconcileClaude', () => {
         cacheReadTokens: 0,
         costUsd: 0.001,
         messageId: 'msg_idem',
-        accountEmail: null,
-        accountUuid: null
+        account: UNATTRIBUTED
       }
     ])
     await usageReconciler.reconcileClaude()
@@ -244,8 +274,7 @@ describe('reconcileClaude', () => {
         cacheReadTokens: 0,
         costUsd: 0.042,
         messageId: 'msg_unpriced',
-        accountEmail: null,
-        accountUuid: null
+        account: UNATTRIBUTED
       }
     ])
     await usageReconciler.reconcileClaude()
@@ -512,8 +541,7 @@ describe('reconcileAll', () => {
         cacheReadTokens: 0,
         costUsd: 0.001,
         messageId: 'msg_both_claude',
-        accountEmail: null,
-        accountUuid: null
+        account: UNATTRIBUTED
       }
     ])
     mockAcquire.mockResolvedValue({ baseUrl: 'http://127.0.0.1:1', authHeader: 'Basic x' })

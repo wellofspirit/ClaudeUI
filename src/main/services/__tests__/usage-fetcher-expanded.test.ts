@@ -622,3 +622,154 @@ describe('UsageFetcher — cache TTL short-circuits startPolling() network call'
     })
   })
 })
+
+// ---------------------------------------------------------------------------
+// Account tracking (ADR-011 §4, extended by ADR-071 §3)
+//
+// Everything here runs against the virtual fs above: '.claude.json' and
+// 'account-log.jsonl' are Map entries, never files. No real credential, no
+// real home directory and no real account is reachable from this suite.
+// ---------------------------------------------------------------------------
+
+describe('UsageFetcher — account log', () => {
+  let fetcher: UsageFetcher
+  const fetchMock = vi.fn()
+
+  /** A fabricated `~/.claude.json`. Every value here is invented. */
+  function seedClaudeJson(oauthAccount: Record<string, unknown>): void {
+    vfs.files.set('.claude.json', JSON.stringify({ oauthAccount }))
+  }
+
+  function logRecords(): Array<Record<string, unknown>> {
+    return (vfs.files.get('account-log.jsonl') ?? '')
+      .split('\n')
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+  }
+
+  beforeEach(() => {
+    vfs.files.clear()
+    vfs.readErrors.clear()
+    fetchMock.mockReset()
+    fetchMock.mockResolvedValue(makeFetchResponse(200, { five_hour: { utilization: 1 } }))
+    vi.stubGlobal('fetch', fetchMock)
+    fetcher = new UsageFetcher()
+    seedValidCredentials()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('records the organization and the billing type beside the account', async () => {
+    seedClaudeJson({
+      accountUuid: 'acc_1',
+      emailAddress: 'someone@example.test',
+      organizationUuid: 'org_personal',
+      organizationName: 'Personal',
+      billingType: 'stripe_subscription'
+    })
+
+    await fetcher.fetch()
+
+    expect(logRecords()).toHaveLength(1)
+    expect(logRecords()[0]).toMatchObject({
+      accountUuid: 'acc_1',
+      email: 'someone@example.test',
+      organizationUuid: 'org_personal',
+      organizationName: 'Personal',
+      billingType: 'subscription'
+    })
+    expect(fetcher.getActiveAccount()).toMatchObject({
+      uuid: 'acc_1',
+      organizationUuid: 'org_personal',
+      organizationName: 'Personal'
+    })
+  })
+
+  it('logs a move between two organizations under ONE account uuid', async () => {
+    // The uuid-only comparison this replaces would have written nothing here,
+    // and every later row would have named the wrong subscription.
+    seedClaudeJson({
+      accountUuid: 'acc_1',
+      emailAddress: 'someone@example.test',
+      organizationUuid: 'org_personal',
+      billingType: 'stripe_subscription'
+    })
+    await fetcher.fetch()
+
+    seedClaudeJson({
+      accountUuid: 'acc_1',
+      emailAddress: 'someone@example.test',
+      organizationUuid: 'org_work',
+      billingType: 'usage_based'
+    })
+    await fetcher.fetch()
+
+    const records = logRecords()
+    expect(records).toHaveLength(2)
+    expect(records[1]).toMatchObject({
+      accountUuid: 'acc_1',
+      organizationUuid: 'org_work',
+      billingType: 'apiKey'
+    })
+  })
+
+  it('writes nothing while the account and the organization both stand', async () => {
+    seedClaudeJson({
+      accountUuid: 'acc_1',
+      emailAddress: 'someone@example.test',
+      organizationUuid: 'org_personal',
+      billingType: 'stripe_subscription'
+    })
+    await fetcher.fetch()
+    await fetcher.fetch()
+    await fetcher.fetch()
+    expect(logRecords()).toHaveLength(1)
+  })
+
+  it('appends once against a log whose last record predates the new fields', async () => {
+    // The upgrade path: an existing log names no organization, so the first
+    // read after this change sees a changed pair and writes one that does.
+    vfs.files.set(
+      'account-log.jsonl',
+      JSON.stringify({ ts: 1000, accountUuid: 'acc_1', email: 'someone@example.test' }) + '\n'
+    )
+    seedClaudeJson({
+      accountUuid: 'acc_1',
+      emailAddress: 'someone@example.test',
+      organizationUuid: 'org_personal',
+      billingType: 'stripe_subscription'
+    })
+
+    await fetcher.fetch()
+    await fetcher.fetch()
+
+    const records = logRecords()
+    expect(records).toHaveLength(2)
+    expect(records[0].organizationUuid).toBeUndefined()
+    expect(records[1]).toMatchObject({ organizationUuid: 'org_personal' })
+  })
+
+  it('says unknown rather than guessing when the profile names no billing type', async () => {
+    // No host auth is wired in this suite, so the fallback signal is absent
+    // too — and 'unknown' is what the row then has to say.
+    seedClaudeJson({
+      accountUuid: 'acc_1',
+      emailAddress: 'someone@example.test',
+      organizationUuid: 'org_personal',
+      billingType: 'some_future_plan'
+    })
+    await fetcher.fetch()
+    expect(logRecords()[0].billingType).toBe('unknown')
+  })
+
+  it('omits the organization keys entirely when the profile carries none', async () => {
+    seedClaudeJson({ accountUuid: 'acc_1', emailAddress: 'someone@example.test' })
+    await fetcher.fetch()
+    const record = logRecords()[0]
+    expect(record.organizationUuid).toBeUndefined()
+    expect(record.organizationName).toBeUndefined()
+    expect(record.accountUuid).toBe('acc_1')
+  })
+})

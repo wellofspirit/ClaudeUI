@@ -23,7 +23,13 @@ import type {
 import { usageFetcher } from './usage-fetcher'
 import { logger } from './logger'
 import { writeJsonAtomic } from './write-json-atomic'
-import { canonicalizeWindowEnd, accountForTimestamp, type AccountLogRecord } from './usage-windows'
+import {
+  canonicalizeWindowEnd,
+  accountForTimestamp,
+  claudeAccountAttribution,
+  type AccountLogRecord,
+  type ClaudeAccountAttribution
+} from './usage-windows'
 import {
   groupEntriesIntoBlocks,
   computeProjectionWLS as computeWLS,
@@ -45,9 +51,8 @@ import {
   type UsageEventRow,
   type DailyUsageRow
 } from './db'
-import { backfillAttribution } from './usage-recorder'
-import { v4 as uuid } from 'uuid'
-import { equivalentCostUsd, ANTHROPIC_MODEL_PRICING, type ModelPricing } from '../../shared/pricing'
+import { claudeTranscriptRow } from './usage-recorder'
+import { ANTHROPIC_MODEL_PRICING, type ModelPricing } from '../../shared/pricing'
 import { emitEvent } from './sync-host'
 
 // ---------------------------------------------------------------------------
@@ -339,26 +344,20 @@ export class BlockUsageService {
   /**
    * Parse all Claude JSONL entries within the scan window (reusing the exact
    * parse + calculateCostFromTokens), each tagged with its time-attributed
-   * account (email + uuid from the account log). The Phase 7 reconciler calls
-   * this to import Claude usage_event rows — there is NO second JSONL parser.
+   * account (ADR-011 §4 resolved into ADR-071 §3's row columns). The Phase 7
+   * reconciler calls this to import Claude usage_event rows — there is NO
+   * second JSONL parser.
    */
   async getClaudeEntriesForReconcile(): Promise<
-    Array<ParsedEntry & { accountEmail: string | null; accountUuid: string | null }>
+    Array<ParsedEntry & { account: ClaudeAccountAttribution }>
   > {
     const cutoff = Date.now() - SCAN_WINDOW_MS
     const entries = await this.scanJsonlWithCutoff(cutoff)
     const accountLog = this.loadAccountLog()
-    // Build email → uuid from the log (latest wins).
-    const emailToUuid = new Map<string, string>()
-    for (const rec of accountLog) emailToUuid.set(rec.email, rec.accountUuid)
-    return entries.map((e) => {
-      const email = accountForTimestamp(accountLog, e.timestamp)
-      return {
-        ...e,
-        accountEmail: email,
-        accountUuid: email ? (emailToUuid.get(email) ?? null) : null
-      }
-    })
+    return entries.map((e) => ({
+      ...e,
+      account: claudeAccountAttribution(accountLog, e.timestamp)
+    }))
   }
 
   /** Set the account filter (email, null = all) and rebuild the view. */
@@ -765,49 +764,16 @@ export class BlockUsageService {
    */
   private upsertClaudeEntriesToDb(entries: ParsedEntry[], accountLog: AccountLogRecord[]): void {
     try {
-      const emailToUuid = new Map<string, string>()
-      for (const rec of accountLog) emailToUuid.set(rec.email, rec.accountUuid)
       const rows: UsageEventInsert[] = []
       for (const e of entries) {
         if (!e.messageId) continue
-        const email = accountForTimestamp(accountLog, e.timestamp)
-        const equiv = equivalentCostUsd('anthropic', e.model, {
-          inputTokens: e.inputTokens,
-          outputTokens: e.outputTokens,
-          cacheWriteTokens: e.cacheCreationTokens,
-          cacheWrite1hTokens: 0,
-          cacheReadTokens: e.cacheReadTokens
-        })
-        rows.push({
-          id: uuid(),
-          ts: e.timestamp,
-          engineId: 'claude',
-          vendorId: 'anthropic',
-          accountId: null,
-          accountUuid: email ? (emailToUuid.get(email) ?? null) : null,
-          modelId: e.model,
-          inputTokens: e.inputTokens,
-          outputTokens: e.outputTokens,
-          cacheWriteTokens: e.cacheCreationTokens,
-          cacheWrite1hTokens: 0,
-          cacheReadTokens: e.cacheReadTokens,
-          equivCostUsd: equiv ?? e.costUsd,
-          engineCostUsd: e.costUsd,
-          sessionId: e.sessionId,
-          messageId: e.messageId,
-          source: 'backfill',
-          // Same ADR-071 attribution the reconciler gives its Claude rows —
-          // the two paths race for the same message_id, so whichever wins the
-          // dedup has to store the same thing. A transcript names no account
-          // and no billing type (S2a2 takes ADR-011's time-based attribution
-          // further); 'unknown' is the honest value for both.
-          ...backfillAttribution({
-            billingType: 'unknown',
-            equivCostUsd: equiv ?? e.costUsd,
-            engineCostUsd: e.costUsd,
-            engineCostIsEquivalent: true
+        rows.push(
+          claudeTranscriptRow({
+            entry: e,
+            account: claudeAccountAttribution(accountLog, e.timestamp),
+            sessionId: e.sessionId
           })
-        })
+        )
       }
       insertUsageEvents(rows)
     } catch (err) {

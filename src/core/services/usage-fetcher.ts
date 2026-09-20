@@ -24,10 +24,15 @@ import { homedir, platform } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { getCliVersion } from './claude-session'
 import { emitEvent } from './sync-host'
-import type { AccountUsage, ExtraUsage, RateWindow } from '../../shared/types'
+import type { AccountUsage, BillingType, ExtraUsage, RateWindow } from '../../shared/types'
 import { logger } from './logger'
 import { recordWindowSample } from './db'
-import { canonicalizeWindowEnd } from './usage-windows'
+import {
+  canonicalizeWindowEnd,
+  claudeBillingTypeFromProfile,
+  type AccountLogRecord
+} from './usage-windows'
+import { buildClaudeAccountRef } from '../host'
 import { getSecurestorageEnv } from '../sdk/securestorage-env'
 import { writeJsonAtomicAsync } from './write-json-atomic'
 
@@ -35,6 +40,14 @@ import { writeJsonAtomicAsync } from './write-json-atomic'
 export interface ActiveAccount {
   uuid: string
   email: string
+  /**
+   * The subscription this account is on (ADR-071 §3's `anthropic:<org>:…`).
+   * Optional because `oauthAccount` is not guaranteed to carry it — an account
+   * with no organization id is attributable by email but not by key.
+   */
+  organizationUuid?: string
+  /** Display only — what tells two subscriptions under one email apart. */
+  organizationName?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -92,6 +105,21 @@ function getCliUserAgent(): string {
   }
 }
 
+/** The account-log dedup subject: which subscription the last record named. */
+interface LoggedAccountPair {
+  accountUuid: string
+  organizationUuid: string | undefined
+}
+
+/**
+ * Whether the account log already names this subscription. Compared as a PAIR
+ * rather than as one encoded string, so no separator has to be assumed absent
+ * from either uuid.
+ */
+function samePair(a: LoggedAccountPair | null, b: LoggedAccountPair): boolean {
+  return a !== null && a.accountUuid === b.accountUuid && a.organizationUuid === b.organizationUuid
+}
+
 /** The anthropic-beta header value — BZ in the CLI's minified code. */
 const ANTHROPIC_BETA = 'oauth-2025-04-20'
 
@@ -132,8 +160,14 @@ export class UsageFetcher {
   private userAgent = getCliUserAgent()
   private cacheWriteTimer: ReturnType<typeof setTimeout> | null = null
   private activeAccount: ActiveAccount | null = null
-  /** Last account written to the account log (avoid duplicate records). */
-  private lastLoggedAccountUuid: string | null = null
+  /**
+   * Last (accountUuid, organizationUuid) PAIR written to the account log
+   * (avoid duplicate records). The pair, not the uuid alone: one person moving
+   * between two organizations keeps one account uuid, and ADR-071 §3 keys each
+   * organization as its own subscription, so a uuid-only comparison would
+   * never log the move and every later row would name the wrong subscription.
+   */
+  private lastLoggedAccountPair: LoggedAccountPair | null = null
   private accountLogSeeded = false
   /** Known canonical 5h window ends, for snap-dedup of window samples (Phase 7). */
   private knownCanonicalEnds: number[] = []
@@ -275,17 +309,36 @@ export class UsageFetcher {
    * Read the authenticated account from ~/.claude.json and append a record to
    * the account log when it changes. The log lets block-usage attribute JSONL
    * entries to the account active at their timestamp.
+   *
+   * The record also carries the organization and the billing type (ADR-071
+   * §3), because a row attributed by time to a PAST account has nothing else
+   * left to read — whatever the log did not write down about that account is
+   * gone by the time the row is built.
    */
   private async trackActiveAccount(): Promise<void> {
     try {
       const raw = await readFile(CLAUDE_JSON_PATH, 'utf-8')
       const parsed = JSON.parse(raw) as {
-        oauthAccount?: { accountUuid?: string; emailAddress?: string }
+        oauthAccount?: {
+          accountUuid?: string
+          emailAddress?: string
+          organizationUuid?: string
+          organizationName?: string
+          billingType?: string
+        }
       }
-      const uuid = parsed.oauthAccount?.accountUuid
-      const email = parsed.oauthAccount?.emailAddress
+      const oauthAccount = parsed.oauthAccount
+      const uuid = oauthAccount?.accountUuid
+      const email = oauthAccount?.emailAddress
       if (!uuid || !email) return
-      this.activeAccount = { uuid, email }
+      const organizationUuid = oauthAccount?.organizationUuid
+      const organizationName = oauthAccount?.organizationName
+      this.activeAccount = {
+        uuid,
+        email,
+        ...(organizationUuid ? { organizationUuid } : {}),
+        ...(organizationName ? { organizationName } : {})
+      }
 
       // Initialize dedup state from the log's last record (once per launch)
       if (!this.accountLogSeeded) {
@@ -293,23 +346,56 @@ export class UsageFetcher {
         try {
           const log = await readFile(ACCOUNT_LOG_PATH, 'utf-8')
           const lines = log.trim().split('\n')
-          const last = JSON.parse(lines[lines.length - 1]) as { accountUuid?: string }
-          this.lastLoggedAccountUuid = last.accountUuid ?? null
+          const last = JSON.parse(lines[lines.length - 1]) as Partial<AccountLogRecord>
+          this.lastLoggedAccountPair = last.accountUuid
+            ? { accountUuid: last.accountUuid, organizationUuid: last.organizationUuid }
+            : null
         } catch {
-          this.lastLoggedAccountUuid = null
+          this.lastLoggedAccountPair = null
         }
       }
 
-      if (uuid !== this.lastLoggedAccountUuid) {
-        this.lastLoggedAccountUuid = uuid
-        const record = JSON.stringify({ ts: Date.now(), accountUuid: uuid, email })
+      // A pre-ADR-071 last record names no organization, so the first run after
+      // the upgrade sees a changed pair and appends one that does. That is how
+      // an existing log starts naming subscriptions at all.
+      const pair: LoggedAccountPair = { accountUuid: uuid, organizationUuid }
+      if (!samePair(this.lastLoggedAccountPair, pair)) {
+        this.lastLoggedAccountPair = pair
+        const record: AccountLogRecord = {
+          ts: Date.now(),
+          accountUuid: uuid,
+          email,
+          ...(organizationUuid ? { organizationUuid } : {}),
+          ...(organizationName ? { organizationName } : {}),
+          billingType: this.claudeBillingType(oauthAccount?.billingType)
+        }
         await mkdir(ACCOUNT_LOG_DIR, { recursive: true })
-        await appendFile(ACCOUNT_LOG_PATH, record + '\n', 'utf-8')
+        await appendFile(ACCOUNT_LOG_PATH, JSON.stringify(record) + '\n', 'utf-8')
         logger.info('UsageFetcher', `Active account changed → ${email}`)
       }
     } catch (err) {
       logger.debug('UsageFetcher', `Account tracking failed: ${err}`)
     }
+  }
+
+  /**
+   * How this account is billed, for the log record.
+   *
+   * `oauthAccount.billingType` is the profile Anthropic itself returned (plan
+   * metadata, not a credential), and it is the only signal that separates a
+   * `usage_based` OAuth account — billed per token — from a plan. The app's
+   * other decision, `ClaudeAuthProvider`'s `inferBillingType`, reads cli.js's
+   * `initialize` response, which for an OAuth account can only ever answer
+   * `subscription` or `unknown`, and is empty until the first session inits.
+   * So it is the FALLBACK here, for a profile field that is absent or holds a
+   * value outside cli.js's own vocabulary.
+   */
+  private claudeBillingType(profileValue: unknown): BillingType {
+    return (
+      claudeBillingTypeFromProfile(profileValue) ??
+      buildClaudeAccountRef()?.billingType ??
+      'unknown'
+    )
   }
 
   // -------------------------------------------------------------------------

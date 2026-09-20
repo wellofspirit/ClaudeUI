@@ -15,6 +15,7 @@ import type { UsageEventInsert } from './db'
 import { equivalentCostUsd } from '../../shared/pricing'
 import { resolveCosts } from '../../shared/cost-rule'
 import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
+import type { ClaudeAccountAttribution } from './usage-windows'
 import type { BillingType, UsageOrigin } from '../../shared/types'
 import { logger } from './logger'
 
@@ -163,6 +164,91 @@ export function backfillAttribution(
     parentRoutingId: null,
     apiCostUsd: costs.apiCostUsd,
     billedCostUsd: costs.billedCostUsd
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The Claude transcript row — one builder, two callers
+// ---------------------------------------------------------------------------
+
+/**
+ * The transcript fields a Claude backfill row is built from — structurally
+ * block-usage's `ParsedEntry`, restated here so this module does not import
+ * from a module that imports it.
+ */
+export interface ClaudeTranscriptEntry {
+  timestamp: number
+  model: string
+  inputTokens: number
+  outputTokens: number
+  cacheCreationTokens: number
+  cacheReadTokens: number
+  costUsd: number
+  messageId: string
+  sessionId: string | null
+}
+
+/**
+ * One Claude JSONL entry as a `usage_event` row.
+ *
+ * TWO paths reach this: the reconciler's Claude builder and block-usage's own
+ * inline upsert. They race for the same `message_id`, so whichever wins the
+ * dedup has to store the same thing — which is only guaranteed if there is one
+ * builder, not two that look alike. The one difference the callers keep is the
+ * session id: the reconciler has none to give (it reads entries that were
+ * already flattened), block-usage derives one from the file path.
+ *
+ * `engineCostIsEquivalent` is true: cli.js reports a list price, never a bill.
+ */
+export function claudeTranscriptRow(params: {
+  entry: ClaudeTranscriptEntry
+  account: ClaudeAccountAttribution
+  sessionId: string | null
+}): UsageEventInsert {
+  const { entry, account, sessionId } = params
+  const equiv = equivalentCostUsd('anthropic', entry.model, {
+    inputTokens: entry.inputTokens,
+    outputTokens: entry.outputTokens,
+    // The JSONL ParsedEntry does not split the 1h cache TTL out separately
+    // (block-usage already priced it into costUsd via calculateCostFromTokens),
+    // so for equiv_cost every cache write counts as 5m and engine_cost carries
+    // block-usage's exact figure.
+    cacheWriteTokens: entry.cacheCreationTokens,
+    cacheWrite1hTokens: 0,
+    cacheReadTokens: entry.cacheReadTokens
+  })
+  return {
+    id: uuid(),
+    ts: entry.timestamp,
+    engineId: 'claude',
+    vendorId: 'anthropic',
+    accountId: null,
+    accountUuid: account.accountUuid,
+    modelId: entry.model,
+    inputTokens: entry.inputTokens,
+    outputTokens: entry.outputTokens,
+    cacheWriteTokens: entry.cacheCreationTokens,
+    cacheWrite1hTokens: 0,
+    cacheReadTokens: entry.cacheReadTokens,
+    // equiv_cost from the pricing table when priced; otherwise fall back to
+    // block-usage's calculateCostFromTokens value (entry.costUsd).
+    equivCostUsd: equiv ?? entry.costUsd,
+    engineCostUsd: entry.costUsd,
+    sessionId,
+    messageId: entry.messageId,
+    source: 'backfill',
+    // A transcript names no account of its own, so the attribution is ADR-011's
+    // time-based one, resolved from the account log (S2a2). An entry older than
+    // the log's first record, or one whose record predates ADR-071 §3, stays in
+    // the `unknown` bucket rather than guessing.
+    ...backfillAttribution({
+      accountKey: account.accountKey,
+      accountLabel: account.accountLabel,
+      billingType: account.billingType,
+      equivCostUsd: equiv ?? entry.costUsd,
+      engineCostUsd: entry.costUsd,
+      engineCostIsEquivalent: true
+    })
   }
 }
 

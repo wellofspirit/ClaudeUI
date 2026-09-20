@@ -34,7 +34,7 @@ import { v4 as uuid } from 'uuid'
 import { insertUsageEvents, type UsageEventInsert } from './db'
 import { blockUsageService } from './block-usage'
 import { equivalentCostUsd } from '../../shared/pricing'
-import { backfillAttribution } from './usage-recorder'
+import { backfillAttribution, claudeTranscriptRow } from './usage-recorder'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { logger } from './logger'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
@@ -98,48 +98,9 @@ class UsageReconciler {
       const rows: UsageEventInsert[] = []
       for (const e of entries) {
         if (!e.messageId) continue // dedup key required; skip if missing
-        const equiv = equivalentCostUsd('anthropic', e.model, {
-          inputTokens: e.inputTokens,
-          outputTokens: e.outputTokens,
-          // The live stream / JSONL ParsedEntry does not split the 1h cache TTL
-          // out separately here (block-usage already priced it into costUsd via
-          // calculateCostFromTokens). For the equiv_cost column we treat all
-          // cache writes as 5m; engine_cost carries block-usage's exact figure.
-          cacheWriteTokens: e.cacheCreationTokens,
-          cacheWrite1hTokens: 0,
-          cacheReadTokens: e.cacheReadTokens
-        })
-        rows.push({
-          id: uuid(),
-          ts: e.timestamp,
-          engineId: 'claude',
-          vendorId: 'anthropic',
-          accountId: null,
-          accountUuid: e.accountUuid,
-          modelId: e.model,
-          inputTokens: e.inputTokens,
-          outputTokens: e.outputTokens,
-          cacheWriteTokens: e.cacheCreationTokens,
-          cacheWrite1hTokens: 0,
-          cacheReadTokens: e.cacheReadTokens,
-          // equiv_cost from the pricing table when priced; otherwise fall back to
-          // block-usage's calculateCostFromTokens value (e.costUsd).
-          equivCostUsd: equiv ?? e.costUsd,
-          engineCostUsd: e.costUsd,
-          sessionId: null,
-          messageId: e.messageId,
-          source: 'backfill',
-          // A transcript records no account and no billing type: it may have
-          // run under a subscription, an API key or Bedrock, and ADR-011's
-          // time-based attribution is a separate question (S2a2). 'unknown'
-          // is the honest value for both, not a guess.
-          ...backfillAttribution({
-            billingType: 'unknown',
-            equivCostUsd: equiv ?? e.costUsd,
-            engineCostUsd: e.costUsd,
-            engineCostIsEquivalent: true
-          })
-        })
+        // The SAME builder block-usage's inline upsert uses — the two race for
+        // one message_id, so they must not be able to disagree about the row.
+        rows.push(claudeTranscriptRow({ entry: e, account: e.account, sessionId: null }))
       }
 
       insertUsageEvents(rows)
