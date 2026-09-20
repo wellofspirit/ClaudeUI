@@ -1,6 +1,7 @@
 # ADR-011: Canonical 5h-window identity from `resets_at` + time-based account attribution for usage analytics
 
 **Status:** Accepted
+**Amendment proposed:** [ADR-071](adr-071_metering-ledger-and-window-value.md) §3 records the account directly for sessions this app spawns; the time-based log in §4 stays for imported transcripts.
 **Date:** 2026-06-10
 
 ## Context
