@@ -10,6 +10,10 @@
  * the billing type to get an API-equivalent figure, a billed figure and the one a
  * headline shows, with null meaning unknown rather than zero (ADR-030).
  *
+ * `displayCostFromRow()` is the same rule read back off a stored row, which
+ * carries the resolved pair rather than the raw inputs. Every dollar figure the
+ * dashboard shows goes through one of the two.
+ *
  * shared/ — no DB, no electron, no node-only APIs, renderer-safe. Pure computation.
  */
 
@@ -74,6 +78,47 @@ export function resolveCosts(input: CostInputs): ResolvedCosts {
       const billedCostUsd = engineCostUsd !== null && engineCostUsd > 0 ? engineCostUsd : null
       return { apiCostUsd, billedCostUsd, displayCostUsd: billedCostUsd ?? apiCostUsd }
     }
+  }
+}
+
+/** A stored row's (or bucket's) resolved pair, as the ledger holds it. */
+export interface ResolvedCostRow {
+  billingType: BillingType
+  /** The row's `api_cost_usd`. Null when nothing could price the turn. */
+  apiCostUsd: number | null
+  /** The row's `billed_cost_usd`. Null when what was charged is unknown. */
+  billedCostUsd: number | null
+}
+
+/**
+ * The figure a surface shows for a row that ALREADY carries the resolved pair
+ * (ADR-071 §1) — the read-side twin of {@link resolveCosts}, which derives that
+ * pair from the raw engine inputs at write time.
+ *
+ * Same answers, one rule: a subscription shows what the tokens were worth, an
+ * API key shows what was actually charged and falls back to the equivalent
+ * when the engine reported no charge, a free turn shows zero, and an unknown
+ * plan shows a charge if there was one and the equivalent otherwise.
+ *
+ * Null means UNKNOWN, never zero (ADR-030). A caller that needs a number
+ * decides what an unknown row is worth — `selectRowCostUsd` recomputes from
+ * the pricing table, a bucket counts it in its unknown-cost count.
+ */
+export function displayCostFromRow(row: ResolvedCostRow): number | null {
+  const apiCostUsd = finiteOrNull(row.apiCostUsd)
+  const billedCostUsd = finiteOrNull(row.billedCostUsd)
+
+  switch (row.billingType) {
+    case 'subscription':
+      return apiCostUsd
+    case 'free':
+      // A free turn cost nothing, whatever the columns hold — the same answer
+      // resolveCosts gives, and the reason `api_cost_usd` is still recorded:
+      // it is what the turn was WORTH, not what it cost.
+      return 0
+    case 'apiKey':
+    default:
+      return billedCostUsd ?? apiCostUsd
   }
 }
 

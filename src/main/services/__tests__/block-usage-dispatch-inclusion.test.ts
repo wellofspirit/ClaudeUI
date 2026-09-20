@@ -1,18 +1,19 @@
 /**
  * @vitest-environment node
  *
- * S2c — a dispatched turn is a `usage_event` row now, and until S2c2 redesigns
- * the readers it must stay INVISIBLE to every figure already on screen.
+ * ADR-071 §1 — a dispatched turn is spend, and every dashboard figure counts it.
  *
- * The dashboard shows dispatched work in its own Delegated section, sourced
- * from `dispatched_usage`. The three readers below all pull from the ledger,
- * so without the `origin != 'dispatch'` exclusion each of them would count the
- * same spend a second time, beside the section that already shows it. These
- * tests are the guard on that exclusion, and they GO when S2c2 does.
+ * This file used to guard the opposite: S2c wrote the ledger rows but left a
+ * temporary `origin != 'dispatch'` filter on all three readers, because the
+ * Delegated section was still sourced from `dispatched_usage` and the same
+ * money would have been shown twice. The old table is gone (migration v20), the
+ * Delegated section reads the ledger, and the filter with it — so these are now
+ * the guard that delegated work is IN the per-engine breakdown, in the 5-hour
+ * blocks of the account that ran it, and in the hourly buckets.
  *
  * DB is isolated per test via an os.homedir() redirect to a temp dir (the db
  * singleton opens ~/.claude/ui/operational.db lazily; better-sqlite3 is the
- * node:sqlite stub) — the same harness block-usage-daily-rollup.test.ts uses.
+ * node:sqlite stub) — the same harness block-usage-bucket-rollup.test.ts uses.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import * as fs from 'fs'
@@ -54,11 +55,11 @@ type DbModule = typeof import('../../../core/services/db')
 type BlockUsageService = InstanceType<
   (typeof import('../../../core/services/block-usage'))['BlockUsageService']
 >
-/** The two private readers under test, reached the way the H13 test reaches them. */
+/** The three private readers under test, reached the way the H13 test reaches them. */
 type Internals = {
   computePerEngine(now: number): Array<{ engineId: string; costUsd: number }> | undefined
   claudeEntriesFromDb(now: number): Array<{ messageId: string }>
-  rollupDailyUsageFromDb(now: number): void
+  rollupUsageBucketsFromDb(now: number): void
 }
 
 async function fresh(): Promise<{ db: DbModule; service: BlockUsageService }> {
@@ -169,8 +170,8 @@ function migratedDispatchRow(db: DbModule, dispatchedId: number, ts: number): vo
   })
 }
 
-describe('S2c — dispatched ledger rows stay out of the figures already on screen', () => {
-  it('the per-engine breakdown counts the session turn and neither dispatched row', async () => {
+describe('ADR-071 — dispatched ledger rows count in every figure', () => {
+  it('the per-engine breakdown counts the session turn and both dispatched rows', async () => {
     const { db, service } = await fresh()
     try {
       sessionRow(db, 'e_session', DAY_D_START + 2 * HOUR)
@@ -179,18 +180,20 @@ describe('S2c — dispatched ledger rows stay out of the figures already on scre
 
       const perEngine = (service as unknown as Internals).computePerEngine(NOW)
 
-      // One engine, one turn's worth of spend. With the exclusion removed the
-      // claude row would carry $0.51 and a second `opencode` engine would
-      // appear out of nowhere.
-      expect(perEngine).toHaveLength(1)
-      expect(perEngine![0]).toMatchObject({ engineId: 'claude' })
-      expect(perEngine![0].costUsd).toBeCloseTo(0.01)
+      // Claude carries the session turn AND the dispatched Claude turn; the
+      // migrated opencode dispatch is opencode's own spend, so opencode
+      // appears — which is the point: delegated work is work.
+      expect(perEngine).toHaveLength(2)
+      const claude = perEngine!.find((e) => e.engineId === 'claude')!
+      const opencode = perEngine!.find((e) => e.engineId === 'opencode')!
+      expect(claude.costUsd).toBeCloseTo(0.51)
+      expect(opencode.costUsd).toBeCloseTo(0.21)
     } finally {
       db.closeDb()
     }
   })
 
-  it('the block grouping reads only the session turn', async () => {
+  it('the block grouping counts a dispatched Claude turn — it spends the same window', async () => {
     const { db, service } = await fresh()
     try {
       sessionRow(db, 'e_session', DAY_D_START + 2 * HOUR)
@@ -198,61 +201,65 @@ describe('S2c — dispatched ledger rows stay out of the figures already on scre
 
       const entries = (service as unknown as Internals).claudeEntriesFromDb(NOW)
 
-      expect(entries.map((e) => e.messageId)).toEqual(['e_session'])
+      // ADR-011: a block is one account's consumption of a 5-hour rate-limit
+      // window. A dispatch target burns that window exactly as a session does.
+      expect(entries.map((e) => e.messageId)).toEqual(['e_session', 'e_dispatch_live'])
     } finally {
       db.closeDb()
     }
   })
 
-  it('the daily rollup counts neither the tokens nor the request of a dispatched row', async () => {
+  it('the rollup buckets a dispatched turn under its own origin', async () => {
     const { db, service } = await fresh()
     try {
       sessionRow(db, 'e_session', DAY_D_START + 2 * HOUR)
       liveDispatchRow(db, 'e_dispatch_live', DAY_D_START + 3 * HOUR)
       migratedDispatchRow(db, 1, DAY_D_START + 4 * HOUR)
 
-      ;(service as unknown as Internals).rollupDailyUsageFromDb(NOW)
+      ;(service as unknown as Internals).rollupUsageBucketsFromDb(NOW)
 
-      const rows = db.getAllDailyUsage()
-      // One (date, engine, vendor, model) row, not three — a migrated row with
-      // a zero split would otherwise mint a whole chart series worth nothing.
-      expect(rows).toHaveLength(1)
-      expect(rows[0]).toMatchObject({
-        date: '2025-06-15',
-        engineId: 'claude',
-        vendorId: 'anthropic',
-        inputTokens: 100,
-        outputTokens: 40,
-        requestCount: 1
-      })
+      const rows = db.getUsageBucketsSince(0)
+      expect(rows.map((r) => [r.engineId, r.origin])).toEqual([
+        ['claude', 'session'],
+        ['claude', 'dispatch'],
+        ['opencode', 'dispatch']
+      ])
+      // The migrated row's ZERO token split is not a claim that the turn was
+      // free: its cost is what it carries, and the bucket keeps it.
+      const migrated = rows[2]
+      expect(migrated.inputTokens).toBe(0)
+      expect(migrated.apiCostUsd).toBeCloseTo(0.21)
+      expect(migrated.requestCount).toBe(1)
     } finally {
       db.closeDb()
     }
   })
 
-  it('the Delegated section still sees the dispatched turn — this is where it belongs', async () => {
+  it('the Delegated section reads the same rows, grouped by target', async () => {
     const { db } = await fresh()
     try {
-      db.insertDispatchedUsage({
-        ts: DAY_D_START + 3 * HOUR,
-        fromRoutingId: 'routing-1',
-        fromEngine: 'claude',
-        targetEngine: 'opencode',
-        targetModel: 'openai/gpt-5.6-luna',
-        targetSessionId: 'oc-sess-1',
-        toolUseId: 'toolu_1',
-        totalTokens: 7_000,
-        costUsd: 0.21,
-        durationMs: 1_000
-      })
       liveDispatchRow(db, 'e_dispatch_live', DAY_D_START + 3 * HOUR)
+      migratedDispatchRow(db, 1, DAY_D_START + 4 * HOUR)
+      // A session's own turn is not delegated work and must not appear here.
+      sessionRow(db, 'e_session', DAY_D_START + 2 * HOUR)
 
       expect(db.dispatchedUsageSummary()).toEqual([
         {
-          targetEngine: 'opencode',
-          targetModel: 'openai/gpt-5.6-luna',
+          targetEngine: 'claude',
+          targetModel: 'claude-opus-4-8',
           dispatches: 1,
           totalTokens: 7_000,
+          costUsd: 0.5
+        },
+        {
+          targetEngine: 'opencode',
+          // Re-encoded the way the dispatcher spelled it, which is also how the
+          // live breakdown keys it.
+          targetModel: 'openai/gpt-5.6-luna',
+          dispatches: 1,
+          // A migrated row records no split, and a zero total is not a claim
+          // that no tokens moved.
+          totalTokens: 0,
           costUsd: 0.21
         }
       ])
@@ -261,7 +268,7 @@ describe('S2c — dispatched ledger rows stay out of the figures already on scre
     }
   })
 
-  it('getUsageEventsSince still returns everything — S2c2 reads the whole ledger', async () => {
+  it('getUsageEventsSince returns every origin — there is no narrower reader left', async () => {
     const { db } = await fresh()
     try {
       sessionRow(db, 'e_session', DAY_D_START + 2 * HOUR)
@@ -271,7 +278,6 @@ describe('S2c — dispatched ledger rows stay out of the figures already on scre
         'e_session',
         'e_dispatch_live'
       ])
-      expect(db.getSessionUsageEventsSince(0).map((r) => r.messageId)).toEqual(['e_session'])
     } finally {
       db.closeDb()
     }

@@ -26,6 +26,17 @@ function userVersion(db: Db): number {
   return (db.pragma('user_version', { simple: true }) as number | null) ?? 0
 }
 
+/**
+ * Migrate UP TO v19 and no further. This file is about that one step, and v20
+ * drops `dispatched_usage` — the very table these assertions read.
+ */
+function runToV19(db: Db): void {
+  runMigrations(
+    db,
+    MIGRATIONS.filter((m) => m.version <= 19)
+  )
+}
+
 /** The v19 step on its own, for the idempotence check (runMigrations won't re-run it). */
 const V19 = MIGRATIONS.find((m) => m.version === 19)!
 
@@ -105,7 +116,7 @@ describe('migration v19 — dispatched turns become usage_event rows', () => {
     try {
       seedV18(db)
 
-      runMigrations(db)
+      runToV19(db)
 
       expect(userVersion(db)).toBe(19)
       expect((db.prepare('SELECT COUNT(*) AS n FROM usage_event').get() as { n: number }).n).toBe(6)
@@ -134,12 +145,12 @@ describe('migration v19 — dispatched turns become usage_event rows', () => {
     }
   })
 
-  it('leaves the old table in place and unchanged — its readers move in S2c2', () => {
+  it('leaves the old table in place and unchanged — v20 is what drops it', () => {
     const db = openRawDb()
     try {
       seedV18(db)
 
-      runMigrations(db)
+      runToV19(db)
 
       const rows = db.prepare('SELECT * FROM dispatched_usage ORDER BY id').all() as Array<{
         id: number
@@ -158,7 +169,7 @@ describe('migration v19 — dispatched turns become usage_event rows', () => {
     try {
       seedV18(db)
 
-      runMigrations(db)
+      runToV19(db)
 
       expect(readRow(db, 'dispatched:1')).toMatchObject({
         engine_id: 'opencode',
@@ -203,7 +214,7 @@ describe('migration v19 — dispatched turns become usage_event rows', () => {
     try {
       seedV18(db)
 
-      runMigrations(db)
+      runToV19(db)
 
       const priced = readRow(db, 'dispatched:1')
       expect(priced.api_cost_usd).toBeCloseTo(0.21)
@@ -239,14 +250,14 @@ describe('migration v19 — dispatched turns become usage_event rows', () => {
     const db = openRawDb()
     try {
       seedV18(db)
-      runMigrations(db)
+      runToV19(db)
       const before = db.prepare('SELECT * FROM usage_event ORDER BY message_id').all()
 
       // `runMigrations` alone would not re-run v19 (user_version guards it), so
       // the step is driven directly — the property under test is the SQL's own
       // idempotence, not the version guard's.
       expect(() => V19.up(db)).not.toThrow()
-      expect(() => runMigrations(db)).not.toThrow()
+      expect(() => runToV19(db)).not.toThrow()
 
       expect(db.prepare('SELECT * FROM usage_event ORDER BY message_id').all()).toEqual(before)
       expect(userVersion(db)).toBe(19)
@@ -270,7 +281,7 @@ describe('migration v19 — dispatched turns become usage_event rows', () => {
                    'anthropic:org:acct', 'subscription', 'session', 0.31)`
       ).run()
 
-      runMigrations(db)
+      runToV19(db)
 
       expect(readRow(db, 'msg_session')).toMatchObject({
         account_key: 'anthropic:org:acct',
@@ -286,7 +297,7 @@ describe('migration v19 — dispatched turns become usage_event rows', () => {
   it('an empty dispatched_usage migrates to an empty ledger, not an error', () => {
     const db = openRawDb()
     try {
-      runMigrations(db)
+      runToV19(db)
       expect(userVersion(db)).toBe(19)
       expect((db.prepare('SELECT COUNT(*) AS n FROM usage_event').get() as { n: number }).n).toBe(0)
     } finally {

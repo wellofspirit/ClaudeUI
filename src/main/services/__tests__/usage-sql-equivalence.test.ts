@@ -6,11 +6,12 @@
  * Proves the SQL-sourced dashboard == the old JSONL/file-sourced dashboard:
  *   1. Blocks: usage_event round-trip → groupEntriesIntoBlocks produces the SAME
  *      UsageBlocks as the old JSONL ParsedEntry path on the same fixtures.
- *   2. Daily: the daily_usage rollup → dailyHistory produces the SAME per-day
- *      totals/models as the old entry-bucket loadDailyHistory on the same fixtures.
+ *   2. Daily: the hourly usage_bucket rollup → dailyHistory produces the SAME
+ *      per-day totals/models as the old entry-bucket loadDailyHistory on the
+ *      same fixtures.
  *
  * Both round-trips go through the real DB stub (node:sqlite), so the lossless-
- * ness of the usage_event/daily_usage mapping is genuinely exercised.
+ * ness of the usage_event/usage_bucket mapping is genuinely exercised.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
@@ -21,10 +22,10 @@ import {
   getUsageEventsSince,
   getWindowSamples,
   recordWindowSample,
-  upsertDailyUsage,
-  getAllDailyUsage,
+  upsertUsageBuckets,
+  getUsageBucketsSince,
   type UsageEventInsert,
-  type DailyUsageRow,
+  type UsageBucketWrite,
   type WindowSampleRow
 } from '../../../core/services/db'
 import {
@@ -36,6 +37,7 @@ import {
   type ProjectionSample
 } from '../../../core/services/usage-aggregation'
 import { v4 as uuid } from 'uuid'
+import { bucketDisplayCostUsd, floorToHour } from '../../../core/services/usage-aggregation'
 import { equivalentCostUsd } from '../../../shared/pricing'
 import type { UsageBlock } from '../../../shared/types'
 
@@ -108,7 +110,15 @@ function upsertClaudeEntries(entries: ParsedEntry[]): void {
       engineCostUsd: e.costUsd,
       sessionId: null,
       messageId: e.messageId,
-      source: 'backfill'
+      source: 'backfill',
+      // What `claudeTranscriptRow` resolves for a transcript row: a Claude
+      // figure is an API-equivalent whatever the plan (ADR-034), and the
+      // precise of the two is block-usage's own (it prices the 1h cache tier).
+      accountKey: 'unknown',
+      billingType: 'unknown',
+      origin: 'session',
+      apiCostUsd: e.costUsd,
+      billedCostUsd: null
     })
   }
   insertUsageEvents(rows)
@@ -346,30 +356,38 @@ function dailyOld(entries: ParsedEntry[]): DailyHistoryEntry[] {
   return out
 }
 
-/** NEW daily: usage_event → daily_usage rollup → dailyHistoryFromDb (mirrors block-usage). */
+/** NEW daily: usage_event → hourly usage_bucket → dailyHistoryFromDb (mirrors block-usage). */
 function dailySql(entries: ParsedEntry[], now: number): DailyHistoryEntry[] {
   upsertClaudeEntries(entries)
-  // Rollup (mirror rollupDailyUsageFromDb — Claude cost = engine_cost_usd)
+  // Rollup (mirror rollupUsageBucketsFromDb — hourly, every origin, the two
+  // cost columns summed as they stand).
   const cutoff = now - SCAN_WINDOW_MS
   const rows = getUsageEventsSince(cutoff)
-  const buckets = new Map<string, DailyUsageRow>()
+  const buckets = new Map<string, UsageBucketWrite>()
   for (const r of rows) {
-    const date = dateStrFromTimestamp(r.ts)
-    const key = `${date}|${r.engineId}|${r.vendorId}|${r.modelId}`
+    const hourUtc = floorToHour(r.ts)
+    const key = `${hourUtc}|${r.accountKey}|${r.billingType}|${r.engineId}|${r.vendorId}|${r.modelId}|${r.origin}`
     let b = buckets.get(key)
     if (!b) {
       b = {
-        date,
+        hourUtc,
+        accountKey: r.accountKey,
+        billingType: r.billingType,
         engineId: r.engineId,
         vendorId: r.vendorId,
         modelId: r.modelId,
+        origin: r.origin,
         inputTokens: 0,
         outputTokens: 0,
         cacheWriteTokens: 0,
+        cacheWrite1hTokens: 0,
         cacheReadTokens: 0,
-        costUsd: 0,
+        apiCostUsd: 0,
+        billedCostUsd: 0,
+        unbilledApiCostUsd: 0,
+        unknownApiCostCount: 0,
+        unknownBilledCostCount: 0,
         requestCount: 0,
-        peakApiPercent: 0,
         source: 'rollup'
       }
       buckets.set(key, b)
@@ -377,25 +395,33 @@ function dailySql(entries: ParsedEntry[], now: number): DailyHistoryEntry[] {
     b.inputTokens += r.inputTokens
     b.outputTokens += r.outputTokens
     b.cacheWriteTokens += r.cacheWriteTokens
+    b.cacheWrite1hTokens += r.cacheWrite1hTokens
     b.cacheReadTokens += r.cacheReadTokens
-    b.costUsd +=
-      (r.engineId === 'claude' ? r.engineCostUsd : (r.equivCostUsd ?? r.engineCostUsd)) ?? 0
+    if (r.apiCostUsd === null) b.unknownApiCostCount += 1
+    else b.apiCostUsd += r.apiCostUsd
+    if (r.billedCostUsd === null) {
+      b.unknownBilledCostCount += 1
+      if (r.apiCostUsd !== null) b.unbilledApiCostUsd += r.apiCostUsd
+    } else {
+      b.billedCostUsd += r.billedCostUsd
+    }
     b.requestCount += 1
   }
-  upsertDailyUsage([...buckets.values()])
+  upsertUsageBuckets([...buckets.values()])
 
-  // dailyHistoryFromDb (mirror)
-  const all = getAllDailyUsage()
+  // dailyHistoryFromDb (mirror): hourly buckets grouped into LOCAL days.
+  const all = getUsageBucketsSince(0)
   const byDate = new Map<string, { tokens: number; cost: number; models: Record<string, number> }>()
   for (const r of all) {
-    let d = byDate.get(r.date)
+    const date = dateStrFromTimestamp(r.hourUtc)
+    let d = byDate.get(date)
     if (!d) {
       d = { tokens: 0, cost: 0, models: {} }
-      byDate.set(r.date, d)
+      byDate.set(date, d)
     }
     const tok = r.inputTokens + r.outputTokens + r.cacheWriteTokens + r.cacheReadTokens
     d.tokens += tok
-    d.cost += r.costUsd
+    d.cost += bucketDisplayCostUsd(r)
     const norm = normalizeModelName(r.modelId)
     if (norm) d.models[norm] = (d.models[norm] || 0) + tok
   }
@@ -413,7 +439,7 @@ function dailySql(entries: ParsedEntry[], now: number): DailyHistoryEntry[] {
   return out
 }
 
-describe('SQL daily == old entry-bucket daily (same fixtures)', () => {
+describe('bucketed daily == old entry-bucket daily (same fixtures)', () => {
   const NOW = BASE + 2 * 24 * MS_PER_HOUR
 
   it('single day, multi-model — identical daily totals + model map', () => {

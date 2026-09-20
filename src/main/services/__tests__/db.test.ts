@@ -184,7 +184,7 @@ describe('migration framework — user_version guard', () => {
     }
   })
 
-  it('applies the real production migration set (v1–v16)', () => {
+  it('applies the real production migration set (v1–v20)', () => {
     const db = openRawDb()
     try {
       // Default migration list (production MIGRATIONS).
@@ -206,7 +206,9 @@ describe('migration framework — user_version guard', () => {
       //      two derived cost columns
       // v19: the dispatched turns already on disk become usage_event rows
       //      (origin 'dispatch'), so the ledger holds delegated work too
-      expect(userVersion(db)).toBe(19)
+      // v20: usage_bucket (hourly, UTC, kept forever) replaces daily_usage, and
+      //      dispatched_usage is dropped — the ledger is the only store
+      expect(userVersion(db)).toBe(20)
       expect(db.prepare('SELECT * FROM codex_session_overrides').all()).toEqual([])
       expect(db.prepare('SELECT * FROM codex_forks').all()).toEqual([])
       // session_meta must exist and be queryable.
@@ -221,12 +223,20 @@ describe('migration framework — user_version guard', () => {
       // usage_window_sample must exist (Phase 7 v4 migration).
       const wsRows = db.prepare('SELECT * FROM usage_window_sample').all()
       expect(wsRows).toEqual([])
-      // daily_usage must exist (Phase 7 v5 migration — Full SQL).
-      const duRows = db.prepare('SELECT * FROM daily_usage').all()
-      expect(duRows).toEqual([])
-      // dispatched_usage must exist (ADR-033 M4-B v6 migration).
-      const dispatchedRows = db.prepare('SELECT * FROM dispatched_usage').all()
-      expect(dispatchedRows).toEqual([])
+      // usage_bucket must exist and be empty (ADR-071 v20 migration), with the
+      // revision counter beside it.
+      const bucketRows = db.prepare('SELECT * FROM usage_bucket').all()
+      expect(bucketRows).toEqual([])
+      expect(db.prepare('SELECT next_rev FROM usage_bucket_rev WHERE id = 1').get()).toEqual({
+        next_rev: 2
+      })
+      // The two tables v20 retired are gone — v5's daily_usage and v6's
+      // dispatched_usage (ADR-071 §1: the ledger is the only store).
+      for (const table of ['daily_usage', 'dispatched_usage']) {
+        expect(
+          db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)
+        ).toBeUndefined()
+      }
       // remote_config must exist (Phase 1 remote-auth v7 migration).
       const remoteRows = db.prepare('SELECT * FROM remote_config').all()
       expect(remoteRows).toEqual([])
@@ -287,7 +297,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(19)
+      expect(userVersion(db)).toBe(20)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',
@@ -431,7 +441,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(19)
+      expect(userVersion(db)).toBe(20)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         auth_policy: null,
         step_up_tier: 'medium',

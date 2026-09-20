@@ -36,7 +36,8 @@ import type {
   UsageOrigin
 } from '../../shared/types'
 import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
-import { engineMeta } from '../../shared/engine-meta'
+import { displayCostFromRow } from '../../shared/cost-rule'
+import { ENGINE_META, engineMeta } from '../../shared/engine-meta'
 import { logger } from './logger'
 
 // ---------------------------------------------------------------------------
@@ -110,22 +111,6 @@ export interface WindowSampleRow {
   accountUuid: string
   usedPercent: number
   canonicalEnd: number
-}
-
-/** One per-day per-model usage rollup row (the durable 30-day-chart store). */
-export interface DailyUsageRow {
-  date: string
-  engineId: string
-  vendorId: string
-  modelId: string
-  inputTokens: number
-  outputTokens: number
-  cacheWriteTokens: number
-  cacheReadTokens: number
-  costUsd: number
-  requestCount: number
-  peakApiPercent: number
-  source: 'rollup' | 'seed'
 }
 
 /**
@@ -805,6 +790,145 @@ export const MIGRATIONS: Migration[] = [
           d.cost_usd,
           NULL
         FROM dispatched_usage d;
+      `)
+    }
+  },
+  {
+    // v20 — ADR-071 §1: the ledger is the only STORE, and `usage_bucket`
+    // replaces `daily_usage`.
+    //
+    // Three acts, in this order, because each needs the tables the next one
+    // removes:
+    //
+    //  1. DELETE the reconciler's duplicates of dispatched opencode turns.
+    //  2. CREATE `usage_bucket` and seed it from `daily_usage`.
+    //  3. DROP `daily_usage` and `dispatched_usage`.
+    //
+    // 1. THE DUPLICATES. Until S2c the opencode reconciler imported the
+    // throwaway sessions the DISPATCHER creates as if they were the user's
+    // own, so every dispatched opencode turn older than that is in the ledger
+    // twice: once as an `origin 'session'` row under opencode's own message
+    // id, and once as v19's `dispatched:<id>` copy of the same turn (the two
+    // even share a `session_id`). The old dashboard double counted them too —
+    // once in the per-engine total, once in the Delegated section — and this
+    // slice's readers, which count `dispatch` rows in the same totals, would
+    // keep doing it. The `dispatched:` copy is the one kept: it carries
+    // `parent_routing_id` (which session delegated the work) and the
+    // dispatcher's own resolved cost; the reconciler's copy has neither.
+    //
+    // 2. THE BUCKETS. Hourly and in UTC so a reader in any timezone can group
+    // them into local days and ADR-072's hub can hold the same table. `rev` is
+    // the hub's pull cursor: every write stamps the rows it replaces with one
+    // fresh, monotonically increasing number (see `nextUsageBucketRev`).
+    // `unknown_api_cost_count` and `unknown_billed_cost_count` are how a sum
+    // says what is MISSING from it rather than absorbing an unknown as zero
+    // (ADR-030).
+    //
+    // `unbilled_api_cost_usd` is what makes an hour's display cost equal the
+    // sum of its rows' display costs. The per-row rule under `apiKey` and
+    // `unknown` is `billed ?? api`, so an hour mixing turns that reported a
+    // charge with turns that did not cannot be resolved from two sums alone:
+    // `billed_cost_usd` leaves the unbilled turns out and `api_cost_usd`
+    // double counts the billed ones. This column carries exactly the `api`
+    // half of that `??` — the API-equivalent of the rows with no known bill —
+    // so `billed_cost_usd + unbilled_api_cost_usd` IS Σ(billed ?? api).
+    //
+    // Each `daily_usage` row becomes ONE bucket at 12:00 UTC of its date. The
+    // old table recorded no account, no billing type and no origin, so those
+    // are `unknown`/`unknown`/`session`, and its one cost is an API-equivalent
+    // (`selectRowCostUsd`'s figure): `billed_cost_usd` is 0 with every request
+    // counted as an unknown bill — never a claimed zero — and the whole figure
+    // is `unbilled_api_cost_usd`, since not one of the day's bills is known.
+    // `rev` 1 is the first revision — nothing has pulled these yet, and the
+    // counter starts at 2.
+    //
+    // MIDDAY IS NOT ALWAYS THE RIGHT LOCAL DAY. 12:00 UTC falls inside the
+    // local day the row was bucketed by from UTC-12 to UTC+12, and ADR-071 §1
+    // chose it for that. At UTC+13/+14 (Chatham, Kiritimati, Samoa in summer)
+    // it lands in the NEXT local day, so a migrated day shows up shifted by
+    // one there, and a day the rollup rebuilds retires its neighbour's seed
+    // rather than its own. Accepted: it affects migrated days only, the shift
+    // is one day, and the alternative — a per-timezone seed instant — would
+    // bake THIS machine's zone into a table ADR-072 shares between machines.
+    //
+    // A `date` SQLite cannot parse yields a NULL instant; such a row is
+    // skipped rather than allowed to fail the whole migration, since its day
+    // is unrecoverable either way.
+    //
+    // The two `usage_event` indexes come with the READERS this slice moves
+    // here: the Delegated section scans by `origin`, and the per-session
+    // dispatched-cost breakdown — which runs on every session construction —
+    // looks a routing id up. `dispatched_usage` had an index for each; the
+    // ledger needs the same two or both reads become full scans of a table
+    // three orders of magnitude bigger.
+    version: 20,
+    up(db) {
+      db.exec(`
+        DELETE FROM usage_event
+        WHERE origin = 'session'
+          AND engine_id = 'opencode'
+          AND session_id IN (
+            SELECT DISTINCT target_session_id FROM dispatched_usage
+            WHERE target_engine = 'opencode' AND target_session_id IS NOT NULL
+          );
+
+        CREATE TABLE IF NOT EXISTS usage_bucket (
+          hour_utc                  INTEGER NOT NULL,
+          account_key               TEXT NOT NULL,
+          billing_type              TEXT NOT NULL,
+          engine_id                 TEXT NOT NULL,
+          vendor_id                 TEXT NOT NULL,
+          model_id                  TEXT NOT NULL,
+          origin                    TEXT NOT NULL,
+          input_tokens              INTEGER NOT NULL DEFAULT 0,
+          output_tokens             INTEGER NOT NULL DEFAULT 0,
+          cache_write_tokens        INTEGER NOT NULL DEFAULT 0,
+          cache_write_1h_tokens     INTEGER NOT NULL DEFAULT 0,
+          cache_read_tokens         INTEGER NOT NULL DEFAULT 0,
+          api_cost_usd              REAL NOT NULL DEFAULT 0,
+          billed_cost_usd           REAL NOT NULL DEFAULT 0,
+          unbilled_api_cost_usd     REAL NOT NULL DEFAULT 0,
+          unknown_api_cost_count    INTEGER NOT NULL DEFAULT 0,
+          unknown_billed_cost_count INTEGER NOT NULL DEFAULT 0,
+          request_count             INTEGER NOT NULL DEFAULT 0,
+          source                    TEXT NOT NULL DEFAULT 'rollup',
+          rev                       INTEGER NOT NULL,
+          PRIMARY KEY (hour_utc, account_key, billing_type, engine_id, vendor_id, model_id, origin)
+        );
+        CREATE INDEX IF NOT EXISTS idx_usage_bucket_rev ON usage_bucket(rev);
+        CREATE INDEX IF NOT EXISTS idx_usage_bucket_hour ON usage_bucket(hour_utc);
+
+        CREATE TABLE IF NOT EXISTS usage_bucket_rev (
+          id       INTEGER PRIMARY KEY CHECK (id = 1),
+          next_rev INTEGER NOT NULL
+        );
+        INSERT OR IGNORE INTO usage_bucket_rev (id, next_rev) VALUES (1, 2);
+
+        CREATE INDEX IF NOT EXISTS idx_usage_event_origin_ts
+          ON usage_event(origin, ts);
+        CREATE INDEX IF NOT EXISTS idx_usage_event_parent_routing
+          ON usage_event(parent_routing_id);
+
+        INSERT INTO usage_bucket (
+          hour_utc, account_key, billing_type, engine_id, vendor_id, model_id, origin,
+          input_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens,
+          cache_read_tokens, api_cost_usd, billed_cost_usd, unbilled_api_cost_usd,
+          unknown_api_cost_count, unknown_billed_cost_count,
+          request_count, source, rev
+        )
+        SELECT
+          CAST(strftime('%s', d.date || ' 12:00:00') AS INTEGER) * 1000,
+          'unknown', 'unknown',
+          d.engine_id, d.vendor_id, d.model_id, 'session',
+          d.input_tokens, d.output_tokens, d.cache_write_tokens, 0, d.cache_read_tokens,
+          d.cost_usd, 0, d.cost_usd,
+          0, d.request_count,
+          d.request_count, 'seed', 1
+        FROM daily_usage d
+        WHERE strftime('%s', d.date || ' 12:00:00') IS NOT NULL;
+
+        DROP TABLE daily_usage;
+        DROP TABLE dispatched_usage;
       `)
     }
   }
@@ -1546,6 +1670,11 @@ export function getUsageEventByMessageId(messageId: string): UsageEventRow | und
  * This is the source for the SQL-backed dashboard aggregation (Pass 2): the
  * block-grouping walk consumes a chronologically-sorted list, exactly like the
  * old JSONL scan did. Optionally filter by engineId.
+ *
+ * EVERY origin, dispatched turns included (ADR-071 §1): delegated work spends
+ * the same account and the same rate-limit window as a session's own turn, and
+ * the dashboard counts it. A caller that wants only one kind filters on
+ * `origin` itself — there is no second, narrower reader to pick by accident.
  */
 export function getUsageEventsSince(cutoffTs: number, engineId?: string): UsageEventRow[] {
   const db = getDb()
@@ -1555,35 +1684,6 @@ export function getUsageEventsSince(cutoffTs: number, engineId?: string): UsageE
         .all(cutoffTs, engineId) as UsageEventDbRow[])
     : (db
         .prepare('SELECT * FROM usage_event WHERE ts >= ? ORDER BY ts ASC')
-        .all(cutoffTs) as UsageEventDbRow[])
-  return rows.map(rowToUsageEvent)
-}
-
-/**
- * {@link getUsageEventsSince} WITHOUT the dispatched turns.
- *
- * TEMPORARY, and it goes in S2c2. ADR-071 §1 says the dashboard counts
- * dispatched work in its totals, but the dashboard that exists today already
- * shows it, from `dispatched_usage`, in its own Delegated section. S2c started
- * writing a `usage_event` row per dispatched turn as well, so every current
- * reader of the ledger would count that spend a SECOND time, beside the
- * section that already shows it. Until S2c2 retires `dispatched_usage` and
- * redesigns those readers around `origin`, the on-screen figures stay sourced
- * exactly as they were.
- *
- * `getUsageEventsSince` is deliberately left alone: S2c2's readers want every
- * row, and so does anything auditing the ledger.
- */
-export function getSessionUsageEventsSince(cutoffTs: number, engineId?: string): UsageEventRow[] {
-  const db = getDb()
-  const rows = engineId
-    ? (db
-        .prepare(
-          "SELECT * FROM usage_event WHERE ts >= ? AND origin != 'dispatch' AND engine_id = ? ORDER BY ts ASC"
-        )
-        .all(cutoffTs, engineId) as UsageEventDbRow[])
-    : (db
-        .prepare("SELECT * FROM usage_event WHERE ts >= ? AND origin != 'dispatch' ORDER BY ts ASC")
         .all(cutoffTs) as UsageEventDbRow[])
   return rows.map(rowToUsageEvent)
 }
@@ -1662,7 +1762,7 @@ export function getWindowSamples(accountUuid: string, limit = 100): WindowSample
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000
 // usage_event is read only at a 7-day lookback (block-usage's getUsageEventsSince
-// callers) and older days live durably in daily_usage, so 90d is a very
+// callers) and older hours live durably in usage_bucket, so 90d is a very
 // conservative floor that keeps well over a week of margin for the reconciler.
 const USAGE_EVENT_RETENTION_DAYS = 90
 // usage_window_sample is read as the newest-N per account for the ACTIVE (a few
@@ -1677,6 +1777,10 @@ const WINDOW_SAMPLE_RETENTION_DAYS = 30
  * survive. A bounded periodic sweep — run once per DB open, never per-insert.
  * Returns the delete counts for diagnostics/tests. Idempotent (a second call
  * with the same clock deletes nothing).
+ *
+ * `usage_bucket` is NEVER pruned: it is the durable history the 90-day event
+ * retention exists to make affordable (ADR-071 §1), and an hour's bucket cannot
+ * be rebuilt once its events are gone.
  */
 export function pruneUsageTables(
   now: number = Date.now(),
@@ -1691,294 +1795,374 @@ export function pruneUsageTables(
 }
 
 // ---------------------------------------------------------------------------
-// Daily usage rollup repository (Phase 7 Pass 2 — Full SQL)
-// Durable per-(date, engine, vendor, model) rollup for the 30-day chart. Recent
-// days are recomputed from usage_event (source 'rollup', REPLACE); older days
-// are seeded once from the legacy daily JSON files (source 'seed', never
-// recomputed — their JSONL is gone). NEVER expose the raw db.
+// Usage bucket repository (ADR-071 §1 — hourly buckets, kept forever)
+//
+// `usage_bucket` is the durable half of the metering store: `usage_event` is
+// pruned at 90 days, so a bucket is what a chart still has after that. One row
+// per (hour, account, billing type, engine, vendor, model, origin), recomputed
+// from the ledger for the recent hours and never touched again once the rollup
+// window has passed them by (see BlockUsageService.rollupUsageBucketsFromDb).
+//
+// Hourly and in UTC, because a bucket outlives the machine that wrote it:
+// ADR-072's hub holds this same table from several machines, and only a UTC
+// hour can be grouped into the local day of whoever is looking.
+//
+// NEVER expose the raw db.
 // ---------------------------------------------------------------------------
 
-interface DailyUsageDbRow {
-  date: string
+/** One hourly usage bucket. */
+export interface UsageBucketRow {
+  /** Start of the hour, in ms since the epoch, floored in UTC. */
+  hourUtc: number
+  accountKey: string
+  billingType: BillingType
+  engineId: string
+  vendorId: string
+  modelId: string
+  origin: UsageOrigin
+  inputTokens: number
+  outputTokens: number
+  cacheWriteTokens: number
+  /** The 1h-TTL SUBSET of cacheWriteTokens — not additive with it. */
+  cacheWrite1hTokens: number
+  cacheReadTokens: number
+  /** Sum of the KNOWN `api_cost_usd` values in the hour. */
+  apiCostUsd: number
+  /** Sum of the KNOWN `billed_cost_usd` values in the hour. */
+  billedCostUsd: number
+  /**
+   * Sum of `api_cost_usd` over the hour's rows that recorded NO bill — the
+   * `api` half of the per-row `billed ?? api` rule, so that
+   * `billedCostUsd + unbilledApiCostUsd` is the hour's Σ(billed ?? api).
+   * A row with neither figure is in `unknownApiCostCount` alone.
+   */
+  unbilledApiCostUsd: number
+  /** How many of `requestCount` turns had no API-equivalent cost at all. */
+  unknownApiCostCount: number
+  /** How many of `requestCount` turns had no known bill. */
+  unknownBilledCostCount: number
+  requestCount: number
+  /** 'rollup' — recomputed from usage_event; 'seed' — migrated from daily_usage. */
+  source: 'rollup' | 'seed'
+  /** Monotonic revision, stamped by the write. ADR-072 pulls "since rev". */
+  rev: number
+}
+
+/** A bucket as a WRITER hands it over — the store issues the `rev`. */
+export type UsageBucketWrite = Omit<UsageBucketRow, 'rev'>
+
+interface UsageBucketDbRow {
+  hour_utc: number
+  account_key: string
+  billing_type: string
   engine_id: string
   vendor_id: string
   model_id: string
+  origin: string
+  input_tokens: number
+  output_tokens: number
+  cache_write_tokens: number
+  cache_write_1h_tokens: number
+  cache_read_tokens: number
+  api_cost_usd: number
+  billed_cost_usd: number
+  unbilled_api_cost_usd: number
+  unknown_api_cost_count: number
+  unknown_billed_cost_count: number
+  request_count: number
+  source: string
+  rev: number
+}
+
+function rowToUsageBucket(row: UsageBucketDbRow): UsageBucketRow {
+  return {
+    hourUtc: row.hour_utc,
+    accountKey: row.account_key,
+    // Both are stored strings and can carry a value this build has no name
+    // for — the cost rule's `default` branch is the fallback, as for a row.
+    billingType: row.billing_type as BillingType,
+    engineId: row.engine_id,
+    vendorId: row.vendor_id,
+    modelId: row.model_id,
+    origin: row.origin as UsageOrigin,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    cacheWriteTokens: row.cache_write_tokens,
+    cacheWrite1hTokens: row.cache_write_1h_tokens,
+    cacheReadTokens: row.cache_read_tokens,
+    apiCostUsd: row.api_cost_usd,
+    billedCostUsd: row.billed_cost_usd,
+    unbilledApiCostUsd: row.unbilled_api_cost_usd,
+    unknownApiCostCount: row.unknown_api_cost_count,
+    unknownBilledCostCount: row.unknown_billed_cost_count,
+    requestCount: row.request_count,
+    source: row.source as 'rollup' | 'seed',
+    rev: row.rev
+  }
+}
+
+const UPSERT_USAGE_BUCKET_SQL = `
+  INSERT INTO usage_bucket (
+    hour_utc, account_key, billing_type, engine_id, vendor_id, model_id, origin,
+    input_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens,
+    cache_read_tokens, api_cost_usd, billed_cost_usd, unbilled_api_cost_usd,
+    unknown_api_cost_count, unknown_billed_cost_count,
+    request_count, source, rev
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(hour_utc, account_key, billing_type, engine_id, vendor_id, model_id, origin)
+  DO UPDATE SET
+    input_tokens              = excluded.input_tokens,
+    output_tokens             = excluded.output_tokens,
+    cache_write_tokens        = excluded.cache_write_tokens,
+    cache_write_1h_tokens     = excluded.cache_write_1h_tokens,
+    cache_read_tokens         = excluded.cache_read_tokens,
+    api_cost_usd              = excluded.api_cost_usd,
+    billed_cost_usd           = excluded.billed_cost_usd,
+    unbilled_api_cost_usd     = excluded.unbilled_api_cost_usd,
+    unknown_api_cost_count    = excluded.unknown_api_cost_count,
+    unknown_billed_cost_count = excluded.unknown_billed_cost_count,
+    request_count             = excluded.request_count,
+    source                    = excluded.source,
+    rev                       = excluded.rev
+`
+
+/**
+ * The next revision number, from the one-row counter, consumed inside the
+ * writing transaction.
+ *
+ * A COUNTER, not `MAX(rev) + 1` over the buckets themselves. One process owns
+ * this database, so either would be race-free, and the MAX is the smaller
+ * mechanism — but it is not monotonic: delete every row (the seed cleanup can,
+ * on a database whose buckets are all seeds) and the maximum falls back to
+ * zero, so the next write REUSES a revision a puller has already seen and its
+ * "everything since rev N" silently skips those rows. Monotonicity is the whole
+ * contract (ADR-072 §3), and a counter is the only thing that keeps it across a
+ * delete.
+ */
+function nextUsageBucketRev(db: SqliteDatabase): number {
+  const row = db.prepare('SELECT next_rev FROM usage_bucket_rev WHERE id = 1').get() as
+    { next_rev: number } | undefined
+  const rev = row?.next_rev ?? 1
+  db.prepare('INSERT OR REPLACE INTO usage_bucket_rev (id, next_rev) VALUES (1, ?)').run(rev + 1)
+  return rev
+}
+
+/**
+ * Replace a set of buckets, all under ONE fresh `rev`, in a single transaction.
+ * Returns the rev they were written under (0 when there was nothing to write).
+ */
+export function upsertUsageBuckets(rows: UsageBucketWrite[]): number {
+  if (rows.length === 0) return 0
+  const db = getDb()
+  db.prepare('BEGIN').run()
+  try {
+    const rev = nextUsageBucketRev(db)
+    const stmt = db.prepare(UPSERT_USAGE_BUCKET_SQL)
+    for (const r of rows) {
+      stmt.run(
+        r.hourUtc,
+        r.accountKey,
+        r.billingType,
+        r.engineId,
+        r.vendorId,
+        r.modelId,
+        r.origin,
+        r.inputTokens,
+        r.outputTokens,
+        r.cacheWriteTokens,
+        r.cacheWrite1hTokens,
+        r.cacheReadTokens,
+        r.apiCostUsd,
+        r.billedCostUsd,
+        r.unbilledApiCostUsd,
+        r.unknownApiCostCount,
+        r.unknownBilledCostCount,
+        r.requestCount,
+        r.source,
+        rev
+      )
+    }
+    db.prepare('COMMIT').run()
+    return rev
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+/**
+ * Buckets at or after `sinceHourUtc`, oldest hour first (the chart's source).
+ *
+ * Bounded on purpose: buckets are hourly and kept forever, so an all-time read
+ * grows without limit behind a chart that shows a fixed window. `idx_usage_
+ * bucket_hour` serves the range. Pass 0 for everything.
+ */
+export function getUsageBucketsSince(sinceHourUtc: number): UsageBucketRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT * FROM usage_bucket WHERE hour_utc >= ? ORDER BY hour_utc ASC')
+    .all(sinceHourUtc) as UsageBucketDbRow[]
+  return rows.map(rowToUsageBucket)
+}
+
+/**
+ * Drop the SEED buckets sitting at the given hours.
+ *
+ * A seed bucket is a whole day of the retired `daily_usage` table parked at
+ * midday UTC (migration v20). The rollup recomputes whole LOCAL DAYS from the
+ * ledger, so the moment it covers a day, that day's seed is a second, coarser
+ * copy of the same spend — and the chart would add the two together. The rollup
+ * passes the midday instant of each day it has just rebuilt; only `source =
+ * 'seed'` rows are touched, so a rollup bucket that happens to sit at midday is
+ * safe.
+ */
+export function deleteSeedUsageBuckets(hourUtcs: number[]): void {
+  if (hourUtcs.length === 0) return
+  const db = getDb()
+  const stmt = db.prepare("DELETE FROM usage_bucket WHERE source = 'seed' AND hour_utc = ?")
+  db.prepare('BEGIN').run()
+  try {
+    for (const hour of hourUtcs) stmt.run(hour)
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dispatched-turn readers (ADR-033 M4-B, on ADR-071 §1's ledger)
+//
+// `dispatched_usage` is gone (migration v20). A dispatched turn is a
+// `usage_event` row with `origin = 'dispatch'` and the dispatching session in
+// `parent_routing_id` — the same two facts the old table's `from_routing_id`
+// and its separateness carried, plus the token split, the account, the billing
+// type and both costs it had nowhere to put.
+//
+// Both readers keep the shapes their callers already consume (the Delegated
+// section over IPC, and the per-session dispatched-cost breakdown), so nothing
+// above them changed. What changed is the money: a dispatched turn's cost is
+// now whatever the ONE cost rule says for its billing type, like every other
+// row, instead of a figure the dispatcher resolved and stored on its own.
+// ---------------------------------------------------------------------------
+
+/**
+ * A dispatched row's target model as the dispatcher ENCODED it, rebuilt from
+ * the vendor and model the ledger stores separately.
+ *
+ * `dispatchModelRef` split it on the way in (`engineMeta.decodeModelValue`),
+ * and the callers of both readers key on the encoded form — the session
+ * breakdown merges these rows with the LIVE ones `addDispatchedCost` records
+ * under exactly that string, so a decoded id here would split one target into
+ * two rows after a resume.
+ *
+ * The round trip is exact because the WRITE side canonicalises first
+ * (`canonicalDispatchModel`): opencode and pi decode a bare id to their default
+ * vendor, so an uncanonicalised `gpt-5-codex` would come back out of here as
+ * `opencode/gpt-5-codex` and be the very second row this function exists to
+ * prevent. A row written before that canonicalisation shipped — or by an engine
+ * whose encoding changed — can still differ, and the live half is what moves in
+ * that case, not this.
+ *
+ * `ENGINE_META` rather than `engineMeta()`, because an engine id this build has
+ * never heard of must read back verbatim, not throw inside a DB read.
+ */
+function dispatchTargetModel(engineId: string, vendorId: string, modelId: string): string {
+  const meta = ENGINE_META[engineId as keyof typeof ENGINE_META]
+  if (!meta) return modelId
+  return meta.encodeModelValue({ engineId: engineId as EngineId, vendorId, modelId })
+}
+
+/** The ledger columns both dispatched-turn readers need. */
+interface DispatchLedgerDbRow {
+  engine_id: string
+  vendor_id: string
+  model_id: string
+  billing_type: string
   input_tokens: number
   output_tokens: number
   cache_write_tokens: number
   cache_read_tokens: number
-  cost_usd: number
-  request_count: number
-  peak_api_percent: number
-  source: string
+  api_cost_usd: number | null
+  billed_cost_usd: number | null
 }
 
-function rowToDailyUsage(row: DailyUsageDbRow): DailyUsageRow {
-  return {
-    date: row.date,
-    engineId: row.engine_id,
-    vendorId: row.vendor_id,
-    modelId: row.model_id,
-    inputTokens: row.input_tokens,
-    outputTokens: row.output_tokens,
-    cacheWriteTokens: row.cache_write_tokens,
-    cacheReadTokens: row.cache_read_tokens,
-    costUsd: row.cost_usd,
-    requestCount: row.request_count,
-    peakApiPercent: row.peak_api_percent,
-    source: row.source as 'rollup' | 'seed'
-  }
+/** The display cost of one dispatched row, or null when nothing could price it. */
+function dispatchRowCostUsd(row: DispatchLedgerDbRow): number | null {
+  return displayCostFromRow({
+    billingType: row.billing_type as BillingType,
+    apiCostUsd: row.api_cost_usd,
+    billedCostUsd: row.billed_cost_usd
+  })
 }
 
-const UPSERT_DAILY_USAGE_SQL = `
-  INSERT INTO daily_usage (
-    date, engine_id, vendor_id, model_id,
-    input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
-    cost_usd, request_count, peak_api_percent, source
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  ON CONFLICT(date, engine_id, vendor_id, model_id) DO UPDATE SET
-    input_tokens      = excluded.input_tokens,
-    output_tokens     = excluded.output_tokens,
-    cache_write_tokens = excluded.cache_write_tokens,
-    cache_read_tokens = excluded.cache_read_tokens,
-    cost_usd          = excluded.cost_usd,
-    request_count     = excluded.request_count,
-    peak_api_percent  = excluded.peak_api_percent,
-    source            = excluded.source
-`
-
-/** Upsert (replace) a set of daily_usage rows in one transaction. */
-export function upsertDailyUsage(rows: DailyUsageRow[]): void {
-  if (rows.length === 0) return
-  const db = getDb()
-  const stmt = db.prepare(UPSERT_DAILY_USAGE_SQL)
-  db.prepare('BEGIN').run()
-  try {
-    for (const r of rows) {
-      stmt.run(
-        r.date,
-        r.engineId,
-        r.vendorId,
-        r.modelId,
-        r.inputTokens,
-        r.outputTokens,
-        r.cacheWriteTokens,
-        r.cacheReadTokens,
-        r.costUsd,
-        r.requestCount,
-        r.peakApiPercent,
-        r.source
-      )
-    }
-    db.prepare('COMMIT').run()
-  } catch (err) {
-    db.prepare('ROLLBACK').run()
-    throw err
-  }
-}
+const DISPATCH_LEDGER_COLUMNS = `engine_id, vendor_id, model_id, billing_type,
+  input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+  api_cost_usd, billed_cost_usd`
 
 /**
- * Seed daily_usage rows ONLY for (date, engine, vendor, model) keys not already
- * present (idempotent). Used by the one-time JSON-file import — never clobbers a
- * rollup row. INSERT OR IGNORE on the composite PK.
- */
-export function seedDailyUsageIfAbsent(rows: DailyUsageRow[]): void {
-  if (rows.length === 0) return
-  const db = getDb()
-  const stmt = db.prepare(`
-    INSERT OR IGNORE INTO daily_usage (
-      date, engine_id, vendor_id, model_id,
-      input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
-      cost_usd, request_count, peak_api_percent, source
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `)
-  db.prepare('BEGIN').run()
-  try {
-    for (const r of rows) {
-      stmt.run(
-        r.date,
-        r.engineId,
-        r.vendorId,
-        r.modelId,
-        r.inputTokens,
-        r.outputTokens,
-        r.cacheWriteTokens,
-        r.cacheReadTokens,
-        r.costUsd,
-        r.requestCount,
-        r.peakApiPercent,
-        r.source
-      )
-    }
-    db.prepare('COMMIT').run()
-  } catch (err) {
-    db.prepare('ROLLBACK').run()
-    throw err
-  }
-}
-
-/** Delete all daily_usage rows for a given date (used before re-rolling a day). */
-export function deleteDailyUsageForDate(date: string): void {
-  const db = getDb()
-  db.prepare('DELETE FROM daily_usage WHERE date = ?').run(date)
-}
-
-/** All daily_usage rows ordered by date asc (the chart's source). */
-export function getAllDailyUsage(): DailyUsageRow[] {
-  const db = getDb()
-  const rows = db.prepare('SELECT * FROM daily_usage ORDER BY date ASC').all() as DailyUsageDbRow[]
-  return rows.map(rowToDailyUsage)
-}
-
-/** Whether the daily_usage table has any rows (gates the one-time seed). */
-export function hasDailyUsage(): boolean {
-  const db = getDb()
-  return (db.prepare('SELECT COUNT(*) as n FROM daily_usage').get() as { n: number }).n > 0
-}
-
-// ---------------------------------------------------------------------------
-// Dispatched-usage repository (ADR-033 M4-B — cross-engine dispatch)
-// One row per completed/failed dispatched-agent turn, attributed to the
-// DISPATCHING session. See the v6 migration comment above for why this table
-// exists (dispatched turns are invisible to ADR-011's JSONL scan).
-// ---------------------------------------------------------------------------
-
-/** One recorded dispatched-agent turn. */
-export interface DispatchedUsageRow {
-  id: number
-  ts: number
-  fromRoutingId: string
-  fromEngine: string
-  targetEngine: string
-  targetModel: string
-  targetSessionId: string | null
-  toolUseId: string | null
-  totalTokens: number | null
-  costUsd: number | null
-  durationMs: number | null
-}
-
-interface DispatchedUsageDbRow {
-  id: number
-  ts: number
-  from_routing_id: string
-  from_engine: string
-  target_engine: string
-  target_model: string
-  target_session_id: string | null
-  tool_use_id: string | null
-  total_tokens: number | null
-  cost_usd: number | null
-  duration_ms: number | null
-}
-
-function rowToDispatchedUsage(row: DispatchedUsageDbRow): DispatchedUsageRow {
-  return {
-    id: row.id,
-    ts: row.ts,
-    fromRoutingId: row.from_routing_id,
-    fromEngine: row.from_engine,
-    targetEngine: row.target_engine,
-    targetModel: row.target_model,
-    targetSessionId: row.target_session_id,
-    toolUseId: row.tool_use_id,
-    totalTokens: row.total_tokens,
-    costUsd: row.cost_usd,
-    durationMs: row.duration_ms
-  }
-}
-
-/** Insert one dispatched-usage row (`id` is auto-assigned by SQLite). */
-export function insertDispatchedUsage(row: Omit<DispatchedUsageRow, 'id'>): void {
-  const db = getDb()
-  db.prepare(
-    `INSERT INTO dispatched_usage (
-       ts, from_routing_id, from_engine, target_engine, target_model,
-       target_session_id, tool_use_id, total_tokens, cost_usd, duration_ms
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    row.ts,
-    row.fromRoutingId,
-    row.fromEngine,
-    row.targetEngine,
-    row.targetModel,
-    row.targetSessionId ?? null,
-    row.toolUseId ?? null,
-    row.totalTokens ?? null,
-    row.costUsd ?? null,
-    row.durationMs ?? null
-  )
-}
-
-/** All dispatched-usage rows since `sinceTs` (default: all-time), newest first. Test/debug use. */
-export function getDispatchedUsageSince(sinceTs = 0): DispatchedUsageRow[] {
-  const db = getDb()
-  const rows = db
-    .prepare('SELECT * FROM dispatched_usage WHERE ts >= ? ORDER BY ts DESC')
-    .all(sinceTs) as DispatchedUsageDbRow[]
-  return rows.map(rowToDispatchedUsage)
-}
-
-interface DispatchedUsageSummaryDbRow {
-  target_engine: string
-  target_model: string
-  dispatches: number
-  totalTokens: number | null
-  costUsd: number | null
-}
-
-/**
- * Aggregate dispatched_usage by (target_engine, target_model) since `sinceTs`
- * (default: all-time). NULL total_tokens/cost_usd (best-effort captures, e.g.
- * a timed-out turn) coalesce to 0 so a single unknown-usage row never poisons
- * the whole aggregate.
+ * Aggregate dispatched turns by (target engine, target model) since `sinceTs`
+ * (default: all-time) — the dashboard's Delegated section.
+ *
+ * A turn nothing could price adds NOTHING to the total (it is not a zero), but
+ * it is still counted as a dispatch: the section says how many turns ran, and
+ * dropping the unpriced ones would understate that too. Grouping happens here
+ * rather than in SQL because the cost rule is TypeScript and must not be
+ * restated as a CASE expression — there is exactly one copy of it (ADR-071 §2).
+ *
+ * `cache_write_1h_tokens` is deliberately not in the token total: it is the
+ * 1h-TTL SUBSET of `cache_write_tokens`, so adding it would count those tokens
+ * twice.
  */
 export function dispatchedUsageSummary(sinceTs = 0): DispatchedUsageSummary[] {
   const db = getDb()
   const rows = db
     .prepare(
-      `SELECT
-         target_engine,
-         target_model,
-         COUNT(*) as dispatches,
-         SUM(COALESCE(total_tokens, 0)) as totalTokens,
-         SUM(COALESCE(cost_usd, 0)) as costUsd
-       FROM dispatched_usage
-       WHERE ts >= ?
-       GROUP BY target_engine, target_model
-       ORDER BY costUsd DESC`
+      `SELECT ${DISPATCH_LEDGER_COLUMNS}
+       FROM usage_event
+       WHERE origin = 'dispatch' AND ts >= ?`
     )
-    .all(sinceTs) as DispatchedUsageSummaryDbRow[]
-  return rows.map((r) => ({
-    targetEngine: r.target_engine,
-    targetModel: r.target_model,
-    dispatches: r.dispatches,
-    totalTokens: r.totalTokens ?? 0,
-    costUsd: r.costUsd ?? 0
-  }))
+    .all(sinceTs) as DispatchLedgerDbRow[]
+
+  const byTarget = new Map<string, DispatchedUsageSummary>()
+  for (const row of rows) {
+    const targetModel = dispatchTargetModel(row.engine_id, row.vendor_id, row.model_id)
+    const key = `${row.engine_id}|${targetModel}`
+    let agg = byTarget.get(key)
+    if (!agg) {
+      agg = {
+        targetEngine: row.engine_id,
+        targetModel,
+        dispatches: 0,
+        totalTokens: 0,
+        costUsd: 0
+      }
+      byTarget.set(key, agg)
+    }
+    agg.dispatches += 1
+    agg.totalTokens +=
+      row.input_tokens + row.output_tokens + row.cache_write_tokens + row.cache_read_tokens
+    agg.costUsd += dispatchRowCostUsd(row) ?? 0
+  }
+  return [...byTarget.values()].sort((a, b) => b.costUsd - a.costUsd)
 }
 
 // ---------------------------------------------------------------------------
 // Slice C — cross-engine dispatched cost in the dispatching session's own
 // cost breakdown (TopBar tooltip). Distinct from dispatchedUsageSummary above
-// (a GLOBAL all-sessions rollup, e.g. for a future usage dashboard) — this is
-// scoped to ONE dispatching session, for BaseSession.seedDispatchedCosts()'s
+// (a GLOBAL all-sessions rollup for the usage dashboard) — this is scoped to
+// ONE dispatching session, for BaseSession.seedDispatchedCosts()'s
 // durability-across-reloads seed.
 // ---------------------------------------------------------------------------
 
-interface DispatchedCostByRoutingDbRow {
-  target_engine: string
-  target_model: string
-  costUsd: number | null
-}
-
 /**
  * Per-(targetEngine, targetModel) cost totals for ONE dispatching session,
- * NULL-cost rows excluded (a timed-out/errored turn recorded no real spend —
- * see the v6 migration comment; including it would just add a spurious $0
- * row group). Feeds BaseSession.seedDispatchedCosts() on session construction/
- * resume so a reloaded session's dispatched-cost breakdown survives instead of
- * resetting to zero (parity with Slice B's costBaseUsd seeding).
+ * UNPRICED turns excluded — a turn that recorded no resolvable cost adds
+ * nothing, and a target whose every turn was unpriced gets no row at all
+ * rather than a spurious $0 group. Feeds BaseSession.seedDispatchedCosts() on
+ * session construction/resume so a reloaded session's dispatched-cost
+ * breakdown survives instead of resetting to zero (parity with Slice B's
+ * costBaseUsd seeding).
  */
 export function dispatchedCostsByRouting(
   fromRoutingId: string
@@ -1986,38 +2170,23 @@ export function dispatchedCostsByRouting(
   const db = getDb()
   const rows = db
     .prepare(
-      `SELECT
-         target_engine,
-         target_model,
-         SUM(cost_usd) as costUsd
-       FROM dispatched_usage
-       WHERE from_routing_id = ? AND cost_usd IS NOT NULL
-       GROUP BY target_engine, target_model`
+      `SELECT ${DISPATCH_LEDGER_COLUMNS}
+       FROM usage_event
+       WHERE origin = 'dispatch' AND parent_routing_id = ?`
     )
-    .all(fromRoutingId) as DispatchedCostByRoutingDbRow[]
-  return rows.map((r) => ({
-    targetEngine: r.target_engine,
-    targetModel: r.target_model,
-    costUsd: r.costUsd ?? 0
-  }))
-}
+    .all(fromRoutingId) as DispatchLedgerDbRow[]
 
-/**
- * Carry dispatched_usage rows from oldRoutingId to newRoutingId (used on
- * session rekey — SessionManager.rekey() — mirroring renameSessionMeta's
- * role for session_meta). Without this, a dispatch recorded under a
- * pre-rekey routingId (e.g. a fresh session's temporary id, before the sdk
- * session UUID arrives) becomes unreachable from seedDispatchedCosts() on a
- * later resume, which looks up by the STABLE post-rekey id. No-op (not an
- * error) when oldRoutingId has no rows — most rekeys happen before any
- * dispatch occurs.
- */
-export function renameDispatchedUsage(oldRoutingId: string, newRoutingId: string): void {
-  const db = getDb()
-  db.prepare('UPDATE dispatched_usage SET from_routing_id = ? WHERE from_routing_id = ?').run(
-    newRoutingId,
-    oldRoutingId
-  )
+  const byTarget = new Map<string, { targetEngine: string; targetModel: string; costUsd: number }>()
+  for (const row of rows) {
+    const costUsd = dispatchRowCostUsd(row)
+    if (costUsd === null) continue
+    const targetModel = dispatchTargetModel(row.engine_id, row.vendor_id, row.model_id)
+    const key = `${row.engine_id}|${targetModel}`
+    const agg = byTarget.get(key)
+    if (agg) agg.costUsd += costUsd
+    else byTarget.set(key, { targetEngine: row.engine_id, targetModel, costUsd })
+  }
+  return [...byTarget.values()]
 }
 
 /**

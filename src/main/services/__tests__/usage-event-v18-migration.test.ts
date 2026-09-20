@@ -27,6 +27,17 @@ function userVersion(db: Db): number {
 }
 
 /**
+ * Migrate UP TO v18 and no further. This file is about that one step, and the
+ * migrations after it drop tables it would otherwise have to know about.
+ */
+function runToV18(db: Db): void {
+  runMigrations(
+    db,
+    MIGRATIONS.filter((m) => m.version <= 18)
+  )
+}
+
+/**
  * A v17 database holding the four shapes the backfill has to tell apart: a
  * Claude row whose two equivalents DISAGREE (the engine one prices the 1h
  * cache tier, the table one does not), a Claude row with only the table
@@ -79,9 +90,9 @@ describe('migration v18 — usage_event gains ADR-071 attribution', () => {
     try {
       seedV17(db)
 
-      runMigrations(db)
+      runToV18(db)
 
-      expect(userVersion(db)).toBe(19)
+      expect(userVersion(db)).toBe(18)
       const row = readRow(db, 'msg_claude_both')
       // History survives the ALTERs untouched.
       expect(row.equiv_cost_usd).toBeCloseTo(0.25)
@@ -102,7 +113,7 @@ describe('migration v18 — usage_event gains ADR-071 attribution', () => {
     try {
       seedV17(db)
 
-      runMigrations(db)
+      runToV18(db)
 
       // A Claude row's two figures are BOTH equivalents; the engine one is the
       // precise of the two and is what the dashboard shows today, so switching
@@ -125,7 +136,7 @@ describe('migration v18 — usage_event gains ADR-071 attribution', () => {
     try {
       seedV17(db)
 
-      runMigrations(db)
+      runToV18(db)
 
       // NULL, not 0: what an old row was BILLED cannot be recovered, and a 0
       // here would be summed as "this cost nothing" (ADR-030).
@@ -145,7 +156,7 @@ describe('migration v18 — usage_event gains ADR-071 attribution', () => {
   it('indexes (account_key, ts) for the per-account queries the dashboard will run', () => {
     const db = openRawDb()
     try {
-      runMigrations(db)
+      runToV18(db)
       const indexes = db
         .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'usage_event'")
         .all() as Array<{ name: string }>
@@ -159,11 +170,11 @@ describe('migration v18 — usage_event gains ADR-071 attribution', () => {
     const db = openRawDb()
     try {
       seedV17(db)
-      runMigrations(db)
+      runToV18(db)
 
-      expect(() => runMigrations(db)).not.toThrow()
+      expect(() => runToV18(db)).not.toThrow()
 
-      expect(userVersion(db)).toBe(19)
+      expect(userVersion(db)).toBe(18)
       expect(readRow(db, 'msg_claude_both').api_cost_usd).toBeCloseTo(0.31)
     } finally {
       db.close()
