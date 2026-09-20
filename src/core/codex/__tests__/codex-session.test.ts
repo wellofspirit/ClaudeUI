@@ -2954,6 +2954,11 @@ describe('Codex native children', () => {
     expect(meters.at(-1)!.equivalentCostUsd).toBeCloseTo(1.302, 6)
     const lines = sent('session:status-line') as Array<{ totalCostUsd: number | null }>
     expect(lines.at(-1)!.totalCostUsd).toBeCloseTo(1.302, 6)
+    // ADR-071 §2 added a billed figure and an unpriced count for the engines
+    // that separate the two (opencode, pi). A Codex status line carries
+    // neither, and the tooltip reads their absence as "no such distinction".
+    expect(lines.at(-1)!).not.toHaveProperty('billedCostUsd')
+    expect(lines.at(-1)!).not.toHaveProperty('unknownCostMessages')
     // `session:status` is only re-emitted when something about the session
     // changes, so it carries the cost from the next emission onward — the
     // TopBar reads it only as the pre-status-line fallback.

@@ -601,6 +601,21 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   // the tooltip can say so instead of printing a fabricated $0.00.
   const cost: number | null = statusLine ? statusLine.totalCostUsd : fallbackCost
   const costUnknown = cost === null
+  // ADR-071 §2: the engines that separate the two costs send what was BILLED
+  // beside the headline. Undefined means the engine does not make the
+  // distinction (Claude, Codex) — then the tooltip says nothing extra.
+  const billedCostUsd = statusLine?.billedCostUsd
+  // A ZERO bill is said in words on the label, never as a figure: `$0.0000` in
+  // a row of its own read as a tiny charge, and as one more model line. The
+  // Billed row is for the one case words cannot carry: a real amount that is
+  // only part of the headline (a session that mixed a plan with an API key).
+  const showBilledCost =
+    typeof billedCostUsd === 'number' && billedCostUsd > 0 && billedCostUsd !== cost
+  const costCovered = billedCostUsd === 0 && cost !== null && cost > 0
+  // Covered claims a figure was covered; with an unknown headline there is no
+  // figure, but that nothing was billed is still known and worth saying.
+  const nothingBilled = billedCostUsd === 0 && cost === null
+  const unpricedMessages = statusLine?.unknownCostMessages ?? 0
   const totalDurationMs = statusLine?.totalDurationMs ?? 0
   const totalApiDurationMs = statusLine?.totalApiDurationMs ?? 0
   const turnStartedAtMs = statusLine?.turnStartedAtMs ?? null
@@ -875,13 +890,44 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
                           <div className="flex gap-4">
                             {showCost && (
                               <div>
-                                <div className="text-[10px] text-text-muted mb-0.5">Cost</div>
+                                <div className="text-[10px] text-text-muted mb-0.5">
+                                  Cost
+                                  {costCovered && (
+                                    <span data-testid="TopBar.costCovered">
+                                      {' '}
+                                      · covered by subscription
+                                    </span>
+                                  )}
+                                  {nothingBilled && (
+                                    <span data-testid="TopBar.costNothingBilled">
+                                      {' '}
+                                      · nothing billed
+                                    </span>
+                                  )}
+                                  {unpricedMessages > 0 && (
+                                    <span data-testid="TopBar.costUnpriced">
+                                      {' '}
+                                      · {unpricedMessages} unpriced
+                                    </span>
+                                  )}
+                                </div>
                                 <div
                                   data-testid="TopBar.cost"
                                   className="text-[11px] text-text-secondary font-mono"
                                 >
                                   {formatCostOrUnknown(cost)}
                                 </div>
+                                {showBilledCost && (
+                                  <div
+                                    data-testid="TopBar.billedCost"
+                                    className="mt-0.5 pb-0.5 mb-0.5 flex items-center justify-between gap-3 border-b border-border/50"
+                                  >
+                                    <span className="text-[10px] text-text-muted">Billed</span>
+                                    <span className="text-[10px] text-text-secondary font-mono shrink-0">
+                                      {formatCostOrUnknown(billedCostUsd)}
+                                    </span>
+                                  </div>
+                                )}
                                 {showCostBreakdown && (
                                   <div
                                     data-testid="TopBar.costBreakdown"

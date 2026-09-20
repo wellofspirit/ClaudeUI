@@ -47,6 +47,7 @@ afterEach(() => {
 })
 
 const {
+  mockBuildAccountRef,
   mockAcquire,
   mockCreateSession,
   mockGetSession,
@@ -59,6 +60,7 @@ const {
   mockListSkills,
   MockOpencodeClient
 } = vi.hoisted(() => {
+  const mockBuildAccountRef = vi.fn()
   const mockAcquire = vi.fn()
   const mockCreateSession = vi.fn()
   const mockGetSession = vi.fn()
@@ -71,6 +73,7 @@ const {
   const mockListSkills = vi.fn()
   const MockOpencodeClient = vi.fn()
   return {
+    mockBuildAccountRef,
     mockAcquire,
     mockCreateSession,
     mockGetSession,
@@ -127,6 +130,17 @@ vi.mock('../command-skill-discovery', () => ({
   discoverOpencodeSkills: vi.fn().mockResolvedValue([])
 }))
 
+// The vendor's billing type decides what a turn is WORTH (ADR-071 §2), and the
+// real provider would reach for opencode's auth.json on the machine running the
+// suite. Default: no account ref at all → 'unknown', which is what every test
+// written before this slice assumed.
+vi.mock('../../auth/OpencodeAuthProvider', () => ({
+  opencodeAuthProvider: {
+    buildAccountRef: mockBuildAccountRef,
+    warmCache: vi.fn().mockResolvedValue(undefined)
+  }
+}))
+
 import { OpencodeSession } from '../OpencodeSession'
 import { insertDispatchedUsage } from '../../services/db'
 import type { OpencodeEvent } from '../protocol/types'
@@ -134,6 +148,7 @@ import type { HostWindowHandle } from '../../host'
 import type { StatusLineData } from '../../../shared/types'
 
 function setupMocks(): void {
+  mockBuildAccountRef.mockReset().mockReturnValue(null)
   mockAcquire.mockReset()
   mockCreateSession.mockReset()
   mockGetSession.mockReset()
@@ -363,6 +378,289 @@ describe('OpencodeSession — dispatched cost (Slice C)', () => {
         { engineId: 'claude', modelId: 'claude-haiku-4-5', costUsd: 0.12, dispatched: true }
       ])
     )
+
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-071 §2 — the headline is what the usage was WORTH, not what opencode
+// says it charged. opencode zeroes its catalog for a provider the user signed
+// into with OAuth, so every assertion below read `$0.00` before this slice.
+//
+// 'anthropic/claude-fable-5-1' is in the built-in pricing table at $10/MTok
+// input, so 1M input tokens is a $10 equivalent — a figure no engine-reported
+// cost in these tests coincides with.
+// ---------------------------------------------------------------------------
+
+const SUBSCRIPTION_REF = {
+  engineId: 'opencode' as const,
+  vendorId: 'anthropic',
+  billingType: 'subscription' as const,
+  authState: 'authenticated' as const
+}
+
+/** One assistant message, then the turn end that settles it. */
+function turnEvents(
+  sessionId: string,
+  messageId: string,
+  cost: number,
+  inputTokens: number
+): () => AsyncGenerator<OpencodeEvent> {
+  return async function* (): AsyncGenerator<OpencodeEvent> {
+    yield {
+      id: 'ev1',
+      type: 'message.updated',
+      properties: {
+        sessionID: sessionId,
+        info: {
+          id: messageId,
+          role: 'assistant',
+          cost,
+          tokens: { input: inputTokens, output: 0, cache: { read: 0, write: 0 } }
+        }
+      }
+    }
+    yield { id: 'ev2', type: 'session.idle', properties: { sessionID: sessionId } }
+  }
+}
+
+async function runOneTurn(
+  routingId: string,
+  model: string,
+  events: () => AsyncGenerator<OpencodeEvent>
+): Promise<{ win: MockWindow; session: OpencodeSession }> {
+  const win = new MockWindow() as unknown as HostWindowHandle
+  const session = new OpencodeSession(routingId, win, '/tmp/test-cwd', { model })
+  mockCreateSession.mockResolvedValue({ id: 'ses_live' })
+  mockSubscribeEvents.mockImplementation(events)
+  await session.run('hello')
+  const sendMock = (win as unknown as MockWindow).webContents.send
+  await vi.waitFor(() => {
+    expect(sendMock.mock.calls.some((c) => c[0] === 'session:result')).toBe(true)
+  })
+  return { win: win as unknown as MockWindow, session }
+}
+
+describe('OpencodeSession — the headline follows the cost rule (ADR-071 §2)', () => {
+  beforeEach(setupMocks)
+
+  it('a subscription turn opencode billed at 0 reports the list-price equivalent, billed 0', async () => {
+    mockBuildAccountRef.mockReturnValue(SUBSCRIPTION_REF)
+    const { win, session } = await runOneTurn(
+      'r_sub',
+      'anthropic/claude-fable-5-1',
+      turnEvents('ses_live', 'msg_sub', 0, 1_000_000)
+    )
+
+    const statusLine = lastStatusLine(win.webContents.send as never)
+    expect(statusLine.totalCostUsd).toBeCloseTo(10, 6)
+    expect(statusLine.billedCostUsd).toBe(0)
+    expect(statusLine.unknownCostMessages).toBeUndefined()
+    // The breakdown has to agree with the headline it sits under.
+    expect(statusLine.modelCosts).toEqual([
+      { engineId: 'opencode', modelId: 'claude-fable-5-1', costUsd: expect.closeTo(10, 6) }
+    ])
+
+    session.dispose()
+  })
+
+  it('the same turn under an API key reports what opencode billed', async () => {
+    mockBuildAccountRef.mockReturnValue({ ...SUBSCRIPTION_REF, billingType: 'apiKey' as const })
+    const { win, session } = await runOneTurn(
+      'r_api',
+      'anthropic/claude-fable-5-1',
+      turnEvents('ses_live', 'msg_api', 0.13, 1_000_000)
+    )
+
+    const statusLine = lastStatusLine(win.webContents.send as never)
+    expect(statusLine.totalCostUsd).toBeCloseTo(0.13, 6)
+    expect(statusLine.billedCostUsd).toBeCloseTo(0.13, 6)
+
+    session.dispose()
+  })
+
+  it('an unpriced model under a subscription is unknown, never zero', async () => {
+    mockBuildAccountRef.mockReturnValue({ ...SUBSCRIPTION_REF, vendorId: 'mystery' })
+    const { win, session } = await runOneTurn(
+      'r_unpriced',
+      'mystery/no-such-model-anywhere',
+      turnEvents('ses_live', 'msg_unpriced', 0, 5_000)
+    )
+
+    const statusLine = lastStatusLine(win.webContents.send as never)
+    expect(statusLine.totalCostUsd).toBeNull()
+    expect(statusLine.billedCostUsd).toBe(0)
+    expect(statusLine.unknownCostMessages).toBe(1)
+
+    session.dispose()
+  })
+
+  it('a known message alongside an unknown one reports the known part and counts the unknown', async () => {
+    mockBuildAccountRef.mockReturnValue(SUBSCRIPTION_REF)
+    mockGetSession.mockResolvedValue({ id: 'ses_resumed' })
+    // History holds one message on a model nothing prices; the live turn runs
+    // on a priced one.
+    mockListMessages.mockResolvedValue([
+      {
+        info: {
+          id: 'msg_hist',
+          role: 'assistant',
+          cost: 0,
+          modelID: 'no-such-model-anywhere',
+          providerID: 'mystery',
+          tokens: { input: 5_000, output: 10 },
+          time: { created: 1000, completed: 2000 }
+        },
+        parts: [{ type: 'text', text: 'old', id: 'p1' }]
+      }
+    ])
+    mockSubscribeEvents.mockImplementation(turnEvents('ses_resumed', 'msg_new', 0, 1_000_000))
+
+    const win = new MockWindow() as unknown as HostWindowHandle
+    const session = new OpencodeSession('r_mixed', win, '/tmp/test-cwd', {
+      model: 'anthropic/claude-fable-5-1',
+      resumeSessionId: 'ses_resumed'
+    })
+    await session.run('hello')
+    const sendMock = (win as unknown as MockWindow).webContents.send
+    await vi.waitFor(() => {
+      expect(sendMock.mock.calls.some((c) => c[0] === 'session:result')).toBe(true)
+    })
+
+    const statusLine = lastStatusLine(sendMock as never)
+    expect(statusLine.totalCostUsd).toBeCloseTo(10, 6)
+    expect(statusLine.unknownCostMessages).toBe(1)
+
+    session.dispose()
+  })
+
+  it('history seeding reproduces the same headline after a reload', async () => {
+    mockBuildAccountRef.mockReturnValue(SUBSCRIPTION_REF)
+    mockGetSession.mockResolvedValue({ id: 'ses_resumed' })
+    mockListMessages.mockResolvedValue([
+      {
+        info: {
+          id: 'msg_1',
+          role: 'assistant',
+          cost: 0, // what a subscription-authenticated opencode always reports
+          modelID: 'claude-fable-5-1',
+          providerID: 'anthropic',
+          tokens: { input: 1_000_000, output: 0 },
+          time: { created: 1000, completed: 2000 }
+        },
+        parts: [{ type: 'text', text: 'hello', id: 'p1' }]
+      }
+    ])
+
+    const win = new MockWindow() as unknown as HostWindowHandle
+    const session = new OpencodeSession('r_reload', win, '/tmp/test-cwd', {
+      model: 'anthropic/claude-fable-5-1',
+      resumeSessionId: 'ses_resumed'
+    })
+    await session.run(null)
+    await vi.waitFor(() => {
+      expect(session.status.totalCostUsd).toBeCloseTo(10, 6)
+    })
+
+    const statusLine = lastStatusLine((win as unknown as MockWindow).webContents.send as never)
+    expect(statusLine.totalCostUsd).toBeCloseTo(10, 6)
+    expect(statusLine.billedCostUsd).toBe(0)
+    expect(statusLine.modelCosts).toEqual([
+      { engineId: 'opencode', modelId: 'claude-fable-5-1', costUsd: expect.closeTo(10, 6) }
+    ])
+
+    session.dispose()
+  })
+
+  it('an in-flight message with a zero cost and no tokens yet contributes nothing', async () => {
+    // opencode announces an assistant message (`cost: 0`, no token snapshot)
+    // before it meters it. Pricing that announcement finds no tokens to price
+    // and reports it as unpriced, so the tooltip flashes "1 unpriced" mid-turn
+    // for every turn. It is an EMPTY message, not an unpriced one — the same
+    // condition recordTurnUsage skips on.
+    mockBuildAccountRef.mockReturnValue(SUBSCRIPTION_REF)
+    const win = new MockWindow() as unknown as HostWindowHandle
+    const session = new OpencodeSession('r_announce', win, '/tmp/test-cwd', {
+      model: 'anthropic/claude-fable-5-1'
+    })
+    mockCreateSession.mockResolvedValue({ id: 'ses_live' })
+    mockSubscribeEvents.mockImplementation(async function* (): AsyncGenerator<OpencodeEvent> {
+      yield {
+        id: 'ev1',
+        type: 'message.updated',
+        properties: {
+          sessionID: 'ses_live',
+          info: { id: 'msg_announced', role: 'assistant', cost: 0 }
+        }
+      }
+      yield { id: 'ev2', type: 'session.idle', properties: { sessionID: 'ses_live' } }
+    })
+    await session.run('hello')
+    const sendMock = (win as unknown as MockWindow).webContents.send
+    await vi.waitFor(() => {
+      expect(sendMock.mock.calls.some((c) => c[0] === 'session:result')).toBe(true)
+    })
+
+    const statusLine = lastStatusLine(sendMock as never)
+    expect(statusLine.totalCostUsd).toBe(0)
+    expect(statusLine.unknownCostMessages).toBeUndefined()
+
+    session.dispose()
+  })
+
+  it('a history seeded before the auth probe lands re-prices once it does', async () => {
+    // buildAccountRef is served by an ASYNCHRONOUS probe, and history seeding
+    // runs at session open — so a reopened session reads its whole history
+    // under `unknown`. Freezing the billing type there leaves the session
+    // reporting `Billed unknown` for its lifetime, on a race.
+    mockBuildAccountRef.mockReturnValue(null)
+    mockGetSession.mockResolvedValue({ id: 'ses_resumed' })
+    mockListMessages.mockResolvedValue([
+      {
+        info: {
+          id: 'msg_1',
+          role: 'assistant',
+          cost: 0,
+          modelID: 'claude-fable-5-1',
+          providerID: 'anthropic',
+          tokens: { input: 1_000_000, output: 0 },
+          time: { created: 1000, completed: 2000 }
+        },
+        parts: [{ type: 'text', text: 'hello', id: 'p1' }]
+      }
+    ])
+    // One event, whose only job is to make the session emit another status
+    // line. The SSE consumer does not start until the first prompt, so this
+    // arrives on the turn the test runs after flipping the probe's answer.
+    mockSubscribeEvents.mockImplementation(async function* (): AsyncGenerator<OpencodeEvent> {
+      yield { id: 'ev1', type: 'session.idle', properties: { sessionID: 'ses_resumed' } }
+    })
+
+    const win = new MockWindow() as unknown as HostWindowHandle
+    const session = new OpencodeSession('r_late_probe', win, '/tmp/test-cwd', {
+      model: 'anthropic/claude-fable-5-1',
+      resumeSessionId: 'ses_resumed'
+    })
+    await session.run(null)
+    const sendMock = (win as unknown as MockWindow).webContents.send
+    await vi.waitFor(() => {
+      expect(session.status.totalCostUsd).toBeCloseTo(10, 6)
+    })
+    // Pre-probe: `unknown` cannot tell a covered turn from a free one, so the
+    // bill is honestly null. That is the figure that must not be frozen.
+    expect(lastStatusLine(sendMock as never).billedCostUsd).toBeNull()
+
+    mockBuildAccountRef.mockReturnValue(SUBSCRIPTION_REF)
+    await session.run('another turn')
+    await vi.waitFor(() => {
+      expect(sendMock.mock.calls.some((c) => c[0] === 'session:result')).toBe(true)
+    })
+
+    const after = lastStatusLine(sendMock as never)
+    expect(after.billedCostUsd).toBe(0)
+    expect(after.totalCostUsd).toBeCloseTo(10, 6)
+    expect(after.unknownCostMessages).toBeUndefined()
 
     session.dispose()
   })

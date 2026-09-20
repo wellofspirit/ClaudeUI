@@ -196,6 +196,12 @@ describe('ClaudeSession — cost double-count guard', () => {
     expect(statusLine.modelCosts).toEqual([
       { engineId: 'claude', modelId: 'claude-sonnet-4-6', costUsd: 0.048 }
     ])
+    // ADR-071 §2 gave StatusLineData a second cost and an unpriced count, for
+    // the engines that can tell the two apart (opencode, pi). A Claude status
+    // line carries neither — cli.js reports one figure — and the tooltip
+    // reads their ABSENCE as "this engine makes no such distinction".
+    expect(statusLine).not.toHaveProperty('billedCostUsd')
+    expect(statusLine).not.toHaveProperty('unknownCostMessages')
   })
 })
 

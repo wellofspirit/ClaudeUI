@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { resolveCosts, sumCosts } from '../cost-rule'
+import { resolveCosts, sumCosts, totalCosts } from '../cost-rule'
 
 describe('resolveCosts — subscription', () => {
   it('bills nothing and shows the API-equivalent figure', () => {
@@ -179,5 +179,71 @@ describe('sumCosts', () => {
       resolveCosts({ billingType: 'unknown', equivCostUsd: null, engineCostUsd: 0 })
     ]
     expect(sumCosts(rows.map((r) => r.displayCostUsd))).toEqual({ total: 2.75, unknown: 1 })
+  })
+})
+
+describe('totalCosts — the headline a session reports', () => {
+  it('keeps the known part and counts what it could not price', () => {
+    expect(
+      totalCosts([
+        { displayCostUsd: 1.25, billedCostUsd: 0 },
+        { displayCostUsd: null, billedCostUsd: 0 },
+        { displayCostUsd: 0.75, billedCostUsd: 0 }
+      ])
+    ).toEqual({ displayCostUsd: 2, billedCostUsd: 0, unknownMessages: 1 })
+  })
+
+  it('is null only when NOTHING was priceable', () => {
+    expect(totalCosts([{ displayCostUsd: null, billedCostUsd: null }])).toEqual({
+      displayCostUsd: null,
+      billedCostUsd: null,
+      unknownMessages: 1
+    })
+  })
+
+  it('totals an empty session as a known zero, not unknown', () => {
+    expect(totalCosts([])).toEqual({
+      displayCostUsd: 0,
+      billedCostUsd: 0,
+      unknownMessages: 0
+    })
+  })
+
+  it('a known zero is a total, not an absence', () => {
+    expect(totalCosts([{ displayCostUsd: 0, billedCostUsd: 0 }])).toEqual({
+      displayCostUsd: 0,
+      billedCostUsd: 0,
+      unknownMessages: 0
+    })
+  })
+
+  it('totals the two costs independently — billed can be known where display is not', () => {
+    expect(
+      totalCosts([
+        { displayCostUsd: null, billedCostUsd: 0 },
+        { displayCostUsd: null, billedCostUsd: 0 }
+      ])
+    ).toEqual({ displayCostUsd: null, billedCostUsd: 0, unknownMessages: 2 })
+  })
+
+  it('counts a non-finite figure as unknown, never as zero', () => {
+    expect(
+      totalCosts([
+        { displayCostUsd: Number.NaN, billedCostUsd: 0 },
+        { displayCostUsd: 2, billedCostUsd: 2 }
+      ])
+    ).toEqual({ displayCostUsd: 2, billedCostUsd: 2, unknownMessages: 1 })
+  })
+
+  it('totals resolved rows end to end', () => {
+    const rows = [
+      resolveCosts({ billingType: 'subscription', equivCostUsd: 10, engineCostUsd: 0 }),
+      resolveCosts({ billingType: 'subscription', equivCostUsd: null, engineCostUsd: 0 })
+    ]
+    expect(totalCosts(rows)).toEqual({
+      displayCostUsd: 10,
+      billedCostUsd: 0,
+      unknownMessages: 1
+    })
   })
 })

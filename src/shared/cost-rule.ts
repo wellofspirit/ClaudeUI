@@ -77,6 +77,37 @@ export function resolveCosts(input: CostInputs): ResolvedCosts {
   }
 }
 
+/** The three figures a session headline reports, derived from its messages. */
+export interface TotalCosts {
+  /** The known part of the headline. Null only when NOTHING was priceable. */
+  displayCostUsd: number | null
+  /** The known part of what was billed, by the same rule. */
+  billedCostUsd: number | null
+  /** How many messages had no known display cost. */
+  unknownMessages: number
+}
+
+/**
+ * Total a session's per-message costs for a headline (ADR-071 §2).
+ *
+ * The headline is the KNOWN total: a message we could not price is never
+ * counted as zero, it is counted in `unknownMessages` so the surface can say
+ * "$12.40 · 2 unpriced". Null is reserved for the one case where the total
+ * would be a fiction — nothing at all was priceable, and at least one message
+ * tried. An empty session totals a known `0`, not unknown.
+ */
+export function totalCosts(
+  costs: ReadonlyArray<Pick<ResolvedCosts, 'displayCostUsd' | 'billedCostUsd'>>
+): TotalCosts {
+  const display = sumCosts(costs.map((c) => c.displayCostUsd))
+  const billed = sumCosts(costs.map((c) => c.billedCostUsd))
+  return {
+    displayCostUsd: display.unknown === costs.length && costs.length > 0 ? null : display.total,
+    billedCostUsd: billed.unknown === costs.length && costs.length > 0 ? null : billed.total,
+    unknownMessages: display.unknown
+  }
+}
+
 /**
  * Sum costs without ever counting an unknown as zero. Callers get the total of
  * the known values and how many were unknown, so a total can say "$12.40 over 9

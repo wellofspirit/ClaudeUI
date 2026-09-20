@@ -111,10 +111,9 @@ import type { TokenUsageBreakdown } from '../codex/protocol/v2/TokenUsageBreakdo
 import type { ThreadTokenUsage } from '../codex/protocol/v2/ThreadTokenUsage'
 import type { CommandExecutionRequestApprovalParams } from '../codex/protocol/v2/CommandExecutionRequestApprovalParams'
 import { equivalentCostUsd } from '../../shared/pricing'
-import { resolveCosts } from '../../shared/cost-rule'
 import type { ResolvedCosts } from '../../shared/cost-rule'
-import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
-import { piAuthProvider } from '../auth/PiAuthProvider'
+import { opencodeMessageCosts } from '../opencode/message-cost'
+import { piMessageCosts } from '../pi/message-cost'
 import { engineMeta } from '../../shared/engine-meta'
 import { query as sdkQuery, locateBunClaude, sendProgress } from '../sdk'
 import type {
@@ -132,7 +131,6 @@ import { insertDispatchedUsage } from './db'
 import type { DispatchedUsageRow } from './db'
 import type {
   ApprovalDecision,
-  BillingType,
   ChatMessage,
   DispatchConfig,
   EngineConfig,
@@ -1362,96 +1360,51 @@ function storedMessageTotalTokens(info: StoredMessage['info'] | undefined): numb
 }
 
 /**
- * One dispatched turn's costs under the rule every session headline follows
- * (ADR-071 §2, `shared/cost-rule.ts`). `dispatch.maxCostUsd` and the
- * dispatching session's own breakdown both count `displayCostUsd`: the
- * list-price equivalent under a subscription, the billed figure under an API
- * key (a gateway's margin is real spend), zero for a free vendor, and `null`
- * when the model has no known price — which the cap cannot count at all
- * (ADR-030: never pretend it is armed).
- *
- * The CLAUDE and CODEX targets deliberately do not route through this, because
- * both already hand the cap exactly what this would return. `codexTurnCostUsd`
- * derives a list-price equivalent from the turn's own tokens for every billing
- * type (ADR-066: a ChatGPT-subscription charge is unknowable from here) and
- * yields `null` for an unpriced model; cli.js's `total_cost_usd` is likewise an
- * API-equivalent whatever plan is behind it (ADR-034). Feeding either through a
- * billing type we would have to infer could only make those two figures worse.
- */
-function dispatchTurnCost(
-  billingType: BillingType,
-  equivCostUsd: number | null,
-  engineCostUsd: number | null
-): ResolvedCosts {
-  return resolveCosts({ billingType, equivCostUsd, engineCostUsd })
-}
-
-/**
  * An opencode dispatch turn's costs, from the stored assistant message the turn
- * ended on. Two things make this more than `info.cost`: opencode prices from
- * its own catalog, which is ZEROED for a provider signed in with OAuth (so the
- * cap never tripped under a subscription — the bug ADR-071 §2 names), and its
- * token counts are DISJOINT — `session.ts` subtracts the cache reads and writes
- * from `input` before storing it, and `reasoning` sits beside `output` rather
- * than inside it — so the buckets add up instead of nesting (the opposite of
- * `codexTurnCostUsd`'s OpenAI shape above).
+ * ended on — the same rule, from the same module, that an opencode session's
+ * own headline follows (ADR-071 §2). `dispatch.maxCostUsd` and the dispatching
+ * session's breakdown both count `displayCostUsd`: the list-price equivalent
+ * under a subscription, the billed figure under an API key (a gateway's margin
+ * is real spend), zero for a free vendor, and `null` when the model has no
+ * known price — which the cap cannot count at all (ADR-030: never pretend it
+ * is armed). `opencodeCostInputs` owns the disjoint-token mapping, the
+ * zero-token short circuit and the billing lookup; the only thing left here is
+ * which model the turn ran on.
  *
  * The vendor/model pair is the one the turn was DISPATCHED with, which is also
  * the pair `promptAsync` sent and the one the usage row records as
- * `targetModel`. A null account ref (the auth probe has not run in this
- * process) reads as `unknown`, and `resolveCosts` treats an engine `0` there as
- * "not known" rather than free — so the equivalent is what gets used.
+ * `targetModel`.
  *
- * A turn that moved NO tokens short-circuits to a known zero before the price
- * table is consulted at all: zero tokens cost zero at any rate, under any
- * billing type, so a turn that idled without producing an assistant message is
- * not "unpriced" even on a model we could not have priced. Without this the
- * `unknown` row would turn every such turn into a phantom uncountable one.
+ * The CLAUDE and CODEX targets deliberately do not route through the rule,
+ * because both already hand the cap exactly what it would return.
+ * `codexTurnCostUsd` derives a list-price equivalent from the turn's own tokens
+ * for every billing type (ADR-066: a ChatGPT-subscription charge is unknowable
+ * from here) and yields `null` for an unpriced model; cli.js's
+ * `total_cost_usd` is likewise an API-equivalent whatever plan is behind it
+ * (ADR-034). Feeding either through a billing type we would have to infer could
+ * only make those two figures worse.
  */
 function opencodeTurnCost(model: string, info: StoredMessage['info'] | undefined): ResolvedCosts {
   const { providerID, modelID } = parseModelString(model)
-  const tokens = info?.tokens
-  const cacheTokens = (tokens?.cache?.read ?? 0) + (tokens?.cache?.write ?? 0)
-  const engineCostUsd = info?.cost ?? null
-  const movedNothing =
-    storedMessageTotalTokens(info) === 0 &&
-    cacheTokens === 0 &&
-    !(typeof engineCostUsd === 'number' && engineCostUsd > 0)
-  if (movedNothing) return { apiCostUsd: 0, billedCostUsd: 0, displayCostUsd: 0 }
-
-  const equivCostUsd = equivalentCostUsd(providerID, modelID, {
-    inputTokens: tokens?.input ?? 0,
-    outputTokens: (tokens?.output ?? 0) + (tokens?.reasoning ?? 0),
-    cacheWriteTokens: tokens?.cache?.write ?? 0,
-    // opencode reports one cache-write figure; the 5m/1h split is Anthropic's.
-    cacheWrite1hTokens: 0,
-    cacheReadTokens: tokens?.cache?.read ?? 0
-  })
-  const billingType = opencodeAuthProvider.buildAccountRef(providerID)?.billingType ?? 'unknown'
-  return dispatchTurnCost(billingType, equivCostUsd, engineCostUsd)
+  return opencodeMessageCosts(providerID, modelID, info?.tokens, info?.cost ?? null)
 }
 
 /**
  * A pi dispatch turn's costs from the per-turn delta of pi's own cumulative
- * figure. pi prices every turn from its own model catalog whatever credential
- * is behind it, so that figure is a LIST-PRICE equivalent under every billing
- * type — and a better one than our table's, which is a snapshot pi's catalog is
- * not. It is therefore passed as the equivalent unconditionally, not just under
- * a subscription: under an API key the same number is also the bill, which is
- * what `resolveCosts` charges it as, and under `unknown` a reported `0` stays a
- * known zero rather than becoming a turn we claim to have no price for. We have
- * no per-turn token breakdown out here (the target keeps only a running
- * `turnTotalTokens` sum), so the S1b fallback `equivalent ?? pi's figure` has
- * nothing to prefer over it anyway.
+ * figure — again the rule an ordinary pi turn follows, from the same module.
+ * pi prices from its own catalog whatever credential is behind it, so that
+ * figure IS the list-price equivalent, and `piCostInputs` takes it as one.
  *
- * That leaves exactly one way a pi turn ends up unpriced: a non-finite figure
- * (`usage.cost.total` arriving as something the mapper's `+=` turns into NaN).
- * `resolveCosts` refuses to count that, which is the right answer.
+ * No tokens are passed because none are available out here (the target keeps
+ * only a running `turnTotalTokens` sum), so our table has nothing to price and
+ * pi's figure stands alone: a reported `0` stays a known zero, and the one way
+ * a pi turn ends up unpriced is a non-finite figure (`usage.cost.total`
+ * arriving as something the mapper's `+=` turns into NaN), which
+ * `resolveCosts` refuses to count — the right answer.
  */
 function piTurnCost(model: string, engineCostUsd: number): ResolvedCosts {
-  const { vendorId } = engineMeta('pi').decodeModelValue(model)
-  const billingType = piAuthProvider.buildPiAccountRef(vendorId)?.billingType ?? 'unknown'
-  return dispatchTurnCost(billingType, engineCostUsd, engineCostUsd)
+  const { vendorId, modelId } = engineMeta('pi').decodeModelValue(model)
+  return piMessageCosts(vendorId, modelId, undefined, engineCostUsd)
 }
 
 /**

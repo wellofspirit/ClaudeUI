@@ -20,6 +20,8 @@ import type {
 } from '../../shared/types'
 import { engineMeta } from '../../shared/engine-meta'
 import { PI_DEFAULT_MODEL } from '../../shared/engine-meta'
+import { totalCosts, type TotalCosts } from '../../shared/cost-rule'
+import { piCostInputs, resolvePiCosts, type PiCostInputs } from './message-cost'
 import { logger } from '../services/logger'
 import { authErrorTranscriptMessage } from '../services/api-error'
 import { piAuthProvider } from '../auth/PiAuthProvider'
@@ -439,8 +441,23 @@ export class PiSession extends BaseSession {
 
   // ── Cost / usage accounting ────────────────────────────────────────────────
   private mapperState: PiMapperState = createPiMapperState()
-  /** Cost from stored history, seeded ONCE on resume from `get_session_stats().cost`. */
-  private costBaseUsd = 0
+  /**
+   * Cost from stored history, seeded ONCE on resume from `get_session_stats()`.
+   *
+   * ADR-071 §2: pi's own figure is a LIST-price computation whatever the
+   * credential, so under a subscription it is what the usage was worth, not
+   * what was billed. Both halves below hold cost INPUTS (piCostInputs); the
+   * billing type is applied when a figure is read, because the auth probe
+   * resolves asynchronously and a session that captured its history first must
+   * not be stuck with what `unknown` made of it.
+   *
+   * pi reports history as one aggregate, so the base is at most one entry —
+   * which also means an unpriced history counts as ONE unknown message rather
+   * than however many it really held. The live half is exact.
+   */
+  private costBase: PiCostInputs[] = []
+  /** One entry per assistant message metered in THIS process. */
+  private liveCostInputs: PiCostInputs[] = []
   private sumInputTokens = 0
   private sumOutputTokens = 0
   private sumCacheReadTokens = 0
@@ -487,10 +504,15 @@ export class PiSession extends BaseSession {
     // Warm the auth probe so status.account resolves shortly after construction
     // (mirrors OpencodeSession's opencodeAuthProvider.warmCache().then(sendStatus)
     // constructor call) — account stays null on the very first sendStatus() above
-    // until this resolves.
+    // until this resolves. The status line goes out again too: its billed figure
+    // depends on the vendor's billing type (ADR-071 §2), which is `unknown`
+    // until the probe lands, and a reopened session may run no further turn.
     piAuthProvider
       .probe()
-      .then(() => this.sendStatus())
+      .then(() => {
+        this.sendStatus()
+        this.sendStatusLine()
+      })
       .catch(() => {})
   }
 
@@ -498,8 +520,14 @@ export class PiSession extends BaseSession {
     return this.isProcessing
   }
 
-  private get totalCostUsd(): number {
-    return this.costBaseUsd + this.mapperState.totalCostUsd
+  /** History base + this process's messages, by the cost rule (ADR-071 §2). */
+  private costTally(): TotalCosts {
+    return totalCosts([...this.costBase, ...this.liveCostInputs].map(resolvePiCosts))
+  }
+
+  /** The headline figure: the known total, null when nothing could be priced. */
+  private get totalCostUsd(): number | null {
+    return this.costTally().displayCostUsd
   }
 
   get status(): SessionStatus {
@@ -1067,7 +1095,21 @@ export class PiSession extends BaseSession {
           type: 'get_session_stats'
         })
         if (statsResp.success && statsResp.data) {
-          this.costBaseUsd = statsResp.data.cost
+          const model = engineMeta('pi').decodeModelValue(this._model)
+          // Nothing metered means there is no history to price — an empty base,
+          // not an unpriced one. Seeding an entry here would report a session
+          // that has cost nothing yet as "unknown" on any unpriced model.
+          const metered = statsResp.data.cost > 0 || statsResp.data.tokens.total > 0
+          this.costBase = metered
+            ? [
+                piCostInputs(
+                  model.vendorId,
+                  model.modelId,
+                  statsResp.data.tokens,
+                  statsResp.data.cost
+                )
+              ]
+            : []
           this.sumInputTokens = statsResp.data.tokens.input
           this.sumOutputTokens = statsResp.data.tokens.output
           this.sumCacheReadTokens = statsResp.data.tokens.cacheRead
@@ -1306,6 +1348,13 @@ export class PiSession extends BaseSession {
           messageId: output.messageId,
           source: 'live'
         })
+        // ADR-071 §2: the headline follows the cost rule, so what this message
+        // adds is its DISPLAY cost — pi's own figure only when the rule says
+        // that is what the user was charged. The ledger row above keeps pi's
+        // raw figure as `engineCostUsd`, unchanged.
+        this.liveCostInputs.push(
+          piCostInputs(output.provider, output.modelId, output.tokens, output.costUsd)
+        )
         this.sumInputTokens += output.tokens.input
         this.sumOutputTokens += output.tokens.output
         this.sumCacheReadTokens += output.tokens.cacheRead
@@ -2747,8 +2796,11 @@ export class PiSession extends BaseSession {
     const remainingPercentage = usedPercentage !== null ? 100 - usedPercentage : null
     const cachedTokens = this.sumCacheReadTokens + this.sumCacheWriteTokens
     const totalTokens = this.sumInputTokens + this.sumOutputTokens + cachedTokens
+    const costs = this.costTally()
     return {
-      totalCostUsd: this.totalCostUsd,
+      totalCostUsd: costs.displayCostUsd,
+      billedCostUsd: costs.billedCostUsd,
+      ...(costs.unknownMessages > 0 ? { unknownCostMessages: costs.unknownMessages } : {}),
       totalDurationMs: this.accTotalDurationMs,
       totalApiDurationMs: 0,
       totalInputTokens: this.sumInputTokens,

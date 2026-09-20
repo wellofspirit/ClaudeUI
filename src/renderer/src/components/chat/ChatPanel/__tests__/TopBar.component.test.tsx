@@ -461,6 +461,117 @@ describe('TopBar — unknown (unpriced) cost', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Two costs (ADR-071 §2): an engine that can tell what a turn was WORTH from
+// what it CHARGED sends both, and the tooltip has to say which figure is which
+// — otherwise a subscription session reads as money spent. Claude and Codex
+// send neither field, and for them the block must look exactly as it did.
+// ---------------------------------------------------------------------------
+
+describe('TopBar — billed cost and coverage', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  it('names the cost as covered under a subscription, and shows no figure for a zero bill', () => {
+    seed.statusLine(ROUTE, makeStatusLine({ totalCostUsd: 12.4, billedCostUsd: 0 }))
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    expect(screen.getByTestId('TopBar.cost')).toHaveTextContent('$12.40')
+    expect(screen.getByTestId('TopBar.costCovered')).toHaveTextContent('covered by subscription')
+    // The label carries the zero bill; a `$0.0000` row read as a tiny charge.
+    expect(screen.queryByTestId('TopBar.billedCost')).toBeNull()
+    expect(screen.queryByTestId('TopBar.costNothingBilled')).toBeNull()
+    expect(screen.queryByTestId('TopBar.costUnpriced')).toBeNull()
+    unmount()
+  })
+
+  it('says nothing extra when the billed figure IS the headline (an API key)', () => {
+    seed.statusLine(ROUTE, makeStatusLine({ totalCostUsd: 0.42, billedCostUsd: 0.42 }))
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    expect(screen.getByTestId('TopBar.cost')).toHaveTextContent('$0.42')
+    expect(screen.queryByTestId('TopBar.billedCost')).toBeNull()
+    expect(screen.queryByTestId('TopBar.costCovered')).toBeNull()
+    unmount()
+  })
+
+  it('shows the Billed row for a real amount that is only part of the headline', () => {
+    // A session that ran some turns on a plan and some on an API key: the
+    // headline is what all of it was worth, the row is what was actually paid.
+    seed.statusLine(ROUTE, makeStatusLine({ totalCostUsd: 5, billedCostUsd: 1.25 }))
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    expect(screen.getByTestId('TopBar.cost')).toHaveTextContent('$5.00')
+    expect(screen.getByTestId('TopBar.billedCost')).toHaveTextContent('$1.25')
+    expect(screen.queryByTestId('TopBar.costCovered')).toBeNull()
+    expect(screen.queryByTestId('TopBar.costNothingBilled')).toBeNull()
+    unmount()
+  })
+
+  it('counts the messages it could not price instead of hiding them', () => {
+    seed.statusLine(
+      ROUTE,
+      makeStatusLine({ totalCostUsd: 3, billedCostUsd: 0, unknownCostMessages: 2 })
+    )
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    expect(screen.getByTestId('TopBar.costUnpriced')).toHaveTextContent('2 unpriced')
+    unmount()
+  })
+
+  it('an engine that sends neither field renders the block unchanged', () => {
+    // Claude and Codex status lines: no billedCostUsd, no unknownCostMessages.
+    seed.statusLine(ROUTE, makeStatusLine({ totalCostUsd: 1.5 }))
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    expect(screen.getByTestId('TopBar.cost')).toHaveTextContent('$1.50')
+    expect(screen.queryByTestId('TopBar.billedCost')).toBeNull()
+    expect(screen.queryByTestId('TopBar.costCovered')).toBeNull()
+    expect(screen.queryByTestId('TopBar.costUnpriced')).toBeNull()
+    unmount()
+  })
+
+  it('an unknown headline with a zero bill says nothing was billed', () => {
+    seed.statusLine(
+      ROUTE,
+      makeStatusLine({ totalCostUsd: null, billedCostUsd: 0, unknownCostMessages: 1 })
+    )
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    expect(screen.getByTestId('TopBar.cost')).toHaveTextContent('unknown')
+    expect(screen.getByTestId('TopBar.costNothingBilled')).toHaveTextContent('nothing billed')
+    expect(screen.queryByTestId('TopBar.billedCost')).toBeNull()
+    // "covered by subscription" claims a real figure was covered; an unknown
+    // headline has no figure to cover.
+    expect(screen.queryByTestId('TopBar.costCovered')).toBeNull()
+    expect(screen.getByTestId('TopBar.costUnpriced')).toHaveTextContent('1 unpriced')
+    unmount()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // The mobile-web fullscreen control is GONE from TopBar — it moved to a
 // double-tap gesture on the chat scroll area (see
 // hooks/__tests__/useFullscreenDoubleTap.unit.test.tsx). This block is the

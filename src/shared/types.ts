@@ -353,7 +353,9 @@ export interface PendingApproval {
 }
 
 export interface SessionResult {
-  totalCostUsd: number
+  /** The session's headline cost at turn end — same contract (and same null
+   *  meaning "unknown, not free") as {@link SessionStatus.totalCostUsd}. */
+  totalCostUsd: number | null
   durationMs: number
   result: string
   sessionId?: string | null
@@ -2872,8 +2874,22 @@ export interface AuthFlowState {
  */
 export interface StatusLineData {
   /** Cumulative session cost in USD; null when unpriced/unknown (see
-   *  {@link SessionStatus.totalCostUsd} — 0 still means known-zero). */
+   *  {@link SessionStatus.totalCostUsd} — 0 still means known-zero).
+   *
+   *  ADR-071 §2: the figure a headline shows for this session's billing type —
+   *  the list-price equivalent of the tokens under a subscription, the engine's
+   *  billed figure under an API key. Messages with no known price are NOT
+   *  counted as zero; they are counted in {@link unknownCostMessages}. */
   totalCostUsd: number | null
+  /** What actually left a wallet, by the same rule: `0` under a subscription or
+   *  a free vendor, the engine's figure under an API key, null when unknown.
+   *  Optional because only the engines that follow ADR-071 §2 report it — a
+   *  Claude or Codex status line leaves it (and `unknownCostMessages`) unset,
+   *  and the tooltip shows the extra rows only when they are present. */
+  billedCostUsd?: number | null
+  /** How many of this session's messages had no known cost. Omitted when none:
+   *  a total that hides unknowns is a total that understates itself (ADR-030). */
+  unknownCostMessages?: number
   totalDurationMs: number
   totalApiDurationMs: number
   totalInputTokens: number

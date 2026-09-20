@@ -32,6 +32,8 @@ import {
   parseModelString
 } from './model-discovery'
 import { equivalentCostUsd } from '../../shared/pricing'
+import { totalCosts, type TotalCosts } from '../../shared/cost-rule'
+import { opencodeCostInputs, resolveOpencodeCosts, type OpencodeCostInputs } from './message-cost'
 import { logger } from '../services/logger'
 import { authErrorTranscriptMessage } from '../services/api-error'
 import {
@@ -193,27 +195,42 @@ export class OpencodeSession extends BaseSession {
    * Cost tracking — base + live overlay (Slice B, durable across reloads,
    * mirrors ClaudeSession's costBaseUsd/liveTotalCostUsd split).
    *
-   * - costBaseUsd / modelCostBase: cost from stored history, seeded ONCE at
+   * - costBase / modelCostBase: cost from stored history, seeded ONCE at
    *   replayStoredHistory (a single OpencodeSession object only ever replays
    *   once — replayStoredHistory is gated on `!this.openSessionId`/`!this.
    *   openSessionId` branches that can't re-fire after openSessionId is set —
    *   so no respawn-fold is needed here, unlike Claude's spawn-per-turn model).
-   * - liveTotalCostUsd / liveModelCosts: cost accumulated THIS live session,
-   *   since resume/creation. liveTotalCostUsd is synced from
-   *   sumAccumulatorCosts(accumulators) (event-mapper.ts) — a full recompute
-   *   over live accumulators only, which is why the historical base MUST live
-   *   in a separate field rather than seeding the same one sumAccumulatorCosts
-   *   writes to (a live cost_update would otherwise overwrite/discard the
-   *   seeded historical total).
+   * - the live half is recomputed from `accumulators` on demand (costTally),
+   *   which is why the historical base MUST live in a separate field: a live
+   *   recompute knows nothing about the messages that preceded this process.
    *
-   * this.totalCostUsd (below) is a getter: costBaseUsd + liveTotalCostUsd.
+   * ADR-071 §2: the headline is not opencode's own `info.cost` — under a
+   * subscription opencode charges zero and the session is worth the list price
+   * of its tokens. What is stored is each message's cost INPUTS
+   * (opencodeCostInputs); the billing type is applied when a figure is read,
+   * because the auth probe resolves asynchronously and a session opened before
+   * it lands must not be stuck with what `unknown` made of its history. The
+   * engine's raw figures survive alongside, in rawCostBaseUsd /
+   * liveTotalCostUsd, for the one consumer that asks for what the ENGINE
+   * reported (sendMetering).
+   *
+   * this.totalCostUsd (below) is a getter over base + live.
    */
-  private costBaseUsd = 0
+  private costBase: OpencodeCostInputs[] = []
   private modelCostBase = new Map<string, number>()
+  /** Engine-reported cost from stored history — MeteringSnapshot's input. */
+  private rawCostBaseUsd = 0
+  /** Engine-reported cost of this live process, synced from the mapper's
+   *  sumAccumulatorCosts ref. Not the headline (see the block comment). */
   private liveTotalCostUsd = 0
-  /** modelId → summed cost, own (non-child) messages only, populated in
+  /** modelId → summed display cost, own (non-child) messages only, populated in
    *  recordTurnUsage at the same point each message's cost is finalized. */
   private liveModelCosts = new Map<string, number>()
+  /** messageId → the cost inputs a message settled on at turn end. Frozen so a
+   *  mid-session model switch cannot re-price a finished message under a model
+   *  that never produced it (the per-model breakdown attributes it to the model
+   *  that did). The billing type is NOT frozen with them. */
+  private settledCostInputs = new Map<string, OpencodeCostInputs>()
   private startTimeMs = 0
   /** Accumulated ACTIVE (turn-processing) duration of completed turns, ms.
    *  Base is reconstructed from stored history on resume (replayStoredHistory),
@@ -388,9 +405,54 @@ export class OpencodeSession extends BaseSession {
     return this.isProcessing
   }
 
-  /** costBaseUsd + liveTotalCostUsd (see the field doc comment for the split). */
-  private get totalCostUsd(): number {
-    return this.costBaseUsd + this.liveTotalCostUsd
+  /**
+   * The session's costs: history base + this process's own messages, each one
+   * resolved by the cost rule (see the field doc comment for the split).
+   *
+   * A message the pricing table cannot price is counted as unknown, never as
+   * zero (ADR-030) — `totalCosts` keeps the known part and the unknown count
+   * apart so the status line can report both.
+   */
+  private costTally(): TotalCosts {
+    return totalCosts([...this.costBase, ...this.liveCostInputs()].map(resolveOpencodeCosts))
+  }
+
+  /**
+   * Cost inputs for this process's own (non-child) assistant messages.
+   *
+   * Own messages carry no per-message model of their own, so they are priced
+   * under the session's CURRENT model — the same simplification (and the same
+   * reason) as recordTurnUsage's attribution. Messages that already settled at
+   * a turn end keep the inputs they settled on.
+   */
+  private liveCostInputs(): OpencodeCostInputs[] {
+    const parsed = parseModelString(this._model)
+    const out: OpencodeCostInputs[] = []
+    for (const [messageId, acc] of this.accumulators) {
+      if (acc.isChild) continue
+      if (acc.role === 'user' || acc.role === 'system') continue
+      // Nothing metered yet — not an unpriced message, an empty one. Same
+      // condition recordTurnUsage skips on, deliberately: a message that has
+      // only just been announced must not flash through the headline as an
+      // unpriced one on its way to being metered.
+      if (!acc.cost && !acc.tokens) continue
+      const settled = this.settledCostInputs.get(messageId)
+      out.push(
+        settled ??
+          opencodeCostInputs(parsed.providerID, parsed.modelID, acc.tokens, acc.cost ?? null)
+      )
+    }
+    return out
+  }
+
+  /** What opencode itself reported spending, history + live. */
+  private get engineReportedCostUsd(): number {
+    return this.rawCostBaseUsd + this.liveTotalCostUsd
+  }
+
+  /** The headline figure: the known total, null when nothing could be priced. */
+  private get totalCostUsd(): number | null {
+    return this.costTally().displayCostUsd
   }
 
   /** modelCostBase merged with liveModelCosts, summed per model id. */
@@ -728,19 +790,37 @@ export class OpencodeSession extends BaseSession {
       // live under a distinct session id and are never included here, so no
       // explicit child filtering is needed (mirrors sumAccumulatorCosts/
       // recordTurnUsage excluding children from the live overlay).
-      let seededCostBase = 0
+      //
+      // ADR-071 §2: a stored message is priced by the same rule as a live one.
+      // Unlike a live own message it carries its OWN providerID/modelID, so the
+      // model it actually ran on prices it, not whatever the session is set to
+      // now. A message with neither model nor tokens can only fall back to
+      // opencode's figure under the session's current model.
+      const seededCostBase: OpencodeCostInputs[] = []
       const seededModelCostBase = new Map<string, number>()
+      let seededRawCostBase = 0
+      const current = parseModelString(this._model)
       for (const stored of storedMessages) {
         const info = stored.info
         if (!info || info.role !== 'assistant') continue
-        const cost = typeof info.cost === 'number' ? info.cost : 0
-        seededCostBase += cost
-        const modelId = info.modelID
-        if (modelId) {
-          seededModelCostBase.set(modelId, (seededModelCostBase.get(modelId) ?? 0) + cost)
+        if (!info.cost && !info.tokens) continue
+        const engineCost = typeof info.cost === 'number' ? info.cost : null
+        seededRawCostBase += engineCost ?? 0
+        const modelId = info.modelID ?? current.modelID
+        const inputs = opencodeCostInputs(
+          info.providerID ?? current.providerID,
+          modelId,
+          info.tokens,
+          engineCost
+        )
+        seededCostBase.push(inputs)
+        const displayCostUsd = resolveOpencodeCosts(inputs).displayCostUsd
+        if (displayCostUsd !== null) {
+          seededModelCostBase.set(modelId, (seededModelCostBase.get(modelId) ?? 0) + displayCostUsd)
         }
       }
-      this.costBaseUsd = seededCostBase
+      this.costBase = seededCostBase
+      this.rawCostBaseUsd = seededRawCostBase
       this.modelCostBase = seededModelCostBase
       // Slice C — cross-engine dispatched cost durability: seed from
       // dispatched_usage, keyed by this.routingId (the STABLE id a later
@@ -1034,12 +1114,13 @@ export class OpencodeSession extends BaseSession {
       if (this.sseAbort === abort) this.sseAbort = null
       return
     }
-    // Starts at liveTotalCostUsd (0 for a fresh/just-resumed session) — NOT
-    // this.totalCostUsd (costBaseUsd + liveTotalCostUsd) — because
+    // The ENGINE-reported live total (what opencode says it charged), not the
+    // headline — the headline is the cost rule's answer and is recomputed from
+    // the accumulators on demand (costTally). Starts at liveTotalCostUsd (0 for
+    // a fresh/just-resumed session) and never at the history base, because
     // sumAccumulatorCosts (event-mapper.ts) always REPLACES this ref with a
-    // full recompute over the (base-less) live accumulators map. Seeding it
-    // with the base here would just get discarded on the first cost_update;
-    // the base is combined with the live value only at the totalCostUsd getter.
+    // full recompute over the (base-less) live accumulators map; a base seeded
+    // here would just get discarded on the first cost_update.
     const totalCostRef = { value: this.liveTotalCostUsd }
 
     try {
@@ -2264,10 +2345,24 @@ export class OpencodeSession extends BaseSession {
         // naturally attributes turn N's messages to whichever model was active
         // when turn N's session.idle fired. Matches recordUsageEvent's own
         // attribution below (same simplification, same precedent).
-        this.liveModelCosts.set(
+        //
+        // ADR-071 §2: the figure is the DISPLAY cost, not opencode's own —
+        // the breakdown has to add up to the headline. The message's inputs are
+        // frozen here so a later model switch cannot silently re-price it.
+        const inputs = opencodeCostInputs(
+          parsed.providerID,
           parsed.modelID,
-          (this.liveModelCosts.get(parsed.modelID) ?? 0) + (acc.cost ?? 0)
+          tokens,
+          acc.cost ?? null
         )
+        this.settledCostInputs.set(messageId, inputs)
+        const displayCostUsd = resolveOpencodeCosts(inputs).displayCostUsd
+        if (displayCostUsd !== null) {
+          this.liveModelCosts.set(
+            parsed.modelID,
+            (this.liveModelCosts.get(parsed.modelID) ?? 0) + displayCostUsd
+          )
+        }
 
         // Own (parent) message — attribute to this session's model.
         recordUsageEvent({
@@ -2369,8 +2464,11 @@ export class OpencodeSession extends BaseSession {
     const remainingPercentage = usedPercentage !== null ? 100 - usedPercentage : null
     const cachedTokens = sum.cacheRead + sum.cacheWrite
     const totalTokens = sum.input + sum.output + cachedTokens
+    const costs = this.costTally()
     return {
-      totalCostUsd: this.totalCostUsd,
+      totalCostUsd: costs.displayCostUsd,
+      billedCostUsd: costs.billedCostUsd,
+      ...(costs.unknownMessages > 0 ? { unknownCostMessages: costs.unknownMessages } : {}),
       totalDurationMs: this.accTotalDurationMs,
       totalApiDurationMs: 0,
       totalInputTokens: sum.input,
@@ -2421,7 +2519,10 @@ export class OpencodeSession extends BaseSession {
           total: input + output + cacheWrite + cacheRead
         },
         equivalentCostUsd: equiv,
-        engineReportedCostUsd: this.totalCostUsd,
+        // What opencode itself reported, NOT the headline — the headline is the
+        // cost rule's answer now (ADR-071 §2) and this field's one job is to
+        // carry the engine's raw claim beside the equivalent.
+        engineReportedCostUsd: this.engineReportedCostUsd,
         contextWindow: { used: this.lastContextLength, size: ctx }
         // window omitted — opencode has no usage provider (cumulative meter)
       }
