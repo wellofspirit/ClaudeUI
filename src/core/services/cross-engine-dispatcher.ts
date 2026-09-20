@@ -137,8 +137,7 @@ import { logger } from './logger'
 import { recordUsageEvent } from './usage-recorder'
 import type { UsageTurnEvent, UsageTurnTokens } from './usage-recorder'
 import { usageFetcher } from './usage-fetcher'
-import { claudeAccountAttribution } from './usage-windows'
-import type { AccountLogRecord } from './usage-windows'
+import { activeClaudeAttribution } from './usage-windows'
 import { buildClaudeAccountRef } from '../host'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { piAuthProvider } from '../auth/PiAuthProvider'
@@ -1549,9 +1548,9 @@ function piDispatchAccount(model: string): DispatchTurnAccount {
  * A Claude target's account: the one ClaudeUI itself is signed in as, since a
  * dispatched cli.js process inherits the app's active credential.
  *
- * The key and the label come from `claudeAccountAttribution`, the same rule
- * ADR-011's time-based attribution puts a TRANSCRIPT row through — fed here
- * with the live active account instead of a log lookup, because the turn is
+ * The key and the label come from `activeClaudeAttribution`, the same rule
+ * ADR-011's time-based attribution puts a TRANSCRIPT row through — run here
+ * over the live active account instead of a log lookup, because the turn is
  * happening now and the log only records changes. Both halves of
  * `anthropic:<org>:<account>` or neither: that guard lives in the rule.
  *
@@ -1565,20 +1564,13 @@ function piDispatchAccount(model: string): DispatchTurnAccount {
  * as covered.
  */
 function claudeDispatchAccount(): DispatchTurnAccount {
-  const active = usageFetcher.getActiveAccount()
-  if (!active) return UNKNOWN_DISPATCH_ACCOUNT
-  const record: AccountLogRecord = {
-    ts: 0,
-    accountUuid: active.uuid,
-    email: active.email,
-    ...(active.organizationUuid ? { organizationUuid: active.organizationUuid } : {}),
-    ...(active.organizationName ? { organizationName: active.organizationName } : {}),
-    billingType:
-      active.billingType !== 'unknown'
-        ? active.billingType
-        : (buildClaudeAccountRef()?.billingType ?? 'unknown')
-  }
-  const attribution = claudeAccountAttribution([record], Date.now())
+  // The same helper the usage fetcher and the limits provider attribute the
+  // live account with, so a dispatched turn, a session's own turn and a limits
+  // reading cannot disagree about the key, the label or the billing type.
+  const attribution = activeClaudeAttribution(
+    usageFetcher.getActiveAccount(),
+    buildClaudeAccountRef()?.billingType
+  )
   return {
     accountKey: attribution.accountKey,
     accountLabel: attribution.accountLabel,
