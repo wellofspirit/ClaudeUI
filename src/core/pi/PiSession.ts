@@ -1067,7 +1067,9 @@ export class PiSession extends BaseSession {
     if (this.replayedHistory) return
     this.replayedHistory = true
     try {
-      const messages = await loadPiSessionHistory(sessionId)
+      // The status line the loader also returns is for a COLD open (no session
+      // object): this one seeds its own base from pi's tally below.
+      const { messages } = await loadPiSessionHistory(sessionId)
       logger.info('PiSession', `Replaying ${messages.length} stored messages for ${sessionId}`)
 
       for (const msg of messages) {

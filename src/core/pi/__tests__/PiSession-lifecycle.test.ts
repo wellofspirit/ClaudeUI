@@ -184,7 +184,7 @@ vi.mock('../model-discovery', async () => {
   return { ...actual, getPiModelCatalog: vi.fn().mockResolvedValue([]) }
 })
 vi.mock('../../services/pi-session-list', () => ({
-  loadPiSessionHistory: vi.fn().mockResolvedValue([]),
+  loadPiSessionHistory: vi.fn().mockResolvedValue({ messages: [], statusLine: null }),
   findPiSessionFile: vi.fn().mockReturnValue(null)
 }))
 vi.mock('../../services/usage-recorder', () => ({ recordUsageEvent: vi.fn() }))

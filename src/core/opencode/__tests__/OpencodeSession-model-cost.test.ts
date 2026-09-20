@@ -142,6 +142,7 @@ vi.mock('../../auth/OpencodeAuthProvider', () => ({
 }))
 
 import { OpencodeSession } from '../OpencodeSession'
+import { opencodeHistoryStatusLine } from '../history-status-line'
 import { insertDispatchedUsage } from '../../services/db'
 import type { OpencodeEvent } from '../protocol/types'
 import type { HostWindowHandle } from '../../host'
@@ -661,6 +662,70 @@ describe('OpencodeSession — the headline follows the cost rule (ADR-071 §2)',
     expect(after.billedCostUsd).toBe(0)
     expect(after.totalCostUsd).toBeCloseTo(10, 6)
     expect(after.unknownCostMessages).toBeUndefined()
+
+    session.dispose()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// S1d — the cold status line and the resumed session's own must not disagree.
+// ---------------------------------------------------------------------------
+
+describe('OpencodeSession — history status line equivalence (S1d)', () => {
+  beforeEach(setupMocks)
+
+  it('emits exactly what the cold history builder produces for the same messages', async () => {
+    mockBuildAccountRef.mockReturnValue(SUBSCRIPTION_REF)
+    const stored = [
+      { info: { id: 'u1', role: 'user', time: { created: 1000 } }, parts: [] },
+      {
+        info: {
+          id: 'a1',
+          role: 'assistant',
+          cost: 0,
+          modelID: 'claude-fable-5-1',
+          providerID: 'anthropic',
+          tokens: { input: 1_000_000, output: 500, cache: { read: 2000, write: 100 } },
+          time: { created: 1100, completed: 2000 }
+        },
+        parts: [{ type: 'text', text: 'hello', id: 'p1' }]
+      },
+      { info: { id: 'u2', role: 'user', time: { created: 5000 } }, parts: [] },
+      {
+        info: {
+          id: 'a2',
+          role: 'assistant',
+          cost: 0,
+          modelID: 'claude-sonnet-4-6',
+          providerID: 'anthropic',
+          tokens: { input: 2000, output: 1000, reasoning: 500 },
+          time: { created: 5100, completed: 7000 }
+        },
+        parts: [{ type: 'text', text: 'world', id: 'p2' }]
+      }
+    ]
+    mockGetSession.mockResolvedValue({ id: 'ses_equiv' })
+    mockListMessages.mockResolvedValue(stored)
+
+    const win = new MockWindow() as unknown as HostWindowHandle
+    const session = new OpencodeSession('r_equiv', win, '/tmp/test-cwd', {
+      model: 'anthropic/claude-fable-5-1',
+      resumeSessionId: 'ses_equiv'
+    })
+    await session.run(null)
+    const sendMock = (win as unknown as MockWindow).webContents.send
+    await vi.waitFor(() => {
+      expect(session.status.totalCostUsd).toBeGreaterThan(0)
+    })
+
+    // Same messages, same fallback model, no live turn: the cold reader and
+    // the resumed session share one reconstruction, so the two lines are the
+    // same object, field for field.
+    const cold = opencodeHistoryStatusLine(stored as never, {
+      providerID: 'anthropic',
+      modelID: 'claude-fable-5-1'
+    })
+    expect(lastStatusLine(sendMock as never)).toEqual(cold)
 
     session.dispose()
   })

@@ -297,7 +297,7 @@ const {
     mockLocatePiBinary: vi.fn().mockReturnValue('/fake/pi'),
     mockGetPiModelCatalog: vi.fn().mockResolvedValue([]),
     mockDiscoverPiModels: vi.fn().mockResolvedValue([]),
-    mockLoadPiSessionHistory: vi.fn().mockResolvedValue([]),
+    mockLoadPiSessionHistory: vi.fn().mockResolvedValue({ messages: [], statusLine: null }),
     mockFindPiSessionFile: vi.fn().mockReturnValue(null),
     mockRecordUsageEvent: vi.fn(),
     mockBridgeHostStart,
@@ -514,7 +514,7 @@ beforeEach(() => {
   MockPiRpcClient.mockClear()
   mockLocatePiBinary.mockClear().mockReturnValue('/fake/pi')
   mockGetPiModelCatalog.mockClear().mockResolvedValue([])
-  mockLoadPiSessionHistory.mockReset().mockResolvedValue([])
+  mockLoadPiSessionHistory.mockReset().mockResolvedValue({ messages: [], statusLine: null })
   mockFindPiSessionFile.mockReset().mockReturnValue(null)
   mockRecordUsageEvent.mockClear()
   mockBridgeHostStart
@@ -1722,18 +1722,21 @@ describe('PiSession — spawn-time effort (EngineSpawnOptions.effort, M2b)', () 
 
 describe('PiSession resume', () => {
   it('replays stored history (session:message + session:tool-result) and seeds costBaseUsd from get_session_stats', async () => {
-    mockLoadPiSessionHistory.mockResolvedValue([
-      { id: 'm1', role: 'user', content: [{ type: 'text', text: 'old prompt' }], timestamp: 1 },
-      {
-        id: 'm2',
-        role: 'assistant',
-        content: [
-          { type: 'tool_use', toolUseId: 'c1', toolName: 'bash', toolInput: { command: 'ls' } },
-          { type: 'tool_result', toolUseId: 'c1', toolResult: 'file.txt', isError: false }
-        ],
-        timestamp: 2
-      }
-    ])
+    mockLoadPiSessionHistory.mockResolvedValue({
+      messages: [
+        { id: 'm1', role: 'user', content: [{ type: 'text', text: 'old prompt' }], timestamp: 1 },
+        {
+          id: 'm2',
+          role: 'assistant',
+          content: [
+            { type: 'tool_use', toolUseId: 'c1', toolName: 'bash', toolInput: { command: 'ls' } },
+            { type: 'tool_result', toolUseId: 'c1', toolResult: 'file.txt', isError: false }
+          ],
+          timestamp: 2
+        }
+      ],
+      statusLine: null
+    })
     mockRequest.mockImplementation((cmd: { type: string }) => {
       if (cmd.type === 'get_session_stats') {
         return Promise.resolve({
@@ -1768,9 +1771,12 @@ describe('PiSession resume', () => {
   })
 
   it('a second replayStoredHistory call (run-once gate) never double-sends messages', async () => {
-    mockLoadPiSessionHistory.mockResolvedValue([
-      { id: 'm1', role: 'user', content: [{ type: 'text', text: 'old prompt' }], timestamp: 1 }
-    ])
+    mockLoadPiSessionHistory.mockResolvedValue({
+      messages: [
+        { id: 'm1', role: 'user', content: [{ type: 'text', text: 'old prompt' }], timestamp: 1 }
+      ],
+      statusLine: null
+    })
     const win = new MockWindow()
     const session = new PiSession('resume-sess-2', win as never, '/cwd', {
       resumeSessionId: 'resume-sess-2'
@@ -1991,7 +1997,7 @@ describe('PiSession fork (M5c)', () => {
   })
 
   it('a non-fork resume (forkSession false) never sends clone/fork — regression guard', async () => {
-    mockLoadPiSessionHistory.mockResolvedValue([])
+    mockLoadPiSessionHistory.mockResolvedValue({ messages: [], statusLine: null })
     mockFindPiSessionFile.mockReturnValue('/fake/sessions/x_resume-plain.jsonl')
 
     const win = new MockWindow()
@@ -2032,9 +2038,12 @@ describe('PiSession fork (M5c)', () => {
       return defaultRequestImpl(cmd)
     })
     mockFindPiSessionFile.mockReturnValue('/fake/sessions/x_source-sess.jsonl')
-    mockLoadPiSessionHistory.mockResolvedValue([
-      { id: 'm1', role: 'user', content: [{ type: 'text', text: 'old prompt' }], timestamp: 1 }
-    ])
+    mockLoadPiSessionHistory.mockResolvedValue({
+      messages: [
+        { id: 'm1', role: 'user', content: [{ type: 'text', text: 'old prompt' }], timestamp: 1 }
+      ],
+      statusLine: null
+    })
 
     const win = new MockWindow()
     const session = new PiSession('rid-fork-8', win as never, '/cwd', {
@@ -5175,9 +5184,12 @@ describe('PiSession — the headline follows the cost rule (ADR-071 §2)', () =>
     // before any account ref exists. Freezing the billing type there would
     // leave this session reporting `Billed unknown` for its lifetime.
     mockBuildPiAccountRef.mockReturnValue(null)
-    mockLoadPiSessionHistory.mockResolvedValue([
-      { id: 'm1', role: 'user', content: [{ type: 'text', text: 'old prompt' }], timestamp: 1 }
-    ])
+    mockLoadPiSessionHistory.mockResolvedValue({
+      messages: [
+        { id: 'm1', role: 'user', content: [{ type: 'text', text: 'old prompt' }], timestamp: 1 }
+      ],
+      statusLine: null
+    })
     mockRequest.mockImplementation((cmd: { type: string }) => {
       if (cmd.type === 'get_session_stats') {
         return Promise.resolve({

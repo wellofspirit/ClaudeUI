@@ -53,7 +53,7 @@ vi.mock('../model-discovery', async () => {
   }
 })
 vi.mock('../../services/pi-session-list', () => ({
-  loadPiSessionHistory: vi.fn(async () => []),
+  loadPiSessionHistory: vi.fn(async () => ({ messages: [], statusLine: null })),
   findPiSessionFile: vi.fn(() => null)
 }))
 vi.mock('../../services/usage-recorder', () => ({ recordUsageEvent: vi.fn() }))

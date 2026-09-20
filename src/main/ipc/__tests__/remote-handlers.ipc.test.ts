@@ -109,7 +109,7 @@ vi.mock('../../../core/services/session-watcher', () => ({
 
 vi.mock('../../../core/services/opencode-session-list', () => ({
   listOpencodeSessionsGlobal: vi.fn(async () => []),
-  loadOpencodeSessionHistory: vi.fn(async () => [])
+  loadOpencodeSessionHistory: vi.fn(async () => ({ messages: [], statusLine: null }))
 }))
 
 // NB: pi-session-list is a lightweight fs reader whose `piAgentDir` export is

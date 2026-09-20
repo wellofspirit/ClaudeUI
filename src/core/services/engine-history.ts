@@ -1,4 +1,4 @@
-import type { EngineId, SessionInfo } from '../../shared/types'
+import type { EngineId, SessionInfo, StatusLineData } from '../../shared/types'
 import { getSessionMeta } from './db'
 import {
   listDirectories,
@@ -28,11 +28,19 @@ interface EngineHistory {
     messageIndex: number
   ): Promise<ForkAnchorResult>
 }
-const bare = (messages: SessionHistoryResult['messages']): SessionHistoryResult => ({
-  messages,
+/**
+ * An engine whose reader returns only a transcript (and, since S1d, the status
+ * line it rebuilt from it) in the engine-neutral shape: the remaining fields
+ * are Claude-transcript concepts those engines have nothing to put in.
+ */
+const bare = (load: {
+  messages: SessionHistoryResult['messages']
+  statusLine?: StatusLineData | null
+}): SessionHistoryResult => ({
+  messages: load.messages,
   taskNotifications: [],
   customTitle: null,
-  statusLine: null,
+  statusLine: load.statusLine ?? null,
   agentIdToToolUseId: {},
   warnings: []
 })

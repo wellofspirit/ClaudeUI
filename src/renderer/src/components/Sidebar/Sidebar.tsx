@@ -325,12 +325,16 @@ export function Sidebar({
       }
       useSessionStore.setState({ sessionEngines })
       window.api.saveSessionConfig({ sessionEngines })
-      // Best-effort history load (returns [] if opencode is down) — paints the
+      // Best-effort history load (empty if opencode is down) — paints the
       // transcript immediately rather than waiting for the first new prompt.
-      const messages = await window.api.loadOpencodeHistory(info.sessionId).catch(() => [])
+      // The status line rides along, so the cost and token figures appear with
+      // it instead of only after the first new turn (S1d).
+      const { messages, statusLine } = await window.api
+        .loadOpencodeHistory(info.sessionId)
+        .catch(() => ({ messages: [], statusLine: null }))
       // A newer click superseded this one while history loaded — discard.
       if (seq !== selectionSeq.current) return
-      loadHistoricalSession(routingId, messages, info.cwd)
+      loadHistoricalSession(routingId, messages, info.cwd, undefined, undefined, statusLine)
       if (info.title && info.title !== 'Untitled') setCustomTitle(routingId, info.title)
       addRecentSession(routingId)
       switchSession(routingId)
@@ -352,9 +356,11 @@ export function Sidebar({
       }
       useSessionStore.setState({ sessionEngines })
       window.api.saveSessionConfig({ sessionEngines })
-      const messages = await window.api.loadPiHistory(info.sessionId).catch(() => [])
+      const { messages, statusLine } = await window.api
+        .loadPiHistory(info.sessionId)
+        .catch(() => ({ messages: [], statusLine: null }))
       if (seq !== selectionSeq.current) return
-      loadHistoricalSession(routingId, messages, info.cwd)
+      loadHistoricalSession(routingId, messages, info.cwd, undefined, undefined, statusLine)
       if (info.title && info.title !== 'Untitled') setCustomTitle(routingId, info.title)
       addRecentSession(routingId)
       switchSession(routingId)

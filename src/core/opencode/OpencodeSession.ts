@@ -34,6 +34,7 @@ import {
 import { equivalentCostUsd } from '../../shared/pricing'
 import { totalCosts, type TotalCosts } from '../../shared/cost-rule'
 import { opencodeCostInputs, resolveOpencodeCosts, type OpencodeCostInputs } from './message-cost'
+import { opencodeHistorySeed, type OpencodeHistoryTokens } from './history-status-line'
 import { logger } from '../services/logger'
 import { authErrorTranscriptMessage } from '../services/api-error'
 import {
@@ -41,8 +42,7 @@ import {
   buildChatMessage,
   extractToolResult,
   convertStoredMessage,
-  storedCompactionMessages,
-  computeStoredDurationMs
+  storedCompactionMessages
 } from './event-mapper'
 import type { MapperOutput, MessageAccumulator } from './event-mapper'
 import type { OpencodeStreamItem } from './event-mapper'
@@ -231,6 +231,14 @@ export class OpencodeSession extends BaseSession {
    *  that never produced it (the per-model breakdown attributes it to the model
    *  that did). The billing type is NOT frozen with them. */
   private settledCostInputs = new Map<string, OpencodeCostInputs>()
+  /**
+   * Token totals from stored history, seeded on resume beside the cost base.
+   *
+   * The status line reports history + live, the way cost does; `sendMetering`
+   * deliberately does not add it, because a MeteringSnapshot describes what
+   * THIS process metered and the ledger rows behind it are per-turn.
+   */
+  private tokenBase: OpencodeHistoryTokens = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0 }
   private startTimeMs = 0
   /** Accumulated ACTIVE (turn-processing) duration of completed turns, ms.
    *  Base is reconstructed from stored history on resume (replayStoredHistory),
@@ -777,51 +785,24 @@ export class OpencodeSession extends BaseSession {
         `Replaying ${storedMessages.length} stored messages for ${sessionId}`
       )
 
-      // Reconstruct the active-duration baseline from history BEFORE any new
-      // turn runs (run() sets startTimeMs / accumulates further turns after
-      // this call returns) — see computeStoredDurationMs for the semantic.
-      this.accTotalDurationMs = computeStoredDurationMs(storedMessages)
-
-      // Slice B — cost durability across reloads: seed costBaseUsd/modelCostBase
-      // from stored history BEFORE ensureSSEConsumer() starts (run()/eagerConnect()
-      // both call replayStoredHistory before starting the SSE consumer), so the
-      // live overlay never has to catch up from zero. listMessages(sessionId)
-      // only returns THIS session's own messages — child (subagent) messages
-      // live under a distinct session id and are never included here, so no
-      // explicit child filtering is needed (mirrors sumAccumulatorCosts/
-      // recordTurnUsage excluding children from the live overlay).
+      // Slice B — cost durability across reloads: seed the cost base, the
+      // per-model breakdown, the token base, the context meter and the
+      // active-duration baseline from stored history BEFORE ensureSSEConsumer()
+      // starts (run()/eagerConnect() both call replayStoredHistory before
+      // starting the SSE consumer) and before any new turn runs, so neither
+      // overlay has to catch up from zero.
       //
-      // ADR-071 §2: a stored message is priced by the same rule as a live one.
-      // Unlike a live own message it carries its OWN providerID/modelID, so the
-      // model it actually ran on prices it, not whatever the session is set to
-      // now. A message with neither model nor tokens can only fall back to
-      // opencode's figure under the session's current model.
-      const seededCostBase: OpencodeCostInputs[] = []
-      const seededModelCostBase = new Map<string, number>()
-      let seededRawCostBase = 0
-      const current = parseModelString(this._model)
-      for (const stored of storedMessages) {
-        const info = stored.info
-        if (!info || info.role !== 'assistant') continue
-        if (!info.cost && !info.tokens) continue
-        const engineCost = typeof info.cost === 'number' ? info.cost : null
-        seededRawCostBase += engineCost ?? 0
-        const modelId = info.modelID ?? current.modelID
-        const inputs = opencodeCostInputs(
-          info.providerID ?? current.providerID,
-          modelId,
-          info.tokens,
-          engineCost
-        )
-        seededCostBase.push(inputs)
-        const displayCostUsd = resolveOpencodeCosts(inputs).displayCostUsd
-        if (displayCostUsd !== null) {
-          seededModelCostBase.set(modelId, (seededModelCostBase.get(modelId) ?? 0) + displayCostUsd)
-        }
-      }
-      this.costBase = seededCostBase
-      this.rawCostBaseUsd = seededRawCostBase
-      this.modelCostBase = seededModelCostBase
+      // S1d: the reconstruction itself lives in history-status-line.ts, which
+      // is also what a COLD sidebar open builds its status line from — one
+      // loop, so a reopened session and the same session after its first new
+      // turn cannot report different histories.
+      const seed = opencodeHistorySeed(storedMessages, parseModelString(this._model))
+      this.costBase = seed.costInputs
+      this.rawCostBaseUsd = seed.engineReportedCostUsd
+      this.modelCostBase = seed.modelCosts
+      this.tokenBase = seed.tokens
+      this.lastContextLength = seed.lastContextLength
+      this.accTotalDurationMs = seed.totalDurationMs
       // Slice C — cross-engine dispatched cost durability: seed from
       // dispatched_usage, keyed by this.routingId (the STABLE id a later
       // reopen constructs this session object with — see seedDispatchedCosts'
@@ -2419,7 +2400,9 @@ export class OpencodeSession extends BaseSession {
   /**
    * Sum the cumulative tokens from all own (non-child) assistant accumulators.
    * Returns { input, output, cacheWrite, cacheRead }.
-   * Extracted from sendMetering for reuse in buildStatusLine (DRY).
+   *
+   * THIS PROCESS only — buildStatusLine adds the history base on top (see
+   * tokenBase), sendMetering deliberately does not.
    */
   private sumSessionTokens(): {
     input: number
@@ -2455,7 +2438,16 @@ export class OpencodeSession extends BaseSession {
    */
   private buildStatusLine(): StatusLineData {
     const parsed = parseModelString(this._model)
-    const sum = this.sumSessionTokens()
+    const live = this.sumSessionTokens()
+    // History + live, the same split cost uses: a resumed session's tokens are
+    // not this process's alone, and the figure must not drop back to one
+    // turn's worth the moment a reopened session is prompted.
+    const sum = {
+      input: this.tokenBase.input + live.input,
+      output: this.tokenBase.output + live.output,
+      cacheWrite: this.tokenBase.cacheWrite + live.cacheWrite,
+      cacheRead: this.tokenBase.cacheRead + live.cacheRead
+    }
     const ctx = getOpencodeModelContextWindow(parsed.providerID, parsed.modelID)
     const usedPercentage =
       ctx > 0 && this.lastContextLength > 0

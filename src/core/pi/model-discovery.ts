@@ -192,6 +192,17 @@ export async function getPiModelCatalog(): Promise<PiModel[]> {
 }
 
 /**
+ * A model's context window from the ALREADY-WARM catalog, or 0 when nothing is
+ * cached for it. Synchronous and side-effect-free — it never spawns the probe
+ * (mirrors opencode's `getOpencodeModelContextWindow`), so a cold history read
+ * pays nothing and reports an unknown window as unknown rather than guessing a
+ * denominator for the context meter (ADR-030).
+ */
+export function peekPiModelContextWindow(vendorId: string, modelId: string): number {
+  return cachedCatalog?.find((m) => m.provider === vendorId && m.id === modelId)?.contextWindow ?? 0
+}
+
+/**
  * Resolve the pi model to actually spawn with, validated against what pi
  * currently reports via get_available_models. This is the AUTHORITATIVE spawn
  * chokepoint (piSpawnPrep routes through here) — the same guard opencode's

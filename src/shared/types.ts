@@ -1227,15 +1227,17 @@ interface SessionAPI {
   listDirectories(): Promise<DirectoryGroup[]>
   /** Fetch the global opencode session list (all cwds). Best-effort: returns [] on error. */
   listOpencodeSessionsGlobal(): Promise<SessionInfo[]>
-  /** Load a persisted opencode session's transcript as ChatMessage[] (read-only,
-   *  for painting history on sidebar click). Best-effort: returns [] on error. */
-  loadOpencodeHistory(sessionId: string): Promise<ChatMessage[]>
+  /** Load a persisted opencode session's transcript and status line (read-only,
+   *  for painting history on sidebar click). Best-effort: returns no messages
+   *  and a null status line on error. */
+  loadOpencodeHistory(sessionId: string): Promise<EngineHistoryLoad>
   /** Fetch the global pi session list (all cwds, read from ~/.pi/agent/sessions).
    *  Best-effort: returns [] on error. */
   listPiSessionsGlobal(): Promise<SessionInfo[]>
-  /** Load a persisted pi session's transcript as ChatMessage[] (read-only,
-   *  for painting history on sidebar click). Best-effort: returns [] on error. */
-  loadPiHistory(sessionId: string): Promise<ChatMessage[]>
+  /** Load a persisted pi session's transcript and status line (read-only,
+   *  for painting history on sidebar click). Best-effort: returns no messages
+   *  and a null status line on error. */
+  loadPiHistory(sessionId: string): Promise<EngineHistoryLoad>
   loadSessionHistory(
     sessionId: string,
     projectKey: string,
@@ -2931,6 +2933,24 @@ export interface ModelCostEntry {
   costUsd: number
   /** true when this spend happened in a cross-engine dispatched call (Slice C). */
   dispatched?: boolean
+}
+
+/**
+ * What a cold history read returns for the engines whose transcript lives
+ * outside our own store (opencode, pi).
+ *
+ * The status line rides along because everything it reports — cost, tokens,
+ * active duration, context used — is reconstructed from the very messages
+ * this read already has; without it a reopened session showed no cost and no
+ * tokens until its first new prompt (S1d). `null` means the read failed or
+ * found nothing, which is not the same as a session that has cost zero.
+ *
+ * It deliberately carries no `ok` field: preload/web `unwrap` reads any object
+ * with one as the transport envelope and would hand the renderer `undefined`.
+ */
+export interface EngineHistoryLoad {
+  messages: ChatMessage[]
+  statusLine: StatusLineData | null
 }
 
 /**
