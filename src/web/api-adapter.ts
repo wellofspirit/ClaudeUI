@@ -617,6 +617,16 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       >,
     fetchDispatchedUsage: () =>
       connection.invoke('usage:fetch-dispatched') as ReturnType<ClaudeAPI['fetchDispatchedUsage']>,
+    fetchAccountLimits: (refresh) =>
+      connection.invoke('usage:limits', refresh ?? false) as ReturnType<
+        ClaudeAPI['fetchAccountLimits']
+      >,
+    fetchUsageWindows: (query) =>
+      connection.invoke('usage:windows', query ?? {}) as ReturnType<ClaudeAPI['fetchUsageWindows']>,
+    fetchUsageDashboard: (range) =>
+      connection.invoke('usage:dashboard', { range }) as ReturnType<
+        ClaudeAPI['fetchUsageDashboard']
+      >,
 
     // Native OAuth (ADR-014) — remote since ADR-057/S4. The host does NOT open
     // its own browser for these calls: it returns `manualUrl` on the state and

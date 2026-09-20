@@ -26,9 +26,9 @@ import {
   insertMissingUsageWindows,
   listUsageWindows,
   upsertUsageWindows,
-  windowSampleGroups,
-  type UsageWindowRow
+  windowSampleGroups
 } from './db'
+import type { UsageWindowQuery, UsageWindowRow, UsageWindowSummaryRow } from '../../shared/types'
 import { logger } from './logger'
 
 const MS_PER_HOUR = 60 * 60 * 1000
@@ -204,41 +204,6 @@ export function recomputeUsageWindows(now: number): number {
   }
 }
 
-/** One window row with what a reader derives from it. */
-export interface UsageWindowSummaryRow extends UsageWindowRow {
-  /** Dollars the ledger saw per 1% of the window, or null under the noise floor. */
-  usdPerPercent: number | null
-  /** What a FULL window would have been worth at that rate, or null under the noise floor. */
-  impliedFullWindowUsd: number | null
-  /**
-   * Always true, and always shown: the numerator is this machine's ledger while
-   * the denominator is the account's global utilization, so every derived figure
-   * here reads LOW by however much the account was used elsewhere (ADR-071 §7).
-   */
-  biased: true
-}
-
-/**
- * The windows a surface reads, with the two derived figures.
- *
- * CLOSED WINDOWS ARE INCLUDED, and are most of the answer: `usage_window_sample`
- * is pruned at 30 days, so past that these rows are the only record that the
- * window existed and what it delivered.
- *
- * THE NOISE FLOOR LIVES HERE, NOT IN THE TABLE. A window whose peak is under
- * {@link MIN_PEAK_PERCENT_FOR_VALUE} keeps its real sums and its real peak —
- * they are facts — and reports no derived figure, because dividing dollars by a
- * percent near zero produces an implied window value of any size at all. Keeping
- * the rule on the read side means the floor can move without a migration and
- * without losing a row.
- */
-/** What {@link usageWindowSummary} takes, and what the IPC channel accepts. */
-export interface UsageWindowQuery {
-  accountKey?: string
-  kind?: string
-  sinceTs?: number
-}
-
 /**
  * Narrow an untrusted query to the three fields, dropping anything else.
  *
@@ -257,6 +222,20 @@ export function sanitizeUsageWindowQuery(raw: unknown): UsageWindowQuery {
   }
 }
 
+/**
+ * The windows a surface reads, with the two derived figures.
+ *
+ * CLOSED WINDOWS ARE INCLUDED, and are most of the answer: `usage_window_sample`
+ * is pruned at 30 days, so past that these rows are the only record that the
+ * window existed and what it delivered.
+ *
+ * THE NOISE FLOOR LIVES HERE, NOT IN THE TABLE. A window whose peak is under
+ * {@link MIN_PEAK_PERCENT_FOR_VALUE} keeps its real sums and its real peak —
+ * they are facts — and reports no derived figure, because dividing dollars by a
+ * percent near zero produces an implied window value of any size at all. Keeping
+ * the rule on the read side means the floor can move without a migration and
+ * without losing a row.
+ */
 export function usageWindowSummary(opts: UsageWindowQuery = {}): UsageWindowSummaryRow[] {
   return listUsageWindows(opts).map((row) => {
     const rate =

@@ -370,6 +370,11 @@ const api: ClaudeAPI = {
   // Cross-engine dispatched usage (ADR-033 M4-B)
   fetchDispatchedUsage: () => ipcRenderer.invoke('usage:fetch-dispatched'),
 
+  // The metering dashboard (ADR-071 §6/§7/§8)
+  fetchAccountLimits: (refresh?: boolean) => ipcRenderer.invoke('usage:limits', refresh ?? false),
+  fetchUsageWindows: (query) => ipcRenderer.invoke('usage:windows', query ?? {}),
+  fetchUsageDashboard: (range) => ipcRenderer.invoke('usage:dashboard', { range }),
+
   // Native Anthropic OAuth (ADR-014)
   signIn: () => ipcRenderer.invoke('auth:sign-in'),
   submitOAuthCode: (code: string) => ipcRenderer.invoke('auth:submit-code', code),

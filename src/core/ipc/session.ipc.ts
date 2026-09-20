@@ -45,6 +45,7 @@ import { usageFetcher } from '../services/usage-fetcher'
 import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
 import { readAccountLimits } from '../services/usage-provider'
 import { sanitizeUsageWindowQuery, usageWindowSummary } from '../services/usage-window-ledger'
+import { buildUsageDashboard, sanitizeDashboardRange } from '../services/usage-dashboard'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
@@ -395,6 +396,7 @@ const SESSION_IPC_CHANNELS = [
   'usage:chatgpt-limits',
   'usage:limits',
   'usage:windows',
+  'usage:dashboard',
   'usage:set-account-filter',
   'usage:refresh-prices',
   'usage:fetch-dispatched',
@@ -1725,6 +1727,21 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     kind: 'query',
     handler: async (opts?: unknown) => {
       return usageWindowSummary(sanitizeUsageWindowQuery(opts))
+    }
+  })
+
+  /**
+   * ADR-071 §8 — the dashboard's one read: the ledger's hourly buckets over a
+   * range, grouped provider → account → model, with both costs, the unknown
+   * counts and a per-local-day series. Dispatched work is inside every total
+   * and reported again as a sub-total (owner ruling).
+   */
+  handleIpc({
+    channel: 'usage:dashboard',
+    capability: 'config',
+    kind: 'query',
+    handler: async (opts?: unknown) => {
+      return buildUsageDashboard({ range: sanitizeDashboardRange(opts) })
     }
   })
 

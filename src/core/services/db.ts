@@ -33,7 +33,8 @@ import type {
   DispatchedUsageSummary,
   RemoteAuthPolicy,
   StepUpTier,
-  UsageOrigin
+  UsageOrigin,
+  UsageWindowRow
 } from '../../shared/types'
 import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
 import { displayCostFromRow } from '../../shared/cost-rule'
@@ -1856,6 +1857,45 @@ export function getUsageEventsSince(cutoffTs: number, engineId?: string): UsageE
   return rows.map(rowToUsageEvent)
 }
 
+/**
+ * The newest label each account key was last written under.
+ *
+ * `usage_bucket` carries no label — it is keyed by the machine-independent
+ * account key and nothing else (ADR-071 §1), so the dashboard has to name its
+ * accounts from somewhere. This is the second source it tries, after the limits
+ * providers: a key this machine no longer holds credentials for still has the
+ * email or the `<vendor> key …abcd` that the turns which spent it recorded.
+ *
+ * NEWEST, not any: a label is display-only and can change (an account renamed,
+ * an organization added), and the latest one is what a person would recognise.
+ * A key whose rows all carry a null label is absent rather than present-and-
+ * empty, so a caller falls through to its own fallback instead of showing a
+ * blank name. Bounded by `usage_event`'s 90-day retention, and served by
+ * `idx_usage_event_account_key_ts`.
+ */
+export function latestAccountLabels(): Map<string, string> {
+  const db = getDb()
+  const rows = db
+    .prepare(
+      `SELECT e.account_key AS account_key, e.account_label AS account_label
+         FROM usage_event e
+         JOIN (SELECT account_key, MAX(ts) AS ts
+                 FROM usage_event
+                WHERE account_label IS NOT NULL
+                GROUP BY account_key) newest
+           ON newest.account_key = e.account_key AND newest.ts = e.ts
+        WHERE e.account_label IS NOT NULL`
+    )
+    .all() as Array<{ account_key: string; account_label: string }>
+  const labels = new Map<string, string>()
+  // Two turns of one account can share the newest ts; the first of a tie wins,
+  // as it does for a window sample.
+  for (const row of rows) {
+    if (!labels.has(row.account_key)) labels.set(row.account_key, row.account_label)
+  }
+  return labels
+}
+
 /** Count usage events (used in tests + reconciler diagnostics). */
 export function countUsageEvents(): number {
   const db = getDb()
@@ -2258,44 +2298,9 @@ export function deleteSeedUsageBuckets(hourUtcs: number[]): void {
 // spans, which windows a recompute touches, when one closes, and what the
 // derived figures are. Nothing here decides any of that — these are the four
 // statements the rule needs, kept beside every other repository because `getDb`
-// is module-private.
+// is module-private. `UsageWindowRow` itself lives in `shared/types.ts`: the
+// dashboard reads these rows over IPC, and the renderer may not import `core/`.
 // ---------------------------------------------------------------------------
-
-/** One window's value row, as ADR-071 §7 defines it. */
-export interface UsageWindowRow {
-  accountKey: string
-  /** `5h`, `7d`, `7d:<slug>` — the same vocabulary `usage_window_sample` uses. */
-  windowKind: string
-  canonicalEnd: number
-  /** `canonicalEnd - windowDurationMs(windowKind)`, stored so a reader need not restate the rule. */
-  windowStart: number
-  /** The highest utilization ever OBSERVED for the window, not the highest still on disk. */
-  peakPercent: number
-  /**
-   * `Σ usage_event.api_cost_usd` over the window's rows — API-EQUIVALENT dollars,
-   * what the tokens were worth at list price, whatever they were actually
-   * charged. That is the numerator ADR-071 §7's implied window value divides,
-   * and it is a different question from what the turns COST, which is the
-   * dashboard's own total and is not stored here.
-   */
-  apiCostUsd: number
-  /** The known part of what those turns were actually charged (`Σ` finite `billed_cost_usd`). */
-  billedCostUsd: number
-  /**
-   * Turns inside the window with no known API-equivalent — never added as zeros
-   * (ADR-030). It qualifies {@link apiCostUsd} and nothing else: this many of
-   * the window's turns are MISSING from that sum.
-   */
-  unknownCostCount: number
-  inputTokens: number
-  outputTokens: number
-  cacheWriteTokens: number
-  cacheReadTokens: number
-  sampleCount: number
-  /** The end passed more than the grace period ago and a recompute summed it since. Final. */
-  closed: boolean
-  updatedAt: number
-}
 
 interface UsageWindowDbRow {
   account_key: string

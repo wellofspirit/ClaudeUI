@@ -1895,6 +1895,26 @@ interface AccountAPI {
    * targetModel), all-time. Backs UsageView's "Delegated" section.
    */
   fetchDispatchedUsage(): Promise<DispatchedUsageSummary[]>
+  /**
+   * Every account's limits, across vendors (ADR-071 §6).
+   *
+   * `refresh: true` is the ONLY thing that reads an inactive Claude account's
+   * credentials, and it spends a refresh grant doing it — the owner's rule is
+   * that a person pressing Refresh is the only reason to. Without it the answer
+   * comes from the last persisted reading and costs nothing.
+   */
+  fetchAccountLimits(refresh?: boolean): Promise<AccountLimits[]>
+  /**
+   * The window-value ledger (ADR-071 §7): one row per limit window with its
+   * peak percent, what the ledger saw inside it, and the two derived figures.
+   * Closed windows are included and are most of the answer.
+   */
+  fetchUsageWindows(query?: UsageWindowQuery): Promise<UsageWindowSummaryRow[]>
+  /**
+   * The dashboard's one read over the ledger's hourly buckets (ADR-071 §8),
+   * grouped provider → account → model for the given range.
+   */
+  fetchUsageDashboard(range: DashboardRange): Promise<UsageDashboardData>
 }
 
 export interface NetworkInterfaceInfo {
@@ -2829,6 +2849,177 @@ export interface AccountLimits {
   source: 'local' | { deviceId: string }
   state: 'ok' | 'stale' | 'needs-sign-in' | 'unavailable'
   error?: string
+}
+
+// ---------------------------------------------------------------------------
+// The window-value ledger (ADR-071 §7)
+//
+// `usage_window`'s row shape and the two figures a reader derives from it. They
+// live here rather than beside the SQL because the dashboard reads them over
+// IPC (`usage:windows`) and the renderer may not import `core/`.
+// ---------------------------------------------------------------------------
+
+/** One window's value row, as ADR-071 §7 defines it. */
+export interface UsageWindowRow {
+  accountKey: string
+  /** `5h`, `7d`, `7d:<slug>` — the same vocabulary `usage_window_sample` uses. */
+  windowKind: string
+  canonicalEnd: number
+  /** `canonicalEnd - windowDurationMs(windowKind)`, stored so a reader need not restate the rule. */
+  windowStart: number
+  /** The highest utilization ever OBSERVED for the window, not the highest still on disk. */
+  peakPercent: number
+  /**
+   * `Σ usage_event.api_cost_usd` over the window's rows — API-EQUIVALENT dollars,
+   * what the tokens were worth at list price, whatever they were actually
+   * charged. That is the numerator ADR-071 §7's implied window value divides,
+   * and it is a different question from what the turns COST, which is the
+   * dashboard's own total and is not stored here.
+   */
+  apiCostUsd: number
+  /** The known part of what those turns were actually charged (`Σ` finite `billed_cost_usd`). */
+  billedCostUsd: number
+  /**
+   * Turns inside the window with no known API-equivalent — never added as zeros
+   * (ADR-030). It qualifies {@link apiCostUsd} and nothing else: this many of
+   * the window's turns are MISSING from that sum.
+   */
+  unknownCostCount: number
+  inputTokens: number
+  outputTokens: number
+  cacheWriteTokens: number
+  cacheReadTokens: number
+  sampleCount: number
+  /** The end passed more than the grace period ago and a recompute summed it since. Final. */
+  closed: boolean
+  updatedAt: number
+}
+
+/** One window row with what a reader derives from it. */
+export interface UsageWindowSummaryRow extends UsageWindowRow {
+  /** Dollars the ledger saw per 1% of the window, or null under the noise floor. */
+  usdPerPercent: number | null
+  /** What a FULL window would have been worth at that rate, or null under the noise floor. */
+  impliedFullWindowUsd: number | null
+  /**
+   * Always true, and always shown: the numerator is this machine's ledger while
+   * the denominator is the account's global utilization, so every derived figure
+   * here reads LOW by however much the account was used elsewhere (ADR-071 §7).
+   */
+  biased: true
+}
+
+/** What `usageWindowSummary` takes, and what the `usage:windows` channel accepts. */
+export interface UsageWindowQuery {
+  accountKey?: string
+  kind?: string
+  sinceTs?: number
+}
+
+// ---------------------------------------------------------------------------
+// The usage dashboard (ADR-071 §8)
+//
+// One read of `usage_bucket` over a range, grouped provider → account → model,
+// with both costs, the unknown counts and a per-local-day series. Every figure
+// here is already resolved by the cost rule; nothing downstream re-derives one.
+// ---------------------------------------------------------------------------
+
+/** The ranges the dashboard offers. */
+export type DashboardRange = '7d' | '30d' | '90d'
+
+/**
+ * What one grouping of buckets cost, in the three currencies ADR-071 §2 defines
+ * plus the honesty counts.
+ *
+ * `displayCostUsd` is Σ of the per-bucket display rule, which is what the
+ * headline shows; `apiCostUsd` and `billedCostUsd` are the raw halves, kept so
+ * the summary can split a total into what a plan absorbed and what was charged.
+ * The two counts say how many turns are MISSING from those sums — an unpriced
+ * turn is never added as a zero (ADR-030).
+ */
+export interface CostTotals {
+  apiCostUsd: number
+  billedCostUsd: number
+  displayCostUsd: number
+  unknownApiCostCount: number
+  unknownBilledCostCount: number
+  requestCount: number
+  /** `cacheWrite` excludes nothing and overlaps nothing: the 1h tier is a SUBSET of it and is not carried. */
+  tokens: { input: number; output: number; cacheWrite: number; cacheRead: number }
+}
+
+/** One (engine, vendor, model) row under an account. */
+export interface DashboardModel {
+  engineId: string
+  vendorId: string
+  modelId: string
+  totals: CostTotals
+  /** The `dispatch`-origin part of {@link totals}, or null when none of it was dispatched. */
+  dispatched: CostTotals | null
+}
+
+/**
+ * One account's spend over the range.
+ *
+ * `billingType` is the type that covered the LARGEST part of the account's
+ * display cost. An account has one plan at a time, so it is the account's plan
+ * in every real case; the exceptions are `unknown` — the bucket every
+ * unattributable row shares, which can mix — and an account whose plan changed
+ * inside the range.
+ */
+export interface DashboardAccount {
+  accountKey: string
+  label: string
+  providerId: string
+  billingType: BillingType
+  totals: CostTotals
+  models: DashboardModel[]
+  /** The `dispatch`-origin part of {@link totals}, or null when none of it was dispatched. */
+  dispatched: CostTotals | null
+}
+
+/** One provider's spend over the range, and the accounts under it. */
+export interface DashboardProvider {
+  providerId: string
+  label: string
+  totals: CostTotals
+  accounts: DashboardAccount[]
+}
+
+/** One LOCAL calendar day of the range. Present even when nothing was spent. */
+export interface DashboardDay {
+  /** `YYYY-MM-DD` in the reader's timezone. */
+  date: string
+  /** Only the providers that spent something that day; a missing one is zero. */
+  byProvider: Record<string, { apiCostUsd: number; billedCostUsd: number; displayCostUsd: number }>
+  totals: CostTotals
+}
+
+/**
+ * The whole dashboard, from one bounded read of `usage_bucket`.
+ *
+ * DISPATCHED WORK IS INSIDE EVERY TOTAL (owner ruling, ADR-071 §8) and is
+ * reported again as a sub-total on the account and on each model row, so a
+ * surface can mark it without having to add it.
+ */
+export interface UsageDashboardData {
+  range: DashboardRange
+  /**
+   * Where the range begins: the local midnight `range` days before {@link toTs},
+   * floored to the UTC hour `usage_bucket` is keyed by. Every bucket at or after
+   * it is in the answer, and `days[0]` is the local day containing it.
+   */
+  fromTs: number
+  /** The instant the range was taken to end at (the `now` the query was built for). */
+  toTs: number
+  generatedAt: number
+  totals: CostTotals
+  /** Σ display over the `subscription` buckets — what the plans absorbed. */
+  coveredUsd: number
+  providers: DashboardProvider[]
+  days: DashboardDay[]
+  /** Σ display over the `unknown` account — history from before attribution. */
+  unattributedUsd: number
 }
 
 export interface AccountUsage {

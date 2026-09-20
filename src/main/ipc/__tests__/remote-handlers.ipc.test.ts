@@ -1916,7 +1916,9 @@ describe('remote surface parity (phase 1 port)', () => {
         // to reach it, because the dashboard built on it is not desktop-only.
         'usage:limits',
         // ADR-071 §7: the window-value ledger, read-only, for the same dashboard.
-        'usage:windows'
+        'usage:windows',
+        // ADR-071 §8: the dashboard's own read over the ledger's buckets.
+        'usage:dashboard'
       ].sort()
     )
   })

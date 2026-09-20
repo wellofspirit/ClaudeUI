@@ -50,6 +50,7 @@ import { usageFetcher } from '../services/usage-fetcher'
 import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
 import { readAccountLimits } from '../services/usage-provider'
 import { sanitizeUsageWindowQuery, usageWindowSummary } from '../services/usage-window-ledger'
+import { buildUsageDashboard, sanitizeDashboardRange } from '../services/usage-dashboard'
 import { blockUsageService } from '../services/block-usage'
 import type {
   ApprovalDecision,
@@ -1096,6 +1097,21 @@ export function registerRemoteHandlers(
     kind: 'query',
     handler: async (opts?: unknown) => {
       return usageWindowSummary(sanitizeUsageWindowQuery(opts))
+    }
+  })
+
+  /**
+   * ADR-071 §8 — the dashboard's one read: the ledger's hourly buckets over a
+   * range, grouped provider → account → model, with both costs, the unknown
+   * counts and a per-local-day series. Read-only, and the dashboard built on it
+   * is not desktop-only.
+   */
+  handleRemote({
+    channel: 'usage:dashboard',
+    capability: 'config',
+    kind: 'query',
+    handler: async (opts?: unknown) => {
+      return buildUsageDashboard({ range: sanitizeDashboardRange(opts) })
     }
   })
 
