@@ -36,9 +36,9 @@ describe('DB migration — v6 dispatched_usage', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      // Bump alongside MIGRATIONS in db.ts — currently v18 (usage_event
-      // gained ADR-071's account, billing-type, origin and two cost columns).
-      expect(userVersion(db)).toBe(18)
+      // Bump alongside MIGRATIONS in db.ts — currently v19 (the dispatched
+      // turns on disk became usage_event rows).
+      expect(userVersion(db)).toBe(19)
     } finally {
       db.close()
     }

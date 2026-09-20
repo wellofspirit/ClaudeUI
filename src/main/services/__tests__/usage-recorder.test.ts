@@ -275,3 +275,24 @@ describe('recordUsageEvent — cache-split billing passthrough', () => {
     expect(row!.cacheWrite1hTokens).toBe(400)
   })
 })
+
+// ---------------------------------------------------------------------------
+// The row's timestamp
+// ---------------------------------------------------------------------------
+
+describe('recordUsageEvent — ts', () => {
+  it('stamps the row with now when the caller gives no ts', () => {
+    const before = Date.now()
+    recordUsageEvent(anthropicEvent({ messageId: 'msg_ts_default' }))
+    const row = getUsageEventByMessageId('msg_ts_default')
+    expect(row!.ts).toBeGreaterThanOrEqual(before)
+    expect(row!.ts).toBeLessThanOrEqual(Date.now())
+  })
+
+  it("uses the caller's ts when there is one, so a turn recorded in two places has one instant", () => {
+    // The dispatcher writes `dispatched_usage` and this ledger row for the
+    // same turn; both must carry the timestamp it resolved once.
+    recordUsageEvent(anthropicEvent({ messageId: 'msg_ts_given', ts: 1_700_000_123_456 }))
+    expect(getUsageEventByMessageId('msg_ts_given')!.ts).toBe(1_700_000_123_456)
+  })
+})

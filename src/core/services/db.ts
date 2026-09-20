@@ -712,6 +712,101 @@ export const MIGRATIONS: Migration[] = [
         END;
       `)
     }
+  },
+  {
+    // v19 — ADR-071 §1: the dispatched turns already on disk become ledger
+    // rows, so the ledger is the whole history and not just what was recorded
+    // after S2c shipped. One `usage_event` row per `dispatched_usage` row,
+    // `origin = 'dispatch'`.
+    //
+    // `dispatched_usage` is NOT dropped and nothing stops writing it: its
+    // readers (the session breakdown and the dashboard's Delegated section)
+    // move in S2c2, which is also when this table goes.
+    //
+    // WHAT IS COPIED, and what deliberately is not:
+    //
+    //  - TOKENS STAY 0. The old table recorded one TOTAL and no split, and
+    //    there is no honest column to put a total in — `input_tokens` would
+    //    claim the whole turn was prompt. A gap is better than a lie, so the
+    //    total is recorded nowhere. S2c2's readers must therefore NOT read a
+    //    zero split as "this turn was free"; the cost columns are what these
+    //    rows carry.
+    //  - `api_cost_usd` takes `cost_usd`, which is what the dispatcher's own
+    //    cost rule resolved for the turn (ADR-071 §2's display figure).
+    //    `billed_cost_usd` stays NULL: the billing type of a dispatched turn
+    //    was never recorded, and NULL is how this schema says unknown.
+    //  - `equiv_cost_usd` and `engine_cost_usd` stay NULL. Both are RAW
+    //    ENGINE INPUTS, and `cost_usd` is neither — it is already a resolved
+    //    figure. Leaving them null also keeps `selectRowCostUsd` (which today
+    //    reads exactly those two) returning 0 for these rows, so copying
+    //    history cannot move a figure the dashboard shows before S2c2 moves
+    //    its readers deliberately.
+    //  - `account_key` and `billing_type` are `'unknown'`: which account ran a
+    //    past dispatched turn cannot be learned after the fact (owner ruling,
+    //    2026-09-20 — such rows still count in totals).
+    //  - `parent_routing_id` takes `from_routing_id`, the column that means
+    //    the same thing. `SessionManager.rekey()` already renames both.
+    //
+    // The vendor and the model come from `target_model` the way the dispatcher
+    // parses it (`engineMeta(engine).decodeModelValue`): Claude and Codex
+    // encode the bare model id under a fixed vendor; opencode and pi encode
+    // `<vendor>/<model>` and split on the FIRST slash, falling back to the
+    // engine's default vendor when there is none.
+    //
+    // `INSERT OR IGNORE` + the `message_id` UNIQUE make a second pass a no-op.
+    version: 19,
+    up(db) {
+      // Every arm is keyed on the ENGINE first, mirroring `dispatchModelRef`:
+      // only opencode and pi encode a vendor in the model string at all, so an
+      // engine this build does not know is `unknown` whether or not its model
+      // happens to contain a slash.
+      const vendorSql = `CASE
+        WHEN d.target_engine = 'claude' THEN 'anthropic'
+        WHEN d.target_engine = 'codex' THEN 'openai'
+        WHEN d.target_engine IN ('opencode', 'pi') AND instr(d.target_model, '/') > 0
+          THEN substr(d.target_model, 1, instr(d.target_model, '/') - 1)
+        WHEN d.target_engine = 'opencode' THEN 'opencode'
+        WHEN d.target_engine = 'pi' THEN 'openai-codex'
+        ELSE 'unknown'
+      END`
+      const modelSql = `CASE
+        WHEN d.target_engine IN ('opencode', 'pi') AND instr(d.target_model, '/') > 0
+          THEN substr(d.target_model, instr(d.target_model, '/') + 1)
+        ELSE d.target_model
+      END`
+      db.exec(`
+        INSERT OR IGNORE INTO usage_event (
+          id, ts, engine_id, vendor_id, account_id, account_uuid, model_id,
+          input_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens,
+          cache_read_tokens, equiv_cost_usd, engine_cost_usd,
+          session_id, message_id, source,
+          account_key, account_label, billing_type, origin, parent_routing_id,
+          api_cost_usd, billed_cost_usd
+        )
+        SELECT
+          'dispatched:' || d.id,
+          d.ts,
+          d.target_engine,
+          ${vendorSql},
+          NULL,
+          NULL,
+          ${modelSql},
+          0, 0, 0, 0, 0,
+          NULL,
+          NULL,
+          d.target_session_id,
+          'dispatched:' || d.id,
+          'backfill',
+          'unknown',
+          NULL,
+          'unknown',
+          'dispatch',
+          d.from_routing_id,
+          d.cost_usd,
+          NULL
+        FROM dispatched_usage d;
+      `)
+    }
   }
 ]
 
@@ -1460,6 +1555,35 @@ export function getUsageEventsSince(cutoffTs: number, engineId?: string): UsageE
         .all(cutoffTs, engineId) as UsageEventDbRow[])
     : (db
         .prepare('SELECT * FROM usage_event WHERE ts >= ? ORDER BY ts ASC')
+        .all(cutoffTs) as UsageEventDbRow[])
+  return rows.map(rowToUsageEvent)
+}
+
+/**
+ * {@link getUsageEventsSince} WITHOUT the dispatched turns.
+ *
+ * TEMPORARY, and it goes in S2c2. ADR-071 §1 says the dashboard counts
+ * dispatched work in its totals, but the dashboard that exists today already
+ * shows it, from `dispatched_usage`, in its own Delegated section. S2c started
+ * writing a `usage_event` row per dispatched turn as well, so every current
+ * reader of the ledger would count that spend a SECOND time, beside the
+ * section that already shows it. Until S2c2 retires `dispatched_usage` and
+ * redesigns those readers around `origin`, the on-screen figures stay sourced
+ * exactly as they were.
+ *
+ * `getUsageEventsSince` is deliberately left alone: S2c2's readers want every
+ * row, and so does anything auditing the ledger.
+ */
+export function getSessionUsageEventsSince(cutoffTs: number, engineId?: string): UsageEventRow[] {
+  const db = getDb()
+  const rows = engineId
+    ? (db
+        .prepare(
+          "SELECT * FROM usage_event WHERE ts >= ? AND origin != 'dispatch' AND engine_id = ? ORDER BY ts ASC"
+        )
+        .all(cutoffTs, engineId) as UsageEventDbRow[])
+    : (db
+        .prepare("SELECT * FROM usage_event WHERE ts >= ? AND origin != 'dispatch' ORDER BY ts ASC")
         .all(cutoffTs) as UsageEventDbRow[])
   return rows.map(rowToUsageEvent)
 }

@@ -48,6 +48,17 @@ export interface ActiveAccount {
   organizationUuid?: string
   /** Display only — what tells two subscriptions under one email apart. */
   organizationName?: string
+  /**
+   * How this account is billed, resolved by {@link UsageFetcher.claudeBillingType}
+   * — the SAME value the account-log record carries, so a row written live and
+   * a row attributed to this account by time cannot disagree.
+   *
+   * It is here because `oauthAccount.billingType` is the only signal that
+   * separates a `usage_based` OAuth account from a plan, and nothing outside
+   * this class reads `~/.claude.json`: a caller that has to name the account
+   * NOW (the dispatcher's Claude target) cannot wait on that file read.
+   */
+  billingType: BillingType
 }
 
 // ---------------------------------------------------------------------------
@@ -333,11 +344,16 @@ export class UsageFetcher {
       if (!uuid || !email) return
       const organizationUuid = oauthAccount?.organizationUuid
       const organizationName = oauthAccount?.organizationName
+      // Resolved on EVERY read, not only when a record is appended below: the
+      // active account has to carry the billing type for a caller attributing
+      // a turn right now, and the log only writes on a CHANGE of subscription.
+      const billingType = this.claudeBillingType(oauthAccount?.billingType)
       this.activeAccount = {
         uuid,
         email,
         ...(organizationUuid ? { organizationUuid } : {}),
-        ...(organizationName ? { organizationName } : {})
+        ...(organizationName ? { organizationName } : {}),
+        billingType
       }
 
       // Initialize dedup state from the log's last record (once per launch)
@@ -367,7 +383,7 @@ export class UsageFetcher {
           email,
           ...(organizationUuid ? { organizationUuid } : {}),
           ...(organizationName ? { organizationName } : {}),
-          billingType: this.claudeBillingType(oauthAccount?.billingType)
+          billingType
         }
         await mkdir(ACCOUNT_LOG_DIR, { recursive: true })
         await appendFile(ACCOUNT_LOG_PATH, JSON.stringify(record) + '\n', 'utf-8')

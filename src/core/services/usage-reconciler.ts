@@ -41,6 +41,7 @@ import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
 import { listOpencodeSessionsGlobal } from './opencode-session-list'
 import { PERSISTED_SESSIONS_DIR } from './persisted-sessions-dir'
+import { OPENCODE_DISPATCH_SESSION_TITLE } from '../../shared/dispatch-session'
 
 /** How often the periodic reconcile runs. */
 const RECONCILE_INTERVAL_MS = 10 * 60 * 1000 // 10 minutes
@@ -146,6 +147,14 @@ class UsageReconciler {
 
       const rows: UsageEventInsert[] = []
       for (const session of sessions) {
+        // A dispatch target IS a real top-level opencode session, so it turns
+        // up here like any other — and every one of its assistant messages is
+        // already a `usage_event` row with `origin: 'dispatch'`, written by
+        // the dispatcher (ADR-071 §1). Importing them again under opencode's
+        // own message ids would be a second, independently-keyed copy of the
+        // same spend that no dedup could ever collapse. The title is the only
+        // marker opencode gives us — see OPENCODE_DISPATCH_SESSION_TITLE.
+        if (session.title === OPENCODE_DISPATCH_SESSION_TITLE) continue
         const messages = await client.listMessages(session.sessionId).catch(() => [])
         for (const m of messages) {
           const row = this.opencodeMessageToRow(m.info, session.sessionId)

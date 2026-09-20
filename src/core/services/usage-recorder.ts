@@ -37,6 +37,13 @@ export interface UsageTurnTokens {
 
 /** One completed turn handed to the recorder. */
 export interface UsageTurnEvent {
+  /**
+   * When the turn was recorded. Defaults to now, which is what a LIVE caller
+   * means. A caller that writes a second row for the same turn elsewhere (the
+   * dispatcher, which also writes `dispatched_usage`) passes the timestamp it
+   * used there, so one turn cannot appear at two instants.
+   */
+  ts?: number
   engineId: string
   vendorId: string
   /** Local account identifier (e.g. "default" or a UUID). Nullable. */
@@ -326,7 +333,7 @@ export function recordUsageEvent(event: UsageTurnEvent): void {
 
     const row: UsageEventInsert = {
       id: uuid(),
-      ts: Date.now(),
+      ts: event.ts ?? Date.now(),
       engineId: event.engineId,
       vendorId: event.vendorId,
       accountId: event.accountId,

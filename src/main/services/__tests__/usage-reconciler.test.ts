@@ -74,6 +74,7 @@ vi.mock('../../../core/auth/OpencodeAuthProvider', () => ({
 }))
 
 import { usageReconciler } from '../../../core/services/usage-reconciler'
+import { OPENCODE_DISPATCH_SESSION_TITLE } from '../../../shared/dispatch-session'
 import {
   closeDb,
   getUsageEventByMessageId,
@@ -369,6 +370,43 @@ describe('reconcileOpencode', () => {
     // A backfilled row is never guessed to be a subagent's.
     expect(row.origin).toBe('session')
     expect(row.parentRoutingId).toBeNull()
+  })
+
+  it("skips the dispatcher's own sessions — their turns are already ledger rows", async () => {
+    // `resolveAndRunOpencode` creates a REAL top-level opencode session per
+    // dispatch target, so it is enumerated here like any other, and every
+    // assistant message under it already has a `usage_event` row with
+    // `origin: 'dispatch'` written by the dispatcher (ADR-071 §1). Importing
+    // them again under opencode's own message ids would be a second copy of
+    // the same spend, keyed differently, that no dedup could collapse.
+    mockAcquire.mockResolvedValue({ baseUrl: 'http://127.0.0.1:1', authHeader: 'Basic x' })
+    mockRelease.mockReturnValue(undefined)
+    mockListSessionsGlobal.mockResolvedValue([
+      { sessionId: 'ses_oc_human', title: 'Fix the login redirect' },
+      { sessionId: 'ses_oc_dispatch', title: OPENCODE_DISPATCH_SESSION_TITLE }
+    ])
+    mockListMessages.mockImplementation(async (sessionId: string) => [
+      {
+        info: {
+          id: sessionId === 'ses_oc_human' ? 'msg_oc_human' : 'msg_oc_dispatched',
+          role: 'assistant',
+          providerID: 'openai',
+          modelID: 'gpt-4o',
+          cost: 0.01,
+          tokens: { input: 1000, output: 400, cache: { read: 0, write: 0 } },
+          time: { created: 4242 }
+        }
+      }
+    ])
+
+    await usageReconciler.reconcileOpencode()
+
+    expect(getUsageEventByMessageId('msg_oc_human')).toBeDefined()
+    expect(getUsageEventByMessageId('msg_oc_dispatched')).toBeUndefined()
+    // The skip happens before the fetch, so the dispatcher's session is never
+    // even read back over HTTP.
+    expect(mockListMessages).toHaveBeenCalledTimes(1)
+    expect(mockListMessages).toHaveBeenCalledWith('ses_oc_human')
   })
 
   it('falls back to an unknown account when the provider knows nothing', async () => {

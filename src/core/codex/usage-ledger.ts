@@ -156,10 +156,14 @@ export class CodexUsageLedger {
  * to what is left after both. `reasoningOutputTokens` is likewise a subset of
  * `outputTokens` and must never be added again.
  *
- * One statement of that mapping for this session's two readers — the price of
- * the meter ({@link import('./CodexSession').CodexSession.equivalentCost}) and
- * the tokens of a row. The dispatcher keeps its own copy for a target session
- * it does not own (`codexTurnCostUsd`).
+ * One statement of that mapping for every reader of it — the price of the
+ * meter ({@link import('./CodexSession').CodexSession.equivalentCost}), the
+ * tokens of a session's row, and the tokens of a dispatched Codex turn's row
+ * (`cross-engine-dispatcher.ts`), whose delta comes from a thread this session
+ * does not own but has the identical shape. That file still states the
+ * arithmetic inline once more for its own PRICING (`codexTurnCostUsd`),
+ * because that call is bound to the dispatch target's provider rather than to
+ * a session's account state.
  */
 export function codexDisjointTokens(
   usage: Pick<

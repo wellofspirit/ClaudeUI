@@ -683,8 +683,32 @@ describe('UsageFetcher — account log', () => {
     expect(fetcher.getActiveAccount()).toMatchObject({
       uuid: 'acc_1',
       organizationUuid: 'org_personal',
-      organizationName: 'Personal'
+      organizationName: 'Personal',
+      billingType: 'subscription'
     })
+  })
+
+  it('carries the billing type on the ACTIVE account, not only in the log record', async () => {
+    // The dispatcher's Claude target reads it from here at the moment it
+    // records a turn (ADR-071 §1): `usage_based` is an OAuth account billed
+    // per token, and nothing else in the app can tell it apart from a plan —
+    // so a turn on one must not be recorded as covered by a subscription.
+    seedClaudeJson({
+      accountUuid: 'acc_1',
+      emailAddress: 'someone@example.test',
+      organizationUuid: 'org_work',
+      billingType: 'usage_based'
+    })
+
+    await fetcher.fetch()
+    expect(fetcher.getActiveAccount()?.billingType).toBe('apiKey')
+
+    // And it is still there on a read that appends NOTHING, which is every
+    // read after the first: the resolution cannot live inside the log's
+    // change-detection branch.
+    await fetcher.fetch()
+    expect(logRecords()).toHaveLength(1)
+    expect(fetcher.getActiveAccount()?.billingType).toBe('apiKey')
   })
 
   it('logs a move between two organizations under ONE account uuid', async () => {

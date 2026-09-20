@@ -52,6 +52,8 @@ import {
 import { opencodeServerManager } from '../../../core/opencode/OpencodeServerManager'
 import { opencodeAuthProvider } from '../../../core/auth/OpencodeAuthProvider'
 import { piAuthProvider } from '../../../core/auth/PiAuthProvider'
+import { usageFetcher } from '../../../core/services/usage-fetcher'
+import type { UsageTurnEvent } from '../../../core/services/usage-recorder'
 import { piBinaryAvailable } from '../../../core/pi/pi-locate'
 import { codexBinaryAvailable } from '../../../core/codex/codex-locate'
 import type {
@@ -328,8 +330,27 @@ const settle = async (): Promise<void> => {
   for (let i = 0; i < 8; i++) await vi.advanceTimersByTimeAsync(0)
 }
 
+/**
+ * The identity a target's account resolves to unless a test says otherwise —
+ * the `<engine>:<vendor>:native` shape ADR-071 §3 gives credentials we cannot
+ * name.
+ *
+ * These two spies are NOT a convenience. Both real methods read the engine's
+ * own `auth.json` off the host's data dir, so without them this suite would
+ * consult the developer's sign-in state (the gotcha that was found in three
+ * other suites when `accountIdentity` first shipped). No test here may touch a
+ * real credential file.
+ */
+const NATIVE_OPENCODE_IDENTITY = { accountKey: 'opencode:openai:native', accountLabel: 'openai' }
+const NATIVE_PI_IDENTITY = {
+  accountKey: 'pi:openai-codex:native',
+  accountLabel: 'openai-codex'
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.spyOn(opencodeAuthProvider, 'accountIdentity').mockReturnValue(NATIVE_OPENCODE_IDENTITY)
+  vi.spyOn(piAuthProvider, 'accountIdentity').mockReturnValue(NATIVE_PI_IDENTITY)
 })
 
 // ---------------------------------------------------------------------------
@@ -4355,6 +4376,8 @@ function piAssistantMessageEnd(opts: {
   input?: number
   output?: number
   reasoning?: number
+  cacheRead?: number
+  cacheWrite?: number
 }): Record<string, unknown> {
   const content: Record<string, unknown>[] = []
   if (opts.text !== undefined) content.push({ type: 'text', text: opts.text })
@@ -4377,8 +4400,8 @@ function piAssistantMessageEnd(opts: {
       usage: {
         input: opts.input ?? 10,
         output: opts.output ?? 5,
-        cacheRead: 0,
-        cacheWrite: 0,
+        cacheRead: opts.cacheRead ?? 0,
+        cacheWrite: opts.cacheWrite ?? 0,
         ...(opts.reasoning !== undefined ? { reasoning: opts.reasoning } : {}),
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: opts.cost ?? 0 }
       },
@@ -5925,15 +5948,18 @@ describe('CrossEngineDispatcher — pi direction: the cap follows the same cost 
     expect(recordDispatchedUsage).toHaveBeenCalledWith(expect.objectContaining({ costUsd: 0 }))
   })
 
-  it('a NON-FINITE figure from pi — the only way a pi turn goes uncountable — says the cap cannot count it', async () => {
+  it('a NON-FINITE figure from pi on an UNPRICED model says the cap cannot count it', async () => {
     // pi's own catalog prices every turn whatever the credential, so its
     // figure is a list-price equivalent under every billing type and a
     // reported `0` is a known zero, not an unpriced turn. What is left is a
-    // malformed `usage.cost.total`, which the mapper's `+=` turns into NaN:
-    // resolveCosts refuses to count that rather than adding a garbage number.
+    // malformed `usage.cost.total`, which the mapper's `+=` turns into NaN —
+    // and with no price of our own for the model either, there is nothing left
+    // to count: resolveCosts refuses rather than adding a garbage number.
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
-      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: MODEL, maxCostUsd: 0.01 } })),
+      loadEngineConfig: vi.fn(() => ({
+        dispatch: { defaultModel: 'openai/model-with-no-price', maxCostUsd: 0.01 }
+      })),
       spawnPiTarget: target.spawnPiTarget
     })
     const ctx = makeCtx({ fromEngine: 'claude' })
@@ -5945,6 +5971,33 @@ describe('CrossEngineDispatcher — pi direction: the cap follows the same cost 
     expect(result.text).toContain('[dispatch cost cap cannot count this turn')
     expect(result.text).not.toContain('[dispatch cost cap reached')
     expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+  })
+
+  it('a NON-FINITE figure on a model WE price falls back to our table rather than going uncountable', async () => {
+    // The turn's tokens reach the cost rule now (they always did for a pi
+    // SESSION's own messages), so pi failing to price a turn is no longer the
+    // end of it: `piCostInputs` reaches for our table whenever pi reported no
+    // real charge, and here it has one.
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: MODEL, maxCostUsd: 0.01 } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    // The tool_use id is load-bearing: the pi target accumulates a turn's
+    // tokens inside the same forwarding path that streams the target's output
+    // back, which is gated on there being a caller tool_use to stream to.
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_pi_nan' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    // 1M input tokens at $0.20/MTok — over the $0.01 cap on its own.
+    target.pushEvent(
+      piAssistantMessageEnd({ text: 'the answer', cost: Number.NaN, input: 1_000_000, output: 0 })
+    )
+    target.pushEvent(PI_AGENT_SETTLED)
+    const result = await pending
+    expect(result.text).not.toContain('[dispatch cost cap cannot count this turn')
+    expect(result.text).toContain('[dispatch cost cap reached')
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', MODEL, expect.closeTo(0.2, 6))
   })
 
   it('a turn pi reports as 0 is a known zero under `unknown` billing, not an unpriced turn', async () => {
@@ -8006,5 +8059,569 @@ describe('CrossEngineDispatcher — no built-in dispatch time limit (ADR-033 202
       intervals.restore()
       vi.useRealTimers()
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADR-071 §1 — a dispatched turn is a usage LEDGER row.
+//
+// `dispatched_usage` keeps its columns, its writes and its readers; what is
+// new is the second write, through the same seam every target already uses, so
+// the ledger holds delegated work as well as a session's own. Retiring the old
+// table and moving its readers is S2c2, which is why every existing
+// `dispatched_usage` assertion above is untouched.
+// ---------------------------------------------------------------------------
+
+describe('CrossEngineDispatcher — the dispatched turn as a ledger row (ADR-071 §1)', () => {
+  /** In the built-in pricing table at $0.20/MTok in, $1.20/MTok out. */
+  const PRICED = 'openai/gpt-5.6-luna'
+
+  /** Frozen dispatcher clock, so a row's `message_id` is a literal to assert. */
+  const LEDGER_TS = 1_700_000_000_000
+
+  /** `dispatch:<who>:<ts>:<seq>` — the id these tests expect to see. */
+  function ledgerId(who: string, seq: number, ts: number = LEDGER_TS): string {
+    return `dispatch:${who}:${ts}:${seq}`
+  }
+
+  function ledgerHarness(overrides: Partial<DispatcherDeps> = {}): ReturnType<
+    typeof makeHarness
+  > & {
+    recordDispatchedUsage: ReturnType<typeof vi.fn>
+    recordUsageEvent: ReturnType<typeof vi.fn>
+  } {
+    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
+    const harness = makeHarness({
+      now: () => LEDGER_TS,
+      recordDispatchedUsage,
+      recordUsageEvent,
+      ...overrides
+    })
+    return { ...harness, recordDispatchedUsage, recordUsageEvent }
+  }
+
+  /** The one ledger event a call recorded. */
+  function ledgerRow(recordUsageEvent: ReturnType<typeof vi.fn>): UsageTurnEvent {
+    expect(recordUsageEvent).toHaveBeenCalledTimes(1)
+    return recordUsageEvent.mock.calls[0]![0] as UsageTurnEvent
+  }
+
+  it('one call writes BOTH rows: the old table and the ledger, from the same inputs', async () => {
+    const { dispatcher, client, recordDispatchedUsage, recordUsageEvent } = ledgerHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: PRICED } }))
+    })
+    client.listMessages.mockResolvedValue([
+      storedAssistant({
+        text: 'ok',
+        info: {
+          tokens: { input: 1_000, output: 200, reasoning: 50, cache: { read: 400, write: 100 } },
+          cost: 0.0123
+        }
+      })
+    ])
+
+    const ctx = makeCtx({ toolUseId: 'toolu_ledger_1' })
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    expect(result.isError).toBeUndefined()
+
+    // The old row still carries exactly what it always did.
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fromRoutingId: 'routing-1',
+        targetEngine: 'opencode',
+        targetModel: PRICED,
+        targetSessionId: 'oc-sess-1',
+        toolUseId: 'toolu_ledger_1',
+        totalTokens: 1_250
+      })
+    )
+    expect(ledgerRow(recordUsageEvent)).toMatchObject({
+      engineId: 'opencode',
+      vendorId: 'openai',
+      modelId: 'gpt-5.6-luna',
+      sessionId: 'oc-sess-1',
+      origin: 'dispatch',
+      parentRoutingId: 'routing-1',
+      messageId: ledgerId('toolu_ledger_1', 1),
+      source: 'live',
+      // opencode reports a CHARGE, so the ledger's cost rule must not read
+      // `info.cost` as an equivalent.
+      engineCostUsd: 0.0123,
+      engineCostIsEquivalent: false,
+      // Disjoint, with reasoning folded into output — the same mapping the
+      // equivalent is priced from.
+      tokens: { input: 1_000, output: 250, cacheWrite: 100, cacheWrite1h: 0, cacheRead: 400 }
+    })
+  })
+
+  it('a THROWING ledger write never reaches the dispatch flow — the turn still succeeds', async () => {
+    const recordUsageEvent = vi.fn(() => {
+      throw new Error('usage_event is locked')
+    })
+    const recordDispatchedUsage = vi.fn()
+    const { dispatcher } = makeHarness({ recordDispatchedUsage, recordUsageEvent })
+
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('target answer')
+    // The old row is written first and is unaffected by the ledger's failure.
+    expect(recordDispatchedUsage).toHaveBeenCalledTimes(1)
+    expect(recordUsageEvent).toHaveBeenCalledTimes(1)
+  })
+
+  it('and the mirror: a THROWING dispatched_usage write still leaves the ledger row', async () => {
+    // The two rows are independent records of one turn, so neither write may
+    // be hostage to the other — least of all the ledger to the table S2c2
+    // deletes.
+    const recordDispatchedUsage = vi.fn(() => {
+      throw new Error('dispatched_usage is locked')
+    })
+    const recordUsageEvent = vi.fn()
+    const { dispatcher } = makeHarness({ recordDispatchedUsage, recordUsageEvent })
+
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('target answer')
+    expect(recordUsageEvent).toHaveBeenCalledTimes(1)
+    expect((recordUsageEvent.mock.calls[0]![0] as UsageTurnEvent).origin).toBe('dispatch')
+  })
+
+  it('both rows carry the SAME timestamp — one turn cannot happen at two instants', async () => {
+    const clock = 1_700_000_123_456
+    const { dispatcher, recordDispatchedUsage, recordUsageEvent } = ledgerHarness({
+      now: () => clock
+    })
+    await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'x' },
+      makeCtx({ toolUseId: 'toolu_ts' })
+    )
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(expect.objectContaining({ ts: clock }))
+    expect(ledgerRow(recordUsageEvent).ts).toBe(clock)
+  })
+
+  it('one turn is exactly one row', async () => {
+    const { dispatcher, recordUsageEvent } = ledgerHarness()
+
+    await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'x' },
+      makeCtx({ toolUseId: 'toolu_once' })
+    )
+
+    expect(recordUsageEvent).toHaveBeenCalledTimes(1)
+    expect(ledgerRow(recordUsageEvent).messageId).toBe(ledgerId('toolu_once', 1))
+  })
+
+  it('TWO turns under ONE tool_use id are TWO rows — a continuation spends too', async () => {
+    // The tool_use id alone looked like the natural dedup key, but a single
+    // dispatch call can drive several turns against the same target (this is
+    // the continuation path: same ctx, same tool_use id, `sessionId` passed
+    // back in). Keying on it would hand every turn after the first to the
+    // ledger's UNIQUE(message_id) to drop — silently, while the cap and
+    // `dispatched_usage` both counted the spend.
+    const { dispatcher, recordDispatchedUsage, recordUsageEvent } = ledgerHarness()
+    const ctx = makeCtx({ toolUseId: 'toolu_retry' })
+
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await dispatcher.dispatch({ engine: 'opencode', prompt: 'x', sessionId: first.sessionId }, ctx)
+
+    expect(recordDispatchedUsage).toHaveBeenCalledTimes(2)
+    expect(recordUsageEvent).toHaveBeenCalledTimes(2)
+    const ids = recordUsageEvent.mock.calls.map((c) => (c[0] as UsageTurnEvent).messageId)
+    expect(ids).toEqual([ledgerId('toolu_retry', 1), ledgerId('toolu_retry', 2)])
+    expect(new Set(ids).size).toBe(2)
+  })
+
+  it('an id-less dispatch keys the row on the target session instead', async () => {
+    let clock = LEDGER_TS
+    const { dispatcher, recordUsageEvent } = ledgerHarness({ now: () => clock })
+    await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+    clock += 5_000
+    await dispatcher.dispatch({ engine: 'opencode', prompt: 'y' }, makeCtx())
+
+    const ids = recordUsageEvent.mock.calls.map((c) => (c[0] as UsageTurnEvent).messageId)
+    expect(ids).toEqual([ledgerId('oc-sess-1', 1), ledgerId('oc-sess-2', 2, LEDGER_TS + 5_000)])
+  })
+
+  it('two turns in the SAME millisecond are still two rows — the sequence breaks the tie', async () => {
+    // The frozen clock is the point: nothing but the counter separates these.
+    const { dispatcher, recordUsageEvent } = ledgerHarness()
+    const ctx = makeCtx({ toolUseId: 'toolu_same_ms' })
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    await dispatcher.dispatch({ engine: 'opencode', prompt: 'y', sessionId: first.sessionId }, ctx)
+
+    const ids = recordUsageEvent.mock.calls.map((c) => (c[0] as UsageTurnEvent).messageId)
+    expect(new Set(ids).size).toBe(2)
+  })
+
+  it('an opencode target names its account and its billing type', async () => {
+    vi.spyOn(opencodeAuthProvider, 'accountIdentity').mockReturnValue({
+      accountKey: 'chatgpt:acct_123:user_456',
+      accountLabel: 'someone@example.test (plus)'
+    })
+    const billing = vi.spyOn(opencodeAuthProvider, 'buildAccountRef').mockReturnValue({
+      engineId: 'opencode',
+      vendorId: 'openai',
+      billingType: 'subscription',
+      authState: 'authenticated'
+    })
+    try {
+      const { dispatcher, recordUsageEvent } = ledgerHarness()
+      await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
+      expect(ledgerRow(recordUsageEvent)).toMatchObject({
+        accountKey: 'chatgpt:acct_123:user_456',
+        accountLabel: 'someone@example.test (plus)',
+        billingType: 'subscription'
+      })
+    } finally {
+      billing.mockRestore()
+    }
+  })
+
+  it('a FAILED opencode turn is a ledger row too — the ledger records spend, not success', async () => {
+    const { dispatcher, client, recordUsageEvent } = ledgerHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: PRICED } }))
+    })
+    client.listMessages.mockResolvedValue([
+      storedAssistant({
+        text: '',
+        info: {
+          tokens: { input: 300, output: 60 },
+          cost: 0.004,
+          error: { name: 'UnknownError', data: { message: 'stream aborted' } }
+        }
+      })
+    ])
+    const result = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'x' },
+      makeCtx({ toolUseId: 'toolu_failed' })
+    )
+    expect(result.isError).toBe(true)
+    expect(ledgerRow(recordUsageEvent)).toMatchObject({
+      origin: 'dispatch',
+      messageId: ledgerId('toolu_failed', 1),
+      tokens: { input: 300, output: 60, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
+      engineCostUsd: 0.004
+    })
+  })
+
+  it('a turn whose numbers were never read still records a row, with zeros and no engine figure', async () => {
+    const { dispatcher, client, stream, recordUsageEvent } = ledgerHarness()
+    holdTurn(client)
+    client.listMessages.mockRejectedValueOnce(new Error('history unavailable'))
+    const pending = dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'x' },
+      makeCtx({ toolUseId: 'toolu_blind' })
+    )
+    await tick()
+    completeTurn(stream)
+    const result = await pending
+    expect(result.isError).toBe(true)
+
+    // Zeros, because `usage_event` has no way to say "unknown tokens" — which
+    // is why S2c2's readers must take `api_cost_usd`, not the split, as the
+    // statement of what a turn was worth.
+    expect(ledgerRow(recordUsageEvent)).toMatchObject({
+      origin: 'dispatch',
+      messageId: ledgerId('toolu_blind', 1),
+      tokens: { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
+      engineCostUsd: null
+    })
+  })
+
+  it("a pi target accumulates the split across the turn's several assistant messages", async () => {
+    const target = makeFakePiTarget()
+    const { dispatcher, recordUsageEvent } = ledgerHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const pending = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_pi' })
+    )
+    await tick()
+    target.pushEvent(
+      piAssistantMessageEnd({ text: 'one', input: 100, output: 20, cacheRead: 5, cacheWrite: 2 })
+    )
+    // A fresh `message_start` is what lets the mapper see a SECOND assistant
+    // message in the same turn (a tool call splits one turn into several).
+    target.pushEvent({ type: 'message_start', message: { role: 'assistant', content: [] } })
+    target.pushEvent(
+      piAssistantMessageEnd({
+        text: 'two',
+        cost: 0.04,
+        input: 40,
+        output: 10,
+        cacheRead: 1,
+        cacheWrite: 3
+      })
+    )
+    target.pushEvent(PI_AGENT_SETTLED)
+    await pending
+
+    expect(ledgerRow(recordUsageEvent)).toMatchObject({
+      engineId: 'pi',
+      vendorId: 'openai-codex',
+      modelId: 'gpt-5.6-luna',
+      origin: 'dispatch',
+      messageId: ledgerId('toolu_pi', 1),
+      accountKey: 'pi:openai-codex:native',
+      tokens: { input: 140, output: 30, cacheWrite: 5, cacheWrite1h: 0, cacheRead: 6 },
+      // pi prices from its own catalog whatever the credential, so its figure
+      // is a list price and never a bill.
+      engineCostUsd: 0.04,
+      engineCostIsEquivalent: true
+    })
+  })
+
+  it('a pi turn pi itself prices at 0 is still counted by the cap, from its tokens', async () => {
+    // The cap and the ledger read the same turn, so they must read it the same
+    // way: pricing the ledger row off the tokens while the cap counted pi's
+    // `0` would be one turn with two answers. `piCostInputs` only reaches for
+    // the tokens when pi reported no positive charge, so a real figure still
+    // wins.
+    const target = makeFakePiTarget()
+    const { dispatcher, recordDispatchedUsage, recordUsageEvent } = ledgerHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_pi_zero' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    // One million input tokens at $0.20/MTok, and pi reporting nothing for it.
+    target.pushEvent(piAssistantMessageEnd({ text: 'ok', cost: 0, input: 1_000_000, output: 0 }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await pending
+
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect.objectContaining({ costUsd: expect.closeTo(0.2, 6) })
+    )
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith(
+      'pi',
+      'openai-codex/gpt-5.6-luna',
+      expect.closeTo(0.2, 6)
+    )
+    // And the ledger row keeps pi's raw figure, unchanged, beside the tokens.
+    expect(ledgerRow(recordUsageEvent)).toMatchObject({
+      engineCostUsd: 0,
+      tokens: { input: 1_000_000, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 }
+    })
+  })
+
+  it("a Claude target passes the result's usage split and the app's active account", async () => {
+    const activeAccount = vi.spyOn(usageFetcher, 'getActiveAccount').mockReturnValue({
+      uuid: 'acct-uuid-1',
+      email: 'someone@example.test',
+      organizationUuid: 'org-uuid-1',
+      organizationName: 'Example Org',
+      billingType: 'subscription'
+    })
+    try {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher, recordUsageEvent } = ledgerHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const pending = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'x' },
+        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude' })
+      )
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      target.push(
+        resultMsg({
+          result: 'the answer',
+          total_cost_usd: 0.03,
+          duration_ms: 4200,
+          usage: {
+            input_tokens: 200,
+            output_tokens: 80,
+            cache_creation_input_tokens: 30,
+            cache_read_input_tokens: 90,
+            // The 1h-TTL SUBSET of the 30 written above, billed at 2× input.
+            cache_creation: { ephemeral_5m_input_tokens: 18, ephemeral_1h_input_tokens: 12 }
+          }
+        })
+      )
+      await pending
+
+      expect(ledgerRow(recordUsageEvent)).toMatchObject({
+        engineId: 'claude',
+        vendorId: 'anthropic',
+        modelId: 'haiku',
+        sessionId: 'claude-sess-1',
+        origin: 'dispatch',
+        parentRoutingId: 'routing-1',
+        messageId: ledgerId('toolu_claude', 1),
+        accountKey: 'anthropic:org-uuid-1:acct-uuid-1',
+        accountLabel: 'someone@example.test (Example Org)',
+        billingType: 'subscription',
+        tokens: { input: 200, output: 80, cacheWrite: 30, cacheWrite1h: 12, cacheRead: 90 },
+        // cli.js reports an API-equivalent whatever the plan (ADR-034).
+        engineCostUsd: 0.03,
+        engineCostIsEquivalent: true
+      })
+    } finally {
+      activeAccount.mockRestore()
+    }
+  })
+
+  it('a Claude turn on a usage_based account is BILLED — the row must not call it covered', async () => {
+    // `oauthAccount.billingType` is the only signal that separates an OAuth
+    // account billed per token from one on a plan, and `UsageFetcher` is the
+    // only reader of it. Taking the billing type from the auth probe instead
+    // would answer `subscription` here and write `billed_cost_usd: 0` over
+    // money that really left a wallet.
+    const activeAccount = vi.spyOn(usageFetcher, 'getActiveAccount').mockReturnValue({
+      uuid: 'acct-uuid-1',
+      email: 'someone@example.test',
+      organizationUuid: 'org-uuid-1',
+      billingType: 'apiKey'
+    })
+    try {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher, recordUsageEvent } = ledgerHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const pending = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'x' },
+        makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_usage_based' })
+      )
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      target.push(resultMsg({ result: 'the answer', total_cost_usd: 0.03 }))
+      await pending
+
+      expect(ledgerRow(recordUsageEvent)).toMatchObject({
+        accountKey: 'anthropic:org-uuid-1:acct-uuid-1',
+        billingType: 'apiKey'
+      })
+    } finally {
+      activeAccount.mockRestore()
+    }
+  })
+
+  it('a Claude target resolves its account ONCE, at creation, not per turn', async () => {
+    // The spawned cli.js holds the credential it was given at spawn, so a
+    // sign-in change mid-target cannot move which account its turns billed —
+    // and a second read would record the wrong one.
+    const activeAccount = vi.spyOn(usageFetcher, 'getActiveAccount').mockReturnValue({
+      uuid: 'acct-uuid-1',
+      email: 'first@example.test',
+      organizationUuid: 'org-uuid-1',
+      billingType: 'subscription'
+    })
+    try {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher, recordUsageEvent } = ledgerHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_pinned' })
+      const first = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      target.push(resultMsg({ result: 'one', total_cost_usd: 0.01 }))
+      await first
+
+      // The user switches accounts between the two turns.
+      activeAccount.mockReturnValue({
+        uuid: 'acct-uuid-2',
+        email: 'second@example.test',
+        organizationUuid: 'org-uuid-2',
+        billingType: 'apiKey'
+      })
+      const second = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'y', sessionId: 'claude-sess-1' },
+        ctx
+      )
+      await tick()
+      target.push(resultMsg({ result: 'two', total_cost_usd: 0.02 }))
+      await second
+
+      const keys = recordUsageEvent.mock.calls.map((c) => (c[0] as UsageTurnEvent).accountKey)
+      expect(keys).toEqual(['anthropic:org-uuid-1:acct-uuid-1', 'anthropic:org-uuid-1:acct-uuid-1'])
+    } finally {
+      activeAccount.mockRestore()
+    }
+  })
+
+  it('a Claude target with no known active account records the unknown one, not half a key', async () => {
+    const activeAccount = vi.spyOn(usageFetcher, 'getActiveAccount').mockReturnValue(null)
+    try {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher, recordUsageEvent } = ledgerHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      const pending = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'x' },
+        makeCtx({ fromEngine: 'opencode' })
+      )
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-1' } as SDKMessage)
+      target.push(resultMsg({ result: 'the answer', total_cost_usd: 0.01 }))
+      await pending
+
+      expect(ledgerRow(recordUsageEvent)).toMatchObject({
+        accountKey: 'unknown',
+        accountLabel: null,
+        billingType: 'unknown'
+      })
+    } finally {
+      activeAccount.mockRestore()
+    }
+  })
+
+  it('a Codex target passes its turn DELTA as a disjoint split, under the native account', async () => {
+    const target = makeFakeCodexTarget()
+    const { dispatcher, recordUsageEvent } = ledgerHarness({
+      attachCodexTarget: target.spawnCodexTarget,
+      loadEngineConfig: vi.fn(() => ({ dispatch: {} }) as EngineConfig)
+    })
+    const pending = dispatcher.dispatch(
+      { engine: 'codex', prompt: 'x' },
+      makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_codex' })
+    )
+    await tick()
+    target.notify('thread/tokenUsage/updated', {
+      threadId: CODEX_THREAD_ID,
+      turnId: CODEX_TURN_ID,
+      tokenUsage: {
+        total: codexUsage({
+          totalTokens: 1_000,
+          inputTokens: 800,
+          cachedInputTokens: 500,
+          cacheWriteInputTokens: 100,
+          outputTokens: 200,
+          reasoningOutputTokens: 40
+        }),
+        last: codexUsage({ totalTokens: 1_000 }),
+        modelContextWindow: 400_000
+      }
+    })
+    target.completeTurn()
+    await pending
+
+    expect(ledgerRow(recordUsageEvent)).toMatchObject({
+      engineId: 'codex',
+      vendorId: 'openai',
+      modelId: 'gpt-5.6-luna',
+      origin: 'dispatch',
+      messageId: ledgerId('toolu_codex', 1),
+      // No vault accounts on this dispatcher, so the vault is never read and
+      // the honest answer is Codex signed in on its own.
+      accountKey: 'codex:openai:native',
+      billingType: 'unknown',
+      // 800 total prompt minus 500 cached minus 100 cache-written.
+      tokens: { input: 200, output: 200, cacheWrite: 100, cacheWrite1h: 0, cacheRead: 500 },
+      // codexTurnCostUsd is our own table's equivalent, not a charge Codex
+      // reported, so the row carries no engine figure at all.
+      engineCostUsd: null,
+      engineCostIsEquivalent: true
+    })
   })
 })

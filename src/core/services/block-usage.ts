@@ -40,7 +40,7 @@ import {
   type ProjectionSample as AggProjectionSample
 } from './usage-aggregation'
 import {
-  getUsageEventsSince,
+  getSessionUsageEventsSince,
   getWindowSamples,
   insertUsageEvents,
   upsertDailyUsage,
@@ -725,7 +725,10 @@ export class BlockUsageService {
   private computePerEngine(now: number): BlockUsageData['perEngine'] {
     try {
       const cutoff = now - SCAN_WINDOW_MS
-      const rows: UsageEventRow[] = getUsageEventsSince(cutoff)
+      // S2c2 REMOVES THIS: dispatched turns are ledger rows now, but the
+      // dashboard already shows them in its own Delegated section (from
+      // `dispatched_usage`), so counting them here too would double them.
+      const rows: UsageEventRow[] = getSessionUsageEventsSince(cutoff)
       if (rows.length === 0) return undefined
       const aggEntries: AggEntry[] = rows.map((r) => ({
         timestamp: r.ts,
@@ -791,7 +794,10 @@ export class BlockUsageService {
    */
   private claudeEntriesFromDb(now: number): ParsedEntry[] {
     const cutoff = now - SCAN_WINDOW_MS
-    const rows = getUsageEventsSince(cutoff, 'claude')
+    // S2c2 REMOVES THIS exclusion — see getSessionUsageEventsSince. A block
+    // is "what this account was doing in a 5-hour window", which the Delegated
+    // section already accounts for separately.
+    const rows = getSessionUsageEventsSince(cutoff, 'claude')
     return rows.map((r) => ({
       timestamp: r.ts,
       model: r.modelId,
@@ -815,7 +821,10 @@ export class BlockUsageService {
   private rollupDailyUsageFromDb(now: number): void {
     try {
       const cutoff = now - SCAN_WINDOW_MS
-      const rows = getUsageEventsSince(cutoff)
+      // S2c2 REMOVES THIS exclusion — see getSessionUsageEventsSince. Until
+      // then the 30-day chart stays sourced exactly as it was, and dispatched
+      // spend stays in the Delegated section alone.
+      const rows = getSessionUsageEventsSince(cutoff)
       if (rows.length === 0) return
 
       // The day that CONTAINS the cutoff is only PARTIALLY covered by the scan

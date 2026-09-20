@@ -81,7 +81,7 @@ describe('migration v18 — usage_event gains ADR-071 attribution', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(18)
+      expect(userVersion(db)).toBe(19)
       const row = readRow(db, 'msg_claude_both')
       // History survives the ALTERs untouched.
       expect(row.equiv_cost_usd).toBeCloseTo(0.25)
@@ -163,7 +163,7 @@ describe('migration v18 — usage_event gains ADR-071 attribution', () => {
 
       expect(() => runMigrations(db)).not.toThrow()
 
-      expect(userVersion(db)).toBe(18)
+      expect(userVersion(db)).toBe(19)
       expect(readRow(db, 'msg_claude_both').api_cost_usd).toBeCloseTo(0.31)
     } finally {
       db.close()
