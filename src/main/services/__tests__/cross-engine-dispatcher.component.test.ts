@@ -9,7 +9,7 @@
  * The singleton's default deps pull in OpencodeServerManager (which imports
  * electron at runtime), so electron is shimmed.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 import {
   DEFAULT_MAX_CONCURRENT_DISPATCHES,
@@ -50,6 +50,8 @@ import {
   buildPiTargetChildEnv
 } from '../../../core/services/cross-engine-dispatcher'
 import { opencodeServerManager } from '../../../core/opencode/OpencodeServerManager'
+import { opencodeAuthProvider } from '../../../core/auth/OpencodeAuthProvider'
+import { piAuthProvider } from '../../../core/auth/PiAuthProvider'
 import { piBinaryAvailable } from '../../../core/pi/pi-locate'
 import { codexBinaryAvailable } from '../../../core/codex/codex-locate'
 import type {
@@ -68,7 +70,7 @@ import type {
 import { CodexMethodNotFound } from '../../../core/codex/CodexAppServerClient'
 import type { QueryHandle, ResultMessage, SDKMessage, SdkToolExtra } from '../../../core/sdk'
 import type { StoredMessage } from '../../../core/opencode/protocol/types'
-import type { EngineConfig, EngineId } from '../../../shared/types'
+import type { BillingType, EngineConfig, EngineId } from '../../../shared/types'
 import type { PiRpcClient } from '../../../core/pi/PiRpcClient'
 import type { PiBridgeHost, PiBridgeHandler } from '../../../core/pi/PiBridgeHost'
 import { SyncCore } from '../../../core/sync/sync-core'
@@ -3921,6 +3923,245 @@ describe('CrossEngineDispatcher — M4-C cost cap (opencode direction)', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// ADR-071 §2 — the cap counts what a turn was WORTH, not what opencode billed.
+// opencode prices from a catalog that is zeroed for a provider signed in with
+// OAuth, so a subscription-authenticated target used to report `info.cost: 0`
+// on every turn and the cap never tripped at all.
+// ---------------------------------------------------------------------------
+
+describe('CrossEngineDispatcher — cost cap on API-equivalent spend (opencode direction)', () => {
+  /** In the built-in pricing table at $0.20/MTok in, $1.20/MTok out. */
+  const PRICED = 'openai/gpt-5.6-luna'
+  /** `openai` is a KNOWN vendor, so an unknown model under it is a genuine
+   *  pricing miss rather than the cross-vendor fallback findPricing applies to
+   *  unrecognized gateway vendors. */
+  const UNPRICED = 'openai/model-with-no-price'
+  /** Exactly $0.20 of list-price spend on PRICED. */
+  const ONE_MTOK_IN = { input: 1_000_000, output: 0 }
+
+  let billingSpy: ReturnType<typeof vi.spyOn> | undefined
+
+  function billAs(billingType: BillingType): void {
+    billingSpy = vi.spyOn(opencodeAuthProvider, 'buildAccountRef').mockReturnValue({
+      engineId: 'opencode',
+      vendorId: 'openai',
+      billingType,
+      authState: 'authenticated'
+    })
+  }
+
+  afterEach(() => {
+    billingSpy?.mockRestore()
+    billingSpy = undefined
+  })
+
+  it('a subscription target reporting info.cost 0 still trips the cap, on the turn its equivalent crosses it', async () => {
+    billAs('subscription')
+    const { dispatcher, client } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: PRICED, maxCostUsd: 0.3 } }))
+    })
+    client.listMessages.mockResolvedValue([
+      storedAssistant({ text: 'ok', info: { tokens: ONE_MTOK_IN, cost: 0 } })
+    ])
+
+    const ctx = makeCtx()
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
+    expect(first.isError).toBeUndefined()
+    // $0.20 of $0.30 — under the cap, so no note yet.
+    expect(first.text).toBe('ok')
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', PRICED, 0.2)
+
+    const second = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'two', sessionId: first.sessionId },
+      ctx
+    )
+    // $0.40 cumulative — the crossing turn carries the note.
+    expect(second.text).toContain('[dispatch cost cap reached')
+
+    const third = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'three', sessionId: first.sessionId },
+      ctx
+    )
+    expect(third.isError).toBe(true)
+    expect(third.text).toContain('cost cap')
+    expect(client.promptAsync).toHaveBeenCalledTimes(2)
+  })
+
+  it('an apiKey target counts the BILLED figure, not our equivalent (a gateway margin is real spend)', async () => {
+    billAs('apiKey')
+    const recordDispatchedUsage = vi.fn()
+    const { dispatcher, client } = makeHarness({
+      recordDispatchedUsage,
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: PRICED, maxCostUsd: 0.3 } }))
+    })
+    // Our equivalent for these tokens is $0.20; the gateway charged $0.31.
+    client.listMessages.mockResolvedValue([
+      storedAssistant({ text: 'ok', info: { tokens: ONE_MTOK_IN, cost: 0.31 } })
+    ])
+
+    const ctx = makeCtx()
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    expect(result.text).toContain('[dispatch cost cap reached')
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', PRICED, 0.31)
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(expect.objectContaining({ costUsd: 0.31 }))
+  })
+
+  it("a failed turn's tokens count toward the cap at the equivalent rate", async () => {
+    billAs('subscription')
+    const { dispatcher, client } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: PRICED, maxCostUsd: 0.15 } }))
+    })
+    client.listMessages.mockResolvedValue([
+      storedAssistant({
+        text: '',
+        info: {
+          tokens: ONE_MTOK_IN,
+          cost: 0,
+          error: { name: 'UnknownError', data: { message: 'stream aborted' } }
+        }
+      })
+    ])
+
+    const ctx = makeCtx()
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
+    expect(first.isError).toBe(true)
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', PRICED, 0.2)
+
+    const second = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'two', sessionId: first.sessionId },
+      ctx
+    )
+    expect(second.isError).toBe(true)
+    expect(second.text).toContain('cost cap')
+  })
+
+  it('an unpriced model appends the cannot-count line once per turn and never trips the cap', async () => {
+    billAs('subscription')
+    const recordDispatchedUsage = vi.fn()
+    const { dispatcher, client } = makeHarness({
+      recordDispatchedUsage,
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: UNPRICED, maxCostUsd: 0.01 } }))
+    })
+    client.listMessages.mockResolvedValue([
+      storedAssistant({ text: 'ok', info: { tokens: ONE_MTOK_IN, cost: 0 } })
+    ])
+
+    const ctx = makeCtx()
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
+    expect(first.text).toBe(
+      `ok\n\n[dispatch cost cap cannot count this turn: ${UNPRICED} has no known price]`
+    )
+    expect(first.text).not.toContain('[dispatch cost cap reached')
+    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(expect.objectContaining({ costUsd: null }))
+
+    // Turn 2 runs — an uncountable turn can never trip a cap — and says so
+    // again, once.
+    const second = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'two', sessionId: first.sessionId },
+      ctx
+    )
+    expect(second.isError).toBeUndefined()
+    expect(second.text.match(/cannot count this turn/g)).toHaveLength(1)
+  })
+
+  it('the rejection message reports the turns the spent figure could not count', async () => {
+    billAs('subscription')
+    const { dispatcher, client } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: UNPRICED, maxCostUsd: 0.1 } }))
+    })
+    // One unpriced turn, then one the fallback DOES price (a real engine
+    // charge under `unknown`-free billing is still a figure).
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({ text: 'unpriceable', info: { tokens: ONE_MTOK_IN, cost: 0 } })
+    ])
+    const ctx = makeCtx()
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
+    expect(first.text).toContain('cannot count this turn')
+
+    // Force the cap over by billing the next turn as apiKey with a real charge.
+    billingSpy?.mockReturnValue({
+      engineId: 'opencode',
+      vendorId: 'openai',
+      billingType: 'apiKey',
+      authState: 'authenticated'
+    })
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({ text: 'billed', info: { cost: 0.2 } })
+    ])
+    await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'two', sessionId: first.sessionId },
+      ctx
+    )
+
+    const third = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'three', sessionId: first.sessionId },
+      ctx
+    )
+    expect(third.isError).toBe(true)
+    expect(third.text).toContain('1 turn(s) on this session could not be counted')
+  })
+
+  it('a turn that moved no tokens is a known zero, not an uncountable turn, even on an unpriced model', async () => {
+    billAs('subscription')
+    const recordDispatchedUsage = vi.fn()
+    const { dispatcher, client } = makeHarness({
+      recordDispatchedUsage,
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: UNPRICED, maxCostUsd: 0.1 } }))
+    })
+    // Zero tokens cost zero at any rate — the price table is irrelevant.
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({ text: 'nothing to do', info: { tokens: { input: 0, output: 0 } } })
+    ])
+    const ctx = makeCtx()
+    const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
+    expect(first.text).toBe('nothing to do')
+    expect(first.text).not.toContain('cannot count this turn')
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(expect.objectContaining({ costUsd: 0 }))
+
+    // …and the entry counted no uncountable turn: drive the cap over with a
+    // real charge and the rejection has nothing to disclaim.
+    billingSpy?.mockReturnValue({
+      engineId: 'opencode',
+      vendorId: 'openai',
+      billingType: 'apiKey',
+      authState: 'authenticated'
+    })
+    client.listMessages.mockResolvedValueOnce([
+      storedAssistant({ text: 'billed', info: { tokens: { input: 10 }, cost: 0.2 } })
+    ])
+    await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'two', sessionId: first.sessionId },
+      ctx
+    )
+    const third = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: 'three', sessionId: first.sessionId },
+      ctx
+    )
+    expect(third.isError).toBe(true)
+    expect(third.text).toContain('cost cap')
+    expect(third.text).not.toContain('could not be counted')
+  })
+
+  it('a free vendor spends nothing: the cap never trips and the breakdown gets nothing', async () => {
+    billAs('free')
+    const recordDispatchedUsage = vi.fn()
+    const { dispatcher, client } = makeHarness({
+      recordDispatchedUsage,
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: PRICED, maxCostUsd: 0.01 } }))
+    })
+    client.listMessages.mockResolvedValue([
+      storedAssistant({ text: 'ok', info: { tokens: ONE_MTOK_IN, cost: 0 } })
+    ])
+    const ctx = makeCtx()
+    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+    expect(result.text).toBe('ok')
+    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(expect.objectContaining({ costUsd: 0 }))
+  })
+})
+
 describe('CrossEngineDispatcher — M4-C cost cap (Claude direction)', () => {
   it('a continuation turn is rejected once cumulative cost meets the cap; target survives', async () => {
     const target = makeFakeClaudeTarget()
@@ -5192,7 +5433,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
     expect(result.isError).toBeUndefined()
   })
 
-  it('a timed-out turn IS recorded (status "failed") with null usage numbers; a stopped turn is NOT recorded', async () => {
+  it('a timed-out turn IS recorded (status "failed") with unknown tokens and a known-zero cost; a stopped turn is NOT recorded', async () => {
     vi.useFakeTimers()
     try {
       const recordDispatchedUsage = vi.fn()
@@ -5215,11 +5456,15 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
       await advance(1_000)
       const result = await pending
       expect(result.isError).toBe(true)
+      // Tokens are unknown (nothing streamed back), but the cost is a KNOWN
+      // zero: pi prices from its own catalog and its cumulative total — after
+      // the get_session_stats reconcile — did not move, so the turn spent
+      // nothing (ADR-071 §2; `null` in this column means unknown, not free).
       expect(recordDispatchedUsage).toHaveBeenCalledWith(
         expect.objectContaining({
           toolUseId: 'toolu_timeout_record',
           totalTokens: null,
-          costUsd: null
+          costUsd: 0
         })
       )
 
@@ -5643,6 +5888,104 @@ describe('CrossEngineDispatcher — pi direction (M4c): cost cap (ADR-033 M4-C)'
     const result = await pending
     expect(result.isError).toBeUndefined()
     expect(result.text).not.toContain('cost cap reached')
+  })
+})
+
+describe('CrossEngineDispatcher — pi direction: the cap follows the same cost rule (ADR-071 §2)', () => {
+  const MODEL = 'openai-codex/gpt-5.6-luna'
+  let billingSpy: ReturnType<typeof vi.spyOn> | undefined
+
+  afterEach(() => {
+    billingSpy?.mockRestore()
+    billingSpy = undefined
+  })
+
+  it('a free vendor spends nothing, whatever pi reports', async () => {
+    billingSpy = vi.spyOn(piAuthProvider, 'buildPiAccountRef').mockReturnValue({
+      engineId: 'pi',
+      vendorId: 'openai-codex',
+      billingType: 'free',
+      authState: 'authenticated'
+    })
+    const recordDispatchedUsage = vi.fn()
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      recordDispatchedUsage,
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: MODEL, maxCostUsd: 0.01 } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'the answer', cost: 0.5 }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const result = await pending
+    expect(result.text).not.toContain('cost cap')
+    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+    expect(recordDispatchedUsage).toHaveBeenCalledWith(expect.objectContaining({ costUsd: 0 }))
+  })
+
+  it('a NON-FINITE figure from pi — the only way a pi turn goes uncountable — says the cap cannot count it', async () => {
+    // pi's own catalog prices every turn whatever the credential, so its
+    // figure is a list-price equivalent under every billing type and a
+    // reported `0` is a known zero, not an unpriced turn. What is left is a
+    // malformed `usage.cost.total`, which the mapper's `+=` turns into NaN:
+    // resolveCosts refuses to count that rather than adding a garbage number.
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: MODEL, maxCostUsd: 0.01 } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'the answer', cost: Number.NaN }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const result = await pending
+    expect(result.text).toContain('[dispatch cost cap cannot count this turn')
+    expect(result.text).not.toContain('[dispatch cost cap reached')
+    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+  })
+
+  it('a turn pi reports as 0 is a known zero under `unknown` billing, not an unpriced turn', async () => {
+    // No credential for the vendor → billing type `unknown`. pi priced the
+    // turn; it just cost nothing (a stop before any spend, say).
+    billingSpy = vi.spyOn(piAuthProvider, 'buildPiAccountRef').mockReturnValue(null)
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: MODEL, maxCostUsd: 0.01 } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'the answer', cost: 0 }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const result = await pending
+    expect(result.text).not.toContain('cost cap')
+    expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
+  })
+
+  it("a subscription turn counts pi's own figure — it is already a list-price equivalent", async () => {
+    billingSpy = vi.spyOn(piAuthProvider, 'buildPiAccountRef').mockReturnValue({
+      engineId: 'pi',
+      vendorId: 'openai-codex',
+      billingType: 'subscription',
+      authState: 'authenticated'
+    })
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: MODEL, maxCostUsd: 0.05 } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    target.pushEvent(piAssistantMessageEnd({ text: 'the answer', cost: 0.06 }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    const result = await pending
+    expect(result.text).toContain('[dispatch cost cap reached')
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', MODEL, 0.06)
   })
 })
 
