@@ -1629,10 +1629,10 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     // Phase 7 Pass 2 (Full SQL): run the backfill reconciler FIRST so usage_event
     // holds out-of-tool Claude + opencode usage before the first dashboard
     // emission (no flash of missing per-engine/opencode data). recalculate() is
-    // itself self-sufficient for the Claude dashboard — it seeds daily_usage from
-    // the legacy JSON files, self-upserts its freshly-parsed JSONL into
-    // usage_event, then reads SQL-sourced blocks + daily — so even if reconcile
-    // is slow/fails, the Claude blocks + history are never empty.
+    // itself self-sufficient for the Claude dashboard — it self-upserts its
+    // freshly-parsed JSONL into usage_event, then reads SQL-sourced blocks and
+    // the hourly buckets it rolls up — so even if reconcile is slow/fails, the
+    // Claude blocks + history are never empty.
     //
     // Lazy import: usage-reconciler statically imports block-usage →
     // usage-fetcher → claude-session, so a static import from this module (which

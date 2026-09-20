@@ -805,7 +805,7 @@ export class OpencodeSession extends BaseSession {
       this.lastContextLength = seed.lastContextLength
       this.accTotalDurationMs = seed.totalDurationMs
       // Slice C — cross-engine dispatched cost durability: seed from
-      // dispatched_usage, keyed by this.routingId (the STABLE id a later
+      // the usage ledger, keyed by this.routingId (the STABLE id a later
       // reopen constructs this session object with — see seedDispatchedCosts'
       // doc comment on BaseSession).
       this.seedDispatchedCosts()

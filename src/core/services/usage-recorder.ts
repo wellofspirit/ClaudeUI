@@ -39,9 +39,9 @@ export interface UsageTurnTokens {
 export interface UsageTurnEvent {
   /**
    * When the turn was recorded. Defaults to now, which is what a LIVE caller
-   * means. A caller that writes a second row for the same turn elsewhere (the
-   * dispatcher, which also writes `dispatched_usage`) passes the timestamp it
-   * used there, so one turn cannot appear at two instants.
+   * means. A caller whose own clock already stopped on the turn (the
+   * dispatcher, which times the target's turn) passes that instant instead, so
+   * the row says when the turn happened.
    */
   ts?: number
   engineId: string

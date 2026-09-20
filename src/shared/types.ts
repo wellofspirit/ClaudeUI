@@ -3109,7 +3109,7 @@ export interface EngineUsageSummary {
 
 /**
  * One (targetEngine, targetModel) aggregate of cross-engine dispatched usage
- * (ADR-033 M4-B) — the operational DB's `dispatched_usage` table grouped by
+ * (ADR-033 M4-B) — the usage ledger's `origin = 'dispatch'` rows grouped by
  * target. Backs UsageView's "Delegated" section.
  */
 export interface DispatchedUsageSummary {

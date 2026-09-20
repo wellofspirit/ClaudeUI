@@ -54,7 +54,7 @@ class UsageReconciler {
    * Start periodic reconciliation. The startup reconcile + recalc is driven by
    * session.ipc (reconcileAll().finally(recalculate)); here the PERIODIC tick
    * reconciles then refreshes the dashboard so out-of-tool usage (esp. opencode,
-   * which block-usage's JSONL scan never sees) rolls into daily_usage + the
+   * which block-usage's JSONL scan never sees) rolls into usage_bucket + the
    * per-engine breakdown. recalculate() is concurrency-guarded internally.
    */
   start(): void {

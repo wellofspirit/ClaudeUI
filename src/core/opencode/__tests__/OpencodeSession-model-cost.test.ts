@@ -147,10 +147,50 @@ vi.mock('../../auth/OpencodeAuthProvider', () => ({
 
 import { OpencodeSession } from '../OpencodeSession'
 import { opencodeHistoryStatusLine } from '../history-status-line'
-import { insertDispatchedUsage } from '../../services/db'
+import { insertUsageEvent } from '../../services/db'
 import type { OpencodeEvent } from '../protocol/types'
 import type { HostWindowHandle } from '../../host'
 import type { StatusLineData } from '../../../shared/types'
+
+/**
+ * One dispatched turn in the ledger (ADR-071 §1), as `safeRecordUsage` writes
+ * it — `origin 'dispatch'` with the dispatching session in `parentRoutingId`,
+ * which is what `dispatchedCostsByRouting` reads back on a resume.
+ */
+function insertDispatchedTurn(row: {
+  fromRoutingId: string
+  targetEngine: string
+  vendorId: string
+  modelId: string
+  costUsd: number
+}): void {
+  insertUsageEvent({
+    id: `ue_${row.fromRoutingId}`,
+    ts: 1000,
+    engineId: row.targetEngine,
+    vendorId: row.vendorId,
+    accountId: null,
+    accountUuid: null,
+    modelId: row.modelId,
+    inputTokens: 200,
+    outputTokens: 100,
+    cacheWriteTokens: 0,
+    cacheWrite1hTokens: 0,
+    cacheReadTokens: 0,
+    equivCostUsd: row.costUsd,
+    engineCostUsd: null,
+    sessionId: 'target-sess-1',
+    messageId: `dispatch:toolu_1:1000:1:${row.fromRoutingId}`,
+    source: 'live',
+    accountKey: 'unknown',
+    accountLabel: null,
+    billingType: 'subscription',
+    origin: 'dispatch',
+    parentRoutingId: row.fromRoutingId,
+    apiCostUsd: row.costUsd,
+    billedCostUsd: 0
+  })
+}
 
 function setupMocks(): void {
   mockBuildAccountRef.mockReset().mockReturnValue(null)
@@ -346,17 +386,12 @@ describe('OpencodeSession — dispatched cost (Slice C)', () => {
   })
 
   it('seeds dispatched cost from durable storage on resume replay (rehydration across reloads)', async () => {
-    insertDispatchedUsage({
-      ts: 1000,
+    insertDispatchedTurn({
       fromRoutingId: 'r_dispatched_resume',
-      fromEngine: 'opencode',
       targetEngine: 'claude',
-      targetModel: 'claude-haiku-4-5',
-      targetSessionId: 'claude-sess-1',
-      toolUseId: 'toolu_1',
-      totalTokens: 300,
-      costUsd: 0.12,
-      durationMs: 1500
+      vendorId: 'anthropic',
+      modelId: 'claude-haiku-4-5',
+      costUsd: 0.12
     })
     mockGetSession.mockResolvedValue({ id: 'ses_resumed' })
     mockListMessages.mockResolvedValue([])

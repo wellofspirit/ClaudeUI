@@ -21,7 +21,7 @@ import {
 } from '../../core/services/cross-engine-dispatcher'
 import { setHostPaths } from '../../core/host'
 import provenance from '../../core/codex/protocol/provenance.json'
-import type { DispatchedUsageRow } from '../../core/services/db'
+import type { UsageTurnEvent } from '../../core/services/usage-recorder'
 
 /**
  * Codex as a cross-engine dispatch TARGET, against the REAL pinned binary and a
@@ -283,7 +283,7 @@ shell_snapshot = false
 
 function makeDispatcher(
   env: NodeJS.ProcessEnv,
-  usage: Array<Omit<DispatchedUsageRow, 'id'>>,
+  usage: UsageTurnEvent[],
   forwarded: Array<Parameters<AttachCodexTargetFn>[0]>
 ): CrossEngineDispatcher {
   const attachCodexTarget: AttachCodexTargetFn = async (opts) => {
@@ -331,7 +331,7 @@ function makeDispatcher(
     // A no-op rather than the real better-sqlite3 insert: this vitest context
     // has no Electron `app` for a userData path, and the point here is the ROW
     // the dispatcher builds, not the table it lands in.
-    recordDispatchedUsage: (row) => usage.push(row)
+    recordUsageEvent: (row) => usage.push(row)
   }
   const dispatcher = new CrossEngineDispatcher(deps)
   dispatchers.push(dispatcher)
@@ -342,7 +342,7 @@ it.runIf(enabled)(
   'a real dispatch into Codex runs a turn, returns its text, records usage, and continues the same thread',
   async () => {
     const fixture = await setupFixture()
-    const usage: Array<Omit<DispatchedUsageRow, 'id'>> = []
+    const usage: UsageTurnEvent[] = []
     const forwarded: Array<Parameters<AttachCodexTargetFn>[0]> = []
     const dispatcher = makeDispatcher(fixture.env, usage, forwarded)
     const emitted: Array<{ channel: string; data: unknown }> = []
@@ -387,17 +387,18 @@ it.runIf(enabled)(
 
     expect(usage).toHaveLength(1)
     expect(usage[0]).toMatchObject({
-      fromRoutingId: ROUTING_ID,
-      fromEngine: 'claude',
-      targetEngine: 'codex',
-      targetModel: 'gpt-6-astra',
-      targetSessionId: first.sessionId,
-      toolUseId: 'toolu_dispatch_integration'
+      parentRoutingId: ROUTING_ID,
+      origin: 'dispatch',
+      engineId: 'codex',
+      vendorId: 'openai',
+      modelId: 'gpt-6-astra',
+      sessionId: first.sessionId,
+      messageId: expect.stringContaining('toolu_dispatch_integration')
     })
-    expect(usage[0]!.totalTokens).toBeGreaterThan(0)
-    // `gpt-6-astra` IS in shared/pricing.ts, so the row carries the API-rate
-    // equivalent — a positive number, not the `null` an unpriced model gets.
-    expect(usage[0]!.costUsd).toBeGreaterThan(0)
+    // A real turn moved real tokens; the recorder prices them (`gpt-6-astra`
+    // IS in shared/pricing.ts) into the row's API cost.
+    const tokens = usage[0]!.tokens
+    expect(tokens.input + tokens.output).toBeGreaterThan(0)
 
     // Continuation: the SAME thread, one more turn, no second thread.
     const second = await dispatcher.dispatch(
@@ -420,7 +421,7 @@ it.runIf(enabled)(
   'a stop mid-turn really interrupts the native turn',
   async () => {
     const fixture = await setupFixture()
-    const usage: Array<Omit<DispatchedUsageRow, 'id'>> = []
+    const usage: UsageTurnEvent[] = []
     const forwarded: Array<Parameters<AttachCodexTargetFn>[0]> = []
     const dispatcher = makeDispatcher(fixture.env, usage, forwarded)
     const ctx: DispatchContext = {

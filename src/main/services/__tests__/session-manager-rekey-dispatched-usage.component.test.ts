@@ -1,20 +1,21 @@
 /**
  * @vitest-environment node
  *
- * Slice C (ADR-033 cross-engine dispatch) — SessionManager.rekey() must carry
- * dispatched_usage rows from the pre-rekey routingId forward to the SDK
- * session UUID, via db.ts's renameDispatchedUsage. Without this, a dispatch
- * recorded under a fresh session's temporary routingId becomes unreachable
- * from BaseSession.seedDispatchedCosts() on a later resume (which looks up by
- * the STABLE post-rekey id).
+ * SessionManager.rekey() must carry every usage row recorded under the
+ * pre-rekey routingId forward to the SDK session UUID, via db.ts's
+ * renameUsageEventParent.
  *
- * ADR-071 §1 puts `usage_event.parent_routing_id` under the same rule, via
- * renameUsageEventParent: a subagent turn can end while the session is still
- * on its temporary id, and its `child` row must follow the session or its
- * spend can never be traced back to what caused it.
+ * Two kinds ride on `parent_routing_id`. A DISPATCHED turn (ADR-033 Slice C,
+ * which had its own `dispatched_usage` rename until ADR-071 §1 made the ledger
+ * the only record): without the rename, a dispatch recorded under a fresh
+ * session's temporary routingId becomes unreachable from
+ * BaseSession.seedDispatchedCosts() on a later resume, which looks up by the
+ * STABLE post-rekey id. And a SUBAGENT turn, which can end while the session is
+ * still on its temporary id, and whose spend could otherwise never be traced
+ * back to what caused it.
  *
  * Exercises the REAL SessionManager class (not the hand-rolled mock used by
- * session-manager.test.ts) so the actual `renameDispatchedUsage` wiring in
+ * session-manager.test.ts) so the actual `renameUsageEventParent` wiring in
  * rekey() is under test. `../providers/register-engines` and
  * `../providers/EngineRegistry` are mocked to avoid pulling in the real
  * ClaudeSession/OpencodeSession classes (and their Electron/opencode deps) —
@@ -22,16 +23,12 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const { mockRenameDispatchedUsage, mockRenameUsageEventParent, mockCreateSession } = vi.hoisted(
-  () => ({
-    mockRenameDispatchedUsage: vi.fn(),
-    mockRenameUsageEventParent: vi.fn(),
-    mockCreateSession: vi.fn()
-  })
-)
+const { mockRenameUsageEventParent, mockCreateSession } = vi.hoisted(() => ({
+  mockRenameUsageEventParent: vi.fn(),
+  mockCreateSession: vi.fn()
+}))
 
 vi.mock('../../../core/services/db', () => ({
-  renameDispatchedUsage: mockRenameDispatchedUsage,
   renameUsageEventParent: mockRenameUsageEventParent
 }))
 
@@ -71,14 +68,13 @@ function makeFakeSession(routingId: string): {
   }
 }
 
-describe('SessionManager.rekey — dispatched_usage id chain (Slice C)', () => {
+describe('SessionManager.rekey — the usage-row id chain', () => {
   beforeEach(() => {
-    mockRenameDispatchedUsage.mockReset()
     mockRenameUsageEventParent.mockReset()
     mockCreateSession.mockReset()
   })
 
-  it('carries dispatched_usage rows from the old routingId to the new one', () => {
+  it('carries the usage rows from the old routingId to the new one', () => {
     mockCreateSession.mockImplementation((_engineId: string, routingId: string) =>
       makeFakeSession(routingId)
     )
@@ -87,27 +83,14 @@ describe('SessionManager.rekey — dispatched_usage id chain (Slice C)', () => {
 
     mgr.rekey('tmp-routing', 'sdk-session-uuid')
 
-    expect(mockRenameDispatchedUsage).toHaveBeenCalledWith('tmp-routing', 'sdk-session-uuid')
+    expect(mockRenameUsageEventParent).toHaveBeenCalledWith('tmp-routing', 'sdk-session-uuid')
     expect(mgr.has('tmp-routing')).toBe(false)
     expect(mgr.has('sdk-session-uuid')).toBe(true)
   })
 
-  it('carries usage_event child rows to the new routingId too (ADR-071 §1)', () => {
-    mockCreateSession.mockImplementation((_engineId: string, routingId: string) =>
-      makeFakeSession(routingId)
-    )
-    const mgr = new SessionManager()
-    mgr.create('tmp-routing-ue', {} as never, '/tmp/proj')
-
-    mgr.rekey('tmp-routing-ue', 'sdk-session-uuid-ue')
-
-    expect(mockRenameUsageEventParent).toHaveBeenCalledWith('tmp-routing-ue', 'sdk-session-uuid-ue')
-  })
-
-  it('does not call either rename for an unknown oldId (nothing to rekey)', () => {
+  it('does not rename anything for an unknown oldId (nothing to rekey)', () => {
     const mgr = new SessionManager()
     mgr.rekey('nonexistent', 'new-id')
-    expect(mockRenameDispatchedUsage).not.toHaveBeenCalled()
     expect(mockRenameUsageEventParent).not.toHaveBeenCalled()
   })
 
@@ -134,24 +117,7 @@ describe('SessionManager.rekey — dispatched_usage id chain (Slice C)', () => {
     expect(mgr.get('route-replace')).toBe(created[1])
   })
 
-  it('a throwing renameDispatchedUsage never breaks rekey (best-effort, logged)', () => {
-    mockRenameDispatchedUsage.mockImplementation(() => {
-      throw new Error('SQLITE_BUSY: database is locked')
-    })
-    mockCreateSession.mockImplementation((_engineId: string, routingId: string) =>
-      makeFakeSession(routingId)
-    )
-    const mgr = new SessionManager()
-    mgr.create('tmp-routing-2', {} as never, '/tmp/proj')
-
-    expect(() => mgr.rekey('tmp-routing-2', 'sdk-session-uuid-2')).not.toThrow()
-    expect(mgr.has('sdk-session-uuid-2')).toBe(true)
-    // The second rename is in its own try, so the first one's failure does not
-    // stop the ledger rows from following the session.
-    expect(mockRenameUsageEventParent).toHaveBeenCalledWith('tmp-routing-2', 'sdk-session-uuid-2')
-  })
-
-  it('a throwing renameUsageEventParent never breaks rekey either', () => {
+  it('a throwing renameUsageEventParent never breaks rekey (best-effort, logged)', () => {
     mockRenameUsageEventParent.mockImplementation(() => {
       throw new Error('SQLITE_BUSY: database is locked')
     })

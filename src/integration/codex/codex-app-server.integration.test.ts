@@ -78,7 +78,6 @@ vi.mock('../../core/services/db', async (importOriginal) => {
     // CodexSession now imports (ADR-033 slice E). No dispatch in this file ever
     // gets far enough to record a row — the target is stubbed — so this exists
     // to keep the mock's export surface honest, not to be called.
-    insertDispatchedUsage: vi.fn(),
     insertUsageEvent: vi.fn(),
     // Real rows, not spies: the fork registry `listCodexSessions` reads (and
     // the legacy session_meta sweep it adopts once) must be the real thing, or

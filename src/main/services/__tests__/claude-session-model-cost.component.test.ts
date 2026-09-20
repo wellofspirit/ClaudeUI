@@ -91,7 +91,7 @@ vi.mock('../../auth/ClaudeAuthProvider', () => ({
 
 // Import AFTER mocks.
 import { ClaudeSession } from '../../../core/services/claude-session'
-import { insertDispatchedUsage } from '../../../core/services/db'
+import { insertUsageEvent } from '../../../core/services/db'
 import type { BrowserWindow } from 'electron'
 import type { StatusLineData } from '../../../shared/types'
 
@@ -161,6 +161,47 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 // 1. Double-count guard
 // ---------------------------------------------------------------------------
+
+/**
+ * One dispatched turn in the ledger (ADR-071 §1), as `safeRecordUsage` writes
+ * it — `origin 'dispatch'` with the dispatching session in `parentRoutingId`,
+ * which is what `dispatchedCostsByRouting` reads back when a session seeds its
+ * breakdown.
+ */
+function insertDispatchedTurn(row: {
+  fromRoutingId: string
+  targetEngine: string
+  vendorId: string
+  modelId: string
+  costUsd: number
+}): void {
+  insertUsageEvent({
+    id: `ue_${row.fromRoutingId}`,
+    ts: 1000,
+    engineId: row.targetEngine,
+    vendorId: row.vendorId,
+    accountId: null,
+    accountUuid: null,
+    modelId: row.modelId,
+    inputTokens: 400,
+    outputTokens: 100,
+    cacheWriteTokens: 0,
+    cacheWrite1hTokens: 0,
+    cacheReadTokens: 0,
+    equivCostUsd: row.costUsd,
+    engineCostUsd: null,
+    sessionId: 'target-sess-1',
+    messageId: `dispatch:toolu_1:1000:1:${row.fromRoutingId}`,
+    source: 'live',
+    accountKey: 'unknown',
+    accountLabel: null,
+    billingType: 'subscription',
+    origin: 'dispatch',
+    parentRoutingId: row.fromRoutingId,
+    apiCostUsd: row.costUsd,
+    billedCostUsd: 0
+  })
+}
 
 describe('ClaudeSession — cost double-count guard', () => {
   it('a second cumulative result (0.048, following 0.044) reports 0.048, not 0.092', async () => {
@@ -400,17 +441,12 @@ describe('ClaudeSession — dispatched cost (Slice C)', () => {
   })
 
   it('seeds dispatched cost from durable storage at construction (rehydration across reloads)', () => {
-    insertDispatchedUsage({
-      ts: 1000,
+    insertDispatchedTurn({
       fromRoutingId: 'routing-dispatched-seed',
-      fromEngine: 'claude',
       targetEngine: 'opencode',
-      targetModel: 'openai/gpt-5',
-      targetSessionId: 'oc-sess-1',
-      toolUseId: 'toolu_1',
-      totalTokens: 500,
-      costUsd: 0.31,
-      durationMs: 2000
+      vendorId: 'openai',
+      modelId: 'gpt-5',
+      costUsd: 0.31
     })
 
     const { win, sent } = makeWin()

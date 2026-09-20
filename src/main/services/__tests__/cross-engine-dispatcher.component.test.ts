@@ -745,8 +745,8 @@ describe('CrossEngineDispatcher — target lifecycle', () => {
     // costUsd/tokens as null and never folded the spend — a target whose turns
     // keep erroring spent real money that escaped the cap AND the dispatching
     // session's breakdown. Must capture it (parity with Claude failed-subtype).
-    const recordDispatchedUsage = vi.fn()
-    const { dispatcher, client } = makeHarness({ recordDispatchedUsage })
+    const recordUsageEvent = vi.fn()
+    const { dispatcher, client } = makeHarness({ recordUsageEvent })
     client.listMessages.mockResolvedValueOnce([
       storedAssistant({
         text: '',
@@ -760,12 +760,13 @@ describe('CrossEngineDispatcher — target lifecycle', () => {
     const ctx = makeCtx({ toolUseId: 'toolu_err_cost' })
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
     expect(result.isError).toBe(true)
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+    expect(recordUsageEvent).toHaveBeenCalledWith(
       expect.objectContaining({
-        toolUseId: 'toolu_err_cost',
-        targetEngine: 'opencode',
-        totalTokens: 300, // 200 + 80 + 20
-        costUsd: 0.05
+        messageId: expect.stringContaining('toolu_err_cost'),
+        engineId: 'opencode',
+        // Disjoint, reasoning folded into output: 200 in, 80 + 20 out.
+        tokens: { input: 200, output: 100, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
+        engineCostUsd: 0.05
       })
     )
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', 'openai/gpt-5', 0.05)
@@ -886,8 +887,8 @@ describe('CrossEngineDispatcher — timeout, abort, heartbeat', () => {
 
 describe('CrossEngineDispatcher — opencode turn completion (prompt_async + SSE)', () => {
   it('completes on session.idle, taking text + usage from the LAST assistant message in stored history', async () => {
-    const recordDispatchedUsage = vi.fn()
-    const { dispatcher, client, stream } = makeHarness({ recordDispatchedUsage })
+    const recordUsageEvent = vi.fn()
+    const { dispatcher, client, stream } = makeHarness({ recordUsageEvent })
     holdTurn(client)
     // A multi-turn target's history holds every earlier turn too — only the
     // trailing assistant message belongs to the turn that just ended.
@@ -919,15 +920,18 @@ describe('CrossEngineDispatcher — opencode turn completion (prompt_async + SSE
       totalTokens: 11,
       toolUses: 0
     })
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ totalTokens: 11, costUsd: 0.02 })
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokens: expect.objectContaining({ input: 7, output: 4 }),
+        engineCostUsd: 0.02
+      })
     )
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', 'openai/gpt-5', 0.02)
   })
 
   it('a turn that idles with NO assistant message returns the empty-text fallback with zero usage', async () => {
-    const recordDispatchedUsage = vi.fn()
-    const { dispatcher, client, stream } = makeHarness({ recordDispatchedUsage })
+    const recordUsageEvent = vi.fn()
+    const { dispatcher, client, stream } = makeHarness({ recordUsageEvent })
     holdTurn(client)
     client.listMessages.mockResolvedValueOnce([])
     const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
@@ -937,8 +941,11 @@ describe('CrossEngineDispatcher — opencode turn completion (prompt_async + SSE
 
     expect(result.isError).toBeUndefined()
     expect(result.text).toBe('(the dispatched agent returned no text)')
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ totalTokens: 0, costUsd: 0 })
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokens: { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
+        engineCostUsd: null
+      })
     )
   })
 
@@ -957,8 +964,8 @@ describe('CrossEngineDispatcher — opencode turn completion (prompt_async + SSE
   })
 
   it('session.error settles the turn as isError with the vendor message + a "failed" notification', async () => {
-    const recordDispatchedUsage = vi.fn()
-    const { dispatcher, client, stream } = makeHarness({ recordDispatchedUsage })
+    const recordUsageEvent = vi.fn()
+    const { dispatcher, client, stream } = makeHarness({ recordUsageEvent })
     holdTurn(client)
     // A turn that dies mid-flight can still have burned tokens — recovered
     // best-effort from stored history and folded into the cap/breakdown.
@@ -980,8 +987,11 @@ describe('CrossEngineDispatcher — opencode turn completion (prompt_async + SSE
     expect(result.sessionId).toBe('oc-sess-1')
     const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
     expect(notif?.[1]).toMatchObject({ status: 'failed' })
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ totalTokens: 50, costUsd: 0.004 })
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokens: expect.objectContaining({ input: 40, output: 10 }),
+        engineCostUsd: 0.004
+      })
     )
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', 'openai/gpt-5', 0.004)
   })
@@ -1057,9 +1067,9 @@ describe('CrossEngineDispatcher — opencode turn completion (prompt_async + SSE
   it('the INACTIVITY watchdog aborts a silent turn (reason-specific text, "failed" notification)', async () => {
     vi.useFakeTimers()
     try {
-      const recordDispatchedUsage = vi.fn()
+      const recordUsageEvent = vi.fn()
       const { dispatcher, client } = makeHarness({
-        recordDispatchedUsage,
+        recordUsageEvent,
         loadEngineConfig: vi.fn(() => ({
           dispatch: { defaultModel: 'openai/gpt-5', idleTimeoutMs: 120_000, turnTimeoutMs: 0 }
         })),
@@ -1078,8 +1088,13 @@ describe('CrossEngineDispatcher — opencode turn completion (prompt_async + SSE
       expect(client.abortSession).toHaveBeenCalledWith('oc-sess-1')
       const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
       expect(notif?.[1]).toMatchObject({ status: 'failed' })
-      expect(recordDispatchedUsage).toHaveBeenCalledWith(
-        expect.objectContaining({ totalTokens: null, costUsd: null })
+      // A turn that never returned reports no split and no cost — zeros here
+      // are "nothing was reported", which is why the row's costs are null.
+      expect(recordUsageEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tokens: { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
+          engineCostUsd: null
+        })
       )
     } finally {
       vi.useRealTimers()
@@ -3393,8 +3408,8 @@ describe('CrossEngineDispatcher — Codex-sourced dispatches', () => {
 
 describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', () => {
   it("captures tokens/cost from the final assistant message's info on success — populates notification.usage and records a row", async () => {
-    const recordDispatchedUsage = vi.fn()
-    const { dispatcher, client } = makeHarness({ recordDispatchedUsage })
+    const recordUsageEvent = vi.fn()
+    const { dispatcher, client } = makeHarness({ recordUsageEvent })
     client.listMessages.mockResolvedValueOnce([
       storedAssistant({
         text: 'ok',
@@ -3415,23 +3430,23 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
     expect(usage!.toolUses).toBe(0)
     expect(usage!.durationMs).toEqual(expect.any(Number))
 
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+    expect(recordUsageEvent).toHaveBeenCalledWith(
       expect.objectContaining({
-        fromRoutingId: 'routing-1',
-        fromEngine: 'claude',
-        targetEngine: 'opencode',
-        targetModel: 'openai/gpt-5',
-        targetSessionId: 'oc-sess-1',
-        toolUseId: 'toolu_usage_1',
-        totalTokens: 160,
-        costUsd: 0.02
+        parentRoutingId: 'routing-1',
+        origin: 'dispatch',
+        engineId: 'opencode',
+        vendorId: 'openai',
+        modelId: 'gpt-5',
+        sessionId: 'oc-sess-1',
+        messageId: expect.stringContaining('toolu_usage_1'),
+        engineCostUsd: 0.02
       })
     )
   })
 
   it('counts DISTINCT tool_use ids as toolUses — repeated part updates for the same call do not double-count', async () => {
-    const recordDispatchedUsage = vi.fn()
-    const { dispatcher, client, stream } = makeHarness({ recordDispatchedUsage })
+    const recordUsageEvent = vi.fn()
+    const { dispatcher, client, stream } = makeHarness({ recordUsageEvent })
     holdTurn(client)
     const ctx = makeCtx({ toolUseId: 'toolu_usage_tools' })
     const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
@@ -3462,16 +3477,16 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
     const notif = ctx.emit.mock.calls.find((c) => c[0] === 'session:task-notification')
     const usage = (notif![1] as { usage?: { toolUses: number } }).usage
     expect(usage!.toolUses).toBe(1)
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ toolUseId: 'toolu_usage_tools' })
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: expect.stringContaining('toolu_usage_tools') })
     )
   })
 
-  it('a throwing recordDispatchedUsage NEVER fails the dispatch — the successful text still returns', async () => {
-    const recordDispatchedUsage = vi.fn(() => {
+  it('a throwing recordUsageEvent NEVER fails the dispatch — the successful text still returns', async () => {
+    const recordUsageEvent = vi.fn(() => {
       throw new Error('SQLITE_BUSY: database is locked')
     })
-    const { dispatcher, client } = makeHarness({ recordDispatchedUsage })
+    const { dispatcher, client } = makeHarness({ recordUsageEvent })
     client.listMessages.mockResolvedValueOnce([
       storedAssistant({
         text: 'the successful answer',
@@ -3481,7 +3496,7 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
     const ctx = makeCtx({ toolUseId: 'toolu_throwing_recorder' })
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
 
-    expect(recordDispatchedUsage).toHaveBeenCalled()
+    expect(recordUsageEvent).toHaveBeenCalled()
     expect(result.isError).toBeUndefined()
     expect(result.text).toBe('the successful answer')
     // The completion notification is unaffected too.
@@ -3490,8 +3505,8 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
   })
 
   it('a turn stopped by the user is NOT recorded (no usage numbers for a turn that never returned)', async () => {
-    const recordDispatchedUsage = vi.fn()
-    const { dispatcher, client } = makeHarness({ recordDispatchedUsage })
+    const recordUsageEvent = vi.fn()
+    const { dispatcher, client } = makeHarness({ recordUsageEvent })
     holdTurn(client)
     const ctx = makeCtx({ toolUseId: 'toolu_stopped_norecord' })
     const pending = dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
@@ -3499,15 +3514,15 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
     expect(dispatcher.stopDispatch('toolu_stopped_norecord')).toBe(true)
     const result = await pending
     expect(result.isError).toBe(true)
-    expect(recordDispatchedUsage).not.toHaveBeenCalled()
+    expect(recordUsageEvent).not.toHaveBeenCalled()
   })
 
   it('a timed-out turn IS recorded (status "failed") with null usage numbers', async () => {
     vi.useFakeTimers()
     try {
-      const recordDispatchedUsage = vi.fn()
+      const recordUsageEvent = vi.fn()
       const { dispatcher, client } = makeHarness({
-        recordDispatchedUsage,
+        recordUsageEvent,
         loadEngineConfig: vi.fn(() => ({
           dispatch: { defaultModel: 'openai/gpt-5', turnTimeoutMs: 60_000 }
         })),
@@ -3520,11 +3535,11 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
       await advance(70_000)
       const result = await pending
       expect(result.isError).toBe(true)
-      expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect(recordUsageEvent).toHaveBeenCalledWith(
         expect.objectContaining({
-          toolUseId: 'toolu_timeout_record',
-          totalTokens: null,
-          costUsd: null
+          messageId: expect.stringContaining('toolu_timeout_record'),
+          tokens: { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
+          engineCostUsd: null
         })
       )
     } finally {
@@ -3532,7 +3547,7 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
     }
   })
 
-  it('the real default (no recordDispatchedUsage injected) does not throw', async () => {
+  it('the real default (no recordUsageEvent injected) does not throw', async () => {
     const { dispatcher } = makeHarness()
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
     expect(result.isError).toBeUndefined()
@@ -3602,12 +3617,12 @@ describe('CrossEngineDispatcher — M4-B usage capture (opencode direction)', ()
 
 describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () => {
   it('captures usage/total_cost_usd/duration_ms from the result on success', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakeClaudeTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
       spawnClaudeQuery: target.spawnClaudeQuery,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude_usage_1' })
     const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
@@ -3631,17 +3646,18 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
     expect(usage!.totalTokens).toBe(280)
     expect(usage!.durationMs).toBe(4200)
 
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+    expect(recordUsageEvent).toHaveBeenCalledWith(
       expect.objectContaining({
-        fromRoutingId: 'routing-1',
-        fromEngine: 'opencode',
-        targetEngine: 'claude',
-        targetModel: 'haiku',
-        targetSessionId: 'claude-sess-1',
-        toolUseId: 'toolu_claude_usage_1',
-        totalTokens: 280,
-        costUsd: 0.03,
-        durationMs: 4200
+        parentRoutingId: 'routing-1',
+        origin: 'dispatch',
+        engineId: 'claude',
+        vendorId: 'anthropic',
+        modelId: 'haiku',
+        sessionId: 'claude-sess-1',
+        messageId: expect.stringContaining('toolu_claude_usage_1'),
+        engineCostUsd: 0.03,
+        // cli.js reports an API-equivalent whatever the plan (ADR-034).
+        engineCostIsEquivalent: true
       })
     )
     // Slice C — the dispatching session's own cost breakdown gets the fold-in.
@@ -3681,7 +3697,7 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
     // cli.js process. Two turns reporting 0.02 then 0.05 (a running total)
     // spent 0.02 and 0.03 respectively — the pre-fix code recorded/folded/
     // capped 0.02 and 0.05 (over-counting turn 2 by the whole turn-1 spend).
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakeClaudeTarget()
     const { dispatcher } = makeHarness({
       // maxCostUsd 0.06 discriminates: true per-turn accumulation is
@@ -3689,7 +3705,7 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
       // `+=` reaches 0.02 + 0.05 = 0.07 ≥ 0.06 (turn 3 cap-rejected).
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku', maxCostUsd: 0.06 } })),
       spawnClaudeQuery: target.spawnClaudeQuery,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'opencode' })
 
@@ -3708,13 +3724,13 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
     expect((await second).isError).toBeUndefined()
 
     // DB rows: per-turn deltas, never the running total.
-    expect(recordDispatchedUsage).toHaveBeenNthCalledWith(
+    expect(recordUsageEvent).toHaveBeenNthCalledWith(
       1,
-      expect.objectContaining({ costUsd: 0.02 })
+      expect.objectContaining({ engineCostUsd: 0.02 })
     )
-    expect(recordDispatchedUsage).toHaveBeenNthCalledWith(
+    expect(recordUsageEvent).toHaveBeenNthCalledWith(
       2,
-      expect.objectContaining({ costUsd: expect.closeTo(0.03, 10) })
+      expect.objectContaining({ engineCostUsd: expect.closeTo(0.03, 10) })
     )
 
     // Live fold-in: same deltas.
@@ -3739,20 +3755,20 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
     // An UNCHANGED cumulative total (turn 3 cost the same process nothing
     // new) is a zero delta — the row records costUsd 0 and there is no
     // fold-in (the >0 guard).
-    expect(recordDispatchedUsage).toHaveBeenNthCalledWith(
+    expect(recordUsageEvent).toHaveBeenNthCalledWith(
       3,
-      expect.objectContaining({ costUsd: 0 })
+      expect.objectContaining({ engineCostUsd: 0 })
     )
     expect(ctx.addDispatchedCost).toHaveBeenCalledTimes(2)
   })
 
   it('a failed-subtype turn with real cost folds in too — parity with its DB record (seed-on-reload includes it)', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakeClaudeTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
       spawnClaudeQuery: target.spawnClaudeQuery,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'opencode' })
     const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
@@ -3764,7 +3780,7 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
     const result = await pending
     expect(result.isError).toBe(true)
 
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(expect.objectContaining({ costUsd: 0.04 }))
+    expect(recordUsageEvent).toHaveBeenCalledWith(expect.objectContaining({ engineCostUsd: 0.04 }))
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('claude', 'haiku', 0.04)
   })
 
@@ -3797,12 +3813,12 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
   })
 
   it('counts DISTINCT tool_use ids — the same assistant message re-forwarded as partial updates does not double-count', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakeClaudeTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
       spawnClaudeQuery: target.spawnClaudeQuery,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude_tools' })
     const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
@@ -3834,15 +3850,15 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
     expect(usage!.toolUses).toBe(1)
   })
 
-  it('a throwing recordDispatchedUsage NEVER fails the dispatch (Claude direction)', async () => {
-    const recordDispatchedUsage = vi.fn(() => {
+  it('a throwing recordUsageEvent NEVER fails the dispatch (Claude direction)', async () => {
+    const recordUsageEvent = vi.fn(() => {
       throw new Error('disk I/O error')
     })
     const target = makeFakeClaudeTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
       spawnClaudeQuery: target.spawnClaudeQuery,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude_throw' })
     const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
@@ -3851,7 +3867,7 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
     target.push(resultMsg({ result: 'the successful answer', total_cost_usd: 0.01 }))
     const result = await pending
 
-    expect(recordDispatchedUsage).toHaveBeenCalled()
+    expect(recordUsageEvent).toHaveBeenCalled()
     expect(result.isError).toBeUndefined()
     expect(result.text).toBe('the successful answer')
   })
@@ -3859,7 +3875,7 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
   it('a stopped turn is NOT recorded; a timed-out turn IS recorded with null usage', async () => {
     vi.useFakeTimers()
     try {
-      const recordDispatchedUsage = vi.fn()
+      const recordUsageEvent = vi.fn()
       const target = makeFakeClaudeTarget()
       const { dispatcher } = makeHarness({
         loadEngineConfig: vi.fn(() => ({
@@ -3867,7 +3883,7 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
         })),
         heartbeatMs: 30_000,
         spawnClaudeQuery: target.spawnClaudeQuery,
-        recordDispatchedUsage
+        recordUsageEvent
       })
       const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'toolu_claude_timeout' })
       const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
@@ -3877,11 +3893,11 @@ describe('CrossEngineDispatcher — M4-B usage capture (Claude direction)', () =
       const result = await pending
       expect(result.isError).toBe(true)
 
-      expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect(recordUsageEvent).toHaveBeenCalledWith(
         expect.objectContaining({
-          toolUseId: 'toolu_claude_timeout',
-          totalTokens: null,
-          costUsd: null
+          messageId: expect.stringContaining('toolu_claude_timeout'),
+          tokens: { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
+          engineCostUsd: null
         })
       )
     } finally {
@@ -4011,9 +4027,9 @@ describe('CrossEngineDispatcher — cost cap on API-equivalent spend (opencode d
 
   it('an apiKey target counts the BILLED figure, not our equivalent (a gateway margin is real spend)', async () => {
     billAs('apiKey')
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const { dispatcher, client } = makeHarness({
-      recordDispatchedUsage,
+      recordUsageEvent,
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: PRICED, maxCostUsd: 0.3 } }))
     })
     // Our equivalent for these tokens is $0.20; the gateway charged $0.31.
@@ -4025,7 +4041,9 @@ describe('CrossEngineDispatcher — cost cap on API-equivalent spend (opencode d
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
     expect(result.text).toContain('[dispatch cost cap reached')
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('opencode', PRICED, 0.31)
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(expect.objectContaining({ costUsd: 0.31 }))
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ engineCostUsd: 0.31, engineCostIsEquivalent: false })
+    )
   })
 
   it("a failed turn's tokens count toward the cap at the equivalent rate", async () => {
@@ -4059,9 +4077,9 @@ describe('CrossEngineDispatcher — cost cap on API-equivalent spend (opencode d
 
   it('an unpriced model appends the cannot-count line once per turn and never trips the cap', async () => {
     billAs('subscription')
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const { dispatcher, client } = makeHarness({
-      recordDispatchedUsage,
+      recordUsageEvent,
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: UNPRICED, maxCostUsd: 0.01 } }))
     })
     client.listMessages.mockResolvedValue([
@@ -4075,7 +4093,16 @@ describe('CrossEngineDispatcher — cost cap on API-equivalent spend (opencode d
     )
     expect(first.text).not.toContain('[dispatch cost cap reached')
     expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(expect.objectContaining({ costUsd: null }))
+    // The tokens are on the row and opencode's own figure is its zeroed
+    // subscription one; what makes the turn UNCOUNTABLE is that nothing can
+    // price the model, which the recorder resolves to a null cost — never a 0.
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokens: expect.objectContaining({ input: 1_000_000 }),
+        engineCostUsd: 0,
+        billingType: 'subscription'
+      })
+    )
 
     // Turn 2 runs — an uncountable turn can never trip a cap — and says so
     // again, once.
@@ -4126,9 +4153,9 @@ describe('CrossEngineDispatcher — cost cap on API-equivalent spend (opencode d
 
   it('a turn that moved no tokens is a known zero, not an uncountable turn, even on an unpriced model', async () => {
     billAs('subscription')
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const { dispatcher, client } = makeHarness({
-      recordDispatchedUsage,
+      recordUsageEvent,
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: UNPRICED, maxCostUsd: 0.1 } }))
     })
     // Zero tokens cost zero at any rate — the price table is irrelevant.
@@ -4139,7 +4166,12 @@ describe('CrossEngineDispatcher — cost cap on API-equivalent spend (opencode d
     const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'one' }, ctx)
     expect(first.text).toBe('nothing to do')
     expect(first.text).not.toContain('cannot count this turn')
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(expect.objectContaining({ costUsd: 0 }))
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokens: { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
+        engineCostUsd: null
+      })
+    )
 
     // …and the entry counted no uncountable turn: drive the cap over with a
     // real charge and the rejection has nothing to disclaim.
@@ -4167,9 +4199,9 @@ describe('CrossEngineDispatcher — cost cap on API-equivalent spend (opencode d
 
   it('a free vendor spends nothing: the cap never trips and the breakdown gets nothing', async () => {
     billAs('free')
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const { dispatcher, client } = makeHarness({
-      recordDispatchedUsage,
+      recordUsageEvent,
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: PRICED, maxCostUsd: 0.01 } }))
     })
     client.listMessages.mockResolvedValue([
@@ -4179,7 +4211,9 @@ describe('CrossEngineDispatcher — cost cap on API-equivalent spend (opencode d
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
     expect(result.text).toBe('ok')
     expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(expect.objectContaining({ costUsd: 0 }))
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ engineCostUsd: 0, billingType: 'free' })
+    )
   })
 })
 
@@ -5340,12 +5374,12 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
   })
 
   it('captures cost/tokens and records a dispatched-usage row on success; folds cost into ctx.addDispatchedCost', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_usage_1' })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
@@ -5355,16 +5389,16 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
     const result = await pending
     expect(result.isError).toBeUndefined()
 
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
+    expect(recordUsageEvent).toHaveBeenCalledWith(
       expect.objectContaining({
-        fromRoutingId: 'routing-1',
-        fromEngine: 'claude',
-        targetEngine: 'pi',
-        targetModel: 'openai-codex/gpt-5.6-luna',
-        targetSessionId: 'pi-target-1',
-        toolUseId: 'toolu_usage_1',
-        totalTokens: 150,
-        costUsd: 0.02
+        parentRoutingId: 'routing-1',
+        origin: 'dispatch',
+        engineId: 'pi',
+        vendorId: 'openai-codex',
+        modelId: 'gpt-5.6-luna',
+        sessionId: 'pi-target-1',
+        messageId: expect.stringContaining('toolu_usage_1'),
+        engineCostUsd: 0.02
       })
     )
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.02)
@@ -5386,12 +5420,12 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
   })
 
   it('turn 2+ converts the CUMULATIVE mapper totalCostUsd into a per-turn delta (result.totalCostUsd is cumulative — same hazard as Claude)', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'claude' })
 
@@ -5412,13 +5446,13 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
     target.pushEvent(PI_AGENT_SETTLED)
     await second
 
-    expect(recordDispatchedUsage).toHaveBeenNthCalledWith(
+    expect(recordUsageEvent).toHaveBeenNthCalledWith(
       1,
-      expect.objectContaining({ costUsd: 0.02 })
+      expect.objectContaining({ engineCostUsd: 0.02 })
     )
-    expect(recordDispatchedUsage).toHaveBeenNthCalledWith(
+    expect(recordUsageEvent).toHaveBeenNthCalledWith(
       2,
-      expect.objectContaining({ costUsd: expect.closeTo(0.03, 10) })
+      expect.objectContaining({ engineCostUsd: expect.closeTo(0.03, 10) })
     )
     expect(ctx.addDispatchedCost).toHaveBeenNthCalledWith(
       1,
@@ -5434,15 +5468,15 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
     )
   })
 
-  it('a throwing recordDispatchedUsage NEVER fails the dispatch', async () => {
-    const recordDispatchedUsage = vi.fn(() => {
+  it('a throwing recordUsageEvent NEVER fails the dispatch', async () => {
+    const recordUsageEvent = vi.fn(() => {
       throw new Error('SQLITE_BUSY: database is locked')
     })
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const pending = dispatcher.dispatch(
       { engine: 'pi', prompt: 'x' },
@@ -5452,14 +5486,14 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
     target.pushEvent(piAssistantMessageEnd({ text: 'the successful answer' }))
     target.pushEvent(PI_AGENT_SETTLED)
     const result = await pending
-    expect(recordDispatchedUsage).toHaveBeenCalled()
+    expect(recordUsageEvent).toHaveBeenCalled()
     expect(result.isError).toBeUndefined()
   })
 
   it('a timed-out turn IS recorded (status "failed") with unknown tokens and a known-zero cost; a stopped turn is NOT recorded', async () => {
     vi.useFakeTimers()
     try {
-      const recordDispatchedUsage = vi.fn()
+      const recordUsageEvent = vi.fn()
       const target = makeFakePiTarget()
       const { dispatcher } = makeHarness({
         loadEngineConfig: vi.fn(() => ({
@@ -5468,7 +5502,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
         heartbeatMs: 30_000,
         piAbortSettleGraceMs: 20,
         spawnPiTarget: target.spawnPiTarget,
-        recordDispatchedUsage
+        recordUsageEvent
       })
       const pending = dispatcher.dispatch(
         { engine: 'pi', prompt: 'x' },
@@ -5483,15 +5517,15 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
       // zero: pi prices from its own catalog and its cumulative total — after
       // the get_session_stats reconcile — did not move, so the turn spent
       // nothing (ADR-071 §2; `null` in this column means unknown, not free).
-      expect(recordDispatchedUsage).toHaveBeenCalledWith(
+      expect(recordUsageEvent).toHaveBeenCalledWith(
         expect.objectContaining({
-          toolUseId: 'toolu_timeout_record',
-          totalTokens: null,
-          costUsd: 0
+          messageId: expect.stringContaining('toolu_timeout_record'),
+          tokens: { input: 0, output: 0, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 },
+          engineCostUsd: 0
         })
       )
 
-      recordDispatchedUsage.mockClear()
+      recordUsageEvent.mockClear()
       const target2 = makeFakePiTarget({ sessionId: 'pi-target-2' })
       const { dispatcher: dispatcher2 } = makeHarness({
         loadEngineConfig: vi.fn(() => ({
@@ -5500,7 +5534,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
         heartbeatMs: 30_000,
         piAbortSettleGraceMs: 20,
         spawnPiTarget: target2.spawnPiTarget,
-        recordDispatchedUsage
+        recordUsageEvent
       })
       const pending2 = dispatcher2.dispatch(
         { engine: 'pi', prompt: 'x' },
@@ -5510,7 +5544,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
       expect(dispatcher2.stopDispatch('toolu_stopped_norecord')).toBe(true)
       await advance(30)
       await pending2
-      expect(recordDispatchedUsage).not.toHaveBeenCalled()
+      expect(recordUsageEvent).not.toHaveBeenCalled()
     } finally {
       vi.useRealTimers()
     }
@@ -5519,14 +5553,14 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
 
 describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost accounting (B1)', () => {
   it('an errored turn that streamed cost still advances cumulativeCostUsd/addDispatchedCost and records the spend+tokens on the usage row; a later successful turn does NOT double-count it', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({
         dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', maxCostUsd: 0.05 }
       })),
       spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_err_cost' })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
@@ -5543,8 +5577,12 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
     const result = await pending
     expect(result.isError).toBe(true)
 
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ toolUseId: 'toolu_err_cost', costUsd: 0.04, totalTokens: 140 })
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messageId: expect.stringContaining('toolu_err_cost'),
+        engineCostUsd: 0.04,
+        tokens: expect.objectContaining({ input: 100, output: 40 })
+      })
     )
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.04)
 
@@ -5563,8 +5601,8 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
     const contResult = await cont
     expect(contResult.isError).toBeUndefined()
     expect(contResult.text).toContain('[dispatch cost cap reached')
-    expect(recordDispatchedUsage).toHaveBeenLastCalledWith(
-      expect.objectContaining({ costUsd: expect.closeTo(0.02, 10) })
+    expect(recordUsageEvent).toHaveBeenLastCalledWith(
+      expect.objectContaining({ engineCostUsd: expect.closeTo(0.02, 10) })
     )
     expect(ctx.addDispatchedCost).toHaveBeenLastCalledWith(
       'pi',
@@ -5576,7 +5614,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
   it('a timed-out turn that streamed cost still advances cumulativeCostUsd/addDispatchedCost and records the spend+tokens on the usage row', async () => {
     vi.useFakeTimers()
     try {
-      const recordDispatchedUsage = vi.fn()
+      const recordUsageEvent = vi.fn()
       const target = makeFakePiTarget()
       const { dispatcher } = makeHarness({
         loadEngineConfig: vi.fn(() => ({
@@ -5585,7 +5623,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
         heartbeatMs: 30_000,
         piAbortSettleGraceMs: 20,
         spawnPiTarget: target.spawnPiTarget,
-        recordDispatchedUsage
+        recordUsageEvent
       })
       const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_cost' })
       const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
@@ -5600,8 +5638,12 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
       expect(result.isError).toBe(true)
       expect(result.text).toContain('timed out')
 
-      expect(recordDispatchedUsage).toHaveBeenCalledWith(
-        expect.objectContaining({ toolUseId: 'toolu_timeout_cost', costUsd: 0.03, totalTokens: 30 })
+      expect(recordUsageEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messageId: expect.stringContaining('toolu_timeout_cost'),
+          engineCostUsd: 0.03,
+          tokens: expect.objectContaining({ input: 20, output: 10 })
+        })
       )
       expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.03)
     } finally {
@@ -5610,14 +5652,14 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
   })
 
   it('a stopped turn that streamed cost advances cumulativeCostUsd/addDispatchedCost but records NO usage row (ADR-033 M4-B: no usage numbers for a turn that never returned) — cap accounting still applies', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({
         dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', maxCostUsd: 0.05 }
       })),
       spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stop_cost' })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
@@ -5630,7 +5672,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
 
     // No usage ROW for the stopped turn (row ≠ spend accounting — see the
     // resolveAndRunPi comment)...
-    expect(recordDispatchedUsage).not.toHaveBeenCalled()
+    expect(recordUsageEvent).not.toHaveBeenCalled()
     // ...but the fold-in and cap accounting still ran: proven directly via
     // addDispatchedCost, and via a fresh continuation now being rejected
     // outright (cumulativeCostUsd already meets the 0.05 cap).
@@ -5646,7 +5688,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): non-success turn cost ac
 
 describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconciliation via get_session_stats (audit-residual C)', () => {
   it('an errored turn whose fake get_session_stats reports MORE cost than any streamed usage event → the recovered (higher) cost is what is counted toward the cap + usage row', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakePiTarget({
       requestHandler: (cmd) => {
         if (cmd.type === 'get_session_stats') {
@@ -5666,7 +5708,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_err_reconcile' })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
@@ -5684,14 +5726,17 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
     const result = await pending
     expect(result.isError).toBe(true)
 
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ toolUseId: 'toolu_err_reconcile', costUsd: 0.1 })
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messageId: expect.stringContaining('toolu_err_reconcile'),
+        engineCostUsd: 0.1
+      })
     )
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.1)
   })
 
   it('a get_session_stats read that FAILS during error-path reconciliation falls back to the mapperState delta (no throw, error result still returned)', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakePiTarget({
       requestHandler: (cmd) => {
         if (cmd.type === 'get_session_stats') throw new Error('target wedged')
@@ -5701,7 +5746,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_err_reconcile_fail' })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
@@ -5716,8 +5761,11 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
     const result = await pending
     expect(result.isError).toBe(true)
 
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ toolUseId: 'toolu_err_reconcile_fail', costUsd: 0.04 })
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messageId: expect.stringContaining('toolu_err_reconcile_fail'),
+        engineCostUsd: 0.04
+      })
     )
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.04)
   })
@@ -5728,7 +5776,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
     // clock afterwards would leave the watchdog reading real wall time and the
     // configured cap would never fire.
     vi.useFakeTimers()
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakePiTarget({
       requestHandler: (cmd) => {
         if (cmd.type === 'get_session_stats') {
@@ -5752,7 +5800,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
       heartbeatMs: 30_000,
       piAbortSettleGraceMs: 20,
       spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_reconcile' })
     try {
@@ -5768,8 +5816,11 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
       expect(result.isError).toBe(true)
       expect(result.text).toContain('timed out')
 
-      expect(recordDispatchedUsage).toHaveBeenCalledWith(
-        expect.objectContaining({ toolUseId: 'toolu_timeout_reconcile', costUsd: 0.08 })
+      expect(recordUsageEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messageId: expect.stringContaining('toolu_timeout_reconcile'),
+          engineCostUsd: 0.08
+        })
       )
       expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.08)
     } finally {
@@ -5778,7 +5829,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
   })
 
   it('when get_session_stats reports the SAME cost as the mapper already streamed, the recorded spend is unchanged (no double count)', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakePiTarget({
       requestHandler: (cmd) => {
         if (cmd.type === 'get_session_stats') {
@@ -5798,7 +5849,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_err_same_cost' })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
@@ -5813,19 +5864,22 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
     const result = await pending
     expect(result.isError).toBe(true)
 
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ toolUseId: 'toolu_err_same_cost', costUsd: 0.04 })
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messageId: expect.stringContaining('toolu_err_same_cost'),
+        engineCostUsd: 0.04
+      })
     )
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', 'openai-codex/gpt-5.6-luna', 0.04)
   })
 
   it('a STOPPED turn never calls get_session_stats (reconciliation is err/timeout-only — stop stays unreconciled by design, ADR-033 M4-B) and still records no usage row', async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_stop_no_reconcile' })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
@@ -5835,7 +5889,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): err/timeout cost reconci
     const result = await pending
     expect(result.isError).toBe(true)
 
-    expect(recordDispatchedUsage).not.toHaveBeenCalled()
+    expect(recordUsageEvent).not.toHaveBeenCalled()
     expect(
       target.client.request.mock.calls.some(
         (c: unknown[]) => (c[0] as { type?: string }).type === 'get_session_stats'
@@ -5930,10 +5984,10 @@ describe('CrossEngineDispatcher — pi direction: the cap follows the same cost 
       billingType: 'free',
       authState: 'authenticated'
     })
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({
-      recordDispatchedUsage,
+      recordUsageEvent,
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: MODEL, maxCostUsd: 0.01 } })),
       spawnPiTarget: target.spawnPiTarget
     })
@@ -5945,7 +5999,11 @@ describe('CrossEngineDispatcher — pi direction: the cap follows the same cost 
     const result = await pending
     expect(result.text).not.toContain('cost cap')
     expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(expect.objectContaining({ costUsd: 0 }))
+    // pi's own figure rides along raw; what makes the turn free is the
+    // BILLING TYPE, which is the whole point of recording it per row.
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ engineCostUsd: 0.5, billingType: 'free' })
+    )
   })
 
   it('a NON-FINITE figure from pi on an UNPRICED model says the cap cannot count it', async () => {
@@ -6960,11 +7018,11 @@ describe('CrossEngineDispatcher — codex direction (slice H): streaming, result
   })
 
   it("records ONE usage row per turn: the thread's cumulative total minus the previous turn's baseline", async () => {
-    const recordDispatchedUsage = vi.fn()
+    const recordUsageEvent = vi.fn()
     const target = makeFakeCodexTarget()
     const { dispatcher } = makeCodexHarness({
       attachCodexTarget: target.spawnCodexTarget,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_dispatch_1' })
     const first = dispatcher.dispatch({ engine: 'codex', prompt: 'one' }, ctx)
@@ -6981,16 +7039,16 @@ describe('CrossEngineDispatcher — codex direction (slice H): streaming, result
     target.completeTurn({ durationMs: 4242 })
     const firstResult = await first
 
-    expect(recordDispatchedUsage).toHaveBeenCalledTimes(1)
-    expect(recordDispatchedUsage.mock.calls[0]![0]).toMatchObject({
-      fromRoutingId: 'routing-1',
-      fromEngine: 'claude',
-      targetEngine: 'codex',
-      targetModel: 'gpt-5.6-luna',
-      targetSessionId: CODEX_THREAD_ID,
-      toolUseId: 'toolu_dispatch_1',
-      totalTokens: 120,
-      durationMs: 4242
+    expect(recordUsageEvent).toHaveBeenCalledTimes(1)
+    expect(recordUsageEvent.mock.calls[0]![0]).toMatchObject({
+      parentRoutingId: 'routing-1',
+      origin: 'dispatch',
+      engineId: 'codex',
+      vendorId: 'openai',
+      modelId: 'gpt-5.6-luna',
+      sessionId: CODEX_THREAD_ID,
+      messageId: expect.stringContaining('toolu_dispatch_1'),
+      tokens: { input: 100, output: 20, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 }
     })
 
     // A SECOND turn on the same thread reports the CUMULATIVE total; the row
@@ -7011,11 +7069,13 @@ describe('CrossEngineDispatcher — codex direction (slice H): streaming, result
     })
     target.completeTurn()
     await second
-    expect(recordDispatchedUsage.mock.calls[1]![0]).toMatchObject({ totalTokens: 80 })
+    expect(recordUsageEvent.mock.calls[1]![0]).toMatchObject({
+      tokens: { input: 60, output: 20, cacheWrite: 0, cacheWrite1h: 0, cacheRead: 0 }
+    })
   })
 
-  it('an unpriced model leaves costUsd NULL — the row means "unknown", never "free"', async () => {
-    const recordDispatchedUsage = vi.fn()
+  it('an unpriced model is never counted as free — nothing is folded into the session', async () => {
+    const recordUsageEvent = vi.fn()
     const target = makeFakeCodexTarget({
       configModel: 'gpt-nonexistent-preview',
       catalog: [
@@ -7029,7 +7089,7 @@ describe('CrossEngineDispatcher — codex direction (slice H): streaming, result
     })
     const { dispatcher } = makeCodexHarness({
       attachCodexTarget: target.spawnCodexTarget,
-      recordDispatchedUsage
+      recordUsageEvent
     })
     const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_dispatch_1' })
     const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
@@ -7045,7 +7105,13 @@ describe('CrossEngineDispatcher — codex direction (slice H): streaming, result
     })
     target.completeTurn()
     await pending
-    expect(recordDispatchedUsage.mock.calls[0]![0].costUsd).toBeNull()
+    // The row carries the SPLIT and no engine figure; the recorder prices it,
+    // and a model with no price leaves both cost columns null (never 0).
+    expect(recordUsageEvent.mock.calls[0]![0]).toMatchObject({
+      engineCostIsEquivalent: true,
+      tokens: expect.objectContaining({ input: 8, output: 2 })
+    })
+    expect(recordUsageEvent.mock.calls[0]![0].engineCostUsd ?? null).toBeNull()
     expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
   })
 
@@ -7414,14 +7480,14 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
   it('the configured absolute cap interrupts the turn and records a failed row', async () => {
     vi.useFakeTimers()
     try {
-      const recordDispatchedUsage = vi.fn()
+      const recordUsageEvent = vi.fn()
       const target = makeFakeCodexTarget()
       const { dispatcher } = makeCodexHarness({
         attachCodexTarget: target.spawnCodexTarget,
         dispatch: { turnTimeoutMs: 60_000 },
         heartbeatMs: 30_000,
         codexAbortSettleGraceMs: 10,
-        recordDispatchedUsage
+        recordUsageEvent
       })
       const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_timeout_1' })
       const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x' }, ctx)
@@ -7435,10 +7501,11 @@ describe('CrossEngineDispatcher — codex direction (slice H): continuation, mod
       expect(result.text).toContain('Dispatch timed out')
       expect(result.text).toContain('1 minutes')
       expect(target.requests.some((e) => e.method === 'turn/interrupt')).toBe(true)
-      expect(recordDispatchedUsage).toHaveBeenCalledTimes(1)
-      expect(recordDispatchedUsage.mock.calls[0]![0]).toMatchObject({
-        targetEngine: 'codex',
-        targetSessionId: CODEX_THREAD_ID
+      expect(recordUsageEvent).toHaveBeenCalledTimes(1)
+      expect(recordUsageEvent.mock.calls[0]![0]).toMatchObject({
+        engineId: 'codex',
+        origin: 'dispatch',
+        sessionId: CODEX_THREAD_ID
       })
     } finally {
       vi.useRealTimers()
@@ -8063,13 +8130,10 @@ describe('CrossEngineDispatcher — no built-in dispatch time limit (ADR-033 202
 })
 
 // ---------------------------------------------------------------------------
-// ADR-071 §1 — a dispatched turn is a usage LEDGER row.
-//
-// `dispatched_usage` keeps its columns, its writes and its readers; what is
-// new is the second write, through the same seam every target already uses, so
-// the ledger holds delegated work as well as a session's own. Retiring the old
-// table and moving its readers is S2c2, which is why every existing
-// `dispatched_usage` assertion above is untouched.
+// ADR-071 §1 — a dispatched turn is a usage LEDGER row, and the only record of
+// it. `dispatched_usage` was a second, poorer copy of the same turn; migration
+// v20 dropped it, and every assertion in this file that used to read it now
+// reads the ledger event the same call produces.
 // ---------------------------------------------------------------------------
 
 describe('CrossEngineDispatcher — the dispatched turn as a ledger row (ADR-071 §1)', () => {
@@ -8087,18 +8151,15 @@ describe('CrossEngineDispatcher — the dispatched turn as a ledger row (ADR-071
   function ledgerHarness(overrides: Partial<DispatcherDeps> = {}): ReturnType<
     typeof makeHarness
   > & {
-    recordDispatchedUsage: ReturnType<typeof vi.fn>
     recordUsageEvent: ReturnType<typeof vi.fn>
   } {
-    const recordDispatchedUsage = vi.fn()
     const recordUsageEvent = vi.fn()
     const harness = makeHarness({
       now: () => LEDGER_TS,
-      recordDispatchedUsage,
       recordUsageEvent,
       ...overrides
     })
-    return { ...harness, recordDispatchedUsage, recordUsageEvent }
+    return { ...harness, recordUsageEvent }
   }
 
   /** The one ledger event a call recorded. */
@@ -8107,8 +8168,8 @@ describe('CrossEngineDispatcher — the dispatched turn as a ledger row (ADR-071
     return recordUsageEvent.mock.calls[0]![0] as UsageTurnEvent
   }
 
-  it('one call writes BOTH rows: the old table and the ledger, from the same inputs', async () => {
-    const { dispatcher, client, recordDispatchedUsage, recordUsageEvent } = ledgerHarness({
+  it('an opencode turn is one ledger row carrying the whole turn', async () => {
+    const { dispatcher, client, recordUsageEvent } = ledgerHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: PRICED } }))
     })
     client.listMessages.mockResolvedValue([
@@ -8125,17 +8186,6 @@ describe('CrossEngineDispatcher — the dispatched turn as a ledger row (ADR-071
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
     expect(result.isError).toBeUndefined()
 
-    // The old row still carries exactly what it always did.
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        fromRoutingId: 'routing-1',
-        targetEngine: 'opencode',
-        targetModel: PRICED,
-        targetSessionId: 'oc-sess-1',
-        toolUseId: 'toolu_ledger_1',
-        totalTokens: 1_250
-      })
-    )
     expect(ledgerRow(recordUsageEvent)).toMatchObject({
       engineId: 'opencode',
       vendorId: 'openai',
@@ -8159,46 +8209,24 @@ describe('CrossEngineDispatcher — the dispatched turn as a ledger row (ADR-071
     const recordUsageEvent = vi.fn(() => {
       throw new Error('usage_event is locked')
     })
-    const recordDispatchedUsage = vi.fn()
-    const { dispatcher } = makeHarness({ recordDispatchedUsage, recordUsageEvent })
-
-    const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
-
-    expect(result.isError).toBeUndefined()
-    expect(result.text).toBe('target answer')
-    // The old row is written first and is unaffected by the ledger's failure.
-    expect(recordDispatchedUsage).toHaveBeenCalledTimes(1)
-    expect(recordUsageEvent).toHaveBeenCalledTimes(1)
-  })
-
-  it('and the mirror: a THROWING dispatched_usage write still leaves the ledger row', async () => {
-    // The two rows are independent records of one turn, so neither write may
-    // be hostage to the other — least of all the ledger to the table S2c2
-    // deletes.
-    const recordDispatchedUsage = vi.fn(() => {
-      throw new Error('dispatched_usage is locked')
-    })
-    const recordUsageEvent = vi.fn()
-    const { dispatcher } = makeHarness({ recordDispatchedUsage, recordUsageEvent })
+    const { dispatcher } = makeHarness({ recordUsageEvent })
 
     const result = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx())
 
     expect(result.isError).toBeUndefined()
     expect(result.text).toBe('target answer')
     expect(recordUsageEvent).toHaveBeenCalledTimes(1)
-    expect((recordUsageEvent.mock.calls[0]![0] as UsageTurnEvent).origin).toBe('dispatch')
   })
 
-  it('both rows carry the SAME timestamp — one turn cannot happen at two instants', async () => {
+  it('the row is stamped with the dispatcher clock at the turn end, not the write', async () => {
     const clock = 1_700_000_123_456
-    const { dispatcher, recordDispatchedUsage, recordUsageEvent } = ledgerHarness({
+    const { dispatcher, recordUsageEvent } = ledgerHarness({
       now: () => clock
     })
     await dispatcher.dispatch(
       { engine: 'opencode', prompt: 'x' },
       makeCtx({ toolUseId: 'toolu_ts' })
     )
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(expect.objectContaining({ ts: clock }))
     expect(ledgerRow(recordUsageEvent).ts).toBe(clock)
   })
 
@@ -8219,15 +8247,14 @@ describe('CrossEngineDispatcher — the dispatched turn as a ledger row (ADR-071
     // dispatch call can drive several turns against the same target (this is
     // the continuation path: same ctx, same tool_use id, `sessionId` passed
     // back in). Keying on it would hand every turn after the first to the
-    // ledger's UNIQUE(message_id) to drop — silently, while the cap and
-    // `dispatched_usage` both counted the spend.
-    const { dispatcher, recordDispatchedUsage, recordUsageEvent } = ledgerHarness()
+    // ledger's UNIQUE(message_id) to drop — silently, while the cap counted
+    // the spend.
+    const { dispatcher, recordUsageEvent } = ledgerHarness()
     const ctx = makeCtx({ toolUseId: 'toolu_retry' })
 
     const first = await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
     await dispatcher.dispatch({ engine: 'opencode', prompt: 'x', sessionId: first.sessionId }, ctx)
 
-    expect(recordDispatchedUsage).toHaveBeenCalledTimes(2)
     expect(recordUsageEvent).toHaveBeenCalledTimes(2)
     const ids = recordUsageEvent.mock.calls.map((c) => (c[0] as UsageTurnEvent).messageId)
     expect(ids).toEqual([ledgerId('toolu_retry', 1), ledgerId('toolu_retry', 2)])
@@ -8376,6 +8403,36 @@ describe('CrossEngineDispatcher — the dispatched turn as a ledger row (ADR-071
     })
   })
 
+  it('a slash-less configured model is canonicalised before anything keys on it', async () => {
+    // opencode decodes a bare id to its default vendor, so `gpt-5-codex` and
+    // `opencode/gpt-5-codex` are the same model spelled two ways. The ledger
+    // stores the decoded halves and its reader re-encodes them, so unless the
+    // WRITE side picks one spelling, a reloaded session's breakdown carries
+    // the target twice: once under the raw string the live fold-in used, once
+    // under the reader's re-encode.
+    const { dispatcher, client, recordUsageEvent } = ledgerHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'gpt-5-codex' } }))
+    })
+    client.listMessages.mockResolvedValue([
+      storedAssistant({ text: 'ok', info: { tokens: { input: 10, output: 5 }, cost: 0.01 } })
+    ])
+
+    const ctx = makeCtx({ toolUseId: 'toolu_canon' })
+    await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, ctx)
+
+    expect(ledgerRow(recordUsageEvent)).toMatchObject({
+      engineId: 'opencode',
+      vendorId: 'opencode',
+      modelId: 'gpt-5-codex'
+    })
+    // The live breakdown keys on the SAME string the reader will rebuild.
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith(
+      'opencode',
+      'opencode/gpt-5-codex',
+      expect.closeTo(0.01, 6)
+    )
+  })
+
   it('a pi turn pi itself prices at 0 is still counted by the cap, from its tokens', async () => {
     // The cap and the ledger read the same turn, so they must read it the same
     // way: pricing the ledger row off the tokens while the cap counted pi's
@@ -8383,7 +8440,7 @@ describe('CrossEngineDispatcher — the dispatched turn as a ledger row (ADR-071
     // the tokens when pi reported no positive charge, so a real figure still
     // wins.
     const target = makeFakePiTarget()
-    const { dispatcher, recordDispatchedUsage, recordUsageEvent } = ledgerHarness({
+    const { dispatcher, recordUsageEvent } = ledgerHarness({
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' } })),
       spawnPiTarget: target.spawnPiTarget
     })
@@ -8395,9 +8452,6 @@ describe('CrossEngineDispatcher — the dispatched turn as a ledger row (ADR-071
     target.pushEvent(PI_AGENT_SETTLED)
     await pending
 
-    expect(recordDispatchedUsage).toHaveBeenCalledWith(
-      expect.objectContaining({ costUsd: expect.closeTo(0.2, 6) })
-    )
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith(
       'pi',
       'openai-codex/gpt-5.6-luna',

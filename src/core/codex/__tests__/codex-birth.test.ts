@@ -43,7 +43,7 @@ vi.mock('../../services/cross-engine-dispatcher', () => ({
 vi.mock('../../services/db', () => ({
   setSessionMeta: vi.fn(),
   getSessionMeta: () => undefined,
-  renameDispatchedUsage: vi.fn(),
+  renameUsageEventParent: vi.fn(),
   appendAuditLog: vi.fn(),
   getCodexSessionOverrides: () => undefined,
   hasCodexSessionOverrides: () => false,
