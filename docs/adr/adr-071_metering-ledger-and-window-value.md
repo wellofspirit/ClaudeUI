@@ -81,7 +81,14 @@ Claude terminal sessions and any other transcript we import keep ADR-011's time-
 
 `thread/tokenUsage/updated` carries cumulative totals per thread, so `CodexSession` records a delta at each turn end, for the root and for each child thread. The row's `message_id` is `codex:<threadId>:<turnId>`. It is built from native ids only, never from a routing id, so a rekey or a resume cannot produce a second row for the same turn.
 
-**Probe before build (S0).** Whether the cumulative total continues or restarts at zero after a cross-host `thread/resume` is not known. The delta needs a baseline that survives whichever it is. The probe runs against the pinned 0.154.0 binary with the fixture provider and its answer is recorded in `docs/codex-spike.md`.
+**What the probe found (S0, 2026-09-20, `docs/codex-spike.md` § Token usage across a resume).** The cumulative total belongs to the native thread and continues on every path: a second turn, a resume after an unload, a resume by a process that did not create the thread, and a fork. A fork starts at the SOURCE's total, not at zero. Four more facts shape the recorder:
+
+- A resume replays one frame before any new turn, carrying the last completed turn's id and that turn's `last`. Reading `last` as "what this turn cost" counts the previous turn twice.
+- `CodexSession` forks with `excludeTurns: true`, which suppresses the replay, so the first frame the product sees on a fork already holds the whole source history.
+- One turn can emit several frames under one turn id, one per model request.
+- A child thread meters itself under its own thread id and never appears in its parent's total.
+
+So the baseline is held per native thread id and seeded from the first cumulative the app is shown for that thread, never from zero. The first frame for a thread id records the baseline and writes nothing. At each turn end the row is the newest frame minus the baseline as it stood when the turn began, and the baseline moves up. A replay is then a no-op, a fork's first turn costs its own tokens, a multi-request turn is one row, and each child has its own baseline. If any component of the cumulative goes DOWN, the baseline is re-seeded and nothing is written: `TokenUsageInfo::fill_to_context_window` in the pinned source replaces the total with the context window size and zeroes its components, and the probe's fixture could not exercise that path. A turn whose end the app never sees (a host killed mid-turn) has its tokens charged to the next observed turn. That misattributes one turn and neither drops nor double counts.
 
 A failed or interrupted turn that moved tokens writes a row. The ledger records spend, not success.
 
