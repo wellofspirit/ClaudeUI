@@ -90,10 +90,28 @@ const DEFAULT_PRICING: ModelPricing = {
   cacheReadPerMTok: 0.3
 }
 
+/** Model ids already warned about, so a transcript scan reports each unknown
+ *  model once instead of once per assistant line (a multi-megabyte transcript
+ *  calls getPricing thousands of times). Per process, deliberately: the point
+ *  is to surface the model, not to count the rows. */
+const warnedUnpricedModels = new Set<string>()
+
 export function getPricing(model: string): ModelPricing {
   const lower = model.toLowerCase()
   for (const { match, pricing } of MODEL_PRICING) {
     if (lower.includes(match)) return pricing
+  }
+  // Falling back is silent money: DEFAULT_PRICING is a sonnet-tier guess, so an
+  // unrecognised Opus-tier id underprices by ~40%. Say which id missed, so the
+  // fix (add it to shared/pricing.ts, or stop keying cost on an alias) is
+  // actionable rather than a mystery in the totals.
+  if (!warnedUnpricedModels.has(model)) {
+    warnedUnpricedModels.add(model)
+    logger.warn(
+      'BlockUsage',
+      `No pricing entry for model "${model}" — applying the default $3/$15 per Mtok ` +
+        'sonnet-tier estimate. Costs attributed to this model are a guess.'
+    )
   }
   return DEFAULT_PRICING
 }

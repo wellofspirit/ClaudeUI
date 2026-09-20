@@ -247,6 +247,59 @@ describe('ClaudeSession — modelUsage parsing', () => {
       { engineId: 'claude', modelId: 'claude-opus-4-8', costUsd: 0.02 }
     ])
   })
+
+  it('keys that fallback on the id init resolved, not on the `default` alias', async () => {
+    // `default` is an alias cli.js resolves server-side; it is not a model id.
+    // Keyed on it, the fallback row renders as "default" in the breakdown, and
+    // prices as the $3/$15 unknown-model guess against any pricing table it
+    // reaches (block-usage's getPricing matches no row for it). cli.js reports
+    // what `default` actually resolved to on every turn's system/init — use it.
+    mockQuery.mockImplementation(() =>
+      makeFakeQueryHandle([
+        {
+          type: 'system',
+          subtype: 'init',
+          session_id: 's-alias-1',
+          model: 'claude-opus-5[1m]',
+          slash_commands: [],
+          skills: [],
+          mcp_servers: []
+        },
+        { type: 'result', total_cost_usd: 0.02 }
+      ])
+    )
+
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('routing-fallback-alias', win, '/tmp/proj', {
+      model: 'default'
+    })
+    liveSessions.push(session)
+    await session.run('hello')
+
+    const statusLine = lastStatusLine(sent)
+    expect(statusLine.modelCosts).toEqual([
+      { engineId: 'claude', modelId: 'claude-opus-5[1m]', costUsd: 0.02 }
+    ])
+  })
+
+  it('falls back to the configured model when no init has resolved one yet', async () => {
+    // No system/init on this stream, so there is nothing to prefer — the
+    // configured id is still the best label available, and it is a concrete one.
+    mockQuery.mockImplementation(() =>
+      makeFakeQueryHandle([{ type: 'result', total_cost_usd: 0.03 }])
+    )
+
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('routing-fallback-no-init', win, '/tmp/proj', {
+      model: 'claude-sonnet-4-6'
+    })
+    liveSessions.push(session)
+    await session.run('hello')
+
+    expect(lastStatusLine(sent).modelCosts).toEqual([
+      { engineId: 'claude', modelId: 'claude-sonnet-4-6', costUsd: 0.03 }
+    ])
+  })
 })
 
 // ---------------------------------------------------------------------------

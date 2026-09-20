@@ -1530,7 +1530,22 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     } else {
       // No per-model breakdown on this result — attribute the whole turn's
       // cost to the currently selected model rather than dropping it.
-      this.liveModelCosts = new Map([[this.model, cost]])
+      //
+      // Keyed on the id init resolved, never the alias: `default` is not a
+      // model, so it prices as the $3/$15 unknown-model guess if this map ever
+      // reaches the pricing table, and it renders as "default" in the cost
+      // breakdown either way. The respawn-boundary fold above copies these keys
+      // straight into modelCostBase, so an alias here outlives the process that
+      // produced it.
+      //
+      // Deliberately broader than the two window sites (the contextWindowSize
+      // getter, buildMeteringSnapshot), which prefer the resolved id only when
+      // `this.model === 'default'`. They can afford that narrow test because
+      // resolveContextWindow reads every OTHER alias correctly on its own
+      // ('haiku' → 200K, 'sonnet' → 1M) — `default` is the single one it cannot
+      // see through. A cost KEY has no such luck: every alias is a wrong key.
+      // Don't "unify" the three sites; they answer different questions.
+      this.liveModelCosts = new Map([[this.resolvedModelId ?? this.model, cost]])
     }
 
     this.isProcessing = false
