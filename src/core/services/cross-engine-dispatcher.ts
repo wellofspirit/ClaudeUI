@@ -4711,6 +4711,27 @@ export class CrossEngineDispatcher {
       // not just the eventual "Dispatched turn failed" summary.
     }
 
+    // ACCOUNTING IS NOT STREAMING, so it runs ABOVE the tool_use gate below:
+    // the cap and the ledger row need this turn's tokens even for a dispatch
+    // with no caller tool_use to stream chunks to, and a gated accumulator
+    // would report such a turn as a zero split and a countable zero cost.
+    // `usage` is still never a visible chunk — the return here is what keeps
+    // it out of the stream, exactly as the switch's own `case` did.
+    if (out.kind === 'usage') {
+      entry.turnTotalTokens += out.tokens.input + out.tokens.output + (out.tokens.reasoning ?? 0)
+      // The split the ledger row needs, accumulated beside the total across
+      // the turn's several assistant messages. The four fields pi reports
+      // are the four `PiSession` records for its OWN turns — `reasoning` is
+      // deliberately not folded into `output` here, for parity with it, and
+      // is carried separately for the price lookup, which does fold it.
+      entry.turnTokens.input += out.tokens.input
+      entry.turnTokens.output += out.tokens.output
+      entry.turnTokens.cacheWrite += out.tokens.cacheWrite
+      entry.turnTokens.cacheRead += out.tokens.cacheRead
+      entry.turnReasoningTokens += out.tokens.reasoning ?? 0
+      return
+    }
+
     const toolUseId = entry.ctx.toolUseId
     if (!toolUseId) return
 
@@ -4752,19 +4773,6 @@ export class CrossEngineDispatcher {
           result: out.result,
           isError: out.isError
         })
-        break
-      case 'usage':
-        entry.turnTotalTokens += out.tokens.input + out.tokens.output + (out.tokens.reasoning ?? 0)
-        // The split the ledger row needs, accumulated beside the total across
-        // the turn's several assistant messages. The four fields pi reports
-        // are the four `PiSession` records for its OWN turns — `reasoning` is
-        // deliberately not folded into `output` here, for parity with it, and
-        // is carried separately for the price lookup, which does fold it.
-        entry.turnTokens.input += out.tokens.input
-        entry.turnTokens.output += out.tokens.output
-        entry.turnTokens.cacheWrite += out.tokens.cacheWrite
-        entry.turnTokens.cacheRead += out.tokens.cacheRead
-        entry.turnReasoningTokens += out.tokens.reasoning ?? 0
         break
       case 'error':
         entry.ctx.emit('session:subagent-message', {

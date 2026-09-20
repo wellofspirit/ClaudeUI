@@ -5413,7 +5413,9 @@ describe('CrossEngineDispatcher — pi direction (M4c): streaming, usage, notifi
     const ctx = makeCtx({ fromEngine: 'claude' })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
     await tick()
-    target.pushEvent(piAssistantMessageEnd({ text: 'ok', cost: 0 }))
+    // No cost AND no tokens: our table stands in for a turn pi priced at 0
+    // (`piCostInputs`), so a turn that is to cost nothing has to spend nothing.
+    target.pushEvent(piAssistantMessageEnd({ text: 'ok', cost: 0, input: 0, output: 0 }))
     target.pushEvent(PI_AGENT_SETTLED)
     await pending
     expect(ctx.addDispatchedCost).not.toHaveBeenCalled()
@@ -6041,10 +6043,7 @@ describe('CrossEngineDispatcher — pi direction: the cap follows the same cost 
       loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: MODEL, maxCostUsd: 0.01 } })),
       spawnPiTarget: target.spawnPiTarget
     })
-    // The tool_use id is load-bearing: the pi target accumulates a turn's
-    // tokens inside the same forwarding path that streams the target's output
-    // back, which is gated on there being a caller tool_use to stream to.
-    const ctx = makeCtx({ fromEngine: 'claude', toolUseId: 'toolu_pi_nan' })
+    const ctx = makeCtx({ fromEngine: 'claude' })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
     await tick()
     // 1M input tokens at $0.20/MTok — over the $0.01 cap on its own.
@@ -6070,7 +6069,9 @@ describe('CrossEngineDispatcher — pi direction: the cap follows the same cost 
     const ctx = makeCtx({ fromEngine: 'claude' })
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
     await tick()
-    target.pushEvent(piAssistantMessageEnd({ text: 'the answer', cost: 0 }))
+    // Zero tokens with it, so the table cannot price the turn ABOVE pi's zero
+    // and what is under test stays pi's figure (`piCostInputs`).
+    target.pushEvent(piAssistantMessageEnd({ text: 'the answer', cost: 0, input: 0, output: 0 }))
     target.pushEvent(PI_AGENT_SETTLED)
     const result = await pending
     expect(result.text).not.toContain('cost cap')
@@ -6097,6 +6098,59 @@ describe('CrossEngineDispatcher — pi direction: the cap follows the same cost 
     const result = await pending
     expect(result.text).toContain('[dispatch cost cap reached')
     expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', MODEL, 0.06)
+  })
+
+  it('a dispatch with NO caller tool_use still accounts its tokens — on the row and against the cap', async () => {
+    // Accounting rides the same forwarding path that streams a target's
+    // output back to a caller's TaskCard, and streaming needs a tool_use id
+    // to key its chunks. Tokens do not: an id-less dispatch must still price
+    // its turn, or the cap would read it as a free one and the ledger row
+    // would record a zero split.
+
+    // The billing type is pinned so the turn's WORTH is what the cap reads: under a subscription
+    // a reported `0` cannot be mistaken for a zero charge (`resolveCosts`),
+    // which leaves the accumulated tokens as the only thing that can cross it.
+    billingSpy = vi.spyOn(piAuthProvider, 'buildPiAccountRef').mockReturnValue({
+      engineId: 'pi',
+      vendorId: 'openai-codex',
+      billingType: 'subscription',
+      authState: 'authenticated'
+    })
+    const recordUsageEvent = vi.fn()
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({
+      recordUsageEvent,
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: MODEL, maxCostUsd: 0.01 } })),
+      spawnPiTarget: target.spawnPiTarget
+    })
+    const ctx = makeCtx({ fromEngine: 'claude' })
+    expect(ctx.toolUseId).toBeUndefined()
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    // Two assistant messages, so the row proves the ACCUMULATION and not just
+    // the last message's numbers. 1M input tokens at $0.20/MTok is over the
+    // $0.01 cap on its own (the 100 output tokens add $0.00012); pi prices the
+    // turn at 0, so the cap only crosses if our own table priced the tokens it
+    // was handed.
+    target.pushEvent(
+      piAssistantMessageEnd({ text: 'part one', cost: 0, input: 600_000, output: 30 })
+    )
+    // A fresh `message_start` is what lets the mapper see a SECOND assistant
+    // message in the same turn (a tool call splits one turn into several).
+    target.pushEvent({ type: 'message_start', message: { role: 'assistant', content: [] } })
+    target.pushEvent(
+      piAssistantMessageEnd({ text: 'part two', cost: 0, input: 400_000, output: 70 })
+    )
+    target.pushEvent(PI_AGENT_SETTLED)
+    const result = await pending
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toContain('[dispatch cost cap reached')
+    expect(ctx.addDispatchedCost).toHaveBeenCalledWith('pi', MODEL, expect.closeTo(0.20012, 6))
+    expect(recordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokens: expect.objectContaining({ input: 1_000_000, output: 100 })
+      })
+    )
   })
 })
 
