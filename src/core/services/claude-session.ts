@@ -185,7 +185,7 @@ export class ClaudeSession extends BaseSession {
   readonly engineId = 'claude' as const
 
   get capabilities(): ResolvedCapabilities {
-    const base = resolveClaudeCapabilities(this.model)
+    const base = resolveClaudeCapabilities(this.model, this.resolvedModelId)
     // ADR-030/ADR-033 M4-A: the static flag is true (both directions ship),
     // but the HONEST per-session value also requires the opencode binary to
     // actually be vendored — otherwise there is no possible dispatch target.

@@ -150,6 +150,33 @@ Always exactly once, by us, immediately after spawn and before (or concurrent wi
 - **`commands`** — slash commands the session supports. `name` excludes the leading `/`. `argumentHint` is a hint string like `"<file>"` that our UI shows inline.
 - **`agents`** — subagents invokable via the `Task` tool. `model` is optional (when absent, the agent inherits the parent turn's model).
 - **`models`** — ordered by cli.js's preference. Our harness exposes this via `supportedModels()`.
+- **`models[].resolvedModel`** — the concrete model id whatever `value` names actually resolves to.
+  The full set of rows probed on 2.1.268 — the only observations we hold, so do not generalize past
+  them:
+
+  | `value`                | `resolvedModel`             |
+  | ---------------------- | --------------------------- |
+  | `default`              | `claude-opus-5[1m]`         |
+  | `opus[1m]`             | `claude-opus-5[1m]`         |
+  | `claude-fable-5-1[1m]` | `claude-fable-5-1`          |
+  | `sonnet`               | `claude-sonnet-5`           |
+  | `haiku`                | `claude-haiku-4-5-20251001` |
+
+  The transformation varies: a short alias is expanded (`sonnet`), a `[1m]` suffix may be stripped
+  (`claude-fable-5-1[1m]`) or kept (`default`), and the target may carry a date suffix (`haiku`).
+  We have not observed a row whose `value` is a bare canonical id, so what the field does there is
+  unknown — read it, don't assume it echoes.
+
+  This is the only field that sizes an alias's context window: `value: "default"` names no model
+  family and is opaque to any id-based resolver, which falls through to the 200K assumption. Note
+  that `resolvedModel` is not always safe to normalize either — the `[1m]` suffix is load-bearing
+  for window resolution, so a normalizer that strips it (ours does, via `canonicalizeModelValue`)
+  must not be applied to this field.
+
+  **Two rows may share one `resolvedModel`.** On 2.1.268 `default` and `opus[1m]` both resolve to
+  `claude-opus-5[1m]` **and carry an identical `description`**, so a picker that labels rows from
+  the description renders them as two indistinguishable entries (ClaudeUI collapses them on
+  `resolvedModel` — `dedupeResolvedModels`).
 - **`output_style`** — active style. Affects formatting / verbosity.
 - **`available_output_styles`** — enumerated styles. Can be changed via `apply_flag_settings` control subtype.
 - **`account`** — authenticated principal. `apiProvider` discriminates API vendor.

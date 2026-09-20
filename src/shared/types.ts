@@ -1061,6 +1061,11 @@ export interface ModelInfo {
   nativeEffortOptions?: Array<{ value: string; description: string }>
   nativeDefaultEffort?: string
   value: string
+  /** Concrete model id an alias resolves to, straight off cli.js's
+   *  `supportedModels()` (e.g. `default` → `claude-opus-5[1m]`). Present on
+   *  Claude rows only; absent on every other engine's catalog. Aliases are
+   *  opaque to `resolveContextWindow`, so this is what sizes their window. */
+  resolvedModel?: string
   displayName: string
   description: string
   /** Capability flags surfaced by the SDK's `supportedModels()`. Authoritative. */

@@ -22,6 +22,9 @@ export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
  */
 export interface ModelCapabilityInput {
   value: string
+  /** See `ModelInfo.resolvedModel` — the concrete id an alias resolves to.
+   *  Preferred over `value` for every id-keyed derivation below. */
+  resolvedModel?: string
   supportsEffort?: boolean
   supportedEffortLevels?: readonly EffortLevel[]
   supportsAdaptiveThinking?: boolean
@@ -377,6 +380,12 @@ const IMPLICIT_1M_ALIASES = new Set(['fable', 'opus', 'sonnet'])
  * Crucially, resolution is keyed on the model VALUE, not the SDK-provided
  * description: implicit-1M models (Fable 5, Opus 4.8) carry no "1m" marker in
  * their description, so a description heuristic silently caps them at 200K.
+ *
+ * Opaque aliases are the flip side of that: `default` names no model family at
+ * all and deliberately falls through to `CONTEXT_WINDOW_DEFAULT`, because only
+ * cli.js knows what it points at. A caller holding a `ModelInfo` must therefore
+ * pass `resolvedModel` (`default` → `claude-opus-5[1m]`) rather than `value`,
+ * or a 1M session is sized at 200K.
  */
 export function resolveContextWindow(modelValue: string | undefined | null): number {
   if (!modelValue) return CONTEXT_WINDOW_DEFAULT
@@ -630,8 +639,12 @@ export function claudeModelCapabilities(
     reasoning,
     vision: true,
     toolCalling: true,
-    contextWindow: resolveContextWindow(model?.value ?? null),
-    maxOutput: maxOutputTokens(model?.value ?? null),
+    // Both figures are keyed on a model ID, and `value` may be an opaque alias
+    // (`default`) that no id-based resolver can see through. cli.js hands us the
+    // concrete target in `resolvedModel` — prefer it, fall back to `value` for
+    // every engine whose catalog has no such field.
+    contextWindow: resolveContextWindow(model?.resolvedModel ?? model?.value ?? null),
+    maxOutput: maxOutputTokens(model?.resolvedModel ?? model?.value ?? null),
     promptCaching: true
   }
 }
@@ -687,13 +700,31 @@ export function resolveCapabilities(
  * id-based heuristics (effort, thinking, context window) key on that id rather
  * than the alias string. The 'default' alias has no canonicalization, preserving
  * its pass-through behaviour.
+ *
+ * `resolvedModel` is the concrete id cli.js reports in system/init (ClaudeSession
+ * tracks it as `resolvedModelId`). Pass it whenever it is known: `default`
+ * canonicalizes to nothing useful, so without it a `default` session's
+ * `contextWindow` is the 200K fallback even when the session is really running a
+ * 1M model.
+ *
+ * It is deliberately NOT canonicalized. `canonicalizeModelValue` routes an
+ * unknown id through `normaliseModelId`, whose `/claude-[a-z0-9-]+/` match stops
+ * at the bracket and DROPS a `[1m]` suffix that `resolveContextWindow` needs:
+ * verified `canonicalizeModelValue('claude-opus-5[1m]') === 'claude-opus-5'`.
+ * That is harmless for the 2.1.268 catalog (opus-5 and fable-5-1 are
+ * implicit-1M anyway) but not in general — `claude-sonnet-4-6[1m]` resolves to
+ * 1M raw and 200K canonicalized, a silent 5x undersize. The wire id is already
+ * concrete; it needs no alias translation.
  */
-export function resolveClaudeCapabilities(modelValue?: string | null): ResolvedCapabilities {
+export function resolveClaudeCapabilities(
+  modelValue?: string | null,
+  resolvedModel?: string | null
+): ResolvedCapabilities {
   const raw = modelValue ?? 'default'
   const canonical = canonicalizeModelValue(raw) || raw
   return resolveCapabilities(
     CLAUDE_ENGINE_CAPABILITIES,
-    claudeModelCapabilities({ value: canonical })
+    claudeModelCapabilities({ value: canonical, resolvedModel: resolvedModel ?? undefined })
   )
 }
 
