@@ -2,7 +2,7 @@
 
 **Status:** Proposed (2026-09-20). Drafted from the owner's rulings of the same date.
 **Depends on:** [ADR-071](adr-071_metering-ledger-and-window-value.md) (the ledger, the machine-independent `account_key`, hourly buckets, the window ledger)
-**Relates to:** [ADR-056](adr-056_headless-admission-model.md) and the headless server (the client lives in `src/core` so it syncs too), [ADR-036](adr-036_unified-auth-vault.md) (where the service token and the read token are kept), [ADR-057](adr-057_remote-vendor-oauth-paste-back.md) (paste-back sign-in on a headless server), [ADR-030](adr-030_capability-honesty.md) (a stale machine is shown as stale)
+**Relates to:** [ADR-056](adr-056_headless-admission-model.md) and the headless server (the client lives in `src/core` so it syncs too), [ADR-036](adr-036_unified-auth-vault.md) (where the service token is kept), [ADR-030](adr-030_capability-honesty.md) (a stale machine is shown as stale)
 
 ## Context
 
@@ -34,7 +34,7 @@ D1 bills by rows read, and a dashboard that scans raw events on every open would
 
 Raw rows are pruned at 90 days. Buckets are kept. A scheduled Worker does the prune.
 
-Each bucket row carries a monotonically increasing `rev`. Clients holding a read session (§6) pull with `GET /v1/buckets?since=<rev>&exclude_device=<me>` and store the result in a local `remote_usage_bucket` table. The combined view therefore works offline from the last pull, and the renderer aggregates remote and local buckets with the same code.
+Each bucket row carries a monotonically increasing `rev`. Clients pull with `GET /v1/buckets?since=<rev>&exclude_device=<me>` and store the result in a local `remote_usage_bucket` table. The combined view therefore works offline from the last pull, and the renderer aggregates remote and local buckets with the same code.
 
 ### 4. Windows and limits are computed across machines
 
@@ -47,7 +47,7 @@ Devices also post their limit readings (`account_key`, `window_kind`, `usedPerce
 
 Per event: timestamp, engine, vendor, model, the five token counts, both costs, `billing_type`, `origin`, `account_key`, `account_label`, `device_id`. Per reading: the fields in §4. Per device: a name the user picks, the OS family and the app version.
 
-Account emails are sent as `account_label`. The owner ruled this on 2026-09-20: the hub is theirs, and a dashboard of opaque ids is useless.
+Account emails are sent as `account_label`. The owner ruled this on 2026-09-20: the hub is theirs, and a dashboard of opaque ids is useless. The hub returns them in full only to a Google sign-in (§6).
 
 Never sent: prompts, responses, tool calls, file paths, working directories, session titles, session ids, routing ids, and any credential. `parent_routing_id` stays local. The API-key account key is ADR-071's 64-bit digest, and the key itself never leaves the vault.
 
@@ -55,18 +55,20 @@ Never sent: prompts, responses, tool calls, file paths, working directories, ses
 
 The first draft put the dashboard behind Cloudflare Access and left the device routes outside it, which depends on scoping an Access application by path. The owner ruled that out on 2026-09-20. Every path sits behind one Access application, and the two kinds of caller differ in what the Worker lets them do.
 
-| Caller    | How it passes Access                                                                                              | What the Worker allows                                                            |
-| --------- | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| A device  | An Access service token, sent as `CF-Access-Client-Id` and `CF-Access-Client-Secret`, under a Service Auth policy | Write only: `POST /v1/events`, `POST /v1/limits`. Every read route answers `403`. |
-| The owner | Google sign-in under an Allow policy naming one email                                                             | Read everything, plus the consolidation writes below.                             |
+| Caller    | How it passes Access                                                                                              | What the Worker allows                                                                                                                                                                              |
+| --------- | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A device  | An Access service token, sent as `CF-Access-Client-Id` and `CF-Access-Client-Secret`, under a Service Auth policy | Write `POST /v1/events` and `POST /v1/limits`. Read the aggregates (`/v1/buckets`, `/v1/windows`, `/v1/limits`) with account labels masked. No consolidation writes, no device list, no raw events. |
+| The owner | Google sign-in under an Allow policy naming one email                                                             | Read everything with full labels, plus the consolidation writes below.                                                                                                                              |
 
 Access validates both at the edge and hands the Worker a signed `Cf-Access-Jwt-Assertion`. The Worker verifies that JWT on every request against the team's signing keys and decides from its claims. A service-token JWT carries the token's client id as `common_name` and no email. A sign-in JWT carries the email, which the Worker compares with a deploy-time variable. A request with no valid assertion is refused, so a mistake in the Access setup fails closed. The allowed address is deploy-time configuration and appears in neither repository.
 
 **Devices.** One service token per machine, created in the Zero Trust dashboard and pasted into ClaudeUI once. Deleting it there revokes that machine alone. The hub needs no enrollment route and no admin secret, and it stores no device credential at all. On a token's first write the hub records its client id in a `device` table with the name the client sent. ClaudeUI keeps the id and secret in the OS credential store through the existing vault, never in a settings file.
 
-A leaked service token can add junk rows. It cannot read spend, emails or anything else. That is the reason for making it write-only.
+**What a device can read, and why it can.** The first amendment of 2026-09-20 made the device token write-only and had the app read through a second token minted by a Google sign-in. The owner reversed that the same day: without read access the in-app dashboard has no combined view, the data is usage figures and nothing more, and a second token is friction on every machine for little gain. So a device reads the aggregates, and only the aggregates: hourly buckets, the window ledger and the latest limit readings. It cannot list raw events or devices and cannot call a consolidation route.
 
-**Reads from inside ClaudeUI.** The combined view has to read buckets, windows and limits, and the device token may not. The app gets a read session by sign-in. It opens the browser at `/auth/device`, the owner signs in with Google, and the Worker mints a read token (256 bits, stored hashed, 30-day expiry, listed and revocable on the hub dashboard). The token returns to the app over a loopback redirect, or by paste-back on a headless server as in ADR-057. A read request carries the device's service token, which gets it through Access, and the read token, which the Worker requires for read routes. A read token alone does not pass Access, and a device token alone does not read. When the session expires the combined view says so and offers the sign-in again, while pushes continue.
+Every device read masks `account_label`. The hub returns the `account_key`, the vendor, the plan and a masked label (`d•••@g•••.com`, or the last four characters for an API key). ClaudeUI shows its own full label for any key it holds a credential for on that machine, and the masked label for an account that only another machine uses. Full emails are returned to a Google sign-in only, which means the hub's own dashboard.
+
+A leaked service token can add junk rows and read spend figures, account keys and masked labels. It cannot read an email address, a raw event or anything that reaches a provider. Deleting the token in the Zero Trust dashboard ends it. That is the accepted risk.
 
 **Consolidation writes, sign-in only.** Ledger rows stay immutable. The owner may add or remove an entry in `account_alias`, which makes two account keys display and sum as one (the `unknown` rows of a machine with one account, or a key that changed shape), rename a device, and remove a device together with its rows. The buckets are rebuilt from the remaining raw rows when a device is removed, so a device older than the 90-day raw retention can be hidden but not subtracted.
 
@@ -79,7 +81,7 @@ The client lives in `src/core/services/usage-hub/`, so the desktop app and `clau
 - The outbox is the ledger itself plus a high-water mark. There is no second queue to keep consistent.
 - Push runs after a turn ends, debounced to at most once a minute, and on a 10-minute timer. Pull runs when the dashboard opens and on the same timer.
 - Failures back off exponentially to a one-hour ceiling. Sync never blocks or fails a turn, the same rule `recordUsageEvent` already follows.
-- Settings gets a Usage hub group: URL, device name, the service token fields, sign in for the combined view, last sync, forget this device.
+- Settings gets a Usage hub group: URL, device name, the service token fields, last sync, forget this device.
 - The dashboard header gets the scope switch (this machine, all machines) and a sync chip. The chip opens the machine list: last sync, events, share of spend. A machine more than 24 hours behind is flagged, because its usage is missing from the combined window value (ADR-030).
 
 ### 8. Versioning across two repositories
@@ -99,9 +101,9 @@ It will repeat some of ClaudeUI's chart code. Sharing React components across tw
 | Slice | Repository | Content                                                                                                                                                                    |
 | ----- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | H1    | hub        | Worker, D1 schema and migrations, Access JWT verification with the two caller kinds, `/v1/events` ingest with bucket upkeep, the `workers.dev` question from §6, fixtures. |
-| H2    | hub        | `/auth/device` read sessions, `/v1/buckets`, `/v1/limits`, `/v1/windows`, the prune job.                                                                                   |
+| H2    | hub        | `/v1/buckets`, `/v1/limits`, `/v1/windows` with label masking for device callers, the prune job.                                                                           |
 | S5    | ClaudeUI   | The client, settings group, scope switch, sync chip and machine list. Needs ADR-071 S2 and H2.                                                                             |
-| H3    | hub        | The HTML dashboard, the consolidation writes, read-session management.                                                                                                     |
+| H3    | hub        | The HTML dashboard and the consolidation writes.                                                                                                                           |
 
 ## Consequences
 
@@ -116,7 +118,7 @@ It will repeat some of ClaudeUI's chart code. Sharing React components across tw
 - **Sync files through R2 or a cloud drive, merge on the client.** No server code at all, and the closest rival. Rejected because the window value needs a cross-machine sum by account and time, the limit relay needs a latest-reading lookup, and the owner wants a dashboard that works with every machine off.
 - **Push rollups instead of raw events.** Rejected for the double counting described in §2.
 - **Our own device tokens with a bypass for the device routes.** The first draft. Rejected by the owner: it leaves part of the hub outside the edge gate and depends on path-scoped Access applications.
-- **A device token that can also read.** Simpler for the app, which would need no sign-in. Rejected: the token sits on four machines, and a leak would expose spend and account emails.
+- **A write-only device token, with the app reading through a token minted by a Google sign-in.** The first amendment. Reversed by the owner: it costs a sign-in per machine every 30 days to protect figures that are not sensitive once the email is masked.
 - **One service token shared by all devices.** Rejected because revoking one machine would mean replacing the token on all of them.
 - **Google sign-in implemented inside the Worker.** Rejected. It adds a client secret, a callback route and session cookies to maintain, and Cloudflare Access does the same job with a policy.
 - **A hosted service.** Rejected by the owner's terms.
