@@ -54,13 +54,21 @@ Subtypes that exist in the SDK schema union but are **not** emitted on the SDK s
 
 ## 4.2 `init`
 
-Session-start snapshot. Exactly one per session, immediately after initialize's control_response.
+Session-start snapshot. **Re-emitted at the head of every turn**, not once per session — and each
+copy carries the model actually in force, so it is the live source for the resolved model id, not
+just a start-of-session fact. Probed on 2.1.268: spawn with `--model haiku` → turn 1 init
+`model: "claude-haiku-4-5-20251001"`; a `set_model` control request to `default` (which emits no
+init of its own) → turn 2 init `model: "claude-opus-5[1m]"`. A consumer that resolves an opaque
+alias (`default`) to its concrete id must therefore re-read `model` on **every** init, or a
+mid-session model switch leaves it stale.
 
 **Anchor:** builder `e86` at char `11322500`; yield at `12800961`.
 
 **Gate:** Always.
 
-**Ordering:** First `system` message. Consumer uses this to resolve temp routingId → real session UUID.
+**Ordering:** First `system` message *of a session start*, but **not** the first message with a
+`session_id` — `queued_command_consumed` (§4.10) precedes it on every turn and carries one.
+Consumer uses this to resolve temp routingId → real session UUID.
 
 ### Shape
 
@@ -427,6 +435,27 @@ been CONSUMED did not. Consumers must normalize before comparing: ClaudeUI does 
 emitted before the turn it starts — i.e. before that turn's first `assistant` /
 `stream_event`. UI uses this to dismiss the "queued" card and show the text as a
 normal user message.
+
+**It carries `session_id`, and it lands before `system/init`.** Verified on 2.1.268, deterministic
+across repeated probes, on the first turn of a fresh session:
+
+```
+#1 control_response                                    (the initialize reply)
+#2 type=system subtype=queued_command_consumed  session_id=YES
+#3 type=system subtype=init                     session_id=YES  model=claude-opus-5[1m]
+#4 type=assistant …
+```
+
+Because A3 is the path an ordinary never-queued prompt takes to its turn, this is the normal
+ordering, not an edge case.
+
+**Consumer hazard.** A bootstrap latch keyed on "the first message carrying a `session_id`" will be
+tripped by this notification and never see `system/init`. ClaudeUI's `captureSessionBootstrap` had
+exactly that shape: the init capture was nested inside `if (msg.session_id && !this.sessionId)`, so
+`resolvedModelId`, `slash_commands`, `skills`, `mcp_servers` and the init permission-mode
+reconciliation were all silently dropped — most visibly, a `default` session sized its context
+window at 200K instead of the resolved model's 1M and rendered a 614K-token transcript as 307%.
+Latch the session id and read `system/init` **independently**.
 
 ---
 

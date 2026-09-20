@@ -308,6 +308,11 @@ export class ClaudeSession extends BaseSession {
    *  (and other server-resolved aliases) actually map to. Used to resolve the
    *  context window when `this.model` is an ambiguous alias. */
   private resolvedModelId: string | null = null
+  /** One-shot bootstrap facts (slash commands, skills, MCP servers, the init
+   *  permission-mode reconciliation) are captured from the FIRST system/init only.
+   *  `resolvedModelId` above is deliberately NOT one-shot — cli.js re-emits
+   *  system/init every turn with the model actually in force. */
+  private initCaptured = false
   private resumeSessionId: string | undefined
   /** Fork ("branch off") seeding: when set on creation, the FIRST run resumes
    *  `resumeSessionId` truncated to this line uuid with `--fork-session`, so a
@@ -1104,18 +1109,39 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
   /**
    * Extract session_id, init metadata (slash commands, skills, mcp_servers,
    * permissionMode), and slug from whichever message carries them first.
-   * cli.js always includes session_id on the first system/init, but other
-   * messages may arrive with it too depending on the flow.
+   *
+   * The session_id latch and the system/init capture are INDEPENDENT. They used
+   * to be nested — init metadata was only read from the first message that also
+   * established the session id — and `system/queued_command_consumed` (which
+   * carries a `session_id` and, because the drain path is how every prompt
+   * reaches its turn, always lands BEFORE `system/init`) tripped that latch
+   * first, so the init branch never ran at all.
    */
   private captureSessionBootstrap(msg: SDKMessage, type: string): void {
+    const isInit = type === 'system' && (msg as SystemMessage).subtype === 'init'
+
     if (msg.session_id && !this.sessionId) {
       this.sessionId = msg.session_id
+      this.sendStatus()
+    }
 
-      if (type === 'system' && (msg as SystemMessage).subtype === 'init') {
-        const sys = msg as SystemMessage
-        // Resolved canonical model id (e.g. "default" → "claude-opus-4-8"),
-        // used to size the context window when this.model is an alias.
-        if (sys.model) this.resolvedModelId = sys.model
+    if (isInit) {
+      const sys = msg as SystemMessage
+      // Resolved canonical model id ("default" → "claude-opus-5[1m]"), which is
+      // how contextWindowSize sizes an opaque alias. cli.js re-emits system/init
+      // at the head of EVERY turn carrying the model actually in force (verified
+      // on 2.1.268: --model haiku → "claude-haiku-4-5-20251001", then a set_model
+      // to "default" → "claude-opus-5[1m]" on the next turn), so this is
+      // re-captured every time and a mid-session setModel self-heals.
+      if (sys.model && sys.model !== this.resolvedModelId) {
+        this.resolvedModelId = sys.model
+        // The window just changed — re-emit the derived figures.
+        this.send('session:status-line', this.buildStatusLineFromAccumulators())
+        this.sendMetering()
+      }
+
+      if (!this.initCaptured) {
+        this.initCaptured = true
         // CLI-only commands that produce no output through the SDK
         const CLI_ONLY = new Set(['context', 'cost', 'login', 'logout', 'release-notes', 'doctor'])
         const raw = sys.slash_commands || []
@@ -1147,8 +1173,6 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
           this.send('session:permission-mode', initMode)
         }
       }
-
-      this.sendStatus()
     }
 
     if (msg.slug && !this.slug) {
