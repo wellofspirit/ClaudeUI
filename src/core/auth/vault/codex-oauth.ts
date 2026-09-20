@@ -108,6 +108,14 @@ export interface VaultCredential {
    * can forward `chatgptPlanType` (ADR-068 §1) without re-parsing the JWT.
    */
   planType?: string
+  /**
+   * The stable user claim (`chatgpt_user_id`, else `user_id`) — the user half
+   * of ADR-071 §3's `chatgpt:<subscription>:<user>` key. Persisted so a usage
+   * row can name the account without re-parsing an access token, and so an
+   * expired credential still resolves to the account it belongs to. Absent on
+   * every credential stored before S2a2; derived from the access token on read.
+   */
+  userId?: string
 }
 
 /** What AuthVault needs from a login flow — CodexLoginFlow implements this; tests can fake it. */
@@ -424,7 +432,7 @@ export async function refreshAccessToken(
 export function buildVaultCredential(
   tokens: TokenResponse,
   now: () => number,
-  prior?: { accountId?: string; email?: string; planType?: string }
+  prior?: { accountId?: string; email?: string; planType?: string; userId?: string }
 ): VaultCredential {
   const cred: VaultCredential = {
     type: 'oauth',
@@ -435,9 +443,11 @@ export function buildVaultCredential(
   const accountId = extractAccountId(tokens) ?? prior?.accountId
   const email = extractEmail(tokens) ?? prior?.email
   const planType = extractPlanType(tokens) ?? prior?.planType
+  const userId = extractUserId(tokens) ?? prior?.userId
   if (accountId) cred.accountId = accountId
   if (email) cred.email = email
   if (planType) cred.planType = planType
+  if (userId) cred.userId = userId
   return cred
 }
 

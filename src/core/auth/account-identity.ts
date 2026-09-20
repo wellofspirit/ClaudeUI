@@ -69,7 +69,7 @@ export function accountIdentityFromAuthEntry(params: {
       (typeof e.accountId === 'string' ? e.accountId : '') ||
       (accessToken ? (extractAccountId({ access_token: accessToken }) ?? '') : '')
     if (!accountId) return native
-    return chatgptIdentity(accountId, accessToken)
+    return chatgptAccountIdentity({ accountId, accessToken })
   }
 
   // A non-oauth entry carrying a `key`: 'api' on opencode, 'api_key' on pi,
@@ -86,16 +86,44 @@ export function accountIdentityFromAuthEntry(params: {
   return native
 }
 
+/** The vendor id the ChatGPT provider goes by outside an engine's own store. */
+const CHATGPT_VENDOR_ID = 'openai'
+
+/**
+ * Codex signed in on its own, with no vault account behind the session
+ * (ADR-071 §3's "credentials an engine holds and we cannot identify").
+ */
+export function codexNativeIdentity(): AccountIdentity {
+  return {
+    accountKey: nativeAccountKey('codex', CHATGPT_VENDOR_ID),
+    accountLabel: CHATGPT_VENDOR_ID
+  }
+}
+
 /**
  * The ChatGPT half: the user claim, or the lowercased email when the token
  * carries none. The label is the email with the plan beside it, so two
  * subscriptions under one email can be told apart on screen.
+ *
+ * `stored` is what a caller has already PERSISTED about the account — the
+ * vault keeps the email, the plan and (since S2a2) the user id beside the
+ * credential. The token wins nothing and loses nothing by it: the vault's
+ * stored fields were parsed out of the same token by `buildVaultCredential`,
+ * so a vault account and an engine's `auth.json` holding one token resolve to
+ * one key. Stored values come FIRST only so an account whose latest refresh
+ * dropped the profile claims keeps the identity its login established.
  */
-function chatgptIdentity(accountId: string, accessToken: string | undefined): AccountIdentity {
+export function chatgptAccountIdentity(params: {
+  accountId: string
+  accessToken?: string
+  stored?: { userId?: string; email?: string; planType?: string }
+}): AccountIdentity {
+  const { accountId, accessToken, stored } = params
   const tokens = { access_token: accessToken }
-  const email = accessToken ? extractEmail(tokens) : undefined
-  const plan = accessToken ? extractPlanType(tokens) : undefined
-  const user = (accessToken ? extractUserId(tokens) : undefined) ?? email?.toLowerCase()
+  const email = stored?.email ?? (accessToken ? extractEmail(tokens) : undefined)
+  const plan = stored?.planType ?? (accessToken ? extractPlanType(tokens) : undefined)
+  const user =
+    stored?.userId ?? (accessToken ? extractUserId(tokens) : undefined) ?? email?.toLowerCase()
 
   const name = email ?? 'ChatGPT'
   return {
