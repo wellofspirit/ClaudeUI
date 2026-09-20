@@ -53,15 +53,26 @@ export interface PkceCodes {
   challenge: string
 }
 
-/** Claims this module reads off the id_token (preferred) / access_token (fallback) JWT. */
+/**
+ * Claims this module reads off the id_token (preferred) / access_token (fallback) JWT.
+ *
+ * `chatgpt_user_id` (falling back to `user_id`) is the STABLE per-user claim
+ * ADR-071 §3 puts in the second half of a `chatgpt:` account key. Both live
+ * inside the `https://api.openai.com/auth` namespace on a real token — the
+ * top-level spellings mirror how `chatgpt_account_id` is read at both levels.
+ */
 export interface JwtClaims {
   chatgpt_account_id?: string
   chatgpt_plan_type?: string
+  chatgpt_user_id?: string
+  user_id?: string
   organizations?: Array<{ id: string }>
   email?: string
   'https://api.openai.com/auth'?: {
     chatgpt_account_id?: string
     chatgpt_plan_type?: string
+    chatgpt_user_id?: string
+    user_id?: string
   }
 }
 
@@ -231,6 +242,11 @@ function planTypeFromClaims(claims: JwtClaims): string | undefined {
   return claims['https://api.openai.com/auth']?.chatgpt_plan_type || claims.chatgpt_plan_type
 }
 
+function userIdFromClaims(claims: JwtClaims): string | undefined {
+  const ns = claims['https://api.openai.com/auth']
+  return ns?.chatgpt_user_id || ns?.user_id || claims.chatgpt_user_id || claims.user_id
+}
+
 /** id_token preferred, access_token fallback; claim priority: chatgpt_account_id → the auth-namespace claim → organizations[0].id. */
 export function extractAccountId(tokens: {
   id_token?: string
@@ -261,6 +277,27 @@ export function extractPlanType(tokens: {
   if (tokens.access_token) {
     const claims = parseJwtClaims(tokens.access_token)
     return claims ? planTypeFromClaims(claims) : undefined
+  }
+  return undefined
+}
+
+/**
+ * Same id_token-preferred/access_token-fallback priority as extractAccountId,
+ * for the stable user claim (`chatgpt_user_id`, then `user_id`) — the user half
+ * of ADR-071 §3's `chatgpt:<account>:<user>` key.
+ */
+export function extractUserId(tokens: {
+  id_token?: string
+  access_token?: string
+}): string | undefined {
+  if (tokens.id_token) {
+    const claims = parseJwtClaims(tokens.id_token)
+    const userId = claims && userIdFromClaims(claims)
+    if (userId) return userId
+  }
+  if (tokens.access_token) {
+    const claims = parseJwtClaims(tokens.access_token)
+    return claims ? userIdFromClaims(claims) : undefined
   }
   return undefined
 }

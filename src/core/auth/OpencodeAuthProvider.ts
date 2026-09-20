@@ -23,6 +23,8 @@ import { invalidateOpencodeModelCache } from '../opencode/model-discovery'
 import { readJsonFileForWrite, writeJsonAtomic } from '../services/write-json-atomic'
 import { logger } from '../services/logger'
 import type { VendorAuthMap, VendorAuthOption, AccountRef, AuthState } from '../../shared/types'
+import type { AccountIdentity } from '../../shared/account-key'
+import { AuthFileIdentityCache } from './account-identity'
 import type { EngineAuthProvider } from './EngineAuthProvider'
 import { FREE_OPENCODE_VENDOR_IDS } from '../../shared/engine-meta'
 import type { CodexCredentialInput, CodexEntrySnapshot } from './vault/CredentialSync'
@@ -30,6 +32,14 @@ import type { CodexCredentialInput, CodexEntrySnapshot } from './vault/Credentia
 // Path resolution + the credential-type read live in opencode/auth-store.ts so
 // model-discovery can consult them for row-action availability without importing
 // this module (which would cycle: this file imports invalidateOpencodeModelCache).
+
+/**
+ * opencode's ChatGPT provider — the one vendor whose oauth entry names a
+ * subscription. Same literal as `CredentialSync.OPENCODE_CODEX_VENDOR_ID`,
+ * restated here because this file must not import that module at runtime (see
+ * the CredentialSync feed-target section below for why).
+ */
+const OPENCODE_CHATGPT_VENDOR_ID = 'openai'
 
 export class OpencodeAuthProvider implements EngineAuthProvider {
   /**
@@ -52,6 +62,18 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
    * `released` guards against double-release (idempotent teardown).
    */
   private oauthHold: { released: boolean } | null = null
+
+  /**
+   * ADR-071 §3 account identity, off opencode's own auth.json. Separate from
+   * `cachedVendorMap` on purpose: that one caches an HTTP probe and is dropped
+   * on every mutation, this one tracks the FILE, so a sign-in change made in a
+   * terminal is picked up without a probe.
+   */
+  private readonly identityCache = new AuthFileIdentityCache(
+    'opencode',
+    resolveOpencodeAuthJsonPath,
+    OPENCODE_CHATGPT_VENDOR_ID
+  )
 
   // -------------------------------------------------------------------------
   // EngineAuthProvider interface
@@ -399,6 +421,18 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
       authState: entry.authState,
       label: entry.label
     }
+  }
+
+  /**
+   * Which ACCOUNT this vendor's turns run under (ADR-071 §3) — the key that
+   * identifies the same subscription on every machine, plus a display label.
+   *
+   * Returns nothing else: no token, no key, no claim dump. Synchronous because
+   * a usage row is written from a synchronous path. An unreadable auth.json
+   * gives `opencode:<vendor>:native`, which is the honest answer, not an error.
+   */
+  accountIdentity(vendorId: string): AccountIdentity {
+    return this.identityCache.identity(vendorId)
   }
 
   /** Warm the probe cache eagerly (call at app start or on first opencode use). */
