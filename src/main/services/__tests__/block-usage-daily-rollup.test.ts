@@ -68,7 +68,7 @@ function claudeEvent(
   id: string,
   ts: number,
   inputTokens: number
-): import('../../../core/services/db').UsageEventRow {
+): import('../../../core/services/db').UsageEventInsert {
   return {
     id,
     ts,

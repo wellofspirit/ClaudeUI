@@ -204,6 +204,22 @@ vi.mock('../command-skill-discovery', () => ({
   discoverOpencodeSkills: mockDiscoverOpencodeSkills
 }))
 
+// recordTurnUsage asks this provider which account a row belongs to
+// (ADR-071 §3). Mocked, because the real one reads opencode's own auth.json
+// out of the HOST's data dir: a suite that consults the dev machine's sign-in
+// state is not hermetic, and must never touch a real credential file.
+vi.mock('../../auth/OpencodeAuthProvider', () => ({
+  opencodeAuthProvider: {
+    probe: vi.fn().mockResolvedValue({}),
+    warmCache: vi.fn().mockResolvedValue(undefined),
+    buildAccountRef: vi.fn().mockReturnValue(null),
+    accountIdentity: vi.fn((vendorId: string) => ({
+      accountKey: `opencode:${vendorId}:native`,
+      accountLabel: vendorId
+    }))
+  }
+}))
+
 // ---------------------------------------------------------------------------
 // Import the system under test AFTER mocking
 // ---------------------------------------------------------------------------
@@ -4200,12 +4216,23 @@ describe('OpencodeSession — Phase 9a: meter subagent under child model', () =>
     expect(childRow!.sessionId).toBe(CHILD_SES)
     expect(childRow!.inputTokens).toBe(200)
     expect(childRow!.outputTokens).toBe(100)
+    // ADR-071 §1: a subagent's row says it is a child and names the session
+    // that spawned it, so its spend can be traced back to what caused it.
+    expect(childRow!.origin).toBe('child')
+    expect(childRow!.parentRoutingId).toBe('routing_id_1')
+    // ...and it is attributed to the CHILD vendor's account, not the parent's.
+    expect(childRow!.accountKey).toBe('opencode:anthropic:native')
+    expect(childRow!.accountLabel).toBe('anthropic')
 
     // Parent row must be attributed to parent model (openai/gpt-4o)
     const parentRow = getUsageEventByMessageId('msg_par_9a_cost')!
     expect(parentRow.vendorId).toBe('openai')
     expect(parentRow.modelId).toBe('gpt-4o')
     expect(parentRow.sessionId).toBe(PARENT_SES)
+    // The session's own turn is not a child and names no parent.
+    expect(parentRow.origin).toBe('session')
+    expect(parentRow.parentRoutingId).toBeNull()
+    expect(parentRow.accountKey).toBe('opencode:openai:native')
 
     session.dispose()
   })

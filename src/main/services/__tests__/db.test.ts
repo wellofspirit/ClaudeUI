@@ -202,7 +202,9 @@ describe('migration framework — user_version guard', () => {
       //      re-probing every session_meta id the native list omits
       // v17: codex_forks becomes a LINEAGE CACHE (roots too), so the delete
       //      plan is a cache read instead of a sweep
-      expect(userVersion(db)).toBe(17)
+      // v18: usage_event gains ADR-071's account, billing-type, origin and
+      //      two derived cost columns
+      expect(userVersion(db)).toBe(18)
       expect(db.prepare('SELECT * FROM codex_session_overrides').all()).toEqual([])
       expect(db.prepare('SELECT * FROM codex_forks').all()).toEqual([])
       // session_meta must exist and be queryable.
@@ -283,7 +285,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(17)
+      expect(userVersion(db)).toBe(18)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',
@@ -427,7 +429,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(17)
+      expect(userVersion(db)).toBe(18)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         auth_policy: null,
         step_up_tier: 'medium',

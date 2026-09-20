@@ -238,6 +238,13 @@ export function piModel(vendorId: VendorId, modelId: string): ModelRef {
 export type BillingType = 'subscription' | 'apiKey' | 'free' | 'unknown'
 
 /**
+ * Where a metered turn came from (ADR-071 §1). 'child' is a native subagent or
+ * a Codex child thread; 'dispatch' is a cross-engine dispatch (ADR-033), which
+ * counts in dashboard totals but not in the dispatching session's headline.
+ */
+export type UsageOrigin = 'session' | 'child' | 'dispatch'
+
+/**
  * Resolved tri-state auth status for a single (engine, vendor) pair.
  * 'authenticated'   — engine has confirmed valid credentials
  * 'unauthenticated' — engine has confirmed no / expired credentials

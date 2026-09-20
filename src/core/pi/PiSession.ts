@@ -1327,7 +1327,10 @@ export class PiSession extends BaseSession {
         }
         break
 
-      case 'usage':
+      case 'usage': {
+        // ADR-071 §3: the account this vendor's turns run under, read from
+        // pi's own auth.json per turn.
+        const identity = piAuthProvider.accountIdentity(output.provider)
         recordUsageEvent({
           engineId: 'pi',
           vendorId: output.provider,
@@ -1348,7 +1351,16 @@ export class PiSession extends BaseSession {
           engineCostUsd: output.costUsd,
           sessionId: this.piSessionId,
           messageId: output.messageId,
-          source: 'live'
+          source: 'live',
+          accountKey: identity.accountKey,
+          accountLabel: identity.accountLabel,
+          billingType: piAuthProvider.buildPiAccountRef(output.provider)?.billingType ?? 'unknown',
+          origin: 'session',
+          parentRoutingId: null,
+          // pi reports a LIST PRICE, not a charge: its catalog knows
+          // long-context tiers our table does not (S1b), but the figure is the
+          // same whether the credential is a subscription or an API key.
+          engineCostIsEquivalent: true
         })
         // ADR-071 §2: the headline follows the cost rule, so what this message
         // adds is its DISPLAY cost — pi's own figure only when the rule says
@@ -1364,6 +1376,7 @@ export class PiSession extends BaseSession {
         this.lastContextLength = output.tokens.input + output.tokens.cacheRead
         this.sendStatusLine()
         break
+      }
 
       case 'subagent_update':
         this.handleSubagentUpdate(output.toolUseId, output.payload)
@@ -1485,6 +1498,7 @@ export class PiSession extends BaseSession {
           if (oldest !== undefined) this.recordedSubagentUsage.delete(oldest)
         }
         const ref = engineMeta('pi').decodeModelValue(agent.model ?? this._model)
+        const identity = piAuthProvider.accountIdentity(ref.vendorId)
         recordUsageEvent({
           engineId: 'pi',
           vendorId: ref.vendorId,
@@ -1501,7 +1515,15 @@ export class PiSession extends BaseSession {
           engineCostUsd: agent.usage.cost,
           sessionId: this.piSessionId,
           messageId: `subagent-${toolUseId}-${agent.agent}-${index}`,
-          source: 'live'
+          source: 'live',
+          accountKey: identity.accountKey,
+          accountLabel: identity.accountLabel,
+          billingType: piAuthProvider.buildPiAccountRef(ref.vendorId)?.billingType ?? 'unknown',
+          // A subagent's spend is its own row, attributed back to the session
+          // that spawned it (ADR-071 §1).
+          origin: 'child',
+          parentRoutingId: this.routingId,
+          engineCostIsEquivalent: true
         })
       }
     })

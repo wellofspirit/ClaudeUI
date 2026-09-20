@@ -137,6 +137,10 @@ vi.mock('../command-skill-discovery', () => ({
 vi.mock('../../auth/OpencodeAuthProvider', () => ({
   opencodeAuthProvider: {
     buildAccountRef: mockBuildAccountRef,
+    accountIdentity: vi.fn((vendorId: string) => ({
+      accountKey: `opencode:${vendorId}:native`,
+      accountLabel: vendorId
+    })),
     warmCache: vi.fn().mockResolvedValue(undefined)
   }
 }))

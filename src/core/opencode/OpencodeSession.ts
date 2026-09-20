@@ -6,6 +6,7 @@ import { OpencodeClient } from './OpencodeClient'
 import { BaseSession } from '../providers/BaseSession'
 import type { EngineSpawnOptions } from '../providers/ISession'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
+import type { AccountIdentity } from '../../shared/account-key'
 import { resolveOpencodeCapabilities } from '../../shared/model-capabilities'
 import type {
   ChatMessage,
@@ -2300,6 +2301,20 @@ export class OpencodeSession extends BaseSession {
   private recordTurnUsage(): void {
     const parsed = parseModelString(this._model)
     const ownAccount = opencodeAuthProvider.buildAccountRef(parsed.providerID)
+    // ADR-071 §3: which account this vendor's turns run under, read per TURN
+    // (so a sign-in change between turns attributes each turn to the account
+    // that actually ran it) but once per provider id, not once per message —
+    // a turn's child accumulators are usually all on the same provider.
+    const identities = new Map<string, AccountIdentity>()
+    const identityFor = (providerID: string): AccountIdentity => {
+      let identity = identities.get(providerID)
+      if (!identity) {
+        identity = opencodeAuthProvider.accountIdentity(providerID)
+        identities.set(providerID, identity)
+      }
+      return identity
+    }
+    const ownIdentity = identityFor(parsed.providerID)
 
     for (const [messageId, acc] of this.accumulators) {
       // Only record assistant messages that have cost or token data
@@ -2362,7 +2377,14 @@ export class OpencodeSession extends BaseSession {
           engineCostUsd: acc.cost ?? null,
           sessionId: this.openSessionId,
           messageId,
-          source: 'live'
+          source: 'live',
+          accountKey: ownIdentity.accountKey,
+          accountLabel: ownIdentity.accountLabel,
+          billingType: ownAccount?.billingType ?? 'unknown',
+          origin: 'session',
+          parentRoutingId: null,
+          // opencode's `cost` is what it charged, not a list-price estimate.
+          engineCostIsEquivalent: false
         })
       } else {
         // Child (subagent) message — attribute to the CHILD's own model + session.
@@ -2375,6 +2397,7 @@ export class OpencodeSession extends BaseSession {
           continue
         }
         const childAccount = opencodeAuthProvider.buildAccountRef(acc.model.providerID)
+        const childIdentity = identityFor(acc.model.providerID)
         recordUsageEvent({
           engineId: 'opencode',
           vendorId: acc.model.providerID,
@@ -2391,7 +2414,15 @@ export class OpencodeSession extends BaseSession {
           engineCostUsd: acc.cost ?? null,
           sessionId: acc.childSessionId ?? null,
           messageId,
-          source: 'live'
+          source: 'live',
+          accountKey: childIdentity.accountKey,
+          accountLabel: childIdentity.accountLabel,
+          billingType: childAccount?.billingType ?? 'unknown',
+          // A subagent's spend is its own row, attributed back to the session
+          // that spawned it (ADR-071 §1).
+          origin: 'child',
+          parentRoutingId: this.routingId,
+          engineCostIsEquivalent: false
         })
       }
     }

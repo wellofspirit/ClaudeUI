@@ -26,13 +26,16 @@ import * as path from 'path'
 import * as os from 'os'
 import { getSqliteDriver, setDbOpenProbe, type SqliteDatabase } from './sqlite-driver'
 import type {
+  BillingType,
   EngineId,
   ModelRef,
   AccountInfo,
   DispatchedUsageSummary,
   RemoteAuthPolicy,
-  StepUpTier
+  StepUpTier,
+  UsageOrigin
 } from '../../shared/types'
+import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
 import { engineMeta } from '../../shared/engine-meta'
 import { logger } from './logger'
 
@@ -59,7 +62,46 @@ export interface UsageEventRow {
   sessionId: string | null
   messageId: string
   source: 'live' | 'backfill'
+  // -- ADR-071 §1, migration v18 ------------------------------------------
+  /** Machine-independent account identity (ADR-071 §3). 'unknown' predates the ADR. */
+  accountKey: string
+  /** What a person calls the account. Display only. */
+  accountLabel: string | null
+  /** The billing type as it stood when the row was written. */
+  billingType: BillingType
+  /** Where the turn came from. */
+  origin: UsageOrigin
+  /** The dispatching or spawning session, for 'child' and 'dispatch' rows. */
+  parentRoutingId: string | null
+  /** Tokens at list price. Null when the model has no known price. */
+  apiCostUsd: number | null
+  /** Money that left a wallet. Null when we cannot know. */
+  billedCostUsd: number | null
 }
+
+/**
+ * What a WRITER has to supply. The seven ADR-071 columns are optional here and
+ * only here, so that a row built against the pre-v18 shape still compiles down
+ * onto its SQL defaults ('unknown' / 'session' / NULL).
+ *
+ * That is a concession to old test fixtures, NOT a licence for product code:
+ * `recordUsageEvent` and the reconciler's row builders pass all seven
+ * explicitly, every time, so a new call site cannot quietly skip attribution.
+ */
+export type UsageEventInsert = Omit<UsageEventRow, keyof UsageEventAttribution> &
+  Partial<UsageEventAttribution>
+
+/** The v18 columns, named once so the insert type can make exactly them optional. */
+type UsageEventAttribution = Pick<
+  UsageEventRow,
+  | 'accountKey'
+  | 'accountLabel'
+  | 'billingType'
+  | 'origin'
+  | 'parentRoutingId'
+  | 'apiCostUsd'
+  | 'billedCostUsd'
+>
 
 /** One window-utilization sample (feeds WLS apiPercent series + block alignment). */
 export interface WindowSampleRow {
@@ -614,6 +656,60 @@ export const MIGRATIONS: Migration[] = [
         ALTER TABLE codex_forks ADD COLUMN verified_at INTEGER;
         ALTER TABLE codex_forks ADD COLUMN lineage_checked_at INTEGER;
         DELETE FROM codex_forks WHERE thread_id = '';
+      `)
+    }
+  },
+  {
+    // v18 — ADR-071 §1: usage_event becomes THE ledger.
+    //
+    // Seven columns, in three groups:
+    //
+    //  - WHO. `account_key` is the machine-independent account identity (§3),
+    //    so the same subscription is one account on every machine and in the
+    //    hub; `account_label` is the display half. A row that predates this
+    //    migration keeps `'unknown'` and still counts in totals (owner ruling,
+    //    2026-09-20) — there is no way to learn after the fact which account
+    //    ran it.
+    //  - WHAT KIND. `billing_type` is captured AT WRITE TIME, because the
+    //    answer changes: the same vendor can be a subscription this week and
+    //    an API key the next, and a row priced under one rule must not be
+    //    re-read under the other. `origin` and `parent_routing_id` say whether
+    //    the turn was the session's own, a subagent's, or dispatched work, and
+    //    from where.
+    //  - HOW MUCH. `api_cost_usd` and `billed_cost_usd` are cost-rule.ts's two
+    //    figures, derived ONCE at write time from `equiv_cost_usd` and
+    //    `engine_cost_usd`, which stay exactly as they are: the raw inputs.
+    //
+    // The backfill fills `api_cost_usd` with the row's best LIST-PRICE figure.
+    // For most engines that is `equiv_cost_usd`. For a CLAUDE row it is
+    // `engine_cost_usd` when there is one: both of a Claude row's figures are
+    // equivalents (cli.js reports an equivalent whatever the plan, ADR-034),
+    // and the engine one is the precise of the two — it prices the 1h cache
+    // tier, where the table figure treats every cache write as 5m. That is
+    // also the figure `selectRowCostUsd` shows today, so switching the
+    // dashboard to this column cannot move a historical total. The live Claude
+    // row builders apply the same rule (usage-recorder's backfillAttribution).
+    //
+    // `billed_cost_usd` stays NULL on every migrated row: the billing type of
+    // an old row is not known, and NULL is how this schema says unknown
+    // (ADR-030). It is never summed as zero.
+    version: 18,
+    up(db) {
+      db.exec(`
+        ALTER TABLE usage_event ADD COLUMN account_key TEXT NOT NULL DEFAULT 'unknown';
+        ALTER TABLE usage_event ADD COLUMN account_label TEXT;
+        ALTER TABLE usage_event ADD COLUMN billing_type TEXT NOT NULL DEFAULT 'unknown';
+        ALTER TABLE usage_event ADD COLUMN origin TEXT NOT NULL DEFAULT 'session';
+        ALTER TABLE usage_event ADD COLUMN parent_routing_id TEXT;
+        ALTER TABLE usage_event ADD COLUMN api_cost_usd REAL;
+        ALTER TABLE usage_event ADD COLUMN billed_cost_usd REAL;
+        CREATE INDEX IF NOT EXISTS idx_usage_event_account_key_ts
+          ON usage_event(account_key, ts);
+        UPDATE usage_event SET api_cost_usd = CASE
+          WHEN engine_id = 'claude' AND engine_cost_usd IS NOT NULL AND engine_cost_usd > 0
+            THEN engine_cost_usd
+          ELSE equiv_cost_usd
+        END;
       `)
     }
   }
@@ -1227,6 +1323,13 @@ interface UsageEventDbRow {
   session_id: string | null
   message_id: string
   source: string
+  account_key: string
+  account_label: string | null
+  billing_type: string
+  origin: string
+  parent_routing_id: string | null
+  api_cost_usd: number | null
+  billed_cost_usd: number | null
 }
 
 function rowToUsageEvent(row: UsageEventDbRow): UsageEventRow {
@@ -1247,7 +1350,17 @@ function rowToUsageEvent(row: UsageEventDbRow): UsageEventRow {
     engineCostUsd: row.engine_cost_usd,
     sessionId: row.session_id,
     messageId: row.message_id,
-    source: row.source as 'live' | 'backfill'
+    source: row.source as 'live' | 'backfill',
+    accountKey: row.account_key,
+    accountLabel: row.account_label,
+    // Both are stored strings, so a row written by a newer build (or hand-
+    // edited) can carry a value this build has no name for. cost-rule.ts's
+    // `default` branch is the conservative fallback for exactly that.
+    billingType: row.billing_type as BillingType,
+    origin: row.origin as UsageOrigin,
+    parentRoutingId: row.parent_routing_id,
+    apiCostUsd: row.api_cost_usd,
+    billedCostUsd: row.billed_cost_usd
   }
 }
 
@@ -1257,18 +1370,16 @@ const INSERT_USAGE_EVENT_SQL = `
     model_id, input_tokens, output_tokens,
     cache_write_tokens, cache_write_1h_tokens, cache_read_tokens,
     equiv_cost_usd, engine_cost_usd,
-    session_id, message_id, source
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    session_id, message_id, source,
+    account_key, account_label, billing_type, origin, parent_routing_id,
+    api_cost_usd, billed_cost_usd
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(message_id) DO NOTHING
 `
 
-/**
- * Insert a single usage event. Idempotent on message_id — duplicate inserts
- * (live turn + reconciler for the same turn) are silently dropped.
- */
-export function insertUsageEvent(event: UsageEventRow): void {
-  const db = getDb()
-  db.prepare(INSERT_USAGE_EVENT_SQL).run(
+/** The bound parameters for {@link INSERT_USAGE_EVENT_SQL}, in column order. */
+function usageEventParams(event: UsageEventInsert): unknown[] {
+  return [
     event.id,
     event.ts,
     event.engineId,
@@ -1285,44 +1396,41 @@ export function insertUsageEvent(event: UsageEventRow): void {
     event.engineCostUsd ?? null,
     event.sessionId ?? null,
     event.messageId,
-    event.source
-  )
+    event.source,
+    // The three NOT NULL v18 columns mirror their SQL defaults here rather
+    // than relying on them, so one statement covers every writer.
+    event.accountKey ?? UNKNOWN_ACCOUNT_KEY,
+    event.accountLabel ?? null,
+    event.billingType ?? 'unknown',
+    event.origin ?? 'session',
+    event.parentRoutingId ?? null,
+    event.apiCostUsd ?? null,
+    event.billedCostUsd ?? null
+  ]
+}
+
+/**
+ * Insert a single usage event. Idempotent on message_id — duplicate inserts
+ * (live turn + reconciler for the same turn) are silently dropped.
+ */
+export function insertUsageEvent(event: UsageEventInsert): void {
+  const db = getDb()
+  db.prepare(INSERT_USAGE_EVENT_SQL).run(...usageEventParams(event))
 }
 
 /**
  * Batch-insert usage events. Each event is inserted idempotently; the batch
  * runs in a single transaction for efficiency.
  */
-export function insertUsageEvents(events: UsageEventRow[]): void {
+export function insertUsageEvents(events: UsageEventInsert[]): void {
   if (events.length === 0) return
   const db = getDb()
   const stmt = db.prepare(INSERT_USAGE_EVENT_SQL)
-  const insertOne = (event: UsageEventRow): void => {
-    stmt.run(
-      event.id,
-      event.ts,
-      event.engineId,
-      event.vendorId,
-      event.accountId ?? null,
-      event.accountUuid ?? null,
-      event.modelId,
-      event.inputTokens,
-      event.outputTokens,
-      event.cacheWriteTokens,
-      event.cacheWrite1hTokens,
-      event.cacheReadTokens,
-      event.equivCostUsd ?? null,
-      event.engineCostUsd ?? null,
-      event.sessionId ?? null,
-      event.messageId,
-      event.source
-    )
-  }
   // Wrap in a manual BEGIN/COMMIT for bulk efficiency. This is the same pattern
   // the reconciler will use in Pass 2 (bulk JSONL backfill).
   db.prepare('BEGIN').run()
   try {
-    for (const event of events) insertOne(event)
+    for (const event of events) stmt.run(...usageEventParams(event))
     db.prepare('COMMIT').run()
   } catch (err) {
     db.prepare('ROLLBACK').run()
@@ -1783,6 +1891,21 @@ export function dispatchedCostsByRouting(
 export function renameDispatchedUsage(oldRoutingId: string, newRoutingId: string): void {
   const db = getDb()
   db.prepare('UPDATE dispatched_usage SET from_routing_id = ? WHERE from_routing_id = ?').run(
+    newRoutingId,
+    oldRoutingId
+  )
+}
+
+/**
+ * The same rename for `usage_event.parent_routing_id` (ADR-071 §1). A `child`
+ * or `dispatch` row names the session that spawned the work, and a subagent
+ * turn can finish while the session is still on its renderer-minted temporary
+ * id — so without this the row keeps pointing at an id that no longer exists
+ * and its spend can never be traced back to the session that caused it.
+ */
+export function renameUsageEventParent(oldRoutingId: string, newRoutingId: string): void {
+  const db = getDb()
+  db.prepare('UPDATE usage_event SET parent_routing_id = ? WHERE parent_routing_id = ?').run(
     newRoutingId,
     oldRoutingId
   )

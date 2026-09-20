@@ -211,7 +211,11 @@ vi.mock('../PiBridgeHost', () => ({
 vi.mock('../../auth/PiAuthProvider', () => ({
   piAuthProvider: {
     probe: vi.fn().mockResolvedValue({}),
-    buildPiAccountRef: vi.fn().mockReturnValue(null)
+    buildPiAccountRef: vi.fn().mockReturnValue(null),
+    accountIdentity: vi.fn((vendorId: string) => ({
+      accountKey: `pi:${vendorId}:native`,
+      accountLabel: vendorId
+    }))
   }
 }))
 vi.mock('node:fs', () => ({ existsSync: vi.fn().mockReturnValue(false) }))

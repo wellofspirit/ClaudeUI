@@ -36,9 +36,9 @@ describe('DB migration — v6 dispatched_usage', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      // Bump alongside MIGRATIONS in db.ts — currently v17 (codex_forks
-      // generalised into the Codex lineage cache ADR-066 plans deletes from).
-      expect(userVersion(db)).toBe(17)
+      // Bump alongside MIGRATIONS in db.ts — currently v18 (usage_event
+      // gained ADR-071's account, billing-type, origin and two cost columns).
+      expect(userVersion(db)).toBe(18)
     } finally {
       db.close()
     }

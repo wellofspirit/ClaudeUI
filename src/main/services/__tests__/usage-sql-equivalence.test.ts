@@ -23,7 +23,7 @@ import {
   recordWindowSample,
   upsertDailyUsage,
   getAllDailyUsage,
-  type UsageEventRow,
+  type UsageEventInsert,
   type DailyUsageRow,
   type WindowSampleRow
 } from '../../../core/services/db'
@@ -81,7 +81,7 @@ function oldEntriesToAgg(entries: ParsedEntry[]): AggEntry[] {
 // ---------------------------------------------------------------------------
 
 function upsertClaudeEntries(entries: ParsedEntry[]): void {
-  const rows: UsageEventRow[] = []
+  const rows: UsageEventInsert[] = []
   for (const e of entries) {
     if (!e.messageId) continue
     const equiv = equivalentCostUsd('anthropic', e.model, {

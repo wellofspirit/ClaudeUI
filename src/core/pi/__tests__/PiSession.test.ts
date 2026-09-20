@@ -69,6 +69,7 @@ const {
   mockHomedir,
   mockPiAuthProbe,
   mockBuildPiAccountRef,
+  mockPiAccountIdentity,
   mockCreateMermaidServer,
   mockMermaidHandler,
   mockCreateMockupServer,
@@ -329,6 +330,10 @@ const {
     // ~/.pi/agent/auth.json from a unit test regardless.
     mockPiAuthProbe: vi.fn().mockResolvedValue({}),
     mockBuildPiAccountRef: vi.fn().mockReturnValue(null),
+    mockPiAccountIdentity: vi.fn((vendorId: string) => ({
+      accountKey: `pi:${vendorId}:native`,
+      accountLabel: vendorId
+    })),
     mockCreateMermaidServer,
     mockMermaidHandler,
     mockCreateMockupServer,
@@ -390,7 +395,11 @@ vi.mock('../PiBridgeHost', () => ({
   writeSubagentExtension: mockWriteSubagentExtension
 }))
 vi.mock('../../auth/PiAuthProvider', () => ({
-  piAuthProvider: { probe: mockPiAuthProbe, buildPiAccountRef: mockBuildPiAccountRef }
+  piAuthProvider: {
+    probe: mockPiAuthProbe,
+    buildPiAccountRef: mockBuildPiAccountRef,
+    accountIdentity: mockPiAccountIdentity
+  }
 }))
 vi.mock('node:fs', () => ({ existsSync: mockExistsSync }))
 // `tmpdir` is part of the mock because ground-truth.ts's redirect scope reads
@@ -539,6 +548,7 @@ beforeEach(() => {
   mockHomedir.mockClear().mockReturnValue('/fake/home')
   mockPiAuthProbe.mockReset().mockResolvedValue({})
   mockBuildPiAccountRef.mockReset().mockReturnValue(null)
+  mockPiAccountIdentity.mockClear()
   mockCreateMermaidServer.mockClear()
   mockMermaidHandler
     .mockReset()
@@ -4641,7 +4651,16 @@ describe('PiSession — in-pi subagents (M5b) — usage attribution', () => {
       engineCostUsd: 0.0123,
       sessionId: 'pi-sess-1',
       messageId: 'subagent-outer-call-usage-1-echoer-0',
-      source: 'live'
+      source: 'live',
+      // ADR-071 §1: a subagent row names the account it ran under and the
+      // session that spawned it.
+      accountKey: 'pi:anthropic:native',
+      accountLabel: 'anthropic',
+      billingType: 'apiKey',
+      origin: 'child',
+      parentRoutingId: 'rid-subagent-usage-1',
+      // pi reports a list price, not a charge (S1b).
+      engineCostIsEquivalent: true
     })
   })
 

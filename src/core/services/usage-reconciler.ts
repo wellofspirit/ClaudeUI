@@ -31,9 +31,11 @@
  */
 
 import { v4 as uuid } from 'uuid'
-import { insertUsageEvents, type UsageEventRow } from './db'
+import { insertUsageEvents, type UsageEventInsert } from './db'
 import { blockUsageService } from './block-usage'
 import { equivalentCostUsd } from '../../shared/pricing'
+import { backfillAttribution } from './usage-recorder'
+import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { logger } from './logger'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
@@ -93,7 +95,7 @@ class UsageReconciler {
       const entries = await blockUsageService.getClaudeEntriesForReconcile()
       if (entries.length === 0) return
 
-      const rows: UsageEventRow[] = []
+      const rows: UsageEventInsert[] = []
       for (const e of entries) {
         if (!e.messageId) continue // dedup key required; skip if missing
         const equiv = equivalentCostUsd('anthropic', e.model, {
@@ -126,7 +128,17 @@ class UsageReconciler {
           engineCostUsd: e.costUsd,
           sessionId: null,
           messageId: e.messageId,
-          source: 'backfill'
+          source: 'backfill',
+          // A transcript records no account and no billing type: it may have
+          // run under a subscription, an API key or Bedrock, and ADR-011's
+          // time-based attribution is a separate question (S2a2). 'unknown'
+          // is the honest value for both, not a guess.
+          ...backfillAttribution({
+            billingType: 'unknown',
+            equivCostUsd: equiv ?? e.costUsd,
+            engineCostUsd: e.costUsd,
+            engineCostIsEquivalent: true
+          })
         })
       }
 
@@ -166,7 +178,12 @@ class UsageReconciler {
       acquired = true
       const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
 
-      const rows: UsageEventRow[] = []
+      // Warm the billing-type source while we hold the server anyway, so the
+      // rows below can say how each vendor was billed instead of 'unknown'.
+      // A cached probe costs nothing; a failed one degrades to {}.
+      await opencodeAuthProvider.probe().catch(() => ({}))
+
+      const rows: UsageEventInsert[] = []
       for (const session of sessions) {
         const messages = await client.listMessages(session.sessionId).catch(() => [])
         for (const m of messages) {
@@ -197,7 +214,7 @@ class UsageReconciler {
   private opencodeMessageToRow(
     info: Record<string, unknown> | undefined,
     sessionId: string
-  ): UsageEventRow | null {
+  ): UsageEventInsert | null {
     if (!info) return null
     const role = info.role as string | undefined
     if (role !== 'assistant') return null
@@ -254,7 +271,18 @@ class UsageReconciler {
       engineCostUsd: engineCost,
       sessionId,
       messageId,
-      source: 'backfill'
+      source: 'backfill',
+      // The account and the billing type come from opencode's own stored
+      // credential, so a terminal run lands on the same account key as one
+      // this app drove (ADR-071 §3).
+      ...backfillAttribution({
+        ...opencodeAuthProvider.accountIdentity(providerID),
+        billingType: opencodeAuthProvider.buildAccountRef(providerID)?.billingType ?? 'unknown',
+        equivCostUsd: equiv,
+        engineCostUsd: engineCost,
+        // opencode's `info.cost` is what it charged, not an equivalent.
+        engineCostIsEquivalent: false
+      })
     }
   }
 }

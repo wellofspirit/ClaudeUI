@@ -20,6 +20,9 @@ const {
   mockRelease,
   mockListSessionsGlobal,
   mockListMessages,
+  mockOpencodeProbe,
+  mockBuildAccountRef,
+  mockAccountIdentity,
   MockOpencodeClient
 } = vi.hoisted(() => ({
   mockGetClaudeEntries: vi.fn(),
@@ -27,6 +30,9 @@ const {
   mockRelease: vi.fn(),
   mockListSessionsGlobal: vi.fn(),
   mockListMessages: vi.fn(),
+  mockOpencodeProbe: vi.fn(),
+  mockBuildAccountRef: vi.fn(),
+  mockAccountIdentity: vi.fn(),
   MockOpencodeClient: vi.fn()
 }))
 
@@ -54,6 +60,19 @@ vi.mock('../../../core/services/persisted-sessions-dir', () => ({
   PERSISTED_SESSIONS_DIR: '/tmp/persisted-sessions'
 }))
 
+// The reconciler asks this provider which account and billing type an opencode
+// row belongs to (ADR-071 §3). Mocked, because the real one reads opencode's
+// own auth.json out of the HOST's data dir — a suite that consults the dev
+// machine's sign-in state is not hermetic, and must never touch a real
+// credential file at all.
+vi.mock('../../../core/auth/OpencodeAuthProvider', () => ({
+  opencodeAuthProvider: {
+    probe: mockOpencodeProbe,
+    buildAccountRef: mockBuildAccountRef,
+    accountIdentity: mockAccountIdentity
+  }
+}))
+
 import { usageReconciler } from '../../../core/services/usage-reconciler'
 import {
   closeDb,
@@ -61,10 +80,10 @@ import {
   insertUsageEvent,
   countUsageEvents,
   getUsageEventsSince,
-  type UsageEventRow
+  type UsageEventInsert
 } from '../../../core/services/db'
 
-function liveRow(overrides: Partial<UsageEventRow> = {}): UsageEventRow {
+function liveRow(overrides: Partial<UsageEventInsert> = {}): UsageEventInsert {
   return {
     id: 'live_1',
     ts: 1000,
@@ -94,6 +113,12 @@ beforeEach(() => {
   mockRelease.mockReset()
   mockListSessionsGlobal.mockReset()
   mockListMessages.mockReset()
+  mockOpencodeProbe.mockReset().mockResolvedValue({})
+  mockBuildAccountRef.mockReset().mockReturnValue(null)
+  mockAccountIdentity.mockReset().mockImplementation((vendorId: string) => ({
+    accountKey: `opencode:${vendorId}:native`,
+    accountLabel: vendorId
+  }))
   MockOpencodeClient.mockReset()
   MockOpencodeClient.mockImplementation(function () {
     return { listMessages: mockListMessages }
@@ -277,6 +302,75 @@ describe('reconcileOpencode', () => {
     expect(getUsageEventByMessageId('msg_oc_user')).toBeUndefined()
     // server released
     expect(mockRelease).toHaveBeenCalledWith('/tmp/persisted-sessions')
+  })
+
+  it('attributes each row to the account and billing type the auth provider reports', async () => {
+    mockAcquire.mockResolvedValue({ baseUrl: 'http://127.0.0.1:1', authHeader: 'Basic x' })
+    mockRelease.mockReturnValue(undefined)
+    mockListSessionsGlobal.mockResolvedValue([{ sessionId: 'ses_oc_attr' }])
+    mockAccountIdentity.mockReturnValue({
+      accountKey: 'chatgpt:acct_1:user_1',
+      accountLabel: 'someone@example.test (pro)'
+    })
+    mockBuildAccountRef.mockReturnValue({ billingType: 'subscription' })
+    mockListMessages.mockResolvedValue([
+      {
+        info: {
+          id: 'msg_oc_attr',
+          role: 'assistant',
+          providerID: 'openai',
+          modelID: 'gpt-4o',
+          cost: 0.013,
+          tokens: { input: 2000, output: 800, cache: { read: 0, write: 0 } },
+          time: { created: 8888 }
+        }
+      }
+    ])
+
+    await usageReconciler.reconcileOpencode()
+
+    const row = getUsageEventByMessageId('msg_oc_attr')!
+    expect(mockAccountIdentity).toHaveBeenCalledWith('openai')
+    expect(row.accountKey).toBe('chatgpt:acct_1:user_1')
+    expect(row.accountLabel).toBe('someone@example.test (pro)')
+    expect(row.billingType).toBe('subscription')
+    // A subscription bills nothing, whatever opencode reported.
+    expect(row.billedCostUsd).toBe(0)
+    expect(row.apiCostUsd).toBeCloseTo((2000 / 1e6) * 2.5 + (800 / 1e6) * 10)
+    // A backfilled row is never guessed to be a subagent's.
+    expect(row.origin).toBe('session')
+    expect(row.parentRoutingId).toBeNull()
+  })
+
+  it('falls back to an unknown account when the provider knows nothing', async () => {
+    mockAcquire.mockResolvedValue({ baseUrl: 'http://127.0.0.1:1', authHeader: 'Basic x' })
+    mockRelease.mockReturnValue(undefined)
+    mockListSessionsGlobal.mockResolvedValue([{ sessionId: 'ses_oc_unk' }])
+    mockAccountIdentity.mockReturnValue({
+      accountKey: 'opencode:openai:native',
+      accountLabel: 'openai'
+    })
+    mockListMessages.mockResolvedValue([
+      {
+        info: {
+          id: 'msg_oc_unk',
+          role: 'assistant',
+          providerID: 'openai',
+          modelID: 'gpt-4o',
+          cost: 0.02,
+          tokens: { input: 2000, output: 800 },
+          time: { created: 9999 }
+        }
+      }
+    ])
+
+    await usageReconciler.reconcileOpencode()
+
+    const row = getUsageEventByMessageId('msg_oc_unk')!
+    expect(row.accountKey).toBe('opencode:openai:native')
+    expect(row.billingType).toBe('unknown')
+    // opencode's figure is a charge, so a positive one counts even unknown.
+    expect(row.billedCostUsd).toBeCloseTo(0.02)
   })
 
   it('BD-j: folds tokens.reasoning into outputTokens (reasoning is billed as output)', async () => {

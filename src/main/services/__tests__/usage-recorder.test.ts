@@ -50,6 +50,12 @@ function anthropicEvent(overrides: Partial<UsageTurnEvent> = {}): UsageTurnEvent
     sessionId: 'ses_test',
     messageId: 'msg_claude_1',
     source: 'backfill',
+    accountKey: 'unknown',
+    accountLabel: null,
+    billingType: 'unknown',
+    origin: 'session',
+    parentRoutingId: null,
+    engineCostIsEquivalent: true,
     ...overrides
   }
 }
@@ -72,6 +78,13 @@ function opencodeTurn(overrides: Partial<UsageTurnEvent> = {}): UsageTurnEvent {
     sessionId: 'ses_oc',
     messageId: 'msg_oc_1',
     source: 'live',
+    accountKey: 'unknown',
+    accountLabel: null,
+    billingType: 'unknown',
+    origin: 'session',
+    parentRoutingId: null,
+    // opencode's figure is a charge, unlike Claude's and pi's.
+    engineCostIsEquivalent: false,
     ...overrides
   }
 }

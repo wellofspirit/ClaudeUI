@@ -41,9 +41,11 @@ import {
   seedDailyUsageIfAbsent,
   getAllDailyUsage,
   hasDailyUsage,
+  type UsageEventInsert,
   type UsageEventRow,
   type DailyUsageRow
 } from './db'
+import { backfillAttribution } from './usage-recorder'
 import { v4 as uuid } from 'uuid'
 import { equivalentCostUsd, ANTHROPIC_MODEL_PRICING, type ModelPricing } from '../../shared/pricing'
 import { emitEvent } from './sync-host'
@@ -765,7 +767,7 @@ export class BlockUsageService {
     try {
       const emailToUuid = new Map<string, string>()
       for (const rec of accountLog) emailToUuid.set(rec.email, rec.accountUuid)
-      const rows: UsageEventRow[] = []
+      const rows: UsageEventInsert[] = []
       for (const e of entries) {
         if (!e.messageId) continue
         const email = accountForTimestamp(accountLog, e.timestamp)
@@ -793,7 +795,18 @@ export class BlockUsageService {
           engineCostUsd: e.costUsd,
           sessionId: e.sessionId,
           messageId: e.messageId,
-          source: 'backfill'
+          source: 'backfill',
+          // Same ADR-071 attribution the reconciler gives its Claude rows —
+          // the two paths race for the same message_id, so whichever wins the
+          // dedup has to store the same thing. A transcript names no account
+          // and no billing type (S2a2 takes ADR-011's time-based attribution
+          // further); 'unknown' is the honest value for both.
+          ...backfillAttribution({
+            billingType: 'unknown',
+            equivCostUsd: equiv ?? e.costUsd,
+            engineCostUsd: e.costUsd,
+            engineCostIsEquivalent: true
+          })
         })
       }
       insertUsageEvents(rows)

@@ -6,7 +6,7 @@ import { engineRegistry } from '../providers/EngineRegistry'
 import '../providers/register-engines'
 import { readSessionHistory as loadSessionHistory } from './engine-history'
 import { cwdToProjectKey } from '../../shared/project-key'
-import { renameDispatchedUsage } from './db'
+import { renameDispatchedUsage, renameUsageEventParent } from './db'
 import { logger } from './logger'
 import { syncCore } from './sync-host'
 
@@ -106,6 +106,9 @@ export class SessionManager {
     // Slice C (ADR-033 cross-engine dispatch): carry any dispatched_usage
     // rows recorded under the pre-rekey id forward, so a later resume's
     // seedDispatchedCosts() (keyed by the STABLE post-rekey id) can find them.
+    // ADR-071 §1 puts the ledger's own `parent_routing_id` under the same
+    // rule: a subagent turn can finish while the session is still on its
+    // temporary id, and that row must follow the session too.
     // Best-effort — a DB hiccup here must never break session rekeying.
     try {
       renameDispatchedUsage(oldId, newId)
@@ -113,6 +116,14 @@ export class SessionManager {
       logger.warn(
         'SessionManager',
         `renameDispatchedUsage failed (dispatched-cost rows may be orphaned): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+    try {
+      renameUsageEventParent(oldId, newId)
+    } catch (err) {
+      logger.warn(
+        'SessionManager',
+        `renameUsageEventParent failed (child usage rows may be orphaned): ${err instanceof Error ? err.message : String(err)}`
       )
     }
   }
