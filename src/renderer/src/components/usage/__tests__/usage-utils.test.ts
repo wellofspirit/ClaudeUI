@@ -3,6 +3,7 @@ import {
   PROVIDER_OVERFLOW_COLOR,
   PROVIDER_SERIES_COLORS,
   buildProviderColorMap,
+  buildSeriesColorMap,
   formatReset,
   formatResetRelative,
   meterSeverity,
@@ -322,5 +323,33 @@ describe('formatReset', () => {
   it('draws a dash rather than a guess when there is no reset to show', () => {
     expect(formatReset('7d', null, now)).toBe('—')
     expect(formatReset('5h', 'not a date', now)).toBe('—')
+  })
+})
+
+describe('buildSeriesColorMap', () => {
+  it('gives the same id the same slot however the caller ordered the list', () => {
+    const byRank = buildSeriesColorMap(['opus', 'gpt-6', 'sonnet'])
+    // The dashboard re-sorts by spend on every range change; the colours must
+    // not follow it (ADR-071 §8 — a filter never repaints the survivors).
+    const reRanked = buildSeriesColorMap(['sonnet', 'opus', 'gpt-6'])
+    for (const id of ['opus', 'gpt-6', 'sonnet']) {
+      expect(reRanked.get(id)).toBe(byRank.get(id))
+    }
+    expect(new Set(byRank.values()).size).toBe(3)
+  })
+
+  it('shares the overflow neutral past the five validated slots', () => {
+    const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g']
+    const map = buildSeriesColorMap(ids)
+    expect(ids.slice(0, 5).map((id) => map.get(id))).toEqual([...PROVIDER_SERIES_COLORS])
+    expect(map.get('f')).toBe(PROVIDER_OVERFLOW_COLOR)
+    expect(map.get('g')).toBe(PROVIDER_OVERFLOW_COLOR)
+  })
+
+  it('does not spend two slots on a repeated id', () => {
+    const map = buildSeriesColorMap(['b', 'a', 'b', 'a'])
+    expect(map.size).toBe(2)
+    expect(map.get('a')).toBe(PROVIDER_SERIES_COLORS[0])
+    expect(map.get('b')).toBe(PROVIDER_SERIES_COLORS[1])
   })
 })

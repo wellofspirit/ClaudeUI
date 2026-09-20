@@ -1,0 +1,649 @@
+/**
+ * Spend over time (ADR-071 §8 item 5, mockup `140549af` Spend over time A / B).
+ *
+ * Replaces `DailyUsageChart`, which drew TOKENS per day from the Claude-shaped
+ * `dailyHistory`. The question this screen answers is what the work cost, so
+ * the value here is `displayCostUsd` — the ledger's headline rule — and the
+ * series are the dashboard's providers rather than Claude's models. A tokens
+ * toggle is deliberately out of scope (S4b's "Out of scope").
+ *
+ * TWO VARIANTS, BECAUSE ONE SCALE CANNOT SHOW BOTH. Stacked columns (A) answer
+ * "what did each day cost, and who spent it" — the total is the bar. But the
+ * owner's providers differ by roughly 30×, and on a shared scale the small ones
+ * are a hairline. Variant B gives each provider its own baseline and its own
+ * scale, which shows a $1/day provider's rhythm at the cost of the total. The
+ * toggle is owned here: nothing outside this widget reads the mode.
+ *
+ * WHAT IT CAN AND CANNOT SPLIT BY. `days[].byProvider` is the only per-day
+ * split the dashboard query carries, so the columns stack by PROVIDER whatever
+ * the header's group-by says, and the subtitle says so when they disagree.
+ * Inventing a per-day per-model series by spreading an account's range total
+ * over its days would be a chart of an assumption, not of the ledger.
+ */
+
+import { useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { UsageDashboardData } from '../../../../shared/types'
+import type { DashboardGroupBy } from './UsageView'
+import { providerLabel } from '../../../../shared/provider-label'
+import { PROVIDER_OVERFLOW_COLOR, formatCost, formatShortDate } from './usage-utils'
+
+// ---------------------------------------------------------------------------
+// Geometry (the mockup's, which is what "130px tall, bars capped at 14px" means)
+// ---------------------------------------------------------------------------
+
+/** The plot's total height, labels included — the owner's pick. */
+const PLOT_HEIGHT = 130
+const PAD_T = 6
+const PAD_B = 16
+const CHART_H = PLOT_HEIGHT - PAD_T - PAD_B
+/** The baseline: no mark may be drawn below it. */
+const PLOT_BOTTOM = PAD_T + CHART_H
+
+/** The y-axis lives in its own SVG so the plot can scroll under a fixed scale. */
+const AXIS_WIDTH = 44
+
+const MAX_BAR_WIDTH = 14
+/** Surface between adjacent columns; the bar takes the rest of its slot. */
+const BAR_GAP = 3
+/**
+ * The narrowest a day may get before the chart starts scrolling instead. At 8px
+ * a 90-day range is about 720px wide, which is the mockup's "90 still fit" on a
+ * normal window and a scroll on a narrow one.
+ */
+const MIN_SLOT = 8
+/** Used until the ResizeObserver reports, and in jsdom, which has none. */
+const FALLBACK_VIEWPORT = 600
+
+/** The 2px surface gap dataviz wants between stacked fills. */
+const SEGMENT_GAP = 2
+/** A day that spent something is never drawn as nothing (ADR-030 in geometry). */
+const MIN_SEGMENT_H = 1
+
+/** Roughly what a `Sep 20` label occupies at 8px, so ticks never collide. */
+const MIN_LABEL_PX = 46
+
+/** Variant B's rows: small, because there is one per provider. */
+const ROW_HEIGHT = 34
+
+export type SpendChartMode = 'stacked' | 'perProvider'
+
+interface SpendChartProps {
+  data: UsageDashboardData
+  /** Provider id → its fixed colour, built once by the shell. */
+  providerColors: Map<string, string>
+  /** Only to explain the stacking when it is not what the header asked for. */
+  groupBy: DashboardGroupBy
+}
+
+// ---------------------------------------------------------------------------
+// Scales
+// ---------------------------------------------------------------------------
+
+/**
+ * A round step, so the axis reads `$0 / $5 / $10 / $15` rather than `$4.87`.
+ * Three steps cover the data, which gives the four ticks the spec asks for.
+ */
+function niceStep(raw: number): number {
+  if (!(raw > 0)) return 1
+  const exponent = 10 ** Math.floor(Math.log10(raw))
+  const f = raw / exponent
+  const step = f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10
+  return step * exponent
+}
+
+/** The axis maximum and its ticks — `[0, step, 2·step, 3·step]`. */
+function axisScale(maxValue: number): { max: number; ticks: number[] } {
+  const step = niceStep(maxValue / 3)
+  const max = step * 3
+  return { max, ticks: [0, step, step * 2, max] }
+}
+
+/** Whole dollars once the steps are dollars; cents while they are cents. */
+function formatAxisCost(usd: number, step: number): string {
+  return step >= 1 ? `$${usd.toFixed(0)}` : `$${usd.toFixed(2)}`
+}
+
+// ---------------------------------------------------------------------------
+// Series
+// ---------------------------------------------------------------------------
+
+interface Series {
+  providerId: string
+  label: string
+  color: string
+  /** The provider's display cost over the whole range, for variant B's row. */
+  totalUsd: number
+}
+
+/**
+ * The providers to stack, in the dashboard query's order (display cost
+ * descending). A provider that only appears in `byProvider` — impossible from
+ * the current query, but the day series and the tree are built separately — is
+ * appended rather than dropped, so a column always sums to its own total.
+ */
+function buildSeries(data: UsageDashboardData, providerColors: Map<string, string>): Series[] {
+  const totals = new Map<string, number>()
+  for (const provider of data.providers) totals.set(provider.providerId, 0)
+  for (const day of data.days) {
+    for (const [id, costs] of Object.entries(day.byProvider)) {
+      totals.set(id, (totals.get(id) ?? 0) + costs.displayCostUsd)
+    }
+  }
+  const ordered = [
+    ...data.providers.map((p) => p.providerId),
+    ...[...totals.keys()].filter((id) => !data.providers.some((p) => p.providerId === id))
+  ]
+  const labels = new Map(data.providers.map((p) => [p.providerId, p.label]))
+  return ordered.map((providerId) => ({
+    providerId,
+    label: labels.get(providerId) ?? providerLabel(providerId),
+    color: providerColors.get(providerId) ?? PROVIDER_OVERFLOW_COLOR,
+    totalUsd: totals.get(providerId) ?? 0
+  }))
+}
+
+function dayTotal(day: UsageDashboardData['days'][number]): number {
+  let sum = 0
+  for (const costs of Object.values(day.byProvider)) sum += costs.displayCostUsd
+  return sum
+}
+
+/**
+ * A figure at the precision `formatCost` will PRINT it at — cents above a cent,
+ * four places below one.
+ */
+function toPrintedPrecision(usd: number): number {
+  return usd >= 0.01 ? Math.round(usd * 100) / 100 : Math.round(usd * 10_000) / 10_000
+}
+
+/**
+ * The day's total as the SUM OF THE LINES ABOVE IT, not as the sum of the
+ * unrounded dollars.
+ *
+ * The ledger keeps cost to full precision, so `$364.3249 + $0.7451` is a true
+ * `$365.07` that prints beside `$364.32` and `$0.75` — two numbers a reader can
+ * add in their head to something else. A tooltip whose own arithmetic looks
+ * wrong costs more trust than the tenth of a cent it is protecting, so the
+ * total is rounded the way its parts are before being added. Every figure on
+ * screen then agrees; the exact sum still drives the bar heights and the axis.
+ */
+function displayedDayTotal(day: UsageDashboardData['days'][number]): number {
+  let sum = 0
+  for (const costs of Object.values(day.byProvider)) {
+    if (costs.displayCostUsd > 0) sum += toPrintedPrecision(costs.displayCostUsd)
+  }
+  return sum
+}
+
+// ---------------------------------------------------------------------------
+// Root
+// ---------------------------------------------------------------------------
+
+export function SpendChart({ data, providerColors, groupBy }: SpendChartProps): React.JSX.Element {
+  const [mode, setMode] = useState<SpendChartMode>('stacked')
+  const series = useMemo(() => buildSeries(data, providerColors), [data, providerColors])
+  const grandTotal = useMemo(() => data.days.reduce((s, d) => s + dayTotal(d), 0), [data.days])
+
+  return (
+    <div
+      data-testid="SpendChart"
+      data-mode={mode}
+      className="bg-bg-secondary rounded-xl border border-border/50 p-3"
+    >
+      <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2">
+        <div className="flex items-baseline gap-2">
+          <h3 className="text-[11px] font-semibold text-text-secondary uppercase tracking-wider">
+            Spend over time
+          </h3>
+          <span className="text-[9px] text-text-muted">daily · {data.range}</span>
+        </div>
+        <ModeToggle mode={mode} onChange={setMode} />
+      </div>
+
+      {groupBy !== 'provider' && (
+        <p data-testid="SpendChart.subtitle" className="text-[9px] text-text-muted mb-2">
+          Stacked by provider: the daily series is the only split the ledger keeps per day, so it
+          cannot be broken down by {groupBy}. The breakdown below groups by {groupBy} in full.
+        </p>
+      )}
+
+      {data.days.length === 0 || grandTotal <= 0 ? (
+        <div
+          data-testid="SpendChart.empty"
+          className="flex items-center justify-center text-text-muted text-[11px] py-8"
+        >
+          Nothing spent in this range
+        </div>
+      ) : mode === 'stacked' ? (
+        <StackedColumns data={data} series={series} />
+      ) : (
+        <PerProviderRows data={data} series={series} />
+      )}
+    </div>
+  )
+}
+
+function ModeToggle({
+  mode,
+  onChange
+}: {
+  mode: SpendChartMode
+  onChange: (next: SpendChartMode) => void
+}): React.JSX.Element {
+  const options: Array<{ id: SpendChartMode; label: string; title: string }> = [
+    {
+      id: 'stacked',
+      label: 'stacked',
+      title: 'One column per day, split by provider on a shared scale — the daily total is the bar.'
+    },
+    {
+      id: 'perProvider',
+      label: 'per provider',
+      title:
+        'One row per provider, each on its own scale — shows a small provider’s rhythm, but the rows are not comparable.'
+    }
+  ]
+  return (
+    <div
+      data-testid="SpendChart.mode"
+      data-value={mode}
+      className="flex items-center gap-0.5 bg-bg-tertiary border border-border/50 rounded-md p-0.5"
+    >
+      {options.map((option) => (
+        <button
+          key={option.id}
+          data-testid={`SpendChart.mode.${option.id}`}
+          data-active={option.id === mode}
+          aria-pressed={option.id === mode}
+          title={option.title}
+          onClick={() => onChange(option.id)}
+          className={`[-webkit-app-region:no-drag] text-[10px] px-2 py-0.5 rounded transition-colors cursor-default ${
+            option.id === mode
+              ? 'bg-bg-hover text-text-primary'
+              : 'text-text-muted hover:text-text-secondary'
+          }`}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Variant A — stacked columns
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether the plot should jump back to the latest day, or leave the reader's
+ * scroll position where they put it.
+ *
+ * A DIFFERENT NUMBER OF DAYS IS A DIFFERENT CHART, so it is always re-pinned.
+ * The "did the reader scroll back" guard cannot answer for it: going 30d → 90d
+ * runs the effect against a `scrollLeft` measured on the PREVIOUS render, and a
+ * 30-day chart that fitted its viewport had `scrollLeft 0` with nothing to
+ * scroll. The guard read that stale zero as "parked at the far left on
+ * purpose" and left the newest 60 days off-screen.
+ *
+ * The guard is for the other dependency — a resize, which does not change what
+ * is being shown. There, someone who has scrolled back to March keeps their
+ * place while someone parked at the right edge stays pinned to it.
+ *
+ * Exported for its own test: jsdom reports every layout figure as 0, so the
+ * decision is testable only as a function of the numbers, not through a render.
+ */
+export function shouldPinToLatest({
+  hasPinned,
+  dayCountChanged,
+  distanceFromEnd,
+  threshold
+}: {
+  /** False on the very first pass for this mount. */
+  hasPinned: boolean
+  /** The range moved, or a day was added to it. */
+  dayCountChanged: boolean
+  /** Pixels between the current viewport's right edge and the plot's. */
+  distanceFromEnd: number
+  /** How close counts as "at the end" — two days' worth of slot. */
+  threshold: number
+}): boolean {
+  if (!hasPinned) return true
+  if (dayCountChanged) return true
+  return distanceFromEnd <= threshold
+}
+
+function StackedColumns({
+  data,
+  series
+}: {
+  data: UsageDashboardData
+  series: Series[]
+}): React.JSX.Element {
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null)
+  const [viewportWidth, setViewportWidth] = useState(0)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const hasAutoScrolled = useRef(false)
+  const lastDayCount = useRef<number | null>(null)
+  const days = data.days
+
+  useLayoutEffect(() => {
+    const scroll = scrollRef.current
+    if (!scroll || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(([entry]) => setViewportWidth(entry.contentRect.width))
+    observer.observe(scroll)
+    return () => observer.disconnect()
+  }, [])
+
+  // The latest day is the one a person opens this for, so a range that does not
+  // fit starts at its right edge — see `shouldPinToLatest` for when it is
+  // re-pinned and when the reader's own scroll position is left alone.
+  useLayoutEffect(() => {
+    const scroll = scrollRef.current
+    if (!scroll) return
+    const dayCountChanged = lastDayCount.current !== null && lastDayCount.current !== days.length
+    lastDayCount.current = days.length
+    if (
+      shouldPinToLatest({
+        hasPinned: hasAutoScrolled.current,
+        dayCountChanged,
+        distanceFromEnd: scroll.scrollWidth - scroll.clientWidth - scroll.scrollLeft,
+        threshold: (scroll.clientWidth / Math.max(1, days.length)) * 2
+      })
+    ) {
+      scroll.scrollLeft = scroll.scrollWidth
+    }
+    hasAutoScrolled.current = true
+  }, [days.length, viewportWidth])
+
+  const dayCount = days.length
+  const slot = Math.max(MIN_SLOT, (viewportWidth || FALLBACK_VIEWPORT) / dayCount)
+  const plotWidth = slot * dayCount
+  const barWidth = Math.min(MAX_BAR_WIDTH, Math.max(2, slot - BAR_GAP))
+
+  const maxDay = days.reduce((m, d) => Math.max(m, dayTotal(d)), 0)
+  const { max: axisMax, ticks } = axisScale(maxDay)
+  const yOf = (value: number): number => PAD_T + CHART_H - (value / axisMax) * CHART_H
+  const labelEvery = Math.max(1, Math.ceil(MIN_LABEL_PX / slot))
+  const lastIdx = dayCount - 1
+  const hovered = hoverIdx === null ? null : days[hoverIdx]
+
+  return (
+    <div className="relative">
+      <div className="flex items-start">
+        <svg
+          data-testid="SpendChart.axis"
+          viewBox={`0 0 ${AXIS_WIDTH} ${PLOT_HEIGHT}`}
+          className="block shrink-0"
+          style={{ width: AXIS_WIDTH, height: PLOT_HEIGHT }}
+          aria-hidden="true"
+        >
+          {ticks.map((tick) => (
+            <text
+              key={tick}
+              x={AXIS_WIDTH - 4}
+              y={yOf(tick)}
+              textAnchor="end"
+              dominantBaseline="middle"
+              className="fill-text-muted"
+              fontSize={9}
+            >
+              {formatAxisCost(tick, ticks[1])}
+            </text>
+          ))}
+        </svg>
+
+        <div
+          ref={scrollRef}
+          data-testid="SpendChart.scroll"
+          className="min-w-0 flex-1 overflow-x-auto"
+        >
+          <svg
+            viewBox={`0 0 ${plotWidth} ${PLOT_HEIGHT}`}
+            className="block max-w-none"
+            style={{ width: plotWidth, height: PLOT_HEIGHT }}
+            onMouseLeave={() => setHoverIdx(null)}
+          >
+            {/* Recessive hairline grid, one line per tick. */}
+            {ticks.map((tick) => (
+              <line
+                key={tick}
+                x1={0}
+                y1={yOf(tick)}
+                x2={plotWidth}
+                y2={yOf(tick)}
+                stroke="currentColor"
+                strokeWidth={0.5}
+                className="text-border/60"
+              />
+            ))}
+
+            {days.map((day, i) => {
+              const x = i * slot + (slot - barWidth) / 2
+              const isHovered = hoverIdx === i
+              // Stacked from the baseline in the series' fixed order, so a
+              // provider is always in the same layer of every column.
+              let cumulative = 0
+              const drawn = series
+                .map((s) => {
+                  const usd = day.byProvider[s.providerId]?.displayCostUsd ?? 0
+                  if (usd <= 0) return null
+                  const trueH = (usd / axisMax) * CHART_H
+                  const top = yOf(cumulative + usd)
+                  cumulative += usd
+                  // The gap is taken off the BOTTOM, so a segment's top stays
+                  // exact and the topmost one still reads as the day's total.
+                  // A value too small to draw is floored to a visible pixel
+                  // (ADR-030 in geometry), and the floor is then pushed UP off
+                  // the baseline rather than allowed to hang below the axis.
+                  const height = Math.max(MIN_SEGMENT_H, trueH - SEGMENT_GAP)
+                  return { s, top: Math.min(top, PLOT_BOTTOM - height), height }
+                })
+                .filter((seg): seg is NonNullable<typeof seg> => seg !== null)
+
+              return (
+                <g
+                  key={day.date}
+                  data-testid="SpendChart.column"
+                  data-date={day.date}
+                  onMouseEnter={() => setHoverIdx(i)}
+                  className="cursor-default"
+                >
+                  {/* Hit target is the whole slot, which is wider than the bar. */}
+                  <rect x={i * slot} y={PAD_T} width={slot} height={CHART_H} fill="transparent" />
+                  {drawn.map((seg, j) => (
+                    <rect
+                      key={seg.s.providerId}
+                      data-testid="SpendChart.segment"
+                      data-provider-id={seg.s.providerId}
+                      x={x}
+                      y={seg.top}
+                      width={barWidth}
+                      height={seg.height}
+                      rx={j === drawn.length - 1 ? 2 : 0}
+                      fill={seg.s.color}
+                      fillOpacity={isHovered ? 1 : 0.85}
+                      className="transition-opacity duration-100"
+                    />
+                  ))}
+                </g>
+              )
+            })}
+
+            {/* Dates anchored on the LATEST day, so the one that matters is
+                always labelled and the spacing never collides. */}
+            {days.map((day, i) =>
+              (lastIdx - i) % labelEvery === 0 ? (
+                <text
+                  key={day.date}
+                  x={i * slot + slot / 2}
+                  y={PLOT_HEIGHT - 4}
+                  textAnchor="middle"
+                  className="fill-text-muted"
+                  fontSize={8}
+                >
+                  {formatShortDate(day.date)}
+                </text>
+              ) : null
+            )}
+          </svg>
+        </div>
+      </div>
+
+      {hovered && (
+        <div
+          data-testid="SpendChart.tooltip"
+          className="absolute top-0 right-0 bg-bg-tertiary border border-border rounded-md px-2 py-1.5 text-[10px] space-y-0.5 pointer-events-none z-10 min-w-[150px]"
+        >
+          <div className="text-text-secondary font-medium">{formatShortDate(hovered.date)}</div>
+          {series.map((s) => {
+            const usd = hovered.byProvider[s.providerId]?.displayCostUsd ?? 0
+            if (usd <= 0) return null
+            return (
+              <div key={s.providerId} className="flex items-center gap-1.5">
+                <i
+                  className="inline-block w-2 h-2 rounded-full shrink-0"
+                  style={{ backgroundColor: s.color }}
+                />
+                <span className="text-text-muted flex-1">{s.label}</span>
+                <span className="text-text-primary font-mono">{formatCost(usd)}</span>
+              </div>
+            )
+          })}
+          <div className="flex items-center gap-3 border-t border-border/30 mt-1 pt-1">
+            <span className="text-text-muted flex-1">Total</span>
+            <span className="text-text-primary font-mono">
+              {formatCost(displayedDayTotal(hovered))}
+            </span>
+          </div>
+        </div>
+      )}
+
+      <Legend series={series} />
+    </div>
+  )
+}
+
+/**
+ * Identity is never colour alone: every series has a named swatch here, and the
+ * tooltip repeats the name beside its figure.
+ */
+function Legend({ series }: { series: Series[] }): React.JSX.Element {
+  return (
+    <div
+      data-testid="SpendChart.legend"
+      className="flex flex-wrap items-center gap-3 mt-1.5 px-1 text-[9px] text-text-muted"
+    >
+      {series.map((s) => (
+        <span
+          key={s.providerId}
+          data-provider-id={s.providerId}
+          className="flex items-center gap-1"
+        >
+          <i className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: s.color }} />
+          {s.label}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Variant B — one row per provider, independent scales
+// ---------------------------------------------------------------------------
+
+function PerProviderRows({
+  data,
+  series
+}: {
+  data: UsageDashboardData
+  series: Series[]
+}): React.JSX.Element {
+  const days = data.days
+  // Rows share ONE viewBox width so the same date is the same x in every row,
+  // even though the heights are not comparable. They scale to the container
+  // rather than scrolling: a row is 34px tall and a horizontal scrollbar per
+  // provider would be more chrome than chart.
+  const width = Math.max(days.length * MIN_SLOT, FALLBACK_VIEWPORT)
+  const slot = width / days.length
+  const barWidth = Math.min(MAX_BAR_WIDTH, Math.max(2, slot - BAR_GAP))
+
+  // A provider that spent nothing over the range has no scale of its own, so
+  // its row is an empty baseline — visually identical to a provider whose data
+  // failed to load. It is counted in the footnote instead. (The stacked variant
+  // keeps them: there they cost a legend entry, not a whole empty row.)
+  const drawn = series.filter((s) => s.totalUsd > 0)
+  const hidden = series.length - drawn.length
+
+  return (
+    <div>
+      {drawn.map((s) => {
+        const values = days.map((d) => d.byProvider[s.providerId]?.displayCostUsd ?? 0)
+        const rowMax = values.reduce((m, v) => Math.max(m, v), 0)
+        return (
+          <div
+            key={s.providerId}
+            data-testid="SpendChart.row"
+            data-provider-id={s.providerId}
+            className="flex items-center gap-2.5 mb-1.5"
+          >
+            <div className="w-[110px] shrink-0">
+              <div className="flex items-center gap-1.5 text-[10px] text-text-secondary truncate">
+                <i
+                  className="inline-block w-2 h-2 rounded-full shrink-0"
+                  style={{ backgroundColor: s.color }}
+                />
+                <span className="truncate">{s.label}</span>
+              </div>
+              <div
+                data-testid="SpendChart.row.total"
+                className="font-mono text-[10px] text-text-primary"
+              >
+                {formatCost(s.totalUsd)}
+              </div>
+            </div>
+            <svg
+              viewBox={`0 0 ${width} ${ROW_HEIGHT}`}
+              preserveAspectRatio="none"
+              className="block flex-1 min-w-0"
+              style={{ height: ROW_HEIGHT }}
+            >
+              <line
+                x1={0}
+                y1={ROW_HEIGHT - 0.5}
+                x2={width}
+                y2={ROW_HEIGHT - 0.5}
+                stroke="currentColor"
+                strokeWidth={0.5}
+                className="text-border/60"
+              />
+              {values.map((usd, i) => {
+                if (usd <= 0) return null
+                const h = rowMax > 0 ? (usd / rowMax) * (ROW_HEIGHT - 3) : 0
+                return (
+                  <rect
+                    key={days[i].date}
+                    data-testid="SpendChart.row.bar"
+                    data-date={days[i].date}
+                    x={i * slot + (slot - barWidth) / 2}
+                    y={ROW_HEIGHT - Math.max(MIN_SEGMENT_H, h)}
+                    width={barWidth}
+                    height={Math.max(MIN_SEGMENT_H, h)}
+                    rx={2}
+                    fill={s.color}
+                  >
+                    <title>{`${s.label} · ${formatShortDate(days[i].date)} · ${formatCost(usd)}`}</title>
+                  </rect>
+                )
+              })}
+            </svg>
+          </div>
+        )
+      })}
+      <p data-testid="SpendChart.rowsNote" className="text-[9px] text-text-muted mt-1 ml-[120px]">
+        Each row has its own scale — heights are comparable within a row, never between rows.
+        {hidden > 0 &&
+          ` · ${hidden} ${hidden === 1 ? 'provider' : 'providers'} with no spend hidden`}
+      </p>
+    </div>
+  )
+}

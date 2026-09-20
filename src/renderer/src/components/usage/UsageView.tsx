@@ -1,10 +1,17 @@
 /**
- * The usage dashboard's SHELL (ADR-071 §8, slice S4b-1).
+ * The usage dashboard's SHELL (ADR-071 §8, slices S4b-1 to S4b-3).
  *
  * It owns the three things every widget needs and none of them should fetch for
  * itself: the range, the group-by, and the two reads — `usage:dashboard` for the
  * ledger and `usage:limits` for what each account has left. The widgets below
- * are pure functions of what lands here.
+ * are pure functions of what lands here, in ADR-071 §8's order: `Summary`, then
+ * `AccountsPanel` beside `ResetTimeline`, then `WindowValue`, `SpendChart` and
+ * `BreakdownTable`. All five live under the `dashboard !== null` guard, because
+ * every one of them takes the dashboard data as a required prop.
+ *
+ * `WindowValue` is the one exception to "the shell does the reading": windows
+ * are a second, differently-shaped query that only it consumes, so it makes its
+ * own call and takes the range from here (see its header).
  *
  * ONE RULE MATTERS MORE THAN THE LAYOUT. `fetchAccountLimits(true)` is the only
  * call that spends a refresh grant (ADR-071 §6), and the owner's concern is that
@@ -22,26 +29,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
 import { onSyncEvent } from '../../../../core/shared/sync/client-registry'
-import type {
-  AccountLimits,
-  DashboardRange,
-  DispatchedUsageSummary,
-  EngineUsageSummary,
-  ModelTokenBreakdown,
-  UsageDashboardData
-} from '../../../../shared/types'
-import { DailyUsageChart } from './DailyUsageChart'
+import type { AccountLimits, DashboardRange, UsageDashboardData } from '../../../../shared/types'
 import { Summary } from './Summary'
 import { AccountsPanel } from './AccountsPanel'
 import { ResetTimeline } from './ResetTimeline'
-import {
-  buildProviderColorMap,
-  formatTokenCount,
-  formatCost,
-  sumTokens,
-  shortModelName,
-  getModelColor
-} from './usage-utils'
+import { WindowValue } from './WindowValue'
+import { SpendChart } from './SpendChart'
+import { BreakdownTable } from './BreakdownTable'
+import { buildProviderColorMap } from './usage-utils'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { SelectMenu } from '../shared/SelectMenu'
 
@@ -77,7 +72,7 @@ function storeRange(range: DashboardRange): void {
   }
 }
 
-/** What the breakdown's hierarchy is rooted on (S4b-2 consumes it). */
+/** What the breakdown's hierarchy is rooted on; the chart only explains itself by it. */
 export type DashboardGroupBy = 'provider' | 'account' | 'engine' | 'model'
 
 const GROUP_BY: DashboardGroupBy[] = ['provider', 'account', 'engine', 'model']
@@ -110,10 +105,6 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
   // Bumped by the debounced event handlers; the fetch effects depend on it.
   const [ledgerNudge, setLedgerNudge] = useState(0)
   const [limitsNudge, setLimitsNudge] = useState(0)
-
-  // ADR-033 M4-B: delegated (cross-engine dispatched) usage — request/response
-  // only, no live-push channel (an all-time aggregate, not a hot path).
-  const [dispatchedUsage, setDispatchedUsage] = useState<DispatchedUsageSummary[] | null>(null)
 
   // The ledger read: on mount, on a range change, and on a debounced nudge.
   useEffect(() => {
@@ -150,21 +141,6 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
       cancelled = true
     }
   }, [limitsNudge])
-
-  useEffect(() => {
-    let cancelled = false
-    window.api
-      .fetchDispatchedUsage()
-      .then((rows) => {
-        if (!cancelled) setDispatchedUsage(rows)
-      })
-      .catch(() => {
-        if (!cancelled) setDispatchedUsage([])
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
 
   // The two push channels that can invalidate what is on screen. Subscribed
   // here rather than in `useClaudeEvents` because the answer is this view's
@@ -222,7 +198,6 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
     [dashboard]
   )
 
-  const opencodeEntry = blockUsage?.perEngine?.find((e) => e.engineId === 'opencode') ?? null
   const accounts = blockUsage?.accounts ?? []
 
   return (
@@ -320,32 +295,19 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
               />
               <ResetTimeline limits={limits} providerColors={providerColors} />
             </div>
+
+            <WindowValue
+              data={dashboard}
+              limits={limits}
+              providerColors={providerColors}
+              range={range}
+            />
+
+            <SpendChart data={dashboard} providerColors={providerColors} groupBy={groupBy} />
+
+            <BreakdownTable data={dashboard} groupBy={groupBy} providerColors={providerColors} />
           </>
         )}
-
-        {/* MOUNT POINT — S4b-3 replaces this placeholder with <WindowValue />.
-            It reads `fetchUsageWindows(...)` itself; the shell owes it only the
-            range and the account list, both on `dashboard`. */}
-        <Section title="Window value" subtitle="what a subscription window delivers">
-          <div className="text-[11px] text-text-muted">
-            Coming with the window-value ledger — what each 5-hour and weekly window was worth.
-          </div>
-        </Section>
-
-        {/* MOUNT POINT — S4b-2 replaces this whole Section with <SpendChart />,
-            which draws the same days from `dashboard.days` stacked by groupBy. */}
-        <Section title="Daily Usage" subtitle="tokens per calendar day · all engines">
-          <DailyUsageChart dailyHistory={blockUsage?.dailyHistory ?? []} />
-        </Section>
-
-        {/* MOUNT POINT — S4b-2 replaces both sections below with
-            <BreakdownTable data={dashboard} groupBy={groupBy} />. */}
-        <div data-group-by={groupBy} className="space-y-4">
-          {opencodeEntry && <OpencodeSection entry={opencodeEntry} />}
-          {dispatchedUsage && dispatchedUsage.length > 0 && (
-            <DelegatedUsageSection rows={dispatchedUsage} />
-          )}
-        </div>
       </div>
     </div>
   )
@@ -403,185 +365,6 @@ function Pill({
     >
       {children}
     </button>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// opencode section — replaced by S4b-2's BreakdownTable
-// ---------------------------------------------------------------------------
-
-function OpencodeSection({ entry }: { entry: EngineUsageSummary }): React.JSX.Element {
-  const [refreshing, setRefreshing] = useState(false)
-  const [note, setNote] = useState<string | null>(null)
-
-  const totalTokens = sumTokens(entry.tokens)
-
-  async function handleRefresh(): Promise<void> {
-    setRefreshing(true)
-    setNote(null)
-    try {
-      const r = await window.api.refreshPrices()
-      setNote(`Updated ${r.count} model prices`)
-    } catch {
-      setNote('Refresh failed')
-    } finally {
-      setRefreshing(false)
-    }
-    setTimeout(() => setNote(null), 4000)
-  }
-
-  return (
-    <div className="bg-bg-secondary rounded-xl border border-border/50 p-3">
-      {/* Header row */}
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <h3 className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
-            opencode
-          </h3>
-          <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-medium">
-            pay-per-token
-          </span>
-          <span className="text-[9px] text-text-muted">last 7 days · no window</span>
-        </div>
-        <div className="flex items-center gap-2">
-          {note && <span className="text-[9px] text-text-muted">{note}</span>}
-          <button
-            onClick={handleRefresh}
-            disabled={refreshing}
-            className="[-webkit-app-region:no-drag] text-[10px] text-text-secondary hover:text-text-primary border border-border/50 rounded px-2 py-0.5 flex items-center gap-1 disabled:opacity-50 transition-colors cursor-default"
-          >
-            {refreshing ? 'Refreshing…' : '↻ refresh prices'}
-          </button>
-        </div>
-      </div>
-
-      {/* Summary row */}
-      <div className="flex gap-5 text-[11px] mb-3">
-        <div>
-          <div className="text-text-muted text-[10px]">Tokens</div>
-          <div className="font-mono text-text-primary">{formatTokenCount(totalTokens)}</div>
-        </div>
-        <div>
-          <div className="text-text-muted text-[10px]">Cost</div>
-          <div className="font-mono text-text-primary">{formatCost(entry.costUsd)}</div>
-        </div>
-        <div>
-          <div className="text-text-muted text-[10px]">Requests</div>
-          <div className="font-mono text-text-primary">{entry.requestCount}</div>
-        </div>
-      </div>
-
-      {/* Per-model table */}
-      {entry.models.length > 0 && (
-        <table className="w-full text-[10px]">
-          <thead>
-            <tr className="text-text-muted">
-              <th className="text-left font-medium pb-1">Model</th>
-              <th className="text-right font-medium pb-1">Tokens</th>
-              <th className="text-right font-medium pb-1">Cost</th>
-              <th className="text-right font-medium pb-1">Reqs</th>
-              <th className="text-right font-medium pb-1">Share</th>
-            </tr>
-          </thead>
-          <tbody>
-            {entry.models.map((m) => (
-              <OpencodeModelRow key={m.model} model={m} engineTotalTokens={totalTokens} />
-            ))}
-          </tbody>
-        </table>
-      )}
-
-      {/* Footnote */}
-      <p className="text-[9px] text-text-muted mt-2">
-        Cost reported by opencode; when the engine reports $0 (subscription/pooled billing),
-        estimated list-price cost is shown. No 5-hour window — pay-per-token.
-      </p>
-    </div>
-  )
-}
-
-function OpencodeModelRow({
-  model,
-  engineTotalTokens
-}: {
-  model: ModelTokenBreakdown
-  engineTotalTokens: number
-}): React.JSX.Element {
-  const mTotal = sumTokens(model.tokens)
-  const pct = engineTotalTokens > 0 ? Math.round((mTotal / engineTotalTokens) * 100) : 0
-  return (
-    <tr className="text-text-secondary">
-      <td className="py-0.5 flex items-center gap-1.5">
-        <span
-          className="inline-block w-2 h-2 rounded-full"
-          style={{ backgroundColor: getModelColor(model.model) }}
-        />
-        {shortModelName(model.model)}
-      </td>
-      <td className="text-right font-mono">{formatTokenCount(mTotal)}</td>
-      <td className="text-right font-mono">{formatCost(model.costUsd)}</td>
-      <td className="text-right font-mono">{model.requestCount}</td>
-      <td className="text-right font-mono">{pct}%</td>
-    </tr>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Delegated (cross-engine dispatched) usage — ADR-033 M4-B, replaced by S4b-2
-// ---------------------------------------------------------------------------
-
-function DelegatedUsageSection({ rows }: { rows: DispatchedUsageSummary[] }): React.JSX.Element {
-  return (
-    <div
-      data-testid="DelegatedUsage"
-      className="bg-bg-secondary rounded-xl border border-border/50 p-3"
-    >
-      <div className="flex items-center gap-2 mb-3">
-        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
-          Delegated
-        </h3>
-        <span className="text-[9px] text-text-muted">
-          cross-engine dispatch_agent calls · all-time
-        </span>
-      </div>
-
-      <table className="w-full text-[10px]">
-        <thead>
-          <tr className="text-text-muted">
-            <th className="text-left font-medium pb-1">Target</th>
-            <th className="text-right font-medium pb-1">Dispatches</th>
-            <th className="text-right font-medium pb-1">Tokens</th>
-            <th className="text-right font-medium pb-1">Cost</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr
-              key={`${row.targetEngine}/${row.targetModel}`}
-              data-testid="DelegatedUsage.row"
-              data-id={`${row.targetEngine}/${row.targetModel}`}
-              className="text-text-secondary"
-            >
-              <td className="py-0.5 flex items-center gap-1.5">
-                <span
-                  className="inline-block w-2 h-2 rounded-full"
-                  style={{ backgroundColor: getModelColor(row.targetModel) }}
-                />
-                {row.targetEngine} · {shortModelName(row.targetModel)}
-              </td>
-              <td className="text-right font-mono">{row.dispatches}</td>
-              <td className="text-right font-mono">{formatTokenCount(row.totalTokens)}</td>
-              <td className="text-right font-mono">{formatCost(row.costUsd)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-
-      <p className="text-[9px] text-text-muted mt-2">
-        Tasks this conversation delegated to the OTHER engine via dispatch_agent — attributed to the
-        dispatching session, cost/tokens from the target&apos;s own turn result.
-      </p>
-    </div>
   )
 }
 
@@ -659,27 +442,5 @@ function AccountSelector({
       triggerClassName="[-webkit-app-region:no-drag] text-[10px] bg-bg-secondary border border-border/50 rounded-md px-1.5 py-0.5 text-text-secondary outline-none"
       title="Filter usage by account"
     />
-  )
-}
-
-function Section({
-  title,
-  subtitle,
-  children
-}: {
-  title: string
-  subtitle?: string
-  children: React.ReactNode
-}): React.JSX.Element {
-  return (
-    <div className="bg-bg-secondary rounded-xl border border-border/50 p-3">
-      <div className="flex items-baseline gap-2 mb-2">
-        <h3 className="text-[11px] font-semibold text-text-secondary uppercase tracking-wider">
-          {title}
-        </h3>
-        {subtitle && <span className="text-[9px] text-text-muted">{subtitle}</span>}
-      </div>
-      {children}
-    </div>
   )
 }

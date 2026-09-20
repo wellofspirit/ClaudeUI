@@ -253,3 +253,23 @@ export function formatDuration(ms: number): string {
   if (h > 0) return `${h}h ${m}m`
   return `${m}m`
 }
+
+/**
+ * A colour per series for the groupings the fixed provider map cannot cover —
+ * engines and models, which have no pinned slot and no shared identity across
+ * profiles.
+ *
+ * Slots are assigned in the ids' LEXICOGRAPHIC order rather than in the order
+ * the data happens to arrive. The dashboard's lists are sorted by spend, so a
+ * first-seen assignment would be a rank assignment: narrowing the range until
+ * one model overtook another would swap their colours, which is the one thing
+ * ADR-071 §8 says categorical colour must never do. Sorted ids are stable
+ * against every filter, and the sixth series onward shares the overflow neutral
+ * exactly as the provider map does.
+ */
+export function buildSeriesColorMap(ids: readonly string[]): Map<string, string> {
+  const ordered = [...new Set(ids)].sort()
+  const map = new Map<string, string>()
+  ordered.forEach((id, i) => map.set(id, PROVIDER_SERIES_COLORS[i] ?? PROVIDER_OVERFLOW_COLOR))
+  return map
+}

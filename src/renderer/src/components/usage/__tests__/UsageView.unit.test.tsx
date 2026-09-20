@@ -1,12 +1,17 @@
 /**
  * `UsageView` — the dashboard SHELL (ADR-071 §8, slice S4b-1).
  *
- * What was here before this slice tested the widgets the shell used to inline:
- * the Claude tab group, its panels and their empty states. Those moved verbatim
- * into `ClaudeBlocksDrillIn` behind an Anthropic account row, so their
- * assertions moved to `AccountsPanel.component.test.tsx` rather than being
- * dropped. The opencode and Delegated sections stay mounted until S4b-2
- * replaces them, and so do their tests.
+ * What was here before S4b-1 tested the widgets the shell used to inline: the
+ * Claude tab group, its panels and their empty states. Those moved verbatim into
+ * `ClaudeBlocksDrillIn` behind an Anthropic account row, so their assertions
+ * moved to `AccountsPanel.component.test.tsx` rather than being dropped. The
+ * opencode and Delegated sections the shell carried until S4b-2 are gone with
+ * it: the ledger covers every engine now, and delegated work is an inline
+ * marker on whichever `BreakdownTable` row it ran under.
+ *
+ * What is left here is the shell's own job — the reads, the guard, the controls
+ * — plus one assertion per widget that it is mounted and given what it needs.
+ * Each widget's own behaviour is tested beside it.
  *
  * The rule this file exists to guard is the refresh grant (ADR-071 §6): NOTHING
  * automatic may send `fetchAccountLimits(true)`.
@@ -55,26 +60,26 @@ function makeBlockUsage(overrides: Partial<BlockUsageData> = {}): BlockUsageData
   } as unknown as BlockUsageData
 }
 
-let mockRefreshPrices: ReturnType<typeof vi.fn>
 let mockFetchDashboard: ReturnType<typeof vi.fn>
 let mockFetchLimits: ReturnType<typeof vi.fn>
+let mockFetchWindows: ReturnType<typeof vi.fn>
 
 beforeEach(() => {
   syncHandlers.clear()
   mockIsMobile.mockReturnValue(false)
   window.localStorage.clear()
-  mockRefreshPrices = vi.fn().mockResolvedValue({ count: 3, refreshedAt: Date.now() })
   mockFetchDashboard = vi.fn().mockResolvedValue(makeDashboard())
   mockFetchLimits = vi.fn().mockResolvedValue([makeLimits()])
+  // `WindowValue` does its own read; without it the widget throws on mount.
+  mockFetchWindows = vi.fn().mockResolvedValue([])
 
   // Assign api directly on the existing window object — do NOT replace window
   // itself, as that breaks waitFor's container check (it loses the document ref).
   ;(window as any).api = {
     setUsageAccountFilter: vi.fn().mockResolvedValue(undefined),
-    refreshPrices: mockRefreshPrices,
-    fetchDispatchedUsage: vi.fn().mockResolvedValue([]),
     fetchUsageDashboard: mockFetchDashboard,
-    fetchAccountLimits: mockFetchLimits
+    fetchAccountLimits: mockFetchLimits,
+    fetchUsageWindows: mockFetchWindows
   }
 
   useSessionStore.setState({ blockUsage: null, accountUsage: null } as any)
@@ -251,91 +256,55 @@ describe('UsageView — limits refresh', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Sections kept until S4b-2 replaces them
+// The widgets the shell composes
 // ---------------------------------------------------------------------------
 
-describe('UsageView — sections awaiting S4b-2', () => {
-  beforeEach(() => {
-    useSessionStore.setState({
-      blockUsage: makeBlockUsage({
-        perEngine: [
-          {
-            engineId: 'opencode',
-            tokens: {
-              inputTokens: 500_000,
-              outputTokens: 240_000,
-              cacheCreationTokens: 0,
-              cacheReadTokens: 0
-            },
-            costUsd: 0.41,
-            requestCount: 23,
-            models: [
-              {
-                model: 'zen/glm-4.6',
-                tokens: {
-                  inputTokens: 300_000,
-                  outputTokens: 140_000,
-                  cacheCreationTokens: 0,
-                  cacheReadTokens: 0
-                },
-                costUsd: 0.27,
-                requestCount: 14
-              }
-            ]
-          }
-        ]
-      }),
-      accountUsage: null
-    } as any)
-  })
-
-  it('keeps the opencode card mounted with its per-model rows and refresh', async () => {
+describe('UsageView — the composed widgets', () => {
+  it('mounts all five dashboard widgets once the query answers', async () => {
     render(<UsageView onClose={vi.fn()} />)
-    await waitFor(() => expect(screen.getByText('opencode')).toBeInTheDocument())
-    expect(screen.getByText('pay-per-token')).toBeInTheDocument()
-    expect(screen.getByText('740.0K')).toBeInTheDocument()
-    expect(screen.getByText('$0.41')).toBeInTheDocument()
-    expect(screen.getByText('zen/glm-4.6')).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: /refresh prices/i }))
-    await waitFor(() => expect(mockRefreshPrices).toHaveBeenCalledOnce())
-    expect(screen.getByText('Updated 3 model prices')).toBeInTheDocument()
-  })
-
-  it('omits the opencode card when no opencode usage exists', async () => {
-    useSessionStore.setState({ blockUsage: makeBlockUsage(), accountUsage: null } as any)
-    render(<UsageView onClose={vi.fn()} />)
     await waitFor(() => expect(screen.getByTestId('Summary')).toBeInTheDocument())
-    expect(screen.queryByRole('heading', { name: /opencode/i })).not.toBeInTheDocument()
+    expect(screen.getByTestId('AccountsPanel')).toBeInTheDocument()
+    expect(screen.getByTestId('ResetTimeline')).toBeInTheDocument()
+    expect(screen.getByTestId('WindowValue')).toBeInTheDocument()
+    expect(screen.getByTestId('SpendChart')).toBeInTheDocument()
+    expect(screen.getByTestId('BreakdownTable')).toBeInTheDocument()
   })
 
-  it('keeps the Delegated table mounted when there are dispatched rows', async () => {
-    ;(window as any).api.fetchDispatchedUsage = vi.fn().mockResolvedValue([
-      {
-        targetEngine: 'opencode',
-        targetModel: 'openai/gpt-5',
-        dispatches: 3,
-        totalTokens: 1500,
-        costUsd: 0.05
-      }
-    ])
+  it('mounts none of them while the query is still in flight', async () => {
+    let resolve!: (d: unknown) => void
+    mockFetchDashboard.mockReturnValue(new Promise((r) => (resolve = r)))
     render(<UsageView onClose={vi.fn()} />)
-    await waitFor(() => expect(screen.getByTestId('DelegatedUsage')).toBeInTheDocument())
-    expect(screen.getAllByTestId('DelegatedUsage.row')).toHaveLength(1)
+
+    // Every widget takes the dashboard data as a required prop, so the guard is
+    // the contract, not a nicety: one of them rendered against `null` would
+    // throw rather than show a placeholder.
+    expect(screen.getByTestId('UsageView.loading')).toBeInTheDocument()
+    for (const id of ['WindowValue', 'SpendChart', 'BreakdownTable']) {
+      expect(screen.queryByTestId(id)).not.toBeInTheDocument()
+    }
+
+    resolve(makeDashboard())
+    await waitFor(() => expect(screen.getByTestId('SpendChart')).toBeInTheDocument())
   })
 
-  it('omits the Delegated table when the query answers empty or rejects', async () => {
+  it('hands the group-by down to the two widgets that read it', async () => {
     render(<UsageView onClose={vi.fn()} />)
-    await waitFor(() => expect((window as any).api.fetchDispatchedUsage).toHaveBeenCalled())
-    expect(screen.queryByTestId('DelegatedUsage')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('BreakdownTable')).toBeInTheDocument())
+    expect(screen.getByTestId('BreakdownTable')).toHaveAttribute('data-group-by', 'provider')
+    // The chart cannot split a day by anything but the provider, so it only
+    // says so; at `provider` it has nothing to say.
+    expect(screen.queryByTestId('SpendChart.subtitle')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('UsageView.groupBy.model'))
+    expect(screen.getByTestId('BreakdownTable')).toHaveAttribute('data-group-by', 'model')
+    expect(screen.getByTestId('SpendChart.subtitle')).toHaveTextContent('Stacked by provider')
   })
 
-  it('keeps the daily chart and reserves the window-value slot', async () => {
+  it('lets the window-value widget do its own read, from the shell range', async () => {
     render(<UsageView onClose={vi.fn()} />)
-    await waitFor(() => expect(screen.getByText('Daily Usage')).toBeInTheDocument())
-    // `DailyUsageChart`'s own empty state — the chart is mounted, S4b-2 replaces it.
-    expect(screen.getByText('No usage history yet')).toBeInTheDocument()
-    expect(screen.getByText('Window value')).toBeInTheDocument()
+    await waitFor(() => expect(mockFetchWindows).toHaveBeenCalled())
+    expect(mockFetchWindows).toHaveBeenCalledWith({ sinceTs: makeDashboard().fromTs })
   })
 })
 
