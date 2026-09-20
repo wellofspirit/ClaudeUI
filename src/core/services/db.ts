@@ -108,9 +108,19 @@ type UsageEventAttribution = Pick<
 export interface WindowSampleRow {
   id: string
   ts: number
+  /**
+   * The Claude account uuid the sample was observed under, and the key the WLS
+   * projection still reads by ({@link getWindowSamples}). A vendor with no such
+   * uuid — a ChatGPT workspace — carries its `accountKey` here, so the column
+   * stays NOT NULL without a second meaning of "none".
+   */
   accountUuid: string
   usedPercent: number
   canonicalEnd: number
+  /** ADR-071 §3's account key — what makes the reading comparable across machines. */
+  accountKey: string
+  /** The window's canonical id: `5h`, `7d`, `7d:<model>` (ADR-071 §6). */
+  windowKind: string
 }
 
 /**
@@ -931,6 +941,46 @@ export const MIGRATIONS: Migration[] = [
         DROP TABLE dispatched_usage;
       `)
     }
+  },
+  {
+    // v21 — ADR-071 §6: one limits provider per vendor, and the readings are kept.
+    //
+    // THE ACCOUNT'S IDENTITY. `~/.claude.json` describes the ACTIVE account and
+    // nothing else, so an account the limits provider only holds credentials
+    // for has nothing to key its reading by. The four columns are that identity,
+    // learned while the account IS active (`UsageFetcher.trackActiveAccount`)
+    // and kept for when it is not. They are nullable on purpose: an account that
+    // has not been active since this shipped has never been observed, and a
+    // guess would mint an account key that names the wrong subscription.
+    //
+    // THE READINGS. `usage_window_sample` stops being the active Claude
+    // account's 5-hour series and becomes every account's series for every
+    // window kind, so it needs both halves of that identity. Existing rows are
+    // exactly what the column defaults say — the active account's 5-hour
+    // samples — except for the account half, which SQL cannot recover: the key
+    // lives in the account LOG (`account-log.jsonl`, resolved by
+    // `claudeAccountAttribution` against each row's timestamp), not in any
+    // table. They stay at `unknown` and stay usable, because the WLS projection
+    // reads them by `account_uuid` and that column is untouched.
+    //
+    // The index is the `refresh: false` read: newest sample per window kind for
+    // one account key, which is what an INACTIVE account's limits are answered
+    // from when no token may be spent.
+    version: 21,
+    up(db) {
+      db.exec(`
+        ALTER TABLE account ADD COLUMN account_uuid TEXT;
+        ALTER TABLE account ADD COLUMN organization_uuid TEXT;
+        ALTER TABLE account ADD COLUMN organization_name TEXT;
+        ALTER TABLE account ADD COLUMN billing_type TEXT;
+
+        ALTER TABLE usage_window_sample ADD COLUMN account_key TEXT NOT NULL DEFAULT 'unknown';
+        ALTER TABLE usage_window_sample ADD COLUMN window_kind TEXT NOT NULL DEFAULT '5h';
+
+        CREATE INDEX IF NOT EXISTS idx_window_sample_key_kind_ts
+          ON usage_window_sample(account_key, window_kind, ts);
+      `)
+    }
   }
 ]
 
@@ -1459,6 +1509,10 @@ interface AccountRow {
   subscription_type: string | null
   organization: string | null
   created_at: number
+  account_uuid: string | null
+  organization_uuid: string | null
+  organization_name: string | null
+  billing_type: string | null
 }
 
 function rowToAccountInfo(row: AccountRow): AccountInfo {
@@ -1467,7 +1521,11 @@ function rowToAccountInfo(row: AccountRow): AccountInfo {
     email: row.email,
     subscriptionType: row.subscription_type,
     organization: row.organization,
-    createdAt: row.created_at
+    createdAt: row.created_at,
+    accountUuid: row.account_uuid,
+    organizationUuid: row.organization_uuid,
+    organizationName: row.organization_name,
+    billingType: (row.billing_type as BillingType | null) ?? null
   }
 }
 
@@ -1489,6 +1547,40 @@ export function upsertAccount(info: AccountInfo): void {
        subscription_type = excluded.subscription_type,
        organization      = excluded.organization`
   ).run(info.id, info.email, info.subscriptionType, info.organization, info.createdAt)
+}
+
+/**
+ * Record what an account's credentials actually name (ADR-071 §6).
+ *
+ * Written while the account is ACTIVE, because `~/.claude.json` describes only
+ * that one — this is how a stored account still has an account key when the
+ * limits provider reads it later without making it active. A no-op when the id
+ * names no row: only a local multi-account dir has one.
+ */
+export function updateAccountIdentity(
+  id: string,
+  identity: {
+    accountUuid: string
+    organizationUuid?: string | undefined
+    organizationName?: string | undefined
+    billingType?: BillingType | undefined
+  }
+): void {
+  const db = getDb()
+  db.prepare(
+    `UPDATE account
+        SET account_uuid      = ?,
+            organization_uuid = ?,
+            organization_name = ?,
+            billing_type      = ?
+      WHERE id = ?`
+  ).run(
+    identity.accountUuid,
+    identity.organizationUuid ?? null,
+    identity.organizationName ?? null,
+    identity.billingType ?? null,
+    id
+  )
 }
 
 /** Delete account metadata row. Credentials directory removal is handled by AccountManager. */
@@ -1706,6 +1798,8 @@ interface WindowSampleDbRow {
   account_uuid: string
   used_percent: number
   canonical_end: number
+  account_key: string
+  window_kind: string
 }
 
 function rowToWindowSample(row: WindowSampleDbRow): WindowSampleRow {
@@ -1714,7 +1808,9 @@ function rowToWindowSample(row: WindowSampleDbRow): WindowSampleRow {
     ts: row.ts,
     accountUuid: row.account_uuid,
     usedPercent: row.used_percent,
-    canonicalEnd: row.canonical_end
+    canonicalEnd: row.canonical_end,
+    accountKey: row.account_key,
+    windowKind: row.window_kind
   }
 }
 
@@ -1726,9 +1822,48 @@ function rowToWindowSample(row: WindowSampleDbRow): WindowSampleRow {
 export function recordWindowSample(sample: WindowSampleRow): void {
   const db = getDb()
   db.prepare(
-    `INSERT INTO usage_window_sample (id, ts, account_uuid, used_percent, canonical_end)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run(sample.id, sample.ts, sample.accountUuid, sample.usedPercent, sample.canonicalEnd)
+    `INSERT INTO usage_window_sample
+       (id, ts, account_uuid, used_percent, canonical_end, account_key, window_kind)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    sample.id,
+    sample.ts,
+    sample.accountUuid,
+    sample.usedPercent,
+    sample.canonicalEnd,
+    sample.accountKey,
+    sample.windowKind
+  )
+}
+
+/**
+ * The NEWEST sample of every window kind this account key has one for.
+ *
+ * What an INACTIVE account's limits are answered from when the caller may not
+ * spend a refresh grant on it (ADR-071 §6): the last thing we saw, with its own
+ * `ts` so the reader can say how old it is. `unknown` is a real key here — the
+ * bucket every pre-v21 row landed in — so callers that mean "this account" must
+ * not pass it.
+ */
+export function latestWindowSamples(accountKey: string): WindowSampleRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare(
+      `SELECT * FROM usage_window_sample s
+        WHERE s.account_key = ?
+          AND s.ts = (SELECT MAX(t.ts) FROM usage_window_sample t
+                       WHERE t.account_key = s.account_key AND t.window_kind = s.window_kind)
+        ORDER BY s.window_kind`
+    )
+    .all(accountKey) as WindowSampleDbRow[]
+  // Two samples of one kind can share the newest ts (a poll that wrote both
+  // halves of a window in the same millisecond); one row per kind is the
+  // contract, so the first of a tie wins.
+  const newest = new Map<string, WindowSampleRow>()
+  for (const row of rows) {
+    if (!newest.has(row.window_kind)) newest.set(row.window_kind, rowToWindowSample(row))
+  }
+  return [...newest.values()]
 }
 
 /**
@@ -1743,11 +1878,21 @@ export function recordWindowSample(sample: WindowSampleRow): void {
  * projection then silently falls back to the in-memory ring forever. Taking the
  * newest `limit` guarantees the current window is always represented; reversing
  * restores the ascending contract callers expect.
+ *
+ * FIVE-HOUR SAMPLES ONLY. The table held nothing else until v21; it now holds
+ * the weekly and per-model series too, and this `limit` is a budget — sharing it
+ * across four kinds would quarter the 5-hour history the projection regresses
+ * over, on exactly the accounts (Max, with scoped weeklies) that have the most
+ * of it. The projection means the 5-hour window, so it says so.
  */
 export function getWindowSamples(accountUuid: string, limit = 100): WindowSampleRow[] {
   const db = getDb()
   const rows = db
-    .prepare('SELECT * FROM usage_window_sample WHERE account_uuid = ? ORDER BY ts DESC LIMIT ?')
+    .prepare(
+      `SELECT * FROM usage_window_sample
+        WHERE account_uuid = ? AND window_kind = '5h'
+        ORDER BY ts DESC LIMIT ?`
+    )
     .all(accountUuid, limit) as WindowSampleDbRow[]
   // Reverse the DESC page back to ascending ts for consumers.
   return rows.reverse().map(rowToWindowSample)

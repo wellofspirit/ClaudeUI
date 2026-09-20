@@ -10,11 +10,13 @@
  * implementations in at boot (`src/main`); a non-Electron entrypoint wires its
  * own or leaves them unset, and the fallbacks below are the headless behaviour.
  *
- * This file is deliberately Electron-free (only neutral `shared/types` and the
- * ambient `process`/`Buffer`), so it can live in `src/core` from the moment it
- * exists.
+ * This file is deliberately Electron-free (neutral `shared/types`, node built-ins
+ * and the ambient `process`/`Buffer`), so it can live in `src/core` from the
+ * moment it exists.
  */
 
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import type { AccountsState, AccountRef, OAuthAccount } from '../shared/types'
 
 // ---------------------------------------------------------------------------
@@ -105,6 +107,30 @@ export function setHostIsPackaged(probe: (() => boolean) | null): void {
  */
 export function hostIsPackaged(): boolean {
   return hostPackaged?.() ?? false
+}
+
+// ---------------------------------------------------------------------------
+// Multi-account credential root (ADR-015)
+// ---------------------------------------------------------------------------
+
+let hostAccountsRoot: string | null = null
+
+/**
+ * Publish the directory holding the per-account credential dirs (or clear it).
+ *
+ * `AccountManager` owns `<root>/<localId>/.credentials.json` on the desktop and
+ * the default below is that layout, so nothing has to wire this in production.
+ * It exists because the ADR-071 §6 limits provider READS those directories for
+ * accounts that are not active, and a test must be able to point that read at a
+ * fixture tree instead of the real `~/.claude`.
+ */
+export function setHostAccountsDir(dir: string | null): void {
+  hostAccountsRoot = dir
+}
+
+/** The per-account credential root — `~/.claude/ui/accounts` unless redirected. */
+export function hostAccountsDir(): string {
+  return hostAccountsRoot ?? join(homedir(), '.claude', 'ui', 'accounts')
 }
 
 // ---------------------------------------------------------------------------

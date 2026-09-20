@@ -19,22 +19,28 @@
 
 import { readFile, writeFile, mkdir, appendFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { homedir, platform } from 'node:os'
-import { randomUUID } from 'node:crypto'
 import { getCliVersion } from './claude-session'
 import { emitEvent } from './sync-host'
-import type { AccountUsage, BillingType, ExtraUsage, RateWindow } from '../../shared/types'
+import type { AccountUsage, BillingType, RateWindow } from '../../shared/types'
 import { logger } from './logger'
-import { recordWindowSample } from './db'
+import { updateAccountIdentity } from './db'
 import {
-  canonicalizeWindowEnd,
+  activeClaudeAttribution,
   claudeBillingTypeFromProfile,
   type AccountLogRecord
 } from './usage-windows'
+import {
+  claudeLimitWindows,
+  fetchClaudeUsage,
+  parseUsageResponse,
+  type CredentialsFile,
+  type OAuthCredentials
+} from './claude-usage-api'
+import { recordLimitSamples } from './window-samples'
 import { buildClaudeAccountRef } from '../host'
 import { getSecurestorageEnv } from '../sdk/securestorage-env'
-import { writeJsonAtomicAsync } from './write-json-atomic'
 
 /** The currently authenticated Claude account (from ~/.claude.json). */
 export interface ActiveAccount {
@@ -62,34 +68,14 @@ export interface ActiveAccount {
 }
 
 // ---------------------------------------------------------------------------
-// Credential types
-// ---------------------------------------------------------------------------
-
-interface OAuthCredentials {
-  accessToken: string
-  refreshToken: string
-  expiresAt: number
-  scopes: string[]
-  subscriptionType?: string
-  rateLimitTier?: string
-}
-
-interface CredentialsFile {
-  claudeAiOauth?: OAuthCredentials
-}
-
-// ---------------------------------------------------------------------------
 // Constants — match Claude Code's internal cli.js exactly
 // ---------------------------------------------------------------------------
 
 const CREDENTIALS_PATH = join(homedir(), '.claude', '.credentials.json')
 const KEYCHAIN_SERVICE = 'Claude Code-credentials'
 const IS_MACOS = platform() === 'darwin'
-const USAGE_API_URL = 'https://api.anthropic.com/api/oauth/usage'
-const TOKEN_REFRESH_URL = 'https://console.anthropic.com/v1/oauth/token'
 
 const DEFAULT_POLL_INTERVAL_MS = 30 * 60 * 1000 // 30 minutes (supplementary data only)
-const FETCH_TIMEOUT_MS = 5_000 // same as CLI's k9q (5s)
 const CACHE_STALE_MS = 10 * 60 * 1000 // 10 minutes — skip API call on startup if cache is fresher
 const CACHE_WRITE_DEBOUNCE_MS = 30_000 // 30s — match block-usage recalc cadence
 const CACHE_DIR = join(homedir(), '.claude', 'ui')
@@ -108,7 +94,7 @@ const UNKNOWN_WINDOW_FETCH_THROTTLE_MS = 30_000
  * The CLI uses "claude-code/<VERSION>" where VERSION comes from its
  * embedded build config. We read it from the vendored CLI's version.json.
  */
-function getCliUserAgent(): string {
+export function getCliUserAgent(): string {
   try {
     return `claude-code/${getCliVersion()}`
   } catch {
@@ -130,9 +116,6 @@ interface LoggedAccountPair {
 function samePair(a: LoggedAccountPair | null, b: LoggedAccountPair): boolean {
   return a !== null && a.accountUuid === b.accountUuid && a.organizationUuid === b.organizationUuid
 }
-
-/** The anthropic-beta header value — BZ in the CLI's minified code. */
-const ANTHROPIC_BETA = 'oauth-2025-04-20'
 
 // ---------------------------------------------------------------------------
 // Utilization normalization
@@ -180,10 +163,6 @@ export class UsageFetcher {
    */
   private lastLoggedAccountPair: LoggedAccountPair | null = null
   private accountLogSeeded = false
-  /** Known canonical 5h window ends, for snap-dedup of window samples (Phase 7). */
-  private knownCanonicalEnds: number[] = []
-  /** Last (accountUuid, usedPercent, canonicalEnd) recorded — dedup identical samples. */
-  private lastWindowSampleKey: string | null = null
   /** One-shot timer firing shortly after the 5h window expires. */
   private expiryTimer: ReturnType<typeof setTimeout> | null = null
   private lastFetchStartedAt = 0
@@ -355,6 +334,7 @@ export class UsageFetcher {
         ...(organizationName ? { organizationName } : {}),
         billingType
       }
+      this.rememberAccountIdentity(this.activeAccount)
 
       // Initialize dedup state from the log's last record (once per launch)
       if (!this.accountLogSeeded) {
@@ -391,6 +371,31 @@ export class UsageFetcher {
       }
     } catch (err) {
       logger.debug('UsageFetcher', `Account tracking failed: ${err}`)
+    }
+  }
+
+  /**
+   * Write the active account's identity onto its own `account` row (ADR-071 §6).
+   *
+   * `~/.claude.json` describes whichever account is active, so this is the only
+   * moment a local account's uuid, organization and billing type are knowable —
+   * the limits provider reading its credentials LATER has no second source. A
+   * no-op in single-account mode (no per-account directory, so no row to name)
+   * and best-effort: the identity is an optimization for a future read, never a
+   * reason to fail the poll that noticed it.
+   */
+  private rememberAccountIdentity(account: ActiveAccount): void {
+    const dir = getSecurestorageEnv()?.dir
+    if (!dir) return
+    try {
+      updateAccountIdentity(basename(dir), {
+        accountUuid: account.uuid,
+        organizationUuid: account.organizationUuid,
+        organizationName: account.organizationName,
+        billingType: account.billingType
+      })
+    } catch (err) {
+      logger.debug('UsageFetcher', `Account identity write failed: ${err}`)
     }
   }
 
@@ -599,41 +604,33 @@ export class UsageFetcher {
   }
 
   /**
-   * Record one usage_window_sample from the current 5h-window observation.
-   * The canonical_end is snap-deduped via canonicalizeWindowEnd (same algorithm
-   * block-usage uses), so one real window registers under one canonical end.
-   * Skips when there's no account UUID, no/expired window, or the sample is a
-   * duplicate of the last (no new information since the previous push).
-   * Failures are swallowed — this is advisory.
+   * Record a usage_window_sample for every window this observation carried —
+   * the 5-hour one, the weekly one, and each weekly per-model bucket (ADR-071
+   * §6). It used to be the 5-hour window alone, which is all the WLS projection
+   * reads; the others are what the limits dashboard and the window-value ledger
+   * are built on, and an observation nobody recorded is gone.
+   *
+   * Skips when there is no account uuid — every sample is filed under an
+   * account, and the fetcher cannot name one before `trackActiveAccount` has
+   * read `~/.claude.json`. The per-window skips (no reset, expired, unchanged)
+   * and the canonical-end snapping live in `recordLimitSamples`, which the
+   * provider's inactive-account reads share. Failures are swallowed — advisory.
    */
   private recordWindowSampleFromUsage(usage: AccountUsage): void {
     try {
       if (usage.error) return
-      const accountUuid = this.activeAccount?.uuid
-      if (!accountUuid) return
-      const resetsAt = usage.fiveHour.resetsAt
-      if (!resetsAt) return
-      const resetMs = new Date(resetsAt).getTime()
-      if (isNaN(resetMs) || resetMs <= Date.now()) return
-
-      const canonicalEnd = canonicalizeWindowEnd(resetMs, this.knownCanonicalEnds)
-      if (!this.knownCanonicalEnds.includes(canonicalEnd)) {
-        this.knownCanonicalEnds.push(canonicalEnd)
-        this.knownCanonicalEnds.sort((a, b) => a - b)
-      }
-
-      const usedPercent = usage.fiveHour.usedPercent
-      const key = `${accountUuid}:${usedPercent}:${canonicalEnd}`
-      if (key === this.lastWindowSampleKey) return // no new info since last push
-      this.lastWindowSampleKey = key
-
-      recordWindowSample({
-        id: randomUUID(),
-        ts: Date.now(),
-        accountUuid,
-        usedPercent,
-        canonicalEnd
+      const active = this.activeAccount
+      if (!active) return
+      const written = recordLimitSamples({
+        accountKey: activeClaudeAttribution(active, buildClaudeAccountRef()?.billingType)
+          .accountKey,
+        accountUuid: active.uuid,
+        windows: claudeLimitWindows(usage)
       })
+      // ADR-071 §6's nudge, beside `usage:data`: a client watching LIMITS across
+      // vendors reads `usage:limits`, and the active account's readings move
+      // here rather than in the provider.
+      if (written > 0) emitEvent('usage:limits-changed', [])
     } catch (err) {
       logger.debug('UsageFetcher', `recordWindowSample failed: ${err}`)
     }
@@ -652,7 +649,7 @@ export class UsageFetcher {
       try {
         const data = await this.sessionGetter()
         if (data !== null && typeof data === 'object') {
-          return this.parseResponse(data)
+          return parseUsageResponse(data)
         }
       } catch (err) {
         logger.debug('UsageFetcher', `SDK fallback failed: ${err}`)
@@ -666,83 +663,34 @@ export class UsageFetcher {
   // Direct API — mirrors CLI's k9q() exactly
   // -------------------------------------------------------------------------
 
+  /**
+   * The direct `/api/oauth/usage` call for the ACTIVE account, in the shape the
+   * relay fallback expects: the usage, or null to mean "try the SDK relay".
+   *
+   * The call itself lives in `claude-usage-api.ts` now — the limits provider
+   * makes the same one against a stored account's own credentials path (ADR-071
+   * §6) — so this is the mapping from its typed failures back onto that older
+   * contract. Only a 429 is an ANSWER here: it says the account is fine and the
+   * relay would be told the same thing, so it becomes an error result rather
+   * than a fallback (the regression pin in usage-fetcher-expanded holds this).
+   */
   private async fetchDirect(): Promise<AccountUsage | null> {
-    const creds = await this.readCredentials()
-    if (!creds) return null // no creds → skip to fallback silently
-
-    // Refresh token if expired (with 60s buffer)
-    let token = creds.accessToken
-    if (creds.expiresAt < Date.now() + 60_000) {
-      try {
-        token = await this.refreshToken(creds)
-      } catch {
-        return null // refresh failed → skip to fallback
-      }
+    const result = await fetchClaudeUsage({
+      credentialsPath: this.credentialsPath(),
+      allowRefresh: true,
+      userAgent: this.userAgent,
+      fallbackCredentials: () => this.readKeychainCredentials()
+    })
+    if ('usage' in result) return result.usage
+    if (result.error === 'rate-limited') {
+      logger.debug(
+        'UsageFetcher',
+        'Direct API returned 429 (rate limited), skipping until next poll'
+      )
+      return this.errorResult('Rate limited')
     }
-
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
-
-    try {
-      // Exact same headers as CLI's k9q():
-      //   { "Content-Type": "application/json", "User-Agent": jO(), ...u_().headers }
-      // where u_().headers = { Authorization: "Bearer <token>", "anthropic-beta": BZ }
-      const resp = await fetch(USAGE_API_URL, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'User-Agent': this.userAgent,
-          Authorization: `Bearer ${token}`,
-          'anthropic-beta': ANTHROPIC_BETA
-        },
-        signal: controller.signal
-      })
-
-      if (resp.status === 401) {
-        // Try refreshing and retrying once
-        try {
-          token = await this.refreshToken(creds)
-        } catch {
-          return null
-        }
-        const retry = await fetch(USAGE_API_URL, {
-          method: 'GET',
-          headers: {
-            'Content-Type': 'application/json',
-            'User-Agent': this.userAgent,
-            Authorization: `Bearer ${token}`,
-            'anthropic-beta': ANTHROPIC_BETA
-          },
-          signal: controller.signal
-        })
-        if (!retry.ok) return null
-        const data = (await retry.json()) as Record<string, unknown>
-        return this.parseResponse(data)
-      }
-
-      if (resp.status === 429) {
-        // Rate-limited — don't retry or fall back, just wait for the next poll cycle
-        logger.debug(
-          'UsageFetcher',
-          'Direct API returned 429 (rate limited), skipping until next poll'
-        )
-        return this.errorResult('Rate limited')
-      }
-
-      if (!resp.ok) {
-        logger.debug('UsageFetcher', `Direct API returned ${resp.status}`)
-        return null // non-200 → skip to fallback
-      }
-
-      const data = (await resp.json()) as Record<string, unknown>
-      return this.parseResponse(data)
-    } catch (err) {
-      // Network error / timeout → skip to fallback
-      logger.debug('UsageFetcher', `Direct API error: ${err}`)
-      return null
-    } finally {
-      clearTimeout(timeout)
-    }
+    logger.debug('UsageFetcher', `Direct API unavailable: ${result.detail}`)
+    return null
   }
 
   // -------------------------------------------------------------------------
@@ -765,29 +713,16 @@ export class UsageFetcher {
     return dir ? join(dir, '.credentials.json') : CREDENTIALS_PATH
   }
 
-  private async readCredentials(): Promise<OAuthCredentials | null> {
-    const fileCreds = await this.readCredentialsFromFile()
-    if (fileCreds) return fileCreds
-
-    // Keychain only applies in single-account mode. When multi-account is
-    // active, credentials are file-based per ADR-015 (SKIP_SECURESTORAGE) —
-    // never the Keychain — so don't consult it.
-    if (IS_MACOS && !getSecurestorageEnv()) {
-      return this.readCredentialsFromKeychain()
-    }
-
-    return null
-  }
-
-  private async readCredentialsFromFile(): Promise<OAuthCredentials | null> {
-    try {
-      const raw = await readFile(this.credentialsPath(), 'utf-8')
-      const parsed = JSON.parse(raw) as CredentialsFile
-      if (!parsed.claudeAiOauth?.accessToken) return null
-      return parsed.claudeAiOauth
-    } catch {
-      return null
-    }
+  /**
+   * The macOS Keychain credential, when it applies at all.
+   *
+   * Keychain storage only exists in single-account mode. When multi-account is
+   * active, credentials are file-based per ADR-015 (SKIP_SECURESTORAGE) — never
+   * the Keychain — so this answers null and the file is the only source.
+   */
+  private async readKeychainCredentials(): Promise<OAuthCredentials | null> {
+    if (!IS_MACOS || getSecurestorageEnv()) return null
+    return this.readCredentialsFromKeychain()
   }
 
   private async readCredentialsFromKeychain(): Promise<OAuthCredentials | null> {
@@ -818,165 +753,6 @@ export class UsageFetcher {
       return parsed.claudeAiOauth
     } catch {
       return null
-    }
-  }
-
-  private async refreshToken(creds: OAuthCredentials): Promise<string> {
-    const resp = await fetch(TOKEN_REFRESH_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'refresh_token',
-        refresh_token: creds.refreshToken,
-        client_id: 'cli'
-      })
-    })
-
-    if (!resp.ok) throw new Error(`Refresh failed: ${resp.status}`)
-
-    const data = (await resp.json()) as {
-      access_token: string
-      refresh_token?: string
-      expires_in?: number
-    }
-
-    // Persist refreshed credentials
-    const newCreds: OAuthCredentials = {
-      ...creds,
-      accessToken: data.access_token,
-      ...(data.refresh_token ? { refreshToken: data.refresh_token } : {}),
-      expiresAt: Date.now() + (data.expires_in ?? 3600) * 1000
-    }
-    try {
-      const path = this.credentialsPath()
-      const raw = await readFile(path, 'utf-8')
-      const file = JSON.parse(raw) as CredentialsFile
-      file.claudeAiOauth = newCreds
-      // Atomic (temp + rename): .credentials.json is the LIVE Claude OAuth store
-      // the CLI also writes; a torn write here could lock the user out. Same
-      // 2-space format as before, now crash-safe (P1).
-      await writeJsonAtomicAsync(path, file, { indent: 2 })
-    } catch {
-      /* best effort */
-    }
-
-    return data.access_token
-  }
-
-  // -------------------------------------------------------------------------
-  // Response parsing
-  // -------------------------------------------------------------------------
-
-  /**
-   * Parse a usage response into AccountUsage. Two shapes are accepted:
-   *
-   *   1. `/api/oauth/usage` HTTP body — windows at the top level
-   *      (`five_hour`, `seven_day`, …) with `extra_usage` alongside.
-   *   2. SDK-relay fallback — cli.js's structured `get_usage` control response,
-   *      which nests the same windows (and `extra_usage`) under `rate_limits`
-   *      (null when `rate_limits_available` is false), and adds `session` /
-   *      `subscription_type` / `behaviors`. cli.js restructured this shape in a
-   *      recent release; before, the relay mirrored the flat HTTP body.
-   *
-   * Window utilization is 0–100 (percentage) in both shapes — unlike the
-   * rate_limit_event headers (0–1 fraction); see toUsedPercent().
-   */
-  private parseResponse(data: Record<string, unknown>): AccountUsage {
-    // The structured relay shape is distinguished by its top-level keys.
-    const isStructured = 'rate_limits' in data || 'rate_limits_available' in data
-    const rateLimits =
-      isStructured && data.rate_limits && typeof data.rate_limits === 'object'
-        ? (data.rate_limits as Record<string, unknown>)
-        : null
-    // Where the per-window objects live: nested under rate_limits for the
-    // structured shape, top-level for the HTTP shape.
-    const windowSource: Record<string, unknown> = isStructured ? (rateLimits ?? {}) : data
-
-    const parseWindow = (key: string): RateWindow | null => {
-      const w = windowSource[key] as
-        { utilization?: number | null; resets_at?: string | null } | undefined | null
-      if (!w || typeof w.utilization !== 'number') return null
-      return {
-        usedPercent: w.utilization,
-        resetsAt: w.resets_at ?? null
-      }
-    }
-
-    const fiveHour = parseWindow('five_hour')
-
-    // Warn only on a genuinely unrecognized HTTP shape. The structured fallback
-    // legitimately reports no five_hour when rate_limits is unavailable (API key
-    // / Bedrock / Vertex sessions) — that's not an error.
-    if (!fiveHour && !isStructured && Object.keys(data).length > 0) {
-      logger.warn('UsageFetcher', 'API response missing five_hour utilization — defaulting to 0%', {
-        keys: Object.keys(data),
-        five_hour: data['five_hour']
-      })
-    }
-
-    // extra_usage: { is_enabled, monthly_limit, used_credits, utilization }.
-    // Top-level in the HTTP shape, nested under rate_limits in the structured one
-    // (windowSource resolves to the right object for both).
-    let extraUsage: ExtraUsage | null = null
-    const eu = windowSource['extra_usage'] as
-      | {
-          is_enabled?: boolean
-          monthly_limit?: number | null
-          used_credits?: number
-          utilization?: number
-        }
-      | undefined
-      | null
-    if (eu && typeof eu === 'object') {
-      extraUsage = {
-        isEnabled: eu.is_enabled ?? false,
-        monthlyLimit: eu.monthly_limit ?? null,
-        usedCredits: eu.used_credits ?? 0,
-        utilization: eu.utilization ?? 0
-      }
-    }
-
-    // The generalized `limits[]` array sits alongside the legacy per-window
-    // keys. Weekly per-model buckets live ONLY here (seven_day_opus /
-    // seven_day_sonnet are null on such accounts), so mirror cli.js: keep
-    // `kind === "weekly_scoped"` entries carrying a scope model and take the
-    // label from the server's display_name — never hardcode a model name.
-    // `percent` is already 0-100. Malformed entries are skipped silently, as
-    // parseWindow does.
-    const sevenDayModels: Array<{ label: string; window: RateWindow }> = []
-    const limits = windowSource['limits']
-    if (Array.isArray(limits)) {
-      for (const raw of limits) {
-        const entry = raw as {
-          kind?: unknown
-          percent?: unknown
-          resets_at?: string | null
-          scope?: { model?: { display_name?: unknown } | null } | null
-        } | null
-        if (!entry || typeof entry !== 'object' || entry.kind !== 'weekly_scoped') continue
-        const label = entry.scope?.model?.display_name
-        if (typeof label !== 'string' || typeof entry.percent !== 'number') continue
-        sevenDayModels.push({
-          label,
-          window: { usedPercent: entry.percent, resetsAt: entry.resets_at ?? null }
-        })
-      }
-    }
-
-    // subscription_type ('pro' | 'max' | 'team' | 'enterprise') is only present
-    // in the structured shape; the HTTP body has no plan name.
-    const planName = typeof data.subscription_type === 'string' ? data.subscription_type : null
-
-    return {
-      fiveHour: fiveHour ?? { usedPercent: 0, resetsAt: null },
-      sevenDay: parseWindow('seven_day'),
-      sevenDaySonnet: parseWindow('seven_day_sonnet'),
-      sevenDayOpus: parseWindow('seven_day_opus'),
-      sevenDayModels: sevenDayModels.length ? sevenDayModels : null,
-      extraUsage,
-      planName,
-      fetchedAt: Date.now(),
-      error: null
     }
   }
 

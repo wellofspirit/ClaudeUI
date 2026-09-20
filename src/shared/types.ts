@@ -2787,6 +2787,50 @@ export interface ExtraUsage {
   utilization: number // percentage 0-100
 }
 
+/** One limit window of an account's reading (ADR-071 §6). */
+export interface AccountLimitWindow {
+  /**
+   * The canonical window id: `5h`, `7d`, or `7d:<model>` for a per-model weekly
+   * bucket. It is a GROUPING key — what makes two readings of the same window,
+   * on this machine and on another, the same series (ADR-072 §4) — never an
+   * identity of spend.
+   */
+  kind: '5h' | '7d' | string
+  /** The display name — `5-hour`, `7-day`, `7-day Fable`. */
+  label: string
+  usedPercent: number
+  resetsAt: string | null
+}
+
+/**
+ * What one vendor account's limits provider observed (ADR-071 §6).
+ *
+ * One shape for every vendor, so the dashboard and ADR-072's hub read Claude's
+ * 5-hour window and a ChatGPT workspace's weekly one through the same fields.
+ * `state` carries WHY a reading is thin instead of leaving the caller to infer
+ * it from an empty `windows` array:
+ *
+ *  - `ok` — read just now;
+ *  - `stale` — the last PERSISTED reading, no token spent (an inactive Claude
+ *    account with `refresh: false`, the owner's refresh-grant rule);
+ *  - `needs-sign-in` — the stored credential no longer authenticates;
+ *  - `unavailable` — nothing was readable and nothing is stored.
+ */
+export interface AccountLimits {
+  /** ADR-071 §3's key, or `unknown` when the account's identity is not yet captured. */
+  accountKey: string
+  label: string
+  vendorId: string
+  plan: string | null
+  windows: AccountLimitWindow[]
+  credits?: { unlimited: boolean; balance: string | null }
+  observedAt: number
+  /** Where the reading came from — ADR-072 relays readings from other machines. */
+  source: 'local' | { deviceId: string }
+  state: 'ok' | 'stale' | 'needs-sign-in' | 'unavailable'
+  error?: string
+}
+
 export interface AccountUsage {
   fiveHour: RateWindow
   sevenDay: RateWindow | null
@@ -2823,6 +2867,19 @@ export interface AccountInfo {
   subscriptionType: string | null
   organization: string | null
   createdAt: number
+  /**
+   * The identity the account was last seen with WHILE ACTIVE (ADR-071 §6).
+   *
+   * `~/.claude.json` describes the active account only, so an account that is
+   * not active has nothing left to read its key off — these four are how the
+   * limits provider can still name a stored account it is only reading
+   * credentials for. Absent on an account that has not been active since this
+   * shipped; such an account's readings land under `unknown`.
+   */
+  accountUuid?: string | null
+  organizationUuid?: string | null
+  organizationName?: string | null
+  billingType?: BillingType | null
 }
 
 export interface AccountsState {

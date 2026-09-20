@@ -48,6 +48,7 @@ import { loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
 import { scanCustomCommands } from '../services/custom-command-scanner'
 import { usageFetcher } from '../services/usage-fetcher'
 import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
+import { readAccountLimits } from '../services/usage-provider'
 import { blockUsageService } from '../services/block-usage'
 import type {
   ApprovalDecision,
@@ -1063,6 +1064,22 @@ export function registerRemoteHandlers(
     handler: async (refresh?: boolean) => {
       if (refresh) await chatgptRateLimits.refresh()
       return chatgptRateLimits.snapshot()
+    }
+  })
+
+  /**
+   * ADR-071 §6 — every account's limits, across vendors. `refresh` decides
+   * whether a stored Claude account's credentials are read at all: without it
+   * the answer comes from the last persisted reading and spends no refresh
+   * grant (the owner's rule). Per-account failures travel as `state`, so one
+   * account needing a sign-in cannot blank the rest.
+   */
+  handleRemote({
+    channel: 'usage:limits',
+    capability: 'config',
+    kind: 'query',
+    handler: async (refresh?: boolean) => {
+      return readAccountLimits({ refresh: !!refresh })
     }
   })
 

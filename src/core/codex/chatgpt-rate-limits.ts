@@ -27,6 +27,8 @@ import type { GetAccountRateLimitsResponse } from './protocol/v2/GetAccountRateL
 import type { RateLimitSnapshot } from './protocol/v2/RateLimitSnapshot'
 import type { RateLimitWindow } from './protocol/v2/RateLimitWindow'
 import { emitEvent } from '../services/sync-host'
+import { recordLimitSamples, type LimitSampleWindow } from '../services/window-samples'
+import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
 
 /**
  * `resetsAt` is a unix timestamp in SECONDS.
@@ -98,6 +100,16 @@ export interface ChatgptRateLimitDeps {
   read: (accountIds: ReadonlyArray<string>) => Promise<Map<string, GetAccountRateLimitsResponse>>
   /** Tells clients the map moved. No payload: they re-query. */
   changed: () => void
+  /**
+   * Keep the reading (ADR-071 §6). Takes the VAULT account id and the windows
+   * THIS snapshot carried — not the merged entry — so a sparse push records what
+   * was actually observed rather than re-recording a window nobody just read.
+   *
+   * Injected because resolving the vault id to ADR-071 §3's account key is async
+   * and touches the vault, neither of which belongs inside a synchronous fold;
+   * it also keeps this class's unit tests free of a database.
+   */
+  persist: (vaultAccountId: string, windows: LimitSampleWindow[]) => void
   now: () => number
 }
 
@@ -125,8 +137,10 @@ export class ChatgptRateLimitStore {
     identity: { email?: string; planType?: string } = {}
   ): void {
     const previous = this.limits[vaultAccountId]
-    const primary = rateWindow(snapshot.primary) ?? previous?.primary ?? null
-    const secondary = rateWindow(snapshot.secondary) ?? previous?.secondary ?? null
+    const observedPrimary = rateWindow(snapshot.primary)
+    const observedSecondary = rateWindow(snapshot.secondary)
+    const primary = observedPrimary ?? previous?.primary ?? null
+    const secondary = observedSecondary ?? previous?.secondary ?? null
     // Same sparse rule as the windows: only a snapshot that actually says the
     // account HAS credits replaces what the last full read established.
     const credits = snapshot.credits?.hasCredits
@@ -143,6 +157,15 @@ export class ChatgptRateLimitStore {
       fetchedAt: this.deps.now()
     }
     this.limits[vaultAccountId] = entry
+
+    // The OBSERVED windows, not the merged ones: a sample says "this is what the
+    // account read at this instant", and re-recording a window this push did not
+    // carry would restate an old reading under a new timestamp.
+    const observed: LimitSampleWindow[] = []
+    if (observedPrimary) observed.push({ kind: '5h', ...observedPrimary })
+    if (observedSecondary) observed.push({ kind: '7d', ...observedSecondary })
+    if (observed.length) this.deps.persist(vaultAccountId, observed)
+
     this.deps.changed()
   }
 
@@ -211,6 +234,36 @@ export const chatgptRateLimits = new ChatgptRateLimitStore({
       service.dispose()
     }
   },
-  changed: () => emitEvent('usage:chatgpt-limits-changed', []),
+  changed: () => {
+    emitEvent('usage:chatgpt-limits-changed', [])
+    // ADR-071 §6's channel, beside ADR-068's: `usage:limits` answers for every
+    // vendor, so a client watching limits across vendors must not have to know
+    // which vendor's nudge to listen for.
+    emitEvent('usage:limits-changed', [])
+  },
+  persist: (vaultAccountId, windows) => {
+    void persistChatgptSamples(vaultAccountId, windows)
+  },
   now: () => Date.now()
 })
+
+/**
+ * Keep one ChatGPT reading under ADR-071 §3's account key.
+ *
+ * The key is resolved from the VAULT (async, and it reads credentials), which is
+ * why this is not inside `record()`. Best-effort: a sample nobody could key is
+ * dropped rather than filed under `unknown`, where it would be indistinguishable
+ * from every other account's.
+ */
+async function persistChatgptSamples(
+  vaultAccountId: string,
+  windows: LimitSampleWindow[]
+): Promise<void> {
+  try {
+    const { accountKey } = await credentialSync.accountIdentity(vaultAccountId)
+    if (accountKey === UNKNOWN_ACCOUNT_KEY) return
+    recordLimitSamples({ accountKey, windows })
+  } catch {
+    /* advisory */
+  }
+}

@@ -569,6 +569,9 @@ function buildProjectionSamplesFromDb(
 
 describe('Phase 9a — DB-sourced WLS projection', () => {
   const ACCOUNT_UUID = 'test-uuid-9a'
+  // v21's columns. The projection reads by account_uuid and ignores both, but
+  // they are NOT NULL, so a writer has to name them.
+  const ACCOUNT_KEY = 'anthropic:test-org-9a:test-uuid-9a'
 
   beforeEach(() => closeDb())
   afterEach(() => closeDb())
@@ -622,7 +625,9 @@ describe('Phase 9a — DB-sourced WLS projection', () => {
         ts: s.timestamp,
         accountUuid: ACCOUNT_UUID,
         usedPercent: s.apiPercent,
-        canonicalEnd: WINDOW_END_9A
+        canonicalEnd: WINDOW_END_9A,
+        accountKey: ACCOUNT_KEY,
+        windowKind: '5h'
       } as WindowSampleRow)
     }
 
@@ -672,7 +677,9 @@ describe('Phase 9a — DB-sourced WLS projection', () => {
         ts: sampleTimes[i],
         accountUuid: ACCOUNT_UUID,
         usedPercent: apiPercents[i],
-        canonicalEnd: WINDOW_END_9A
+        canonicalEnd: WINDOW_END_9A,
+        accountKey: ACCOUNT_KEY,
+        windowKind: '5h'
       } as WindowSampleRow)
     }
 
@@ -745,7 +752,9 @@ describe('Phase 9a — DB-sourced WLS projection', () => {
         ts: sampleTimes[i],
         accountUuid: ACCOUNT_UUID,
         usedPercent: apiPercents[i],
-        canonicalEnd: WINDOW_END_9A
+        canonicalEnd: WINDOW_END_9A,
+        accountKey: ACCOUNT_KEY,
+        windowKind: '5h'
       } as WindowSampleRow)
     }
 
@@ -806,7 +815,9 @@ describe('Phase 9a — DB-sourced WLS projection', () => {
         ts: BASE + i * 10 * MS_PER_MINUTE,
         accountUuid: ACCOUNT_UUID,
         usedPercent: 5 + i * 5,
-        canonicalEnd: WINDOW_END_9A
+        canonicalEnd: WINDOW_END_9A,
+        accountKey: ACCOUNT_KEY,
+        windowKind: '5h'
       } as WindowSampleRow)
     }
 

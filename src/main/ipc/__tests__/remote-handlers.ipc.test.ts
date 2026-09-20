@@ -1910,7 +1910,11 @@ describe('remote surface parity (phase 1 port)', () => {
         'codex:recompile-rules',
         'session:codex-approval',
         // Read-only: what deleting a Codex session would remove (slice G).
-        'session:codex-delete-plan'
+        'session:codex-delete-plan',
+        // ADR-071 §6: every account's limits, for every vendor. `config` and a
+        // query, like the two usage reads beside it — and the remote client has
+        // to reach it, because the dashboard built on it is not desktop-only.
+        'usage:limits'
       ].sort()
     )
   })

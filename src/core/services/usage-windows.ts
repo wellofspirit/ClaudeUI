@@ -157,3 +157,50 @@ export function claudeAccountAttribution(
 function claudeAccountLabel(rec: AccountLogRecord): string {
   return rec.organizationName ? `${rec.email} (${rec.organizationName})` : rec.email
 }
+
+/**
+ * The account fields {@link activeClaudeAttribution} needs — `UsageFetcher`'s
+ * `ActiveAccount`, structurally, so this module stays free of service imports.
+ */
+export interface ActiveClaudeAccount {
+  uuid: string
+  email: string
+  organizationUuid?: string
+  organizationName?: string
+  billingType: BillingType
+}
+
+/**
+ * Attribute a turn or a reading to the account that is active RIGHT NOW.
+ *
+ * {@link claudeAccountAttribution} answers "which account was active at `ts`"
+ * from the log; this answers "which account is active" from the live read of
+ * `~/.claude.json`, by running that same rule over a one-record log. Same rule,
+ * so a row written live and a row attributed by time cannot disagree about the
+ * key, the label or the billing type.
+ *
+ * `fallbackBillingType` is the caller's second signal for an account whose
+ * profile named no billing type — `ClaudeAuthProvider`'s probe cache, which the
+ * host exposes and which may have filled in since the account was read. It is a
+ * parameter rather than a lookup so this file keeps importing nothing.
+ *
+ * NOTE (S3a): the cross-engine dispatcher's `claudeDispatchAccount()` still
+ * holds an inline copy of this, because that file is being changed in a
+ * concurrent slice. It switches to this helper when the two land.
+ */
+export function activeClaudeAttribution(
+  active: ActiveClaudeAccount | null,
+  fallbackBillingType?: BillingType | null
+): ClaudeAccountAttribution {
+  if (!active) return claudeAccountAttribution([], 0)
+  const record: AccountLogRecord = {
+    ts: 0,
+    accountUuid: active.uuid,
+    email: active.email,
+    ...(active.organizationUuid ? { organizationUuid: active.organizationUuid } : {}),
+    ...(active.organizationName ? { organizationName: active.organizationName } : {}),
+    billingType:
+      active.billingType !== 'unknown' ? active.billingType : (fallbackBillingType ?? 'unknown')
+  }
+  return claudeAccountAttribution([record], Date.now())
+}

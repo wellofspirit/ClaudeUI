@@ -43,6 +43,7 @@ import { gitServiceManager } from '../services/git-service'
 import { gitWatchRegistry } from '../services/git-watch-registry'
 import { usageFetcher } from '../services/usage-fetcher'
 import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
+import { readAccountLimits } from '../services/usage-provider'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
@@ -391,6 +392,7 @@ const SESSION_IPC_CHANNELS = [
   'usage:fetch',
   'usage:fetch-block',
   'usage:chatgpt-limits',
+  'usage:limits',
   'usage:set-account-filter',
   'usage:refresh-prices',
   'usage:fetch-dispatched',
@@ -1690,6 +1692,22 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: async (refresh?: boolean) => {
       if (refresh) await chatgptRateLimits.refresh()
       return chatgptRateLimits.snapshot()
+    }
+  })
+
+  /**
+   * ADR-071 §6 — every account's limits, across vendors. `refresh` decides
+   * whether a stored Claude account's credentials are read at all: without it
+   * the answer comes from the last persisted reading and spends no refresh
+   * grant (the owner's rule). Per-account failures travel as `state`, so one
+   * account needing a sign-in cannot blank the rest.
+   */
+  handleIpc({
+    channel: 'usage:limits',
+    capability: 'config',
+    kind: 'query',
+    handler: async (refresh?: boolean) => {
+      return readAccountLimits({ refresh: !!refresh })
     }
   })
 

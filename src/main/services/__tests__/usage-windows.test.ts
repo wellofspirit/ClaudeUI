@@ -7,6 +7,7 @@ import {
   accountForTimestamp,
   accountRecordForTimestamp,
   claudeAccountAttribution,
+  activeClaudeAttribution,
   claudeBillingTypeFromProfile,
   type AccountLogRecord
 } from '../../../core/services/usage-windows'
@@ -234,5 +235,53 @@ describe('claudeBillingTypeFromProfile', () => {
     expect(claudeBillingTypeFromProfile('')).toBeNull()
     expect(claudeBillingTypeFromProfile(undefined)).toBeNull()
     expect(claudeBillingTypeFromProfile(42)).toBeNull()
+  })
+})
+
+describe('activeClaudeAttribution', () => {
+  const active = {
+    uuid: 'acc_1',
+    email: 'someone@example.test',
+    organizationUuid: 'org_personal',
+    organizationName: 'Personal',
+    billingType: 'subscription' as const
+  }
+
+  it('keys the live account exactly as the log-based rule would', () => {
+    expect(activeClaudeAttribution(active)).toEqual({
+      email: 'someone@example.test',
+      accountUuid: 'acc_1',
+      accountKey: 'anthropic:org_personal:acc_1',
+      accountLabel: 'someone@example.test (Personal)',
+      billingType: 'subscription'
+    })
+  })
+
+  it('is the unknown attribution when no account is signed in', () => {
+    expect(activeClaudeAttribution(null)).toEqual({
+      email: null,
+      accountUuid: null,
+      accountKey: 'unknown',
+      accountLabel: null,
+      billingType: 'unknown'
+    })
+  })
+
+  it('refuses to key an account with no organization', () => {
+    // Half of `anthropic:<org>:<account>` is not a key: two subscriptions under
+    // one account uuid would collapse into it.
+    const attribution = activeClaudeAttribution({ ...active, organizationUuid: undefined })
+    expect(attribution.accountKey).toBe('unknown')
+    expect(attribution.accountLabel).toBeNull()
+  })
+
+  it('takes the caller’s billing type only when the account names none', () => {
+    expect(
+      activeClaudeAttribution({ ...active, billingType: 'unknown' }, 'apiKey').billingType
+    ).toBe('apiKey')
+    expect(activeClaudeAttribution(active, 'apiKey').billingType).toBe('subscription')
+    expect(activeClaudeAttribution({ ...active, billingType: 'unknown' }).billingType).toBe(
+      'unknown'
+    )
   })
 })

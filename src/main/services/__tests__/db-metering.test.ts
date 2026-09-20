@@ -18,6 +18,7 @@ import {
   getUsageEventByMessageId,
   recordWindowSample,
   getWindowSamples,
+  latestWindowSamples,
   pruneUsageTables,
   upsertUsageBuckets,
   getUsageBucketsSince,
@@ -48,9 +49,9 @@ describe('DB migrations — v3 usage_event + v4 usage_window_sample', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      // Bump alongside MIGRATIONS in db.ts — currently v20 (usage_bucket
-      // replaced daily_usage and dispatched_usage was dropped).
-      expect(userVersion(db)).toBe(20)
+      // Bump alongside MIGRATIONS in db.ts — currently v21 (the account's
+      // identity columns and the window samples' account key + kind).
+      expect(userVersion(db)).toBe(21)
     } finally {
       db.close()
     }
@@ -267,6 +268,8 @@ function makeSample(overrides: Partial<WindowSampleRow> = {}): WindowSampleRow {
     accountUuid: 'uuid_test',
     usedPercent: 42.5,
     canonicalEnd: 1_700_000_000_000,
+    accountKey: 'anthropic:org_test:uuid_test',
+    windowKind: '5h',
     ...overrides
   }
 }
@@ -343,11 +346,71 @@ describe('recordWindowSample / getWindowSamples', () => {
     expect(tsList).toEqual([...tsList].sort((a, b) => a - b))
   })
 
+  it('is the FIVE-HOUR series only — the weekly kinds must not eat the budget', () => {
+    // The projection regresses over 5-hour samples; sharing one LIMIT across
+    // every kind would quarter its history on an account with scoped weeklies.
+    recordWindowSample(makeSample({ accountUuid: 'kinds', windowKind: '5h', usedPercent: 10 }))
+    recordWindowSample(makeSample({ accountUuid: 'kinds', windowKind: '7d', usedPercent: 20 }))
+    recordWindowSample(makeSample({ accountUuid: 'kinds', windowKind: '7d:opus', usedPercent: 30 }))
+
+    const rows = getWindowSamples('kinds')
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0].usedPercent).toBeCloseTo(10)
+  })
+
   it('multiple samples per window are allowed (no unique constraint)', () => {
     recordWindowSample(makeSample({ accountUuid: 'ua2', canonicalEnd: 100 }))
     recordWindowSample(makeSample({ accountUuid: 'ua2', canonicalEnd: 100 }))
     const rows = getWindowSamples('ua2')
     expect(rows).toHaveLength(2) // both rows kept
+  })
+})
+
+/**
+ * ADR-071 §6 — what an INACTIVE account's limits are answered from when no
+ * refresh grant may be spent: the newest sample of each window kind.
+ */
+describe('latestWindowSamples', () => {
+  const KEY = 'anthropic:org_x:uuid_x'
+
+  it('returns the newest sample of every kind, one per kind', () => {
+    recordWindowSample(makeSample({ accountKey: KEY, windowKind: '5h', ts: 1000, usedPercent: 10 }))
+    recordWindowSample(makeSample({ accountKey: KEY, windowKind: '5h', ts: 3000, usedPercent: 30 }))
+    recordWindowSample(makeSample({ accountKey: KEY, windowKind: '7d', ts: 2000, usedPercent: 20 }))
+
+    const rows = latestWindowSamples(KEY)
+
+    expect(rows).toHaveLength(2)
+    expect(rows.map((r) => [r.windowKind, r.usedPercent])).toEqual(
+      expect.arrayContaining([
+        ['5h', 30],
+        ['7d', 20]
+      ])
+    )
+  })
+
+  it('never answers with another account’s samples', () => {
+    recordWindowSample(makeSample({ accountKey: KEY, windowKind: '5h', ts: 1000, usedPercent: 11 }))
+    recordWindowSample(
+      makeSample({ accountKey: 'anthropic:org_y:uuid_y', windowKind: '5h', ts: 9000 })
+    )
+
+    const rows = latestWindowSamples(KEY)
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0].usedPercent).toBeCloseTo(11)
+  })
+
+  it('is empty for an account nothing was ever recorded for', () => {
+    expect(latestWindowSamples('anthropic:org_none:uuid_none')).toEqual([])
+  })
+
+  it('keeps one row per kind even when two share the newest timestamp', () => {
+    recordWindowSample(makeSample({ accountKey: KEY, windowKind: '5h', ts: 5000 }))
+    recordWindowSample(makeSample({ accountKey: KEY, windowKind: '5h', ts: 5000 }))
+
+    expect(latestWindowSamples(KEY)).toHaveLength(1)
   })
 })
 

@@ -108,11 +108,32 @@ vi.mock('node:fs/promises', () => ({
 }))
 
 // ---------------------------------------------------------------------------
+// The two database writes on this path (ADR-071 §6): the active account's
+// identity, and one window sample per window kind. Mocked at the db seam rather
+// than at `window-samples`, so the canonicalization and the dedup between them
+// are the real ones.
+// ---------------------------------------------------------------------------
+
+const { updateAccountIdentity, recordWindowSample } = vi.hoisted(() => ({
+  updateAccountIdentity: vi.fn(),
+  recordWindowSample: vi.fn()
+}))
+
+vi.mock('../../../core/services/db', () => ({ updateAccountIdentity, recordWindowSample }))
+
+// The two nudges the poll fans out: `usage:data` (the whole reading) and
+// ADR-071 §6's `usage:limits-changed` (limits moved, for any vendor).
+const { emitEvent } = vi.hoisted(() => ({ emitEvent: vi.fn() }))
+vi.mock('../../../core/services/sync-host', () => ({ emitEvent }))
+
+// ---------------------------------------------------------------------------
 // Import AFTER mocks are registered. UsageFetcher is a class — new up per
 // test so state doesn't leak.
 // ---------------------------------------------------------------------------
 
 import { UsageFetcher } from '../../../core/services/usage-fetcher'
+import { resetWindowSampleDedup } from '../../../core/services/window-samples'
+import { setSecurestorageEnv } from '../../../core/sdk/securestorage-env'
 
 // Seed a credentials file that passes the expiry check so fetchDirect()
 // proceeds to fetch() rather than bailing silently.
@@ -795,5 +816,122 @@ describe('UsageFetcher — account log', () => {
     expect(record.organizationUuid).toBeUndefined()
     expect(record.organizationName).toBeUndefined()
     expect(record.accountUuid).toBe('acc_1')
+  })
+})
+
+/**
+ * ADR-071 §6 — what the poll KEEPS.
+ *
+ * Two writes, both new in S3a: the active account's identity onto its own
+ * `account` row (the only moment it is knowable, since `~/.claude.json`
+ * describes the active account alone), and one window sample per window kind
+ * rather than the 5-hour one alone.
+ */
+describe('UsageFetcher — the identity and the samples it records', () => {
+  let fetcher: UsageFetcher
+  const fetchMock = vi.fn()
+
+  /** A fabricated `~/.claude.json`. Every value here is invented. */
+  function seedClaudeJson(oauthAccount: Record<string, unknown>): void {
+    vfs.files.set('.claude.json', JSON.stringify({ oauthAccount }))
+  }
+
+  /** A usage body with a weekly window and a weekly per-model bucket. */
+  function usageBody(): Record<string, unknown> {
+    const resets = (hours: number): string =>
+      new Date(Date.now() + hours * 60 * 60 * 1000).toISOString()
+    return {
+      five_hour: { utilization: 31, resets_at: resets(2) },
+      seven_day: { utilization: 12, resets_at: resets(50) },
+      limits: [
+        {
+          kind: 'weekly_scoped',
+          percent: 4,
+          resets_at: resets(50),
+          scope: { model: { display_name: 'Fable' } }
+        }
+      ]
+    }
+  }
+
+  beforeEach(() => {
+    vfs.files.clear()
+    vfs.readErrors.clear()
+    fetchMock.mockReset()
+    fetchMock.mockResolvedValue(makeFetchResponse(200, usageBody()))
+    vi.stubGlobal('fetch', fetchMock)
+    updateAccountIdentity.mockReset()
+    recordWindowSample.mockReset()
+    emitEvent.mockReset()
+    resetWindowSampleDedup()
+    fetcher = new UsageFetcher()
+    seedValidCredentials()
+    seedClaudeJson({
+      accountUuid: 'acc_1',
+      emailAddress: 'someone@example.test',
+      organizationUuid: 'org_personal',
+      organizationName: 'Personal',
+      billingType: 'stripe_subscription'
+    })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    setSecurestorageEnv(null)
+  })
+
+  it('writes the active account’s identity onto the local account row', async () => {
+    setSecurestorageEnv({ dir: '/home/someone/.claude/ui/accounts/acct-local' })
+
+    await fetcher.fetch()
+
+    expect(updateAccountIdentity).toHaveBeenCalledWith('acct-local', {
+      accountUuid: 'acc_1',
+      organizationUuid: 'org_personal',
+      organizationName: 'Personal',
+      billingType: 'subscription'
+    })
+  })
+
+  it('writes no identity in single-account mode — there is no row to name', async () => {
+    await fetcher.fetch()
+
+    expect(updateAccountIdentity).not.toHaveBeenCalled()
+  })
+
+  it('records one sample per window kind, keyed by the account key', async () => {
+    await fetcher.fetch()
+
+    const samples = recordWindowSample.mock.calls.map(([sample]) => sample)
+    expect(samples.map((s) => s.windowKind)).toEqual(['5h', '7d', '7d:fable'])
+    expect(samples.map((s) => s.usedPercent)).toEqual([31, 12, 4])
+    for (const sample of samples) {
+      expect(sample.accountKey).toBe('anthropic:org_personal:acc_1')
+      expect(sample.accountUuid).toBe('acc_1')
+    }
+  })
+
+  it('records nothing a second time when the reading has not moved', async () => {
+    await fetcher.fetch()
+    const first = recordWindowSample.mock.calls.length
+    recordWindowSample.mockClear()
+
+    await fetcher.fetch()
+
+    expect(first).toBe(3)
+    expect(recordWindowSample).not.toHaveBeenCalled()
+  })
+
+  it('announces that limits moved — once, and not for an unchanged reading', async () => {
+    const nudges = (): number =>
+      emitEvent.mock.calls.filter(([channel]) => channel === 'usage:limits-changed').length
+
+    await fetcher.fetch()
+    expect(nudges()).toBe(1)
+
+    emitEvent.mockClear()
+    await fetcher.fetch()
+
+    expect(nudges()).toBe(0)
   })
 })

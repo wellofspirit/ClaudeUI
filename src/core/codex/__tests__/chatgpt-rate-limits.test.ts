@@ -57,16 +57,23 @@ function store(over: Partial<ChatgptRateLimitDeps> = {}): {
   store: ChatgptRateLimitStore
   changed: ReturnType<typeof vi.fn>
   read: ReturnType<typeof vi.fn>
+  persist: ReturnType<typeof vi.fn>
 } {
   const changed = vi.fn()
+  const persist = vi.fn()
   const read = vi.fn(async () => new Map<string, GetAccountRateLimitsResponse>())
   return {
     changed,
+    persist,
     read: read as ReturnType<typeof vi.fn>,
     store: new ChatgptRateLimitStore({
       accounts: async () => [],
       read: read as unknown as ChatgptRateLimitDeps['read'],
       changed,
+      // ADR-071 §6 persists every reading. Injected, so this suite stays
+      // DB-free — the real dep resolves the vault's account key and writes a
+      // usage_window_sample.
+      persist,
       now: () => 1_700_000_000_000,
       ...over
     })
@@ -108,6 +115,42 @@ describe('the per-account rate-limit map', () => {
       }
     })
     expect(changed).toHaveBeenCalledTimes(1)
+  })
+
+  it('persists the two windows the reading carried, under the vault account id', () => {
+    const { store: limits, persist } = store()
+
+    limits.record('acct-a', snapshot())
+
+    expect(persist).toHaveBeenCalledTimes(1)
+    expect(persist).toHaveBeenCalledWith('acct-a', [
+      { kind: '5h', usedPercent: 42, resetsAt: '2025-01-01T01:00:00.000Z' },
+      { kind: '7d', usedPercent: 7, resetsAt: '2025-01-04T14:13:20.000Z' }
+    ])
+  })
+
+  it('a sparse push persists only the window it carried', () => {
+    // The merged ENTRY still shows both windows (the sparse rule below), but a
+    // sample is an observation: the weekly window was not read this time, so
+    // recording it again would date an old number to now.
+    const { store: limits, persist } = store()
+    limits.record('acct-a', snapshot())
+    persist.mockClear()
+
+    limits.record('acct-a', snapshot({ secondary: null }))
+
+    expect(persist).toHaveBeenCalledTimes(1)
+    expect(persist).toHaveBeenCalledWith('acct-a', [
+      { kind: '5h', usedPercent: 42, resetsAt: '2025-01-01T01:00:00.000Z' }
+    ])
+  })
+
+  it('persists nothing for a reading with no windows at all', () => {
+    const { store: limits, persist } = store()
+
+    limits.record('acct-credits', noWindows())
+
+    expect(persist).not.toHaveBeenCalled()
   })
 
   it('a SPARSE update does not erase a window the last full read established', () => {
