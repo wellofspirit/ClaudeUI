@@ -228,11 +228,18 @@ async function storedClaudeLimits(refresh: boolean): Promise<{
     })
     if ('usage' in result) {
       const windows = claudeLimitWindows(result.usage)
-      persisted += recordLimitSamples({
+      const written = recordLimitSamples({
         accountKey,
         accountUuid: account.accountUuid,
         windows
       })
+      persisted += written
+      // The key and the counts, never the label: this line is the only trace
+      // a refresh leaves, and a refresh spends a grant (ADR-071 §6).
+      logger.info(
+        'UsageProvider',
+        `stored Claude account ${accountKey} read: ${windows.length} window(s), ${written} sample(s) new`
+      )
       limits.push({
         ...base,
         plan: result.usage.planName ?? account.subscriptionType,
@@ -243,6 +250,10 @@ async function storedClaudeLimits(refresh: boolean): Promise<{
       continue
     }
     // No retry and no timer: ADR-071 §6 says mark it and stop.
+    logger.info(
+      'UsageProvider',
+      `stored Claude account ${accountKey} not read: ${result.error} (${result.detail})`
+    )
     limits.push({
       ...base,
       windows: [],
@@ -359,6 +370,9 @@ export function readAccountLimits(opts: { refresh?: boolean } = {}): Promise<Acc
 }
 
 async function readEveryProvider(refresh: boolean): Promise<AccountLimits[]> {
+  // A refreshing read is the one thing in the app that may spend refresh
+  // grants, so it always leaves a line; a cheap read is debug-only.
+  logger[refresh ? 'info' : 'debug']('UsageProvider', `limits read (refresh: ${refresh})`)
   const readings = await Promise.all(
     limitsProviders().map(async (provider) => {
       try {

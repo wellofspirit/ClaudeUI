@@ -308,9 +308,14 @@ export async function buildUsageDashboard(opts: {
   const range = isDashboardRange(opts.range) ? opts.range : DEFAULT_RANGE
   const fromTs = floorToHour(startOfLocalDay(now - RANGE_DAYS[range] * MS_PER_DAY))
 
+  const started = Date.now()
   const buckets = getUsageBucketsSince(fromTs)
   const ledgerLabels = latestAccountLabels()
   const limits = await limitsLabels()
+  logger.debug(
+    'UsageDashboard',
+    `range ${range}: ${buckets.length} bucket(s) read in ${Date.now() - started} ms`
+  )
 
   const totals = emptyTotals()
   const providers = new Map<string, ProviderAgg>()
