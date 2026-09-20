@@ -131,3 +131,52 @@ export function signInProviderFor(
       : null
   return null
 }
+
+/**
+ * Can ClaudeUI drive this provider's sign-in at all?
+ *
+ * The two shared providers can (`SignInDialog` has a driver for each); an
+ * `opencode:<vendorId>` / `pi:<vendorId>` credential lives in that ENGINE's own
+ * store and has no flow here, so its entry point opens Settings › Models &
+ * providers rather than a dialog with nothing to run (ADR-030).
+ */
+export function isDrivableProvider(providerId: string): providerId is SignInProviderId {
+  return providerId === 'anthropic' || providerId === 'chatgpt'
+}
+
+/**
+ * How a provider an auth fact blamed is NAMED to the user — the pill, the
+ * transcript row and the dialog all read this one table (ADR-070 §4), so the
+ * three cannot drift into calling the same credential different things.
+ *
+ * A non-drivable id is engine-namespaced on the wire (`provider-registry.ts`
+ * mints `pi:anthropic`, `opencode:openrouter`) and the namespace is noise to the
+ * reader, who is looking at that engine's session: strip it. This replaces the
+ * copy that lived inside the deleted `AuthRequiredRow`.
+ */
+export function providerDisplayName(providerId: string): string {
+  return isDrivableProvider(providerId)
+    ? SIGN_IN_PROVIDER_LABEL[providerId]
+    : providerId.replace(/^(?:opencode|pi):/, '')
+}
+
+/**
+ * How a stored ACCOUNT is named to the user — its email when the credential
+ * carried one, a neutral fallback when it did not.
+ *
+ * Six renderer sites spelled this rule inline and two of them spelled it
+ * differently (`email ?? 'Account'` rather than `email || 'Account'`), so an
+ * account whose email is `''` — representable on every one of the wire types,
+ * which declare it `string | null` or `string?` — named itself `Account` in four
+ * places and rendered BLANK in the other two. Unified on the `||` reading:
+ * missing, null, empty and whitespace-only all render the fallback, because an
+ * empty label is never the useful answer.
+ *
+ * A placeholder label such as `Account 2` IS the account's stored email until
+ * the login lands, so it passes through untouched — see `account-rows.ts`: the
+ * fix for the placeholder is that it stops being the truth, not that the
+ * renderer second-guesses it.
+ */
+export function accountDisplayName(email: string | null | undefined): string {
+  return email?.trim() || 'Account'
+}

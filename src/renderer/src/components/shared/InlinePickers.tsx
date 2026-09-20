@@ -14,6 +14,7 @@ import {
 import type { EngineId, VendorId } from '../../../../shared/types'
 import { ENGINE_META, engineMeta } from '../../../../shared/engine-meta'
 import {
+  accountDisplayName,
   SIGN_IN_PROVIDER_LABEL,
   signInProviderFor,
   type ProviderAuthView
@@ -571,11 +572,6 @@ export interface AccountChoice {
   planType?: string
 }
 
-/** The label a stored account shows. Email when the JWT carried one. */
-export function accountLabel(account: AccountChoice | undefined): string {
-  return account?.email ?? 'Account'
-}
-
 /**
  * The per-session ChatGPT account picker (ADR-068 §2), in the same visual
  * grammar as {@link EffortPicker}.
@@ -609,7 +605,10 @@ export function AccountPicker({
   useClickOutside(ref, open, () => setOpen(false))
   const active = accounts.find((account) => account.id === activeAccountId)
   const current = pinned === null ? undefined : accounts.find((account) => account.id === pinned)
-  const trigger = pinned === null ? `Active · ${accountLabel(active)}` : accountLabel(current)
+  const trigger =
+    pinned === null
+      ? `Active · ${accountDisplayName(active?.email)}`
+      : accountDisplayName(current?.email)
 
   return (
     <div className="relative" ref={ref} data-testid="AccountPicker">
@@ -633,7 +632,7 @@ export function AccountPicker({
             dataValue="__active__"
             selected={pinned === null}
             label="Follow active account"
-            detail={active ? accountLabel(active) : undefined}
+            detail={active ? accountDisplayName(active.email) : undefined}
             onClick={() => {
               onSelectAccount(null)
               setOpen(false)
@@ -645,7 +644,7 @@ export function AccountPicker({
               testId="AccountPicker.option"
               dataValue={account.id}
               selected={pinned === account.id}
-              label={accountLabel(account)}
+              label={accountDisplayName(account.email)}
               detail={account.planType}
               onClick={() => {
                 onSelectAccount(account.id)

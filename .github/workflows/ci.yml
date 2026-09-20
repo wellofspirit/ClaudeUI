@@ -13,6 +13,7 @@ name: CI
 # (windows-2022 + macos) still runs in release.yml / pre-release.yml before any
 # tag is published, so a Windows-only regression is caught at push-to-pre-release
 # time. Add an os matrix here if PR-time Windows coverage becomes worth the cost.
+# (The `layout` job below is the one exception, and says why.)
 #
 # The build steps at the end are gates, not artifacts: electron-vite + the web
 # bundle catch vite-config regressions that tests cannot see, and the server
@@ -137,3 +138,49 @@ jobs:
           bun run build:server
           bun run build:server:compile
           ./dist/server-bin/claudeui-server --help > /dev/null
+
+  # The `layout` vitest project: the top bar rendered in a real browser under the
+  # app's compiled CSS, because "does the bar fit itself" is not a question jsdom
+  # can answer (docs/testing-strategy.md, Layer 5). Its own job rather than a step
+  # above, for two reasons: the tier thresholds it pins were MEASURED on win32
+  # (Segoe UI, and the 138px WindowControls only that platform draws), so that is
+  # where a failure means something; and it needs none of the gate job's weight.
+  # `--ignore-scripts` skips postinstall entirely — no Electron, no engine CLIs,
+  # no native rebuild — since the project imports renderer code and nothing else.
+  layout:
+    name: Layout (real Chromium)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          # Same pin, same reason, as the gates job.
+          node-version: 24.15.0
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Cache bun install
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      # Keyed on the lockfile: the browser build is pinned by the playwright
+      # version, and that is where the version lives.
+      - name: Cache Playwright Chromium
+        uses: actions/cache@v6
+        with:
+          path: ~\AppData\Local\ms-playwright
+          key: ${{ runner.os }}-playwright-chromium-${{ hashFiles('bun.lock') }}
+
+      - name: Install dependencies (no postinstall)
+        run: bun install --ignore-scripts
+
+      - name: Install Chromium
+        run: bunx playwright install chromium
+
+      - name: Layout tests
+        run: bun run test:layout

@@ -19,6 +19,8 @@ import { render, fireEvent, screen, act, cleanup, waitFor } from '@testing-libra
 import { useSessionStore } from '../../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { TopBar } from '../TopBar'
+import { TIER1_HIDE, TIER1_ROW_HIDE, TIER2_HIDE, TIER2_ROW_HIDE } from '../top-bar-tiers'
+import { useEscapeLayer } from '../../../shared/use-escape-layer'
 import { SidebarContext } from '../../../SessionView'
 import type { GitStatusData, SessionStatus, StatusLineData } from '../../../../../../shared/types'
 import type { IdeAvailability } from '../../../../../../shared/remote-protocol'
@@ -26,6 +28,23 @@ import { resolveClaudeCapabilities } from '../../../../../../shared/model-capabi
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 const ROUTE = 'route-topbar'
+
+/**
+ * The px a `@max-[Npx]` / `@min-[Npx]` container variant switches at. Parsed
+ * rather than retyped, so a threshold that moves in `top-bar-tiers.ts` moves
+ * here too instead of leaving this file asserting the old bar.
+ */
+function tierThreshold(cls: string): number {
+  const match = /@(?:max|min)-\[(\d+)px\]/.exec(cls)
+  if (!match?.[1]) throw new Error(`no px threshold in ${cls}`)
+  return Number(match[1])
+}
+
+/** A stand-in for any overlay that registers on the shared Escape stack. */
+function EscapeLayerProbe({ onClose }: { onClose: () => void }): null {
+  useEscapeLayer(onClose)
+  return null
+}
 
 function makeStatusLine(overrides: Partial<StatusLineData> = {}): StatusLineData {
   return {
@@ -655,12 +674,68 @@ describe('TopBar — mobile entry points', () => {
     expect(screen.queryByTestId('TopBar.overflowMenuPermissions')).toBeNull()
   })
 
-  it('hides the ⋯ button entirely when there are no items to show (no cwd)', () => {
+  it('hides the ⋯ button entirely when this client can have none of the tools', async () => {
+    // Every gate refused at once: no cwd (so VS Code, Skills, MCP and Permissions
+    // are out) on a web client whose host says no remote terminal. An empty list
+    // hides the button rather than opening an empty popover.
+    app.api.platform = 'web'
+    const terminalAvailability = vi.fn(async () => ({
+      allowed: false,
+      granted: false,
+      needsStepUp: false,
+      stepUp: null
+    }))
+    ;(window.api as unknown as { terminalAvailability: unknown }).terminalAvailability =
+      terminalAvailability
     useSessionStore.getState().createNewSession('route-topbar-nocwd', '')
     useSessionStore.setState({ activeSessionId: 'route-topbar-nocwd' })
 
     renderTopBar(true)
+    await waitFor(() => expect(terminalAvailability).toHaveBeenCalled())
+    await act(async () => {
+      await Promise.resolve()
+    })
     expect(screen.queryByTestId('TopBar.overflowMenu')).toBeNull()
+  })
+
+  it('offers Terminal with no cwd — availability is that action’s ONLY gate', () => {
+    // A narrow desktop session with no working directory used to have NO way
+    // into the terminal at all: tier 2 hides the bar button by width, and the
+    // menu returned an empty list without a cwd, which suppressed the ⋯ too.
+    // Nothing about the terminal needs a cwd — the panel's own empty state is
+    // the affordance there.
+    useSessionStore.getState().createNewSession('route-topbar-nocwd', '')
+    useSessionStore.setState({ activeSessionId: 'route-topbar-nocwd' })
+
+    renderTopBar(true)
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    expect(screen.getByTestId('TopBar.overflowMenuTerminal')).toBeInTheDocument()
+    // The ones that genuinely need a directory are still gone.
+    expect(screen.queryByTestId('TopBar.overflowMenuPermissions')).toBeNull()
+    expect(screen.queryByTestId('TopBar.overflowMenuVSCode')).toBeNull()
+  })
+
+  it('names each tool ONCE — the bar tooltip and the ⋯ row cannot drift apart', () => {
+    renderTopBar(true)
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+
+    for (const [bar, row] of [
+      ['TopBar.openVSCode', 'TopBar.overflowMenuVSCode'],
+      ['TopBar.skills', 'TopBar.overflowMenuSkills'],
+      ['TopBar.mcp', 'TopBar.overflowMenuMcp'],
+      ['TopBar.permissions', 'TopBar.overflowMenuPermissions']
+    ] as const)
+      expect(screen.getByTestId(bar).getAttribute('title'), bar).toBe(
+        screen.getByTestId(row).textContent
+      )
+
+    // Terminal is the one exception and it is additive: the bar tooltip appends
+    // the keybinding a menu row has no room for. The label itself is still one
+    // string in one place.
+    const label = screen.getByTestId('TopBar.overflowMenuTerminal').textContent
+    expect(screen.getByTestId('TopBar.terminal').getAttribute('title')).toMatch(
+      new RegExp(`^${label} \\(`)
+    )
   })
 
   it('opens the permissions dialog from the overflow menu', async () => {
@@ -691,12 +766,143 @@ describe('TopBar — mobile entry points', () => {
     expect(screen.queryByTestId('TopBar.overflowMenuPermissions')).toBeNull()
   })
 
-  it('desktop keeps its own buttons and never grows a ⋯ menu (regression lock)', () => {
+  it('answers Escape on the shared stack — the layer behind never sees the key', () => {
+    // `SettingsDialog` and friends keep bubble-phase document handlers of their
+    // own. A menu that answered Escape with a second bubble handler let the same
+    // press close the thing underneath as well.
+    renderTopBar(true)
+    const behind = vi.fn()
+    document.addEventListener('keydown', behind)
+    try {
+      fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+      fireEvent.keyDown(document.body, { key: 'Escape' })
+
+      expect(screen.queryByTestId('TopBar.overflowMenuPermissions')).toBeNull()
+      expect(behind).not.toHaveBeenCalled()
+    } finally {
+      document.removeEventListener('keydown', behind)
+    }
+  })
+
+  it('closes the MENU, not the layer under it, when an overlay is already on the stack', () => {
+    // The other half: `useEscapeLayer` stops Escape in the CAPTURE phase, so any
+    // overlay registered before the menu opened swallowed the key — the menu
+    // could not be closed from the keyboard at all, and the overlay closed
+    // instead of it.
+    const closeUnder = vi.fn()
+    render(<EscapeLayerProbe onClose={closeUnder} />)
+    renderTopBar(true)
+
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+
+    expect(screen.queryByTestId('TopBar.overflowMenuPermissions')).toBeNull()
+    expect(closeUnder).not.toHaveBeenCalled()
+  })
+
+  it('closes the ⋯ menu on a window resize, so widening cannot re-reveal it', () => {
+    // The ⋯ trigger is a container query: widen past tier 2 and the button that
+    // opened the menu is gone, while the menu itself is still mounted under a
+    // bar full of tool buttons. Narrow again and it would be back, opened by
+    // nobody.
+    renderTopBar(true)
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    expect(screen.getByTestId('TopBar.overflowMenuPermissions')).toBeInTheDocument()
+
+    fireEvent.resize(window)
+    expect(screen.queryByTestId('TopBar.overflowMenuPermissions')).toBeNull()
+  })
+
+  it('renders its dialogs OUTSIDE the container element, not inside it', () => {
+    // `@container/bar` on the bar is what the collapse tiers query. CSS
+    // Containment 3 makes that element the containing block for `fixed`
+    // descendants; Chromium 151 does not, and the app's Electron ships a
+    // different Chromium again — so the four `fixed inset-0` dialogs are
+    // rendered as SIBLINGS of the bar rather than children, and neither
+    // engine's reading can collapse a dialog into a 48px strip. Structural,
+    // because "it happened to look right in this browser" is the assertion
+    // this repo already learned not to trust.
+    renderTopBar(false)
+    const bar = screen.getByTestId('TopBar')
+    fireEvent.click(screen.getByTestId('TopBar.permissions'))
+    const dialog = screen.getByTestId('PermissionsDialog')
+    expect(bar.contains(dialog)).toBe(false)
+    expect(bar.className).toContain('@container/bar')
+  })
+
+  it('desktop keeps its own buttons, and the ⋯ that replaces them is width-gated', () => {
     renderTopBar(false)
 
-    expect(screen.queryByTestId('TopBar.overflowMenu')).toBeNull()
+    // Slice F made the collapse a WIDTH rule, so both surfaces are in the DOM
+    // at all times and CSS picks one — jsdom has no layout and therefore no
+    // opinion about which. What a jsdom test can still pin is that the ⋯ is
+    // gated by tier 2's exact complement rather than by a device check that
+    // has come back: `TopBar.layout.test.tsx` measures which one is visible.
     expect(screen.getByTestId('TopBar.permissions')).toBeInTheDocument()
     expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument()
+    expect(screen.getByTestId('TopBar.permissions').className).toContain(TIER2_HIDE)
+    expect(screen.getByTestId('TopBar.openVSCode').className).toContain(TIER2_HIDE)
+    // The ⋯ is gated at the same WIDTH as the tier it stands in for, rather than
+    // by a class string this test happens to have copied. This fixture is
+    // outside a git repo, so tier 1 has no rows to offer and the button's
+    // threshold is tier 2's.
+    expect(tierThreshold(screen.getByTestId('TopBar.overflowMenu').parentElement!.className)).toBe(
+      tierThreshold(TIER2_HIDE)
+    )
+  })
+
+  it('moves the ⋯ up to tier 1 in a repo, where the branch pill has a row to offer', () => {
+    // The branch pill is the ONLY fetch / pull / push / switch surface, and tier
+    // 1 hides it at 1000px while the ⋯ used to arrive at 768 — so 768–1000 could
+    // not reach any of them.
+    useSessionStore.getState().createNewSession('route-topbar-gitrepo', GIT_CWD)
+    useSessionStore.setState({ activeSessionId: 'route-topbar-gitrepo' })
+    useSessionStore.getState().setIsGitRepo('route-topbar-gitrepo', true)
+    useSessionStore.getState().setGitStatus('route-topbar-gitrepo', makeGitStatus())
+
+    renderTopBar(false)
+    expect(tierThreshold(screen.getByTestId('TopBar.overflowMenu').parentElement!.className)).toBe(
+      tierThreshold(TIER1_HIDE)
+    )
+
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    const branchRow = screen.getByTestId('TopBar.overflowMenuBranch')
+    expect(branchRow).toHaveTextContent('main')
+    // Its row is the complement of the pill's own tier, so the two can never be
+    // on screen together.
+    expect(branchRow.className).toContain(TIER1_ROW_HIDE)
+    expect(screen.getByTestId('TopBar.overflowMenuPermissions').className).toContain(TIER2_ROW_HIDE)
+  })
+
+  it('opens the real GitBranchDropdown from the ⋯ row, not a copy of it', async () => {
+    useSessionStore.getState().createNewSession('route-topbar-gitrepo', GIT_CWD)
+    useSessionStore.setState({ activeSessionId: 'route-topbar-gitrepo' })
+    useSessionStore.getState().setIsGitRepo('route-topbar-gitrepo', true)
+    useSessionStore.getState().setGitStatus('route-topbar-gitrepo', makeGitStatus())
+
+    renderTopBar(false)
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('TopBar.overflowMenuBranch'))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(screen.getByTestId('GitBranchDropdown')).toBeInTheDocument()
+    // The menu closes behind it, like every other row.
+    expect(screen.queryByTestId('TopBar.overflowMenuBranch')).toBeNull()
+  })
+
+  it('offers no ⋯ at all outside a repo with every tool gone', () => {
+    // Tier 1 hid nothing here — both pills render null in a plain directory — so
+    // the button must not appear at tier 1's width with an empty menu behind it.
+    // (That it appears at tier 2's is the assertion above.)
+    renderTopBar(false)
+    expect(tierThreshold(screen.getByTestId('TopBar.overflowMenu').parentElement!.className)).toBe(
+      tierThreshold(TIER2_HIDE)
+    )
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    expect(screen.queryByTestId('TopBar.overflowMenuBranch')).toBeNull()
+    expect(screen.queryByTestId('TopBar.overflowMenuWorktree')).toBeNull()
   })
 
   // ── Skills / MCP entries (M2) ─────────────────────────────────────────────
@@ -925,9 +1131,12 @@ describe('TopBar — terminal toggle button', () => {
     expect(screen.queryByTestId('TopBar.terminal')).toBeNull()
   })
 
-  it('is hidden on mobile — the phone reaches the terminal from the ⋯ menu instead', () => {
+  it('carries tier 2, so a phone-width bar reaches the terminal from the ⋯ menu', () => {
     renderTopBar(true)
-    expect(screen.queryByTestId('TopBar.terminal')).toBeNull()
+    // No longer `!isMobileCtx`: the button is in the DOM and tier 2 hides it,
+    // and a phone is inside tier 2 by construction (T2 === MOBILE_BREAKPOINT —
+    // pinned in `TopBar.layout.test.tsx`, which also measures the 390px bar).
+    expect(screen.getByTestId('TopBar.terminal').className).toContain(TIER2_HIDE)
     expect(screen.getByTestId('TopBar.overflowMenu')).toBeInTheDocument()
   })
 
@@ -936,12 +1145,14 @@ describe('TopBar — terminal toggle button', () => {
   // overflow menu — carrying the desktop button's gate verbatim, so the two
   // surfaces can never disagree about whether this client can have a shell.
 
-  it('offers Terminal in the ⋯ menu, first, matching the desktop bar order', () => {
+  it('offers Terminal in the ⋯ menu, after VS Code, matching the desktop bar order', () => {
     renderTopBar(true)
     fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
 
     expect(screen.getByTestId('TopBar.overflowMenuTerminal')).toBeInTheDocument()
-    // Desktop reads VSCode · Terminal · Skills · MCP · Permissions left to right.
+    // Desktop reads VSCode · Terminal · Skills · MCP · Permissions left to right,
+    // and Slice F put VS Code at the head of the menu to match — it was the one
+    // bar button with no menu row of its own.
     const labels = screen
       .getAllByRole('button')
       .map((b) => b.getAttribute('data-testid'))
@@ -949,7 +1160,7 @@ describe('TopBar — terminal toggle button', () => {
         (id): id is string =>
           !!id && id.startsWith('TopBar.overflowMenu') && id !== 'TopBar.overflowMenu'
       )
-    expect(labels[0]).toBe('TopBar.overflowMenuTerminal')
+    expect(labels.slice(0, 2)).toEqual(['TopBar.overflowMenuVSCode', 'TopBar.overflowMenuTerminal'])
   })
 
   it('drops the ⋯ Terminal entry when the host says the remote terminal is off', async () => {
@@ -1242,13 +1453,54 @@ describe('TopBar — VSCode button (remote IDE, ADR-064)', () => {
     await waitFor(() => expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument())
   })
 
-  it('is hidden on mobile even when the host allows it (no phone entry point)', async () => {
+  it('carries tier 2, and the ⋯ row it collapses into repeats its gate exactly', async () => {
     app.api.platform = 'web'
     renderTopBar(true)
     await act(async () => {
       await Promise.resolve()
     })
-    expect(screen.queryByTestId('TopBar.openVSCode')).toBeNull()
+    // Slice F: the bar button is width-gated rather than device-gated, and the
+    // phone now HAS an entry point — the ⋯ row, carrying `cwd && (!isWeb ||
+    // allowed === true)` verbatim, which is why it appears here (the host says
+    // allowed) and not in the two cases below.
+    expect(screen.getByTestId('TopBar.openVSCode').className).toContain(TIER2_HIDE)
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    expect(screen.getByTestId('TopBar.overflowMenuVSCode')).toBeInTheDocument()
+  })
+
+  it('drops the ⋯ VS Code row when the host has the remote IDE turned off', async () => {
+    app.api.platform = 'web'
+    answer = ok({ allowed: false, granted: false })
+    renderTopBar(true)
+    await waitFor(() => expect(ideAvailability).toHaveBeenCalled())
+    await act(async () => {
+      await Promise.resolve()
+    })
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    expect(screen.queryByTestId('TopBar.overflowMenuVSCode')).toBeNull()
+    // The rest of the menu is untouched by the IDE's answer.
+    expect(screen.getByTestId('TopBar.overflowMenuPermissions')).toBeInTheDocument()
+  })
+
+  it('drops the ⋯ VS Code row while the first availability query is in flight', async () => {
+    app.api.platform = 'web'
+    ideAvailability.mockReturnValue(new Promise(() => {}))
+    renderTopBar(true)
+    await act(async () => {
+      await Promise.resolve()
+    })
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    expect(screen.queryByTestId('TopBar.overflowMenuVSCode')).toBeNull()
+  })
+
+  it('opens VS Code from the ⋯ menu through the SAME handler the button uses', () => {
+    // Desktop: the `vscode://` deep link, no host question asked (ADR-064 §5).
+    renderTopBar(true)
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenuVSCode'))
+    expect(openInVSCode).toHaveBeenCalledWith(IDE_CWD)
+    // The menu closes behind the act, like every other row.
+    expect(screen.queryByTestId('TopBar.overflowMenuVSCode')).toBeNull()
   })
 
   // ── The click flow ────────────────────────────────────────────────────────

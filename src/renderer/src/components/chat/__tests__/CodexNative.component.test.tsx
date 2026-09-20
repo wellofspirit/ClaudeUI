@@ -68,6 +68,18 @@ describe('native controls', () => {
     expect(window.api.listProviderAccounts).toHaveBeenCalledWith('chatgpt')
   })
 
+  // Slice J: this label read `active.email ?? 'Account'`, so an EMPTY email
+  // rendered `ChatGPT · ` with nothing after the separator. Asserted here
+  // rather than only on the helper, because a helper test passes whether or
+  // not this call site was converted.
+  it('names an account whose email came back EMPTY, never a bare separator', async () => {
+    api.listProviderAccounts.mockResolvedValue(account({ email: '', planType: undefined }))
+    render(<CodexAccount />)
+    await waitFor(() =>
+      expect(screen.getByTestId('CodexAccount')).toHaveTextContent('ChatGPT · Account')
+    )
+  })
+
   it('says so when Codex is running on its own login', async () => {
     api.codexAuthStatus.mockResolvedValue({
       available: true,

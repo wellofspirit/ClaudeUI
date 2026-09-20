@@ -1,4 +1,4 @@
-import { memo, useState } from 'react'
+import { createContext, memo, useContext, useState } from 'react'
 import type {
   ChatMessage,
   ContentBlock,
@@ -21,6 +21,8 @@ import { hostedMcpKind } from '../../../../shared/tool-kinds'
 import type { EngineToolMap } from '../../../../shared/tool-kinds'
 import { engineToolMap } from './tool-registry/engine-tool-maps'
 import { useImageGallery } from '../shared/ImageViewer'
+import { isDrivableProvider, providerDisplayName } from '../../utils/sign-in-provider'
+import { openProviderSettings } from '../SettingsDialog/settings-target'
 
 // ---------------------------------------------------------------------------
 // Unified tool-block dispatch
@@ -115,6 +117,30 @@ function renderToolBlock(
   )
 }
 
+/**
+ * WHICH session's transcript these bubbles belong to — the chat message list
+ * provides its own routing id; every other host leaves it `null`.
+ *
+ * `MessageBubble` is not the chat's alone: automation-run history replays a
+ * recorded run through it. Anything inside a bubble that needs a session was
+ * therefore reading `activeSessionId`, which for a replayed run is an unrelated
+ * chat — so its auth row showed that session's lifetime and its Retry re-sent
+ * the prompt into a session the user was not looking at.
+ *
+ * `null` is a real answer, not a missing one: a transcript that belongs to no
+ * open session has no live fact to read and nothing it could correctly act on.
+ * Consumers render history.
+ */
+const TranscriptSessionContext = createContext<string | null>(null)
+
+/** Mounted by a message list that IS a session's transcript. */
+export const TranscriptSessionProvider = TranscriptSessionContext.Provider
+
+/** The routing id of the transcript this bubble is in, or `null`. */
+export function useTranscriptSessionId(): string | null {
+  return useContext(TranscriptSessionContext)
+}
+
 /** Stable identity so the default never re-renders a memoised bubble. */
 const EMPTY_ACTIVE_THINKING: ReadonlyArray<{ index: number; startedAt?: number }> = []
 
@@ -173,7 +199,7 @@ export const MessageBubble = memo(function MessageBubble({
           }
           if (block.type === 'api_error') {
             return block.errorType === 'authentication' ? (
-              <AuthErrorBlock key={i} block={block} />
+              <AuthTranscriptRow key={i} block={block} />
             ) : (
               <ApiErrorBlock key={i} block={block} />
             )
@@ -657,100 +683,189 @@ function ApiErrorBlock({
   )
 }
 
-// Small button helpers — match FloatingApproval styling.
-function PrimaryBtn(props: React.ButtonHTMLAttributes<HTMLButtonElement>): React.JSX.Element {
-  return (
-    <button
-      {...props}
-      className="text-[12px] font-medium rounded-md px-3.5 py-1.5 bg-accent text-bg-primary hover:bg-accent-hover transition-colors cursor-pointer disabled:opacity-50"
-    />
-  )
-}
-function GhostBtn(props: React.ButtonHTMLAttributes<HTMLButtonElement>): React.JSX.Element {
-  return (
-    <button
-      {...props}
-      className="text-[12px] font-medium rounded-md px-3.5 py-1.5 border border-border-bright text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer"
-    />
-  )
-}
-
 /**
- * Authentication-error variant of the API error card (ADR-014 / ADR-068 §3).
+ * The transcript's engine-neutral "a credential was rejected" row (ADR-070 §4),
+ * replacing `AuthErrorBlock`.
  *
- * A compact row, not a flow. It used to walk the whole OAuth state machine
- * inline — waiting, manual paste, success, retry — which made the transcript the
- * fourth place the Claude sign-in was implemented. Everything that MOVES now
- * lives in `SignInDialog`; what stays here is the fact the turn reports: this
- * credential was rejected, here is the action.
+ * Every engine emits this block now (`api_error` / `errorType:
+ * 'authentication'`), so the failure is anchored where it happened on all four
+ * instead of Claude having history and the rest a floating card that vanished.
  *
- * "Sign in" captures the session's last user prompt and hands it to the dialog,
- * whose done state offers to re-send it through the respawn-aware `retrySend` —
- * the same recovery the old inline card's Retry gave, one surface further up.
+ * THREE LIFETIMES, read off the session's `authRequired` (ADR-070 §2), because
+ * the block itself is transcript DATA and outlives the problem:
+ *
+ *  · `broken`   — a rejection nobody has fixed: Sign in + the disclosure;
+ *  · `resolved` — `provider:auth-resolved` landed and the prompt is still
+ *                 un-sent: the retry, which is the only work left;
+ *  · `settled`  — no owed sign-in, which is what a RELOADED transcript always
+ *                 restores to. It has **no action at all**. That is the specific
+ *                 bug this rewrite fixes: the old row kept a live "Sign in" for
+ *                 a credential fixed three days ago, and a component-local
+ *                 `dismissed` was its only answer — so the row came back on the
+ *                 next reload, permanently. A settled row is history; history
+ *                 has nothing to dismiss and nothing to act on.
+ *
+ * EXACTLY TWO hit areas in `broken` — the Sign in link and the disclosure
+ * toggle. The sentence is inert, selectable text and there is no whole-row
+ * onClick: a whole-row target beside two real actions is how a user gets an
+ * accidental dialog while trying to copy an error out of permanent history.
+ *
+ * The retry prompt comes from `authRequired.retryPrompt`, captured by the
+ * reducer at failure time. There is deliberately no message walk here — this
+ * component and the deleted `AuthRequiredRow` each grew their own, and they
+ * disagreed.
  */
-function AuthErrorBlock({
+function AuthTranscriptRow({
   block
 }: {
   block: Extract<ContentBlock, { type: 'api_error' }>
-}): React.JSX.Element | null {
+}): React.JSX.Element {
+  // The session whose TRANSCRIPT this is — never the active one. See
+  // {@link TranscriptSessionContext}: `null` (automation-run history, or any
+  // other host) has no live fact and gets the settled row.
+  const routingId = useTranscriptSessionId()
+  const sessionFact = useSessionStore((s) =>
+    routingId ? (s.sessions[routingId]?.authRequired ?? null) : null
+  )
+  const providerAccounts = useSessionStore((s) => s.providerAccounts)
   const openSignIn = useSessionStore((s) => s.openSignIn)
-  const [dismissed, setDismissed] = useState(false)
+  const retrySend = useSessionStore((s) => s.retrySend)
+  const clearAuthRequired = useSessionStore((s) => s.clearAuthRequired)
+  const [expanded, setExpanded] = useState(false)
 
-  if (dismissed) return null
+  // The session's fact is THIS row's lifetime only while the two are about the
+  // same credential. ADR-070 §4 matches per session rather than per block and
+  // accepts the resulting duplication — but only between rows that name the
+  // SAME provider. A session that failed on Anthropic and later on ChatGPT
+  // otherwise rendered its Anthropic row saying "Claude rejected the
+  // credential" above a Sign in that opened ChatGPT: named one, acted on
+  // another. A block that names nobody predates the field and still defers.
+  const authRequired =
+    sessionFact && (block.providerId === undefined || block.providerId === sessionFact.providerId)
+      ? sessionFact
+      : null
 
-  const startSignIn = (): void => {
-    const state = useSessionStore.getState()
-    const routingId = state.activeSessionId
-    const messages = routingId ? (state.sessions[routingId]?.messages ?? []) : []
-    const lastUser = [...messages].reverse().find((m) => m.role === 'user')
-    const prompt = (lastUser?.content ?? [])
-      .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
-      .map((b) => b.text)
-      .join('\n')
-      .trim()
+  const lifetime = !authRequired
+    ? 'settled'
+    : authRequired.resolved === true
+      ? 'resolved'
+      : 'broken'
+  // WHOSE credential was refused is a property of the BLOCK, not of the
+  // session: `authRequired` is nulled the moment the failure settles, and
+  // settled is what a reloaded session always restores to — so reading the name
+  // from the session alone made a Claude failure read "the credential was
+  // rejected", provider unknown, for the rest of that transcript's life. The
+  // session's live fact is the fallback, for blocks written before the field
+  // existed (it is optional exactly so those stay valid).
+  const named = block.providerId ?? authRequired?.providerId
+  const providerId = authRequired?.providerId
+  const drivable = providerId !== undefined && isDrivableProvider(providerId)
+  // Verbatim, and THIS block's words win: they are per-block correct, while the
+  // event's message describes whatever the session failed on last. The message
+  // is the fallback for a block that carried no text of its own.
+  const detail = block.errorMessage || authRequired?.message
+  const sentence = named
+    ? `Turn stopped — ${providerDisplayName(named)} rejected the credential.`
+    : 'Turn stopped — the credential was rejected.'
+
+  const rule =
+    lifetime === 'broken'
+      ? 'border-danger/50'
+      : lifetime === 'resolved'
+        ? 'border-success/50'
+        : 'border-border'
+
+  const signIn = (): void => {
+    if (!providerId) return
+    if (!drivable) {
+      // No ClaudeUI flow owns an engine-native credential, so offering a dialog
+      // would be a dead affordance (ADR-030).
+      openProviderSettings()
+      return
+    }
     openSignIn({
-      providerId: 'anthropic',
+      providerId,
       mode: 'reauth',
-      ...(routingId && prompt ? { retry: { routingId, prompt } } : {})
+      ...(authRequired?.accountId ? { accountId: authRequired.accountId } : {}),
+      ...(authRequired?.retryPrompt && routingId
+        ? { retry: { routingId, prompt: authRequired.retryPrompt } }
+        : {})
     })
   }
 
+  const retry = (): void => {
+    if (!routingId || !authRequired?.retryPrompt) return
+    void retrySend(routingId, authRequired.retryPrompt)
+    // Performing the retry IS lifetime 3 (ADR-070 §2) — don't wait for the
+    // respawned turn to start running before the row stops offering it.
+    clearAuthRequired(routingId)
+  }
+
+  /** The account a resolution signed in as, when the vault's list names one. */
+  const signedInAs =
+    providerId === 'chatgpt' && authRequired?.accountId
+      ? providerAccounts?.accounts.find((account) => account.id === authRequired.accountId)?.email
+      : undefined
+
   return (
     <div
-      data-testid="AuthErrorBlock"
-      className="rounded-lg border border-danger/30 bg-bg-secondary overflow-hidden animate-fade-in"
+      data-testid="AuthTranscriptRow"
+      data-lifetime={lifetime}
+      {...(named ? { 'data-id': named } : {})}
+      className={`border-l-2 ${rule} pl-3 py-0.5 animate-fade-in`}
     >
-      <div className="px-3 py-2.5 flex items-start gap-2.5">
-        <svg
-          width="14"
-          height="14"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          className="text-danger shrink-0 mt-0.5"
+      <div
+        className={`text-[12px] ${lifetime === 'settled' ? 'text-text-muted' : 'text-text-primary'}`}
+      >
+        {sentence}
+      </div>
+      <div className="mt-1.5 flex items-center gap-3 flex-wrap">
+        {lifetime === 'resolved' && (
+          <span data-testid="AuthTranscriptRow.signedIn" className="text-[11px] text-success">
+            ✓ signed in{signedInAs ? ` as ${signedInAs}` : ''}
+          </span>
+        )}
+        {lifetime === 'resolved' && authRequired?.retryPrompt && (
+          <button
+            type="button"
+            data-testid="AuthTranscriptRow.retry"
+            onClick={retry}
+            className="text-[12px] font-medium rounded-md px-2.5 py-1 bg-accent text-bg-primary hover:bg-accent-hover transition-colors cursor-pointer"
+          >
+            Retry this prompt
+          </button>
+        )}
+        {lifetime === 'broken' && (
+          <button
+            type="button"
+            data-testid={drivable ? 'AuthTranscriptRow.signIn' : 'AuthTranscriptRow.settings'}
+            data-id={providerId}
+            onClick={signIn}
+            className="text-[12px] text-accent underline decoration-dotted cursor-pointer"
+          >
+            {drivable ? 'Sign in' : 'Open provider settings'}
+          </button>
+        )}
+        {detail && (
+          <button
+            type="button"
+            data-testid="AuthTranscriptRow.disclose"
+            aria-expanded={expanded}
+            onClick={() => setExpanded(!expanded)}
+            className="text-[11px] text-text-muted hover:text-text-secondary transition-colors cursor-pointer"
+          >
+            {expanded ? '▴' : '▾'} what the engine said
+          </button>
+        )}
+      </div>
+      {expanded && detail && (
+        <pre
+          data-testid="AuthTranscriptRow.message"
+          className="mt-2 text-[11px] font-mono text-danger/80 whitespace-pre-wrap break-words bg-bg-secondary rounded-md p-2.5 border border-border max-h-64 overflow-y-auto"
         >
-          <circle cx="12" cy="12" r="10" />
-          <line x1="12" y1="8" x2="12" y2="12" />
-          <line x1="12" y1="16" x2="12.01" y2="16" />
-        </svg>
-        <div className="flex-1 min-w-0">
-          <div className="text-[13px] font-medium text-danger">
-            Turn stopped: Claude rejected the credential
-          </div>
-          <div className="text-[12px] text-text-secondary mt-0.5 break-words">
-            {block.errorMessage}
-          </div>
-        </div>
-      </div>
-      <div className="flex justify-end gap-2 px-3 py-2 border-t border-border">
-        <GhostBtn data-testid="AuthErrorBlock.dismiss" onClick={() => setDismissed(true)}>
-          Dismiss
-        </GhostBtn>
-        <PrimaryBtn data-testid="AuthErrorBlock.signIn" onClick={startSignIn}>
-          Sign in
-        </PrimaryBtn>
-      </div>
+          {detail}
+        </pre>
+      )}
     </div>
   )
 }

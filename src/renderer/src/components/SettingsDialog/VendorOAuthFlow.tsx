@@ -140,7 +140,7 @@ export function VendorOAuthFlow({
       {flow?.stage === 'waiting' && (
         <div className="flex items-center gap-2 text-[12px] text-text-secondary">
           Waiting for browser authorization…
-          <Button variant="link" testid={`${FLOW}.cancel`} onClick={() => cancelVendorOAuth()}>
+          <Button variant="link" testid={`${FLOW}.cancel`} onClick={() => void cancelVendorOAuth()}>
             Cancel
           </Button>
         </div>

@@ -130,7 +130,16 @@ export type ContentBlock =
     }
   | { type: 'thinking'; text: string; durationMs?: number }
   | { type: 'cli_command'; commandName: string; commandArgs?: string; commandOutput?: string }
-  | { type: 'api_error'; errorType: string; errorMessage: string }
+  /**
+   * `providerId` is the credential that was refused (ADR-070 §4) — carried on
+   * the BLOCK so history is self-describing. The row used to name the provider
+   * from the session's live `authRequired`, which is nulled the moment the
+   * failure settles, so a Claude rejection read "the credential was rejected"
+   * with no provider from then on — forever, and on every reload. OPTIONAL, so
+   * every block written before this (and every reconstructed Claude transcript)
+   * stays valid and simply falls back to the generic sentence.
+   */
+  | { type: 'api_error'; errorType: string; errorMessage: string; providerId?: string }
   | { type: 'compact_separator'; text?: string }
   /**
    * Context an engine injected into the model's prompt that the USER never

@@ -177,6 +177,24 @@ describe('UsagePanel — the ChatGPT section', () => {
     expect(screen.getByTestId('UsagePanel.chatgptAccount').getAttribute('data-id')).toBe('acct-d')
   })
 
+  // Slice J: the heading read `limits.email ?? accountId`, so an EMPTY email
+  // beat the id fallback and the block lost its name entirely — the one thing
+  // a per-account panel cannot afford.
+  it('falls back to the account id for an EMPTY email too, not a blank heading', () => {
+    store.chatgptLimits = {
+      'acct-e': {
+        email: '  ',
+        primary: { usedPercent: 5, resetsAt: null },
+        secondary: null,
+        fetchedAt: 0
+      }
+    }
+    render(<UsagePanel usage={makeUsage()} onRefresh={vi.fn()} />)
+    const block = screen.getByTestId('UsagePanel.chatgptAccount')
+    expect(block.getAttribute('data-id')).toBe('acct-e')
+    expect(block).toHaveTextContent('acct-e')
+  })
+
   it('Refresh re-reads the ChatGPT accounts too, not just Claude', () => {
     store.chatgptLimits = limits
     const onRefresh = vi.fn()

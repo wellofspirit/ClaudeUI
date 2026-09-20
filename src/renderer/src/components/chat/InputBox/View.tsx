@@ -8,7 +8,7 @@ import type {
   EngineId,
   PermissionMode
 } from '../../../../../shared/types'
-import { useSessionStore, type SignInProviderId } from '../../../stores/session-store'
+import { useSessionStore } from '../../../stores/session-store'
 import { SlashCommandMenu } from '../SlashCommandMenu'
 import { FileMentionMenu } from '../FileMentionMenu'
 import { FileAttachmentBar } from '../FileAttachmentBar'
@@ -133,15 +133,6 @@ export interface InputBoxViewProps {
   voiceEnabled: boolean
   voiceState: VoiceState
   statusLine: StatusLineData | null
-  /**
-   * The pre-spawn sign-in hint (ADR-068 §3, Slice 6), or null. Composed by
-   * InputBox — the view only renders it.
-   */
-  signInHint?: {
-    providerId: SignInProviderId
-    engineLabel: string
-    providerLabel: string
-  } | null
 
   // Callbacks
   onSend: () => void
@@ -213,53 +204,6 @@ const ALIGN_CLASS = {
   center: 'text-center',
   right: 'text-right px-4'
 } as const
-
-// ---------------------------------------------------------------------------
-// SignInHint (pre-spawn only — reads openSignIn itself, like StatusLine)
-// ---------------------------------------------------------------------------
-
-/**
- * One compact row above the composer, on a session that has not spawned yet,
- * when the engine it would spawn on has no usable credential (ADR-068 §3,
- * Slice 6; the mockup's welcome-tile "Sign in instead of Start", relocated to
- * the composer because the real app has no engine tiles).
- *
- * It does NOT disable Send. ADR-030's rule is about advertising capabilities
- * that do not work, not about blocking the user: sending anyway still produces
- * the reactive auth-required row, which is the honest outcome and the one that
- * carries the prompt through a retry.
- */
-function SignInHint({
-  providerId,
-  engineLabel,
-  providerLabel
-}: {
-  providerId: SignInProviderId
-  engineLabel: string
-  providerLabel: string
-}): React.JSX.Element {
-  const openSignIn = useSessionStore((s) => s.openSignIn)
-  return (
-    <div
-      data-testid="InputBox.signInHint"
-      data-id={providerId}
-      className="mb-1.5 px-3 py-1.5 flex items-center gap-2 rounded-lg border border-warning/40 bg-bg-secondary animate-fade-in"
-    >
-      <span className="flex-1 text-[11px] text-text-secondary truncate">
-        {engineLabel} needs a {providerLabel} sign-in.
-      </span>
-      <button
-        type="button"
-        data-testid="InputBox.signInHint.action"
-        data-id={providerId}
-        onClick={() => openSignIn({ providerId, mode: 'reauth' })}
-        className="text-[11px] font-medium text-accent hover:underline cursor-pointer shrink-0"
-      >
-        Sign in
-      </button>
-    </div>
-  )
-}
 
 // ---------------------------------------------------------------------------
 // Sub-components — each receives props from InputBoxView
@@ -564,13 +508,6 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
       className="shrink-0"
     >
       <div className={`${isMobile ? 'max-w-full' : 'max-w-[740px]'} mx-auto`}>
-        {props.signInHint && (
-          <SignInHint
-            providerId={props.signInHint.providerId}
-            engineLabel={props.signInHint.engineLabel}
-            providerLabel={props.signInHint.providerLabel}
-          />
-        )}
         <div
           className={`group relative rounded-2xl bg-bg-input transition-colors ${
             permissionMode === 'acceptEdits'

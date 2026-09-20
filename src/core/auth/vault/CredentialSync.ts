@@ -180,6 +180,30 @@ export interface CredentialSyncDeps {
    * provider's mutation points instead (ADR-047).
    */
   onActiveAccountChanged?: () => void | Promise<void>
+  /**
+   * Rung once AFTER a ChatGPT login has been applied — the one post-completion
+   * tail every login path runs ({@link CredentialSync.applyCompletedLogin}), so
+   * the desktop loopback, the ADR-057 paste-back and the Slice-7 device code all
+   * ring it exactly once and none of them owns a copy.
+   *
+   * INJECTED rather than an `emitEvent` import (ADR-070 §2): this class is
+   * unit-tested with almost nothing mocked, and importing `sync-host` would drag
+   * the service graph into those tests. Same posture, same boot seam and same
+   * no-op default as {@link CredentialSyncDeps.onActiveAccountChanged} above.
+   *
+   * A throw is caught and logged, never propagated: by the time this rings, the
+   * credential is stored and vended, so failing the login would be a lie.
+   *
+   * `accountId` is the VAULT account key the credential landed on — the same
+   * id-space {@link CodexInjectionToken.vaultAccountId} reports, so the two
+   * halves of ADR-070 §2 compare on one id. It matters because a provider holds
+   * several accounts: adding account B must not announce that the sessions
+   * broken on account A are fixed. `undefined` for a vault with no named
+   * account: {@link LEGACY_ACCOUNT_KEY} is this class's own slot key, not an
+   * account, and the listener's event is replicated — with nothing to tell
+   * apart there is nothing to name.
+   */
+  onCredentialStored?: (accountId: string | undefined) => void
 }
 
 /**
@@ -280,6 +304,7 @@ export class CredentialSync {
    */
   private activeKey: string = LEGACY_ACCOUNT_KEY
   private onActiveAccountChanged: () => void | Promise<void>
+  private onCredentialStored: (accountId: string | undefined) => void
 
   // -- watcher state --
   private watchers = new Map<EngineKey, fs.FSWatcher>()
@@ -301,6 +326,7 @@ export class CredentialSync {
     this.getEnabledRoutes = deps.getEnabledRoutes ?? (() => ({ pi: true, opencode: true }))
     this.hasConfiguredRoutePolicy = deps.getEnabledRoutes !== undefined
     this.onActiveAccountChanged = deps.onActiveAccountChanged ?? ((): void => {})
+    this.onCredentialStored = deps.onCredentialStored ?? ((): void => {})
   }
 
   /**
@@ -318,6 +344,7 @@ export class CredentialSync {
     opencode?: CodexFeedTarget
     getEnabledRoutes?: () => CodexEnabledRoutes
     onActiveAccountChanged?: () => void | Promise<void>
+    onCredentialStored?: (accountId: string | undefined) => void
   }): void {
     if (targets.pi) this.piTarget = targets.pi
     if (targets.opencode) this.opencodeTarget = targets.opencode
@@ -326,6 +353,7 @@ export class CredentialSync {
       this.hasConfiguredRoutePolicy = true
     }
     if (targets.onActiveAccountChanged) this.onActiveAccountChanged = targets.onActiveAccountChanged
+    if (targets.onCredentialStored) this.onCredentialStored = targets.onCredentialStored
   }
 
   /**
@@ -589,6 +617,25 @@ export class CredentialSync {
     }
     this.scheduleRefresh(key, cred)
     this.startWatchers()
+    // ADR-070 §2: a stored credential is the one thing that means "this provider
+    // works now". Rung AFTER the cancellation check above, so a login the user
+    // cancelled mid-exchange (which throws and removes the credential) never
+    // reports a resolution.
+    //
+    // The try/catch is what MAKES the listener non-fatal, rather than a contract
+    // asserted of callers: `cred` is already stored and vended by the time we get
+    // here, so a listener that threw would turn a login that genuinely succeeded
+    // into a rejected promise the caller reports as a failed sign-in — telling the
+    // user their working credential is broken, which is the exact failure mode
+    // this whole ADR exists to remove.
+    try {
+      this.onCredentialStored(key === LEGACY_ACCOUNT_KEY ? undefined : key)
+    } catch (err) {
+      logger.warn(
+        'CredentialSync',
+        `onCredentialStored listener threw (login already succeeded): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
     return cred
   }
 

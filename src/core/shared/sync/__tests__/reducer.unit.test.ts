@@ -1367,4 +1367,206 @@ describe('session:auth-required — one event, on the wire (ADR-068 §4, slice 3
     expect(events).not.toContain('session:vendor-auth-required')
     expect(events).toContain("'session:auth-required'")
   })
+
+  // ── ADR-070 §2/§3: the engine's words and the retry, captured at failure time ──
+
+  it('captures the engine’s message and the LAST user prompt', () => {
+    const owed = fold([
+      created(),
+      ['session:user-message', 'rid', { id: 'u1', prompt: 'first prompt' }],
+      ['session:user-message', 'rid', { id: 'u2', prompt: 'fix the parser' }],
+      ['session:status', 'rid', status({ state: 'running' })],
+      ['session:auth-required', 'rid', { providerId: 'chatgpt', message: 'Token expired' }]
+    ])
+    expect(owed.sessions['rid'].authRequired).toEqual({
+      providerId: 'chatgpt',
+      message: 'Token expired',
+      retryPrompt: 'fix the parser'
+    })
+    // Lifetime 1 is `resolved` ABSENT, not `false`.
+    expect('resolved' in owed.sessions['rid'].authRequired!).toBe(false)
+  })
+
+  it('joins every text block of that message, and trims', () => {
+    // The two component-side copies of this walk disagreed on exactly this —
+    // `AuthRequiredRow` took the FIRST text block, `AuthErrorBlock` joined all of
+    // them — so the retry the user got depended on which surface they clicked. A
+    // replayed history message (opencode's `convertStoredMessage`) is where a
+    // multi-block user turn actually comes from.
+    const owed = fold([
+      created(),
+      [
+        'session:message',
+        'rid',
+        {
+          id: 'u-multi',
+          role: 'user',
+          timestamp: 0,
+          content: [
+            { type: 'text', text: '  fix the parser' },
+            { type: 'text', text: 'and the tests  ' }
+          ]
+        }
+      ],
+      ['session:status', 'rid', status({ state: 'running' })],
+      ['session:auth-required', 'rid', { providerId: 'anthropic' }]
+    ])
+    expect(owed.sessions['rid'].authRequired!.retryPrompt).toBe('fix the parser\nand the tests')
+  })
+
+  it('omits retryPrompt when the session has no user message to retry', () => {
+    const owed = fold([
+      created(),
+      ['session:status', 'rid', status({ state: 'running' })],
+      ['session:auth-required', 'rid', { providerId: 'anthropic' }]
+    ])
+    expect(owed.sessions['rid'].authRequired).toEqual({ providerId: 'anthropic' })
+  })
+
+  /**
+   * GUARD — the retry belongs to a turn this failure actually killed.
+   *
+   * Codex's host fans one failed refresh to EVERY session attached to the
+   * process (ADR-069 §8), so a session that has been idle for hours hears about
+   * a credential it was not using. Capturing its last prompt there meant the
+   * sign-in dialog then offered to "retry" a turn that completed long ago.
+   */
+  it('captures retryPrompt only while the session’s turn is in flight', () => {
+    const idle = fold([
+      created(),
+      ['session:user-message', 'rid', { id: 'u1', prompt: 'finished hours ago' }],
+      ['session:status', 'rid', status({ state: 'idle' })],
+      ['session:auth-required', 'rid', { providerId: 'chatgpt', message: 'rejected' }]
+    ])
+    expect(idle.sessions['rid'].authRequired).toEqual({
+      providerId: 'chatgpt',
+      message: 'rejected'
+    })
+
+    const running = fold([
+      created(),
+      ['session:user-message', 'rid', { id: 'u1', prompt: 'the killed prompt' }],
+      ['session:status', 'rid', status({ state: 'running' })],
+      ['session:auth-required', 'rid', { providerId: 'chatgpt', message: 'rejected' }]
+    ])
+    expect(running.sessions['rid'].authRequired!.retryPrompt).toBe('the killed prompt')
+  })
+
+  it('a snapshot round-trip carries all five fields', () => {
+    const owed = fold([
+      created(),
+      ['session:user-message', 'rid', { id: 'u1', prompt: 'retry me' }],
+      ['session:status', 'rid', status({ state: 'running' })],
+      [
+        'session:auth-required',
+        'rid',
+        { providerId: 'chatgpt', accountId: 'acct-a', message: 'Token expired' }
+      ],
+      ['provider:auth-resolved', { providerId: 'chatgpt' }]
+    ])
+    const expected = {
+      providerId: 'chatgpt',
+      accountId: 'acct-a',
+      message: 'Token expired',
+      retryPrompt: 'retry me',
+      resolved: true
+    }
+    expect(owed.sessions['rid'].authRequired).toEqual(expected)
+    // The widening is worthless if a resync drops three of the five.
+    expect(fromSnapshot(toSnapshot(owed, 9)).sessions['rid'].authRequired).toEqual(expected)
+  })
+})
+
+describe('provider:auth-resolved — the one resolution signal (ADR-070 §2)', () => {
+  /** Two sessions owing DIFFERENT providers, plus one owing nothing. */
+  const owedByThree = (): CanonicalState =>
+    fold([
+      created('r-chatgpt'),
+      created('r-anthropic'),
+      created('r-fine'),
+      ['session:user-message', 'r-chatgpt', { id: 'u1', prompt: 'the killed prompt' }],
+      ['session:status', 'r-chatgpt', status({ state: 'running' })],
+      ['session:auth-required', 'r-chatgpt', { providerId: 'chatgpt', message: 'Token expired' }],
+      ['session:auth-required', 'r-anthropic', { providerId: 'anthropic', message: '401' }]
+    ])
+
+  it('marks only the sessions blaming THAT provider, keeping everything else', () => {
+    const before = owedByThree()
+    const after = fold([['provider:auth-resolved', { providerId: 'chatgpt' }]], before)
+
+    expect(after.sessions['r-chatgpt'].authRequired).toEqual({
+      providerId: 'chatgpt',
+      message: 'Token expired',
+      // Lifetime 2 keeps the retry: it is what makes closing the dialog safe.
+      retryPrompt: 'the killed prompt',
+      resolved: true
+    })
+    // A different provider is untouched, by identity — not merely equal.
+    expect(after.sessions['r-anthropic']).toBe(before.sessions['r-anthropic'])
+    expect(after.sessions['r-fine']).toBe(before.sessions['r-fine'])
+  })
+
+  it('returns the IDENTICAL state object when nothing matched', () => {
+    // `replica.ts` identity-diffs the projection ("Projection is identity-diffed,
+    // and that is load-bearing"), so a fresh object here would re-write every
+    // session — and revert any in-flight local write — on a sign-in that fixed
+    // nothing. `toBe`, deliberately, not `toEqual`.
+    const before = owedByThree()
+    expect(fold([['provider:auth-resolved', { providerId: 'pi:anthropic' }]], before)).toBe(before)
+    expect(fold([['provider:auth-resolved', {}]], before)).toBe(before)
+    // Idempotent: a second signal for an already-resolved provider changes nothing.
+    const resolved = fold([['provider:auth-resolved', { providerId: 'chatgpt' }]], before)
+    expect(fold([['provider:auth-resolved', { providerId: 'chatgpt' }]], resolved)).toBe(resolved)
+  })
+
+  /**
+   * GUARD — a provider can hold several accounts (ADR-068 §2). Without the id on
+   * the signal, ADDING ChatGPT account B announced "chatgpt works now" and every
+   * session broken on account A was marked resolved — a fixed-credential row for
+   * a credential nobody touched.
+   */
+  it('skips a session whose broken account is not the one that was stored', () => {
+    const before = fold([
+      created('r-a'),
+      created('r-b'),
+      created('r-either'),
+      ['session:auth-required', 'r-a', { providerId: 'chatgpt', accountId: 'acct-a' }],
+      ['session:auth-required', 'r-b', { providerId: 'chatgpt', accountId: 'acct-b' }],
+      ['session:auth-required', 'r-either', { providerId: 'chatgpt' }]
+    ])
+
+    const after = fold(
+      [['provider:auth-resolved', { providerId: 'chatgpt', accountId: 'acct-b' }]],
+      before
+    )
+
+    expect(after.sessions['r-b'].authRequired!.resolved).toBe(true)
+    // Identity, not equality: account A was never in question.
+    expect(after.sessions['r-a']).toBe(before.sessions['r-a'])
+    // An absent id on EITHER side matches — today's behaviour, and Anthropic's,
+    // which names no account at all.
+    expect(after.sessions['r-either'].authRequired!.resolved).toBe(true)
+  })
+
+  it('an account-less signal still resolves every session for that provider', () => {
+    const before = fold([
+      created('r-a'),
+      created('r-b'),
+      ['session:auth-required', 'r-a', { providerId: 'chatgpt', accountId: 'acct-a' }],
+      ['session:auth-required', 'r-b', { providerId: 'chatgpt', accountId: 'acct-b' }]
+    ])
+
+    const after = fold([['provider:auth-resolved', { providerId: 'chatgpt' }]], before)
+
+    expect(after.sessions['r-a'].authRequired!.resolved).toBe(true)
+    expect(after.sessions['r-b'].authRequired!.resolved).toBe(true)
+  })
+
+  it('a running turn still nulls the WHOLE field, resolved or not', () => {
+    // Lifetime 3 (`reducer.ts`'s status rule) is unchanged by the other two: a
+    // turn that runs is the proof, and it settles the resolved state as well.
+    const resolved = fold([['provider:auth-resolved', { providerId: 'chatgpt' }]], owedByThree())
+    const ran = fold([['session:status', 'r-chatgpt', status({ state: 'running' })]], resolved)
+    expect(ran.sessions['r-chatgpt'].authRequired).toBeNull()
+  })
 })

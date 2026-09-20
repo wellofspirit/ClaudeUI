@@ -83,6 +83,22 @@ export default defineConfig({
       {
         resolve: { alias: sharedAlias },
         test: {
+          name: 'layout',
+          environment: 'jsdom',
+          globals: true,
+          setupFiles: ['./src/test/setup/jsdom.setup.ts'],
+          include: ['src/layout/**/*.layout.test.tsx'],
+          globalSetup: ['./src/layout/global-setup.ts'],
+          // Builds the app's real Tailwind CSS with vite and drives a real
+          // Chromium — seconds, not milliseconds, and it needs a browser
+          // binary, so it is gated out of `test` / `test:ci` exactly like
+          // `integration`. `src/layout/harness.ts` says why it has to.
+          testTimeout: 120000
+        }
+      },
+      {
+        resolve: { alias: sharedAlias },
+        test: {
           name: 'integration',
           environment: 'node',
           globals: true,

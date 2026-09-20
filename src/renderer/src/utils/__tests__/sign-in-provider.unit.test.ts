@@ -13,6 +13,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
+  accountDisplayName,
   anthropicAuthState,
   chatgptAuthFromRegistry,
   signInProviderFor,
@@ -186,5 +187,26 @@ describe('chatgptAuthFromRegistry', () => {
         snapshot(chatgptEntry({ engines: { pi: { enabled: false }, opencode: { enabled: true } } }))
       ).chatgptRoutes
     ).toEqual({ pi: false, opencode: true })
+  })
+})
+
+/**
+ * The rule six sites used to spell for themselves, two of them differently
+ * (ADR-070, Slice J). `''` is the case that made the disagreement observable:
+ * `??` passes it through and renders a blank row.
+ */
+describe('accountDisplayName', () => {
+  it('passes a real email through, placeholder labels included', () => {
+    expect(accountDisplayName('owner@example.test')).toBe('owner@example.test')
+    // A stored placeholder IS the email until the login lands; it is not
+    // this function's business to detect one (see `account-rows.ts`).
+    expect(accountDisplayName('Account 2')).toBe('Account 2')
+  })
+
+  it('falls back for every shape of absent, empty included', () => {
+    expect(accountDisplayName(undefined)).toBe('Account')
+    expect(accountDisplayName(null)).toBe('Account')
+    expect(accountDisplayName('')).toBe('Account')
+    expect(accountDisplayName('   ')).toBe('Account')
   })
 })

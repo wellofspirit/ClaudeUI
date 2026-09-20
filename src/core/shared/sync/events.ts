@@ -241,12 +241,23 @@ export interface SyncEventMap {
    * `providerId` is what the sign-in dialog acts on: `anthropic`, `chatgpt`, or
    * `opencode:<vendorId>` / `pi:<vendorId>` for a vendor no shared provider owns
    * (those have no flow, so the row opens Settings › Models & providers
-   * instead). It carries no message — the emitting engine sends its own words as
-   * `session:error`.
+   * instead).
+   *
+   * **`message` is the emitting engine's verbatim words, and emitting a
+   * companion `session:error` alongside this event is FORBIDDEN** (ADR-070 §1).
+   * This comment used to say the opposite — "it carries no message, the emitting
+   * engine sends its own words as `session:error`" — and that sanction is
+   * precisely how ADR-068 §4's "one event, one card" shipped as one event and
+   * several independently-dismissable cards. The information-preservation
+   * instinct was right and the delivery was wrong: the text rides here, and the
+   * row discloses it in place. A guard test per engine pins the absence of the
+   * duplicate. Every engine ALSO puts the same text in the transcript as an
+   * `api_error` / `errorType: 'authentication'` block, so the failure has a
+   * permanent, correctly-anchored home rather than a card that vanishes.
    */
   'session:auth-required': (
     routingId: string,
-    data: { providerId: string; accountId?: string }
+    data: { providerId: string; accountId?: string; message?: string }
   ) => void
   /**
    * Login status from session init: 'authenticated' | 'none'. The
@@ -287,6 +298,35 @@ export interface SyncEventMap {
    * one shape and one owner.
    */
   'usage:chatgpt-limits-changed': () => void
+  /**
+   * A credential for `providerId` was successfully stored — the ONE resolution
+   * signal (ADR-070 §2). Before it, nothing in the app meant "this provider's
+   * credential is good now", so every auth surface invented its own clear
+   * condition and none of them was "the user signed in".
+   *
+   * APP-LEVEL on purpose: it is a fact about a PROVIDER, not about a session, so
+   * it carries no routingId. The reducer fans it across every session whose
+   * `authRequired.providerId` matches and marks them resolved — one fold, so a
+   * desktop sign-in clears the owed sign-in on the phone too.
+   *
+   * `accountId` is the VAULT account id the credential landed on — the same
+   * id-space `session:auth-required` reports (`CodexInjectionToken.vaultAccountId`
+   * on one side, `CredentialSync.keyForCredential` on the other). It narrows the
+   * fan-out: a provider can hold several accounts, so adding ChatGPT account B
+   * must not announce that the sessions broken on account A are fixed. The
+   * reducer skips a session only when BOTH ids are present and differ, so absent
+   * on either side still matches — which is what Anthropic (one credential, no
+   * id) and every older emitter rely on.
+   *
+   * Emitted by Anthropic's own success transition (`AuthManager.finalize`) and
+   * by the vault's one post-completion tail
+   * (`CredentialSync.applyCompletedLogin`, which covers the desktop loopback,
+   * the ADR-057 paste-back and the device-code flow alike).
+   *
+   * Still no token, no URL and no flow state: it is replicated to every remote
+   * client, and a vault account id is an opaque local handle.
+   */
+  'provider:auth-resolved': (data: { providerId: string; accountId?: string }) => void
 
   // -------------------------------------------------------------------------
   // Automation

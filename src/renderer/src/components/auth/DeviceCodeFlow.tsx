@@ -18,25 +18,40 @@
  * `window.api.platform === 'web'` by its one caller (`SignInDialog`); the desktop
  * opens the host browser and waits on the host loopback exactly as before.
  *
- * Paste-back stays reachable — "Paste the callback URL instead" — because device
- * code is the newer of the two endpoints and a server that has it turned off
- * fails the usercode request outright (ADR-030: never leave the user with no
- * working path).
+ * Paste-back stays reachable — "Paste a URL instead" — because device code is
+ * the newer of the two endpoints and a server that has it turned off fails the
+ * usercode request outright (ADR-030: never leave the user with no working
+ * path).
+ *
+ * ONE VERB PER ROW (ADR-070 §5 rule 4, mockup `4ed195a3`). The numbered
+ * circles, their titles and their captions are gone: `OPEN ‹link›` / `ENTER
+ * ‹code›` reads as the instruction because the link and the code ARE the
+ * instruction. "This phone, a laptop, anything with a browser you can sign in
+ * on" went with them — a URL implies a browser. The expiry joined the waiting
+ * line rather than being a sentence of its own, but it is KEPT: a code with no
+ * expiry is a code the user retypes forever.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 /** Re-rendered on this cadence so "expires in N min" does not go stale on an open dialog. */
 const EXPIRY_TICK_MS = 20_000
 
+/** How long `Copied` stays on the button before it says `Copy` again. */
+const COPIED_MS = 1500
+
 /**
  * Whole minutes left, rounded to the nearest minute and floored at 0.
- * `undefined` when the host has not answered yet. Rounded rather than ceiled:
+ * `undefined` when there is no deadline to report. Rounded rather than ceiled:
  * a fifteen-minute code read "Expires in 16 min" the moment it arrived, because
  * the browser's clock trails the host's by a few seconds and the ceiling of
  * 15.02 is 16 (seen on the hermetic drive).
+ *
+ * A NON-POSITIVE `expiresAt` is an absent deadline, not an epoch instant: `0` is
+ * what a host with nothing to report sends, and keyed on `!== undefined` it
+ * rendered "expires in 0 min" on a code that had just been issued.
  */
 export function minutesUntil(expiresAt: number | undefined, now: number): number | undefined {
-  if (expiresAt === undefined) return undefined
+  if (expiresAt === undefined || expiresAt <= 0) return undefined
   return Math.max(0, Math.round((expiresAt - now) / 60_000))
 }
 
@@ -67,12 +82,22 @@ export function DeviceCodeFlow({
 }: DeviceCodeFlowProps): React.JSX.Element {
   const [now, setNow] = useState(() => Date.now())
   const [copied, setCopied] = useState(false)
+  /** The pending `Copied` reset — scheduled off a promise, so it outlives a close. */
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
-    if (expiresAt === undefined) return
+    // Same rule as `minutesUntil`: no deadline, nothing to tick.
+    if (expiresAt === undefined || expiresAt <= 0) return
     const timer = setInterval(() => setNow(Date.now()), EXPIRY_TICK_MS)
     return () => clearInterval(timer)
   }, [expiresAt])
+
+  useEffect(
+    () => () => {
+      if (copiedTimer.current) clearTimeout(copiedTimer.current)
+    },
+    []
+  )
 
   const minutes = minutesUntil(expiresAt, now)
   const ready = Boolean(userCode)
@@ -86,7 +111,8 @@ export function DeviceCodeFlow({
       ?.writeText(userCode)
       .then(() => {
         setCopied(true)
-        setTimeout(() => setCopied(false), 1500)
+        if (copiedTimer.current) clearTimeout(copiedTimer.current)
+        copiedTimer.current = setTimeout(() => setCopied(false), COPIED_MS)
       })
       .catch(() => {})
   }
@@ -98,99 +124,86 @@ export function DeviceCodeFlow({
       className="space-y-3"
       data-ready={ready ? 'true' : 'false'}
     >
-      <div className="flex items-start gap-2.5">
-        <div
-          className="h-5 w-5 rounded-full flex items-center justify-center text-[10px] font-semibold shrink-0 bg-accent/15 text-accent"
-          aria-hidden="true"
-        >
-          1
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="text-[12px] font-medium text-text-primary">
-            Open this link on any device
-          </div>
-          <div className="text-[11px] text-text-muted mt-0.5 leading-relaxed">
-            This phone, a laptop, anything with a browser you can sign in on.
-          </div>
-          {verificationUrl ? (
-            <a
-              data-testid="DeviceCodeFlow.url"
-              {...(id ? { 'data-id': id } : {})}
-              href={verificationUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-1.5 inline-block text-[11px] px-2.5 py-1 rounded-md bg-bg-tertiary hover:bg-bg-hover text-text-primary transition-colors break-all"
-            >
-              {verificationUrl} ↗
-            </a>
-          ) : (
-            <div className="mt-1.5 text-[11px] text-text-muted">Requesting a code…</div>
-          )}
-        </div>
-      </div>
-
-      <div className="flex items-start gap-2.5">
-        <div
-          className="h-5 w-5 rounded-full flex items-center justify-center text-[10px] font-semibold shrink-0 bg-accent/15 text-accent"
-          aria-hidden="true"
-        >
-          2
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="text-[12px] font-medium text-text-primary">Enter this code there</div>
-          <div className="mt-1.5 flex items-center gap-2">
-            <span
-              data-testid="DeviceCodeFlow.code"
-              {...(id ? { 'data-id': id } : {})}
-              className="px-2.5 py-1.5 rounded-md bg-bg-input border border-border/40 font-mono text-[18px] tracking-[0.18em] text-text-primary select-all"
-            >
-              {userCode ?? '––––––'}
-            </span>
-            <button
-              type="button"
-              data-testid="DeviceCodeFlow.copy"
-              {...(id ? { 'data-id': id } : {})}
-              disabled={!ready || busy}
-              onClick={copy}
-              className="shrink-0 text-[11px] px-2.5 py-1 rounded-md bg-bg-tertiary hover:bg-bg-hover text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {copied ? 'Copied' : 'Copy'}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <div
-        data-testid="DeviceCodeFlow.waiting"
-        {...(id ? { 'data-id': id } : {})}
-        className="text-[11px] text-text-muted leading-relaxed"
-      >
-        Waiting for you to enter the code…
-        {minutes !== undefined && (
-          <span className="text-text-secondary"> Expires in {minutes} min.</span>
+      <div className="flex items-center gap-2.5">
+        <span className="shrink-0 w-[38px] text-[10px] font-semibold tracking-wide text-text-muted">
+          OPEN
+        </span>
+        {verificationUrl ? (
+          <a
+            data-testid="DeviceCodeFlow.url"
+            {...(id ? { 'data-id': id } : {})}
+            href={verificationUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex-1 min-w-0 truncate text-[11px] font-mono px-2.5 py-1.5 rounded-md bg-bg-tertiary hover:bg-bg-hover text-text-primary transition-colors"
+          >
+            {verificationUrl} ↗
+          </a>
+        ) : (
+          <span className="text-[11px] text-text-muted">Requesting a code…</span>
         )}
       </div>
 
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-2.5">
+        <span className="shrink-0 w-[38px] text-[10px] font-semibold tracking-wide text-text-muted">
+          ENTER
+        </span>
+        <span
+          data-testid="DeviceCodeFlow.code"
+          {...(id ? { 'data-id': id } : {})}
+          className="px-2.5 py-1.5 rounded-md bg-bg-input border border-border/40 font-mono text-[18px] tracking-[0.18em] text-text-primary select-all"
+        >
+          {userCode ?? '––––––'}
+        </span>
+        <button
+          type="button"
+          data-testid="DeviceCodeFlow.copy"
+          {...(id ? { 'data-id': id } : {})}
+          disabled={!ready || busy}
+          onClick={copy}
+          className="shrink-0 text-[11px] px-2.5 py-1 rounded-md bg-bg-tertiary hover:bg-bg-hover text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+
+      <div className="flex items-center gap-2.5 pt-2.5 border-t border-border/55">
+        <span className="w-3 h-3 shrink-0 rounded-full border-2 border-accent border-t-transparent animate-spin-slow" />
+        <span
+          data-testid="DeviceCodeFlow.waiting"
+          {...(id ? { 'data-id': id } : {})}
+          className="flex-1 min-w-0 text-[11px] text-text-secondary"
+        >
+          Waiting{minutes !== undefined && ` · expires in ${minutes} min`}
+        </span>
         <button
           type="button"
           data-testid="DeviceCodeFlow.cancel"
           {...(id ? { 'data-id': id } : {})}
           onClick={onCancel}
-          className="text-[11px] text-text-muted hover:text-text-secondary underline underline-offset-2"
+          className="shrink-0 text-[11px] text-text-secondary hover:text-text-primary"
         >
           Cancel
         </button>
-        <button
-          type="button"
-          data-testid="DeviceCodeFlow.pasteInstead"
-          {...(id ? { 'data-id': id } : {})}
-          onClick={onPasteInstead}
-          className="text-[11px] text-text-muted hover:text-text-secondary underline underline-offset-2"
-        >
-          Paste the callback URL instead
-        </button>
       </div>
+
+      {/* ADR-030's escape hatch: a server with device code off must still have a
+          path, and this is it. Same handler, shorter label.
+
+          Locked while the start is in flight, like Copy: the fallback cancels
+          the device flow before starting the PKCE one, and until the start has
+          answered there is no flow on record to cancel — so the click would
+          leave a live device flow behind and race a second one against it. */}
+      <button
+        type="button"
+        data-testid="DeviceCodeFlow.pasteInstead"
+        {...(id ? { 'data-id': id } : {})}
+        disabled={busy}
+        onClick={onPasteInstead}
+        className="text-[11px] text-text-muted hover:text-text-secondary underline underline-offset-2 disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        Paste a URL instead
+      </button>
     </div>
   )
 }

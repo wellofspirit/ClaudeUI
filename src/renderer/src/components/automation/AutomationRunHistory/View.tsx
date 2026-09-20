@@ -133,7 +133,12 @@ export function AutomationRunHistoryView({
           <div className="space-y-3">
             {/* Same viewers as the live chat — attached-image thumbnails in a
                 replayed run are clickable too, and its diagrams page as one
-                gallery. Neither renders a wrapper element. */}
+                gallery. Neither renders a wrapper element.
+
+                Deliberately NO `TranscriptSessionProvider`: a recorded run
+                belongs to no open chat session, so every bubble that needs one
+                (the auth row) renders as history rather than acting on whatever
+                session happens to be active behind this view. */}
             <ImageGalleryProvider messages={runMessages ?? []}>
               <DiagramGalleryProvider messages={runMessages ?? []}>
                 {runMessages?.map((msg, idx) => (

@@ -144,8 +144,10 @@ export function parseOptions(argv) {
     out: arg('out', join(root, '.cache', 'screenshots', 'codex-render-stress.png')),
     prompt: arg('prompt', 'Reply with one short sentence. Do not run any command.')
   }
-  // The app must be BUILT: this drives `out/main`, not the dev server.
-  if (!existsSync(join(root, 'out', 'main', 'index.js')))
+  // The app must be BUILT: this drives `out/main`, not the dev server. A
+  // precondition of LAUNCHING, so `--dry-run` — which launches nothing — is
+  // exempt; CI runs the dry-run test before any build exists.
+  if (!options.dryRun && !existsSync(join(root, 'out', 'main', 'index.js')))
     errors.push('out/main/index.js is missing — run `bun run build` first')
   if (options.home) {
     const home = resolve(options.home)

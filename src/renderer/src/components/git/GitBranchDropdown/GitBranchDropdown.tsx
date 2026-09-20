@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useActiveSession, useSessionStore } from '../../../stores/session-store'
+import { useEscapeLayer } from '../../shared/use-escape-layer'
 import type { GitBranchData } from '../../../../../shared/types'
 import { GitBranchDropdownView } from './View'
 
@@ -81,6 +82,15 @@ export function GitBranchDropdown({ onClose, anchorRef }: Props): React.JSX.Elem
       })
       .catch(() => {})
   }, []) // eslint-disable-line react-hooks/exhaustive-deps -- only on mount
+
+  // Escape, through the app's one stack (use-escape-layer). One press peels
+  // one step: naming a new branch is a step of its own, and the capture-phase
+  // layer would otherwise swallow the key before the name field's own handler.
+  useEscapeLayer(() => {
+    if (!creating) return onClose()
+    setCreating(false)
+    setNewBranchName('')
+  })
 
   // Click-outside to close
   useEffect(() => {

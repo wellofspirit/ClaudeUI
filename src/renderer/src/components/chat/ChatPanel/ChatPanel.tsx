@@ -5,15 +5,13 @@ import {
   useSessionStore,
   useFocusedAgentData
 } from '../../../stores/session-store'
-import { MessageBubble } from '../MessageBubble'
+import { MessageBubble, TranscriptSessionProvider } from '../MessageBubble'
 import { InputBox } from '../InputBox'
 import { TodoWidget } from '../../TodoWidget'
 import { SentFilesWidget } from '../../SentFilesWidget'
 import { FloatingApproval } from '../FloatingApproval'
 import { BtwCard } from '../BtwCard'
 import { FloatingError } from '../FloatingError'
-import { AuthRequiredRow } from '../AuthRequiredRow'
-import { AuthBanner } from '../AuthBanner'
 import { SandboxViolationToast } from '../SandboxViolationToast'
 import { useIsMobile } from '../../../hooks/useIsMobile'
 import {
@@ -287,7 +285,6 @@ export function ChatPanel(): React.JSX.Element {
   return (
     <div data-testid="ChatPanel" className="flex-1 flex flex-col min-h-0 min-w-0 relative">
       <TopBar hasContent={hasContent} />
-      <AuthBanner />
 
       <div className="flex-1 flex flex-col min-h-0 relative">
         <ChatSearchOverlay
@@ -317,20 +314,26 @@ export function ChatPanel(): React.JSX.Element {
                   layout of the message list is untouched. They own the two
                   full-screen viewers: a thumbnail click opens the image gallery,
                   expanding a diagram card opens the diagram gallery. */}
-              <ImageGalleryProvider messages={messages}>
-                <DiagramGalleryProvider messages={messages}>
-                  {messages.map((msg) => (
-                    <div key={msg.id} className="cv-auto">
-                      <MessageBubble
-                        message={msg}
-                        pendingApprovals={pendingApprovals}
-                        isLastAssistant={msg.id === lastAssistantId}
-                        activeThinking={activeThinkingByMessage.get(msg.id)}
-                      />
-                    </div>
-                  ))}
-                </DiagramGalleryProvider>
-              </ImageGalleryProvider>
+              {/* WHOSE transcript this is. A bubble that needs a session must
+                  read it from here, not from `activeSessionId` — the same
+                  component also replays automation-run history, where that
+                  pointer names an unrelated chat. */}
+              <TranscriptSessionProvider value={activeSessionId}>
+                <ImageGalleryProvider messages={messages}>
+                  <DiagramGalleryProvider messages={messages}>
+                    {messages.map((msg) => (
+                      <div key={msg.id} className="cv-auto">
+                        <MessageBubble
+                          message={msg}
+                          pendingApprovals={pendingApprovals}
+                          isLastAssistant={msg.id === lastAssistantId}
+                          activeThinking={activeThinkingByMessage.get(msg.id)}
+                        />
+                      </div>
+                    ))}
+                  </DiagramGalleryProvider>
+                </ImageGalleryProvider>
+              </TranscriptSessionProvider>
               <div className="flex flex-col gap-5">
                 {!hasItemStreams && status.state === 'running' && <TypingIndicator />}
               </div>
@@ -409,14 +412,41 @@ export function ChatPanel(): React.JSX.Element {
         </div>
       )}
       <FloatingApproval />
-      <AuthRequiredRow />
-      <FloatingError />
-      <SandboxViolationToast />
+      <ChatNoticeStack />
     </div>
   )
 }
 
 // ── Presentational sub-components ───────────────────────────────────
+
+/**
+ * The ONE owner of the chat's `top-12` notice slot (ADR-070 §4).
+ *
+ * `AuthRequiredRow`, `FloatingError` and `SandboxViolationToast` used to be
+ * absolutely-positioned SIBLINGS, each rendering `absolute top-12 left-0 right-0
+ * z-20` — same coordinates, same stacking order, painting over one another, so
+ * which notice the user saw was DOM order rather than intent. The positioning,
+ * the gutter and the reading width live here now and the leaves render just
+ * their cards, which makes two live notices STACK instead of overlap.
+ *
+ * `pointer-events-none` on the container with `pointer-events-auto` on the cards
+ * is kept exactly as it was: the slot sits over the transcript, so everything
+ * but a card has to stay click-through.
+ */
+export function ChatNoticeStack(): React.JSX.Element {
+  const isMobile = useIsMobile()
+  return (
+    <div
+      data-testid="ChatNoticeStack"
+      className="absolute top-12 left-0 right-0 z-20 pointer-events-none px-4 pt-2"
+    >
+      <div className={`${isMobile ? 'max-w-full' : 'max-w-[740px]'} mx-auto flex flex-col gap-2`}>
+        <FloatingError />
+        <SandboxViolationToast />
+      </div>
+    </div>
+  )
+}
 
 function LoadingState(): React.JSX.Element {
   return (

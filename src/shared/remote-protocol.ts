@@ -1069,13 +1069,44 @@ export interface PerSessionSnapshot {
   selectedModel?: string
   codexModelExplicit?: boolean
   /**
-   * The sign-in this session owes (ADR-068 §4) — which provider rejected a
-   * credential, and which stored account when the provider has several. Null
-   * once a turn runs again. Optional for the same older-server-compat reason as
-   * {@link PerSessionSnapshot.queue}: a host that predates slice 3 sends none,
-   * which reads as "nothing owed".
+   * The sign-in this session owes — see {@link AuthRequiredState}. Optional for
+   * the same older-server-compat reason as {@link PerSessionSnapshot.queue}: a
+   * host that predates slice 3 sends none, which reads as "nothing owed".
    */
-  authRequired?: { providerId: string; accountId?: string } | null
+  authRequired?: AuthRequiredState | null
+}
+
+/**
+ * The sign-in a session owes, and how far along fixing it is (ADR-070 §2).
+ *
+ * Declared once and shared by the wire, core's `CanonicalSessionState` and the
+ * renderer store, because all three hold the SAME object: the reducer builds it
+ * and every other layer only reads it.
+ *
+ * Three lifetimes, not one (ADR-070 §2):
+ *
+ *  1. **broken** — `session:auth-required` set it and `resolved` is absent/false;
+ *  2. **resolved, retry owed** — `provider:auth-resolved` for this `providerId`
+ *     (and, when both sides name one, this `accountId`) set `resolved: true`
+ *     and kept `retryPrompt`;
+ *  3. **settled** — the field is `null`, which the `status.state === 'running'`
+ *     rule does (a turn that runs is the proof the credential works).
+ */
+export interface AuthRequiredState {
+  /** What the sign-in dialog acts on: `anthropic`, `chatgpt`, `opencode:<v>`, `pi:<v>`. */
+  providerId: string
+  /** Which stored account was refused, when the provider has several. */
+  accountId?: string
+  /** The emitting engine's verbatim words. Rendered as in-place disclosure, never paraphrased. */
+  message?: string
+  /**
+   * The prompt whose turn this killed, captured by the reducer at failure time.
+   * Absent when no turn was running — an idle session told about a dead
+   * credential has nothing to retry.
+   */
+  retryPrompt?: string
+  /** The credential is good again but the retry has not been taken yet (ADR-070 §2 lifetime 2). */
+  resolved?: boolean
 }
 
 export interface FullStateSnapshot {

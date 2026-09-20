@@ -27,6 +27,7 @@ import {
   CLAUDE_ENGINE_CAPABILITIES
 } from '../../../../shared/model-capabilities'
 import { AUTONOMY_TO_PERMISSION, AUTONOMY_LABELS } from '../../../../shared/permission-modes'
+import { accountDisplayName } from '../../utils/sign-in-provider'
 import {
   SettingsToggle,
   SettingsSlider,
@@ -499,7 +500,7 @@ function AccountsSetting(): React.JSX.Element {
               as="label"
               testid="AccountsSetting.accountRow"
               dataId={a.id}
-              label={a.email || 'Account'}
+              label={accountDisplayName(a.email)}
               description={a.subscriptionType ?? undefined}
               className={active ? 'bg-accent/5' : 'hover:bg-bg-hover/40'}
               leading={

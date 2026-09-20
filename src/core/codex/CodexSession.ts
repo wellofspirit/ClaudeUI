@@ -50,6 +50,7 @@ import type { ThreadTokenUsage } from './protocol/v2/ThreadTokenUsage'
 import type { TokenUsageBreakdown } from './protocol/v2/TokenUsageBreakdown'
 import { resolveCodexCapabilities } from '../../shared/model-capabilities'
 import { logger } from '../services/logger'
+import { authErrorTranscriptMessage } from '../services/api-error'
 import { CodexTransportError, type CodexClientOptions } from './CodexAppServerClient'
 import {
   codexHostRegistry,
@@ -634,6 +635,8 @@ export class CodexSession extends BaseSession {
   private children = new Map<string, CodexChild>()
   /** One "nested agents are not rendered" error per session, not per spawn. */
   private nestedAgentWarned = false
+  /** One "credential rejected" transcript row per TURN — see {@link authRequired}. */
+  private authRowWritten = false
   /** The root's own last token totals — the base every child's usage adds to. */
   private rootUsage: ThreadTokenUsage | null = null
   /** Last computed API-rate equivalent of this session's tokens; null = unpriced. */
@@ -712,14 +715,47 @@ export class CodexSession extends BaseSession {
    */
   private authRequired(accountId: string | null): void {
     if (this.closed) return
+    // ADR-070 §1: the words ride ON the event and there is NO companion
+    // `session:error` — the pair used to produce two separately-dismissable
+    // cards for one rejected credential. The text also drops "sign in again from
+    // Settings › Models & providers": the UI owns the action now (the pill and
+    // the transcript row both open the one dialog), so naming a route the user
+    // no longer has to take would be wrong advice rather than helpful advice.
+    const message = 'ChatGPT rejected the credential Codex runs under.'
+    // The EVENT goes to every attached session, idle ones included: their
+    // credential really is broken and the pill has to say so.
     this.send('session:auth-required', {
       providerId: CODEX_AUTH_PROVIDER_ID,
-      ...(accountId ? { accountId } : {})
+      ...(accountId ? { accountId } : {}),
+      message
     })
-    this.send(
-      'session:error',
-      'ChatGPT sign-in expired; sign in again from Settings › Models & providers'
-    )
+    // The transcript BLOCK does not: it is the record of a turn that DIED, and
+    // the host fans this to every session on the process (ADR-069 §8), so one
+    // failed refresh used to write N rows into N transcripts where nothing was
+    // running. The latch is the second half — `onRefreshRequest` rings on every
+    // failed refresh REQUEST and Codex retries inside one turn, so an unlatched
+    // dispatch stacked identical rows.
+    if (!this.busy && !this.sending) return
+    if (this.authRowWritten) return
+    this.authRowWritten = true
+    // The block itself is the same text, as the neutral row Claude already
+    // emitted, so the failure has a permanent, correctly-anchored home. Through
+    // `dispatch` so it lands in `messageHistory` like every other row here.
+    this.dispatch({
+      kind: 'message',
+      message: authErrorTranscriptMessage(randomUUID(), message, CODEX_AUTH_PROVIDER_ID)
+    })
+  }
+
+  /**
+   * Re-arm {@link authRowWritten} at the turn BOUNDARY.
+   *
+   * Guarded on the transition rather than assigned outright: `turn/started` also
+   * arrives for a turn {@link run} has already begun, and re-arming there would
+   * hand that turn a second row.
+   */
+  private resetAuthRowLatch(): void {
+    if (!this.busy && !this.sending) this.authRowWritten = false
   }
 
   get willQueue(): boolean {
@@ -884,6 +920,7 @@ export class CodexSession extends BaseSession {
     if (this.willQueue && prompt !== null)
       throw new Error('Codex turn is already running; send this prompt through the queue')
     if (prompt !== null) {
+      this.resetAuthRowLatch()
       this.sending = true
       this.clearInactivityTimer()
       this.status('running')
@@ -1965,6 +2002,7 @@ export class CodexSession extends BaseSession {
     if (method === 'turn/started' && record(value.turn) && typeof value.turn.id === 'string') {
       if (this.endedTurns.has(value.turn.id)) return
       this.turnId = value.turn.id
+      this.resetAuthRowLatch()
       this.busy = true
       this.status('running')
       if (this.interruptRequested) void this.interrupt().catch(() => {})

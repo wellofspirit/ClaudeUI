@@ -2,16 +2,40 @@ import { useState, useRef } from 'react'
 import { useActiveSession } from '../../stores/session-store'
 import { GitBranchDropdown } from './GitBranchDropdown'
 
-export function GitBranchPill(): React.JSX.Element | null {
+/**
+ * The branch this pill would name, or `null` when there is no pill at all.
+ *
+ * One copy of "has this session got a branch to act on", because below tier 1
+ * the pill is hidden and `TopBar`'s ⋯ menu carries the row that opens the same
+ * dropdown — a second derivation there could offer fetch/pull/push for a
+ * session the pill itself would have said nothing about.
+ */
+export function useBranchPillName(): string | null {
   const isGitRepo = useActiveSession((s) => s.isGitRepo)
   const gitStatus = useActiveSession((s) => s.gitStatus)
+  return isGitRepo && gitStatus ? gitStatus.branch || 'HEAD' : null
+}
+
+/** The branch mark, shared with the ⋯ row that replaces this pill below tier 1
+ *  — one drawing, whatever `<svg>` box each surface puts it in. */
+export const BRANCH_MARK = (
+  <>
+    <line x1="6" y1="3" x2="6" y2="15" />
+    <circle cx="18" cy="6" r="3" />
+    <circle cx="6" cy="18" r="3" />
+    <path d="M18 9a9 9 0 01-9 9" />
+  </>
+)
+
+export function GitBranchPill(): React.JSX.Element | null {
+  const gitStatus = useActiveSession((s) => s.gitStatus)
   const syncOp = useActiveSession((s) => s.gitSyncOperation)
+  const branchName = useBranchPillName()
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
 
-  if (!isGitRepo || !gitStatus) return null
+  if (branchName === null || !gitStatus) return null
 
-  const branchName = gitStatus.branch || 'HEAD'
   const displayName = branchName.length > 16 ? branchName.slice(0, 15) + '\u2026' : branchName
   const { ahead, behind, trackingBranch } = gitStatus
   const isSyncing = syncOp !== 'idle'
@@ -48,10 +72,7 @@ export function GitBranchPill(): React.JSX.Element | null {
           strokeLinejoin="round"
           className="shrink-0 relative top-[1.5px]"
         >
-          <line x1="6" y1="3" x2="6" y2="15" />
-          <circle cx="18" cy="6" r="3" />
-          <circle cx="6" cy="18" r="3" />
-          <path d="M18 9a9 9 0 01-9 9" />
+          {BRANCH_MARK}
         </svg>
         <span className="truncate max-w-[100px] font-mono">{displayName}</span>
 
