@@ -47,7 +47,7 @@ New columns on `usage_event`:
 
 `StatusLineData.totalCostUsd` follows the same rule on every engine, so the opencode and pi sessions stop reporting zero under a subscription. The status line gains `billedCostUsd` for the tooltip. ADR-034's ruling that dispatched spend stays out of the session headline is unchanged. The dashboard includes it in every total and marks the rows.
 
-`dispatch.maxCostUsd` gates on `api_cost_usd ?? billed_cost_usd` for every target. A target whose model has no price cannot be capped, and the dispatch card says so instead of pretending the cap is armed.
+`dispatch.maxCostUsd` gates on the same figure a headline shows, for every target: the API-equivalent cost under a subscription, the billed cost under an API key. A target whose model has no price cannot be capped, and the dispatch card says so instead of pretending the cap is armed.
 
 ### 3. `account_key` is derived from the provider, never from this machine
 
