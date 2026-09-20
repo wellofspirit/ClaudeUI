@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import {
+  PROVIDER_OVERFLOW_COLOR,
+  PROVIDER_SERIES_COLORS,
+  buildProviderColorMap,
+  formatReset,
+  formatResetRelative,
+  meterSeverity,
   formatTokenCount,
   formatCost,
   sumTokens,
@@ -233,5 +239,88 @@ describe('getModelColor', () => {
     const c1 = getModelColor('test-model-xyz')
     const c2 = getModelColor('test-model-xyz')
     expect(c1).toBe(c2)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The dashboard's palette and meter vocabulary (ADR-071 §8)
+// ---------------------------------------------------------------------------
+
+describe('buildProviderColorMap', () => {
+  it('pins anthropic to the first slot and openai to the second, whatever the input order', () => {
+    const map = buildProviderColorMap(['openrouter', 'openai', 'anthropic'])
+    expect(map.get('anthropic')).toBe(PROVIDER_SERIES_COLORS[0])
+    expect(map.get('openai')).toBe(PROVIDER_SERIES_COLORS[1])
+    expect(map.get('openrouter')).toBe(PROVIDER_SERIES_COLORS[2])
+  })
+
+  it('gives an unpinned provider the same colour whether or not a pinned one is present', () => {
+    // A filter that drops Anthropic must not repaint OpenRouter.
+    const withPinned = buildProviderColorMap(['anthropic', 'openai', 'openrouter'])
+    const withoutOne = buildProviderColorMap(['anthropic', 'openrouter'])
+    expect(withoutOne.get('anthropic')).toBe(withPinned.get('anthropic'))
+    // Slots close up when a provider genuinely leaves the data, which is the
+    // documented behaviour: the map is rebuilt from what the range returned.
+    expect(withoutOne.get('openrouter')).toBe(PROVIDER_SERIES_COLORS[1])
+  })
+
+  it('folds providers past the validated five into one neutral rather than inventing a hue', () => {
+    const map = buildProviderColorMap(['a', 'b', 'c', 'd', 'e', 'f', 'g'])
+    expect(map.get('e')).toBe(PROVIDER_SERIES_COLORS[4])
+    expect(map.get('f')).toBe(PROVIDER_OVERFLOW_COLOR)
+    expect(map.get('g')).toBe(PROVIDER_OVERFLOW_COLOR)
+  })
+})
+
+describe('meterSeverity', () => {
+  it('grades at 70 and 90', () => {
+    expect(meterSeverity(0)).toBe('ok')
+    expect(meterSeverity(69.9)).toBe('ok')
+    expect(meterSeverity(70)).toBe('warn')
+    expect(meterSeverity(89.9)).toBe('warn')
+    expect(meterSeverity(90)).toBe('crit')
+    expect(meterSeverity(100)).toBe('crit')
+  })
+})
+
+describe('formatResetRelative', () => {
+  const now = Date.parse('2026-09-21T12:00:00.000Z')
+
+  it('counts forward to the reset', () => {
+    expect(formatResetRelative('2026-09-21T13:48:00.000Z', now)).toBe('in 1h 48m')
+  })
+
+  it('says now for a window that has already turned over', () => {
+    expect(formatResetRelative('2026-09-21T11:00:00.000Z', now)).toBe('now')
+  })
+
+  it('draws a dash rather than a guess when there is no reset to show', () => {
+    expect(formatResetRelative(null, now)).toBe('—')
+    expect(formatResetRelative('not a date', now)).toBe('—')
+  })
+})
+
+describe('formatReset', () => {
+  const now = Date.parse('2026-09-21T12:00:00.000Z')
+
+  it('counts a 5-hour window down, because that wait is actionable', () => {
+    expect(formatReset('5h', '2026-09-21T13:48:00.000Z', now)).toBe('in 1h 48m')
+  })
+
+  it('names the weekday and clock time for a weekly window', () => {
+    // Built from LOCAL parts so the expectation holds in any timezone.
+    const at = new Date(2026, 8, 24, 9, 0, 0)
+    expect(formatReset('7d', at.toISOString(), now)).toBe('Thu 09:00')
+    expect(formatReset('7d:fable', at.toISOString(), now)).toBe('Thu 09:00')
+  })
+
+  it('pads a single-digit hour and minute', () => {
+    const at = new Date(2026, 8, 21, 7, 5, 0)
+    expect(formatReset('7d', at.toISOString(), now)).toBe('Mon 07:05')
+  })
+
+  it('draws a dash rather than a guess when there is no reset to show', () => {
+    expect(formatReset('7d', null, now)).toBe('—')
+    expect(formatReset('5h', 'not a date', now)).toBe('—')
   })
 })

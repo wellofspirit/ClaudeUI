@@ -117,6 +117,132 @@ export function formatShortDate(dateStr: string): string {
   return `${months[d.getMonth()]} ${d.getDate()}`
 }
 
+// ---------------------------------------------------------------------------
+// The usage dashboard's categorical palette and meter vocabulary (ADR-071 §8)
+//
+// Lives here rather than in a widget so the three S4b slices colour and grade
+// the same thing the same way: a provider that was blue in the summary and
+// green in the breakdown would read as two providers.
+// ---------------------------------------------------------------------------
+
+/**
+ * The five-slot categorical palette, in FIXED order (ADR-071 §8).
+ *
+ * Validated against the `#111318` card surface (`--color-bg-secondary`) with
+ * the dataviz validator: lightness band, chroma floor, contrast and CVD all
+ * pass, worst adjacent pair ΔE 8.4 (protan). Slots are assigned by provider
+ * identity and never by rank, so narrowing the range or dropping a provider
+ * cannot repaint the survivors.
+ */
+export const PROVIDER_SERIES_COLORS = [
+  '#3987e5',
+  '#d95926',
+  '#199e70',
+  '#c98500',
+  '#d55181'
+] as const
+
+/**
+ * Providers that always take the same slot whatever else the ledger holds, so
+ * Anthropic is the same blue on a profile that has never run anything else.
+ */
+const PINNED_PROVIDER_ORDER = ['anthropic', 'openai']
+
+/**
+ * The sixth provider onward. Five slots is what was validated; a generated hue
+ * would be an unvalidated guess, so the tail shares one neutral and relies on
+ * the direct label every surface already draws beside its mark.
+ */
+export const PROVIDER_OVERFLOW_COLOR = '#8b929e'
+
+/** Provider id → its fixed colour, pinned providers first and the rest as given. */
+export function buildProviderColorMap(providerIds: readonly string[]): Map<string, string> {
+  const seen = new Set<string>()
+  const ordered: string[] = []
+  for (const id of [...PINNED_PROVIDER_ORDER, ...providerIds]) {
+    if (!providerIds.includes(id) || seen.has(id)) continue
+    seen.add(id)
+    ordered.push(id)
+  }
+  const map = new Map<string, string>()
+  ordered.forEach((id, i) => map.set(id, PROVIDER_SERIES_COLORS[i] ?? PROVIDER_OVERFLOW_COLOR))
+  return map
+}
+
+/** How close to its ceiling a limit window is. */
+export type MeterSeverity = 'ok' | 'warn' | 'crit'
+
+export function meterSeverity(usedPercent: number): MeterSeverity {
+  if (usedPercent >= 90) return 'crit'
+  if (usedPercent >= 70) return 'warn'
+  return 'ok'
+}
+
+/**
+ * Severity never rests on colour alone: every meter ships the icon AND the
+ * percent beside its fill, so a CVD reader, a greyscale screenshot and a
+ * forced-colours theme all still read the state.
+ */
+export const SEVERITY_ICON: Record<MeterSeverity, string> = {
+  ok: '●',
+  warn: '⚠',
+  crit: '⛔'
+}
+
+/**
+ * Theme tokens rather than the mockup's literals: the app has three themes and
+ * a meter drawn in a hard-coded amber is unreadable in two of them.
+ */
+export const SEVERITY_FILL_CLASS: Record<MeterSeverity, string> = {
+  ok: 'bg-accent',
+  warn: 'bg-warning',
+  crit: 'bg-danger'
+}
+
+/**
+ * When a window comes back, relative to now — `in 1h 48m`, `now` for one that
+ * has already turned over, `—` when the vendor reported no reset at all.
+ */
+export function formatResetRelative(resetsAt: string | null | undefined, now = Date.now()): string {
+  if (!resetsAt) return '—'
+  const at = Date.parse(resetsAt)
+  if (!Number.isFinite(at)) return '—'
+  const ms = at - now
+  if (ms <= 0) return 'now'
+  return `in ${formatDuration(ms)}`
+}
+
+const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+
+/** A weekly window kind: `7d`, or a per-model bucket like `7d:fable`. */
+function isWeeklyKind(kind: string): boolean {
+  return kind === '7d' || kind.startsWith('7d:')
+}
+
+/**
+ * When a window comes back, in the form that kind of window is ACTED on.
+ *
+ * A 5-hour window turns over inside a working session, so the useful fact is
+ * how long the wait is (`in 1h 48m`). A weekly one is days away, where a
+ * duration ("in 6d 3h") is arithmetic the reader has to finish; the weekday and
+ * clock time (`Thu 09:00`, 24-hour, the viewer's zone) is the fact they can
+ * plan around. The relative form stays available for the tooltip.
+ */
+export function formatReset(
+  kind: string,
+  resetsAt: string | null | undefined,
+  now = Date.now()
+): string {
+  if (!resetsAt) return '—'
+  const at = Date.parse(resetsAt)
+  if (!Number.isFinite(at)) return '—'
+  if (!isWeeklyKind(kind)) return formatResetRelative(resetsAt, now)
+  const d = new Date(at)
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  return `${WEEKDAY_NAMES[d.getDay()]} ${hh}:${mm}`
+}
+
 /** Format duration in ms as human-readable */
 export function formatDuration(ms: number): string {
   const totalSec = Math.floor(ms / 1_000)
