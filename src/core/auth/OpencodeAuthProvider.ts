@@ -73,9 +73,13 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
       const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR)
       const client = new OpencodeClient(conn.baseUrl, conn.authHeader)
       try {
-        const [configResp, authCatalog] = await Promise.all([
+        const [configResp, authCatalog, credentialTypes] = await Promise.all([
           client.getConfigProviders().catch(() => ({ providers: [] })),
-          client.getProviderAuth().catch(() => ({}) as Record<string, unknown[]>)
+          client.getProviderAuth().catch(() => ({}) as Record<string, unknown[]>),
+          // One read of opencode's own auth.json for the whole probe — the
+          // stored credential is what a vendor is actually BILLED under (see
+          // billingType below). Missing/unparseable file → {}.
+          readOpencodeCredentialTypes()
         ])
 
         const map: VendorAuthMap = {}
@@ -98,14 +102,22 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
             authState = 'unauthenticated'
           }
 
-          // billingType inference:
+          // billingType:
           // - free vendors (opencode/zen): 'free'
-          // - configured-with-oauth: 'subscription' (heuristic: if vendor has oauth options)
-          // - configured-with-api-key: 'apiKey'
-          // - unconfigured: 'unknown'
+          // - a STORED credential decides: 'oauth' → subscription, 'api' → apiKey
+          // - no stored credential, unconfigured: 'unknown'
+          // - no stored credential, configured (a key from the environment or
+          //   from opencode.json): inferred from the auth options offered
+          //
+          // The stored credential comes first because the options a vendor
+          // OFFERS cannot tell the two apart where it matters: `openai` offers
+          // both oauth and api, so a ChatGPT subscription used to read as
+          // 'apiKey' and its turns were priced as real spend (ADR-071 §2).
           let billingType: 'subscription' | 'apiKey' | 'free' | 'unknown'
           if (isFree) {
             billingType = 'free'
+          } else if (credentialTypes[vendorId]) {
+            billingType = credentialTypes[vendorId] === 'oauth' ? 'subscription' : 'apiKey'
           } else if (!isConfigured) {
             billingType = 'unknown'
           } else {
@@ -123,10 +135,16 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
           map[vendorId] = { authState, billingType }
         }
 
-        // Add any configured providers not in the auth catalog (e.g. custom)
+        // Add any configured providers not in the auth catalog (e.g. custom).
+        // A stored credential still decides the billing type — same rule as
+        // above, so a custom gateway with an API key is not read as 'unknown'.
         for (const p of configResp.providers ?? []) {
           if (!map[p.id]) {
-            map[p.id] = { authState: 'authenticated', billingType: 'unknown' }
+            const stored = credentialTypes[p.id]
+            map[p.id] = {
+              authState: 'authenticated',
+              billingType: stored ? (stored === 'oauth' ? 'subscription' : 'apiKey') : 'unknown'
+            }
           }
         }
 

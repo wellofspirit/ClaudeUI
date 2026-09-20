@@ -155,6 +155,35 @@ function makeProvider(): OpencodeAuthProvider {
 }
 
 // ---------------------------------------------------------------------------
+// probe() reads opencode's own auth.json to decide a vendor's billing type
+// (ADR-071 §2), and that file is resolved from XDG_DATA_HOME. Point it at an
+// empty temp dir for EVERY test here, so no assertion depends on whether the
+// machine running the suite happens to be signed into opencode.
+// ---------------------------------------------------------------------------
+
+let dataHome: string
+let originalDataHome: string | undefined
+
+beforeEach(() => {
+  originalDataHome = process.env.XDG_DATA_HOME
+  dataHome = mkdtempSync(join(tmpdir(), 'opencode-datahome-'))
+  process.env.XDG_DATA_HOME = dataHome
+})
+
+afterEach(() => {
+  if (originalDataHome === undefined) delete process.env.XDG_DATA_HOME
+  else process.env.XDG_DATA_HOME = originalDataHome
+  rmSync(dataHome, { recursive: true, force: true })
+})
+
+/** Write opencode's auth.json under the ACTIVE XDG_DATA_HOME. */
+function writeAuthJson(contents: string): void {
+  const dir = join(process.env.XDG_DATA_HOME as string, 'opencode')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'auth.json'), contents, 'utf-8')
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -217,6 +246,75 @@ describe('OpencodeAuthProvider — probe()', () => {
     const map = await provider.probe()
     expect(map['openai']?.billingType).toBe('unknown')
     expect(map['github-copilot']?.billingType).toBe('unknown')
+  })
+
+  // ADR-071 §2 — the STORED credential, not the auth options a vendor offers,
+  // decides how its turns are billed. `openai` offers both oauth and api, so
+  // the option-based inference read a ChatGPT subscription as 'apiKey' and
+  // priced covered turns as real spend.
+  it('takes billingType from an oauth credential, even when the vendor also offers api', async () => {
+    mockGetProviderAuth.mockResolvedValue({
+      ...SAMPLE_PROVIDER_AUTH,
+      openai: [
+        { type: 'oauth', label: 'ChatGPT' },
+        { type: 'api', label: 'OpenAI API key' }
+      ]
+    })
+    mockGetConfigProviders.mockResolvedValue({
+      providers: [
+        ...SAMPLE_CONFIG_PROVIDERS.providers,
+        { id: 'openai', name: 'OpenAI', source: 'config', env: [], options: {}, models: {} }
+      ]
+    })
+    writeAuthJson(JSON.stringify({ openai: { type: 'oauth', expires: 1 } }))
+
+    const map = await makeProvider().probe()
+    expect(map['openai']?.billingType).toBe('subscription')
+  })
+
+  it('takes billingType from an api credential for the same vendor', async () => {
+    mockGetProviderAuth.mockResolvedValue({
+      ...SAMPLE_PROVIDER_AUTH,
+      openai: [
+        { type: 'oauth', label: 'ChatGPT' },
+        { type: 'api', label: 'OpenAI API key' }
+      ]
+    })
+    mockGetConfigProviders.mockResolvedValue({
+      providers: [
+        ...SAMPLE_CONFIG_PROVIDERS.providers,
+        { id: 'openai', name: 'OpenAI', source: 'config', env: [], options: {}, models: {} }
+      ]
+    })
+    writeAuthJson(JSON.stringify({ openai: { type: 'api' } }))
+
+    const map = await makeProvider().probe()
+    expect(map['openai']?.billingType).toBe('apiKey')
+  })
+
+  it('falls back to the option-based inference for a vendor with NO stored credential', async () => {
+    // A key from the environment or from opencode.json: configured, nothing in
+    // auth.json. anthropic offers oauth AND api → the old inference says apiKey.
+    writeAuthJson(JSON.stringify({ openai: { type: 'api' } }))
+
+    const map = await makeProvider().probe()
+    expect(map['anthropic']?.billingType).toBe('apiKey')
+  })
+
+  it('a missing or unparseable auth.json changes nothing', async () => {
+    const missing = await makeProvider().probe()
+    expect(missing['anthropic']?.billingType).toBe('apiKey')
+    expect(missing['opencode']?.billingType).toBe('free')
+
+    writeAuthJson('{"anthropic":{"type":"oauth"')
+    const corrupt = await makeProvider().probe()
+    expect(corrupt).toEqual(missing)
+  })
+
+  it('a free vendor stays free whatever it stored', async () => {
+    writeAuthJson(JSON.stringify({ opencode: { type: 'oauth', expires: 1 } }))
+    const map = await makeProvider().probe()
+    expect(map['opencode']?.billingType).toBe('free')
   })
 
   it('degrades to {} on any failure (opencode optional)', async () => {
