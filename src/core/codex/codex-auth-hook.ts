@@ -32,7 +32,9 @@
  * except into the two protocol payloads Codex requires.
  */
 import { CHATGPT_PROVIDER_ID } from '../auth/vault/AuthVault'
+import { codexNativeIdentity } from '../auth/account-identity'
 import { credentialSync, type CodexInjectionToken } from '../auth/vault/CredentialSync'
+import type { AccountIdentity } from '../../shared/account-key'
 import type { ChatgptAuthTokensRefreshResponse } from './protocol/v2/ChatgptAuthTokensRefreshResponse'
 
 export type { CodexInjectionToken }
@@ -52,6 +54,14 @@ export interface CodexAuthSource {
   ): Promise<CodexInjectionToken | null>
   /** Token-free; used only to map a WORKSPACE id back onto a vault account id. */
   getStatus(): Promise<{ accounts: Array<{ id: string; accountId?: string }> }>
+  /**
+   * Token-free (ADR-071 §3): which SUBSCRIPTION one vault account is, for the
+   * usage rows a session writes. Optional because a test's fake source has no
+   * accounts to name and a hook built over one answers
+   * {@link codexNativeIdentity} — the same answer a process running on Codex's
+   * own sign-in gets.
+   */
+  accountIdentity?(accountId: string | null): Promise<AccountIdentity>
 }
 
 export interface CodexAuthHook {
@@ -80,6 +90,21 @@ export interface CodexAuthHook {
    * applied to accounts: never silently substitute another identity).
    */
   hasAccount(accountId: string): Promise<boolean>
+  /**
+   * The ADR-071 §3 account key and label of one vault account — what a usage
+   * row stores so a Codex turn lands on the same subscription as the same
+   * plan's spend through opencode or pi.
+   *
+   * On the hook rather than read off the vault directly because the hook is
+   * what a session HAS: a session built without one never reaches a vault at
+   * all (the integration suites depend on that), and asking it keeps the
+   * identity on the same seam the injection already travels.
+   *
+   * `accountId` is the vault account the session's PROCESS was injected with,
+   * which is not this hook's own `injectedAccountId`: since ADR-069 the host
+   * owns the injection and the session's hook only answers vault questions.
+   */
+  accountIdentity(accountId: string | null): Promise<AccountIdentity>
   /** The vault account id this process currently runs as, or null. */
   readonly injectedAccountId: string | null
   /**
@@ -136,6 +161,9 @@ export function codexAuthHook(deps: CodexAuthHookDeps = {}): CodexAuthHook {
     async hasAccount(accountId: string): Promise<boolean> {
       const status = await source.getStatus()
       return status.accounts.some((account) => account.id === accountId)
+    },
+    async accountIdentity(accountId: string | null): Promise<AccountIdentity> {
+      return (await source.accountIdentity?.(accountId)) ?? codexNativeIdentity()
     },
     async inject(): Promise<CodexInjectionToken | null> {
       const token = await source.injectionTokenFor(requested)

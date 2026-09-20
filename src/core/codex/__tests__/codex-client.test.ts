@@ -570,6 +570,12 @@ describe('ChatGPT token injection', () => {
       onRefreshRequest: vi.fn(),
       requestAccount: vi.fn(),
       hasAccount: vi.fn(async () => true),
+      // Metering's question (ADR-071 §3), never asked on the injection path
+      // these tests drive: present so the fake is a whole hook.
+      accountIdentity: vi.fn(async () => ({
+        accountKey: 'codex:openai:native',
+        accountLabel: null
+      })),
       injectedAccountId: token?.vaultAccountId ?? null
     }
   }

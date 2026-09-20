@@ -109,6 +109,7 @@ vi.mock('../../core/services/db', async (importOriginal) => {
   return {
     dispatchedCostsByRouting: () => [],
     insertDispatchedUsage: vi.fn(),
+    insertUsageEvent: vi.fn(),
     setSessionMeta: (id: string, meta: unknown) => void sessionMeta.set(id, meta),
     getSessionMeta: (id: string) => sessionMeta.get(id),
     allSessionMeta: () => Object.fromEntries(sessionMeta),

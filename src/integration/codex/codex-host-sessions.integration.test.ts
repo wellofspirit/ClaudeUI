@@ -98,6 +98,7 @@ const overrides = vi.hoisted(() => new Map<string, unknown>())
 vi.mock('../../core/services/db', () => ({
   dispatchedCostsByRouting: () => [],
   insertDispatchedUsage: vi.fn(),
+  insertUsageEvent: vi.fn(),
   setSessionMeta: vi.fn(),
   registerCodexFork: vi.fn(),
   getCodexSessionOverrides: (id: string) => overrides.get(id),

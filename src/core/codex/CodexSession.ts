@@ -14,7 +14,8 @@ import type {
   ChatMessage,
   ToolReviewBlock,
   MeteringSnapshot,
-  TaskNotification
+  TaskNotification,
+  UsageOrigin
 } from '../../shared/types'
 import type {
   CodexApprovalDecision,
@@ -106,6 +107,10 @@ import type { DynamicToolCallResponse } from './protocol/v2/DynamicToolCallRespo
 import type { DynamicToolCallOutputContentItem } from './protocol/v2/DynamicToolCallOutputContentItem'
 import type { ToolResultContent } from '../sdk/types'
 import { unwrapShellCommand } from './command-text'
+import { CodexUsageLedger, codexDisjointTokens } from './usage-ledger'
+import { codexNativeIdentity } from '../auth/account-identity'
+import { recordUsageEvent } from '../services/usage-recorder'
+import { UNKNOWN_ACCOUNT_KEY, type AccountIdentity } from '../../shared/account-key'
 import { equivalentCostUsd } from '../../shared/pricing'
 import { BashStreamGate } from '../opencode/bash-stream-gate'
 import {
@@ -639,6 +644,14 @@ export class CodexSession extends BaseSession {
   private authRowWritten = false
   /** The root's own last token totals — the base every child's usage adds to. */
   private rootUsage: ThreadTokenUsage | null = null
+  /** Per-thread baselines behind the ledger rows this session writes (ADR-071 §4). */
+  private readonly usageLedger = new CodexUsageLedger()
+  /**
+   * The SUBSCRIPTION every row of this session names (ADR-071 §3). Native until
+   * {@link readAccount} resolves it, which is also where a pin that moves this
+   * session to another account refreshes it.
+   */
+  private accountIdentity: AccountIdentity = codexNativeIdentity()
   /** Last computed API-rate equivalent of this session's tokens; null = unpriced. */
   private equivalentCostUsd: number | null = null
   private output = new Map<string, string>()
@@ -1109,6 +1122,15 @@ export class CodexSession extends BaseSession {
       if (this.model !== undefined && response.model !== this.model)
         throw new Error('Codex silently changed the requested model')
       this.threadId = response.thread.id
+      // ADR-071 §4. A thread this app just CREATED has spent nothing yet and
+      // emits no frame before its first turn, so its baseline is zero; a
+      // resumed or forked one is already carrying history — a fork's first
+      // total is the SOURCE's — so its baseline is whatever cumulative it is
+      // first shown, and that frame writes no row.
+      this.usageLedger.openThread(
+        this.threadId,
+        branch || this.options.resumeSessionId ? 'observed' : 'created'
+      )
       // From here on this session takes delivery of everything stamped with the
       // thread id — and of nothing else (ADR-069 §2). Held notifications from a
       // child that started before its spawn item landed are replayed as each
@@ -1260,6 +1282,7 @@ export class CodexSession extends BaseSession {
   private async readAccount(): Promise<void> {
     const account = (await this.wire.request('account/read', { refreshToken: false })).account
     if (this.closed) return
+    this.accountIdentity = await this.resolveAccountIdentity()
     if (this.injectedAccountId) {
       // An injected process IS the vault's subscription, whatever `account/read`
       // makes of the token: the email it reports is parsed from the very JWT we
@@ -1280,6 +1303,35 @@ export class CodexSession extends BaseSession {
         authState: 'authenticated',
         billingType: account.type === 'chatgpt' ? 'subscription' : 'apiKey'
       }
+  }
+
+  /**
+   * The account key and label every usage row this session writes carries
+   * (ADR-071 §3).
+   *
+   * Asked of the vault ONLY for a process that was actually injected: a null
+   * `injectedAccountId` means this thread runs on whatever Codex itself is
+   * signed in with, which is the native key by definition — and asking anyway
+   * would have a session with no vault behind it (the integration suites, a
+   * user who never signed in through ClaudeUI) read a credential store it has
+   * nothing to do with.
+   *
+   * A vault that cannot answer gives `unknown` rather than the native key: "we
+   * could not establish the account" and "Codex's own sign-in" are different
+   * statements, and the second would merge a subscription's spend into a
+   * bucket it does not belong in.
+   */
+  private async resolveAccountIdentity(): Promise<AccountIdentity> {
+    if (!this.auth || !this.injectedAccountId) return codexNativeIdentity()
+    try {
+      return await this.auth.accountIdentity(this.injectedAccountId)
+    } catch (error) {
+      logger.debug(
+        LOG_SOURCE,
+        `account identity unavailable: ${error instanceof Error ? error.message : 'unknown error'}`
+      )
+      return { accountKey: UNKNOWN_ACCOUNT_KEY, accountLabel: null }
+    }
   }
 
   /**
@@ -2027,7 +2079,11 @@ export class CodexSession extends BaseSession {
       })
       this.status(this.busy ? 'running' : 'idle')
     } else if (method === 'thread/tokenUsage/updated' && record(value.tokenUsage)) {
-      this.rootUsage = value.tokenUsage as ThreadTokenUsage
+      const usage = value.tokenUsage as ThreadTokenUsage
+      this.rootUsage = usage
+      // Guarded exactly as `emitMetering` guards it: a frame with no totals is
+      // not a cumulative this thread can be measured against.
+      if (usage.total) this.usageLedger.observe(this.threadId, usage.total)
       this.emitMetering()
     } else if (method === 'turn/completed' && record(value.turn)) {
       this.finishTurn(value.turn as Turn)
@@ -2143,13 +2199,67 @@ export class CodexSession extends BaseSession {
     cacheWrite: number
   }): number | null {
     if (!this.effectiveModel) return null
-    return equivalentCostUsd(this.native?.modelProvider ?? 'openai', this.effectiveModel, {
-      inputTokens: Math.max(0, tokens.input - tokens.cacheRead - tokens.cacheWrite),
+    const disjoint = codexDisjointTokens({
+      inputTokens: tokens.input,
       outputTokens: tokens.output,
-      cacheWriteTokens: tokens.cacheWrite,
-      // OpenAI publishes ONE cache-write rate; the 5m/1h split is Anthropic's.
-      cacheWrite1hTokens: 0,
-      cacheReadTokens: tokens.cacheRead
+      cachedInputTokens: tokens.cacheRead,
+      cacheWriteInputTokens: tokens.cacheWrite
+    })
+    return equivalentCostUsd(this.native?.modelProvider ?? 'openai', this.effectiveModel, {
+      inputTokens: disjoint.input,
+      outputTokens: disjoint.output,
+      cacheWriteTokens: disjoint.cacheWrite,
+      cacheWrite1hTokens: disjoint.cacheWrite1h,
+      cacheReadTokens: disjoint.cacheRead
+    })
+  }
+
+  /**
+   * One ledger row for a turn that has just ended on `threadId` — the root's
+   * own, or a child's under its own native thread id (ADR-071 §4).
+   *
+   * Written from NATIVE ids only: `codex:<threadId>:<turnId>` is the dedup key,
+   * so a rekey, a resume onto another host or a replayed `turn/completed`
+   * cannot mint a second row for one turn. A turn that FAILED or was
+   * interrupted still writes one — the ledger records spend, not success.
+   *
+   * Called from inside both turn-end latches (`endedTurns`, `endedChildTurns`),
+   * which is what keeps the recorder from being called twice at all rather than
+   * relying on the DB's `message_id` conflict.
+   */
+  private recordTurnUsage(threadId: string, turnId: string, origin: UsageOrigin): void {
+    // Checked BEFORE the delta is taken, which consumes it: a row has to name
+    // the model that ran, and `start()` resolves one before any turn can end,
+    // so this is a guard rather than a path.
+    if (!this.effectiveModel) return
+    const delta = this.usageLedger.turnEnded(threadId)
+    if (!delta) return
+    recordUsageEvent({
+      engineId: 'codex',
+      vendorId: this.native?.modelProvider ?? 'openai',
+      // The VAULT account id, which is what `readAccount` attributes an
+      // injected session to; null on Codex's own sign-in.
+      accountId: this.account?.accountId ?? null,
+      accountUuid: null,
+      // A child thread's own model is not on the wire at 0.154.0 (a spawn
+      // carries one, the thread never reports it), so both rows name the
+      // thread's model — the same simplification `emitMetering` already prices
+      // every child's tokens under.
+      modelId: this.effectiveModel,
+      tokens: codexDisjointTokens(delta),
+      // Codex reports no cost of any kind, only tokens. With no engine figure
+      // the equivalence flag cannot change the outcome; `false` says the
+      // figure that is absent would have been a charge, not a second estimate.
+      engineCostUsd: null,
+      engineCostIsEquivalent: false,
+      sessionId: threadId,
+      messageId: `codex:${threadId}:${turnId}`,
+      source: 'live',
+      accountKey: this.accountIdentity.accountKey,
+      accountLabel: this.accountIdentity.accountLabel,
+      billingType: this.account?.billingType ?? 'unknown',
+      origin,
+      parentRoutingId: origin === 'session' ? null : this.routingId
     })
   }
 
@@ -2259,6 +2369,9 @@ export class CodexSession extends BaseSession {
       state: 'pendingInit'
     }
     this.children.set(childThreadId, child)
+    // A spawned child is always a NEW thread, so it has spent nothing yet and
+    // its first frame is spend, not history (ADR-071 §4).
+    this.usageLedger.openThread(childThreadId, 'created')
     // Registered BEFORE the claim: the host replays what it held for this thread
     // synchronously, and every one of those notifications routes through
     // `childNotification`, which has to find the child already bound.
@@ -2285,6 +2398,9 @@ export class CodexSession extends BaseSession {
       for (const item of turn.items ?? []) this.childItem(child, childThreadId, turn.id, item, true)
       this.flushItemStreams(turn.id, child.parentToolUseId)
       this.endedChildTurns.add(JSON.stringify([childThreadId, turn.id]))
+      // A subagent's spend is its own row under its OWN thread id, attributed
+      // back to the session that spawned it (ADR-071 §1).
+      this.recordTurnUsage(childThreadId, turn.id, 'child')
       if (child.turnId === turn.id) child.turnId = null
       // Nothing can answer a question from a turn that ended.
       this.connection?.abortServerRequests(childThreadId, turn.id)
@@ -2320,7 +2436,9 @@ export class CodexSession extends BaseSession {
       return
     }
     if (method === 'thread/tokenUsage/updated' && record(value.tokenUsage)) {
-      child.usage = (value.tokenUsage as ThreadTokenUsage).total
+      const total = (value.tokenUsage as ThreadTokenUsage).total
+      child.usage = total
+      if (total) this.usageLedger.observe(childThreadId, total)
       this.emitMetering()
       return
     }
@@ -2661,6 +2779,9 @@ export class CodexSession extends BaseSession {
       )
     this.flushItemStreams(turn.id)
     this.endedTurns.add(turn.id)
+    // Past the `endedTurns` latch above, so a replayed `turn/completed` for a
+    // turn already ended never reaches the recorder a second time.
+    this.recordTurnUsage(this.threadId, turn.id, 'session')
     this.connection?.abortServerRequests(this.threadId, turn.id)
     for (const pending of [...this.pending.values()]) {
       if (pending.turnId === turn.id) pending.settle()

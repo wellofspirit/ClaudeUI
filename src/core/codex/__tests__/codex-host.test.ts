@@ -119,6 +119,9 @@ function fakeHook(accountId: string | null): CodexAuthHook & { injected: Array<s
       requested = id
     },
     hasAccount: async () => true,
+    // ADR-071 §3's metering question. Nothing in this suite asks it; a hook
+    // that did not answer it at all would not be one.
+    accountIdentity: async () => ({ accountKey: 'codex:openai:native', accountLabel: null }),
     onRefreshRequest: vi.fn(),
     inject: async () => {
       injected.push(requested)
