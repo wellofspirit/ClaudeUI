@@ -4,6 +4,7 @@ import type { CodexClientOptions } from './CodexAppServerClient'
 import { codexBinaryAvailable, locateCodexBinary } from './codex-locate'
 import { codexItemId, mapCodexItem, subAgentActivityResult } from './event-mapper'
 import { readCodexImageView } from './codex-image-view'
+import { codexHistoryStatusLine } from './history-status-line'
 import { assertCodexProvider } from './model-selection'
 import type { SessionInfo, ChatMessage, ForkAnchorResult } from '../../shared/types'
 import type { SessionHistoryResult } from '../services/session-history'
@@ -505,7 +506,9 @@ export async function loadCodexHistory(
       messages: [...messages.values()],
       taskNotifications: [],
       customTitle: thread.name,
-      statusLine: null,
+      // S1e: the ledger and the persisted context reading, not the wire — a
+      // cold read never resumes, and a resume is the only way to see usage.
+      statusLine: codexHistoryStatusLine(threadId),
       agentIdToToolUseId: {},
       subagentMessages: await readCodexChildren(service, childCards),
       warnings: turns.some((turn) => turn.status === 'interrupted')

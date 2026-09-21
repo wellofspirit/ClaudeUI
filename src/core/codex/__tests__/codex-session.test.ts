@@ -131,10 +131,12 @@ vi.mock('../../services/ui-config', async (importOriginal) => ({
  * subject, not this suite's.
  */
 const usageRows = vi.hoisted(() => vi.fn())
+/** `session_meta` writes, so the persisted context reading (db v24) is observable. */
+const sessionMetaWrites = vi.hoisted(() => vi.fn())
 vi.mock('../../services/usage-recorder', () => ({ recordUsageEvent: usageRows }))
 vi.mock('../../services/db', () => ({
   dispatchedCostsByRouting: () => [],
-  setSessionMeta: vi.fn(),
+  setSessionMeta: sessionMetaWrites,
   registerCodexFork: (threadId: string, forkedFromId: string) =>
     void forks.set(threadId, forkedFromId),
   getCodexSessionOverrides: (id: string) => overrides.get(id),
@@ -152,6 +154,7 @@ afterEach(() => {
   sessions.length = 0
   events.mockClear()
   usageRows.mockClear()
+  sessionMetaWrites.mockClear()
   rateLimitStore.record.mockClear()
   overrides.clear()
   forks.clear()
@@ -2920,6 +2923,61 @@ describe('Codex native children', () => {
     // The context window is the ROOT's: a child has its own window and folding
     // it in would misreport how close this thread is to compaction.
     expect(meters.at(-1)!.contextWindow.used).toBe(110)
+  })
+
+  // S1e: the window size is on this frame and nowhere else — not in the
+  // catalog, not in `thread/read` — so a cold reopen can only paint a meter
+  // from what the live session wrote down.
+  it('persists the root context reading on session_meta without losing the model', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    f.notify('thread/settings/updated', {
+      threadId: 'root',
+      threadSettings: { model: 'gpt-5.6-luna', modelProvider: 'openai', effort: 'ultra' }
+    })
+    const settingsWrite = sessionMetaWrites.mock.calls.at(-1)
+    f.notify('thread/tokenUsage/updated', {
+      threadId: 'root',
+      turnId: 'turn',
+      tokenUsage: {
+        total: {
+          inputTokens: 100,
+          cachedInputTokens: 0,
+          outputTokens: 10,
+          cacheWriteInputTokens: 0,
+          reasoningOutputTokens: 0,
+          totalTokens: 110
+        },
+        last: {
+          inputTokens: 100,
+          cachedInputTokens: 0,
+          outputTokens: 10,
+          cacheWriteInputTokens: 0,
+          reasoningOutputTokens: 0,
+          totalTokens: 110
+        },
+        modelContextWindow: 272_000
+      }
+    })
+
+    expect(settingsWrite).toEqual([
+      'root',
+      {
+        engineId: 'codex',
+        model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-5.6-luna' }
+      }
+    ])
+    // The model rides along: `setSessionMeta` REPLACES it, so a context-only
+    // write would blank what the settings frame just recorded.
+    expect(sessionMetaWrites.mock.calls.at(-1)).toEqual([
+      'root',
+      {
+        engineId: 'codex',
+        model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-5.6-luna' },
+        contextUsed: 110,
+        contextWindow: 272_000
+      }
+    ])
   })
 
   it('prices the turn at the API-rate equivalent, with cached and written input split out', async () => {

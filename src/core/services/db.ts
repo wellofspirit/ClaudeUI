@@ -140,6 +140,13 @@ export type Db = SqliteDatabase
 export interface SessionMeta {
   engineId: EngineId
   model?: ModelRef
+  /** Tokens the session's native context last held (v24). Codex only, so far:
+   *  it is the one engine whose context meter cannot be recomputed from a
+   *  history read. Absent on a write MERGES — see {@link setSessionMeta}. */
+  contextUsed?: number | null
+  /** The model's context window in tokens at that moment (v24), null/absent
+   *  when the engine never reported one. */
+  contextWindow?: number | null
 }
 
 // ---------------------------------------------------------------------------
@@ -1109,6 +1116,29 @@ export const MIGRATIONS: Migration[] = [
           VALUES ('claude_identity_repair', 'pending');
       `)
     }
+  },
+  {
+    // v24 — ADR-071 §2: the context window a cold Codex line cannot recompute.
+    //
+    // Every other engine derives its context meter from something a history
+    // read can see again: opencode and pi from the last stored turn's prompt
+    // against a catalog window. Codex publishes neither half. The window size
+    // arrives ONLY on `thread/tokenUsage/updated` (`modelContextWindow`) — the
+    // model catalog carries none and `thread/read` returns no usage at all —
+    // and the consumption is that frame's `last.totalTokens`, which is the
+    // native context after compaction rather than a sum of the turns.
+    //
+    // So the two are RECORDED as they stream past, on the one row that already
+    // exists per session. Nullable: a session that predates this, or one that
+    // has never metered, simply has no reading, and `size 0` is how the status
+    // line already spells an unknown window.
+    version: 24,
+    up(db) {
+      db.exec(`
+        ALTER TABLE session_meta ADD COLUMN context_used INTEGER;
+        ALTER TABLE session_meta ADD COLUMN context_window INTEGER;
+      `)
+    }
   }
 ]
 
@@ -1312,6 +1342,8 @@ interface SessionMetaRow {
   engine_id: string
   vendor_id: string | null
   model_id: string | null
+  context_used: number | null
+  context_window: number | null
   updated_at: number
 }
 
@@ -1320,6 +1352,13 @@ function rowToMeta(row: SessionMetaRow): SessionMeta {
     row.engine_id === 'opencode' || row.engine_id === 'pi' || row.engine_id === 'codex'
       ? row.engine_id
       : 'claude'
+  // Spread only when read: this map is also the renderer's `sessionEngines`
+  // payload, and a session that never metered should not carry two null keys
+  // into it (nor round-trip them back through `saveSessionConfig`).
+  const context = {
+    ...(row.context_used != null ? { contextUsed: row.context_used } : {}),
+    ...(row.context_window != null ? { contextWindow: row.context_window } : {})
+  }
   if (row.model_id != null) {
     return {
       engineId,
@@ -1329,10 +1368,11 @@ function rowToMeta(row: SessionMetaRow): SessionMeta {
         // have no persisted vendor, so fall back to the engine's historical default.
         vendorId: row.vendor_id ?? engineMeta(engineId).defaultVendorId,
         modelId: row.model_id
-      }
+      },
+      ...context
     }
   }
-  return { engineId }
+  return { engineId, ...context }
 }
 
 // ---------------------------------------------------------------------------
@@ -1509,22 +1549,34 @@ export function deleteCodexFork(threadId: string, db: Db = getDb()): void {
 
 /**
  * Insert or replace session metadata for a session ID.
+ *
+ * The engine and the model are REPLACED — the caller that writes them always
+ * knows the whole answer. The two context columns (v24) are MERGED instead:
+ * they are written by the metering path and by nothing else, so a model write
+ * from the sidebar's adoption pass or from the renderer's config round-trip
+ * must leave the session's last context reading where it is. The cost of that
+ * is that a reading cannot be cleared back to NULL, which nothing needs.
  */
 export function setSessionMeta(sessionId: string, meta: SessionMeta): void {
   const db = getDb()
   db.prepare(
-    `INSERT INTO session_meta (session_id, engine_id, vendor_id, model_id, updated_at)
-     VALUES (?, ?, ?, ?, ?)
+    `INSERT INTO session_meta
+       (session_id, engine_id, vendor_id, model_id, context_used, context_window, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(session_id) DO UPDATE SET
-       engine_id  = excluded.engine_id,
-       vendor_id  = excluded.vendor_id,
-       model_id   = excluded.model_id,
-       updated_at = excluded.updated_at`
+       engine_id      = excluded.engine_id,
+       vendor_id      = excluded.vendor_id,
+       model_id       = excluded.model_id,
+       context_used   = COALESCE(excluded.context_used, session_meta.context_used),
+       context_window = COALESCE(excluded.context_window, session_meta.context_window),
+       updated_at     = excluded.updated_at`
   ).run(
     sessionId,
     meta.engineId,
     meta.model?.vendorId ?? null,
     meta.model?.modelId ?? null,
+    meta.contextUsed ?? null,
+    meta.contextWindow ?? null,
     Date.now()
   )
 }
@@ -1562,14 +1614,28 @@ export function renameSessionMeta(oldId: string, newId: string, fallback?: Sessi
 
   if (existing) {
     db.prepare(
-      `INSERT INTO session_meta (session_id, engine_id, vendor_id, model_id, updated_at)
-       VALUES (?, ?, ?, ?, ?)
+      `INSERT INTO session_meta
+         (session_id, engine_id, vendor_id, model_id, context_used, context_window, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(session_id) DO UPDATE SET
-         engine_id  = excluded.engine_id,
-         vendor_id  = excluded.vendor_id,
-         model_id   = excluded.model_id,
-         updated_at = excluded.updated_at`
-    ).run(newId, existing.engine_id, existing.vendor_id, existing.model_id, Date.now())
+         engine_id      = excluded.engine_id,
+         vendor_id      = excluded.vendor_id,
+         model_id       = excluded.model_id,
+         context_used   = COALESCE(excluded.context_used, session_meta.context_used),
+         context_window = COALESCE(excluded.context_window, session_meta.context_window),
+         updated_at     = excluded.updated_at`
+      // The rekey CARRIES the context reading: it is the same session under a
+      // new id, and dropping it would blank the meter of a session that has
+      // already metered a turn.
+    ).run(
+      newId,
+      existing.engine_id,
+      existing.vendor_id,
+      existing.model_id,
+      existing.context_used,
+      existing.context_window,
+      Date.now()
+    )
     db.prepare('DELETE FROM session_meta WHERE session_id = ?').run(oldId)
   } else if (fallback) {
     setSessionMeta(newId, fallback)
@@ -1993,6 +2059,32 @@ export function latestAccountLabels(): Map<string, string> {
     if (!labels.has(row.account_key)) labels.set(row.account_key, row.account_label)
   }
   return labels
+}
+
+/**
+ * Every ledger row a Codex thread is answerable for: its own turns, plus the
+ * turns of the children it spawned (ADR-071 §2, S1e).
+ *
+ * A child files its row under its OWN native thread id, so `session_id` cannot
+ * find it from the root — `parent_routing_id` is the join, and for Codex the
+ * routing id, the sidebar session id and the native thread id are the same
+ * string (`adoptThread`), which is what makes one parameter enough for both
+ * halves. Served by `idx_usage_event_session` and `idx_usage_event_parent_routing`.
+ *
+ * Rows of EVERY origin that matches come back, dispatch included: the caller
+ * decides what belongs in a sum and what is only a breakdown row.
+ */
+export function usageEventsForCodexThread(threadId: string): UsageEventRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare(
+      `SELECT * FROM usage_event
+        WHERE engine_id = 'codex'
+          AND (session_id = ? OR (origin = 'child' AND parent_routing_id = ?))
+        ORDER BY ts ASC`
+    )
+    .all(threadId, threadId) as UsageEventDbRow[]
+  return rows.map(rowToUsageEvent)
 }
 
 /** Count usage events (used in tests + reconciler diagnostics). */

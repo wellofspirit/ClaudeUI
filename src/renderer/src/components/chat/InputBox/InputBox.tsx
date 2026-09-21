@@ -296,7 +296,8 @@ export function InputBox(): React.JSX.Element {
   // against the UNDEDUPED `models`, so a session pinned to a collapsed row is
   // still resolvable.
   const pickerModels = useMemo(
-    () => dedupeResolvedModels(filterModelsForEngine(models, effectiveEngineId), selectedModelValue),
+    () =>
+      dedupeResolvedModels(filterModelsForEngine(models, effectiveEngineId), selectedModelValue),
     [models, effectiveEngineId, selectedModelValue]
   )
   // Memoized so its identity is stable across renders (it feeds several
@@ -1244,7 +1245,12 @@ export function InputBox(): React.JSX.Element {
       showThinkingPicker={effectiveEngineId !== 'codex' && thinkingCap != null}
       showModelPicker={true}
       showCostInStatusLine={effectiveEngineId !== 'codex' && billingType !== 'free'}
-      showContextMeter={capabilities.contextWindow > 0}
+      showContextMeter={
+        // Codex's window is never in the catalog — it arrives on a usage frame,
+        // and (S1e) from `session_meta` on a cold reopen — so the status line
+        // is the second source the meter can come from.
+        capabilities.contextWindow > 0 || (statusLine?.contextWindow.size ?? 0) > 0
+      }
       visionEnabled={capabilities.vision}
       sandboxEnabled={sandboxEnabled}
       voiceEnabled={voiceEnabled && capabilities.voice}

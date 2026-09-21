@@ -2111,6 +2111,63 @@ describe('InputBox FC — billingType cost gating (ROADMAP #3)', () => {
     renderFC()
     expect(viewProps.showCostInStatusLine).toBe(false)
   })
+
+  // S1e — Codex's context window never reaches the model catalog: it arrives
+  // on a usage frame, and on a cold reopen from `session_meta` through the
+  // history status line. So the line is the meter's second source.
+  /** A session whose engine publishes no context window — Codex's shape. */
+  function setWindowlessCapabilities(): void {
+    const state = useSessionStore.getState()
+    const session = state.sessions[BT_ROUTE]
+    useSessionStore.setState({
+      sessions: {
+        ...state.sessions,
+        [BT_ROUTE]: {
+          ...session,
+          status: {
+            ...session.status,
+            capabilities: { ...session.status.capabilities, contextWindow: 0 }
+          }
+        }
+      }
+    })
+    mirrorStoreIntoReplica()
+  }
+
+  it('a status line that knows the window shows the meter even when capabilities say 0', () => {
+    setWindowlessCapabilities()
+    const state = useSessionStore.getState()
+    const session = state.sessions[BT_ROUTE]
+    useSessionStore.setState({
+      sessions: {
+        ...state.sessions,
+        [BT_ROUTE]: {
+          ...session,
+          statusLine: {
+            totalCostUsd: 1.5,
+            totalDurationMs: 0,
+            totalApiDurationMs: 0,
+            totalInputTokens: 10,
+            totalOutputTokens: 2,
+            cachedTokens: 0,
+            totalTokens: 12,
+            contextWindow: { used: 4000, size: 272_000 },
+            usedPercentage: 1.47,
+            remainingPercentage: 98.53
+          }
+        }
+      }
+    })
+    mirrorStoreIntoReplica()
+    renderFC()
+    expect(viewProps.showContextMeter).toBe(true)
+  })
+
+  it('no status line and no catalog window leaves the meter off', () => {
+    setWindowlessCapabilities()
+    renderFC()
+    expect(viewProps.showContextMeter).toBe(false)
+  })
 })
 
 // ---------------------------------------------------------------------------

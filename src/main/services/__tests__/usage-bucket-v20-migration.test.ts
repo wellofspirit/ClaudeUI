@@ -154,7 +154,7 @@ describe('migration v20 — usage_bucket replaces daily_usage', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(23)
+      expect(userVersion(db)).toBe(24)
       expect(tableExists(db, 'usage_bucket')).toBe(true)
       expect(tableExists(db, 'daily_usage')).toBe(false)
       expect(tableExists(db, 'dispatched_usage')).toBe(false)
@@ -256,7 +256,7 @@ describe('migration v20 — usage_bucket replaces daily_usage', () => {
       expect(() => runMigrations(db)).not.toThrow()
 
       expect(db.prepare('SELECT * FROM usage_bucket ORDER BY hour_utc').all()).toEqual(before)
-      expect(userVersion(db)).toBe(23)
+      expect(userVersion(db)).toBe(24)
     } finally {
       db.close()
     }
@@ -266,7 +266,7 @@ describe('migration v20 — usage_bucket replaces daily_usage', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      expect(userVersion(db)).toBe(23)
+      expect(userVersion(db)).toBe(24)
       expect(buckets(db)).toEqual([])
     } finally {
       db.close()

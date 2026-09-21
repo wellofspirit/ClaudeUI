@@ -2327,6 +2327,44 @@ export class CodexSession extends BaseSession {
         ? Math.max(0, 100 - (usage.last.totalTokens / usage.modelContextWindow) * 100)
         : null
     })
+    // AFTER the two sends: the meter is what the user is waiting on, the
+    // durable copy is only for the next cold open.
+    this.persistContextWindow(usage)
+  }
+
+  /**
+   * Keep the ROOT thread's last context reading on `session_meta` (db v24), so
+   * a cold reopen can paint a meter (`codexHistoryStatusLine`).
+   *
+   * Nothing else can recover it: the window size is published only on this
+   * frame, the Codex catalog carries none, and `thread/read` returns no usage.
+   * One write per frame, which is at most a handful per turn.
+   *
+   * The model half rides along because `setSessionMeta` REPLACES it — writing
+   * the engine alone would blank the model a settings frame recorded. The
+   * guard is the same one `recordTurnUsage` takes: `start()` resolves a model
+   * before any frame can arrive, so this is a guard and not a path.
+   */
+  private persistContextWindow(usage: ThreadTokenUsage): void {
+    if (!this.threadId || !this.effectiveModel) return
+    try {
+      setSessionMeta(this.threadId, {
+        engineId: 'codex',
+        model: {
+          engineId: 'codex',
+          vendorId: this.native?.modelProvider ?? 'openai',
+          modelId: this.effectiveModel
+        },
+        contextUsed: usage.last?.totalTokens ?? null,
+        contextWindow: usage.modelContextWindow ?? null
+      })
+    } catch (err) {
+      // Best-effort: a cold-line convenience must never break a live meter.
+      logger.warn(
+        LOG_SOURCE,
+        `Failed to persist the context window for ${this.threadId}: ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
   }
 
   /**

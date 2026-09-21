@@ -176,12 +176,13 @@ function StatusLine({
   const align = useSessionStore((s) => s.settings.statusLineAlign)
   const rawTemplate = useSessionStore((s) => s.settings.statusLineTemplate)
 
-  // Strip the cost placeholder when the engine doesn't report cost, and the
-  // context-usage placeholders when the model has no known context window
-  // (contextWindow === 0 — the meter would be meaningless).
+  // Strip the cost placeholder when the engine doesn't report cost. An
+  // unavailable context meter renders as the SAME em-dash `interpolateTemplate`
+  // uses for a null percentage: stripping the placeholder left a bare `%` in
+  // the default template, a third spelling of "unknown" that read as a bug.
   let template = showCost ? rawTemplate : rawTemplate.replace(/\{cost\}/g, '')
   if (!showContextMeter) {
-    template = template.replace(/\{used\}/g, '').replace(/\{remaining\}/g, '')
+    template = template.replace(/\{used\}/g, '–').replace(/\{remaining\}/g, '–')
   }
 
   // usedPercentage/remainingPercentage are computed in the main process (live:

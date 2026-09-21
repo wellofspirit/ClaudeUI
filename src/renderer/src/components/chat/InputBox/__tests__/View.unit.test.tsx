@@ -478,3 +478,45 @@ describe('StatusLine — {cost} placeholder', () => {
     expect(renderWithCost(1.5)).toHaveTextContent('Cost: $1.50')
   })
 })
+
+// ---------------------------------------------------------------------------
+// Status-line context placeholders. An engine with no known window used to
+// have `{used}` STRIPPED, leaving the default template's bare `%` — a third
+// spelling of "unknown" beside the em-dash a null percentage already renders.
+// ---------------------------------------------------------------------------
+
+describe('StatusLine — {used} with no context meter', () => {
+  function renderContext(showContextMeter: boolean, usedPercentage: number | null) {
+    useSessionStore.setState((s) => ({
+      settings: { ...s.settings, statusLineTemplate: '{used}% context used' }
+    }))
+    render(
+      <InputBoxView
+        {...makeProps({
+          showContextMeter,
+          statusLine: {
+            totalCostUsd: 0,
+            totalDurationMs: 0,
+            totalApiDurationMs: 0,
+            totalInputTokens: 0,
+            totalOutputTokens: 0,
+            cachedTokens: 0,
+            totalTokens: 0,
+            contextWindow: { used: 0, size: 0 },
+            usedPercentage,
+            remainingPercentage: usedPercentage !== null ? 100 - usedPercentage : null
+          }
+        })}
+      />
+    )
+    return screen.getByTestId('InputBox.statusLine')
+  }
+
+  it('renders the em-dash, not a bare percent sign, when the meter is unavailable', () => {
+    expect(renderContext(false, null)).toHaveTextContent('–% context used')
+  })
+
+  it('renders the percentage when the meter is available', () => {
+    expect(renderContext(true, 42)).toHaveTextContent('42% context used')
+  })
+})

@@ -49,9 +49,9 @@ describe('DB migrations — v3 usage_event + v4 usage_window_sample', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      // Bump alongside MIGRATIONS in db.ts — currently v21 (the account's
-      // identity columns and the window samples' account key + kind).
-      expect(userVersion(db)).toBe(23)
+      // Bump alongside MIGRATIONS in db.ts — currently v24 (session_meta's
+      // persisted Codex context reading).
+      expect(userVersion(db)).toBe(24)
     } finally {
       db.close()
     }
