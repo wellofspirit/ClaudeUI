@@ -266,6 +266,41 @@ are the auto-continuing "agent-like" set (upstream busy predicate `S3e`, §3.7).
 top-level `task_started`/`task_notification` (`task_type: "local_bash"`) with **no
 `parent_tool_use_id`** — task events are not scoped to the agent that spawned the task.
 
+### A RESUMED agent emits a second `task_started` (probed 2026-09-21, 2.1.268)
+
+"Non-existent → existing" above describes the first run only. `SendMessage` to an agent that has
+already reached a terminal `task_notification` **restarts it, and the full lifecycle repeats**:
+`task_started` → `task_updated` → `task_notification`, once per run. Probe:
+`scripts/probe-agent-resume.mjs`.
+
+- `task_id` is **stable across runs** — it is the agent's identity.
+- `tool_use_id` is **the id of whichever tool call started that run**: the `Agent` call for run 1,
+  the `SendMessage` call for run 2. It is NOT stable, and it is not the agent's identity.
+- `description` keeps the value from the original spawn.
+
+The resumed child's own output is **split across both ids**, which is the trap:
+
+| run 2 signal | carries the tool_use_id of |
+| --- | --- |
+| `task_started` / `task_updated` / `task_notification` | the SendMessage call |
+| `stream_event` partials | the SendMessage call |
+| the completed `assistant` message | **the original Agent call** |
+
+A consumer that keys subagent state by `tool_use_id` (as ClaudeUI does) must therefore map each
+run's id back to the agent's ORIGIN tool_use id via `task_id`, and must not evict that mapping on a
+terminal notification — see ADR-073. Observed sequence, `proberalpha`, 2.1.268:
+
+```
+run 1   task_started      task_id=aec60e185d4e7eb6d  tool_use_id=toolu_01Csp3…  task_type=local_agent
+        task_notification task_id=aec60e185d4e7eb6d  tool_use_id=toolu_01Csp3…  status=completed
+run 2   task_started      task_id=aec60e185d4e7eb6d  tool_use_id=toolu_01MYC4…  task_type=local_agent
+        task_notification task_id=aec60e185d4e7eb6d  tool_use_id=toolu_01MYC4…  status=completed
+```
+
+**Harness gotcha:** `SendMessage` is a DEFERRED tool at this version — the model must call
+`ToolSearch` (`select:SendMessage`) to load its schema before it can invoke it. A probe that stops
+at the first `result` after asking for a resume will cut the run off mid-`ToolSearch`.
+
 ---
 
 ## 4.6 `task_updated`
