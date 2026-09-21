@@ -23,6 +23,12 @@ import { transformAssistantMessage } from './assistant-message'
 import { ClaudeItemStreamLifecycle } from './claude-item-stream'
 import { extractToolResultContent } from './tool-result-content'
 import { classifyApiError } from './api-error'
+import {
+  classifierReviewBlock,
+  isClassifierDecision,
+  permissionDenialBlock,
+  readPermissionDecisionFrame
+} from './claude-permission-decision'
 import { ANTHROPIC_AUTH_PROVIDER_ID } from '../auth/auth-providers'
 import { VoiceClient } from './voice-client'
 import { startRecording, stopRecording } from './voice-capture'
@@ -1311,6 +1317,10 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.handleModelFallback(msg)
       return
     }
+    if (msg.subtype === 'permission_denied' || msg.subtype === 'permission_allowed') {
+      this.handlePermissionDecision(msg)
+      return
+    }
     if (msg.subtype === 'compact_boundary') {
       // cli.js compacted the transcript (docs/protocol-cc/04-system-subtypes.md
       // § 4.8). It was dropped live and only ever appeared on a JSONL reload, so
@@ -1375,6 +1385,74 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       this.itemStreams.retract(messageIds)
       this.send('session:messages-retracted', { messageIds })
     }
+  }
+
+  /**
+   * A tool call decided BEFORE any prompt was raised — cli.js's
+   * `permission_denied` (stock) and `permission_allowed` (the `automode-verdict`
+   * patch). Both are documented in docs/protocol-cc/04-system-subtypes.md §4.25.
+   *
+   * Claude is the one engine whose auto-mode judge we do not run ourselves: the
+   * two-stage classifier lives inside cli.js, so these frames are the ONLY way
+   * its verdict reaches a card. Without them an auto-mode block showed up as a
+   * bare `is_error` tool_result with no reason and no reviewer — where pi,
+   * opencode and Codex all render a verdict — and an auto-mode allow showed
+   * nothing at all.
+   *
+   * The two outcomes go to two different blocks on purpose; the split lives in
+   * `claude-permission-decision.ts`, which owns the wire contract.
+   *
+   * Frames from INSIDE a subagent carry `agent_id`. They are dropped here
+   * rather than emitted: the call they name lives in a subagent transcript, and
+   * `session:tool-review` binds against top-level messages only, so emitting
+   * one would be silently discarded by the reducer. Logged so the drop is
+   * visible if subagent verdicts are wired later.
+   */
+  private handlePermissionDecision(msg: SystemMessage): void {
+    const frame = readPermissionDecisionFrame(msg as unknown as Record<string, unknown>)
+    if (!frame) {
+      logger.debug(
+        'ClaudeSession',
+        `${msg.subtype} with no tool_use_id/uuid — nothing to bind it to`
+      )
+      return
+    }
+    if (frame.agentId) {
+      logger.debug(
+        'ClaudeSession',
+        `${msg.subtype} for ${frame.toolUseId} dropped — decided inside subagent ${frame.agentId}`
+      )
+      return
+    }
+
+    const denied = msg.subtype === 'permission_denied'
+    if (isClassifierDecision(frame)) {
+      const review = classifierReviewBlock(frame, denied ? 'denied' : 'approved')
+      logger.info(
+        'ClaudeSession',
+        `auto-mode ${denied ? 'BLOCK' : 'allow'}${review.rule ? ` (rule=${review.rule})` : ''} ${msg.tool_name ?? '?'}`
+      )
+      this.send('session:tool-review', { toolUseId: frame.toolUseId, review })
+      return
+    }
+
+    // `permission_allowed` only ever carries a classifier decision — the patch
+    // emits nothing for a rule/mode allow, because an allow nobody judged is
+    // just the tool running. Anything else here is a wire contract change.
+    if (!denied) {
+      logger.warn(
+        'ClaudeSession',
+        `permission_allowed with a non-classifier reason (${frame.decisionReasonType ?? 'none'}) — ignored`
+      )
+      return
+    }
+
+    const denial = permissionDenialBlock(frame)
+    logger.info(
+      'ClaudeSession',
+      `pre-ask denial (${denial.source}) ${msg.tool_name ?? '?'}${denial.reason ? ` — ${denial.reason}` : ''}`
+    )
+    this.send('session:permission-denial', { toolUseId: frame.toolUseId, denial })
   }
 
   /**

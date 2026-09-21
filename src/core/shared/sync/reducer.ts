@@ -41,7 +41,8 @@ import type {
   ModelRef,
   WorktreeInfo,
   SlashCommandInfo,
-  ToolReviewBlock
+  ToolReviewBlock,
+  PermissionDenialBlock
 } from '../../../shared/types'
 import { mergeContentBlocks } from '../../../shared/content-blocks'
 import { applyItemLifecycle, mergeItemContent, type ItemStreamTarget } from './item-stream'
@@ -128,6 +129,45 @@ function routingIdOf(event: ReducerEvent): string | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
+}
+
+/**
+ * Append a permission-decision block — a judge's verdict or a non-judge
+ * denial — to the assistant message that holds the `tool_use` it is about.
+ *
+ * Shared by `session:tool-review` and `session:permission-denial` because the
+ * binding rule is ONE rule, not two: search from the END (a repeated identical
+ * call must annotate its latest card, not the first one that ever ran), append
+ * once, and DROP rather than park when no message holds the call. Parking is
+ * the producer's job — CodexSession holds a verdict until its target item
+ * lands — and a reducer-side queue would be a second, divergent copy of that
+ * rule.
+ *
+ * `isDuplicate` is the caller's identity test (`reviewId` / `denialId`), which
+ * is what makes a replayed catch-up a no-op.
+ */
+function attachToToolUse(
+  state: CanonicalState,
+  event: ReducerEvent,
+  toolUseId: string | undefined,
+  block: ToolReviewBlock | PermissionDenialBlock,
+  isDuplicate: (b: ContentBlock) => boolean
+): CanonicalState {
+  const routingId = routingIdOf(event)
+  if (!routingId || !toolUseId) return state
+  const session = state.sessions[routingId]
+  if (!session) return state
+
+  const messages = [...session.messages]
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    if (msg.role !== 'assistant') continue
+    if (!msg.content.some((b) => b.type === 'tool_use' && b.toolUseId === toolUseId)) continue
+    if (msg.content.some(isDuplicate)) return state
+    messages[i] = { ...msg, content: [...msg.content, { ...block, toolUseId }] }
+    return withSession(state, routingId, () => ({ messages }))
+  }
+  return state
 }
 
 /**
@@ -736,35 +776,36 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
     /**
      * A permission judge's verdict, attached to the assistant message holding
      * the `tool_use` it judged (F18). Deliberately NOT modelled on
-     * `session:tool-result`'s "first one wins": the identity here is `reviewId`,
+     * `session:tool-result`'s "first one wins": the identity is `reviewId`,
      * because a re-review after "approve anyway" is a genuinely NEW verdict on
-     * the same call and the renderer shows the LAST one. Idempotence is per
-     * review id, which is what makes a replayed catch-up a no-op.
-     *
-     * A verdict with no host message is DROPPED rather than parked: holding it
-     * is the producer's job (CodexSession holds one until its target item
-     * lands), and a reducer-side queue would be a second, divergent copy of
-     * that rule.
+     * the same call and the renderer shows the LAST one.
      */
     case 'session:tool-review': {
-      const routingId = routingIdOf(event)
       const data = arg<{ toolUseId?: string; review?: ToolReviewBlock }>(event, 1)
-      if (!routingId || !data?.toolUseId || !data.review?.reviewId) return state
-      const session = state.sessions[routingId]
-      if (!session) return state
+      if (!data?.review?.reviewId) return state
+      const review = data.review
+      return attachToToolUse(state, event, data.toolUseId, review, (b) =>
+        b.type === 'tool_review' ? b.reviewId === review.reviewId : false
+      )
+    }
 
-      const { toolUseId, review } = data
-      const messages = [...session.messages]
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const msg = messages[i]
-        if (msg.role !== 'assistant') continue
-        if (!msg.content.some((b) => b.type === 'tool_use' && b.toolUseId === toolUseId)) continue
-        if (msg.content.some((b) => b.type === 'tool_review' && b.reviewId === review.reviewId))
-          return state
-        messages[i] = { ...msg, content: [...msg.content, { ...review, toolUseId }] }
-        return withSession(state, routingId, () => ({ messages }))
-      }
-      return state
+    /**
+     * A pre-ask refusal that no judge made — a deny rule, the permission mode,
+     * a hook, the static safety checker. Same binding as a verdict (find the
+     * assistant message holding the call, append once), different block,
+     * because the card must not present a policy lookup as a judgment.
+     *
+     * Identity is `denialId`, the emitting frame's own uuid: cli.js mints one
+     * frame per decision and never revises it, so unlike a review there is no
+     * "last one wins" — the first copy stands and every replay is a no-op.
+     */
+    case 'session:permission-denial': {
+      const data = arg<{ toolUseId?: string; denial?: PermissionDenialBlock }>(event, 1)
+      if (!data?.denial?.denialId) return state
+      const denial = data.denial
+      return attachToToolUse(state, event, data.toolUseId, denial, (b) =>
+        b.type === 'permission_denial' ? b.denialId === denial.denialId : false
+      )
     }
 
     // -----------------------------------------------------------------------

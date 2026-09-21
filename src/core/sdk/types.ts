@@ -106,6 +106,8 @@ export interface SystemMessage extends BaseSDKMessage {
     | 'compact_boundary'
     | 'model_refusal_fallback'
     | 'model_fallback'
+    | 'permission_denied'
+    | 'permission_allowed'
     | string
   permissionMode?: string
   /** init-only fields */
@@ -126,6 +128,24 @@ export interface SystemMessage extends BaseSDKMessage {
     end_time?: number
     [k: string]: unknown
   }
+  /**
+   * `permission_denied` (stock) / `permission_allowed` (the `automode-verdict`
+   * patch) — a tool call decided before any prompt was raised
+   * (docs/protocol-cc/04-system-subtypes.md §4.25). `tool_use_id` above binds
+   * the decision to its call.
+   */
+  tool_name?: string
+  /** Subagent id when the decision was made INSIDE a subagent. */
+  agent_id?: string
+  /** cli.js's `PermissionDecisionReason` discriminator — `classifier`, `rule`, … */
+  decision_reason_type?: string
+  /**
+   * Human-readable reason, present only for the sources cli.js's `Noe` renders
+   * one for (`classifier`, `hook`, `safetyCheck`, `workingDir`, …). UNTRUSTED.
+   */
+  decision_reason?: string
+  /** The rejection text handed to the model — already the tool_result's body. */
+  message?: string
   /** task_notification-only fields */
   output_file?: string
   status?: string

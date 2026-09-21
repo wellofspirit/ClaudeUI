@@ -179,6 +179,12 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: true,
     why: "Attaches a permission judge's verdict (tool_review) to its tool_use, idempotent by reviewId."
   },
+  'session:permission-denial': {
+    cls: 'replicated',
+    ring: true,
+    canonical: true,
+    why: 'Attaches a non-judge pre-ask denial (permission_denial) to its tool_use, idempotent by denialId.'
+  },
   'session:queue-changed': {
     cls: 'replicated',
     ring: true,

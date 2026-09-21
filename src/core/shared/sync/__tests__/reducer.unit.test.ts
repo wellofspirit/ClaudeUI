@@ -488,6 +488,103 @@ describe('reducer — transcript', () => {
     })
   })
 
+  /**
+   * A pre-ask refusal nothing judged (a deny rule, a hook, the safety checker)
+   * binds exactly as a verdict does, and for the same reason — it describes a
+   * call, so it belongs on that call's card. Its identity is `denialId`, the
+   * emitting frame's own uuid: cli.js decides each call once and never revises
+   * it, so unlike a review there is no second copy to append.
+   */
+  describe('session:permission-denial', () => {
+    const denial = (over: Record<string, unknown> = {}) => ({
+      type: 'permission_denial' as const,
+      toolUseId: 't1',
+      denialId: 'dn-1',
+      source: 'rule' as const,
+      ...over
+    })
+    const hostMessage = (): [string, ...unknown[]] => [
+      'session:message',
+      'rid',
+      assistant('m1', [{ type: 'tool_use', toolUseId: 't1', toolName: 'Bash', toolInput: {} }])
+    ]
+    const denials = (s: CanonicalState) =>
+      s.sessions['rid'].messages.flatMap((m) =>
+        m.content.filter((b) => b.type === 'permission_denial')
+      )
+
+    it('attaches the denial to the message holding its tool_use', () => {
+      const s = fold([
+        created(),
+        hostMessage(),
+        ['session:permission-denial', 'rid', { toolUseId: 't1', denial: denial() }]
+      ])
+      expect(denials(s)).toEqual([denial()])
+    })
+
+    it('is idempotent by denialId — a replayed catch-up appends once', () => {
+      const s = fold([
+        created(),
+        hostMessage(),
+        ['session:permission-denial', 'rid', { toolUseId: 't1', denial: denial() }],
+        ['session:permission-denial', 'rid', { toolUseId: 't1', denial: denial() }]
+      ])
+      expect(denials(s)).toHaveLength(1)
+    })
+
+    it('is dropped when no message holds the tool_use', () => {
+      const s = fold([
+        created(),
+        ['session:message', 'rid', assistant('m1', [{ type: 'text', text: 'hi' }])],
+        ['session:permission-denial', 'rid', { toolUseId: 't1', denial: denial() }]
+      ])
+      expect(denials(s)).toEqual([])
+    })
+
+    it('survives an item-scoped upsert of its host message (mergeContentBlocks)', () => {
+      const s = fold([
+        created(),
+        hostMessage(),
+        ['session:permission-denial', 'rid', { toolUseId: 't1', denial: denial() }],
+        hostMessage()
+      ])
+      expect(denials(s)).toEqual([denial()])
+    })
+
+    // The two channels share one binding helper; this pins that they still
+    // write DIFFERENT blocks, so a denial can never render as a judgment.
+    it('coexists with a verdict on the same transcript without merging', () => {
+      const s = fold([
+        created(),
+        hostMessage(),
+        [
+          'session:message',
+          'rid',
+          assistant('m2', [{ type: 'tool_use', toolUseId: 't2', toolName: 'Bash', toolInput: {} }])
+        ],
+        [
+          'session:tool-review',
+          'rid',
+          {
+            toolUseId: 't2',
+            review: {
+              type: 'tool_review',
+              toolUseId: 't2',
+              reviewId: 'rv-9',
+              reviewer: 'auto-mode',
+              decision: 'denied'
+            }
+          }
+        ],
+        ['session:permission-denial', 'rid', { toolUseId: 't1', denial: denial() }]
+      ])
+      expect(denials(s)).toEqual([denial()])
+      expect(
+        s.sessions['rid'].messages.flatMap((m) => m.content.filter((b) => b.type === 'tool_review'))
+      ).toHaveLength(1)
+    })
+  })
+
   it('retracts messages by id', () => {
     const s = fold([
       created(),

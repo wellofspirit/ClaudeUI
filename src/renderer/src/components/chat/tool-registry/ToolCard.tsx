@@ -27,7 +27,8 @@ import type {
   PermissionMode,
   PermissionSuggestion,
   TaskNotification,
-  ToolReviewBlock
+  ToolReviewBlock,
+  PermissionDenialBlock
 } from '../../../../../shared/types'
 import type { ToolKind, ToolView } from '../../../../../shared/tool-kinds'
 import type { ThemeId } from '../../../stores/session-store'
@@ -40,6 +41,7 @@ import { GenericBody } from './kinds/GenericBody'
 import { BackgroundBashOutput } from './kinds/bash-output'
 import { ToolResultImages } from './ToolResultImages'
 import { ToolReviewChip, ToolReviewStrip } from './ToolReview'
+import { PermissionDenialChip, PermissionDenialStrip } from './PermissionDenial'
 import type { BashOutputSlice, BgOutputSlice } from './kinds/types'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
@@ -70,6 +72,12 @@ export interface ToolCardProps {
    * reviewed twice (a re-review after "approve anyway"); the caller picks it.
    */
   review?: ToolReviewBlock
+  /**
+   * A pre-ask refusal by something that is NOT a judge — a deny rule, the
+   * permission mode, a hook. Mutually exclusive with `review` in practice: one
+   * decision is made per call, and it is either weighed or looked up.
+   */
+  denial?: PermissionDenialBlock
   isHistorical: boolean
   permissionMode: PermissionMode
   expandToolCalls: boolean
@@ -109,6 +117,7 @@ export function ToolCard({
   result,
   approval,
   review,
+  denial,
   isHistorical,
   permissionMode,
   expandToolCalls,
@@ -296,6 +305,7 @@ export function ToolCard({
           </span>
         ))}
         {review && <ToolReviewChip review={review} />}
+        {denial && <PermissionDenialChip denial={denial} />}
         {isPendingApproval && (
           <span className="text-[11px] font-semibold text-warning uppercase tracking-wider mr-1">
             Permission
@@ -352,6 +362,7 @@ export function ToolCard({
       {/* The verdict sits between the header and the body, in the approval
           card's own vocabulary — it is a permission decision, not reasoning. */}
       {expanded && review && <ToolReviewStrip review={review} />}
+      {expanded && denial && <PermissionDenialStrip denial={denial} />}
 
       {expanded && (
         <div className="border-t border-border">

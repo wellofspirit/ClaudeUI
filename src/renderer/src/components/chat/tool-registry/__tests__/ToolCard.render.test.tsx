@@ -54,7 +54,11 @@ vi.mock('../../MockupPreviewCard', () => ({
 }))
 
 import { ToolCard, type ToolCardProps } from '../ToolCard'
-import type { ContentBlock, ToolReviewBlock } from '../../../../../../shared/types'
+import type {
+  ContentBlock,
+  PermissionDenialBlock,
+  ToolReviewBlock
+} from '../../../../../../shared/types'
 import type { ToolView } from '../../../../../../shared/tool-kinds'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
@@ -691,6 +695,100 @@ describe('ToolCard — review verdict', () => {
     )
     expect(screen.queryByTestId('ToolCard.reviewChip')).not.toBeInTheDocument()
     expect(screen.queryByTestId('ToolCard.review')).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * A pre-ask refusal nothing judged — cli.js's `permission_denied` with a
+ * `decision_reason_type` other than `classifier`. Same two surfaces as a
+ * verdict, deliberately different words: the card must say WHO refused without
+ * implying anyone weighed it.
+ */
+describe('ToolCard — pre-ask denial', () => {
+  const denial = (over: Partial<PermissionDenialBlock> = {}): PermissionDenialBlock => ({
+    type: 'permission_denial',
+    toolUseId: 'tu-1',
+    denialId: 'dn-1',
+    source: 'rule',
+    ...over
+  })
+
+  function renderCard(d: PermissionDenialBlock, expandToolCalls = true) {
+    return render(
+      <ToolCard
+        {...baseProps({
+          kind: 'command',
+          view: { kind: 'command', command: 'mkdir -p out' },
+          block: block('Bash', { command: 'mkdir -p out' }),
+          denial: d,
+          expandToolCalls
+        })}
+      />
+    )
+  }
+
+  it('shows the source chip collapsed, and the strip once expanded', () => {
+    renderCard(denial(), false)
+    expect(screen.getByTestId('ToolCard.denialChip')).toHaveTextContent('Blocked · deny rule')
+    expect(screen.queryByTestId('ToolCard.denial')).not.toBeInTheDocument()
+
+    renderCard(denial())
+    expect(screen.getByTestId('ToolCard.denial')).toHaveTextContent(
+      'A deny rule refused this action'
+    )
+  })
+
+  // Every source cli.js declares gets its own sentence: "denied" alone is what
+  // the tool_result already said, so a generic line would make this redundant.
+  // `subcommandResults` shares the `rule` sentence deliberately: cli.js reports
+  // it for every Bash decision, so a "part of this command" claim is wrong for
+  // the single-subcommand case that dominates in practice.
+  it.each([
+    ['subcommandResults', 'A deny rule refused this action'],
+    ['mode', 'The permission mode refused this action'],
+    ['hook', 'A permission hook refused this action'],
+    ['safetyCheck', 'The safety checker refused this action'],
+    ['workingDir', 'Refused — outside the working directory'],
+    ['other', 'This action was refused']
+  ] as const)('words a %s denial as its own', (source, sentence) => {
+    renderCard(denial({ source }))
+    expect(screen.getByTestId('ToolCard.denial')).toHaveTextContent(sentence)
+  })
+
+  it('shows the reason when the source carries one', () => {
+    renderCard(denial({ source: 'hook', reason: 'PreToolUse blocked writes to /etc.' }))
+    expect(screen.getByTestId('ToolCard.denial')).toHaveTextContent(
+      'PreToolUse blocked writes to /etc.'
+    )
+  })
+
+  /** UNTRUSTED text — a hook's own stdout. Plain text, never markdown. */
+  it('renders the reason verbatim, never through markdown', () => {
+    renderCard(denial({ source: 'hook', reason: 'It writes **only** to dist/.' }))
+    expect(screen.getByTestId('ToolCard.denial')).toHaveTextContent('It writes **only** to dist/.')
+    expect(screen.queryByTestId('MarkdownRenderer')).not.toBeInTheDocument()
+  })
+
+  // A denial is not a verdict; rendering it through the review surfaces would
+  // tell the user a judge weighed something that nothing weighed.
+  it('never renders as a review', () => {
+    renderCard(denial())
+    expect(screen.queryByTestId('ToolCard.reviewChip')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('ToolCard.review')).not.toBeInTheDocument()
+  })
+
+  it('renders nothing when the call was not refused', () => {
+    render(
+      <ToolCard
+        {...baseProps({
+          kind: 'command',
+          view: { kind: 'command', command: 'mkdir -p out' },
+          block: block('Bash', { command: 'mkdir -p out' })
+        })}
+      />
+    )
+    expect(screen.queryByTestId('ToolCard.denialChip')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('ToolCard.denial')).not.toBeInTheDocument()
   })
 })
 

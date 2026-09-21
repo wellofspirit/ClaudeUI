@@ -92,10 +92,15 @@ export function isImageMediaType(mediaType: unknown): mediaType is ImageMediaTyp
  * of that call rather than as prose beside it (ADR-067, F18).
  *
  * Two reviewers produce one: Codex's native auto-review (`codex-auto-review`,
- * whose `riskLevel` is the reviewer's own) and ClaudeUI's Auto-mode classifier
- * for opencode and pi (`auto-mode`, whose `rule` names the corpus rule it
- * matched). Claude's Auto mode is cli.js-native and emits no verdict on the
- * wire, so it produces none.
+ * whose `riskLevel` is the reviewer's own) and the Auto-mode classifier
+ * (`auto-mode`, whose `rule` names the rule it matched). `auto-mode` covers two
+ * judges that answer the same question: ClaudeUI's own classifier on opencode
+ * and pi, and cli.js's native one on Claude, whose verdict reaches us as
+ * `system/permission_denied` (blocks) and, behind the `automode-verdict` patch,
+ * `system/permission_allowed` (allows). A pre-ask denial that was NOT a judge's
+ * call — a deny rule, a hook, the static safety checker — is a
+ * {@link PermissionDenialBlock} instead, because it carries no verdict that
+ * could have gone the other way.
  *
  * `rationale` and `rule` are UNTRUSTED model text. The PRODUCER (core) collapses
  * whitespace and caps the length once — see `core/shared/tool-review.ts` — so
@@ -116,9 +121,70 @@ export type ToolReviewBlock = {
   rationale?: string
 }
 
+/**
+ * Who refused a tool call before any prompt was raised — cli.js's
+ * `PermissionDecisionReason` discriminator, narrowed to the set it declares
+ * (`docs/protocol-cc/04-system-subtypes.md` §4.25). `classifier` is deliberately
+ * absent: a judge's verdict is a {@link ToolReviewBlock}. Anything unrecognised
+ * lands on `other` rather than widening the union, so a new upstream source
+ * renders as a generic denial instead of vanishing.
+ */
+export type PermissionDenialSource =
+  | 'rule'
+  | 'mode'
+  | 'subcommandResults'
+  | 'permissionPromptTool'
+  | 'hook'
+  | 'asyncAgent'
+  | 'sandboxOverride'
+  | 'workingDir'
+  | 'safetyCheck'
+  | 'other'
+
+/**
+ * A tool call refused before any prompt was raised, by something that is not a
+ * judge — a deny rule, the permission mode (`dontAsk`), a PermissionRequest
+ * hook, the static safety checker, a working-directory bound.
+ *
+ * Without this the refusal reaches the user as a bare `is_error` tool_result
+ * and nothing says WHO refused or why; the whole point of cli.js emitting the
+ * frame is that SDK hosts can render the denial rather than only its fallout.
+ *
+ * The `message` cli.js hands the model IS the tool_result's text, so it is
+ * deliberately not carried here — duplicating it on the card would say the same
+ * sentence twice. This block adds only what the result cannot: the source, and
+ * the reason when the source has one.
+ *
+ * `reason` is UNTRUSTED text (a hook's output, a classifier-adjacent string)
+ * collapsed and capped ONCE by the producer — `core/shared/tool-review.ts`,
+ * the same gate `ToolReviewBlock.rationale` goes through — and rendered
+ * verbatim as plain text by every client, never through markdown.
+ */
+export type PermissionDenialBlock = {
+  type: 'permission_denial'
+  /** The `tool_use` block this denial is about. */
+  toolUseId: string
+  /**
+   * The emitting frame's `uuid` — the block's identity, which is what makes a
+   * replayed catch-up a no-op. cli.js mints one per frame; unlike a review
+   * there is never a second denial for the same call, so this is a dedupe key
+   * rather than a version.
+   */
+  denialId: string
+  source: PermissionDenialSource
+  /**
+   * Present only when the source carries one: cli.js's `Noe` returns a reason
+   * for `hook`, `safetyCheck`, `asyncAgent`, `sandboxOverride`, `workingDir` and
+   * `other`, and returns NOTHING for `rule`, `mode`, `subcommandResults` and
+   * `permissionPromptTool` — those denials are fully described by their source.
+   */
+  reason?: string
+}
+
 export type ContentBlock =
   | { type: 'text'; text: string }
   | ToolReviewBlock
+  | PermissionDenialBlock
   | { type: 'tool_use'; toolUseId: string; toolName: string; toolInput?: Record<string, unknown> }
   | {
       type: 'tool_result'

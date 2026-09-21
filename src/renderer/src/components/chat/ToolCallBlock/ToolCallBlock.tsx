@@ -17,7 +17,8 @@ import type {
   ContentBlock,
   PendingApproval,
   PermissionSuggestion,
-  ToolReviewBlock
+  ToolReviewBlock,
+  PermissionDenialBlock
 } from '../../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../../stores/session-store'
 import { hostedMcpKind } from '../../../../../shared/tool-kinds'
@@ -33,13 +34,16 @@ interface Props {
   approval?: PendingApproval
   /** A permission judge's verdict on this call (F18) — the caller pairs it by id. */
   review?: ToolReviewBlock
+  /** A pre-ask refusal no judge made — same pairing, different block. */
+  denial?: PermissionDenialBlock
 }
 
 export const ToolCallBlock = memo(function ToolCallBlock({
   block,
   result,
   approval,
-  review
+  review,
+  denial
 }: Props): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const dismissApproval = useSessionStore((s) => s.dismissApproval)
@@ -153,6 +157,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
       result={result}
       approval={approval}
       review={review}
+      denial={denial}
       isHistorical={isHistorical}
       permissionMode={permissionMode}
       expandToolCalls={expandToolCalls}
