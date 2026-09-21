@@ -96,7 +96,7 @@ describe('PAGES structure', () => {
 
   it('each page lists its groups in the documented order', () => {
     const expected: Record<string, string[]> = {
-      appearance: ['theme', 'layout', 'diff', 'status-line', 'git-panel'],
+      appearance: ['theme', 'layout', 'agents', 'diff', 'status-line', 'git-panel'],
       chat: ['tool-output', 'thinking', 'voice', 'git-actions'],
       sessions: ['autonomy', 'permissions', 'judge', 'trust', 'retention'],
       advanced: ['logging', 'usage'],

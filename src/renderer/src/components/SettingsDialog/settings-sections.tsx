@@ -1964,6 +1964,59 @@ export const SECTIONS: Section[] = [
     ]
   },
   {
+    id: 'agents',
+    label: 'Agents',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <circle cx="12" cy="12" r="3" />
+        <circle cx="5" cy="6" r="2" />
+        <circle cx="19" cy="6" r="2" />
+        <path d="M7 7.5 10 10.5M17 7.5 14 10.5M12 15v5" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'showAgentPill',
+        label: 'Agent pill in the top bar',
+        keywords: 'agents subagents roster tasks running list top bar pill',
+        render: (s, u) => (
+          <SettingsToggle
+            testid="SettingsAgentPill"
+            label="Agent pill in the top bar"
+            description="Shows how many agents this session has and opens the Agents panel. Stays after they finish."
+            {...appDefault(s, u, 'showAgentPill')}
+            checked={s.showAgentPill}
+            onChange={(v) => u({ showAgentPill: v })}
+          />
+        )
+      },
+      {
+        key: 'showAgentTab',
+        label: 'Agent tab above the composer',
+        keywords: 'agents subagents roster tasks running list composer tab',
+        render: (s, u) => (
+          <SettingsToggle
+            testid="SettingsAgentTab"
+            label="Agent tab above the composer"
+            description="Appears only while agents are running; click it for the live list."
+            {...appDefault(s, u, 'showAgentTab')}
+            checked={s.showAgentTab}
+            onChange={(v) => u({ showAgentTab: v })}
+          />
+        )
+      }
+    ]
+  },
+  {
     id: 'chat',
     label: 'Chat',
     icon: (

@@ -378,6 +378,7 @@ export const PAGES: SettingsPage[] = [
     groups: [
       { id: 'theme', label: 'Theme & type', items: itemsOf('appearance') },
       { id: 'layout', label: 'Chat layout', items: itemsOf('chat') },
+      { id: 'agents', label: 'Agents', items: itemsOf('agents') },
       { id: 'diff', label: 'Diff viewer', items: itemsOf('diff') },
       { id: 'status-line', label: 'Status line', items: itemsOf('status-line') },
       { id: 'git-panel', label: 'Git panel', items: itemsOf('git', ['gitPanelLayout']) }
@@ -1039,6 +1040,7 @@ export function appliesOnOf(
  */
 export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; group: string }>> = {
   appearance: { page: 'appearance', group: 'theme' },
+  agents: { page: 'appearance', group: 'agents' },
   chat: { page: 'appearance', group: 'layout' },
   diff: { page: 'appearance', group: 'diff' },
   'status-line': { page: 'appearance', group: 'status-line' },
