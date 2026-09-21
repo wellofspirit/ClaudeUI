@@ -446,7 +446,7 @@ Module inventory (confirmed at 2.1.261, Windows PE x64): 1,815 modules — 1,631
 
 ### Patch registry
 
-14 content-regex patches under `patch/` (registry: `patch/apply-all.mjs`), applied between the extract and rebundle steps. Three auto-detect upstream fixes and no-op on recent cli.js versions (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The active 11:
+15 content-regex patches under `patch/` (registry: `patch/apply-all.mjs`), applied between the extract and rebundle steps. Three auto-detect upstream fixes and no-op on recent cli.js versions (`taskstop-notification`, `incomplete-session-resume-fix`, `mcp-tool-refresh`). The active 12:
 
 | Patch                    | What it adds to cli.js                                                                                                                                                                                                  |
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -461,6 +461,7 @@ Module inventory (confirmed at 2.1.261, Windows PE x64): 1,815 modules — 1,631
 | `bash-output-streaming`  | Pushes Bash output to stream_event immediately instead of buffering 2s                                                                                                                                                  |
 | `subprocess-proxy-strip` | Strips `HTTP(S)_PROXY` / `ALL_PROXY` / `NO_PROXY` from env handed to bash/MCP/LSP/etc. subprocesses so cli.js's own proxy doesn't leak into shell tools (gated off via `CLAUDEUI_PROXY_SUBPROCESSES=1`)                 |
 | `skip-securestorage`     | When `SKIP_SECURESTORAGE` is set, forces the credential store to the plaintext file backend (bypassing macOS Keychain) so per-account `.credentials.json` files can be managed/swapped. Enables multi-account (ADR-015) |
+| `automode-verdict`       | Emits `system/permission_allowed` when the auto-mode classifier ALLOWS a call — upstream emits only the denial half, so Claude alone showed a judge's verdict on a block but never on an allow (§04 §4.25)              |
 
 Retired: `ci-path-remap` (obsolete once cli.js runs inside its native Bun runtime — ADR-006), `sandbox-network-fix` (upstream's "no allowed domains = no network" semantics kept deliberately), `team-streaming` (dir removed).
 

@@ -45,6 +45,7 @@ Exception: `session_state_changed` has no `session_id`/`uuid` (raw emit, not thr
 | `commands_changed`        | Mid-session slash-command list change            | stream-json module (§4.23)       |
 | `elicitation_complete`    | MCP URL-mode elicitation completes               | stream-json module (§4.24)       |
 | `permission_denied`       | Tool call auto-denied without prompt             | Control channel (§4.25)          |
+| `permission_allowed`      | Patch `automode-verdict`                         | Control channel (§4.25)          |
 | `mirror_error`            | Transcript-mirror write failure                  | SessionStore mirror (§4.26)      |
 | `dev_intent`              | Resumed transcript shows iOS-app work            | Dev-intent fold (§4.28)          |
 
@@ -66,7 +67,7 @@ mid-session model switch leaves it stale.
 
 **Gate:** Always.
 
-**Ordering:** First `system` message *of a session start*, but **not** the first message with a
+**Ordering:** First `system` message _of a session start_, but **not** the first message with a
 `session_id` — `queued_command_consumed` (§4.10) precedes it on every turn and carries one.
 Consumer uses this to resolve temp routingId → real session UUID.
 
@@ -696,7 +697,7 @@ The outer filter at char `12822512` lists subtypes excluded from `--output-forma
 - **`thinking_tokens`** — optional spinner/pill progress; not authoritative token counts.
 - **`commands_changed`** — REPLACE the cached slash-command list with the payload (a re-fetch returns the stale init list).
 - **`elicitation_complete`** — dismiss any pending MCP elicitation UI.
-- **`permission_denied`** — render the auto-denial on the tool call instead of only showing an `is_error` tool_result.
+- **`permission_denied`** / **`permission_allowed`** — render the decision on the tool call instead of only showing an `is_error` tool_result. ClaudeUI does: a `classifier` decision becomes a `tool_review` block (the same one pi and opencode produce), anything else becomes a `permission_denial` block. See `core/services/claude-permission-decision.ts`.
 - **`mirror_error`** — log; surfaces transcript-mirror data loss.
 - **`dev_intent`** — advisory only; safe to ignore. ClaudeUI does not handle it (unknown subtypes fall through `handleSystemMessage`'s if-chain). See §4.28.
 
@@ -848,26 +849,48 @@ Emitted when an MCP server confirms that a URL-mode elicitation is complete.
 
 ---
 
-## 4.25 `permission_denied`
+## 4.25 `permission_denied` / `permission_allowed`
 
-Emitted when a tool call is **auto-denied without an interactive permission prompt** (auto-mode classifier, `dontAsk` mode, headless-agent auto-deny, or a deny rule). The "ask" path surfaces via a `can_use_tool` control_request; this event covers the "deny" short-circuit so SDK hosts can render the denial instead of only seeing an `is_error` tool_result. PreToolUse hook denies bypass `canUseTool` and are NOT covered.
+`permission_denied` is emitted when a tool call is **auto-denied without an interactive permission prompt** (auto-mode classifier, `dontAsk` mode, headless-agent auto-deny, or a deny rule). The "ask" path surfaces via a `can_use_tool` control_request; this event covers the "deny" short-circuit so SDK hosts can render the denial instead of only seeing an `is_error` tool_result. PreToolUse hook denies bypass `canUseTool` and are NOT covered.
+
+`permission_allowed` is the symmetric frame for an **auto-mode classifier allow** and is **not upstream** — it is added by the `automode-verdict` patch. Stock cli.js emits nothing when the classifier clears an action, which left Claude the only engine ClaudeUI runs that showed a judge's verdict on a block but not on an allow. Same fields minus `message` (an allow has no rejection text), and only ever emitted with `decision_reason_type: "classifier"` — a rule/mode/fast-path allow carries a different or absent decision reason and is deliberately silent.
 
 **Anchors (2.1.170):** schema `BkO` at `~7094308`; emit at `7156177` (control-channel area).
 
 ```jsonc
 {
   "type": "system",
-  "subtype": "permission_denied",
+  "subtype": "permission_denied", // or "permission_allowed" (patched)
   "tool_name": "Bash",
   "tool_use_id": "toolu_...",
-  "agent_id": "...", // optional; subagent ID when denied inside a subagent
+  "agent_id": "...", // optional; subagent ID when decided inside a subagent
   "decision_reason_type": "rule", // optional; 'classifier'|'asyncAgent'|'mode'|'rule'|…
   "decision_reason": "...", // optional human-readable reason
-  "message": "...", // the rejection message returned to the model
+  "message": "...", // the rejection message returned to the model — DENIED ONLY
   "session_id": "...",
   "uuid": "..."
 }
 ```
+
+### Two emitters — only one is on the wire (probed 2.1.268, 2026-09-21)
+
+cli.js builds `permission_denied` in **two** places, and this trips up anyone hooking the obvious one:
+
+1. **The engine turn loop** wraps `canUseTool` and pushes advisory frames onto a `pendingDenialFrames` buffer, drained by a generator into the engine's message stream. It sits right next to the tool executor and is a **dead end**: that stream passes through the stdout adapter's `case "system"` switch, whose `default: return` drops every subtype not explicitly listed — and `permission_denied` is not listed. Frames emitted here are enqueued, yielded, and silently discarded.
+2. **The control-channel class** (`emitPermissionDenied`) enqueues onto `this.outbound`, written to stdout unconditionally under `--output-format stream-json --verbose`. **This is the wire.**
+
+Verify by instrumenting both with `process.stderr.write(...)` before assuming.
+
+### `decision_reason` is not symmetric between allow and deny
+
+- **Allow** reasons are **fixed cli.js strings**: `"Allowed by fast classifier"` (stage 1 cleared it) or `"Allowed by classifier"` (stage 2 did). Useful — they say which stage decided — but they are not model prose.
+- **Deny** reasons ARE model text, following the stage-2 grammar (§14 §2): `[Exact Rule Name]` optionally followed by one sentence. Observed live: `"[Create Unsafe Agents]"` with no sentence at all. A consumer must handle bracket-only, bracket-plus-sentence, and no-bracket (`fast` mode never asks for one).
+
+`cli.js`'s own rejection `message` restates the reason inline: _"Permission for this action was denied by the Claude Code auto mode classifier. Reason: [Create Unsafe Agents]. …"_ — so it is also the `tool_result` body, and a consumer that renders both will say the same thing twice.
+
+### Neither frame is persisted
+
+Both subtypes are excluded from the "worth keeping" predicate that gates the accumulated message list, the `--output-format json` last-message pick, and the transcript mirror. They are live-only: a reopened session shows no verdicts, on any engine (ClaudeUI's own `tool_review` blocks are live-only too, so this is parity rather than a gap).
 
 ---
 
