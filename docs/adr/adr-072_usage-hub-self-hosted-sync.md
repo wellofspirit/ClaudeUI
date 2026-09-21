@@ -1,6 +1,6 @@
 # ADR-072: Usage hub, an opt-in self-hosted sync of the metering ledger across machines
 
-**Status:** Proposed (2026-09-20). Drafted from the owner's rulings of the same date. Amended 2026-09-21 from the S5 design discussion: clean data only, resync in place of device removal, a retired device keeps its name and data, raw rows archived to R2 after 360 days, aliases deferred, protocol ownership, and §6 restated as a requirement plus a mechanism, which a spike confirmed the same day on both a custom subdomain and `workers.dev`.
+**Status:** Accepted (2026-09-21; proposed 2026-09-20). Drafted from the owner's rulings of 2026-09-20. Amended 2026-09-21 from the S5 design discussion: clean data only, resync in place of device removal, a retired device keeps its name and data, raw rows archived to R2 after 360 days, aliases deferred, protocol ownership, and §6 restated as a requirement plus a mechanism, which a spike confirmed the same day on both a custom subdomain and `workers.dev`.
 **Depends on:** [ADR-071](adr-071_metering-ledger-and-window-value.md) (the ledger, the machine-independent `account_key`, hourly buckets, the window ledger)
 **Relates to:** [ADR-056](adr-056_headless-admission-model.md) and the headless server (the client lives in `src/core` so it syncs too), [ADR-036](adr-036_unified-auth-vault.md) (where the service token is kept), [ADR-030](adr-030_capability-honesty.md) (a stale machine is shown as stale)
 
