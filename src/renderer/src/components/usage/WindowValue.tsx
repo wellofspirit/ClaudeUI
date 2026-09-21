@@ -41,7 +41,7 @@ import type {
   UsageWindowSummaryRow
 } from '../../../../shared/types'
 import { providerIdForBucket, providerLabel } from '../../../../shared/provider-label'
-import { PROVIDER_OVERFLOW_COLOR, formatCost } from './usage-utils'
+import { PROVIDER_OVERFLOW_COLOR, formatCost, rangeWords } from './usage-utils'
 import { SelectMenu } from '../shared/SelectMenu'
 
 /**
@@ -67,6 +67,21 @@ const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
 const EMPTY_MESSAGE = 'No closed window yet — the first values appear a day after a window ends.'
+
+/**
+ * Which windows the range actually admits.
+ *
+ * `usageWindowSummary` filters on `canonical_end >= fromTs`, so an OPEN window
+ * — whose end is in the future — is in every range's rows. On `today` that is
+ * most of what there is to see: with `fromTs` at midnight, almost nothing has
+ * closed yet, and a caption promising "windows ending today" alone would read
+ * as a bug when the widget draws a hatched open one.
+ */
+function windowScope(range: DashboardRange): string {
+  return range === 'today'
+    ? 'windows ending today or still open'
+    : `windows ending in the ${rangeWords(range)}`
+}
 
 // ---------------------------------------------------------------------------
 // Window-kind vocabulary
@@ -196,8 +211,7 @@ export function WindowValue({
           Window value
         </h3>
         <span className="text-[9px] text-text-muted">
-          what a subscription window delivers · windows ending in the last {range.replace('d', '')}{' '}
-          days
+          what a subscription window delivers · {windowScope(range)}
         </span>
       </div>
 

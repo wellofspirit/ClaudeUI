@@ -117,6 +117,34 @@ describe('WindowValue — states', () => {
     expect(mockFetchWindows).toHaveBeenCalledWith({ sinceTs: data.fromTs })
   })
 
+  it('scopes its caption to the range, and admits open windows on today', async () => {
+    mockFetchWindows.mockResolvedValue([])
+    const { unmount } = render(
+      <WindowValue
+        data={dashboardWithAccounts()}
+        limits={null}
+        providerColors={COLORS}
+        range="30d"
+      />
+    )
+    expect(screen.getByTestId('WindowValue')).toHaveTextContent(
+      'windows ending in the last 30 days'
+    )
+    unmount()
+
+    render(
+      <WindowValue
+        data={dashboardWithAccounts()}
+        limits={null}
+        providerColors={COLORS}
+        range="today"
+      />
+    )
+    expect(screen.getByTestId('WindowValue')).toHaveTextContent(
+      'windows ending today or still open'
+    )
+  })
+
   it('shows the loading state until the read lands', async () => {
     await renderWith(new Promise<UsageWindowSummaryRow[]>(() => {}))
     expect(screen.getByTestId('WindowValue.loading')).toBeInTheDocument()

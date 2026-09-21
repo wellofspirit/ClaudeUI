@@ -9,6 +9,8 @@ import type {
   AccountLimitWindow,
   CostTotals,
   DashboardAccount,
+  DashboardDay,
+  DashboardHour,
   DashboardProvider,
   UsageDashboardData
 } from '../../../../../shared/types'
@@ -23,6 +25,36 @@ export function makeTotals(overrides: Partial<CostTotals> = {}): CostTotals {
     requestCount: 0,
     tokens: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0 },
     ...overrides
+  }
+}
+
+/** One provider split, given as plain display dollars. */
+function splitOf(byProvider: Record<string, number>): DashboardDay['byProvider'] {
+  return Object.fromEntries(
+    Object.entries(byProvider).map(([id, usd]) => [
+      id,
+      { apiCostUsd: usd, billedCostUsd: 0, displayCostUsd: usd }
+    ])
+  )
+}
+
+/** A local day whose providers are given as plain display dollars. */
+export function makeDay(date: string, byProvider: Record<string, number>): DashboardDay {
+  const display = Object.values(byProvider).reduce((s, v) => s + v, 0)
+  return {
+    date,
+    byProvider: splitOf(byProvider),
+    totals: makeTotals({ displayCostUsd: display, apiCostUsd: display })
+  }
+}
+
+/** One hour of the `today` series — `hourUtc` is epoch ms on a UTC hour. */
+export function makeHour(hourUtc: number, byProvider: Record<string, number>): DashboardHour {
+  const display = Object.values(byProvider).reduce((s, v) => s + v, 0)
+  return {
+    hourUtc,
+    byProvider: splitOf(byProvider),
+    totals: makeTotals({ displayCostUsd: display, apiCostUsd: display })
   }
 }
 

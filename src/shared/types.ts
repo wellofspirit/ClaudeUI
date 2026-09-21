@@ -2924,8 +2924,8 @@ export interface UsageWindowQuery {
 // here is already resolved by the cost rule; nothing downstream re-derives one.
 // ---------------------------------------------------------------------------
 
-/** The ranges the dashboard offers. */
-export type DashboardRange = '7d' | '30d' | '90d'
+/** The ranges the dashboard offers. `today` is the viewer's local calendar day. */
+export type DashboardRange = 'today' | '7d' | '30d' | '90d'
 
 /**
  * What one grouping of buckets cost, in the three currencies ADR-071 §2 defines
@@ -2996,6 +2996,22 @@ export interface DashboardDay {
 }
 
 /**
+ * One hour of the `today` range — the same cell as a {@link DashboardDay}, keyed
+ * by the UTC hour `usage_bucket` already stores rather than by a date string.
+ *
+ * A day is a local calendar fact and has to be derived; an hour is the ledger's
+ * own grain, so the bucket's key IS the column and no timezone arithmetic sits
+ * between the two.
+ */
+export interface DashboardHour {
+  /** Epoch ms floored to the UTC hour, exactly as `usage_bucket` keys it. */
+  hourUtc: number
+  /** Only the providers that spent something that hour; a missing one is zero. */
+  byProvider: DashboardDay['byProvider']
+  totals: CostTotals
+}
+
+/**
  * The whole dashboard, from one bounded read of `usage_bucket`.
  *
  * DISPATCHED WORK IS INSIDE EVERY TOTAL (owner ruling, ADR-071 §8) and is
@@ -3005,9 +3021,10 @@ export interface DashboardDay {
 export interface UsageDashboardData {
   range: DashboardRange
   /**
-   * Where the range begins: the local midnight `range` days before {@link toTs},
-   * floored to the UTC hour `usage_bucket` is keyed by. Every bucket at or after
-   * it is in the answer, and `days[0]` is the local day containing it.
+   * Where the range begins: the local midnight `range` days before {@link toTs}
+   * (today's own midnight for `today`), floored to the UTC hour `usage_bucket`
+   * is keyed by. Every bucket at or after it is in the answer, and `days[0]` is
+   * the local day containing it.
    */
   fromTs: number
   /** The instant the range was taken to end at (the `now` the query was built for). */
@@ -3018,6 +3035,13 @@ export interface UsageDashboardData {
   coveredUsd: number
   providers: DashboardProvider[]
   days: DashboardDay[]
+  /**
+   * The `today` range's hourly series — midnight through the hour in progress —
+   * and undefined for every other range, which has no per-hour split to show.
+   * `days` is emitted alongside it, so a widget that only knows about days
+   * keeps working on `today`.
+   */
+  hours?: DashboardHour[]
   /** Σ display over the `unknown` account — history from before attribution. */
   unattributedUsd: number
 }

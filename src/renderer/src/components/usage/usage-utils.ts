@@ -1,4 +1,4 @@
-import type { TokenCounts } from '../../../../shared/types'
+import type { DashboardRange, TokenCounts } from '../../../../shared/types'
 
 /** Model color palette — match by substring */
 const MODEL_COLORS: Array<{ match: string; color: string }> = [
@@ -115,6 +115,17 @@ export function formatShortDate(dateStr: string): string {
     'Dec'
   ]
   return `${months[d.getMonth()]} ${d.getDate()}`
+}
+
+/**
+ * How a range reads in prose — `today`, or `last 30 days`.
+ *
+ * One helper rather than the `range.replace('d', '')` idiom each caption grew
+ * its own copy of: `today` carries no number to strip, so every copy would have
+ * had to learn the same exception.
+ */
+export function rangeWords(range: DashboardRange): string {
+  return range === 'today' ? 'today' : `last ${range.replace('d', '')} days`
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +252,15 @@ export function formatReset(
   const hh = String(d.getHours()).padStart(2, '0')
   const mm = String(d.getMinutes()).padStart(2, '0')
   return `${WEEKDAY_NAMES[d.getDay()]} ${hh}:${mm}`
+}
+
+/**
+ * A UTC hour stamp as the LOCAL 24-hour clock hour it falls in — `09:00`, the
+ * hourly chart's x label. Hand-rolled like the rest of this file's clock: the
+ * dashboard is English by design and `Intl` would drag a locale into one axis.
+ */
+export function formatHourLabel(hourUtc: number): string {
+  return `${String(new Date(hourUtc).getHours()).padStart(2, '0')}:00`
 }
 
 /** Format duration in ms as human-readable */

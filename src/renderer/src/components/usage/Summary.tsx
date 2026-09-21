@@ -16,7 +16,7 @@
  */
 
 import type { UsageDashboardData } from '../../../../shared/types'
-import { formatCost } from './usage-utils'
+import { formatCost, rangeWords } from './usage-utils'
 
 interface SummaryProps {
   data: UsageDashboardData
@@ -24,11 +24,6 @@ interface SummaryProps {
   compact: boolean
   /** Provider id → its fixed colour, built once by the shell. */
   providerColors: Map<string, string>
-}
-
-/** `30d` -> `last 30 days`. */
-function rangeLabel(range: UsageDashboardData['range']): string {
-  return `last ${range.replace('d', '')} days`
 }
 
 /**
@@ -107,7 +102,7 @@ export function Summary({ data, compact, providerColors }: SummaryProps): React.
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <div className="text-[10px] uppercase tracking-wider text-text-muted">
-            Spend · {rangeLabel(data.range)}
+            Spend · {rangeWords(data.range)}
           </div>
           <div className="flex items-baseline gap-2 mt-1">
             <div

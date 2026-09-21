@@ -13,7 +13,9 @@ import {
   shortModelName,
   formatTime,
   formatShortDate,
+  formatHourLabel,
   formatDuration,
+  rangeWords,
   getModelColor
 } from '../usage-utils'
 
@@ -178,6 +180,32 @@ describe('formatShortDate', () => {
 
   it('formats February', () => {
     expect(formatShortDate('2025-02-28')).toBe('Feb 28')
+  })
+})
+
+describe('rangeWords', () => {
+  it('spells a day range as its duration', () => {
+    expect(rangeWords('7d')).toBe('last 7 days')
+    expect(rangeWords('30d')).toBe('last 30 days')
+    expect(rangeWords('90d')).toBe('last 90 days')
+  })
+
+  it('leaves today as the word it already is', () => {
+    expect(rangeWords('today')).toBe('today')
+  })
+})
+
+describe('formatHourLabel', () => {
+  // LOCAL components throughout: the label is the viewer's clock, so a UTC
+  // literal would assert a different hour in every timezone the suite runs in.
+  it('prints the local clock hour, zero-padded', () => {
+    expect(formatHourLabel(new Date(2026, 8, 21, 9, 0, 0, 0).getTime())).toBe('09:00')
+    expect(formatHourLabel(new Date(2026, 8, 21, 23, 0, 0, 0).getTime())).toBe('23:00')
+    expect(formatHourLabel(new Date(2026, 8, 21, 0, 0, 0, 0).getTime())).toBe('00:00')
+  })
+
+  it('names the hour a mid-hour instant falls in', () => {
+    expect(formatHourLabel(new Date(2026, 8, 21, 14, 59, 59, 999).getTime())).toBe('14:00')
   })
 })
 

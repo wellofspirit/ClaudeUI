@@ -21,7 +21,9 @@
  *    and every grouping carries the counts beside its dollars.
  *  - DAYS ARE LOCAL. Buckets are stored in UTC so that any reader can group
  *    them into ITS calendar days; the series is contiguous so a chart has no
- *    gaps to interpret.
+ *    gaps to interpret. The `today` range adds an HOURLY series beside the
+ *    daily one, which needs no such grouping: an hour of the ledger is already
+ *    a column.
  */
 
 import type {
@@ -29,6 +31,7 @@ import type {
   CostTotals,
   DashboardAccount,
   DashboardDay,
+  DashboardHour,
   DashboardModel,
   DashboardProvider,
   DashboardRange,
@@ -41,13 +44,22 @@ import { bucketDisplayCostUsd, floorToHour } from './usage-aggregation'
 import { readAccountLimits } from './usage-provider'
 import { logger } from './logger'
 
-const MS_PER_DAY = 24 * 60 * 60 * 1000
-
-/** How many days back each range reaches, from the local midnight that begins it. */
-const RANGE_DAYS: Record<DashboardRange, number> = { '7d': 7, '30d': 30, '90d': 90 }
+const MS_PER_HOUR = 60 * 60 * 1000
+const MS_PER_DAY = 24 * MS_PER_HOUR
 
 /**
- * Is this one of the three ranges?
+ * How many days back each range reaches, from the local midnight that begins it.
+ *
+ * `today` reaches back none of them: its start is today's own local midnight,
+ * which in a timezone whose offset is not a whole hour the UTC-hour floor pulls
+ * back into the last hour of yesterday. That is the same straddling hour every
+ * other range already begins with, so `today` is not a special case — `fromTs`
+ * says exactly where it starts, and the hourly series starts with it.
+ */
+const RANGE_DAYS: Record<DashboardRange, number> = { today: 0, '7d': 7, '30d': 30, '90d': 90 }
+
+/**
+ * Is this one of the ranges?
  *
  * A Set rather than `in RANGE_DAYS`: `in` walks the prototype chain, so
  * `'toString'` would pass and then index the record to a FUNCTION, which turns
@@ -60,7 +72,11 @@ function isDashboardRange(value: unknown): value is DashboardRange {
 
 const RANGE_KEYS: ReadonlySet<string> = new Set(Object.keys(RANGE_DAYS))
 
-/** What an argument that names no valid range means. Matches the header's default. */
+/**
+ * What an argument that names no valid range means — the WIRE's default, which
+ * a remote client with a newer or older idea of the range list falls back to.
+ * The renderer opens on `today`; that is a reading preference, not this.
+ */
 const DEFAULT_RANGE: DashboardRange = '30d'
 
 /**
@@ -239,9 +255,40 @@ interface ProviderAgg {
   accounts: Map<string, AccountAgg>
 }
 
-interface DayAgg {
+/** One cell of a time series — a local day, or an hour of today. */
+interface SeriesCell {
   totals: CostTotals
   byProvider: Map<string, { apiCostUsd: number; billedCostUsd: number; displayCostUsd: number }>
+}
+
+/**
+ * Fold one bucket into the series cell it belongs to, creating the cell on
+ * first sight. The two series differ only in their key — a local date string
+ * for the daily one, the bucket's own UTC hour for the hourly one — so the
+ * arithmetic is written once.
+ */
+function addToSeries<K>(
+  series: Map<K, SeriesCell>,
+  key: K,
+  bucket: UsageBucketRow,
+  providerId: string,
+  display: number
+): void {
+  let cell = series.get(key)
+  if (!cell) {
+    cell = { totals: emptyTotals(), byProvider: new Map() }
+    series.set(key, cell)
+  }
+  addBucket(cell.totals, bucket)
+  const cellProvider = cell.byProvider.get(providerId) ?? {
+    apiCostUsd: 0,
+    billedCostUsd: 0,
+    displayCostUsd: 0
+  }
+  cellProvider.apiCostUsd += bucket.apiCostUsd
+  cellProvider.billedCostUsd += bucket.billedCostUsd
+  cellProvider.displayCostUsd += display
+  cell.byProvider.set(providerId, cellProvider)
 }
 
 /**
@@ -297,6 +344,12 @@ export function sanitizeDashboardRange(raw: unknown): DashboardRange {
  * series starts one column earlier and holds at most that fraction of an hour —
  * `fromTs` always says exactly where it begins.
  *
+ * `today` is that rule with `range` at zero, plus a second series at the
+ * ledger's own grain: one column per UTC hour from `fromTs` through the hour in
+ * progress, by the same "whole slots plus the one running" rule the days follow.
+ * The daily series is still emitted for it, so a widget that only reads `days`
+ * keeps working.
+ *
  * A bucket dated AFTER `now` — only reachable from a clock that moved backwards
  * — counts in the totals and has no column; the series ends at today.
  */
@@ -319,7 +372,9 @@ export async function buildUsageDashboard(opts: {
 
   const totals = emptyTotals()
   const providers = new Map<string, ProviderAgg>()
-  const days = new Map<string, DayAgg>()
+  const days = new Map<string, SeriesCell>()
+  // Only `today` shows hours, and only `today` pays for building them.
+  const hours = range === 'today' ? new Map<number, SeriesCell>() : null
   let coveredUsd = 0
   let unattributedUsd = 0
 
@@ -374,22 +429,8 @@ export async function buildUsageDashboard(opts: {
     addBucket(model.totals, bucket)
     model.dispatched = addDispatched(model.dispatched, bucket)
 
-    const date = dateStrFromTimestamp(bucket.hourUtc)
-    let day = days.get(date)
-    if (!day) {
-      day = { totals: emptyTotals(), byProvider: new Map() }
-      days.set(date, day)
-    }
-    addBucket(day.totals, bucket)
-    const dayProvider = day.byProvider.get(providerId) ?? {
-      apiCostUsd: 0,
-      billedCostUsd: 0,
-      displayCostUsd: 0
-    }
-    dayProvider.apiCostUsd += bucket.apiCostUsd
-    dayProvider.billedCostUsd += bucket.billedCostUsd
-    dayProvider.displayCostUsd += display
-    day.byProvider.set(providerId, dayProvider)
+    addToSeries(days, dateStrFromTimestamp(bucket.hourUtc), bucket, providerId, display)
+    if (hours) addToSeries(hours, bucket.hourUtc, bucket, providerId, display)
   }
 
   return {
@@ -401,6 +442,7 @@ export async function buildUsageDashboard(opts: {
     coveredUsd,
     providers: toProviders(providers, limits, ledgerLabels),
     days: toDays(days, fromTs, now),
+    ...(hours ? { hours: toHours(hours, fromTs, now) } : {}),
     unattributedUsd
   }
 }
@@ -452,7 +494,7 @@ function toProviders(
 }
 
 /** The range's local days, oldest first, with a cell for every day that has none. */
-function toDays(days: Map<string, DayAgg>, fromTs: number, now: number): DashboardDay[] {
+function toDays(days: Map<string, SeriesCell>, fromTs: number, now: number): DashboardDay[] {
   const out: DashboardDay[] = []
   const lastDate = dateStrFromTimestamp(now)
   for (
@@ -466,6 +508,27 @@ function toDays(days: Map<string, DayAgg>, fromTs: number, now: number): Dashboa
       date,
       byProvider: day ? Object.fromEntries(day.byProvider) : {},
       totals: day?.totals ?? emptyTotals()
+    })
+  }
+  return out
+}
+
+/**
+ * Today's hours, oldest first, with a cell for every hour that spent nothing.
+ *
+ * Plain `+ MS_PER_HOUR` arithmetic, unlike {@link toDays}: a UTC hour is always
+ * an hour long, so a clock change moves which LOCAL hour a column is labelled
+ * with but never how far apart two columns are.
+ */
+function toHours(hours: Map<number, SeriesCell>, fromTs: number, now: number): DashboardHour[] {
+  const out: DashboardHour[] = []
+  const lastHour = floorToHour(now)
+  for (let cursor = fromTs; cursor <= lastHour; cursor += MS_PER_HOUR) {
+    const hour = hours.get(cursor)
+    out.push({
+      hourUtc: cursor,
+      byProvider: hour ? Object.fromEntries(hour.byProvider) : {},
+      totals: hour?.totals ?? emptyTotals()
     })
   }
   return out

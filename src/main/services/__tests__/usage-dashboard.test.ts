@@ -401,9 +401,80 @@ describe('buildUsageDashboard — the day series', () => {
   })
 })
 
+describe('buildUsageDashboard — the today range, hourly', () => {
+  it('runs from local midnight to the hour in progress, one column each', async () => {
+    const { db, dashboard } = await fresh()
+    seedTree(db)
+
+    const data = await dashboard.buildUsageDashboard({ range: 'today', now: NOW })
+
+    // `fromTs` is the same rule every range uses, with zero days back: today's
+    // local midnight, floored to the UTC hour the ledger is keyed by. The
+    // hourly series starts exactly there and ends at the hour NOW falls in.
+    const midnight = Math.floor(startOfLocalDay(NOW) / HOUR) * HOUR
+    expect(data.fromTs).toBe(midnight)
+    expect(data.hours![0].hourUtc).toBe(midnight)
+    expect(data.hours![data.hours!.length - 1].hourUtc).toBe(Math.floor(NOW / HOUR) * HOUR)
+    // Contiguous, one UTC hour apart. In a whole-hour timezone — which is the
+    // suite's and CI's — that is the local hour of NOW plus one, eleven here.
+    expect(data.hours).toHaveLength((Math.floor(NOW / HOUR) * HOUR - midnight) / HOUR + 1)
+    for (let i = 1; i < data.hours!.length; i++) {
+      expect(data.hours![i].hourUtc - data.hours![i - 1].hourUtc).toBe(HOUR)
+    }
+
+    // The two buckets today holds: the API key's charged $0.60 at +5h and the
+    // unattributed $0.40 at +6h. Every other hour is a real zero, not a hole.
+    const byHour = new Map(data.hours!.map((h) => [h.hourUtc, h]))
+    expect(byHour.get(DAY_D + 2 * DAY + 5 * HOUR)!.totals.displayCostUsd).toBeCloseTo(0.6, 6)
+    expect(
+      byHour.get(DAY_D + 2 * DAY + 5 * HOUR)!.byProvider.openrouter.displayCostUsd
+    ).toBeCloseTo(0.6, 6)
+    expect(byHour.get(DAY_D + 2 * DAY + 6 * HOUR)!.byProvider.anthropic.displayCostUsd).toBeCloseTo(
+      0.4,
+      6
+    )
+    expect(byHour.get(DAY_D + 2 * DAY + 1 * HOUR)!.totals.displayCostUsd).toBe(0)
+    expect(byHour.get(DAY_D + 2 * DAY + 1 * HOUR)!.byProvider).toEqual({})
+  })
+
+  it('adds back up to the range totals, hour by hour and provider by provider', async () => {
+    const { db, dashboard } = await fresh()
+    seedTree(db)
+
+    const data = await dashboard.buildUsageDashboard({ range: 'today', now: NOW })
+
+    const summed = data.hours!.reduce((sum, h) => sum + h.totals.displayCostUsd, 0)
+    expect(summed).toBeCloseTo(data.totals.displayCostUsd, 6)
+    expect(data.hours!.reduce((sum, h) => sum + h.totals.requestCount, 0)).toBe(
+      data.totals.requestCount
+    )
+    for (const provider of data.providers) {
+      const perProvider = data.hours!.reduce(
+        (sum, h) => sum + (h.byProvider[provider.providerId]?.displayCostUsd ?? 0),
+        0
+      )
+      expect(perProvider).toBeCloseTo(provider.totals.displayCostUsd, 6)
+    }
+  })
+
+  it('still emits the day series, and emits hours for no other range', async () => {
+    const { db, dashboard } = await fresh()
+    seedTree(db)
+
+    const today = await dashboard.buildUsageDashboard({ range: 'today', now: NOW })
+    // One local day, so a widget that only reads `days` keeps working.
+    expect(today.days.map((d) => d.date)).toEqual([dateStr(NOW)])
+    expect(today.days[0].totals.displayCostUsd).toBeCloseTo(today.totals.displayCostUsd, 6)
+
+    const week = await dashboard.buildUsageDashboard({ range: '7d', now: NOW })
+    expect(week.hours).toBeUndefined()
+  })
+})
+
 describe('sanitizeDashboardRange', () => {
-  it('takes the three ranges and nothing else', async () => {
+  it('takes the four ranges and nothing else', async () => {
     const { dashboard } = await fresh()
+    expect(dashboard.sanitizeDashboardRange({ range: 'today' })).toBe('today')
     expect(dashboard.sanitizeDashboardRange({ range: '7d' })).toBe('7d')
     expect(dashboard.sanitizeDashboardRange({ range: '90d' })).toBe('90d')
     expect(dashboard.sanitizeDashboardRange({ range: '1y' })).toBe('30d')
@@ -414,6 +485,12 @@ describe('sanitizeDashboardRange', () => {
     expect(dashboard.sanitizeDashboardRange({ range: 'toString' })).toBe('30d')
   })
 })
+
+/** Local midnight of the day containing `ts` — the query's own rule. */
+function startOfLocalDay(ts: number): number {
+  const d = new Date(ts)
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+}
 
 function dateStr(ts: number): string {
   const d = new Date(ts)

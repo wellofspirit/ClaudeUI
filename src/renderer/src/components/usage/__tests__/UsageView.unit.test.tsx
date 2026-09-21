@@ -107,9 +107,9 @@ describe('UsageView — load', () => {
     expect(screen.getByTestId('AccountsPanel')).toBeInTheDocument()
   })
 
-  it('asks for the default 30-day range and the stored limits on mount', async () => {
+  it('asks for today and the stored limits on mount', async () => {
     render(<UsageView onClose={vi.fn()} />)
-    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('30d'))
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('today'))
     expect(mockFetchLimits).toHaveBeenCalledWith(false)
   })
 
@@ -136,7 +136,7 @@ describe('UsageView — load', () => {
 describe('UsageView — range control', () => {
   it('refetches with the new range and remembers it for next time', async () => {
     render(<UsageView onClose={vi.fn()} />)
-    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('30d'))
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('today'))
 
     fireEvent.click(screen.getByTestId('UsageView.range.7d'))
     await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('7d'))
@@ -153,7 +153,23 @@ describe('UsageView — range control', () => {
   it('ignores a stored value that is not a range', async () => {
     window.localStorage.setItem('claudeui.usage.range', 'all-time')
     render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('today'))
+  })
+
+  it('leaves a stored range alone — the default only applies to a fresh viewer', async () => {
+    window.localStorage.setItem('claudeui.usage.range', '30d')
+    render(<UsageView onClose={vi.fn()} />)
     await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('30d'))
+    expect(screen.getByTestId('UsageView.range.30d')).toHaveAttribute('data-active', 'true')
+  })
+
+  it('offers Today as the first pill, spelled as a word', async () => {
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(screen.getByTestId('UsageView.range')).toBeInTheDocument())
+    const pills = screen.getByTestId('UsageView.range').querySelectorAll('button')
+    expect(pills[0]).toHaveAttribute('data-testid', 'UsageView.range.today')
+    expect(pills[0]).toHaveTextContent('Today')
+    expect(pills[0]).toHaveAttribute('data-active', 'true')
   })
 
   it('carries the group-by for the breakdown S4b-2 mounts', async () => {
@@ -420,7 +436,7 @@ describe('UsageView — tabs', () => {
 
   it('still refetches when the range changes on the Plan value tab', async () => {
     render(<UsageView onClose={vi.fn()} />)
-    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('30d'))
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('today'))
 
     fireEvent.click(screen.getByTestId('UsageView.tab.plans'))
     fireEvent.click(screen.getByTestId('UsageView.range.7d'))

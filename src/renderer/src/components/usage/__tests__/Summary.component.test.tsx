@@ -82,6 +82,18 @@ describe('Summary — variant B', () => {
     )
   })
 
+  it('captions the Today range as a word, not as a duration', () => {
+    const data = makeDashboard({ range: 'today', totals: makeTotals({ displayCostUsd: 9 }) })
+    render(<Summary data={data} compact={false} providerColors={colors(['anthropic'])} />)
+    expect(screen.getByTestId('Summary')).toHaveTextContent('Spend · today')
+  })
+
+  it('names the range on the compact strip, Today included', () => {
+    const data = makeDashboard({ range: 'today', totals: makeTotals({ displayCostUsd: 9 }) })
+    render(<Summary data={data} compact providerColors={colors(['anthropic'])} />)
+    expect(screen.getByTestId('Summary.strip')).toHaveTextContent('today')
+  })
+
   it('footnotes the unattributed total only when it is non-zero', () => {
     const zero = makeDashboard({ unattributedUsd: 0 })
     const { unmount } = render(

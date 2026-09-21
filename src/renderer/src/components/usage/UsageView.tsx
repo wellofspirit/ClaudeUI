@@ -50,8 +50,21 @@ import { SelectMenu } from '../shared/SelectMenu'
 // Header controls
 // ---------------------------------------------------------------------------
 
-const RANGES: DashboardRange[] = ['7d', '30d', '90d']
-const DEFAULT_RANGE: DashboardRange = '30d'
+const RANGES: DashboardRange[] = ['today', '7d', '30d', '90d']
+
+/**
+ * A pill reads as its own token — `7d`, `30d` — except `today`, which is a word
+ * rather than a duration and would read as a window kind in lower case beside
+ * them. Only the exceptions are listed.
+ */
+const RANGE_LABELS: Partial<Record<DashboardRange, string>> = { today: 'Today' }
+
+/**
+ * What a viewer who has never chosen sees. Owner ruling (S4d): the screen opens
+ * on the current day. This is the RENDERER's default only — the wire keeps its
+ * own in `sanitizeDashboardRange`, for a remote client that names no range.
+ */
+const DEFAULT_RANGE: DashboardRange = 'today'
 
 /**
  * Per-viewer, not per-profile: the range is a reading preference, and a phone
@@ -265,7 +278,7 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
                 active={r === range}
                 onClick={() => handleRange(r)}
               >
-                {r}
+                {RANGE_LABELS[r] ?? r}
               </Pill>
             ))}
           </PillGroup>

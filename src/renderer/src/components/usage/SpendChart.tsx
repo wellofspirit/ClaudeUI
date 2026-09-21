@@ -19,13 +19,24 @@
  * the header's group-by says, and the subtitle says so when they disagree.
  * Inventing a per-day per-model series by spreading an account's range total
  * over its days would be a chart of an assumption, not of the ledger.
+ *
+ * TWO GRAINS (S4d). The `today` range carries an `hours` series as well, and a
+ * day of hours is the chart the range exists for — a single daily column says
+ * nothing about when the day was spent. Everything below therefore draws
+ * `Column`s rather than days: the grain decides the key, the x label and the
+ * tooltip heading, and nothing else in the geometry changes.
  */
 
 import { useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { UsageDashboardData } from '../../../../shared/types'
+import type { DashboardDay, UsageDashboardData } from '../../../../shared/types'
 import type { DashboardGroupBy } from './UsageView'
 import { providerLabel } from '../../../../shared/provider-label'
-import { PROVIDER_OVERFLOW_COLOR, formatCost, formatShortDate } from './usage-utils'
+import {
+  PROVIDER_OVERFLOW_COLOR,
+  formatCost,
+  formatHourLabel,
+  formatShortDate
+} from './usage-utils'
 
 // ---------------------------------------------------------------------------
 // Geometry (the mockup's, which is what "130px tall, bars capped at 14px" means)
@@ -59,7 +70,7 @@ const SEGMENT_GAP = 2
 /** A day that spent something is never drawn as nothing (ADR-030 in geometry). */
 const MIN_SEGMENT_H = 1
 
-/** Roughly what a `Sep 20` label occupies at 8px, so ticks never collide. */
+/** Roughly what a `Sep 20` or `09:00` label occupies at 8px, so ticks never collide. */
 const MIN_LABEL_PX = 46
 
 /** Variant B's rows: small, because there is one per provider. */
@@ -73,6 +84,62 @@ interface SpendChartProps {
   providerColors: Map<string, string>
   /** Only to explain the stacking when it is not what the header asked for. */
   groupBy: DashboardGroupBy
+}
+
+// ---------------------------------------------------------------------------
+// Columns — the two grains, flattened to one shape
+// ---------------------------------------------------------------------------
+
+/** Which series the dashboard handed us. `today` brings hours; every range has days. */
+type Granularity = 'daily' | 'hourly'
+
+interface Column {
+  /** React key, and the identity the hover index is resolved against. */
+  key: string
+  byProvider: DashboardDay['byProvider']
+  /** The x-axis tick under the column. */
+  label: string
+  /** The tooltip's heading, and variant B's `<title>` — the full slot, not the tick. */
+  heading: string
+  /** Set on a daily column only — the mark's identity, and the test hook. */
+  date?: string
+  /** Set on an hourly column only, for the same two jobs. */
+  hourUtc?: number
+}
+
+/**
+ * The columns to draw: the hourly series when the query sent one, the daily one
+ * otherwise. `hours` is present only for `today`, so the presence of the field
+ * IS the grain — the range token is never re-interpreted here.
+ */
+function buildColumns(data: UsageDashboardData): { columns: Column[]; granularity: Granularity } {
+  if (data.hours) {
+    return {
+      granularity: 'hourly',
+      columns: data.hours.map((hour) => {
+        const label = formatHourLabel(hour.hourUtc)
+        return {
+          key: String(hour.hourUtc),
+          byProvider: hour.byProvider,
+          label,
+          // The whole slot, so the reader is never left wondering whether
+          // `09:00` means the instant or the hour that follows it.
+          heading: `${label} – ${label.slice(0, 3)}59`,
+          hourUtc: hour.hourUtc
+        }
+      })
+    }
+  }
+  return {
+    granularity: 'daily',
+    columns: data.days.map((day) => ({
+      key: day.date,
+      byProvider: day.byProvider,
+      label: formatShortDate(day.date),
+      heading: formatShortDate(day.date),
+      date: day.date
+    }))
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -118,14 +185,22 @@ interface Series {
 /**
  * The providers to stack, in the dashboard query's order (display cost
  * descending). A provider that only appears in `byProvider` — impossible from
- * the current query, but the day series and the tree are built separately — is
+ * the current query, but the series and the tree are built separately — is
  * appended rather than dropped, so a column always sums to its own total.
+ *
+ * The row totals come from the COLUMNS on screen, not from the provider tree:
+ * on `today` the two agree, but variant B's per-row figure has to be the sum of
+ * the bars beside it whatever grain is drawn.
  */
-function buildSeries(data: UsageDashboardData, providerColors: Map<string, string>): Series[] {
+function buildSeries(
+  data: UsageDashboardData,
+  columns: Column[],
+  providerColors: Map<string, string>
+): Series[] {
   const totals = new Map<string, number>()
   for (const provider of data.providers) totals.set(provider.providerId, 0)
-  for (const day of data.days) {
-    for (const [id, costs] of Object.entries(day.byProvider)) {
+  for (const column of columns) {
+    for (const [id, costs] of Object.entries(column.byProvider)) {
       totals.set(id, (totals.get(id) ?? 0) + costs.displayCostUsd)
     }
   }
@@ -142,9 +217,9 @@ function buildSeries(data: UsageDashboardData, providerColors: Map<string, strin
   }))
 }
 
-function dayTotal(day: UsageDashboardData['days'][number]): number {
+function columnTotal(column: Column): number {
   let sum = 0
-  for (const costs of Object.values(day.byProvider)) sum += costs.displayCostUsd
+  for (const costs of Object.values(column.byProvider)) sum += costs.displayCostUsd
   return sum
 }
 
@@ -157,7 +232,7 @@ function toPrintedPrecision(usd: number): number {
 }
 
 /**
- * The day's total as the SUM OF THE LINES ABOVE IT, not as the sum of the
+ * The column's total as the SUM OF THE LINES ABOVE IT, not as the sum of the
  * unrounded dollars.
  *
  * The ledger keeps cost to full precision, so `$364.3249 + $0.7451` is a true
@@ -167,9 +242,9 @@ function toPrintedPrecision(usd: number): number {
  * total is rounded the way its parts are before being added. Every figure on
  * screen then agrees; the exact sum still drives the bar heights and the axis.
  */
-function displayedDayTotal(day: UsageDashboardData['days'][number]): number {
+function displayedColumnTotal(column: Column): number {
   let sum = 0
-  for (const costs of Object.values(day.byProvider)) {
+  for (const costs of Object.values(column.byProvider)) {
     if (costs.displayCostUsd > 0) sum += toPrintedPrecision(costs.displayCostUsd)
   }
   return sum
@@ -181,8 +256,15 @@ function displayedDayTotal(day: UsageDashboardData['days'][number]): number {
 
 export function SpendChart({ data, providerColors, groupBy }: SpendChartProps): React.JSX.Element {
   const [mode, setMode] = useState<SpendChartMode>('stacked')
-  const series = useMemo(() => buildSeries(data, providerColors), [data, providerColors])
-  const grandTotal = useMemo(() => data.days.reduce((s, d) => s + dayTotal(d), 0), [data.days])
+  const { columns, granularity } = useMemo(() => buildColumns(data), [data])
+  const series = useMemo(
+    () => buildSeries(data, columns, providerColors),
+    [data, columns, providerColors]
+  )
+  const grandTotal = useMemo(
+    () => columns.reduce((sum, column) => sum + columnTotal(column), 0),
+    [columns]
+  )
 
   return (
     <div
@@ -195,19 +277,22 @@ export function SpendChart({ data, providerColors, groupBy }: SpendChartProps): 
           <h3 className="text-[11px] font-semibold text-text-secondary uppercase tracking-wider">
             Spend over time
           </h3>
-          <span className="text-[9px] text-text-muted">daily · {data.range}</span>
+          <span data-testid="SpendChart.granularity" className="text-[9px] text-text-muted">
+            {granularity} · {data.range}
+          </span>
         </div>
         <ModeToggle mode={mode} onChange={setMode} />
       </div>
 
       {groupBy !== 'provider' && (
         <p data-testid="SpendChart.subtitle" className="text-[9px] text-text-muted mb-2">
-          Stacked by provider: the daily series is the only split the ledger keeps per day, so it
-          cannot be broken down by {groupBy}. The breakdown below groups by {groupBy} in full.
+          Stacked by provider: the {granularity} series is the only split the ledger keeps per{' '}
+          {granularity === 'hourly' ? 'hour' : 'day'}, so it cannot be broken down by {groupBy}. The
+          breakdown below groups by {groupBy} in full.
         </p>
       )}
 
-      {data.days.length === 0 || grandTotal <= 0 ? (
+      {columns.length === 0 || grandTotal <= 0 ? (
         <div
           data-testid="SpendChart.empty"
           className="flex items-center justify-center text-text-muted text-[11px] py-8"
@@ -215,9 +300,9 @@ export function SpendChart({ data, providerColors, groupBy }: SpendChartProps): 
           Nothing spent in this range
         </div>
       ) : mode === 'stacked' ? (
-        <StackedColumns data={data} series={series} />
+        <StackedColumns columns={columns} series={series} />
       ) : (
-        <PerProviderRows data={data} series={series} />
+        <PerProviderRows columns={columns} series={series} />
       )}
     </div>
   )
@@ -234,7 +319,8 @@ function ModeToggle({
     {
       id: 'stacked',
       label: 'stacked',
-      title: 'One column per day, split by provider on a shared scale — the daily total is the bar.'
+      title:
+        'One column per slot, split by provider on a shared scale — the slot’s total is the bar.'
     },
     {
       id: 'perProvider',
@@ -275,14 +361,14 @@ function ModeToggle({
 // ---------------------------------------------------------------------------
 
 /**
- * Whether the plot should jump back to the latest day, or leave the reader's
+ * Whether the plot should jump back to the latest column, or leave the reader's
  * scroll position where they put it.
  *
- * A DIFFERENT NUMBER OF DAYS IS A DIFFERENT CHART, so it is always re-pinned.
- * The "did the reader scroll back" guard cannot answer for it: going 30d → 90d
- * runs the effect against a `scrollLeft` measured on the PREVIOUS render, and a
- * 30-day chart that fitted its viewport had `scrollLeft 0` with nothing to
- * scroll. The guard read that stale zero as "parked at the far left on
+ * A DIFFERENT NUMBER OF COLUMNS IS A DIFFERENT CHART, so it is always
+ * re-pinned. The "did the reader scroll back" guard cannot answer for it:
+ * going 30d → 90d runs the effect against a `scrollLeft` measured on the
+ * PREVIOUS render, and a 30-day chart that fitted its viewport had
+ * `scrollLeft 0` with nothing to scroll. The guard read that stale zero as "parked at the far left on
  * purpose" and left the newest 60 days off-screen.
  *
  * The guard is for the other dependency — a resize, which does not change what
@@ -294,37 +380,36 @@ function ModeToggle({
  */
 export function shouldPinToLatest({
   hasPinned,
-  dayCountChanged,
+  columnCountChanged,
   distanceFromEnd,
   threshold
 }: {
   /** False on the very first pass for this mount. */
   hasPinned: boolean
-  /** The range moved, or a day was added to it. */
-  dayCountChanged: boolean
+  /** The range moved, or a column was added to it. */
+  columnCountChanged: boolean
   /** Pixels between the current viewport's right edge and the plot's. */
   distanceFromEnd: number
-  /** How close counts as "at the end" — two days' worth of slot. */
+  /** How close counts as "at the end" — two columns' worth of slot. */
   threshold: number
 }): boolean {
   if (!hasPinned) return true
-  if (dayCountChanged) return true
+  if (columnCountChanged) return true
   return distanceFromEnd <= threshold
 }
 
 function StackedColumns({
-  data,
+  columns,
   series
 }: {
-  data: UsageDashboardData
+  columns: Column[]
   series: Series[]
 }): React.JSX.Element {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null)
   const [viewportWidth, setViewportWidth] = useState(0)
   const scrollRef = useRef<HTMLDivElement>(null)
   const hasAutoScrolled = useRef(false)
-  const lastDayCount = useRef<number | null>(null)
-  const days = data.days
+  const lastColumnCount = useRef<number | null>(null)
 
   useLayoutEffect(() => {
     const scroll = scrollRef.current
@@ -334,38 +419,39 @@ function StackedColumns({
     return () => observer.disconnect()
   }, [])
 
-  // The latest day is the one a person opens this for, so a range that does not
-  // fit starts at its right edge — see `shouldPinToLatest` for when it is
+  // The latest column is the one a person opens this for, so a range that does
+  // not fit starts at its right edge — see `shouldPinToLatest` for when it is
   // re-pinned and when the reader's own scroll position is left alone.
   useLayoutEffect(() => {
     const scroll = scrollRef.current
     if (!scroll) return
-    const dayCountChanged = lastDayCount.current !== null && lastDayCount.current !== days.length
-    lastDayCount.current = days.length
+    const columnCountChanged =
+      lastColumnCount.current !== null && lastColumnCount.current !== columns.length
+    lastColumnCount.current = columns.length
     if (
       shouldPinToLatest({
         hasPinned: hasAutoScrolled.current,
-        dayCountChanged,
+        columnCountChanged,
         distanceFromEnd: scroll.scrollWidth - scroll.clientWidth - scroll.scrollLeft,
-        threshold: (scroll.clientWidth / Math.max(1, days.length)) * 2
+        threshold: (scroll.clientWidth / Math.max(1, columns.length)) * 2
       })
     ) {
       scroll.scrollLeft = scroll.scrollWidth
     }
     hasAutoScrolled.current = true
-  }, [days.length, viewportWidth])
+  }, [columns.length, viewportWidth])
 
-  const dayCount = days.length
-  const slot = Math.max(MIN_SLOT, (viewportWidth || FALLBACK_VIEWPORT) / dayCount)
-  const plotWidth = slot * dayCount
+  const columnCount = columns.length
+  const slot = Math.max(MIN_SLOT, (viewportWidth || FALLBACK_VIEWPORT) / columnCount)
+  const plotWidth = slot * columnCount
   const barWidth = Math.min(MAX_BAR_WIDTH, Math.max(2, slot - BAR_GAP))
 
-  const maxDay = days.reduce((m, d) => Math.max(m, dayTotal(d)), 0)
-  const { max: axisMax, ticks } = axisScale(maxDay)
+  const maxColumn = columns.reduce((m, c) => Math.max(m, columnTotal(c)), 0)
+  const { max: axisMax, ticks } = axisScale(maxColumn)
   const yOf = (value: number): number => PAD_T + CHART_H - (value / axisMax) * CHART_H
   const labelEvery = Math.max(1, Math.ceil(MIN_LABEL_PX / slot))
-  const lastIdx = dayCount - 1
-  const hovered = hoverIdx === null ? null : days[hoverIdx]
+  const lastIdx = columnCount - 1
+  const hovered = hoverIdx === null ? null : columns[hoverIdx]
 
   return (
     <div className="relative">
@@ -417,7 +503,7 @@ function StackedColumns({
               />
             ))}
 
-            {days.map((day, i) => {
+            {columns.map((column, i) => {
               const x = i * slot + (slot - barWidth) / 2
               const isHovered = hoverIdx === i
               // Stacked from the baseline in the series' fixed order, so a
@@ -425,7 +511,7 @@ function StackedColumns({
               let cumulative = 0
               const drawn = series
                 .map((s) => {
-                  const usd = day.byProvider[s.providerId]?.displayCostUsd ?? 0
+                  const usd = column.byProvider[s.providerId]?.displayCostUsd ?? 0
                   if (usd <= 0) return null
                   const trueH = (usd / axisMax) * CHART_H
                   const top = yOf(cumulative + usd)
@@ -442,9 +528,10 @@ function StackedColumns({
 
               return (
                 <g
-                  key={day.date}
+                  key={column.key}
                   data-testid="SpendChart.column"
-                  data-date={day.date}
+                  data-date={column.date}
+                  data-hour={column.hourUtc}
                   onMouseEnter={() => setHoverIdx(i)}
                   className="cursor-default"
                 >
@@ -469,19 +556,19 @@ function StackedColumns({
               )
             })}
 
-            {/* Dates anchored on the LATEST day, so the one that matters is
+            {/* Ticks anchored on the LATEST column, so the one that matters is
                 always labelled and the spacing never collides. */}
-            {days.map((day, i) =>
+            {columns.map((column, i) =>
               (lastIdx - i) % labelEvery === 0 ? (
                 <text
-                  key={day.date}
+                  key={column.key}
                   x={i * slot + slot / 2}
                   y={PLOT_HEIGHT - 4}
                   textAnchor="middle"
                   className="fill-text-muted"
                   fontSize={8}
                 >
-                  {formatShortDate(day.date)}
+                  {column.label}
                 </text>
               ) : null
             )}
@@ -494,7 +581,7 @@ function StackedColumns({
           data-testid="SpendChart.tooltip"
           className="absolute top-0 right-0 bg-bg-tertiary border border-border rounded-md px-2 py-1.5 text-[10px] space-y-0.5 pointer-events-none z-10 min-w-[150px]"
         >
-          <div className="text-text-secondary font-medium">{formatShortDate(hovered.date)}</div>
+          <div className="text-text-secondary font-medium">{hovered.heading}</div>
           {series.map((s) => {
             const usd = hovered.byProvider[s.providerId]?.displayCostUsd ?? 0
             if (usd <= 0) return null
@@ -512,7 +599,7 @@ function StackedColumns({
           <div className="flex items-center gap-3 border-t border-border/30 mt-1 pt-1">
             <span className="text-text-muted flex-1">Total</span>
             <span className="text-text-primary font-mono">
-              {formatCost(displayedDayTotal(hovered))}
+              {formatCost(displayedColumnTotal(hovered))}
             </span>
           </div>
         </div>
@@ -552,19 +639,18 @@ function Legend({ series }: { series: Series[] }): React.JSX.Element {
 // ---------------------------------------------------------------------------
 
 function PerProviderRows({
-  data,
+  columns,
   series
 }: {
-  data: UsageDashboardData
+  columns: Column[]
   series: Series[]
 }): React.JSX.Element {
-  const days = data.days
-  // Rows share ONE viewBox width so the same date is the same x in every row,
+  // Rows share ONE viewBox width so the same slot is the same x in every row,
   // even though the heights are not comparable. They scale to the container
   // rather than scrolling: a row is 34px tall and a horizontal scrollbar per
   // provider would be more chrome than chart.
-  const width = Math.max(days.length * MIN_SLOT, FALLBACK_VIEWPORT)
-  const slot = width / days.length
+  const width = Math.max(columns.length * MIN_SLOT, FALLBACK_VIEWPORT)
+  const slot = width / columns.length
   const barWidth = Math.min(MAX_BAR_WIDTH, Math.max(2, slot - BAR_GAP))
 
   // A provider that spent nothing over the range has no scale of its own, so
@@ -577,7 +663,7 @@ function PerProviderRows({
   return (
     <div>
       {drawn.map((s) => {
-        const values = days.map((d) => d.byProvider[s.providerId]?.displayCostUsd ?? 0)
+        const values = columns.map((c) => c.byProvider[s.providerId]?.displayCostUsd ?? 0)
         const rowMax = values.reduce((m, v) => Math.max(m, v), 0)
         return (
           <div
@@ -621,9 +707,10 @@ function PerProviderRows({
                 const h = rowMax > 0 ? (usd / rowMax) * (ROW_HEIGHT - 3) : 0
                 return (
                   <rect
-                    key={days[i].date}
+                    key={columns[i].key}
                     data-testid="SpendChart.row.bar"
-                    data-date={days[i].date}
+                    data-date={columns[i].date}
+                    data-hour={columns[i].hourUtc}
                     x={i * slot + (slot - barWidth) / 2}
                     y={ROW_HEIGHT - Math.max(MIN_SEGMENT_H, h)}
                     width={barWidth}
@@ -631,7 +718,7 @@ function PerProviderRows({
                     rx={2}
                     fill={s.color}
                   >
-                    <title>{`${s.label} · ${formatShortDate(days[i].date)} · ${formatCost(usd)}`}</title>
+                    <title>{`${s.label} · ${columns[i].heading} · ${formatCost(usd)}`}</title>
                   </rect>
                 )
               })}

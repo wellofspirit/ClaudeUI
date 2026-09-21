@@ -1,20 +1,32 @@
 /**
  * `SpendChart` — spend over time (ADR-071 §8 item 5, mockup Spend over time A / B).
  *
- * The geometry is the contract: one column per day of the range whatever the
+ * The geometry is the contract: one column per slot of the range whatever the
  * data is (a sparse `byProvider` is a gap, not a missing column), a bar that
  * never exceeds the owner's 14px cap, and a stack that draws exactly the
- * providers that spent something that day. The subtitle is the honesty check —
- * the daily series only splits by provider, and the chart has to say so rather
- * than let the header's group-by imply otherwise.
+ * providers that spent something in that slot. The subtitle is the honesty
+ * check — the series only splits by provider, and the chart has to say so
+ * rather than let the header's group-by imply otherwise.
+ *
+ * S4d added the second grain: `today` arrives with an `hours` series, and the
+ * chart draws that instead of the one-or-two daily columns it would otherwise
+ * have. Everything else about the geometry is shared, so the hourly section
+ * only asserts what the grain decides — the keys, the ticks and the chip.
  */
 
 import { describe, it, expect } from 'vitest'
 import { render, screen, fireEvent, within } from '@testing-library/react'
 import { SpendChart, shouldPinToLatest } from '../SpendChart'
 import { buildProviderColorMap } from '../usage-utils'
-import { makeAccount, makeDashboard, makeProvider, makeTotals } from './dashboard-fixtures'
-import type { DashboardDay, UsageDashboardData } from '../../../../../shared/types'
+import {
+  makeAccount,
+  makeDashboard,
+  makeDay,
+  makeHour,
+  makeProvider,
+  makeTotals
+} from './dashboard-fixtures'
+import type { DashboardDay, DashboardHour, UsageDashboardData } from '../../../../../shared/types'
 
 const COLORS = buildProviderColorMap(['anthropic', 'openai'])
 
@@ -23,24 +35,10 @@ function isoDay(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10)
 }
 
-/** A day whose providers are given as plain display dollars. */
-function makeDay(date: string, byProvider: Record<string, number>): DashboardDay {
-  const display = Object.values(byProvider).reduce((s, v) => s + v, 0)
-  return {
-    date,
-    byProvider: Object.fromEntries(
-      Object.entries(byProvider).map(([id, usd]) => [
-        id,
-        { apiCostUsd: usd, billedCostUsd: 0, displayCostUsd: usd }
-      ])
-    ),
-    totals: makeTotals({ displayCostUsd: display, apiCostUsd: display })
-  }
-}
-
-function twoProviderDashboard(days: DashboardDay[]): UsageDashboardData {
+function twoProviderDashboard(days: DashboardDay[], hours?: DashboardHour[]): UsageDashboardData {
   return makeDashboard({
     days,
+    ...(hours ? { range: 'today' as const, hours } : {}),
     providers: [
       makeProvider({
         providerId: 'anthropic',
@@ -272,21 +270,21 @@ describe('SpendChart — scroll-to-latest', () => {
     expect(
       shouldPinToLatest({
         hasPinned: false,
-        dayCountChanged: false,
+        columnCountChanged: false,
         distanceFromEnd: 999,
         threshold: 40
       })
     ).toBe(true)
   })
 
-  it('pins whenever the range changed, however the old chart was scrolled', () => {
+  it('pins whenever the column count changed, however the old chart was scrolled', () => {
     // The regression: 30d fitted its viewport, so `scrollLeft` was 0 and the
     // distance-from-end guard read it as "parked at the far left on purpose",
     // leaving 90d showing its oldest 30 days.
     expect(
       shouldPinToLatest({
         hasPinned: true,
-        dayCountChanged: true,
+        columnCountChanged: true,
         distanceFromEnd: 205,
         threshold: 22
       })
@@ -297,7 +295,7 @@ describe('SpendChart — scroll-to-latest', () => {
     expect(
       shouldPinToLatest({
         hasPinned: true,
-        dayCountChanged: false,
+        columnCountChanged: false,
         distanceFromEnd: 10,
         threshold: 40
       })
@@ -308,7 +306,7 @@ describe('SpendChart — scroll-to-latest', () => {
     expect(
       shouldPinToLatest({
         hasPinned: true,
-        dayCountChanged: false,
+        columnCountChanged: false,
         distanceFromEnd: 400,
         threshold: 40
       })
@@ -336,5 +334,83 @@ describe('SpendChart — what it can split by', () => {
       expect(subtitle).toHaveTextContent(groupBy)
       unmount()
     }
+  })
+})
+
+describe('SpendChart — the hourly grain', () => {
+  // Built from LOCAL components: the labels are the viewer's clock, so a fixed
+  // UTC instant would assert a different hour in every timezone.
+  const HOUR = 60 * 60 * 1000
+  const midnight = new Date(2026, 8, 21, 0, 0, 0, 0).getTime()
+  const hours = [
+    makeHour(midnight, {}),
+    makeHour(midnight + HOUR, { anthropic: 3 }),
+    makeHour(midnight + 2 * HOUR, { anthropic: 5, openai: 2 })
+  ]
+  // `today` still carries its day series; the chart must ignore it.
+  const today = () =>
+    twoProviderDashboard([makeDay('2026-09-21', { anthropic: 8, openai: 2 })], hours)
+
+  it('draws one column per hour, keyed by the hour and not by a date', () => {
+    render(<SpendChart data={today()} providerColors={COLORS} groupBy="provider" />)
+
+    const columns = screen.getAllByTestId('SpendChart.column')
+    expect(columns).toHaveLength(3)
+    expect(columns.map((c) => Number(c.getAttribute('data-hour')))).toEqual([
+      midnight,
+      midnight + HOUR,
+      midnight + 2 * HOUR
+    ])
+    expect(columns.every((c) => c.getAttribute('data-date') === null)).toBe(true)
+  })
+
+  it('labels the x axis with the local 24-hour clock', () => {
+    render(<SpendChart data={today()} providerColors={COLORS} groupBy="provider" />)
+    const ticks = [...screen.getByTestId('SpendChart.scroll').querySelectorAll('text')].map(
+      (t) => t.textContent
+    )
+    expect(ticks).toContain('02:00')
+    expect(ticks.every((t) => /^\d{2}:00$/.test(t ?? ''))).toBe(true)
+  })
+
+  it('says which grain it is drawing, and names the whole hour in the tooltip', () => {
+    render(<SpendChart data={today()} providerColors={COLORS} groupBy="provider" />)
+    expect(screen.getByTestId('SpendChart.granularity')).toHaveTextContent('hourly · today')
+
+    fireEvent.mouseEnter(screen.getAllByTestId('SpendChart.column')[2])
+    const tooltip = screen.getByTestId('SpendChart.tooltip')
+    expect(tooltip).toHaveTextContent('02:00 – 02:59')
+    expect(tooltip).toHaveTextContent('$7.00')
+  })
+
+  it('admits to the hourly series in the subtitle, not the daily one', () => {
+    render(<SpendChart data={today()} providerColors={COLORS} groupBy="model" />)
+    expect(screen.getByTestId('SpendChart.subtitle')).toHaveTextContent(
+      'the hourly series is the only split the ledger keeps per hour'
+    )
+  })
+
+  it('keys variant B bars by the hour too, and totals the hours beside them', () => {
+    render(<SpendChart data={today()} providerColors={COLORS} groupBy="provider" />)
+    fireEvent.click(screen.getByTestId('SpendChart.mode.perProvider'))
+
+    const bars = screen.getAllByTestId('SpendChart.row.bar')
+    expect(bars.every((b) => b.getAttribute('data-hour') !== null)).toBe(true)
+    expect(bars.every((b) => b.getAttribute('data-date') === null)).toBe(true)
+    // Sum of the HOURS on screen ($3 + $5), never the day row's $8 + $2.
+    const rows = screen.getAllByTestId('SpendChart.row')
+    expect(within(rows[0]).getByTestId('SpendChart.row.total')).toHaveTextContent('$8.00')
+    expect(within(rows[1]).getByTestId('SpendChart.row.total')).toHaveTextContent('$2.00')
+  })
+
+  it('keeps the daily grain when no hourly series was sent', () => {
+    const days = [makeDay('2026-09-19', { anthropic: 5 }), makeDay('2026-09-20', { anthropic: 9 })]
+    render(
+      <SpendChart data={twoProviderDashboard(days)} providerColors={COLORS} groupBy="provider" />
+    )
+    expect(screen.getByTestId('SpendChart.granularity')).toHaveTextContent('daily · 30d')
+    expect(
+      screen.getAllByTestId('SpendChart.column').map((c) => c.getAttribute('data-date'))
+    ).toEqual(['2026-09-19', '2026-09-20'])
   })
 })
