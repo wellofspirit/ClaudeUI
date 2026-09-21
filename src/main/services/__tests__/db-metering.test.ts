@@ -49,9 +49,9 @@ describe('DB migrations — v3 usage_event + v4 usage_window_sample', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      // Bump alongside MIGRATIONS in db.ts — currently v24 (session_meta's
-      // persisted Codex context reading).
-      expect(userVersion(db)).toBe(24)
+      // Bump alongside MIGRATIONS in db.ts — currently v25 (a limit window's
+      // stated length, and the drop of the position-kinded ChatGPT rows).
+      expect(userVersion(db)).toBe(25)
     } finally {
       db.close()
     }
@@ -270,6 +270,7 @@ function makeSample(overrides: Partial<WindowSampleRow> = {}): WindowSampleRow {
     canonicalEnd: 1_700_000_000_000,
     accountKey: 'anthropic:org_test:uuid_test',
     windowKind: '5h',
+    windowMinutes: null,
     ...overrides
   }
 }

@@ -51,6 +51,8 @@ const START = END - FIVE_HOURS
 
 const ACCOUNT_A = 'anthropic:org-a:acct-a'
 const ACCOUNT_B = 'anthropic:org-b:acct-b'
+/** A ChatGPT subscription — the vendor that states each window's length (S3c). */
+const CHATGPT_A = 'chatgpt:w-a:user-a'
 
 async function fresh(): Promise<{ db: DbModule; ledger: LedgerModule }> {
   vi.resetModules()
@@ -72,7 +74,8 @@ function sample(
   ts: number,
   usedPercent: number,
   canonicalEnd = END,
-  windowKind = '5h'
+  windowKind = '5h',
+  windowMinutes: number | null = null
 ): WindowSampleRow {
   sampleSeq += 1
   return {
@@ -82,7 +85,8 @@ function sample(
     usedPercent,
     canonicalEnd,
     accountKey,
-    windowKind
+    windowKind,
+    windowMinutes
   }
 }
 
@@ -333,7 +337,7 @@ describe('recomputeUsageWindows', () => {
     }
   })
 
-  it('spans a week for every non-5h kind', async () => {
+  it('spans a week for a scoped weekly, whose kind states its length', async () => {
     const { db, ledger } = await fresh()
     try {
       const weeklyEnd = END + SEVEN_DAYS
@@ -348,6 +352,82 @@ describe('recomputeUsageWindows', () => {
       const row = db.listUsageWindows({ kind: '7d:fable' })[0]
       expect(row.windowStart).toBe(weeklyEnd - SEVEN_DAYS)
       expect(row.apiCostUsd).toBe(1)
+    } finally {
+      db.closeDb()
+    }
+  })
+
+  /**
+   * S3c — the span comes from `window_minutes` when the reading carried one.
+   * A ChatGPT plan states the length of each window it reports, and a weekly
+   * one arrives in the `primary` slot, which used to make it a `5h` row summed
+   * over five hours of spend.
+   */
+  it('spans the stated duration, not the one its position implied', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      const weeklyEnd = END + SEVEN_DAYS
+      // What a weekly-only ChatGPT plan now writes: kind `7d`, minutes 10,080.
+      db.recordWindowSample(sample(CHATGPT_A, END, 63, weeklyEnd, '7d', 10_080))
+      db.insertUsageEvents([
+        event(CHATGPT_A, weeklyEnd - SEVEN_DAYS, { apiCostUsd: 9 }),
+        // Inside the week but outside the five hours the old rule would have used.
+        event(CHATGPT_A, weeklyEnd - 3 * 24 * HOUR, { apiCostUsd: 4 }),
+        event(CHATGPT_A, weeklyEnd - SEVEN_DAYS - 1, { apiCostUsd: 50 })
+      ])
+
+      ledger.recomputeUsageWindows(END + HOUR)
+
+      const row = db.listUsageWindows({ accountKey: CHATGPT_A })[0]
+      expect(row).toMatchObject({
+        windowKind: '7d',
+        windowStart: weeklyEnd - SEVEN_DAYS,
+        windowMinutes: 10_080,
+        apiCostUsd: 13,
+        peakPercent: 63
+      })
+    } finally {
+      db.closeDb()
+    }
+  })
+
+  it('spans an hour for an hourly window', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      db.recordWindowSample(sample(CHATGPT_A, END - HOUR, 20, END, '1h', 60))
+      db.insertUsageEvents([
+        event(CHATGPT_A, END - HOUR, { apiCostUsd: 2 }),
+        event(CHATGPT_A, END - HOUR - 1, { apiCostUsd: 30 })
+      ])
+
+      ledger.recomputeUsageWindows(END)
+
+      const row = db.listUsageWindows({ accountKey: CHATGPT_A })[0]
+      expect(row.windowStart).toBe(END - HOUR)
+      expect(row.apiCostUsd).toBe(2)
+    } finally {
+      db.closeDb()
+    }
+  })
+
+  /**
+   * S3c — no length, no numerator. A window the vendor described only by
+   * position is a real reading and is kept as a sample, but there is no
+   * interval to sum it over, so materialising it would mean picking a span at
+   * random and publishing the result as a plan's value.
+   */
+  it('never materializes a window whose length nothing states', async () => {
+    const { db, ledger } = await fresh()
+    try {
+      db.recordWindowSample(sample(CHATGPT_A, END - HOUR, 55, END, 'primary', null))
+      db.insertUsageEvents([event(CHATGPT_A, END - HOUR, { apiCostUsd: 8 })])
+
+      expect(ledger.recomputeUsageWindows(END)).toBe(0)
+      expect(db.listUsageWindows({})).toHaveLength(0)
+      // The reading itself is not lost.
+      expect(db.latestWindowSamples(CHATGPT_A)).toMatchObject([
+        { windowKind: 'primary', usedPercent: 55, windowMinutes: null }
+      ])
     } finally {
       db.closeDb()
     }

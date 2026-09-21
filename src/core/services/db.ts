@@ -119,8 +119,14 @@ export interface WindowSampleRow {
   canonicalEnd: number
   /** ADR-071 §3's account key — what makes the reading comparable across machines. */
   accountKey: string
-  /** The window's canonical id: `5h`, `7d`, `7d:<model>` (ADR-071 §6). */
+  /** The window's canonical id: `5h`, `7d`, `7d:<model>`, `3d`, `primary` (ADR-071 §6). */
   windowKind: string
+  /**
+   * How long the window lasts, as the VENDOR stated it (S3c) — null when it
+   * said nothing, which is every Claude reading (its window names carry their
+   * own lengths) and every row written before v25.
+   */
+  windowMinutes: number | null
 }
 
 /**
@@ -1138,6 +1144,49 @@ export const MIGRATIONS: Migration[] = [
         ALTER TABLE session_meta ADD COLUMN context_window INTEGER;
       `)
     }
+  },
+  {
+    // v25 — S3c: a window's LENGTH is data, not an inference from its kind.
+    //
+    // `usage-window-ledger.ts` derived a window's span from its kind (`5h` five
+    // hours, everything else a week) because Claude's kinds are named by the
+    // API and their lengths come with the names. ChatGPT's do not: the backend
+    // states `limit_window_seconds`, Codex carries it as `window_minutes`, and
+    // the app-server wire as `windowDurationMins`. The column keeps it, so the
+    // numerator is summed over the window the vendor actually described.
+    // Nullable: a Claude row states no duration and never will, and every row
+    // written before this has none.
+    //
+    // THE CHATGPT ROWS ARE DROPPED. Until now the kind came from the window's
+    // POSITION in the snapshot — `primary` was filed as `5h` and `secondary` as
+    // `7d` — so a plan whose only limit is weekly (the owner's, 2026-09-21) has
+    // its seven-day window stored as a five-hour one, summed over five hours of
+    // spend and drawn with a five-hour label. There is no way to re-kind those
+    // rows from SQL: the duration they were missing is exactly what would be
+    // needed. They are derived, local, a day old (ChatGPT samples exist only
+    // since S3a, 2026-09-21) and wrong, so they go and re-seed from the next
+    // reading. `usage_event` and the buckets are NOT touched — they are the
+    // record of what was spent, and their attribution was never in question.
+    //
+    // BOTH KEY SHAPES, because a versioned migration cannot be widened later.
+    // `persistChatgptSamples` files a reading under the vault's resolved
+    // identity and drops only `unknown`, so a stored credential with no
+    // workspace id resolves through `codexNativeIdentity()` and its samples are
+    // keyed `codex:openai:native` — mis-kinded exactly like the `chatgpt:` ones,
+    // and invisible to a `LIKE 'chatgpt:%'` sweep. No other vendor writes that
+    // key, so nothing else is caught by it.
+    version: 25,
+    up(db) {
+      db.exec(`
+        ALTER TABLE usage_window_sample ADD COLUMN window_minutes INTEGER;
+        ALTER TABLE usage_window ADD COLUMN window_minutes INTEGER;
+
+        DELETE FROM usage_window_sample
+          WHERE account_key LIKE 'chatgpt:%' OR account_key = 'codex:openai:native';
+        DELETE FROM usage_window
+          WHERE account_key LIKE 'chatgpt:%' OR account_key = 'codex:openai:native';
+      `)
+    }
   }
 ]
 
@@ -2106,6 +2155,7 @@ interface WindowSampleDbRow {
   canonical_end: number
   account_key: string
   window_kind: string
+  window_minutes: number | null
 }
 
 function rowToWindowSample(row: WindowSampleDbRow): WindowSampleRow {
@@ -2116,7 +2166,8 @@ function rowToWindowSample(row: WindowSampleDbRow): WindowSampleRow {
     usedPercent: row.used_percent,
     canonicalEnd: row.canonical_end,
     accountKey: row.account_key,
-    windowKind: row.window_kind
+    windowKind: row.window_kind,
+    windowMinutes: row.window_minutes
   }
 }
 
@@ -2129,8 +2180,8 @@ export function recordWindowSample(sample: WindowSampleRow): void {
   const db = getDb()
   db.prepare(
     `INSERT INTO usage_window_sample
-       (id, ts, account_uuid, used_percent, canonical_end, account_key, window_kind)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
+       (id, ts, account_uuid, used_percent, canonical_end, account_key, window_kind, window_minutes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     sample.id,
     sample.ts,
@@ -2138,7 +2189,8 @@ export function recordWindowSample(sample: WindowSampleRow): void {
     sample.usedPercent,
     sample.canonicalEnd,
     sample.accountKey,
-    sample.windowKind
+    sample.windowKind,
+    sample.windowMinutes
   )
 }
 
@@ -2508,6 +2560,7 @@ interface UsageWindowDbRow {
   sample_count: number
   closed: number
   updated_at: number
+  window_minutes: number | null
 }
 
 function rowToUsageWindow(row: UsageWindowDbRow): UsageWindowRow {
@@ -2516,6 +2569,7 @@ function rowToUsageWindow(row: UsageWindowDbRow): UsageWindowRow {
     windowKind: row.window_kind,
     canonicalEnd: row.canonical_end,
     windowStart: row.window_start,
+    windowMinutes: row.window_minutes,
     peakPercent: row.peak_percent,
     apiCostUsd: row.api_cost_usd,
     billedCostUsd: row.billed_cost_usd,
@@ -2537,6 +2591,12 @@ export interface WindowSampleGroup {
   canonicalEnd: number
   peakPercent: number
   sampleCount: number
+  /**
+   * The length the samples of this window state, or null when none does.
+   * `MAX` rather than a pick: SQLite's aggregate skips NULLs, so a window
+   * sampled once before v25 and once after knows its length from the newer row.
+   */
+  windowMinutes: number | null
 }
 
 /**
@@ -2552,7 +2612,8 @@ export function windowSampleGroups(sinceTs: number): WindowSampleGroup[] {
     .prepare(
       `SELECT account_key, window_kind, canonical_end,
               MAX(used_percent) AS peak_percent,
-              COUNT(*) AS sample_count
+              COUNT(*) AS sample_count,
+              MAX(window_minutes) AS window_minutes
          FROM usage_window_sample
         WHERE account_key <> 'unknown' AND ts >= ?
         GROUP BY account_key, window_kind, canonical_end`
@@ -2563,13 +2624,15 @@ export function windowSampleGroups(sinceTs: number): WindowSampleGroup[] {
     canonical_end: number
     peak_percent: number
     sample_count: number
+    window_minutes: number | null
   }>
   return rows.map((r) => ({
     accountKey: r.account_key,
     windowKind: r.window_kind,
     canonicalEnd: r.canonical_end,
     peakPercent: r.peak_percent,
-    sampleCount: r.sample_count
+    sampleCount: r.sample_count,
+    windowMinutes: r.window_minutes
   }))
 }
 
@@ -2581,21 +2644,30 @@ export function windowSampleGroups(sinceTs: number): WindowSampleGroup[] {
  */
 export function insertMissingUsageWindows(
   windows: ReadonlyArray<
-    Pick<UsageWindowRow, 'accountKey' | 'windowKind' | 'canonicalEnd' | 'windowStart'>
+    Pick<
+      UsageWindowRow,
+      'accountKey' | 'windowKind' | 'canonicalEnd' | 'windowStart' | 'windowMinutes'
+    >
   >
 ): number {
   if (windows.length === 0) return 0
   const db = getDb()
   const stmt = db.prepare(
     `INSERT OR IGNORE INTO usage_window
-       (account_key, window_kind, canonical_end, window_start)
-     VALUES (?, ?, ?, ?)`
+       (account_key, window_kind, canonical_end, window_start, window_minutes)
+     VALUES (?, ?, ?, ?, ?)`
   )
   let inserted = 0
   db.prepare('BEGIN').run()
   try {
     for (const w of windows) {
-      inserted += stmt.run(w.accountKey, w.windowKind, w.canonicalEnd, w.windowStart).changes
+      inserted += stmt.run(
+        w.accountKey,
+        w.windowKind,
+        w.canonicalEnd,
+        w.windowStart,
+        w.windowMinutes
+      ).changes
     }
     db.prepare('COMMIT').run()
   } catch (err) {
@@ -2648,10 +2720,11 @@ export function upsertUsageWindows(rows: ReadonlyArray<UsageWindowRow>): void {
        account_key, window_kind, canonical_end, window_start, peak_percent,
        api_cost_usd, billed_cost_usd, unknown_cost_count,
        input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
-       sample_count, closed, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       sample_count, closed, updated_at, window_minutes
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(account_key, window_kind, canonical_end) DO UPDATE SET
        window_start       = excluded.window_start,
+       window_minutes     = excluded.window_minutes,
        peak_percent       = excluded.peak_percent,
        api_cost_usd       = excluded.api_cost_usd,
        billed_cost_usd    = excluded.billed_cost_usd,
@@ -2682,7 +2755,8 @@ export function upsertUsageWindows(rows: ReadonlyArray<UsageWindowRow>): void {
         r.cacheReadTokens,
         r.sampleCount,
         r.closed ? 1 : 0,
-        r.updatedAt
+        r.updatedAt,
+        r.windowMinutes
       )
     }
     db.prepare('COMMIT').run()

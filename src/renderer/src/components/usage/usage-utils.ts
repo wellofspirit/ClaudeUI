@@ -1,4 +1,5 @@
 import type { DashboardRange, TokenCounts } from '../../../../shared/types'
+import { isShortWindow } from '../../../../shared/window-kind'
 
 /** Model color palette — match by substring */
 const MODEL_COLORS: Array<{ match: string; color: string }> = [
@@ -225,29 +226,30 @@ export function formatResetRelative(resetsAt: string | null | undefined, now = D
 
 const WEEKDAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
-/** A weekly window kind: `7d`, or a per-model bucket like `7d:fable`. */
-function isWeeklyKind(kind: string): boolean {
-  return kind === '7d' || kind.startsWith('7d:')
-}
-
 /**
  * When a window comes back, in the form that kind of window is ACTED on.
  *
- * A 5-hour window turns over inside a working session, so the useful fact is
- * how long the wait is (`in 1h 48m`). A weekly one is days away, where a
- * duration ("in 6d 3h") is arithmetic the reader has to finish; the weekday and
- * clock time (`Thu 09:00`, 24-hour, the viewer's zone) is the fact they can
- * plan around. The relative form stays available for the tooltip.
+ * A window shorter than a day turns over inside a working session, so the
+ * useful fact is how long the wait is (`in 1h 48m`). A longer one is days away,
+ * where a duration ("in 6d 3h") is arithmetic the reader has to finish; the
+ * weekday and clock time (`Thu 09:00`, 24-hour, the viewer's zone) is the fact
+ * they can plan around. The relative form stays available for the tooltip.
+ *
+ * The split is decided by the window's LENGTH — the minutes the vendor stated
+ * when it did, and the kind's own name otherwise (S3c). It used to key off the
+ * `7d` prefix alone, which put a three-day window in the countdown form and a
+ * weekly ChatGPT window there too, since that one arrived kinded `5h`.
  */
 export function formatReset(
   kind: string,
   resetsAt: string | null | undefined,
-  now = Date.now()
+  now = Date.now(),
+  windowMinutes?: number | null
 ): string {
   if (!resetsAt) return '—'
   const at = Date.parse(resetsAt)
   if (!Number.isFinite(at)) return '—'
-  if (!isWeeklyKind(kind)) return formatResetRelative(resetsAt, now)
+  if (isShortWindow(kind, windowMinutes)) return formatResetRelative(resetsAt, now)
   const d = new Date(at)
   const hh = String(d.getHours()).padStart(2, '0')
   const mm = String(d.getMinutes()).padStart(2, '0')

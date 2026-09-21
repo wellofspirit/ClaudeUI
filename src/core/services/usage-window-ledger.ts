@@ -29,25 +29,34 @@ import {
   windowSampleGroups
 } from './db'
 import type { UsageWindowQuery, UsageWindowRow, UsageWindowSummaryRow } from '../../shared/types'
+import { windowKindMinutes } from '../../shared/window-kind'
 import { logger } from './logger'
 
 const MS_PER_HOUR = 60 * 60 * 1000
 
-export const FIVE_HOUR_MS = 5 * MS_PER_HOUR
-export const SEVEN_DAY_MS = 7 * 24 * MS_PER_HOUR
-
 /**
- * How long a window of each kind lasts — the one statement of the rule that
- * migration v22's seed restates in SQL.
+ * How long one window lasted, in milliseconds — null when nothing says.
  *
- * `5h` is Claude's five-hour block. Everything else is a week: `7d`, and the
- * `7d:<slug>` per-model weekly buckets a Max plan reports. An unrecognised kind
- * falls to a week rather than to nothing, because a window whose start cannot be
- * computed has no numerator at all, and a week is the wider (so more forgiving)
- * of the two spans.
+ * THE DATA WINS. `window_minutes` is what the vendor stated about THIS window
+ * (S3c), so it is read first: a ChatGPT plan whose only limit is weekly delivers
+ * it in the `primary` slot, and the kind alone used to span it over five hours.
+ *
+ * The KIND is the fallback, and it is enough for every Claude window: those are
+ * named by the API (`five_hour`, `seven_day`, `weekly_scoped`) and the name
+ * fixes the length, which is why `5h` is five hours and `7d` / `7d:<slug>` a
+ * week with no duration stored anywhere.
+ *
+ * A kind that names no length and carries no minutes — `primary` / `secondary`,
+ * a window the vendor described only by position — answers NULL, and the
+ * recompute skips it: with no span there is no numerator, and materialising it
+ * would mean picking a length at random and calling the sum a fact.
  */
-export function windowDurationMs(kind: string): number {
-  return kind === '5h' ? FIVE_HOUR_MS : SEVEN_DAY_MS
+export function windowDurationMs(kind: string, windowMinutes?: number | null): number | null {
+  if (typeof windowMinutes === 'number' && Number.isFinite(windowMinutes) && windowMinutes > 0) {
+    return windowMinutes * 60_000
+  }
+  const minutes = windowKindMinutes(kind)
+  return minutes === null ? null : minutes * 60_000
 }
 
 /**
@@ -122,13 +131,22 @@ export function recomputeUsageWindows(now: number): number {
   try {
     const groups = windowSampleGroups(now - SAMPLE_LOOKBACK_MS)
 
+    // A window of unknown LENGTH is sampled and never materialised (S3c): there
+    // is no interval to sum, so a row for it could only hold a made-up one.
     insertMissingUsageWindows(
-      groups.map((g) => ({
-        accountKey: g.accountKey,
-        windowKind: g.windowKind,
-        canonicalEnd: g.canonicalEnd,
-        windowStart: g.canonicalEnd - windowDurationMs(g.windowKind)
-      }))
+      groups.flatMap((g) => {
+        const duration = windowDurationMs(g.windowKind, g.windowMinutes)
+        if (duration === null) return []
+        return [
+          {
+            accountKey: g.accountKey,
+            windowKind: g.windowKind,
+            canonicalEnd: g.canonicalEnd,
+            windowStart: g.canonicalEnd - duration,
+            windowMinutes: g.windowMinutes
+          }
+        ]
+      })
     )
 
     const open = getOpenUsageWindows()
@@ -138,9 +156,16 @@ export function recomputeUsageWindows(now: number): number {
       groups.map((g) => [windowKey(g.accountKey, g.windowKind, g.canonicalEnd), g])
     )
 
-    const rebuilt: UsageWindowRow[] = open.map((w) => {
+    const rebuilt: UsageWindowRow[] = open.flatMap((w) => {
       const group = byWindow.get(windowKey(w.accountKey, w.windowKind, w.canonicalEnd))
-      const windowStart = w.canonicalEnd - windowDurationMs(w.windowKind)
+      // The row's own minutes first, then what the samples now say: a row
+      // seeded before the length was known learns it from the next reading.
+      const windowMinutes = w.windowMinutes ?? group?.windowMinutes ?? null
+      const duration = windowDurationMs(w.windowKind, windowMinutes)
+      // Cannot happen for a row this module inserted, and left alone rather
+      // than summed over a guessed span if it ever does.
+      if (duration === null) return []
+      const windowStart = w.canonicalEnd - duration
 
       let apiCostUsd = 0
       let billedCostUsd = 0
@@ -174,26 +199,29 @@ export function recomputeUsageWindows(now: number): number {
         cacheReadTokens += row.cacheReadTokens
       }
 
-      return {
-        accountKey: w.accountKey,
-        windowKind: w.windowKind,
-        canonicalEnd: w.canonicalEnd,
-        windowStart,
-        // The highest reading ever SEEN, not the highest still on disk: samples
-        // are pruned at 30 days, so a freshly recomputed maximum can only ever
-        // be lower than one an earlier pass recorded.
-        peakPercent: Math.max(w.peakPercent, group?.peakPercent ?? 0),
-        apiCostUsd,
-        billedCostUsd,
-        unknownCostCount,
-        inputTokens,
-        outputTokens,
-        cacheWriteTokens,
-        cacheReadTokens,
-        sampleCount: Math.max(w.sampleCount, group?.sampleCount ?? 0),
-        closed: w.canonicalEnd < now - WINDOW_CLOSE_GRACE_MS,
-        updatedAt: now
-      }
+      return [
+        {
+          accountKey: w.accountKey,
+          windowKind: w.windowKind,
+          canonicalEnd: w.canonicalEnd,
+          windowStart,
+          windowMinutes,
+          // The highest reading ever SEEN, not the highest still on disk: samples
+          // are pruned at 30 days, so a freshly recomputed maximum can only ever
+          // be lower than one an earlier pass recorded.
+          peakPercent: Math.max(w.peakPercent, group?.peakPercent ?? 0),
+          apiCostUsd,
+          billedCostUsd,
+          unknownCostCount,
+          inputTokens,
+          outputTokens,
+          cacheWriteTokens,
+          cacheReadTokens,
+          sampleCount: Math.max(w.sampleCount, group?.sampleCount ?? 0),
+          closed: w.canonicalEnd < now - WINDOW_CLOSE_GRACE_MS,
+          updatedAt: now
+        }
+      ]
     })
 
     upsertUsageWindows(rebuilt)

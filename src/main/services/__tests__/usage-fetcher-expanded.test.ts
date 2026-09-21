@@ -228,8 +228,9 @@ describe('UsageFetcher — 429 rate-limit behavior', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(result.error).toBe('Rate limited')
-    // Default empty window shape — no real data parsed from the 429 body.
-    expect(result.fiveHour).toEqual({ usedPercent: 0, resetsAt: null })
+    // No window at all — nothing was parsed from the 429 body, and S3c stopped
+    // substituting a 0 % five-hour window for "we do not know".
+    expect(result.fiveHour).toBeNull()
   })
 
   it('preserves previously-cached usage data on 429, only overlaying the error', async () => {
@@ -242,14 +243,14 @@ describe('UsageFetcher — 429 rate-limit behavior', () => {
     )
     const ok = await fetcher.fetch()
     expect(ok.error).toBeNull()
-    expect(ok.fiveHour.usedPercent).toBe(42)
+    expect(ok.fiveHour!.usedPercent).toBe(42)
 
     // Second call: 429 — error set, but data from ok is retained
     fetchMock.mockResolvedValueOnce(makeFetchResponse(429, {}))
     const rateLimited = await fetcher.fetch()
 
     expect(rateLimited.error).toBe('Rate limited')
-    expect(rateLimited.fiveHour.usedPercent).toBe(42) // preserved from prior fetch
+    expect(rateLimited.fiveHour!.usedPercent).toBe(42) // preserved from prior fetch
     expect(rateLimited.sevenDay?.usedPercent).toBe(20)
   })
 })
@@ -306,7 +307,7 @@ describe('UsageFetcher — disk cache loadCache()', () => {
 
     const cached = await fetcher.loadCache()
     expect(cached).not.toBeNull()
-    expect(cached!.fiveHour.usedPercent).toBe(55)
+    expect(cached!.fiveHour!.usedPercent).toBe(55)
     expect(cached!.fetchedAt).toBe(twoMinAgo)
   })
 
@@ -349,8 +350,8 @@ describe('UsageFetcher — utilization scale conversion (0-1 vs 0-100)', () => {
 
     const usage = fetcher.getLastUsage()
     expect(usage).not.toBeNull()
-    expect(usage!.fiveHour.usedPercent).toBe(50)
-    expect(usage!.fiveHour.resetsAt).toBe(new Date(1737000000 * 1000).toISOString())
+    expect(usage!.fiveHour!.usedPercent).toBe(50)
+    expect(usage!.fiveHour!.resetsAt).toBe(new Date(1737000000 * 1000).toISOString())
   })
 
   it('updateFromHeaderUtilization converts 0-1 fraction to 0-100 percent', () => {
@@ -361,7 +362,7 @@ describe('UsageFetcher — utilization scale conversion (0-1 vs 0-100)', () => {
 
     const usage = fetcher.getLastUsage()
     expect(usage).not.toBeNull()
-    expect(usage!.fiveHour.usedPercent).toBe(50)
+    expect(usage!.fiveHour!.usedPercent).toBe(50)
     expect(usage!.sevenDay?.usedPercent).toBe(25)
   })
 
@@ -376,7 +377,7 @@ describe('UsageFetcher — utilization scale conversion (0-1 vs 0-100)', () => {
     const result = await fetcher.fetch()
 
     expect(result.error).toBeNull()
-    expect(result.fiveHour.usedPercent).toBe(50)
+    expect(result.fiveHour!.usedPercent).toBe(50)
   })
 })
 
@@ -504,7 +505,7 @@ describe('UsageFetcher — merge semantics across header + event sources', () =>
     fetcher.updateFromHeaderUtilization({
       five_hour: { utilization: 0.4, resets_at: 1737000000 }
     })
-    expect(fetcher.getLastUsage()!.fiveHour.usedPercent).toBe(40)
+    expect(fetcher.getLastUsage()!.fiveHour!.usedPercent).toBe(40)
     expect(fetcher.getLastUsage()!.sevenDay).toBeNull()
 
     // Layer a seven_day update from a rate_limit_event — five_hour must survive
@@ -515,7 +516,7 @@ describe('UsageFetcher — merge semantics across header + event sources', () =>
     })
 
     const usage = fetcher.getLastUsage()!
-    expect(usage.fiveHour.usedPercent).toBe(40) // preserved
+    expect(usage.fiveHour!.usedPercent).toBe(40) // preserved
     expect(usage.sevenDay?.usedPercent).toBe(30) // newly added
   })
 
@@ -525,7 +526,7 @@ describe('UsageFetcher — merge semantics across header + event sources', () =>
       rateLimitType: 'five_hour',
       resetsAt: 1737000000
     })
-    expect(fetcher.getLastUsage()!.fiveHour.usedPercent).toBe(20)
+    expect(fetcher.getLastUsage()!.fiveHour!.usedPercent).toBe(20)
 
     // Second event for the same window — newer value wins
     fetcher.updateFromRateLimitEvent({
@@ -533,8 +534,8 @@ describe('UsageFetcher — merge semantics across header + event sources', () =>
       rateLimitType: 'five_hour',
       resetsAt: 1737001000
     })
-    expect(fetcher.getLastUsage()!.fiveHour.usedPercent).toBe(90)
-    expect(fetcher.getLastUsage()!.fiveHour.resetsAt).toBe(
+    expect(fetcher.getLastUsage()!.fiveHour!.usedPercent).toBe(90)
+    expect(fetcher.getLastUsage()!.fiveHour!.resetsAt).toBe(
       new Date(1737001000 * 1000).toISOString()
     )
   })
@@ -555,7 +556,7 @@ describe('UsageFetcher — merge semantics across header + event sources', () =>
     })
     const second = fetcher.getLastUsage()!
     expect(second.error).toBeNull()
-    expect(second.fiveHour.usedPercent).toBe(10)
+    expect(second.fiveHour!.usedPercent).toBe(10)
     expect(second.sevenDay?.usedPercent).toBe(20)
   })
 })
@@ -602,7 +603,7 @@ describe('UsageFetcher — cache TTL short-circuits startPolling() network call'
     for (let i = 0; i < 20; i++) await Promise.resolve()
 
     expect(fetchMock).not.toHaveBeenCalled()
-    expect(fetcher.getLastUsage()?.fiveHour.usedPercent).toBe(12)
+    expect(fetcher.getLastUsage()?.fiveHour?.usedPercent).toBe(12)
   })
 
   it('fetches at launch when the cached window is not indicative (no resetsAt)', async () => {
@@ -630,7 +631,7 @@ describe('UsageFetcher — cache TTL short-circuits startPolling() network call'
     fetcher.startPolling()
 
     await vi.waitFor(() => {
-      expect(fetcher.getLastUsage()?.fiveHour.usedPercent).toBe(33)
+      expect(fetcher.getLastUsage()?.fiveHour?.usedPercent).toBe(33)
     })
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
@@ -666,7 +667,7 @@ describe('UsageFetcher — cache TTL short-circuits startPolling() network call'
     })
     expect(fetchMock.mock.calls[0][0]).toBe('https://api.anthropic.com/api/oauth/usage')
     await vi.waitFor(() => {
-      expect(fetcher.getLastUsage()?.fiveHour.usedPercent).toBe(33)
+      expect(fetcher.getLastUsage()?.fiveHour?.usedPercent).toBe(33)
     })
   })
 })

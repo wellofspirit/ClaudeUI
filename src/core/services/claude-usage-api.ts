@@ -20,7 +20,6 @@
 
 import { readFile } from 'node:fs/promises'
 import type { AccountLimitWindow, AccountUsage, ExtraUsage, RateWindow } from '../../shared/types'
-import { logger } from './logger'
 import { writeJsonAtomicAsync } from './write-json-atomic'
 
 /** The OAuth credential cli.js stores. Token material — never log a value of it. */
@@ -452,17 +451,12 @@ export function parseUsageResponse(data: Record<string, unknown>): AccountUsage 
     }
   }
 
+  // No five_hour in the payload means the account HAS no five-hour window — an
+  // API-key, Bedrock or Vertex session, where `rate_limits` is unavailable. It
+  // used to default to a 0 % window, which drew a meter and wrote samples for a
+  // window that does not exist (S3c); there is nothing to warn about and
+  // nothing to substitute.
   const fiveHour = parseWindow('five_hour')
-
-  // Warn only on a genuinely unrecognized HTTP shape. The structured fallback
-  // legitimately reports no five_hour when rate_limits is unavailable (API key
-  // / Bedrock / Vertex sessions) — that's not an error.
-  if (!fiveHour && !isStructured && Object.keys(data).length > 0) {
-    logger.warn('UsageFetcher', 'API response missing five_hour utilization — defaulting to 0%', {
-      keys: Object.keys(data),
-      five_hour: data['five_hour']
-    })
-  }
 
   // extra_usage: { is_enabled, monthly_limit, used_credits, utilization }.
   // Top-level in the HTTP shape, nested under rate_limits in the structured one
@@ -518,7 +512,7 @@ export function parseUsageResponse(data: Record<string, unknown>): AccountUsage 
   const planName = typeof data.subscription_type === 'string' ? data.subscription_type : null
 
   return {
-    fiveHour: fiveHour ?? { usedPercent: 0, resetsAt: null },
+    fiveHour,
     sevenDay: parseWindow('seven_day'),
     sevenDaySonnet: parseWindow('seven_day_sonnet'),
     sevenDayOpus: parseWindow('seven_day_opus'),
@@ -559,9 +553,15 @@ export function weeklyScopedKind(label: string): string {
  * `7d:<model>` too rather than a third concept. An account reporting both (none
  * observed) files them as separate series, which is the honest reading: two
  * numbers the server chose to send separately.
+ *
+ * EVERY window here is one the payload named, the five-hour one included: an
+ * account the API reports no `five_hour` for gets no `5h` window, no sample
+ * under one and no meter (S3c). The kinds are the API's own vocabulary, which is
+ * why none of them is derived from a duration.
  */
 export function claudeLimitWindows(usage: AccountUsage): AccountLimitWindow[] {
-  const windows: AccountLimitWindow[] = [{ kind: '5h', label: '5-hour', ...usage.fiveHour }]
+  const windows: AccountLimitWindow[] = []
+  if (usage.fiveHour) windows.push({ kind: '5h', label: '5-hour', ...usage.fiveHour })
   if (usage.sevenDay) windows.push({ kind: '7d', label: '7-day', ...usage.sevenDay })
   if (usage.sevenDaySonnet) {
     windows.push({ kind: '7d:sonnet', label: '7-day Sonnet', ...usage.sevenDaySonnet })

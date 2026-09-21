@@ -31,9 +31,11 @@ import type {
   AccountLimits,
   AccountLimitWindow,
   AccountUsage,
-  BillingType
+  BillingType,
+  RateWindow
 } from '../../shared/types'
 import { anthropicAccountKey, UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
+import { windowKindLabel, windowKindsForReading } from '../../shared/window-kind'
 import { usageFetcher, getCliUserAgent } from './usage-fetcher'
 import { claudeLimitWindows, fetchClaudeUsage } from './claude-usage-api'
 import { claudeDirAccountKey, resolveClaudeDirIdentity } from './claude-account-identity'
@@ -63,7 +65,9 @@ export interface UsageProvider {
 const claudeUsageProvider: UsageProvider = {
   getWindow(): UsageWindow | null {
     const usage = usageFetcher.getLastUsage()
-    if (!usage || usage.error) return null
+    // No five-hour window is now literally none (S3c) rather than a fabricated
+    // 0 % one, and this gate already means "no window is available".
+    if (!usage || usage.error || !usage.fiveHour) return null
     return { usedPercent: usage.fiveHour.usedPercent, resetsAt: usage.fiveHour.resetsAt }
   }
 }
@@ -116,14 +120,6 @@ async function credentialsMtime(path: string): Promise<number | null> {
   } catch {
     return null
   }
-}
-
-/** The display name of a window kind read back from storage (which keeps no label). */
-function windowKindLabel(kind: string): string {
-  if (kind === '5h') return '5-hour'
-  if (kind === '7d') return '7-day'
-  if (kind.startsWith('7d:')) return `7-day ${kind.slice(3).replace(/-/g, ' ')}`
-  return kind
 }
 
 /**
@@ -358,10 +354,13 @@ function lastPersistedReading(
   if (samples.length === 0) return { windows: [], observedAt: 0, state: 'unavailable' }
   const windows: AccountLimitWindow[] = samples.map((sample) => ({
     kind: sample.windowKind,
+    // Storage keeps no label, so it is rebuilt from the kind — the one rule
+    // every surface labels a window by (S3c).
     label: windowKindLabel(sample.windowKind),
     usedPercent: sample.usedPercent,
     // The canonical end IS the window's reset instant (ADR-011's snap rule).
-    resetsAt: new Date(sample.canonicalEnd).toISOString()
+    resetsAt: new Date(sample.canonicalEnd).toISOString(),
+    windowMinutes: sample.windowMinutes
   }))
   return {
     windows,
@@ -388,6 +387,17 @@ const claudeLimitsProvider: LimitsProvider = {
   }
 }
 
+/** One ChatGPT window in ADR-071 §6's vocabulary, under the kind the reading gave it. */
+function chatgptWindow(kind: string, window: RateWindow): AccountLimitWindow {
+  return {
+    kind,
+    label: windowKindLabel(kind),
+    usedPercent: window.usedPercent,
+    resetsAt: window.resetsAt,
+    windowMinutes: window.windowMinutes ?? null
+  }
+}
+
 const chatgptLimitsProvider: LimitsProvider = {
   vendorId: 'openai',
   async read({ refresh }) {
@@ -398,9 +408,15 @@ const chatgptLimitsProvider: LimitsProvider = {
     const limits: AccountLimits[] = []
     for (const [vaultAccountId, account] of Object.entries(snapshot)) {
       const identity = await credentialSync.accountIdentity(vaultAccountId)
+      // The KIND comes from the length the backend stated, never from the slot
+      // the window arrived in (S3c): a plan whose only limit is weekly delivers
+      // it as `primary`, and position said it was a five-hour window. The SAME
+      // helper the store's sample writer uses, so a meter and the sample behind
+      // it can never be filed under two different kinds.
+      const kinds = windowKindsForReading(account)
       const windows: AccountLimitWindow[] = []
-      if (account.primary) windows.push({ kind: '5h', label: '5-hour', ...account.primary })
-      if (account.secondary) windows.push({ kind: '7d', label: '7-day', ...account.secondary })
+      if (account.primary) windows.push(chatgptWindow(kinds.primary, account.primary))
+      if (account.secondary) windows.push(chatgptWindow(kinds.secondary, account.secondary))
       limits.push({
         accountKey: identity.accountKey,
         label: identity.accountLabel ?? account.email ?? vaultAccountId,

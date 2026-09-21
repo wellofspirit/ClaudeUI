@@ -710,7 +710,7 @@ export class BlockUsageService {
     const apiUsage = usageFetcher.getLastUsage()
     const activeAccount = usageFetcher.getActiveAccount()
     let currentWindowEnd: number | null = null
-    if (apiUsage && !apiUsage.error && apiUsage.fiveHour.resetsAt) {
+    if (apiUsage && !apiUsage.error && apiUsage.fiveHour?.resetsAt) {
       currentWindowEnd = this.registerWindow(
         apiUsage.fiveHour.resetsAt,
         activeAccount?.email ?? null
@@ -1261,7 +1261,9 @@ export class BlockUsageService {
     blockEntries: ParsedEntry[] = []
   ): UsageBlock['projectedUsage'] {
     const apiUsage = usageFetcher.getLastUsage()
-    if (!apiUsage || apiUsage.error) return null
+    // No five-hour window reported at all (an API-key account, S3c) is the same
+    // answer as an expired one: there is no percent to project against.
+    if (!apiUsage || apiUsage.error || !apiUsage.fiveHour) return null
 
     // No known window (expired / not yet reported): the percent denominator
     // is meaningless — pause the projection entirely.
@@ -1605,8 +1607,8 @@ export class BlockUsageService {
     const apiUsage = usageFetcher.getLastUsage()
     return {
       timestamp: Date.now(),
-      apiUsagePercent: apiUsage?.fiveHour.usedPercent ?? 0,
-      apiResetAt: apiUsage?.fiveHour.resetsAt ?? null,
+      apiUsagePercent: apiUsage?.fiveHour?.usedPercent ?? 0,
+      apiResetAt: apiUsage?.fiveHour?.resetsAt ?? null,
       activeBlockId: currentBlock?.id ?? null,
       blockTokens: currentBlock?.tokens ?? null,
       blockCostUsd: currentBlock?.costUsd ?? 0,

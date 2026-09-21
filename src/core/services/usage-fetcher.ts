@@ -355,7 +355,7 @@ export class UsageFetcher {
     this.loadCache()
       .then((cached) => {
         const windowIndicative =
-          cached?.fiveHour.resetsAt != null &&
+          cached?.fiveHour?.resetsAt != null &&
           new Date(cached.fiveHour.resetsAt).getTime() > Date.now()
         if (cached) {
           this.publish(cached)
@@ -475,7 +475,7 @@ export class UsageFetcher {
    * its resets_at without waiting for the regular poll. Throttled.
    */
   fetchIfWindowUnknown(): void {
-    const resetsAt = this.lastUsage?.fiveHour.resetsAt
+    const resetsAt = this.lastUsage?.fiveHour?.resetsAt
     const windowKnown = resetsAt != null && new Date(resetsAt).getTime() > Date.now()
     if (windowKnown) return
     if (Date.now() - this.lastFetchStartedAt < UNKNOWN_WINDOW_FETCH_THROTTLE_MS) return
@@ -1256,7 +1256,7 @@ export class UsageFetcher {
       clearTimeout(this.expiryTimer)
       this.expiryTimer = null
     }
-    const resetsAt = this.lastUsage?.fiveHour.resetsAt
+    const resetsAt = this.lastUsage?.fiveHour?.resetsAt
     if (!resetsAt) return
     const resetMs = new Date(resetsAt).getTime()
     if (isNaN(resetMs)) return
@@ -1378,7 +1378,10 @@ export class UsageFetcher {
       if (!data.fetchedAt || Date.now() - data.fetchedAt > CACHE_STALE_MS) return null
       // A cache written before sevenDayModels or accountLabel existed has no
       // such key. The label is re-stamped on publish anyway; this keeps the
-      // object honest for anything that reads it in between.
+      // object honest for anything that reads it in between. A pre-S3c file's
+      // fabricated 0 % `fiveHour` is deliberately NOT sanitised: it carries no
+      // `resetsAt`, so it is not window-indicative, writes no sample and is
+      // replaced by the immediate fetch that a non-indicative cache triggers.
       return {
         ...data,
         sevenDayModels: data.sevenDayModels ?? null,
@@ -1403,9 +1406,14 @@ export class UsageFetcher {
     }, CACHE_WRITE_DEBOUNCE_MS)
   }
 
+  /**
+   * The merge base for a header or `rate_limit_event` update that arrives before
+   * any full read. Every window is null: nothing has been observed yet, and a
+   * placeholder 0 % five-hour window is exactly what S3c removed.
+   */
   private defaultUsage(): AccountUsage {
     return {
-      fiveHour: { usedPercent: 0, resetsAt: null },
+      fiveHour: null,
       sevenDay: null,
       sevenDaySonnet: null,
       sevenDayOpus: null,
@@ -1612,7 +1620,7 @@ export class UsageFetcher {
 
   private errorResult(message: string): AccountUsage {
     return {
-      fiveHour: { usedPercent: 0, resetsAt: null },
+      fiveHour: null,
       sevenDay: null,
       sevenDaySonnet: null,
       sevenDayOpus: null,

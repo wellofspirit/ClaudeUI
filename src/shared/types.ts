@@ -2761,6 +2761,17 @@ export interface ClaudeAPI
 export interface RateWindow {
   usedPercent: number // 0-100
   resetsAt: string | null // ISO8601 timestamp
+  /**
+   * How long the window lasts, when the vendor says (ADR-071 §6, S3c).
+   *
+   * ChatGPT states it (`limit_window_seconds` → Codex's `window_minutes` →
+   * `windowDurationMins`) and it is what the window's KIND is derived from, so
+   * a plan with only a weekly limit is no longer filed as a five-hour one.
+   * Claude never states it: its windows are named by the API itself
+   * (`five_hour`, `seven_day`), so the name carries the length and this stays
+   * absent. Absent and null mean the same thing — no stated length.
+   */
+  windowMinutes?: number | null
 }
 
 /**
@@ -2772,9 +2783,12 @@ export interface RateWindow {
  * window resets"), converted to ISO 8601 on the way in so the panel's existing
  * `formatResetTime` works unchanged.
  *
- * `primary` is the rolling 5-hour window and `secondary` the weekly one; either
- * is null when the backend did not report it, which the panel shows as
- * unavailable rather than as zero usage.
+ * `primary` and `secondary` are SLOTS, not lengths (corrected 2026-09-21, S3c):
+ * the backend fills whichever ones the plan has, and a plan with one weekly
+ * limit delivers it as `primary`. How long each window lasts is
+ * {@link RateWindow.windowMinutes}, and `windowKindForMinutes` is what turns
+ * that into a kind and a label. Either slot is null when the backend did not
+ * report it, which the panel shows as unavailable rather than as zero usage.
  */
 export interface ChatgptAccountLimits {
   email?: string
@@ -2811,10 +2825,12 @@ export interface AccountLimitWindow {
    * identity of spend.
    */
   kind: '5h' | '7d' | string
-  /** The display name — `5-hour`, `7-day`, `7-day Fable`. */
+  /** The display name — `5-hour`, `7-day`, `7-day Fable`, `limit`. */
   label: string
   usedPercent: number
   resetsAt: string | null
+  /** The window's length when the vendor stated it — see {@link RateWindow.windowMinutes}. */
+  windowMinutes?: number | null
 }
 
 /**
@@ -2860,8 +2876,15 @@ export interface UsageWindowRow {
   /** `5h`, `7d`, `7d:<slug>` — the same vocabulary `usage_window_sample` uses. */
   windowKind: string
   canonicalEnd: number
-  /** `canonicalEnd - windowDurationMs(windowKind)`, stored so a reader need not restate the rule. */
+  /** `canonicalEnd - windowDurationMs(windowKind, windowMinutes)`, stored so a reader need not restate the rule. */
   windowStart: number
+  /**
+   * The length the vendor stated, when it did (S3c). It is what
+   * {@link windowStart} was computed from; a row without one had its length
+   * read off its kind, which is Claude's case and every row written before the
+   * duration was kept.
+   */
+  windowMinutes: number | null
   /** The highest utilization ever OBSERVED for the window, not the highest still on disk. */
   peakPercent: number
   /**
@@ -3042,7 +3065,15 @@ export interface UsageDashboardData {
 }
 
 export interface AccountUsage {
-  fiveHour: RateWindow
+  /**
+   * Null when the API reported no five-hour window at all (S3c).
+   *
+   * It used to default to `{ usedPercent: 0, resetsAt: null }`, which drew a
+   * 0 % meter and wrote samples under a window the account does not have — the
+   * case an API-key, Bedrock or Vertex session hits, where `rate_limits` is
+   * unavailable. An absent window is now absent (ADR-030).
+   */
+  fiveHour: RateWindow | null
   sevenDay: RateWindow | null
   sevenDaySonnet: RateWindow | null
   sevenDayOpus: RateWindow | null

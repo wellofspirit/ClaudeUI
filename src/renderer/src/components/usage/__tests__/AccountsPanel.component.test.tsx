@@ -147,6 +147,112 @@ describe('AccountsPanel — limit meters', () => {
     expect(within(sevenDay).getByTestId('AccountsPanel.meter.reset')).toHaveTextContent('Thu 09:00')
   })
 
+  /**
+   * S3c — a ChatGPT plan whose ONLY limit is weekly delivers it in the
+   * `primary` slot. Kinded by position it arrived here as `5h` / `5-hour` and
+   * its reset was drawn as a countdown ("in 28h 55m"); kinded by the duration
+   * the backend states, it is the weekly window it always was.
+   */
+  it('renders a lone weekly ChatGPT window as 7-day, with a weekday reset', () => {
+    const weekly = new Date(2026, 8, 24, 9, 0, 0)
+    render(
+      <AccountsPanel
+        data={makeDashboard()}
+        limits={[
+          makeLimits({
+            accountKey: 'chatgpt:ws-1:user-1',
+            label: 'chat@example.test',
+            vendorId: 'openai',
+            windows: [
+              makeWindow({
+                kind: '7d',
+                label: '7-day',
+                usedPercent: 63,
+                resetsAt: weekly.toISOString(),
+                windowMinutes: 10_080
+              })
+            ]
+          })
+        ]}
+        blockUsage={null}
+        providerColors={COLORS}
+      />
+    )
+
+    const meter = screen.getByTestId('AccountsPanel.meter')
+    expect(meter).toHaveAttribute('data-kind', '7d')
+    expect(meter).toHaveTextContent('7-day')
+    expect(meter.getAttribute('title')).toContain('resets Thu 09:00')
+    expect(within(meter).getByTestId('AccountsPanel.meter.reset')).toHaveTextContent('Thu 09:00')
+  })
+
+  /**
+   * Round 2 — a plan whose two limits are the same length. The meters are keyed
+   * by kind, so `7d` twice would be a duplicate React key and one row standing
+   * for two windows; `7d:secondary` keeps them distinct and labelled.
+   */
+  it('draws two same-length windows as two meters with distinct kinds', () => {
+    render(
+      <AccountsPanel
+        data={makeDashboard()}
+        limits={[
+          makeLimits({
+            accountKey: 'chatgpt:ws-1:user-1',
+            vendorId: 'openai',
+            windows: [
+              makeWindow({ kind: '7d', label: '7-day', usedPercent: 63, windowMinutes: 10_080 }),
+              makeWindow({
+                kind: '7d:secondary',
+                label: '7-day secondary',
+                usedPercent: 12,
+                windowMinutes: 10_080
+              })
+            ]
+          })
+        ]}
+        blockUsage={null}
+        providerColors={COLORS}
+      />
+    )
+
+    const meters = screen.getAllByTestId('AccountsPanel.meter')
+    expect(meters.map((m) => m.getAttribute('data-kind'))).toEqual(['7d', '7d:secondary'])
+    expect(meters[1]).toHaveTextContent('7-day secondary')
+    expect(meters[1]).toHaveTextContent('12%')
+  })
+
+  /**
+   * The meter has to PASS the stated length on, not just the kind: the reset
+   * form is chosen by length now, and a row whose kind and duration disagree —
+   * a reading kinded before S3c, refreshed after it — must follow the duration.
+   */
+  it('chooses the reset form from the stated minutes, not the kind', () => {
+    const weekly = new Date(2026, 8, 24, 9, 0, 0)
+    render(
+      <AccountsPanel
+        data={makeDashboard()}
+        limits={[
+          makeLimits({
+            windows: [
+              makeWindow({
+                kind: '5h',
+                label: '5-hour',
+                resetsAt: weekly.toISOString(),
+                windowMinutes: 10_080
+              })
+            ]
+          })
+        ]}
+        blockUsage={null}
+        providerColors={COLORS}
+      />
+    )
+
+    expect(
+      within(screen.getByTestId('AccountsPanel.meter')).getByTestId('AccountsPanel.meter.reset')
+    ).toHaveTextContent('Thu 09:00')
+  })
+
   it('keeps the icon and the percent at every width, and only folds the reset', () => {
     render(
       <AccountsPanel

@@ -7,6 +7,7 @@ import type {
   RateWindow
 } from '../../../../shared/types'
 import { formatTokenCount } from '../usage/usage-utils'
+import { windowKindLabel, windowKindsForReading } from '../../../../shared/window-kind'
 
 export function getUsageColor(pct: number): string {
   if (pct >= 80) return '#ef4444' // red
@@ -103,6 +104,23 @@ export function ExtraUsageBar({ extra }: { extra: ExtraUsage }): React.JSX.Eleme
 }
 
 /**
+ * A ChatGPT window's kind as THIS panel spells it: `7-Day`, `5-Hour`,
+ * `1-Hour`, `Limit` when the backend stated no duration (S3c).
+ *
+ * Title case, unlike every other surface: the Claude bars beside it are
+ * `5-Hour Session` and `7-Day (all models)`, and a lower-case `7-day` in that
+ * column reads as a different kind of thing. The accounts panel and the Plan
+ * value tab keep the shared lower-case label, which matches their own Claude
+ * rows (orchestrator ruling, round 2).
+ */
+function chatgptWindowLabel(kind: string): string {
+  return windowKindLabel(kind).replace(
+    /(^|[\s-])([a-z])/g,
+    (_, before, first) => `${before}${first.toUpperCase()}`
+  )
+}
+
+/**
  * ChatGPT subscription usage, one block per stored vault account (ADR-068 §2).
  *
  * Beside Claude's rather than instead of it: a ClaudeUI user can be paying for
@@ -126,6 +144,7 @@ export function ChatgptUsageBlock({
   label: string
   limits: ChatgptAccountLimits
 }): React.JSX.Element {
+  const kinds = windowKindsForReading(limits)
   return (
     <div data-testid="UsagePanel.chatgptAccount" data-id={label} className="mb-2 last:mb-0">
       <div className="flex items-baseline justify-between gap-2 mb-1">
@@ -136,8 +155,21 @@ export function ChatgptUsageBlock({
       </div>
       {limits.primary || limits.secondary ? (
         <>
-          {limits.primary && <UsageProgressBar label="5-Hour" window={limits.primary} />}
-          {limits.secondary && <UsageProgressBar label="Weekly" window={limits.secondary} />}
+          {/* The label is the window's LENGTH, from the duration the backend
+              stated (S3c) — not its slot. A plan whose only limit is weekly
+              delivers it as `primary`, and calling that "5-Hour" is how a
+              seven-day meter came to say it resets in 28 hours. Both slots go
+              through the one helper that keeps their kinds distinct when they
+              state the same length. */}
+          {limits.primary && (
+            <UsageProgressBar label={chatgptWindowLabel(kinds.primary)} window={limits.primary} />
+          )}
+          {limits.secondary && (
+            <UsageProgressBar
+              label={chatgptWindowLabel(kinds.secondary)}
+              window={limits.secondary}
+            />
+          )}
         </>
       ) : (
         !limits.credits && (
@@ -185,6 +217,14 @@ export function UsagePanel({
 
   const currentBlock = blockUsage?.currentBlock
 
+  const hasClaudeWindow = !!(
+    usage?.fiveHour ||
+    usage?.sevenDay ||
+    usage?.sevenDayOpus ||
+    usage?.sevenDaySonnet ||
+    usage?.sevenDayModels?.length
+  )
+
   // Format block summary
   let blockSummary: string | null = null
   if (currentBlock) {
@@ -222,7 +262,9 @@ export function UsagePanel({
               {usage.accountLabel}
             </div>
           )}
-          <UsageProgressBar label="5-Hour Session" window={usage.fiveHour} />
+          {/* Absent on an account the API reports no five-hour window for
+              (S3c) — an API-key or Bedrock session. It used to draw 0 %. */}
+          {usage.fiveHour && <UsageProgressBar label="5-Hour Session" window={usage.fiveHour} />}
           {usage.sevenDay && (
             <UsageProgressBar label="7-Day (all models)" window={usage.sevenDay} />
           )}
@@ -241,6 +283,13 @@ export function UsagePanel({
             return <UsageProgressBar key={label} label={`7-Day ${label}`} window={w} />
           })}
           {usage.extraUsage && <ExtraUsageBar extra={usage.extraUsage} />}
+          {/* An account with no windows at all — an API key, Bedrock, Vertex —
+              says so rather than leaving the block blank (ADR-030). */}
+          {!hasClaudeWindow && !usage.extraUsage && (
+            <div data-testid="UsagePanel.noWindows" className="text-[10px] text-text-muted">
+              No window limits for this account
+            </div>
+          )}
         </>
       ) : (
         <div className="text-[10px] text-text-muted">No live API data</div>
@@ -359,10 +408,13 @@ export function UsageRing(): React.JSX.Element {
   const strokeWidth = 2.5
   const radius = (size - strokeWidth) / 2
   const circumference = 2 * Math.PI * radius
-  const pct = usage?.error ? 0 : (usage?.fiveHour.usedPercent ?? 0)
+  // The ring IS the five-hour window. An account that has none (S3c) reads as
+  // no data rather than as 0 % used — the same treatment as an error.
+  const fiveHour = usage && !usage.error ? usage.fiveHour : null
+  const pct = fiveHour?.usedPercent ?? 0
   const dashOffset = circumference - (circumference * Math.min(100, pct)) / 100
-  const color = usage && !usage.error ? getUsageColor(pct) : '#6b7280' // grey when no data
-  const displayText = usage && !usage.error ? `${Math.round(pct)}` : usage?.error ? '!' : '—'
+  const color = fiveHour ? getUsageColor(pct) : '#6b7280' // grey when no data
+  const displayText = fiveHour ? `${Math.round(pct)}` : usage?.error ? '!' : '—'
 
   return (
     <div data-testid="UsageRing" ref={ringRef} className="relative flex items-center gap-2">
@@ -370,7 +422,10 @@ export function UsageRing(): React.JSX.Element {
         data-testid="UsageRing.toggle"
         onClick={() => setShowPanel(!showPanel)}
         className="relative flex items-center justify-center cursor-default hover:opacity-80 transition-opacity"
-        title={usage?.error || `5hr usage: ${Math.round(pct)}%`}
+        title={
+          usage?.error ||
+          (fiveHour ? `5hr usage: ${Math.round(pct)}%` : 'No 5-hour window for this account')
+        }
       >
         <svg width={size} height={size} className={isRefreshing ? 'animate-spin' : ''}>
           {/* Background track */}
@@ -418,7 +473,7 @@ export function UsageRing(): React.JSX.Element {
         </svg>
       </button>
       <span className="text-[10px] text-text-muted select-none">
-        {usage && !usage.error ? formatResetTime(usage.fiveHour.resetsAt) : 'Usage'}
+        {fiveHour ? formatResetTime(fiveHour.resetsAt) : 'Usage'}
       </span>
       {showPanel && <UsagePanel usage={usage} onRefresh={handleRefresh} />}
     </div>

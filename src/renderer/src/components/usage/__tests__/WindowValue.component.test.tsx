@@ -38,6 +38,7 @@ function makeRow(overrides: Partial<UsageWindowSummaryRow> = {}): UsageWindowSum
     windowKind: '7d',
     canonicalEnd: END,
     windowStart: END - 7 * DAY,
+    windowMinutes: null,
     peakPercent,
     apiCostUsd,
     billedCostUsd: 0,
@@ -252,6 +253,26 @@ describe('WindowValue — B, subscriptions compared', () => {
     expect(
       screen.getAllByTestId('WindowValue.compare.kind').map((k) => k.getAttribute('data-kind'))
     ).toEqual(['5h', '7d', '7d:fable'])
+  })
+
+  /**
+   * S3c — a ChatGPT plan states each window's length, so a kind can be any
+   * duration. Ordering by the two literals dropped `3d` and `1h` into the
+   * "anything new" bucket after the scoped weeklies, and labelled them with
+   * their raw kind.
+   */
+  it('orders an arbitrary duration by its length and labels it in words', async () => {
+    await renderWith([
+      makeRow({ windowKind: '7d' }),
+      makeRow({ windowKind: '3d', canonicalEnd: END - DAY }),
+      makeRow({ windowKind: '1h', canonicalEnd: END - 2 * DAY }),
+      makeRow({ windowKind: '5h', canonicalEnd: END - 3 * DAY })
+    ])
+    await screen.findByTestId('WindowValue.compare')
+    const kinds = screen.getAllByTestId('WindowValue.compare.kind')
+    expect(kinds.map((k) => k.getAttribute('data-kind'))).toEqual(['1h', '5h', '3d', '7d'])
+    expect(kinds[0]).toHaveTextContent('1-hour')
+    expect(kinds[2]).toHaveTextContent('3-day')
   })
 
   it('names the account from the credentials when the ledger has no row for it', async () => {

@@ -22,10 +22,17 @@ import { logger } from './logger'
 
 /** One window of a reading, as a writer sees it. */
 export interface LimitSampleWindow {
-  /** `5h`, `7d`, `7d:<model>` — see `AccountLimitWindow.kind`. */
+  /** `5h`, `7d`, `7d:<model>`, `3d`, `primary` — see `AccountLimitWindow.kind`. */
   kind: string
   usedPercent: number
   resetsAt: string | null
+  /**
+   * How long the window lasts, when the vendor said (S3c). Persisted beside the
+   * kind rather than left to be re-derived from it: the kind is a grouping key
+   * and `primary` names no length at all, so a row that carries the minutes is
+   * the only one ADR-071 §7's ledger can span.
+   */
+  windowMinutes?: number | null
 }
 
 export interface LimitSampleInput {
@@ -105,7 +112,8 @@ export function recordLimitSamples(input: LimitSampleInput): number {
         usedPercent: window.usedPercent,
         canonicalEnd,
         accountKey: input.accountKey,
-        windowKind: window.kind
+        windowKind: window.kind,
+        windowMinutes: window.windowMinutes ?? null
       })
       // Only after the row is actually in: marking the sample as written before
       // the insert would make a write lost to a locked database permanent, since

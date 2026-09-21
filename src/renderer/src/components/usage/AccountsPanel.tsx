@@ -521,7 +521,7 @@ function Meter({ limitWindow: w }: { limitWindow: AccountLimitWindow }): React.J
   const severity = meterSeverity(pct)
   // The row shows the form this kind of window is acted on; the tooltip carries
   // the other one, so neither reading costs a click.
-  const reset = formatReset(w.kind, w.resetsAt)
+  const reset = formatReset(w.kind, w.resetsAt, Date.now(), w.windowMinutes)
   const relative = formatResetRelative(w.resetsAt)
 
   return (

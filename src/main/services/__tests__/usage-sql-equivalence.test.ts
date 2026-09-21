@@ -627,7 +627,8 @@ describe('Phase 9a — DB-sourced WLS projection', () => {
         usedPercent: s.apiPercent,
         canonicalEnd: WINDOW_END_9A,
         accountKey: ACCOUNT_KEY,
-        windowKind: '5h'
+        windowKind: '5h',
+        windowMinutes: null
       } as WindowSampleRow)
     }
 
@@ -679,7 +680,8 @@ describe('Phase 9a — DB-sourced WLS projection', () => {
         usedPercent: apiPercents[i],
         canonicalEnd: WINDOW_END_9A,
         accountKey: ACCOUNT_KEY,
-        windowKind: '5h'
+        windowKind: '5h',
+        windowMinutes: null
       } as WindowSampleRow)
     }
 
@@ -754,7 +756,8 @@ describe('Phase 9a — DB-sourced WLS projection', () => {
         usedPercent: apiPercents[i],
         canonicalEnd: WINDOW_END_9A,
         accountKey: ACCOUNT_KEY,
-        windowKind: '5h'
+        windowKind: '5h',
+        windowMinutes: null
       } as WindowSampleRow)
     }
 
@@ -817,7 +820,8 @@ describe('Phase 9a — DB-sourced WLS projection', () => {
         usedPercent: 5 + i * 5,
         canonicalEnd: WINDOW_END_9A,
         accountKey: ACCOUNT_KEY,
-        windowKind: '5h'
+        windowKind: '5h',
+        windowMinutes: null
       } as WindowSampleRow)
     }
 

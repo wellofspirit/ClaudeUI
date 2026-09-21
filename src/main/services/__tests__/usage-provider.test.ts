@@ -265,7 +265,8 @@ describe('a STORED (inactive) Claude account', () => {
         usedPercent: 61,
         canonicalEnd: 1_700_010_000_000,
         accountKey: STORED_KEY,
-        windowKind: '5h'
+        windowKind: '5h',
+        windowMinutes: null
       }
     ])
 
@@ -286,7 +287,8 @@ describe('a STORED (inactive) Claude account', () => {
           kind: '5h',
           label: '5-hour',
           usedPercent: 61,
-          resetsAt: new Date(1_700_010_000_000).toISOString()
+          resetsAt: new Date(1_700_010_000_000).toISOString(),
+          windowMinutes: null
         }
       ]
     })
@@ -595,14 +597,18 @@ describe('the ChatGPT provider', () => {
       'vault-1': {
         email: 'chat@example.test',
         planType: 'plus',
-        primary: { usedPercent: 40, resetsAt: '2026-09-21T10:00:00.000Z' },
-        secondary: { usedPercent: 8, resetsAt: '2026-09-27T10:00:00.000Z' },
+        primary: { usedPercent: 40, resetsAt: '2026-09-21T10:00:00.000Z', windowMinutes: 300 },
+        secondary: {
+          usedPercent: 8,
+          resetsAt: '2026-09-27T10:00:00.000Z',
+          windowMinutes: 10_080
+        },
         fetchedAt: 1_700_000_100_000
       }
     } as ChatgptRateLimits)
   })
 
-  it('maps the store’s two windows onto the canonical kinds', async () => {
+  it('maps the store’s two windows onto the kinds their durations name', async () => {
     const limits = await readAccountLimits()
 
     expect(limits[1]).toEqual({
@@ -611,14 +617,113 @@ describe('the ChatGPT provider', () => {
       vendorId: 'openai',
       plan: 'plus',
       windows: [
-        { kind: '5h', label: '5-hour', usedPercent: 40, resetsAt: '2026-09-21T10:00:00.000Z' },
-        { kind: '7d', label: '7-day', usedPercent: 8, resetsAt: '2026-09-27T10:00:00.000Z' }
+        {
+          kind: '5h',
+          label: '5-hour',
+          usedPercent: 40,
+          resetsAt: '2026-09-21T10:00:00.000Z',
+          windowMinutes: 300
+        },
+        {
+          kind: '7d',
+          label: '7-day',
+          usedPercent: 8,
+          resetsAt: '2026-09-27T10:00:00.000Z',
+          windowMinutes: 10_080
+        }
       ],
       observedAt: 1_700_000_100_000,
       source: 'local',
       state: 'ok'
     })
     expect(mockAccountIdentity).toHaveBeenCalledWith('vault-1')
+  })
+
+  /**
+   * S3c — the owner's plan. ONE limit, weekly, delivered in the `primary`
+   * slot: position said five-hour, and the panel drew a `5-Hour` meter that
+   * reset in 28 hours.
+   */
+  it('reads a weekly-only plan’s lone primary window as 7-day', async () => {
+    mockChatgptSnapshot.mockReturnValue({
+      'vault-1': {
+        email: 'chat@example.test',
+        planType: 'prolite',
+        primary: { usedPercent: 63, resetsAt: '2026-09-27T10:00:00.000Z', windowMinutes: 10_080 },
+        secondary: null,
+        fetchedAt: 1_700_000_100_000
+      }
+    } as ChatgptRateLimits)
+
+    const limits = await readAccountLimits()
+
+    expect(limits[1].windows).toEqual([
+      {
+        kind: '7d',
+        label: '7-day',
+        usedPercent: 63,
+        resetsAt: '2026-09-27T10:00:00.000Z',
+        windowMinutes: 10_080
+      }
+    ])
+  })
+
+  /**
+   * Round 2 — the provider and the store's sample writer share ONE helper, so a
+   * meter and the sample behind it cannot be filed under two different kinds.
+   * Two slots of one length would otherwise both be `7d`, and the panel keys
+   * its meters by kind.
+   */
+  it('gives two same-length windows distinct kinds', async () => {
+    mockChatgptSnapshot.mockReturnValue({
+      'vault-1': {
+        email: 'chat@example.test',
+        primary: { usedPercent: 63, resetsAt: '2026-09-27T10:00:00.000Z', windowMinutes: 10_080 },
+        secondary: { usedPercent: 12, resetsAt: '2026-09-28T10:00:00.000Z', windowMinutes: 10_080 },
+        fetchedAt: 1_700_000_100_000
+      }
+    } as ChatgptRateLimits)
+
+    const limits = await readAccountLimits()
+
+    expect(limits[1].windows).toEqual([
+      {
+        kind: '7d',
+        label: '7-day',
+        usedPercent: 63,
+        resetsAt: '2026-09-27T10:00:00.000Z',
+        windowMinutes: 10_080
+      },
+      {
+        kind: '7d:secondary',
+        label: '7-day secondary',
+        usedPercent: 12,
+        resetsAt: '2026-09-28T10:00:00.000Z',
+        windowMinutes: 10_080
+      }
+    ])
+  })
+
+  it('calls a window whose duration the backend withheld a plain `limit`', async () => {
+    mockChatgptSnapshot.mockReturnValue({
+      'vault-1': {
+        primary: { usedPercent: 11, resetsAt: '2026-09-22T10:00:00.000Z', windowMinutes: null },
+        secondary: null,
+        fetchedAt: 1_700_000_100_000
+      }
+    } as ChatgptRateLimits)
+
+    const limits = await readAccountLimits()
+
+    expect(limits[1].windows).toEqual([
+      {
+        kind: 'primary',
+        label: 'limit',
+        usedPercent: 11,
+        resetsAt: '2026-09-22T10:00:00.000Z',
+        windowMinutes: null
+      }
+    ])
   })
 
   it('prefers the vault’s label for the account', async () => {
@@ -717,6 +822,14 @@ describe('claudeUsageProvider.getWindow', () => {
 
   it('returns null when usageFetcher has no data', () => {
     mockGetLastUsage.mockReturnValue(null)
+    const provider = resolveUsageProvider('claude', 'anthropic', 'subscription')!
+    expect(provider.getWindow()).toBeNull()
+  })
+
+  it('returns null when the account HAS no five-hour window', () => {
+    // S3c: `fiveHour` is null now instead of a fabricated 0 % window, and a
+    // window that does not exist is not a window this gate may report.
+    mockGetLastUsage.mockReturnValue({ error: null, fiveHour: null })
     const provider = resolveUsageProvider('claude', 'anthropic', 'subscription')!
     expect(provider.getWindow()).toBeNull()
   })

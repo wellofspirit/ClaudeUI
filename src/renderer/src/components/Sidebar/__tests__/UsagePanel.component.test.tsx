@@ -72,6 +72,24 @@ describe('UsagePanel — weekly per-model bars', () => {
     expect(within(bar('7-Day Quill')!).getByText('7%')).toBeInTheDocument()
   })
 
+  /**
+   * S3c — an account the API reports no five-hour window for (an API key,
+   * Bedrock, Vertex) drew a 0 % `5-Hour Session` bar off a fabricated default.
+   */
+  it('draws no five-hour bar when the account has no five-hour window', () => {
+    render(<UsagePanel usage={makeUsage({ fiveHour: null })} onRefresh={vi.fn()} />)
+
+    expect(bar('5-Hour Session')).toBeNull()
+    expect(screen.getAllByTestId('UsageProgressBar')).toHaveLength(1) // the weekly
+  })
+
+  it('says so when the account has no windows at all', () => {
+    render(<UsagePanel usage={makeUsage({ fiveHour: null, sevenDay: null })} onRefresh={vi.fn()} />)
+
+    expect(screen.queryAllByTestId('UsageProgressBar')).toHaveLength(0)
+    expect(screen.getByTestId('UsagePanel.noWindows')).toBeInTheDocument()
+  })
+
   it('renders no per-model bar when sevenDayModels is null', () => {
     render(<UsagePanel usage={makeUsage()} onRefresh={vi.fn()} />)
 
@@ -117,18 +135,20 @@ describe('UsagePanel — the ChatGPT section', () => {
   })
   afterEach(cleanup)
 
+  // The durations are the backend's own: the block's labels are derived from
+  // them (S3c), so a fixture without them describes no real plan.
   const limits = {
     'acct-a': {
       email: 'a@example.test',
       planType: 'pro',
-      primary: { usedPercent: 42, resetsAt: null },
-      secondary: { usedPercent: 7, resetsAt: null },
+      primary: { usedPercent: 42, resetsAt: null, windowMinutes: 300 },
+      secondary: { usedPercent: 7, resetsAt: null, windowMinutes: 10_080 },
       fetchedAt: 0
     },
     'acct-b': {
       email: 'b@example.test',
       planType: 'plus',
-      primary: { usedPercent: 90, resetsAt: null },
+      primary: { usedPercent: 90, resetsAt: null, windowMinutes: 300 },
       secondary: null,
       fetchedAt: 0
     }
@@ -194,6 +214,68 @@ describe('UsagePanel — the ChatGPT section', () => {
     const block = screen.getByTestId('UsagePanel.chatgptAccount')
     expect(block.getAttribute('data-id')).toBe('acct-e')
     expect(block).toHaveTextContent('acct-e')
+  })
+
+  /**
+   * S3c — the block's labels come from each window's stated LENGTH, not from
+   * the slot it arrived in. The owner's plan has one limit, it is weekly, and
+   * the backend sends it as `primary`; the block called it `5-Hour`.
+   */
+  it('labels a lone weekly window 7-day, not 5-Hour', () => {
+    store.chatgptLimits = {
+      'acct-weekly': {
+        email: 'weekly@example.test',
+        planType: 'prolite',
+        primary: { usedPercent: 63, resetsAt: null, windowMinutes: 10_080 },
+        secondary: null,
+        fetchedAt: 0
+      }
+    }
+    render(<UsagePanel usage={makeUsage()} onRefresh={vi.fn()} />)
+
+    const block = screen.getByTestId('UsagePanel.chatgptAccount')
+    expect(within(block).getAllByTestId('UsageProgressBar')).toHaveLength(1)
+    // Title case in the POPUP only (round 2): the Claude bars beside it are
+    // `5-Hour Session` and `7-Day (all models)`.
+    expect(within(block).getByTestId('UsageProgressBar').getAttribute('data-id')).toBe('7-Day')
+    expect(block).not.toHaveTextContent('5-Hour')
+  })
+
+  /**
+   * Round 2 — two slots of one length. Distinct kinds keep the two bars (and
+   * the two samples behind them) apart; both are title-cased here.
+   */
+  it('draws both windows of a plan whose two limits are the same length', () => {
+    store.chatgptLimits = {
+      'acct-twin': {
+        email: 'twin@example.test',
+        primary: { usedPercent: 63, resetsAt: null, windowMinutes: 10_080 },
+        secondary: { usedPercent: 12, resetsAt: null, windowMinutes: 10_080 },
+        fetchedAt: 0
+      }
+    }
+    render(<UsagePanel usage={makeUsage()} onRefresh={vi.fn()} />)
+
+    const block = screen.getByTestId('UsagePanel.chatgptAccount')
+    expect(
+      within(block)
+        .getAllByTestId('UsageProgressBar')
+        .map((b) => b.getAttribute('data-id'))
+    ).toEqual(['7-Day', '7-Day Secondary'])
+  })
+
+  it('labels a window whose duration the backend withheld a plain `limit`', () => {
+    store.chatgptLimits = {
+      'acct-mystery': {
+        primary: { usedPercent: 11, resetsAt: null, windowMinutes: null },
+        secondary: null,
+        fetchedAt: 0
+      }
+    }
+    render(<UsagePanel usage={makeUsage()} onRefresh={vi.fn()} />)
+
+    const block = screen.getByTestId('UsagePanel.chatgptAccount')
+    expect(within(block).getByTestId('UsageProgressBar').getAttribute('data-id')).toBe('Limit')
   })
 
   it('Refresh re-reads the ChatGPT accounts too, not just Claude', () => {

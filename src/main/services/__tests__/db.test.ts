@@ -187,7 +187,7 @@ describe('migration framework — user_version guard', () => {
     }
   })
 
-  it('applies the real production migration set (v1–v24)', () => {
+  it('applies the real production migration set (v1–v25)', () => {
     const db = openRawDb()
     try {
       // Default migration list (production MIGRATIONS).
@@ -219,7 +219,9 @@ describe('migration framework — user_version guard', () => {
       //      ~/.claude.json), and `meta` arms the one-shot re-key
       // v24: session_meta remembers a Codex thread's last context reading, the
       //      one figure a cold status line cannot recompute
-      expect(userVersion(db)).toBe(24)
+      // v25: a limit window's LENGTH becomes a column, and the ChatGPT rows
+      //      that were kinded by position are dropped so they re-seed
+      expect(userVersion(db)).toBe(25)
       expect(db.prepare('SELECT * FROM codex_session_overrides').all()).toEqual([])
       expect(db.prepare('SELECT * FROM codex_forks').all()).toEqual([])
       // session_meta must exist and be queryable.
@@ -308,7 +310,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(24)
+      expect(userVersion(db)).toBe(25)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',
@@ -452,7 +454,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(24)
+      expect(userVersion(db)).toBe(25)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         auth_policy: null,
         step_up_tier: 'medium',

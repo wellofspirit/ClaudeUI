@@ -120,6 +120,36 @@ describe('recordLimitSamples', () => {
     expect(rows()).toHaveLength(3)
   })
 
+  /**
+   * Round 2 — why two slots of one length need distinct kinds (S3c).
+   *
+   * The series key is `accountKey:accountUuid:kind`, so two windows sharing a
+   * kind share a series: the second one's end snaps onto the first's and the
+   * value ledger, whose primary key is `(account, kind, end)`, sees one window
+   * where the plan has two. `<kind>:secondary` is what keeps them apart.
+   */
+  it('keeps two same-length windows of one reading apart by their kinds', () => {
+    recordLimitSamples({
+      accountKey: KEY,
+      now: NOW,
+      windows: [
+        { kind: '7d', usedPercent: 63, resetsAt: later(600_000), windowMinutes: 10_080 },
+        // A minute apart, which is INSIDE the snap tolerance — the same kind
+        // would have collapsed the two onto one canonical end.
+        {
+          kind: '7d:secondary',
+          usedPercent: 12,
+          resetsAt: later(660_000),
+          windowMinutes: 10_080
+        }
+      ]
+    })
+
+    const written = rows()
+    expect(written.map((r) => r.windowKind)).toEqual(['7d', '7d:secondary'])
+    expect(written[0].canonicalEnd).not.toBe(written[1].canonicalEnd)
+  })
+
   it('keeps going when one window fails to write, and retries it next time', () => {
     recordWindowSample.mockImplementationOnce(() => {
       throw new Error('locked')

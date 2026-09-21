@@ -425,4 +425,42 @@ describe('the windows a reading carries', () => {
   it('omits a window the reading did not carry', () => {
     expect(claudeLimitWindows(usage({ sevenDay: null })).map((w) => w.kind)).toEqual(['5h'])
   })
+
+  /**
+   * S3c — the five-hour window is not special. It used to be the one window
+   * that was always emitted, defaulted to 0 % when the payload carried none, so
+   * an account with no five-hour limit (an API key, Bedrock, Vertex) got a
+   * fabricated meter and a `usage_window_sample` row under a window it does not
+   * have.
+   */
+  it('emits NO 5-hour window when the reading has none', () => {
+    expect(claudeLimitWindows(usage({ fiveHour: null })).map((w) => w.kind)).toEqual(['7d'])
+    expect(claudeLimitWindows(usage({ fiveHour: null, sevenDay: null }))).toEqual([])
+  })
+})
+
+describe('a reading with no five-hour window', () => {
+  it('answers null rather than a 0 % window', async () => {
+    fetchMock.mockResolvedValueOnce(
+      ok({ seven_day: { utilization: 12, resets_at: '2026-09-25T15:00:00.000Z' } })
+    )
+
+    const result = await read()
+
+    expect('usage' in result).toBe(true)
+    const { usage } = result as { usage: AccountUsage }
+    expect(usage.fiveHour).toBeNull()
+    expect(usage.sevenDay).toEqual({ usedPercent: 12, resetsAt: '2026-09-25T15:00:00.000Z' })
+    // Nothing to sample: the ONE writer skips a window it was not given.
+    expect(claudeLimitWindows(usage).map((w) => w.kind)).toEqual(['7d'])
+  })
+
+  it('leaves a reading that DOES carry one untouched', async () => {
+    fetchMock.mockResolvedValueOnce(ok(usageBody()))
+
+    const result = await read()
+
+    const { usage } = result as { usage: AccountUsage }
+    expect(usage.fiveHour).toEqual({ usedPercent: 31, resetsAt: '2026-09-21T15:00:00.000Z' })
+  })
 })

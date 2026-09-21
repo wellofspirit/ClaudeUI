@@ -1,6 +1,6 @@
 # ADR-071: One metering ledger, two costs, machine-independent account keys, and a window-value ledger
 
-**Status:** Accepted (2026-09-21; proposed 2026-09-20). Drafted from the owner's rulings of 2026-09-20 and mockup `140549af`. Slices S0 to S4 are built on it. §6 amended 2026-09-21 to the 401 rule as built.
+**Status:** Accepted (2026-09-21; proposed 2026-09-20). Drafted from the owner's rulings of 2026-09-20 and mockup `140549af`. Slices S0 to S4 are built on it. §6 amended 2026-09-21 to the 401 rule as built, and again on 2026-09-21 (S3c) so a window's kind and length come from the value the API states rather than from the window's position.
 **Amends:** [ADR-011](adr-011_canonical-usage-windows-and-account-attribution.md) §4 (account attribution), [ADR-033](adr-033_cross-engine-dispatch.md) (what `dispatch.maxCostUsd` gates on, where dispatched usage is stored), [ADR-034](adr-034_session-time-and-cost-accounting.md) (what `totalCostUsd` means)
 **Relates to:** [ADR-015](adr-015_multi-account-file-credentials.md) (per-account Claude credential files), [ADR-030](adr-030_capability-honesty.md) (unknown is never shown as zero), [ADR-068](adr-068_chatgpt-identity-vault-owned-codex-injection.md) and [ADR-069](adr-069_codex-host-per-home-and-account.md) (ChatGPT accounts and their hosts), [ADR-070](adr-070_one-auth-surface.md) (where a dead credential is reported), [ADR-072](adr-072_usage-hub-self-hosted-sync.md) (the sync that consumes this ledger)
 
@@ -15,7 +15,7 @@ The usage dashboard was built for one engine and one account. Four engines and s
 5. **Rows cannot answer "which account" or "covered by what".** `usage_event` has no billing type. Claude rows carry `account_uuid` and a null `account_id`. opencode rows carry neither, because `OpencodeAuthProvider.buildAccountRef` returns no `accountId` at all. `daily_usage` has no account column, so any per-account history is gone once `usage_event` is pruned at 90 days. `dispatched_usage` is a separate table with a token total and a cost and nothing else, which is why the dashboard shows dispatched work in its own section and leaves it out of every total.
 6. **Limits are per-engine one-offs.** ChatGPT limits are held per vault account in memory with no history. Claude limits exist for the active account only. `usage-provider.ts` is a 57-line placeholder for the abstraction both need.
 
-The owner's requirements, stated 2026-09-20: show what subscription usage would have cost on the API, next to what was billed. Track usage and limits per account. Count dispatched work. Show how much API-equivalent usage each subscription delivers per 5-hour and per 7-day window, which is the measure of what a plan is worth. OpenAI plans have only the 7-day window.
+The owner's requirements, stated 2026-09-20: show what subscription usage would have cost on the API, next to what was billed. Track usage and limits per account. Count dispatched work. Show how much API-equivalent usage each subscription delivers per window, which is the measure of what a plan is worth. (The first draft said "per 5-hour and per 7-day window" and "OpenAI plans have only the 7-day window". **Amended 2026-09-21 (S3c):** a plan has whatever windows it has and each one states its own length — the owner's ChatGPT plan reports ONE window and it is weekly, while Codex's fixtures carry 30-minute, 1-hour and 1-day windows. See §6.)
 
 ## Decision
 
@@ -105,7 +105,13 @@ interface AccountLimits {
   accountKey: string
   label: string
   plan?: string
-  windows: Array<{ kind: '5h' | '7d' | string; usedPercent: number; resetsAt: string | null }>
+  windows: Array<{
+    kind: '5h' | '7d' | string
+    label: string
+    usedPercent: number
+    resetsAt: string | null
+    windowMinutes?: number | null // the length the vendor stated (S3c)
+  }>
   credits?: { unlimited: boolean; balance: string | null }
   observedAt: number
   source: 'local' | { deviceId: string } // ADR-072 relays readings from other machines
@@ -117,6 +123,12 @@ The ChatGPT provider wraps `ChatgptRateLimitStore` unchanged. The Claude provide
 **Inactive Claude accounts are never refreshed in the background.** The owner's concern is that Anthropic may limit how many refresh grants an account gets, and a timer spending them on accounts nobody is using is the wrong trade. The rule is: use the stored access token while it is valid. Refresh only when the user opens the dashboard or presses refresh. On a 401 during a read the user asked for, spend one refresh grant and retry once. If the refresh fails or the retry is a 401 too, mark the account as needing sign-in through ADR-070's pill and stop. A read that may not refresh marks it on the first 401. (Amended 2026-09-21. The first draft said to stop on the first 401 in every case. The owner ruled that the one retry stays, because no timer reaches this path, refreshes are single-flighted per credentials file, and stopping cold would turn a server-side token revocation into a full sign-in. Syncing tokens between machines is a later discussion.) With ADR-072 enabled, a reading relayed from the machine where the account is active beats any local fetch, and this machine spends no token at all.
 
 Readings are persisted. `usage_window_sample` gains `account_key` and `window_kind`, and takes ChatGPT readings as well as Claude's.
+
+**A window's kind and length come from the value the API states, never from the window's position (amended 2026-09-21, S3c; owner: "don't just assume, use trusted value").** Claude names its own windows (`five_hour`, `seven_day`, and `limits[]` entries of `kind: "weekly_scoped"`), so `5h`, `7d` and `7d:<slug>` are the payload's own vocabulary and their lengths come with their names. ChatGPT names nothing: it fills two SLOTS, `primary` and `secondary`, and states each window's length — the backend's `limit_window_seconds`, which Codex carries as `window_minutes` and the app-server wire as `windowDurationMins`. Reading the slot as the kind filed a weekly-only plan's one window (the owner's, delivered as `primary`) under `5h`, labelled it `5-hour`, and summed a week of spend over five hours in §7's ledger.
+
+So one shared function derives the kind and the label from the duration: 300 minutes is `5h`, 10,080 is `7d`, any other whole number of days or hours is `<n>d` / `<n>h`, anything else `<n>m`. A window whose duration the vendor withheld keeps the slot's own name (`primary` / `secondary`) and is labelled `limit` — never a guessed `5h`. When BOTH slots of one reading state the same length, the secondary's kind becomes `<kind>:secondary`: the kind is an identity downstream (the sample dedup key, `usage_window`'s primary key, one row per kind in a stale read, the accounts panel's meter key), so two windows may never share one. `usage_window_sample` and `usage_window` carry a nullable `window_minutes` (migration v25, which also drops the mis-kinded ChatGPT rows so they re-seed), and §7's ledger takes a window's span from it when present, falling back to the kind's own name for Claude's rows. A window whose length nothing states is sampled but never materialised into `usage_window`: no length, no numerator.
+
+The same amendment removes ONE assumption on the Claude side: `AccountUsage.fiveHour` was defaulted to `{ usedPercent: 0, resetsAt: null }` when the payload carried no `five_hour`, so an account with no five-hour window (an API key, Bedrock, Vertex) got a fabricated 0 % meter and samples under a window it does not have. It is nullable now, and an absent window is absent (ADR-030).
 
 ### 7. The window-value ledger
 
