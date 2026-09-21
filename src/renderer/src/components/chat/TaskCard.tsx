@@ -6,6 +6,7 @@ import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { SubagentOutputBody } from './SubagentOutputBody'
 import { ApprovalButtons } from './ApprovalButtons'
+import { deriveTaskState, latestNotification } from './task-state'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -101,7 +102,7 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
     () => overlayItemStreams(subagentMsgs[toolUseId] || [], itemStreams, toolUseId),
     [subagentMsgs, itemStreams, toolUseId]
   )
-  const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
+  const bgNotification = latestNotification(taskNotifications, toolUseId)
   const hasSubagentOutput = msgs.length > 0
   const isBackground = !!view.background
   // Has this task received a task_started wire event with no matching
@@ -116,17 +117,17 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
   // task_started, so they have no activeTasks record and fall through to the
   // unchanged legacy heuristic below.
   const hasActiveTask = !isHistorical && !!activeTasks[toolUseId]
-  // Background tasks get a tool_result immediately ("agent launched") but keep running until task_notification
-  const isError = bgNotification ? bgNotification.status === 'failed' : (result?.isError ?? false)
-  const isRunning = isHistorical
-    ? false
-    : hasActiveTask
-      ? true
-      : isBackground
-        ? !bgNotification
-        : !hasResult
-  // In historical mode, tasks without results show as "loaded" (neutral state)
-  const isLoaded = isHistorical && !hasResult && !bgNotification
+  // Background tasks get a tool_result immediately ("agent launched") but keep
+  // running until task_notification. In historical mode, tasks without results
+  // show as "loaded" (neutral state) rather than running.
+  const { isRunning, isError, isLoaded } = deriveTaskState({
+    isHistorical,
+    hasActiveTask,
+    isBackground,
+    hasResult,
+    notification: bgNotification,
+    resultIsError: result?.isError ?? false
+  })
 
   // Read display fields from the engine-neutral view (not block.toolInput)
   const description = (view.description || view.prompt || '').slice(0, 120)

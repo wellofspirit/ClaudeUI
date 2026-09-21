@@ -5,6 +5,7 @@ import { MarkdownRenderer } from '../chat/MarkdownRenderer'
 import { SubagentOutputBody } from '../chat/SubagentOutputBody'
 import { TerminalView } from '../chat/TerminalView'
 import { engineToolMap } from '../chat/tool-registry/engine-tool-maps'
+import { deriveTaskState, latestNotification } from '../chat/task-state'
 import { findTaskBlocks, formatElapsed } from './utils'
 
 function BashOutputPanel({
@@ -110,16 +111,26 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const hasResult = !!resultBlock
   const resultText =
     resultBlock?.toolResult?.replace(/<usage>[\s\S]*?<\/usage>/, '').trimEnd() || ''
-  const bgNotification = taskNotifications.find((n) => n.toolUseId === toolUseId)
-  // Same lifecycle predicate as TaskCard: a task_started record with no
-  // task_notification yet means RUNNING, regardless of tool_result /
-  // background-flag state (Claude 2.1.219+ async-launches Tasks and omits
-  // run_in_background). Tasks without a record (opencode/pi children) keep
-  // the legacy heuristic.
+  const bgNotification = latestNotification(taskNotifications, toolUseId)
+  // The shared ADR-040 predicate — the panel is a live surface, so isHistorical
+  // is false here by construction (a historical transcript's entries are opened
+  // through the same panel but carry no activeTasks record either way).
+  //
+  // `isError` now follows the notification whenever there IS one, which is what
+  // TaskCard has always done. The old `isBackground ? … : resultBlock?.isError`
+  // form missed the case this whole arc is about: an async-launched agent has
+  // `run_in_background` absent from its input (so isBackground is false) and an
+  // immediate "launched successfully" tool_result (so `resultBlock.isError` is
+  // false) — a FAILED one showed no failure badge in the panel at all.
   const hasActiveTask = !!activeTasks[toolUseId]
-  const isRunning = hasActiveTask ? true : isBackground ? !bgNotification : !hasResult
-
-  const isError = isBackground ? bgNotification?.status === 'failed' : resultBlock?.isError
+  const { isRunning, isError } = deriveTaskState({
+    isHistorical: false,
+    hasActiveTask,
+    isBackground,
+    hasResult,
+    notification: bgNotification,
+    resultIsError: resultBlock?.isError ?? false
+  })
 
   const statusBadge = isError ? (
     <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-danger/10 text-danger shrink-0">
