@@ -3,7 +3,7 @@
  *
  * Tested flows:
  *   1. renders null when task panel is not open
- *   2. renders null when openedTaskToolUseIds is empty
+ *   2. renders the roster, with no entries, when nothing is opened yet
  *   3. onClose calls closeTaskPanel store action
  */
 
@@ -51,7 +51,11 @@ describe('TaskDetailPanel FC', () => {
     expect(viewProps).toBeNull()
   })
 
-  it('renders nothing when no opened task tool use IDs', async () => {
+  it('still renders the roster when no task is opened', async () => {
+    // Changed deliberately in ADR-073: the top-bar pill opens this panel
+    // WITHOUT picking an agent, because a card scrolled out of view used to
+    // leave the panel unreachable. An open panel with no entries is the
+    // roster on its own, not a bug.
     useSessionStore.getState().openTaskPanel(ROUTE, 'tu-1')
     useSessionStore.setState((state) => ({
       sessions: {
@@ -61,7 +65,9 @@ describe('TaskDetailPanel FC', () => {
     }))
 
     await renderFC()
-    expect(viewProps).toBeNull()
+    expect(viewProps).not.toBeNull()
+    expect(viewProps?.entries).toEqual([])
+    expect(viewProps?.roster.totalCount).toBe(0)
   })
 
   it('classifies each task as bash-background, task, or missing', async () => {

@@ -59,6 +59,24 @@ describe('deriveTaskState', () => {
     expect(deriveTaskState({ ...base, hasResult: true }).isRunning).toBe(false)
   })
 
+  it('a terminal notification settles a foreground task too', () => {
+    // ADR-040 calls the notification authoritative. A synchronous task that
+    // notified may never post a tool_result, and used to read as running for
+    // the rest of the session.
+    expect(deriveTaskState({ ...base, notification: notif('t') }).isRunning).toBe(false)
+  })
+
+  it('an armed record outranks an earlier terminal event — the resume case', () => {
+    // Run 1 notified, then run 2 started: the agent IS running again (ADR-073).
+    const s = deriveTaskState({
+      ...base,
+      hasActiveTask: true,
+      hasResult: true,
+      notification: notif('t', 'completed')
+    })
+    expect(s.isRunning).toBe(true)
+  })
+
   it('nothing in a historical transcript is running', () => {
     const s = deriveTaskState({ ...base, isHistorical: true, hasActiveTask: true })
     expect(s.isRunning).toBe(false)

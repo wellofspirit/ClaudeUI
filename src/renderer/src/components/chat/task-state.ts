@@ -79,11 +79,20 @@ export function deriveTaskState({
 }: TaskLifecycleInput): TaskLifecycleState {
   const isRunning = isHistorical
     ? false
-    : hasActiveTask
+    : // An armed lifecycle record outranks everything, INCLUDING an earlier
+      // terminal event: that is exactly the state a resumed agent is in — run
+      // 1 notified, then run 2 started (ADR-073).
+      hasActiveTask
       ? true
-      : isBackground
-        ? !notification
-        : !hasResult
+      : // Otherwise a terminal event settles it whatever the tool result says.
+        // ADR-040 calls task_notification authoritative; the foreground branch
+        // used to ignore it and leave such a task "running" forever, because a
+        // synchronous task that notified may never post a tool_result.
+        notification
+        ? false
+        : isBackground
+          ? true
+          : !hasResult
 
   return {
     isRunning,
