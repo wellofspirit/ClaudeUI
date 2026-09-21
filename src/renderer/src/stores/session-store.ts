@@ -388,6 +388,14 @@ export type ThemeId = 'dark' | 'light' | 'monokai'
 
 export interface AppSettings {
   theme: ThemeId
+  /**
+   * The two agent-roster surfaces (ADR-073). The pill is the scroll-independent
+   * door to the panel and stays while the session has any agent; the tab sits
+   * on the composer's top-right corner and exists only while one is running.
+   * Both default on; with both off the transcript card is the way in, as before.
+   */
+  showAgentPill: boolean
+  showAgentTab: boolean
   expandToolCalls: boolean
   expandReadResults: boolean
   hideToolInput: boolean
@@ -459,6 +467,8 @@ export interface AppSettings {
 /** Exported for the replica's settings projection (one merge base, not two). */
 export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark',
+  showAgentPill: true,
+  showAgentTab: true,
   expandToolCalls: true,
   expandReadResults: false,
   hideToolInput: false,
@@ -1470,6 +1480,12 @@ export interface SessionState {
   watchBackgroundOutput: (routingId: string, toolUseId: string) => void
   unwatchBackgroundOutput: (routingId: string, toolUseId: string) => void
   openTaskPanel: (routingId: string, toolUseId: string) => void
+  /**
+   * Open or close the panel on the ROSTER, with no agent selected (ADR-073).
+   * What the top-bar pill does: reaching the list must not depend on a card
+   * still being on screen, which is what `openTaskPanel` requires.
+   */
+  toggleAgentsPanel: (routingId: string) => void
   closeTaskPanel: (routingId: string) => void
   removeTaskFromPanel: (routingId: string, toolUseId: string) => void
   setTaskStopping: (routingId: string, toolUseId: string) => void
@@ -2590,6 +2606,15 @@ export const useSessionStore = create<SessionState>((set) => ({
           : [...s.openedTaskToolUseIds, toolUseId],
         rightPanel: 'task' as const
       }))
+    })),
+
+  toggleAgentsPanel: (routingId) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) =>
+        s.rightPanel === 'task'
+          ? { openedTaskToolUseIds: [], rightPanel: 'none' as const }
+          : { rightPanel: 'task' as const }
+      )
     })),
 
   closeTaskPanel: (routingId) =>
