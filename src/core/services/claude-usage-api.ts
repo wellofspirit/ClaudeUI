@@ -12,7 +12,10 @@
  *
  * `/api/oauth/usage` says nothing about WHO the token belongs to: the body
  * carries windows and a subscription type, never an account id. Identity is the
- * caller's problem, and it is why `AccountInfo` learned to remember it.
+ * caller's problem, and it is why `AccountInfo` learned to remember it — and
+ * why {@link authorizedOAuthGet} is exported: `claude-account-identity.ts` asks
+ * `/api/oauth/profile` the same question about the same credential file, under
+ * the same refresh rules.
  */
 
 import { readFile } from 'node:fs/promises'
@@ -84,6 +87,9 @@ export async function readCredentialsFile(path: string): Promise<OAuthCredential
   }
 }
 
+/** Refresh exchanges in flight, keyed by the file whose grant they are spending. */
+const refreshInFlight = new Map<string, Promise<OAuthCredentials>>()
+
 /**
  * Exchange the refresh token for a fresh access token and PERSIST the result to
  * `path`.
@@ -95,7 +101,25 @@ export async function readCredentialsFile(path: string): Promise<OAuthCredential
  * INACTIVE account nobody would notice until they switched to it. The write is
  * atomic (temp + rename) because this file is cli.js's live OAuth store.
  */
-export async function refreshClaudeToken(
+export function refreshClaudeToken(
+  creds: OAuthCredentials,
+  path: string
+): Promise<OAuthCredentials> {
+  // Single-flighted per file for the reason the doc comment gives: the grant is
+  // single-use, and this module now has two callers per credential (the usage
+  // read and S2e's identity resolve), each with its own in-flight map. Two
+  // DIFFERENT operations overlapping on one expired file would otherwise POST
+  // the same spent token twice.
+  const existing = refreshInFlight.get(path)
+  if (existing) return existing
+  const exchange = exchangeRefreshToken(creds, path).finally(() => {
+    refreshInFlight.delete(path)
+  })
+  refreshInFlight.set(path, exchange)
+  return exchange
+}
+
+async function exchangeRefreshToken(
   creds: OAuthCredentials,
   path: string
 ): Promise<OAuthCredentials> {
@@ -135,8 +159,14 @@ export async function refreshClaudeToken(
   return newCreds
 }
 
-/** The headers cli.js's k9q() sends, given a bearer token. */
-function usageHeaders(token: string, userAgent: string): Record<string, string> {
+/**
+ * The headers cli.js's k9q() sends, given a bearer token.
+ *
+ * Shared with the `/api/oauth/profile` read (S2e): cli.js builds both requests
+ * from the same helper, and an endpoint that saw a different `anthropic-beta`
+ * or User-Agent than the CLI's would be answering a different client.
+ */
+export function oauthApiHeaders(token: string, userAgent: string): Record<string, string> {
   return {
     'Content-Type': 'application/json',
     'User-Agent': userAgent,
@@ -179,7 +209,48 @@ export function fetchClaudeUsage(options: ClaudeUsageOptions): Promise<ClaudeUsa
 }
 
 async function readUsage(options: ClaudeUsageOptions): Promise<ClaudeUsageResult> {
-  const { credentialsPath, allowRefresh, userAgent } = options
+  const result = await authorizedOAuthGet({
+    ...options,
+    url: USAGE_API_URL,
+    label: 'usage API',
+    timeoutMs: FETCH_TIMEOUT_MS
+  })
+  if ('error' in result) return result
+  return { usage: parseUsageResponse(result.body) }
+}
+
+export interface AuthorizedGetOptions extends ClaudeUsageOptions {
+  url: string
+  /** What the detail string calls this endpoint ("usage API returned 503"). */
+  label: string
+  timeoutMs: number
+  /** Anything beyond {@link oauthApiHeaders} — the profile read's Cache-Control. */
+  extraHeaders?: Record<string, string>
+}
+
+export type AuthorizedGetResult =
+  { body: Record<string, unknown> } | { error: ClaudeUsageError; detail: string }
+
+/**
+ * One authenticated GET against an `/api/oauth/*` endpoint, with the whole
+ * credential dance around it: the 60-second expiry buffer, ADR-071 §6's rule
+ * that a refresh grant is spent only when the caller allows it, one 401 retry
+ * and no more, and a 429 as its own answer rather than a failure.
+ *
+ * Shared rather than copied because the rules are the RISKY part, not the URL:
+ * the second endpoint to need them (S2e's `/api/oauth/profile`) reads and
+ * rotates the same single-use grant, and a divergent copy of the retry policy
+ * is how an account gets its token family revoked. Callers never throw out of
+ * it — every failure is a typed {@link ClaudeUsageError}.
+ *
+ * NOT single-flighted here: each caller keys its own in-flight map by
+ * credentials path, because "the same usage read" and "the same identity read"
+ * are different answers to share.
+ */
+export async function authorizedOAuthGet(
+  options: AuthorizedGetOptions
+): Promise<AuthorizedGetResult> {
+  const { credentialsPath, allowRefresh, userAgent, url, label, timeoutMs } = options
   let creds = await readCredentialsFile(credentialsPath)
   if (!creds && options.fallbackCredentials) creds = await options.fallbackCredentials()
   if (!creds) return { error: 'needs-sign-in', detail: 'no stored credentials' }
@@ -198,14 +269,16 @@ async function readUsage(options: ClaudeUsageOptions): Promise<ClaudeUsageResult
   }
 
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
-
-  try {
-    const resp = await fetch(USAGE_API_URL, {
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  const get = (bearer: string): Promise<Response> =>
+    fetch(url, {
       method: 'GET',
-      headers: usageHeaders(token, userAgent),
+      headers: { ...oauthApiHeaders(bearer, userAgent), ...options.extraHeaders },
       signal: controller.signal
     })
+
+  try {
+    const resp = await get(token)
 
     if (resp.status === 401) {
       // The token was valid by the clock and rejected anyway. One refresh, one
@@ -216,26 +289,22 @@ async function readUsage(options: ClaudeUsageOptions): Promise<ClaudeUsageResult
       } catch (err) {
         return { error: 'needs-sign-in', detail: `token refresh failed: ${err}` }
       }
-      const retry = await fetch(USAGE_API_URL, {
-        method: 'GET',
-        headers: usageHeaders(creds.accessToken, userAgent),
-        signal: controller.signal
-      })
+      const retry = await get(creds.accessToken)
       if (retry.status === 401)
         return { error: 'needs-sign-in', detail: 'unauthorized after refresh' }
-      if (!retry.ok) return { error: 'unavailable', detail: `usage API returned ${retry.status}` }
-      return { usage: parseUsageResponse((await retry.json()) as Record<string, unknown>) }
+      if (!retry.ok) return { error: 'unavailable', detail: `${label} returned ${retry.status}` }
+      return { body: (await retry.json()) as Record<string, unknown> }
     }
 
     if (resp.status === 429) {
-      return { error: 'rate-limited', detail: 'usage API returned 429' }
+      return { error: 'rate-limited', detail: `${label} returned 429` }
     }
 
     if (!resp.ok) {
-      return { error: 'unavailable', detail: `usage API returned ${resp.status}` }
+      return { error: 'unavailable', detail: `${label} returned ${resp.status}` }
     }
 
-    return { usage: parseUsageResponse((await resp.json()) as Record<string, unknown>) }
+    return { body: (await resp.json()) as Record<string, unknown> }
   } catch (err) {
     return { error: 'unavailable', detail: `${err}` }
   } finally {

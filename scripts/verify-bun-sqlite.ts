@@ -71,7 +71,8 @@ const REQUIRED_TABLES = [
   'audit_log',
   'webauthn_credential',
   'codex_session_overrides',
-  'codex_forks'
+  'codex_forks',
+  'meta'
 ]
 
 /** The full production migration list, on an in-memory `bun:sqlite` database. */

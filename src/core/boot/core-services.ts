@@ -59,6 +59,7 @@ import { emitEvent } from '../services/sync-host'
 import { sharedProviderService } from '../shared-providers'
 import { logger } from '../services/logger'
 import { loadPersistedPrices, refreshPricesIfStale } from '../services/opencode-pricing'
+import { usageFetcher } from '../services/usage-fetcher'
 import { createHostAnchor, type HostAnchor } from './host-anchor'
 import type { CommandConnection } from '../ipc/command-registry'
 import type { HostNotifier } from '../host'
@@ -169,6 +170,27 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // The host's own post-session wiring — see the module header for why this is
   // one ordered hook rather than several options.
   afterSessionGraph?.(sessionManager)
+
+  // THE USAGE POLL STARTS HERE, AND NOT ONE LINE EARLIER.
+  //
+  // It used to run inside `registerSessionIpc`, which is ~25 lines above — and
+  // the hook that just returned is where the desktop runs `accountManager
+  // .init()`, hence `applyActive()`, hence `setSecurestorageEnv({ dir })`. So
+  // the poll was starting BEFORE the app knew which credential directory was
+  // active, and two things followed (S2e round 2):
+  //
+  //  - the first `trackActiveAccount()` saw no dir, took the single-account
+  //    path, and settled the one-shot identity repair as done before it ran;
+  //  - the account-switch listener `startPolling` subscribes was already
+  //    attached when the boot-time apply fired, so every launch spent a second
+  //    pointless `fetch()` on a "switch" that was just the app starting.
+  //
+  // The contract, for anything added here later: nothing may resolve an account
+  // IDENTITY, or subscribe to the switch that changes it, before this line.
+  // `setIntervalSecs` stays in `registerSessionIpc` — it only configures the
+  // timer and is where the settings are read. A host that wires no hook (the
+  // headless `claudeui-server`) reaches this line just the same.
+  usageFetcher.startPolling()
 
   // ACTIVE-account switch -> the Codex sessions that follow it (ADR-069 §4).
   // Here rather than in `register-auth-providers.ts` (which wires the two engine

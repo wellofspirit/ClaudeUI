@@ -1058,6 +1058,57 @@ export const MIGRATIONS: Migration[] = [
         GROUP BY account_key, window_kind, canonical_end;
       `)
     }
+  },
+  {
+    // v23 — S2e: the four identity columns were read off the WRONG file.
+    //
+    // `UsageFetcher` learned an account's uuid / organization / billing type
+    // from `~/.claude.json` (v21) and stamped them onto whichever dir was
+    // active. But that file is SHARED — one copy for every account dir and for
+    // the terminal `claude` — and cli.js rewrites its `oauthAccount` only when
+    // it refetches the profile, so the block names whichever cli.js process
+    // refetched last. On a machine with two accounts the active dir routinely
+    // carries the other account's identity, and the other dir carries NULLs.
+    //
+    // So none of the four is trustworthy on any row, and there is no way to
+    // tell the right ones from the wrong ones. They are cleared. The ACTIVE dir
+    // is re-stamped at the next boot from its OWN credential (through
+    // `/api/oauth/profile`), and an inactive dir on the next refresh the user
+    // asks for — never on a timer, because reading one spends a refresh grant
+    // (ADR-071 §6). `identity_checked_at` is when that last succeeded, so a
+    // credential file newer than it means a re-login and a re-read.
+    //
+    // `email`, `subscription_type` and `organization` are LEFT ALONE: those
+    // come from cli.js's own login control response for that dir
+    // (`AccountManager.noteLogin`), which was always per-account and correct.
+    //
+    // THE MARKER. Every Claude ledger row written since the stale attribution
+    // began is keyed to the wrong subscription, and no row carries a dir id to
+    // repair by — only a time-bounded re-key against the account log is
+    // possible (`claude-account-identity.ts`). It runs once, at the first boot
+    // that can resolve the active dir, and `meta` is where "once" is recorded:
+    // a two-column key/value table, because a one-off marker does not deserve a
+    // schema of its own and the next one will not either.
+    version: 23,
+    up(db) {
+      db.exec(`
+        ALTER TABLE account ADD COLUMN identity_checked_at INTEGER;
+
+        UPDATE account SET
+          account_uuid      = NULL,
+          organization_uuid = NULL,
+          organization_name = NULL,
+          billing_type      = NULL;
+
+        CREATE TABLE IF NOT EXISTS meta (
+          key   TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+
+        INSERT OR IGNORE INTO meta (key, value)
+          VALUES ('claude_identity_repair', 'pending');
+      `)
+    }
   }
 ]
 
@@ -1590,6 +1641,7 @@ interface AccountRow {
   organization_uuid: string | null
   organization_name: string | null
   billing_type: string | null
+  identity_checked_at: number | null
 }
 
 function rowToAccountInfo(row: AccountRow): AccountInfo {
@@ -1602,7 +1654,8 @@ function rowToAccountInfo(row: AccountRow): AccountInfo {
     accountUuid: row.account_uuid,
     organizationUuid: row.organization_uuid,
     organizationName: row.organization_name,
-    billingType: (row.billing_type as BillingType | null) ?? null
+    billingType: (row.billing_type as BillingType | null) ?? null,
+    identityCheckedAt: row.identity_checked_at
   }
 }
 
@@ -1611,6 +1664,20 @@ export function getAllAccounts(): AccountInfo[] {
   const db = getDb()
   const rows = db.prepare('SELECT * FROM account ORDER BY created_at ASC').all() as AccountRow[]
   return rows.map(rowToAccountInfo)
+}
+
+/**
+ * One account row by its local id, or null.
+ *
+ * A targeted read rather than a scan of {@link getAllAccounts}, because the
+ * usage poll asks for the ACTIVE dir's row on every pass — it is where the
+ * login-captured `organization` display name lives, and the profile endpoint
+ * does not return one (S2e).
+ */
+export function getAccount(id: string): AccountInfo | null {
+  const db = getDb()
+  const row = db.prepare('SELECT * FROM account WHERE id = ?').get(id) as AccountRow | undefined
+  return row ? rowToAccountInfo(row) : null
 }
 
 /** Insert or replace account metadata. Does NOT touch credentials. */
@@ -1627,12 +1694,17 @@ export function upsertAccount(info: AccountInfo): void {
 }
 
 /**
- * Record what an account's credentials actually name (ADR-071 §6).
+ * Record what an account's credentials actually name (ADR-071 §6, S2e).
  *
- * Written while the account is ACTIVE, because `~/.claude.json` describes only
- * that one — this is how a stored account still has an account key when the
- * limits provider reads it later without making it active. A no-op when the id
- * names no row: only a local multi-account dir has one.
+ * The identity comes from a `/api/oauth/profile` read of THAT dir's own
+ * credential — never from the shared `~/.claude.json`, which names whichever
+ * cli.js process refetched last (migration v23 says what that cost). It is
+ * written while the account is active, and on demand for a stored one, so the
+ * limits provider can key a reading without making the account active.
+ *
+ * `identity_checked_at` is stamped with it: a credentials file newer than this
+ * instant means a re-login, which is the one thing that invalidates the four.
+ * A no-op when the id names no row: only a local multi-account dir has one.
  */
 export function updateAccountIdentity(
   id: string,
@@ -1641,23 +1713,50 @@ export function updateAccountIdentity(
     organizationUuid?: string | undefined
     organizationName?: string | undefined
     billingType?: BillingType | undefined
-  }
+  },
+  checkedAt: number = Date.now()
 ): void {
   const db = getDb()
   db.prepare(
     `UPDATE account
-        SET account_uuid      = ?,
-            organization_uuid = ?,
-            organization_name = ?,
-            billing_type      = ?
+        SET account_uuid        = ?,
+            organization_uuid   = ?,
+            organization_name   = ?,
+            billing_type        = ?,
+            identity_checked_at = ?
       WHERE id = ?`
   ).run(
     identity.accountUuid,
     identity.organizationUuid ?? null,
     identity.organizationName ?? null,
     identity.billingType ?? null,
+    checkedAt,
     id
   )
+}
+
+// ---------------------------------------------------------------------------
+// Key/value marker table (migration v23)
+// ---------------------------------------------------------------------------
+
+/** One durable marker, or null when it was never written. */
+export function getMeta(key: string): string | null {
+  const db = getDb()
+  const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as
+    { value: string } | undefined
+  return row?.value ?? null
+}
+
+/** Write (or overwrite) one durable marker. */
+export function setMeta(key: string, value: string): void {
+  const db = getDb()
+  db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(key, value)
+}
+
+/** Forget one durable marker. Nothing in production does; tests and repairs may. */
+export function deleteMeta(key: string): void {
+  const db = getDb()
+  db.prepare('DELETE FROM meta WHERE key = ?').run(key)
 }
 
 /** Delete account metadata row. Credentials directory removal is handled by AccountManager. */
@@ -2558,6 +2657,113 @@ export function getLedgerCostRows(
     cacheWriteTokens: r.cache_write_tokens,
     cacheReadTokens: r.cache_read_tokens
   }))
+}
+
+// ---------------------------------------------------------------------------
+// The one-shot Claude identity re-key (S2e)
+//
+// The SQL half of `claude-account-identity.ts`, which owns the RULE — which
+// rows moved to the wrong account, how far back, and when the repair may run.
+// Nothing here decides any of that; it is the four statements the rule needs,
+// in one transaction, because a half-applied re-key would leave the ledger and
+// the buckets disagreeing about the same hours.
+// ---------------------------------------------------------------------------
+
+/** What the rule hands over: where the rows are, and where they belong. */
+export interface ClaudeIdentityRepairPlan {
+  /** The account key the rows were wrongly written under. */
+  staleKey: string
+  /** The account they actually belong to. */
+  accountKey: string
+  accountLabel: string | null
+  accountUuid: string
+  billingType: BillingType
+  /** Rows at or after this instant move; earlier ones predate the mistake. */
+  since: number
+  /** `since` floored to its hour — the first bucket the span covers. */
+  bucketSinceHourUtc: number
+  /**
+   * The first hour a bucket may be DELETED at: the rollup's own reach. Deleting
+   * an hour it will never rebuild would simply lose that hour's spend, so a
+   * span older than the rollup's window keeps its (mis-keyed) buckets and the
+   * caller reports how many were left behind.
+   */
+  bucketDeleteFromHourUtc: number
+}
+
+export interface ClaudeIdentityRepairCounts {
+  events: number
+  samples: number
+  windows: number
+  buckets: number
+  bucketsLeftBehind: number
+}
+
+/**
+ * Move one account's rows onto another key, for a time span, atomically.
+ *
+ * `usage_event` and `usage_window_sample` are UPDATED — they are the record of
+ * what happened and only their attribution was wrong. `usage_window` and
+ * `usage_bucket` are DELETED instead, because both are DERIVED: the next
+ * `recomputeUsageWindows` re-seeds a window from the re-keyed samples, and the
+ * next rollup rebuilds an hour from the re-keyed ledger. Updating a
+ * `usage_window` row's key would also collide with the primary key whenever the
+ * correct account already owns that window.
+ */
+export function repairClaudeAccountKey(plan: ClaudeIdentityRepairPlan): ClaudeIdentityRepairCounts {
+  const db = getDb()
+  db.prepare('BEGIN').run()
+  try {
+    // ENGINE-FILTERED, unlike the three below: `usage_event` is the one table
+    // holding other engines' rows, and only Claude's attribution was read off
+    // the shared file.
+    const events = db
+      .prepare(
+        `UPDATE usage_event
+            SET account_key  = ?,
+                account_label = ?,
+                account_uuid  = ?,
+                billing_type  = ?
+          WHERE engine_id = 'claude' AND account_key = ? AND ts >= ?`
+      )
+      .run(
+        plan.accountKey,
+        plan.accountLabel,
+        plan.accountUuid,
+        plan.billingType,
+        plan.staleKey,
+        plan.since
+      ).changes
+
+    const samples = db
+      .prepare(
+        `UPDATE usage_window_sample
+            SET account_key = ?, account_uuid = ?
+          WHERE account_key = ? AND ts >= ?`
+      )
+      .run(plan.accountKey, plan.accountUuid, plan.staleKey, plan.since).changes
+
+    const windows = db
+      .prepare('DELETE FROM usage_window WHERE account_key = ? AND canonical_end >= ?')
+      .run(plan.staleKey, plan.since).changes
+
+    const leftBehind = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM usage_bucket
+          WHERE account_key = ? AND hour_utc >= ? AND hour_utc < ?`
+      )
+      .get(plan.staleKey, plan.bucketSinceHourUtc, plan.bucketDeleteFromHourUtc) as { n: number }
+
+    const buckets = db
+      .prepare('DELETE FROM usage_bucket WHERE account_key = ? AND hour_utc >= ?')
+      .run(plan.staleKey, plan.bucketDeleteFromHourUtc).changes
+
+    db.prepare('COMMIT').run()
+    return { events, samples, windows, buckets, bucketsLeftBehind: leftBehind.n }
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -51,7 +51,7 @@ describe('DB migrations — v3 usage_event + v4 usage_window_sample', () => {
       runMigrations(db)
       // Bump alongside MIGRATIONS in db.ts — currently v21 (the account's
       // identity columns and the window samples' account key + kind).
-      expect(userVersion(db)).toBe(22)
+      expect(userVersion(db)).toBe(23)
     } finally {
       db.close()
     }

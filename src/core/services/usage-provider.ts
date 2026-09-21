@@ -24,9 +24,10 @@
  * `claude-session.ts` reads it on every metering snapshot.
  */
 
-import { access } from 'node:fs/promises'
+import { stat } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import type {
+  AccountInfo,
   AccountLimits,
   AccountLimitWindow,
   AccountUsage,
@@ -35,9 +36,10 @@ import type {
 import { anthropicAccountKey, UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
 import { usageFetcher, getCliUserAgent } from './usage-fetcher'
 import { claudeLimitWindows, fetchClaudeUsage } from './claude-usage-api'
-import { activeClaudeAttribution } from './usage-windows'
+import { claudeDirAccountKey, resolveClaudeDirIdentity } from './claude-account-identity'
+import { activeClaudeAttribution, claudeAccountLabel } from './usage-windows'
 import { recordLimitSamples } from './window-samples'
-import { getAllAccounts, latestWindowSamples } from './db'
+import { getAllAccounts, latestWindowSamples, updateAccountIdentity } from './db'
 import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import { buildClaudeAccountRef, hostAccountsDir } from '../host'
@@ -99,13 +101,20 @@ export interface LimitsProvider {
   read(opts: { refresh: boolean }): Promise<AccountLimits[]>
 }
 
-/** Does this path exist? (An account directory with no credentials file is not an account.) */
-async function exists(path: string): Promise<boolean> {
+/**
+ * When was this credential file last written? Null when there is none — an
+ * account directory with no credentials file is not an account.
+ *
+ * The mtime is not decoration: it is how a stored account's recorded identity
+ * is invalidated. A file written after the identity was last read means the
+ * user signed in again, and the account behind that path may now be a
+ * different one (S2e).
+ */
+async function credentialsMtime(path: string): Promise<number | null> {
   try {
-    await access(path)
-    return true
+    return (await stat(path)).mtimeMs
   } catch {
-    return false
+    return null
   }
 }
 
@@ -179,12 +188,71 @@ function storedAccountKey(account: {
 }
 
 /**
+ * Does this stored account's recorded identity still have to be read?
+ *
+ * Yes when it was never read (migration v23 cleared every row, because the
+ * values it held came from the shared `~/.claude.json` and named whichever
+ * account cli.js refetched last), and yes when the credential file is newer
+ * than the last successful read — a re-login is the one thing that can put a
+ * different account behind the same path.
+ */
+function needsIdentityRead(account: AccountInfo, credentialsMtimeMs: number): boolean {
+  if (!account.accountUuid || !account.organizationUuid) return true
+  return credentialsMtimeMs > (account.identityCheckedAt ?? 0)
+}
+
+/**
+ * Read a stored account's identity off its OWN credential and persist it.
+ *
+ * Only on a refreshing read: it is a network call against that account's token,
+ * which is exactly what ADR-071 §6 says happens when a person asks and never
+ * on a timer. Returns null when it could not be read, and the caller falls back
+ * to whatever the row already said — a reading under a stale key is still more
+ * useful than no reading, and the usage read below will report its own failure
+ * if the credential is the problem.
+ */
+async function readStoredIdentity(
+  account: AccountInfo,
+  credentialsPath: string
+): Promise<{ accountKey: string; accountUuid: string } | null> {
+  const result = await resolveClaudeDirIdentity({
+    credentialsPath,
+    allowRefresh: true,
+    userAgent: getCliUserAgent()
+  })
+  if ('error' in result) {
+    logger.info(
+      'UsageProvider',
+      `stored Claude account ${account.id} identity not read: ${result.error} (${result.detail})`
+    )
+    return null
+  }
+  try {
+    // The organization NAME is not in the profile body, so the label keeps
+    // reading the login-captured columns.
+    updateAccountIdentity(account.id, {
+      accountUuid: result.identity.accountUuid,
+      organizationUuid: result.identity.organizationUuid,
+      billingType: result.identity.billingType
+    })
+  } catch (err) {
+    logger.debug('UsageProvider', `stored identity write failed: ${err}`)
+  }
+  const accountKey = claudeDirAccountKey(result.identity)
+  logger.info('UsageProvider', `stored Claude account ${account.id} is ${accountKey}`)
+  return { accountKey, accountUuid: result.identity.accountUuid }
+}
+
+/**
  * Every OTHER stored Claude account (ADR-015's per-account credential dirs).
  *
- * An account that has not been active since migration v21 shipped has no
- * identity recorded, so its key is `unknown` and its email is the label — the
- * reading is still worth showing, it just cannot be pooled with the same
- * subscription seen on another machine until it has been active once.
+ * An account with no identity recorded reads under `unknown` with its email as
+ * the label — the reading is still worth showing, it just cannot be pooled with
+ * the same subscription seen on another machine. A REFRESHING read fixes that
+ * first: it asks the account's own credential who it belongs to (S2e) and files
+ * the reading under the answer, which is the only way an account that is never
+ * made active gets a real key, since migration v23 cleared the identities that
+ * were guessed from the shared `~/.claude.json`.
  */
 async function storedClaudeLimits(refresh: boolean): Promise<{
   limits: AccountLimits[]
@@ -203,14 +271,28 @@ async function storedClaudeLimits(refresh: boolean): Promise<{
   for (const account of getAllAccounts()) {
     if (account.id === activeId) continue
     const credentialsPath = join(root, account.id, '.credentials.json')
-    if (!(await exists(credentialsPath))) continue
+    const credentialsMtimeMs = await credentialsMtime(credentialsPath)
+    if (credentialsMtimeMs === null) continue
 
-    const accountKey = storedAccountKey(account)
+    // BEFORE the usage read, because the key is what the reading is filed
+    // under: reading first and re-keying after would leave a sample under the
+    // stale key on every path that fails halfway.
+    const identity =
+      refresh && needsIdentityRead(account, credentialsMtimeMs)
+        ? await readStoredIdentity(account, credentialsPath)
+        : null
+    const accountKey = identity?.accountKey ?? storedAccountKey(account)
+    const accountUuid = identity?.accountUuid ?? account.accountUuid
     const base = {
       accountKey,
-      label: account.organizationName
-        ? `${account.email ?? account.id} (${account.organizationName})`
-        : (account.email ?? account.id),
+      // `organization_name` is NULL on every row until the account has been
+      // refreshed at least once (migration v23 cleared it), so the
+      // login-captured `organization` is the fallback rather than nothing: two
+      // subscriptions under one email differ by that word alone.
+      label: claudeAccountLabel({
+        email: account.email ?? account.id,
+        organizationName: account.organizationName ?? account.organization ?? undefined
+      }),
       vendorId: 'anthropic',
       plan: account.subscriptionType,
       source: 'local' as const
@@ -230,7 +312,7 @@ async function storedClaudeLimits(refresh: boolean): Promise<{
       const windows = claudeLimitWindows(result.usage)
       const written = recordLimitSamples({
         accountKey,
-        accountUuid: account.accountUuid,
+        accountUuid,
         windows
       })
       persisted += written

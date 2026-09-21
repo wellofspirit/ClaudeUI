@@ -90,6 +90,17 @@ vi.mock('node:fs/promises', () => ({
     vfs.files.set(name, (vfs.files.get(name) ?? '') + data)
   }),
   mkdir: vi.fn(async () => undefined),
+  // S2e reads the credential file's mtime/size to cache the resolved identity.
+  stat: vi.fn(async (p: string | URL) => {
+    const name = basenameOf(p)
+    const data = vfs.files.get(name)
+    if (data === undefined) {
+      const err = new Error(`ENOENT: ${name}`) as NodeJS.ErrnoException
+      err.code = 'ENOENT'
+      throw err
+    }
+    return { mtimeMs: 1_000, size: data.length }
+  }),
   // The .credentials.json refresh write now goes through writeJsonAtomicAsync
   // (temp-file + rename). Model rename/chmod/unlink over the basename-keyed vfs
   // so the atomic write still lands the final content under '.credentials.json'.
@@ -119,7 +130,23 @@ const { updateAccountIdentity, recordWindowSample } = vi.hoisted(() => ({
   recordWindowSample: vi.fn()
 }))
 
-vi.mock('../../../core/services/db', () => ({ updateAccountIdentity, recordWindowSample }))
+// `getMeta`/`setMeta` back S2e's one-shot repair marker; it is already settled
+// here so no suite in this file re-keys anything.
+const { getMeta, setMeta } = vi.hoisted(() => ({
+  getMeta: vi.fn(() => 'done'),
+  setMeta: vi.fn()
+}))
+
+vi.mock('../../../core/services/db', () => ({
+  updateAccountIdentity,
+  recordWindowSample,
+  getMeta,
+  setMeta,
+  repairClaudeAccountKey: vi.fn(),
+  // No `account` row in this suite, so the dir path finds no display name —
+  // the label rule itself lives in `usage-fetcher-account-dir.test.ts`.
+  getAccount: vi.fn(() => null)
+}))
 
 // The two nudges the poll fans out: `usage:data` (the whole reading) and
 // ADR-071 §6's `usage:limits-changed` (limits moved, for any vendor).
@@ -823,9 +850,11 @@ describe('UsageFetcher — account log', () => {
  * ADR-071 §6 — what the poll KEEPS.
  *
  * Two writes, both new in S3a: the active account's identity onto its own
- * `account` row (the only moment it is knowable, since `~/.claude.json`
- * describes the active account alone), and one window sample per window kind
- * rather than the 5-hour one alone.
+ * `account` row, and one window sample per window kind rather than the 5-hour
+ * one alone. Since S2e the identity under a credential dir comes from that
+ * dir's own credential through `/api/oauth/profile`, not from the shared
+ * `~/.claude.json` — `usage-fetcher-account-dir.test.ts` owns that rule; this
+ * suite only pins that the write still happens and that the samples follow it.
  */
 describe('UsageFetcher — the identity and the samples it records', () => {
   let fetcher: UsageFetcher
@@ -881,14 +910,23 @@ describe('UsageFetcher — the identity and the samples it records', () => {
   })
 
   it('writes the active account’s identity onto the local account row', async () => {
+    // Under a dir the identity is the DIR's, read from the profile endpoint —
+    // the `~/.claude.json` seeded above is a decoy and must not be reached.
+    fetchMock.mockImplementation(async (url: string) =>
+      String(url).includes('/api/oauth/profile')
+        ? makeFetchResponse(200, {
+            account: { uuid: 'acc_dir', email: 'alice@example.com' },
+            organization: { uuid: 'org_dir', billing_type: 'stripe_subscription' }
+          })
+        : makeFetchResponse(200, usageBody())
+    )
     setSecurestorageEnv({ dir: '/home/someone/.claude/ui/accounts/acct-local' })
 
     await fetcher.fetch()
 
     expect(updateAccountIdentity).toHaveBeenCalledWith('acct-local', {
-      accountUuid: 'acc_1',
-      organizationUuid: 'org_personal',
-      organizationName: 'Personal',
+      accountUuid: 'acc_dir',
+      organizationUuid: 'org_dir',
       billingType: 'subscription'
     })
   })

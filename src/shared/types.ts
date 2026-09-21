@@ -3071,6 +3071,15 @@ export interface AccountInfo {
   organizationUuid?: string | null
   organizationName?: string | null
   billingType?: BillingType | null
+  /**
+   * When those four were last read out of THIS account's own credential (S2e).
+   *
+   * Null means never. A credentials file whose mtime is newer says the account
+   * was signed in again since, so the identity is re-read on the next refresh
+   * the user asks for — the four columns are otherwise trusted as they stand,
+   * because re-reading them spends a refresh grant (ADR-071 §6).
+   */
+  identityCheckedAt?: number | null
 }
 
 export interface AccountsState {

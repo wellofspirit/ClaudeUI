@@ -1620,11 +1620,13 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     // Fall back to the service session (spawns lazily on first call)
     return serviceSession.getUsage()
   })
-  // Apply saved refresh interval before starting
+  // Apply the saved refresh interval. The poll ITSELF is started by
+  // `startCoreServices`, after the host's `afterSessionGraph` hook has applied
+  // the active credential dir — see the comment there. Setting the interval
+  // here is safe and has to stay here: this is where the settings are read.
   if (typeof savedSettings.usageRefreshSecs === 'number') {
     usageFetcher.setIntervalSecs(savedSettings.usageRefreshSecs)
   }
-  usageFetcher.startPolling()
 
   // Block usage analytics — watches JSONL files for changes (no polling).
   // Full scan on startup, then event-driven recalculation on file changes.

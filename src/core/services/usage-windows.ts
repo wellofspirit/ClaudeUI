@@ -153,8 +153,19 @@ export function claudeAccountAttribution(
   }
 }
 
-/** The email, with the organization name beside it when the log recorded one. */
-function claudeAccountLabel(rec: AccountLogRecord): string {
+/**
+ * The email, with the organization name beside it when one is known.
+ *
+ * Exported because a row's label is written in more than one place and they
+ * must agree: the live attribution above, and S2e's one-shot re-key, which
+ * rewrites `account_label` on rows that were attributed to the wrong account.
+ * A structural parameter rather than an `AccountLogRecord`, so a caller that
+ * has the two fields but no log record can use it.
+ */
+export function claudeAccountLabel(rec: {
+  email: string
+  organizationName?: string | undefined
+}): string {
   return rec.organizationName ? `${rec.email} (${rec.organizationName})` : rec.email
 }
 

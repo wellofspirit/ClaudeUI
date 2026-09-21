@@ -17,7 +17,7 @@
  * starts can display data immediately without an API call.
  */
 
-import { readFile, writeFile, mkdir, appendFile } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, appendFile, stat } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { basename, join } from 'node:path'
 import { homedir, platform } from 'node:os'
@@ -25,7 +25,7 @@ import { getCliVersion } from './claude-session'
 import { emitEvent } from './sync-host'
 import type { AccountUsage, BillingType, RateWindow } from '../../shared/types'
 import { logger } from './logger'
-import { updateAccountIdentity } from './db'
+import { getAccount, updateAccountIdentity } from './db'
 import {
   activeClaudeAttribution,
   claudeBillingTypeFromProfile,
@@ -40,29 +40,47 @@ import {
 } from './claude-usage-api'
 import { recordLimitSamples } from './window-samples'
 import { buildClaudeAccountRef } from '../host'
-import { getSecurestorageEnv } from '../sdk/securestorage-env'
+import { getSecurestorageEnv, onSecurestorageEnvChange } from '../sdk/securestorage-env'
+import {
+  claudeDirAccountKey,
+  repairClaudeIdentityOnce,
+  resolveClaudeDirIdentity,
+  skipClaudeIdentityRepair,
+  type ClaudeDirIdentity
+} from './claude-account-identity'
 
-/** The currently authenticated Claude account (from ~/.claude.json). */
+/**
+ * The currently authenticated Claude account.
+ *
+ * Under multi-account it is what the ACTIVE dir's own credential resolves to
+ * (`/api/oauth/profile`, S2e); in single-account mode it is `~/.claude.json`'s
+ * `oauthAccount`. Same three facts either way.
+ */
 export interface ActiveAccount {
   uuid: string
   email: string
   /**
    * The subscription this account is on (ADR-071 §3's `anthropic:<org>:…`).
-   * Optional because `oauthAccount` is not guaranteed to carry it — an account
-   * with no organization id is attributable by email but not by key.
+   * Optional because the single-account source is not guaranteed to carry it —
+   * an account with no organization id is attributable by email but not by key.
    */
   organizationUuid?: string
-  /** Display only — what tells two subscriptions under one email apart. */
+  /**
+   * Display only — what tells two subscriptions under one email apart. On the
+   * dir path it comes from the account row's login-captured `organization`
+   * column, not from the profile body (which carries no name), so an account
+   * that has never completed a login in this app has none.
+   */
   organizationName?: string
   /**
-   * How this account is billed, resolved by {@link UsageFetcher.claudeBillingType}
-   * — the SAME value the account-log record carries, so a row written live and
-   * a row attributed to this account by time cannot disagree.
+   * How this account is billed — the SAME value the account-log record carries,
+   * so a row written live and a row attributed to this account by time cannot
+   * disagree.
    *
-   * It is here because `oauthAccount.billingType` is the only signal that
+   * It is here because the profile's `billing_type` is the only signal that
    * separates a `usage_based` OAuth account from a plan, and nothing outside
-   * this class reads `~/.claude.json`: a caller that has to name the account
-   * NOW (the dispatcher's Claude target) cannot wait on that file read.
+   * this class resolves it: a caller that has to name the account NOW (the
+   * dispatcher's Claude target) cannot wait on a file read or a request.
    */
   billingType: BillingType
 }
@@ -162,7 +180,28 @@ export class UsageFetcher {
    * never log the move and every later row would name the wrong subscription.
    */
   private lastLoggedAccountPair: LoggedAccountPair | null = null
+  /** The whole last record, which the one-shot identity repair reads back. */
+  private lastLoggedRecord: AccountLogRecord | null = null
   private accountLogSeeded = false
+  /**
+   * The resolved identity of one credential file, remembered until that file
+   * changes (S2e).
+   *
+   * Keyed by mtime AND size so a re-login — the one event that puts a different
+   * account behind the same path — misses, while the half-hourly poll costs no
+   * request at all. An identity is not a reading: it moves only when the
+   * credential does.
+   */
+  private identityCache: {
+    dir: string
+    mtimeMs: number
+    size: number
+    identity: ClaudeDirIdentity
+  } | null = null
+  /** Which dir `activeAccount` was resolved for, or null in Keychain mode. */
+  private activeAccountDir: string | null = null
+  /** Unsubscribe from the account-switch hook, while polling. */
+  private unsubscribeSwitch: (() => void) | null = null
   /** One-shot timer firing shortly after the 5h window expires. */
   private expiryTimer: ReturnType<typeof setTimeout> | null = null
   private lastFetchStartedAt = 0
@@ -209,6 +248,13 @@ export class UsageFetcher {
           this.fetch().catch((err) => {
             logger.warn('UsageFetcher', 'Initial fetch failed', err)
           })
+        } else {
+          // `fetch()` is the only thing that resolves the active account, so a
+          // fresh cache used to leave the app with NO account until the first
+          // poll half an hour in — and with it, no window samples and no chance
+          // to run S2e's one-shot repair. Resolve it now, without making the
+          // cached reading wait on a network call.
+          void this.trackActiveAccount()
         }
       })
       .catch(() => {
@@ -217,6 +263,17 @@ export class UsageFetcher {
           logger.warn('UsageFetcher', 'Initial fetch failed', err)
         })
       })
+
+    // The account can move while the app runs (ADR-015's switch), and the
+    // identity is the dir's, not the machine's. `AccountManager` lives in main
+    // and core cannot import it, so the credential-dir pointer is the seam.
+    this.unsubscribeSwitch ??= onSecurestorageEnvChange(() => {
+      // `fetch()` tracks the account first, so the limits and the sample land
+      // under the new one in the same pass.
+      this.fetch().catch((err) => {
+        logger.warn('UsageFetcher', 'Account-switch fetch failed', err)
+      })
+    })
 
     this.pollTimer = setInterval(() => {
       this.fetch().catch((err) => {
@@ -235,6 +292,8 @@ export class UsageFetcher {
       clearTimeout(this.expiryTimer)
       this.expiryTimer = null
     }
+    this.unsubscribeSwitch?.()
+    this.unsubscribeSwitch = null
   }
 
   /** Fetch usage and push to the renderer. Returns the result. */
@@ -296,92 +355,247 @@ export class UsageFetcher {
   // -------------------------------------------------------------------------
 
   /**
-   * Read the authenticated account from ~/.claude.json and append a record to
-   * the account log when it changes. The log lets block-usage attribute JSONL
-   * entries to the account active at their timestamp.
+   * Resolve which Claude account is active, and append a record to the account
+   * log when it changes. The log lets block-usage attribute JSONL entries to
+   * the account active at their timestamp.
    *
-   * The record also carries the organization and the billing type (ADR-071
-   * §3), because a row attributed by time to a PAST account has nothing else
-   * left to read — whatever the log did not write down about that account is
-   * gone by the time the row is built.
+   * TWO SOURCES, AND ONLY ONE OF THEM IS TRUSTWORTHY PER MODE (S2e).
+   *
+   *  - Multi-account (a credential dir is set): the dir's OWN credential,
+   *    through `/api/oauth/profile`. `~/.claude.json` is shared by every dir
+   *    and by the terminal `claude`, and cli.js rewrites its `oauthAccount`
+   *    only when it refetches the profile — so it names whichever cli.js
+   *    process refetched last, which is routinely the wrong account. It is not
+   *    read at all on this path.
+   *  - Single account (no dir): `~/.claude.json`, unchanged. There is one
+   *    credential, one account, and nothing for the file to be wrong about.
+   *
+   * The record carries the organization and the billing type (ADR-071 §3),
+   * because a row attributed by time to a PAST account has nothing else left to
+   * read — whatever the log did not write down about that account is gone by
+   * the time the row is built.
    */
   private async trackActiveAccount(): Promise<void> {
+    const dir = getSecurestorageEnv()?.dir
     try {
-      const raw = await readFile(CLAUDE_JSON_PATH, 'utf-8')
-      const parsed = JSON.parse(raw) as {
-        oauthAccount?: {
-          accountUuid?: string
-          emailAddress?: string
-          organizationUuid?: string
-          organizationName?: string
-          billingType?: string
-        }
-      }
-      const oauthAccount = parsed.oauthAccount
-      const uuid = oauthAccount?.accountUuid
-      const email = oauthAccount?.emailAddress
-      if (!uuid || !email) return
-      const organizationUuid = oauthAccount?.organizationUuid
-      const organizationName = oauthAccount?.organizationName
-      // Resolved on EVERY read, not only when a record is appended below: the
-      // active account has to carry the billing type for a caller attributing
-      // a turn right now, and the log only writes on a CHANGE of subscription.
-      const billingType = this.claudeBillingType(oauthAccount?.billingType)
-      this.activeAccount = {
-        uuid,
-        email,
-        ...(organizationUuid ? { organizationUuid } : {}),
-        ...(organizationName ? { organizationName } : {}),
-        billingType
-      }
-      this.rememberAccountIdentity(this.activeAccount)
-
-      // Initialize dedup state from the log's last record (once per launch)
-      if (!this.accountLogSeeded) {
-        this.accountLogSeeded = true
-        try {
-          const log = await readFile(ACCOUNT_LOG_PATH, 'utf-8')
-          const lines = log.trim().split('\n')
-          const last = JSON.parse(lines[lines.length - 1]) as Partial<AccountLogRecord>
-          this.lastLoggedAccountPair = last.accountUuid
-            ? { accountUuid: last.accountUuid, organizationUuid: last.organizationUuid }
-            : null
-        } catch {
-          this.lastLoggedAccountPair = null
-        }
-      }
-
-      // A pre-ADR-071 last record names no organization, so the first run after
-      // the upgrade sees a changed pair and appends one that does. That is how
-      // an existing log starts naming subscriptions at all.
-      const pair: LoggedAccountPair = { accountUuid: uuid, organizationUuid }
-      if (!samePair(this.lastLoggedAccountPair, pair)) {
-        this.lastLoggedAccountPair = pair
-        const record: AccountLogRecord = {
-          ts: Date.now(),
-          accountUuid: uuid,
-          email,
-          ...(organizationUuid ? { organizationUuid } : {}),
-          ...(organizationName ? { organizationName } : {}),
-          billingType
-        }
-        await mkdir(ACCOUNT_LOG_DIR, { recursive: true })
-        await appendFile(ACCOUNT_LOG_PATH, JSON.stringify(record) + '\n', 'utf-8')
-        logger.info('UsageFetcher', `Active account changed → ${email}`)
-      }
+      if (dir) await this.trackAccountFromDir(dir)
+      else await this.trackAccountFromClaudeJson()
     } catch (err) {
       logger.debug('UsageFetcher', `Account tracking failed: ${err}`)
     }
   }
 
+  /** The multi-account path: the dir's own credential names the account. */
+  private async trackAccountFromDir(dir: string): Promise<void> {
+    const identity = await this.resolveDirIdentity(dir)
+    if (!identity) {
+      // A dir we already resolved keeps what it had — the endpoint being down
+      // says nothing about who the account is. A dir we have NOT resolved gets
+      // nothing: a row keyed to the previous dir's subscription is the exact
+      // bug this replaced, and `unknown` is the honest answer instead.
+      if (this.activeAccountDir !== dir) {
+        this.activeAccountDir = dir
+        this.activeAccount = null
+      }
+      return
+    }
+
+    // The profile body carries no organization NAME, and the label is the only
+    // thing on screen that tells two subscriptions under one email apart — so
+    // it comes from the row cli.js's own login response filled in for this dir.
+    const organizationName = this.dirOrganizationName(dir)
+
+    this.activeAccountDir = dir
+    this.activeAccount = {
+      uuid: identity.accountUuid,
+      email: identity.email,
+      organizationUuid: identity.organizationUuid,
+      ...(organizationName ? { organizationName } : {}),
+      // The profile's own answer, with `ClaudeAuthProvider`'s probe as the
+      // fallback for a billing type outside cli.js's vocabulary — the same
+      // two signals, in the same order, as the single-account path.
+      billingType:
+        identity.billingType !== 'unknown'
+          ? identity.billingType
+          : (buildClaudeAccountRef()?.billingType ?? 'unknown')
+    }
+    this.rememberAccountIdentity(this.activeAccount)
+
+    await this.seedAccountLog()
+    const staleRecord = this.lastLoggedRecord
+    await this.appendAccountLogIfMoved(this.activeAccount)
+    // After the append, the log's last record IS the dir — so the repair reads
+    // the one captured before it, which is the stale attribution it has to move.
+    repairClaudeIdentityOnce({
+      identity,
+      ...(organizationName ? { organizationName } : {}),
+      lastRecord: staleRecord
+    })
+  }
+
+  /**
+   * The display name recorded for this dir at its last login, or undefined.
+   *
+   * Best-effort in the same sense as {@link rememberAccountIdentity}: an
+   * unreadable row costs a label, never the poll that wanted one.
+   */
+  private dirOrganizationName(dir: string): string | undefined {
+    try {
+      return getAccount(basename(dir))?.organization ?? undefined
+    } catch (err) {
+      logger.debug('UsageFetcher', `Account row read failed: ${err}`)
+      return undefined
+    }
+  }
+
+  /** The single-account (Keychain) path: `~/.claude.json` is the only source. */
+  private async trackAccountFromClaudeJson(): Promise<void> {
+    const raw = await readFile(CLAUDE_JSON_PATH, 'utf-8')
+    const parsed = JSON.parse(raw) as {
+      oauthAccount?: {
+        accountUuid?: string
+        emailAddress?: string
+        organizationUuid?: string
+        organizationName?: string
+        billingType?: string
+      }
+    }
+    const oauthAccount = parsed.oauthAccount
+    const uuid = oauthAccount?.accountUuid
+    const email = oauthAccount?.emailAddress
+    if (!uuid || !email) return
+    const organizationUuid = oauthAccount?.organizationUuid
+    const organizationName = oauthAccount?.organizationName
+    // Resolved on EVERY read, not only when a record is appended below: the
+    // active account has to carry the billing type for a caller attributing
+    // a turn right now, and the log only writes on a CHANGE of subscription.
+    const billingType = this.claudeBillingType(oauthAccount?.billingType)
+    this.activeAccountDir = null
+    this.activeAccount = {
+      uuid,
+      email,
+      ...(organizationUuid ? { organizationUuid } : {}),
+      ...(organizationName ? { organizationName } : {}),
+      billingType
+    }
+    this.rememberAccountIdentity(this.activeAccount)
+
+    await this.seedAccountLog()
+    await this.appendAccountLogIfMoved(this.activeAccount)
+    // One credential file, so the shared `~/.claude.json` described it
+    // correctly and there is nothing for S2e's re-key to move.
+    skipClaudeIdentityRepair('single-account mode')
+  }
+
+  /**
+   * Who the credential in `dir` belongs to, cached until that file changes.
+   *
+   * The 30-minute poll must not ask the profile endpoint again for an answer
+   * that cannot have moved: the only thing that puts a different account behind
+   * this path is a re-login, and that rewrites the file. `allowRefresh` is true
+   * because this is the ACTIVE account — cli.js keeps its token fresh, so a
+   * refresh here is the exception, not the rule (ADR-071 §6).
+   */
+  private async resolveDirIdentity(dir: string): Promise<ClaudeDirIdentity | null> {
+    const credentialsPath = join(dir, '.credentials.json')
+    let mtimeMs = 0
+    let size = 0
+    try {
+      const info = await stat(credentialsPath)
+      mtimeMs = info.mtimeMs
+      size = info.size
+      const cached = this.identityCache
+      if (cached && cached.dir === dir && cached.mtimeMs === mtimeMs && cached.size === size) {
+        return cached.identity
+      }
+    } catch {
+      // No credential file: the resolve below answers `needs-sign-in`, and
+      // nothing is cached against a file that is not there.
+    }
+
+    const result = await resolveClaudeDirIdentity({
+      credentialsPath,
+      allowRefresh: true,
+      userAgent: this.userAgent
+    })
+    if ('error' in result) {
+      logger.info(
+        'UsageFetcher',
+        `active account ${basename(dir)} identity not read: ${result.error} (${result.detail})`
+      )
+      return null
+    }
+    if (mtimeMs > 0) {
+      this.identityCache = { dir, mtimeMs, size, identity: result.identity }
+    }
+    logger.info(
+      'UsageFetcher',
+      `active account ${basename(dir)} is ${claudeDirAccountKey(result.identity)}`
+    )
+    return result.identity
+  }
+
+  /** Load the log's last record once per launch — the dedup and repair subject. */
+  private async seedAccountLog(): Promise<void> {
+    if (this.accountLogSeeded) return
+    this.accountLogSeeded = true
+    try {
+      const log = await readFile(ACCOUNT_LOG_PATH, 'utf-8')
+      // Backwards to the last line that PARSES: a crash mid-append leaves a
+      // partial one, and the repair reads this record to decide what to move.
+      const lines = log.split('\n')
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (!lines[i].trim()) continue
+        try {
+          const record = JSON.parse(lines[i]) as AccountLogRecord
+          if (typeof record.ts !== 'number' || typeof record.email !== 'string') continue
+          this.lastLoggedRecord = record
+          this.lastLoggedAccountPair = record.accountUuid
+            ? { accountUuid: record.accountUuid, organizationUuid: record.organizationUuid }
+            : null
+          return
+        } catch {
+          // Try the line before it.
+        }
+      }
+      this.lastLoggedAccountPair = null
+    } catch {
+      this.lastLoggedAccountPair = null
+    }
+  }
+
+  /** Append a record when the subscription moved. No-op otherwise. */
+  private async appendAccountLogIfMoved(account: ActiveAccount): Promise<void> {
+    // A pre-ADR-071 last record names no organization, so the first run after
+    // the upgrade sees a changed pair and appends one that does. That is how
+    // an existing log starts naming subscriptions at all.
+    const pair: LoggedAccountPair = {
+      accountUuid: account.uuid,
+      organizationUuid: account.organizationUuid
+    }
+    if (samePair(this.lastLoggedAccountPair, pair)) return
+    this.lastLoggedAccountPair = pair
+    const record: AccountLogRecord = {
+      ts: Date.now(),
+      accountUuid: account.uuid,
+      email: account.email,
+      ...(account.organizationUuid ? { organizationUuid: account.organizationUuid } : {}),
+      ...(account.organizationName ? { organizationName: account.organizationName } : {}),
+      billingType: account.billingType
+    }
+    await mkdir(ACCOUNT_LOG_DIR, { recursive: true })
+    await appendFile(ACCOUNT_LOG_PATH, JSON.stringify(record) + '\n', 'utf-8')
+    this.lastLoggedRecord = record
+    logger.info('UsageFetcher', `Active account changed → ${account.email}`)
+  }
+
   /**
    * Write the active account's identity onto its own `account` row (ADR-071 §6).
    *
-   * `~/.claude.json` describes whichever account is active, so this is the only
-   * moment a local account's uuid, organization and billing type are knowable —
-   * the limits provider reading its credentials LATER has no second source. A
-   * no-op in single-account mode (no per-account directory, so no row to name)
-   * and best-effort: the identity is an optimization for a future read, never a
+   * What the limits provider reads back when the account is NOT active, so that
+   * a stored account's reading has a key without a second network call. A no-op
+   * in single-account mode (no per-account directory, so no row to name) and
+   * best-effort: the identity is an optimization for a future read, never a
    * reason to fail the poll that noticed it.
    */
   private rememberAccountIdentity(account: ActiveAccount): void {
@@ -400,7 +614,8 @@ export class UsageFetcher {
   }
 
   /**
-   * How this account is billed, for the log record.
+   * How this account is billed, for the log record. Single-account path only —
+   * the dir path applies the same two signals to the profile's own answer.
    *
    * `oauthAccount.billingType` is the profile Anthropic itself returned (plan
    * metadata, not a credential), and it is the only signal that separates a
@@ -612,7 +827,7 @@ export class UsageFetcher {
    *
    * Skips when there is no account uuid — every sample is filed under an
    * account, and the fetcher cannot name one before `trackActiveAccount` has
-   * read `~/.claude.json`. The per-window skips (no reset, expired, unchanged)
+   * resolved it. The per-window skips (no reset, expired, unchanged)
    * and the canonical-end snapping live in `recordLimitSamples`, which the
    * provider's inactive-account reads share. Failures are swallowed — advisory.
    */

@@ -83,6 +83,14 @@ dir>` (via the existing `buildEnv` overlay). `CLAUDE_SECURESTORAGE_CONFIG_DIR`
 - The `skip-securestorage` patch is one more content-regex patch to re-anchor on
   cli.js version bumps (guarded by `patch/skip-securestorage/test.mjs`).
 
+- **`~/.claude.json` is shared, so its `oauthAccount` block is not an
+  identity source** (found 2026-09-21). cli.js rewrites that block only when it
+  refetches its profile, at most daily per process, so under multi-account it
+  names whichever process refetched last, including a terminal `claude` on a
+  different account. Anything that needs to know which account a dir holds
+  resolves it from the dir's own `.credentials.json` through the profile
+  endpoint. ADR-071 §3 (amended) records the rule and the repair.
+
 ## Touch points
 
 - `patch/skip-securestorage/` — the cli.js patch (apply + README + test)

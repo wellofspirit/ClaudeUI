@@ -32,7 +32,9 @@ const {
   mockChatgptRefresh,
   mockChatgptSnapshot,
   mockAccountIdentity,
-  mockEmitEvent
+  mockEmitEvent,
+  mockUpdateAccountIdentity,
+  mockResolveDirIdentity
 } = vi.hoisted(() => ({
   mockFetch: vi.fn(),
   mockGetLastUsage: vi.fn(),
@@ -44,7 +46,9 @@ const {
   mockChatgptRefresh: vi.fn(),
   mockChatgptSnapshot: vi.fn(),
   mockAccountIdentity: vi.fn(),
-  mockEmitEvent: vi.fn()
+  mockEmitEvent: vi.fn(),
+  mockUpdateAccountIdentity: vi.fn(),
+  mockResolveDirIdentity: vi.fn()
 }))
 
 vi.mock('../../../core/services/usage-fetcher', () => ({
@@ -64,7 +68,14 @@ vi.mock('../../../core/services/claude-usage-api', async (importOriginal) => ({
 
 vi.mock('../../../core/services/db', () => ({
   getAllAccounts: mockGetAllAccounts,
-  latestWindowSamples: mockLatestWindowSamples
+  latestWindowSamples: mockLatestWindowSamples,
+  updateAccountIdentity: mockUpdateAccountIdentity
+}))
+
+// Only the network call is replaced — `claudeDirAccountKey` is the real rule.
+vi.mock('../../../core/services/claude-account-identity', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../core/services/claude-account-identity')>()),
+  resolveClaudeDirIdentity: mockResolveDirIdentity
 }))
 
 vi.mock('../../../core/services/window-samples', () => ({
@@ -169,6 +180,7 @@ beforeEach(async () => {
   mockRecordLimitSamples.mockReturnValue(0)
   mockChatgptSnapshot.mockReturnValue({} as ChatgptRateLimits)
   mockAccountIdentity.mockResolvedValue({ accountKey: 'chatgpt:ws-1:user-1', accountLabel: null })
+  mockResolveDirIdentity.mockResolvedValue({ error: 'unavailable', detail: 'not stubbed' })
 })
 
 afterEach(async () => {
@@ -383,6 +395,121 @@ describe('a STORED (inactive) Claude account', () => {
 
     expect(limits).toHaveLength(1)
     expect(mockFetchClaudeUsage).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * S2e — a stored account's identity comes from its OWN credential.
+ *
+ * Migration v23 cleared the four identity columns, because what filled them was
+ * the shared `~/.claude.json` and it named whichever account cli.js refetched
+ * last. A refreshing read is the one moment a stored account may be asked who
+ * it belongs to, and it has to be asked BEFORE the usage read, because the
+ * answer is what the reading is filed under.
+ */
+describe('a stored account’s identity', () => {
+  beforeEach(async () => {
+    await seedStoredCredentials('acct-b')
+    mockFetchClaudeUsage.mockResolvedValue({ usage: usage() })
+    mockResolveDirIdentity.mockResolvedValue({
+      identity: {
+        accountUuid: 'acct-uuid-real',
+        email: 'stored@example.test',
+        organizationUuid: 'org-real',
+        billingType: 'subscription'
+      }
+    })
+  })
+
+  it('is read, persisted and used as the key when the row has none', async () => {
+    mockGetAllAccounts.mockReturnValue([
+      account({ id: 'acct-a' }),
+      account({ accountUuid: null, organizationUuid: null, billingType: null })
+    ])
+
+    const limits = await readAccountLimits({ refresh: true })
+
+    expect(mockResolveDirIdentity).toHaveBeenCalledWith({
+      credentialsPath: join(root, 'acct-b', '.credentials.json'),
+      allowRefresh: true,
+      userAgent: 'claude-code/test'
+    })
+    expect(mockUpdateAccountIdentity).toHaveBeenCalledWith('acct-b', {
+      accountUuid: 'acct-uuid-real',
+      organizationUuid: 'org-real',
+      billingType: 'subscription'
+    })
+    expect(limits[1].accountKey).toBe('anthropic:org-real:acct-uuid-real')
+    expect(mockRecordLimitSamples).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountKey: 'anthropic:org-real:acct-uuid-real',
+        accountUuid: 'acct-uuid-real'
+      })
+    )
+  })
+
+  it('is re-read when the credential file is newer than the last check', async () => {
+    mockGetAllAccounts.mockReturnValue([
+      account({ id: 'acct-a' }),
+      // The file was just written by `seedStoredCredentials`, so any stamp in
+      // the past means a sign-in happened since.
+      account({ identityCheckedAt: 1 })
+    ])
+
+    await readAccountLimits({ refresh: true })
+
+    expect(mockResolveDirIdentity).toHaveBeenCalledTimes(1)
+  })
+
+  it('is left alone when it was read after the credential was last written', async () => {
+    mockGetAllAccounts.mockReturnValue([
+      account({ id: 'acct-a' }),
+      account({ identityCheckedAt: Date.now() + 60_000 })
+    ])
+
+    const limits = await readAccountLimits({ refresh: true })
+
+    expect(mockResolveDirIdentity).not.toHaveBeenCalled()
+    expect(limits[1].accountKey).toBe(STORED_KEY)
+  })
+
+  it('is labelled by the login-captured organization when it has no other', async () => {
+    // Migration v23 cleared `organization_name` on every row, so this IS the
+    // shape of every stored account until one is refreshed — and the owner's
+    // case is two subscriptions under one email.
+    mockGetAllAccounts.mockReturnValue([
+      account({ id: 'acct-a' }),
+      account({ organizationName: null, organization: 'Company' })
+    ])
+
+    const limits = await readAccountLimits({ refresh: false })
+
+    expect(limits[1].label).toBe('stored@example.test (Company)')
+  })
+
+  it('is never read on a non-refreshing sweep — that would spend a grant', async () => {
+    mockGetAllAccounts.mockReturnValue([
+      account({ id: 'acct-a' }),
+      account({ accountUuid: null, organizationUuid: null })
+    ])
+
+    await readAccountLimits({ refresh: false })
+
+    expect(mockResolveDirIdentity).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the row’s own key when the identity cannot be read', async () => {
+    mockResolveDirIdentity.mockResolvedValue({ error: 'unavailable', detail: 'offline' })
+    mockGetAllAccounts.mockReturnValue([
+      account({ id: 'acct-a' }),
+      account({ identityCheckedAt: 1 })
+    ])
+
+    const limits = await readAccountLimits({ refresh: true })
+
+    expect(mockUpdateAccountIdentity).not.toHaveBeenCalled()
+    // A reading under the stale key is still more useful than no reading.
+    expect(limits[1]).toMatchObject({ accountKey: STORED_KEY, state: 'ok' })
   })
 })
 
