@@ -137,6 +137,10 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
 
   const progress = taskProgressMap[toolUseId]
   const elapsed = progress?.elapsedTimeSeconds
+  // How many times this agent has been started. The live record carries it
+  // while it runs; the notification carries it afterwards, because activeTasks
+  // drops the task at terminal (ADR-073).
+  const runIndex = activeTasks[toolUseId]?.runIndex ?? bgNotification?.runIndex ?? 1
 
   const { body: resultBody, usage: parsedUsage } = useMemo(
     () => parseUsage(result?.toolResult || ''),
@@ -372,6 +376,15 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
               background
             </span>
           )}
+          {runIndex > 1 && (
+            <span
+              data-testid="TaskCard.resumed"
+              className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent"
+              title="This agent was sent a message after it finished, and ran again"
+            >
+              resumed ×{runIndex - 1}
+            </span>
+          )}
           {/* Usage stats inline when collapsed */}
           {usage && (
             <span className="text-[10px] font-mono text-text-secondary">
@@ -455,6 +468,15 @@ export function TaskCard({ block, result, view, approval }: Props): React.JSX.El
               {isBackground && (
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-warning/10 text-warning">
                   background
+                </span>
+              )}
+              {runIndex > 1 && (
+                <span
+                  data-testid="TaskCard.resumed"
+                  className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent"
+                  title="This agent was sent a message after it finished, and ran again"
+                >
+                  resumed ×{runIndex - 1}
                 </span>
               )}
               {usage && (

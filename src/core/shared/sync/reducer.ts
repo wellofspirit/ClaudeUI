@@ -1002,13 +1002,25 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
     // -----------------------------------------------------------------------
     case 'session:task-started': {
       const routingId = routingIdOf(event)
-      const data = arg<{ toolUseId?: string; taskId?: string; taskType?: string }>(event, 1)
+      const data = arg<{
+        toolUseId?: string
+        taskId?: string
+        taskType?: string
+        runIndex?: number
+      }>(event, 1)
       if (!routingId || !data?.toolUseId) return state
       const toolUseId = data.toolUseId
+      // toolUseId is the agent's ORIGIN call, normalized by ClaudeSession — so a
+      // resumed agent re-arms the record it already had rather than opening a
+      // second one under the SendMessage call's id (ADR-073).
       return withSession(state, routingId, (s) => ({
         activeTasks: {
           ...s.activeTasks,
-          [toolUseId]: { taskId: data.taskId ?? '', taskType: data.taskType ?? '' }
+          [toolUseId]: {
+            taskId: data.taskId ?? '',
+            taskType: data.taskType ?? '',
+            ...(data.runIndex !== undefined ? { runIndex: data.runIndex } : {})
+          }
         }
       }))
     }
