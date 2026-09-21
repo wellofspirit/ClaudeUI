@@ -6,13 +6,14 @@
  * `dispatched_usage` is gone (migration v20): a dispatched turn is a
  * `usage_event` row with `origin = 'dispatch'` and the dispatching session in
  * `parent_routing_id`. These are the same behaviours the old table's tests
- * pinned — the Delegated section's aggregate, one session's own dispatched-cost
- * breakdown, a rekey carrying rows forward — re-stated against the ledger:
- *   - dispatchedUsageSummary groups by (targetEngine, targetModel) and re-encodes
- *     the model the way the dispatcher spelled it
- *   - an UNPRICED turn adds nothing to a total but still counts as a dispatch
- *   - dispatchedCostsByRouting is scoped to one dispatching session
+ * pinned, re-stated against the ledger:
+ *   - dispatchedCostsByRouting is scoped to one dispatching session, and an
+ *     UNPRICED turn adds nothing to its total
  *   - renameUsageEventParent moves a session's rows on rekey
+ *
+ * The all-sessions `dispatchedUsageSummary` rollup went with `usage:fetch-dispatched`
+ * in S2f: the dashboard reads the ledger through `usage:dashboard` now, and the
+ * Delegated section it backed no longer exists.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import BetterSqlite3 from 'better-sqlite3'
@@ -20,7 +21,6 @@ import {
   runMigrations,
   closeDb,
   insertUsageEvent,
-  dispatchedUsageSummary,
   dispatchedCostsByRouting,
   renameUsageEventParent,
   type UsageEventInsert,
@@ -76,123 +76,6 @@ function dispatchRow(overrides: Partial<UsageEventInsert> = {}): UsageEventInser
 function sessionRow(overrides: Partial<UsageEventInsert> = {}): UsageEventInsert {
   return dispatchRow({ origin: 'session', parentRoutingId: null, ...overrides })
 }
-
-describe('dispatchedUsageSummary', () => {
-  it('aggregates by target engine and model, re-encoding the model value', () => {
-    insertUsageEvent(dispatchRow({ apiCostUsd: 0.1, billedCostUsd: 0.1 }))
-    insertUsageEvent(dispatchRow({ ts: 1500, apiCostUsd: 0.05, billedCostUsd: 0.05 }))
-    insertUsageEvent(
-      dispatchRow({
-        engineId: 'claude',
-        vendorId: 'anthropic',
-        modelId: 'haiku',
-        inputTokens: 50,
-        outputTokens: 0,
-        cacheWriteTokens: 0,
-        cacheWrite1hTokens: 0,
-        cacheReadTokens: 0,
-        apiCostUsd: 0.005,
-        billedCostUsd: 0.005
-      })
-    )
-
-    const summary = dispatchedUsageSummary(0)
-    expect(summary).toHaveLength(2)
-    const opencode = summary.find((s) => s.targetEngine === 'opencode')
-    // The ledger stores vendor and model apart; the Delegated section and the
-    // live breakdown both key on the encoded form.
-    expect(opencode).toMatchObject({ targetModel: 'openai/gpt-5', dispatches: 2 })
-    // 300 + 100 + 50 + 50 per row — cache_write_1h is a SUBSET of cache_write
-    // and is not added again.
-    expect(opencode!.totalTokens).toBe(1000)
-    expect(opencode!.costUsd).toBeCloseTo(0.15, 6)
-
-    const claude = summary.find((s) => s.targetEngine === 'claude')
-    expect(claude).toMatchObject({ targetModel: 'haiku', dispatches: 1, totalTokens: 50 })
-    expect(claude!.costUsd).toBeCloseTo(0.005, 6)
-  })
-
-  it('ignores a session turn — only delegated work is delegated work', () => {
-    insertUsageEvent(dispatchRow())
-    insertUsageEvent(sessionRow({ apiCostUsd: 9.99, billedCostUsd: 9.99 }))
-
-    const summary = dispatchedUsageSummary(0)
-    expect(summary).toHaveLength(1)
-    expect(summary[0].dispatches).toBe(1)
-  })
-
-  it('an unpriced turn adds nothing to the total but still counts as a dispatch', () => {
-    insertUsageEvent(dispatchRow({ apiCostUsd: 0.01, billedCostUsd: 0.01 }))
-    // A timed-out turn nothing could price: not a zero — unknown.
-    insertUsageEvent(
-      dispatchRow({
-        ts: 1500,
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheWriteTokens: 0,
-        cacheWrite1hTokens: 0,
-        cacheReadTokens: 0,
-        equivCostUsd: null,
-        engineCostUsd: null,
-        apiCostUsd: null,
-        billedCostUsd: null
-      })
-    )
-
-    const summary = dispatchedUsageSummary(0)
-    expect(summary).toHaveLength(1)
-    expect(summary[0].dispatches).toBe(2)
-    expect(summary[0].costUsd).toBeCloseTo(0.01, 6)
-  })
-
-  it('shows what a subscription turn was WORTH, and what an API-key turn was billed', () => {
-    insertUsageEvent(
-      dispatchRow({ billingType: 'subscription', apiCostUsd: 0.4, billedCostUsd: 0 })
-    )
-    insertUsageEvent(
-      dispatchRow({
-        ts: 1500,
-        engineId: 'claude',
-        vendorId: 'anthropic',
-        modelId: 'haiku',
-        billingType: 'apiKey',
-        apiCostUsd: 0.1,
-        billedCostUsd: 0.25
-      })
-    )
-
-    const summary = dispatchedUsageSummary(0)
-    expect(summary.find((s) => s.targetEngine === 'opencode')!.costUsd).toBeCloseTo(0.4)
-    expect(summary.find((s) => s.targetEngine === 'claude')!.costUsd).toBeCloseTo(0.25)
-  })
-
-  it('orders the most expensive target first', () => {
-    insertUsageEvent(dispatchRow({ apiCostUsd: 0.01, billedCostUsd: 0.01 }))
-    insertUsageEvent(
-      dispatchRow({
-        engineId: 'claude',
-        vendorId: 'anthropic',
-        modelId: 'haiku',
-        apiCostUsd: 5,
-        billedCostUsd: 5
-      })
-    )
-
-    expect(dispatchedUsageSummary(0).map((s) => s.targetEngine)).toEqual(['claude', 'opencode'])
-  })
-
-  it('respects sinceTs, excluding rows before the cutoff', () => {
-    insertUsageEvent(dispatchRow({ ts: 1000 }))
-    insertUsageEvent(dispatchRow({ ts: 5000 }))
-
-    expect(dispatchedUsageSummary(4000)[0].dispatches).toBe(1)
-    expect(dispatchedUsageSummary(0)[0].dispatches).toBe(2)
-  })
-
-  it('returns an empty array when there are no rows', () => {
-    expect(dispatchedUsageSummary(0)).toEqual([])
-  })
-})
 
 describe('dispatchedCostsByRouting', () => {
   it('aggregates cost per (targetEngine, targetModel) for ONE dispatching session', () => {

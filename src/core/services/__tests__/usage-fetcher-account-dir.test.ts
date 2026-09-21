@@ -108,6 +108,18 @@ vi.mock('../sync-host', () => ({ emitEvent }))
 import { UsageFetcher } from '../usage-fetcher'
 import { resetWindowSampleDedup } from '../window-samples'
 import { setSecurestorageEnv } from '../../sdk/securestorage-env'
+import { setHostAuth } from '../../host'
+import type { AccountsState } from '../../../shared/types'
+
+/** A host that answers only the account-state read the fetcher consults. */
+function hostAuthWith(state: AccountsState): Parameters<typeof setHostAuth>[0] {
+  return {
+    getAccountState: () => state,
+    buildClaudeAccountRef: () => ({}) as never,
+    updateClaudeAuthSource: () => {},
+    reportLoginStatus: () => {}
+  }
+}
 
 const PROFILE_URL = 'https://api.anthropic.com/api/oauth/profile'
 
@@ -372,6 +384,30 @@ describe('UsageFetcher — the active account under a credential dir', () => {
     expect(fetcher.getActiveAccount()).toBeNull()
   })
 
+  // S2f change 1: the popup's Claude meters name their account, and the only
+  // place that knows which account they belong to is the fetcher that just
+  // resolved it. The label rule is `claudeAccountLabel` — the same one the
+  // ledger's rows are labelled with, so the popup and the dashboard agree.
+  it('stamps the pushed payload with the account label', async () => {
+    await fetcher.fetch()
+
+    const pushed = emitEvent.mock.calls.filter(([channel]) => channel === 'usage:data')
+    expect(pushed.length).toBeGreaterThan(0)
+    for (const [, [usage]] of pushed) {
+      expect(usage.accountLabel).toBe('alice@example.com (Company)')
+    }
+  })
+
+  it('pushes a null label when no account could be resolved', async () => {
+    routeByUrl({ account: { uuid: 'acc_dir_a', email: 'alice@example.com' } })
+
+    await fetcher.fetch()
+
+    const pushed = emitEvent.mock.calls.filter(([channel]) => channel === 'usage:data')
+    expect(pushed.length).toBeGreaterThan(0)
+    expect(pushed.at(-1)![1][0].accountLabel).toBeNull()
+  })
+
   it('treats a profile body missing the organization as unreadable', async () => {
     routeByUrl({ account: { uuid: 'acc_dir_a', email: 'alice@example.com' } })
 
@@ -459,5 +495,80 @@ describe('UsageFetcher — the account-switch hook', () => {
     await Promise.resolve()
 
     expect(fetchMock.mock.calls.length).toBe(before)
+  })
+})
+
+/**
+ * S2f round 2 — multi-account is ON but no dir is applied yet.
+ *
+ * The incident this guards: something ran the fetcher's SINGLE-account path in
+ * a process where the credential dir had not been applied, and it appended a
+ * record naming whichever account the shared `~/.claude.json` happened to
+ * describe. Every Claude turn between that record and the next one was then
+ * attributed, by time, to the wrong subscription.
+ *
+ * "Multi-account is enabled" is the fact that makes the shared file worthless:
+ * it says there is more than one credential and this file cannot say which is
+ * active. So the path refuses — no read, no record, no repair marker — rather
+ * than writing a guess the ledger cannot tell from an observation.
+ */
+describe('UsageFetcher — multi-account enabled with no dir applied', () => {
+  let fetcher: UsageFetcher
+
+  beforeEach(() => {
+    files.clear()
+    reads.length = 0
+    fetchMock.mockReset()
+    updateAccountIdentity.mockReset()
+    recordWindowSample.mockReset()
+    emitEvent.mockReset()
+    getMeta.mockReset()
+    setMeta.mockReset()
+    getAccount.mockReset()
+    getMeta.mockReturnValue(null) // the repair marker is UNSET, so a write would show
+    resetWindowSampleDedup()
+    vi.stubGlobal('fetch', fetchMock)
+    routeByUrl()
+    seedClaudeJson()
+    setSecurestorageEnv(null)
+    setHostAuth(hostAuthWith({ enabled: true, activeId: 'acct-a', accounts: [] }))
+    fetcher = new UsageFetcher()
+  })
+
+  afterEach(() => {
+    fetcher.stopPolling()
+    setHostAuth(null)
+    vi.unstubAllGlobals()
+  })
+
+  it('never opens the shared `~/.claude.json`, and writes nothing', async () => {
+    await fetcher.fetch()
+
+    expect(reads.some((p) => p.endsWith('/.claude.json'))).toBe(false)
+    expect(logRecords()).toEqual([])
+    expect(fetcher.getActiveAccount()).toBeNull()
+    // Neither the account log nor S2e's one-shot repair marker moved: a process
+    // that cannot name the account settles nothing on its behalf.
+    expect(files.has(`${key(homedir())}/.claude/ui/usage/account-log.jsonl`)).toBe(false)
+    expect(setMeta).not.toHaveBeenCalled()
+  })
+
+  it('still reads the shared file when no host is wired at all', async () => {
+    // `accountState()` null is headless or a test harness, not "multi-account
+    // is on" — there is one credential there and the file describes it.
+    setHostAuth(null)
+
+    await fetcher.fetch()
+
+    expect(fetcher.getActiveAccount()).toMatchObject({ uuid: 'acc_stale' })
+    expect(logRecords()).toHaveLength(1)
+  })
+
+  it('still reads the shared file when multi-account is off', async () => {
+    setHostAuth(hostAuthWith({ enabled: false, activeId: null, accounts: [] }))
+
+    await fetcher.fetch()
+
+    expect(fetcher.getActiveAccount()).toMatchObject({ uuid: 'acc_stale' })
   })
 })

@@ -367,9 +367,6 @@ const api: ClaudeAPI = {
   setUsageAccountFilter: (account: string | null) =>
     ipcRenderer.invoke('usage:set-account-filter', account),
 
-  // Cross-engine dispatched usage (ADR-033 M4-B)
-  fetchDispatchedUsage: () => ipcRenderer.invoke('usage:fetch-dispatched'),
-
   // The metering dashboard (ADR-071 §6/§7/§8)
   fetchAccountLimits: (refresh?: boolean) => ipcRenderer.invoke('usage:limits', refresh ?? false),
   fetchUsageWindows: (query) => ipcRenderer.invoke('usage:windows', query ?? {}),

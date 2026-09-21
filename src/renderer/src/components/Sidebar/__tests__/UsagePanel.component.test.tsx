@@ -40,6 +40,7 @@ function makeUsage(overrides: Partial<AccountUsage> = {}): AccountUsage {
     planName: 'max',
     fetchedAt: Date.now(),
     error: null,
+    accountLabel: null,
     ...overrides
   }
 }
@@ -271,5 +272,54 @@ describe('UsagePanel — ChatGPT credits', () => {
 
     expect(within(block()).queryByTestId('UsagePanel.chatgptCredits')).toBeNull()
     expect(within(block()).getByText('No usage data for this account')).toBeInTheDocument()
+  })
+})
+
+/**
+ * S2f change 1 — the Claude meters name their account.
+ *
+ * The ChatGPT section has named its accounts since ADR-068 §2, while the Claude
+ * bars above it named nothing: on a machine with two Anthropic subscriptions
+ * the popup showed a set of percentages with no way to tell whose they were.
+ * The label is `AccountUsage.accountLabel`, filled by the fetcher from the
+ * account it just resolved, and it is ABSENT rather than blank when no account
+ * is resolved — an unnamed heading would be worse than none.
+ */
+describe('UsagePanel — the Claude account heading', () => {
+  beforeEach(() => {
+    store.chatgptLimits = null
+    store.loadChatgptLimits.mockClear()
+  })
+  afterEach(cleanup)
+
+  it('names the account above the Claude meters', () => {
+    render(
+      <UsagePanel
+        usage={makeUsage({ accountLabel: 'alice@example.test (Company)' })}
+        onRefresh={vi.fn()}
+      />
+    )
+
+    const heading = screen.getByTestId('UsagePanel.claudeAccount')
+    expect(heading.getAttribute('data-id')).toBe('alice@example.test (Company)')
+    expect(heading).toHaveTextContent('alice@example.test (Company)')
+  })
+
+  it('omits the heading when no account is resolved', () => {
+    render(<UsagePanel usage={makeUsage({ accountLabel: null })} onRefresh={vi.fn()} />)
+
+    expect(screen.queryByTestId('UsagePanel.claudeAccount')).toBeNull()
+    expect(screen.getAllByTestId('UsageProgressBar')).toHaveLength(2)
+  })
+
+  it('renders a cache written before the field existed', () => {
+    // `loadCache()` hands back whatever the old file held, so the panel has to
+    // survive a payload with no `accountLabel` key at all.
+    const legacy = makeUsage()
+    delete (legacy as Partial<AccountUsage>).accountLabel
+    render(<UsagePanel usage={legacy} onRefresh={vi.fn()} />)
+
+    expect(screen.queryByTestId('UsagePanel.claudeAccount')).toBeNull()
+    expect(screen.getAllByTestId('UsageProgressBar')).toHaveLength(2)
   })
 })

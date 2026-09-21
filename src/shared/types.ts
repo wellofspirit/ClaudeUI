@@ -1891,11 +1891,6 @@ interface AccountAPI {
    */
   refreshPrices(): Promise<{ count: number; refreshedAt: number }>
   /**
-   * Aggregate cross-engine dispatched usage (ADR-033 M4-B) by (targetEngine,
-   * targetModel), all-time. Backs UsageView's "Delegated" section.
-   */
-  fetchDispatchedUsage(): Promise<DispatchedUsageSummary[]>
-  /**
    * Every account's limits, across vendors (ADR-071 §6).
    *
    * `refresh: true` is the ONLY thing that reads an inactive Claude account's
@@ -3058,6 +3053,12 @@ export interface AccountUsage {
   planName: string | null // e.g. "claude_max_5x"
   fetchedAt: number // Date.now()
   error: string | null
+  /**
+   * Whose meters these are — the active account's email, with its organization
+   * beside it when one is known (S2f). Null when no account is resolved: the
+   * popup omits the heading rather than showing an unnamed one.
+   */
+  accountLabel: string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -3386,19 +3387,6 @@ export interface EngineUsageSummary {
   requestCount: number
   /** Per-model breakdown within this engine, sorted by total tokens desc (Phase 9b). */
   models: ModelTokenBreakdown[]
-}
-
-/**
- * One (targetEngine, targetModel) aggregate of cross-engine dispatched usage
- * (ADR-033 M4-B) — the usage ledger's `origin = 'dispatch'` rows grouped by
- * target. Backs UsageView's "Delegated" section.
- */
-export interface DispatchedUsageSummary {
-  targetEngine: string
-  targetModel: string
-  dispatches: number
-  totalTokens: number
-  costUsd: number
 }
 
 // ---------------------------------------------------------------------------

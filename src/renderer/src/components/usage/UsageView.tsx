@@ -24,7 +24,9 @@
  * call that spends a refresh grant (ADR-071 §6), and the owner's concern is that
  * an account has a finite supply of them. So `true` is sent from exactly one
  * place in the app — the Refresh button below, on a click — and every other read
- * here, on mount and on every event, passes `false`.
+ * here, on mount and on every event, passes `false`. The refresh-prices button
+ * beside it spends nothing — models.dev is a public catalog — so it has only
+ * the re-entrancy guard, not the "one place in the app" rule.
  *
  * State is component-local rather than in `session-store`. The dashboard is one
  * screen's worth of derived numbers that nothing else reads; a store field would
@@ -42,7 +44,7 @@ import { AccountsPanel } from './AccountsPanel'
 import { WindowValue } from './WindowValue'
 import { SpendChart } from './SpendChart'
 import { BreakdownTable } from './BreakdownTable'
-import { buildProviderColorMap } from './usage-utils'
+import { buildProviderColorMap, formatDuration } from './usage-utils'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { SelectMenu } from '../shared/SelectMenu'
 
@@ -153,6 +155,8 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
   const [error, setError] = useState<string | null>(null)
   const [limits, setLimits] = useState<AccountLimits[] | null>(null)
   const [refreshing, setRefreshing] = useState(false)
+  const [pricesRefreshing, setPricesRefreshing] = useState(false)
+  const [prices, setPrices] = useState<{ count: number; refreshedAt: number } | null>(null)
   // Bumped by the debounced event handlers; the fetch effects depend on it.
   const [ledgerNudge, setLedgerNudge] = useState(0)
   const [limitsNudge, setLimitsNudge] = useState(0)
@@ -249,6 +253,30 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
     }
   }, [])
 
+  const pricesInFlight = useRef(false)
+  const handleRefreshPrices = useCallback(async () => {
+    // Same guard as the limits button: one press, one fetch. models.dev costs
+    // no grant, but two concurrent runs would race on the persisted catalog.
+    if (pricesInFlight.current) return
+    pricesInFlight.current = true
+    setPricesRefreshing(true)
+    try {
+      const result = await window.api.refreshPrices()
+      setPrices(result)
+      // No display cost on screen CHANGES — the ledger stores what each turn
+      // resolved to when it ran. What can change is a turn that had no price at
+      // all: a model the catalog has just learned about now prices, so the read
+      // goes again.
+      setLedgerNudge((n) => n + 1)
+    } catch {
+      // A stale catalog is the status quo, not a failure worth a banner: the
+      // button's tooltip still names the last run that worked.
+    } finally {
+      pricesInFlight.current = false
+      setPricesRefreshing(false)
+    }
+  }, [])
+
   const providerColors = useMemo(
     () => buildProviderColorMap((dashboard?.providers ?? []).map((p) => p.providerId)),
     [dashboard]
@@ -300,25 +328,55 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
             </PillGroup>
           )}
 
-          <button
-            data-testid="UsageView.refreshLimits"
-            onClick={() => void handleRefreshLimits()}
-            disabled={refreshing}
-            title="Ask each provider for a fresh limits reading. Uses one refresh per signed-in account."
-            className="[-webkit-app-region:no-drag] ml-auto text-[10px] text-text-secondary hover:text-text-primary border border-border/50 rounded px-2 py-0.5 flex items-center gap-1 disabled:opacity-50 transition-colors cursor-default"
-          >
-            {refreshing ? (
-              <>
-                <span
-                  data-testid="UsageView.refreshLimits.spinner"
-                  className="inline-block w-2.5 h-2.5 rounded-full border border-current border-t-transparent animate-spin"
-                />
-                Refreshing…
-              </>
-            ) : (
-              '↻ refresh limits'
-            )}
-          </button>
+          <div className="ml-auto flex items-center gap-2">
+            {/* Prices are the ledger's other input, and the only one a user can
+                do anything about: an unpriced model stays unpriced until the
+                catalog is refetched. It left with the opencode card in S4b-2
+                and comes back here, beside the other manual read. */}
+            <button
+              data-testid="UsageView.refreshPrices"
+              onClick={() => void handleRefreshPrices()}
+              disabled={pricesRefreshing}
+              title={
+                prices
+                  ? `Fetch the latest model prices from models.dev (${prices.count} models · refreshed ${formatDuration(Date.now() - prices.refreshedAt)} ago)`
+                  : 'Fetch the latest model prices from models.dev'
+              }
+              className="[-webkit-app-region:no-drag] text-[10px] text-text-secondary hover:text-text-primary border border-border/50 rounded px-2 py-0.5 flex items-center gap-1 disabled:opacity-50 transition-colors cursor-default"
+            >
+              {pricesRefreshing ? (
+                <>
+                  <span
+                    data-testid="UsageView.refreshPrices.spinner"
+                    className="inline-block w-2.5 h-2.5 rounded-full border border-current border-t-transparent animate-spin"
+                  />
+                  Refreshing…
+                </>
+              ) : (
+                '↻ refresh prices'
+              )}
+            </button>
+
+            <button
+              data-testid="UsageView.refreshLimits"
+              onClick={() => void handleRefreshLimits()}
+              disabled={refreshing}
+              title="Ask each provider for a fresh limits reading. Uses one refresh per signed-in account."
+              className="[-webkit-app-region:no-drag] text-[10px] text-text-secondary hover:text-text-primary border border-border/50 rounded px-2 py-0.5 flex items-center gap-1 disabled:opacity-50 transition-colors cursor-default"
+            >
+              {refreshing ? (
+                <>
+                  <span
+                    data-testid="UsageView.refreshLimits.spinner"
+                    className="inline-block w-2.5 h-2.5 rounded-full border border-current border-t-transparent animate-spin"
+                  />
+                  Refreshing…
+                </>
+              ) : (
+                '↻ refresh limits'
+              )}
+            </button>
+          </div>
         </div>
       </div>
 

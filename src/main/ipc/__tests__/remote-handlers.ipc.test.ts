@@ -1462,7 +1462,6 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'stream:watch',
   'usage:fetch',
   'usage:fetch-block',
-  'usage:fetch-dispatched',
   'usage:set-account-filter'
 ] as const
 

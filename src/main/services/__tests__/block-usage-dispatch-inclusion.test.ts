@@ -7,8 +7,8 @@
  * temporary `origin != 'dispatch'` filter on all three readers, because the
  * Delegated section was still sourced from `dispatched_usage` and the same
  * money would have been shown twice. The old table is gone (migration v20), the
- * Delegated section reads the ledger, and the filter with it — so these are now
- * the guard that delegated work is IN the per-engine breakdown, in the 5-hour
+ * dashboard reads the ledger, and the filter with it — so these are now the
+ * guard that delegated work is IN the per-engine breakdown, in the 5-hour
  * blocks of the account that ran it, and in the hourly buckets.
  *
  * DB is isolated per test via an os.homedir() redirect to a temp dir (the db
@@ -230,39 +230,6 @@ describe('ADR-071 — dispatched ledger rows count in every figure', () => {
       expect(migrated.inputTokens).toBe(0)
       expect(migrated.apiCostUsd).toBeCloseTo(0.21)
       expect(migrated.requestCount).toBe(1)
-    } finally {
-      db.closeDb()
-    }
-  })
-
-  it('the Delegated section reads the same rows, grouped by target', async () => {
-    const { db } = await fresh()
-    try {
-      liveDispatchRow(db, 'e_dispatch_live', DAY_D_START + 3 * HOUR)
-      migratedDispatchRow(db, 1, DAY_D_START + 4 * HOUR)
-      // A session's own turn is not delegated work and must not appear here.
-      sessionRow(db, 'e_session', DAY_D_START + 2 * HOUR)
-
-      expect(db.dispatchedUsageSummary()).toEqual([
-        {
-          targetEngine: 'claude',
-          targetModel: 'claude-opus-4-8',
-          dispatches: 1,
-          totalTokens: 7_000,
-          costUsd: 0.5
-        },
-        {
-          targetEngine: 'opencode',
-          // Re-encoded the way the dispatcher spelled it, which is also how the
-          // live breakdown keys it.
-          targetModel: 'openai/gpt-5.6-luna',
-          dispatches: 1,
-          // A migrated row records no split, and a zero total is not a claim
-          // that no tokens moved.
-          totalTokens: 0,
-          costUsd: 0.21
-        }
-      ])
     } finally {
       db.closeDb()
     }

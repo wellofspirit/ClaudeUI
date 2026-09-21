@@ -49,7 +49,7 @@ import { buildUsageDashboard, sanitizeDashboardRange } from '../services/usage-d
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
-import { dispatchedUsageSummary, getSessionMeta } from '../services/db'
+import { getSessionMeta } from '../services/db'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import { sharedProviderService } from '../shared-providers'
 import { opencodeProviderId } from '../shared-providers/OpencodeSharedProviderAdapter'
@@ -399,7 +399,6 @@ const SESSION_IPC_CHANNELS = [
   'usage:dashboard',
   'usage:set-account-filter',
   'usage:refresh-prices',
-  'usage:fetch-dispatched',
   'auth:sign-in',
   'auth:submit-code',
   'auth:cancel',
@@ -1753,17 +1752,6 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     kind: 'command',
     handler: async (account: string | null) => {
       blockUsageService.setAccountFilter(account)
-    }
-  })
-
-  // ADR-033 M4-B: cross-engine dispatched usage, all-time, grouped by
-  // (targetEngine, targetModel). Backs UsageView's "Delegated" section.
-  handleIpc({
-    channel: 'usage:fetch-dispatched',
-    capability: 'config',
-    kind: 'query',
-    handler: async () => {
-      return dispatchedUsageSummary()
     }
   })
 

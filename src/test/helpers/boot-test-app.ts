@@ -281,7 +281,6 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     fetchBlockUsage: () => ipcRenderer.invoke('usage:fetch-block'),
     setUsageAccountFilter: async () => {},
     refreshPrices: async () => ({ count: 0, refreshedAt: Date.now() }),
-    fetchDispatchedUsage: () => ipcRenderer.invoke('usage:fetch-dispatched'),
     fetchAccountLimits: (refresh) => ipcRenderer.invoke('usage:limits', refresh ?? false),
     fetchUsageWindows: (query) => ipcRenderer.invoke('usage:windows', query ?? {}),
     fetchUsageDashboard: (range) => ipcRenderer.invoke('usage:dashboard', { range }),

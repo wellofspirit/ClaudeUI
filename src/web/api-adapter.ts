@@ -615,8 +615,6 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('usage:set-account-filter', account) as ReturnType<
         ClaudeAPI['setUsageAccountFilter']
       >,
-    fetchDispatchedUsage: () =>
-      connection.invoke('usage:fetch-dispatched') as ReturnType<ClaudeAPI['fetchDispatchedUsage']>,
     fetchAccountLimits: (refresh) =>
       connection.invoke('usage:limits', refresh ?? false) as ReturnType<
         ClaudeAPI['fetchAccountLimits']

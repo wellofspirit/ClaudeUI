@@ -125,6 +125,7 @@ function usage(over: Partial<AccountUsage> = {}): AccountUsage {
     planName: 'max',
     fetchedAt: 1_700_000_000_000,
     error: null,
+    accountLabel: null,
     ...over
   }
 }

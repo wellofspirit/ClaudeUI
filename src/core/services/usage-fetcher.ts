@@ -28,6 +28,7 @@ import { logger } from './logger'
 import { getAccount, updateAccountIdentity } from './db'
 import {
   activeClaudeAttribution,
+  claudeAccountLabel,
   claudeBillingTypeFromProfile,
   type AccountLogRecord
 } from './usage-windows'
@@ -39,8 +40,10 @@ import {
   type OAuthCredentials
 } from './claude-usage-api'
 import { recordLimitSamples } from './window-samples'
-import { buildClaudeAccountRef } from '../host'
+import { accountState, buildClaudeAccountRef } from '../host'
 import { getSecurestorageEnv, onSecurestorageEnvChange } from '../sdk/securestorage-env'
+import { apiKeyAccountKey } from './account-key-hash'
+import { apiKeyAccountLabel } from '../../shared/account-key'
 import {
   claudeDirAccountKey,
   repairClaudeIdentityOnce,
@@ -72,6 +75,13 @@ export interface ActiveAccount {
    * that has never completed a login in this app has none.
    */
   organizationName?: string
+  /**
+   * The account key OUTRIGHT, for an account that has no uuid pair to build one
+   * from: a Claude API key, identified by a digest of the key (S2f). `uuid`
+   * holds the same string, because `usage_window_sample.account_uuid` is NOT
+   * NULL and the ChatGPT accounts already file their key there.
+   */
+  accountKey?: string
   /**
    * How this account is billed — the SAME value the account-log record carries,
    * so a row written live and a row attributed to this account by time cannot
@@ -124,6 +134,8 @@ export function getCliUserAgent(): string {
 interface LoggedAccountPair {
   accountUuid: string
   organizationUuid: string | undefined
+  /** Set for an API-key account, whose key is not derived from the pair (S2f). */
+  accountKey: string | undefined
 }
 
 /**
@@ -132,7 +144,12 @@ interface LoggedAccountPair {
  * from either uuid.
  */
 function samePair(a: LoggedAccountPair | null, b: LoggedAccountPair): boolean {
-  return a !== null && a.accountUuid === b.accountUuid && a.organizationUuid === b.organizationUuid
+  return (
+    a !== null &&
+    a.accountUuid === b.accountUuid &&
+    a.organizationUuid === b.organizationUuid &&
+    a.accountKey === b.accountKey
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -236,8 +253,7 @@ export class UsageFetcher {
           cached?.fiveHour.resetsAt != null &&
           new Date(cached.fiveHour.resetsAt).getTime() > Date.now()
         if (cached) {
-          this.lastUsage = cached
-          this.pushToRenderer(cached)
+          this.publish(cached)
           this.scheduleExpiryFetch()
           logger.debug(
             'UsageFetcher',
@@ -254,7 +270,13 @@ export class UsageFetcher {
           // poll half an hour in — and with it, no window samples and no chance
           // to run S2e's one-shot repair. Resolve it now, without making the
           // cached reading wait on a network call.
-          void this.trackActiveAccount()
+          void this.trackActiveAccount().then(() => {
+            // The cached payload went out before the account was known, so the
+            // popup's heading (and this reading's window samples) would wait
+            // half an hour for the first poll. Re-publish what is already on
+            // screen, now that it can be named.
+            if (this.lastUsage) this.publish(this.lastUsage)
+          })
         }
       })
       .catch(() => {
@@ -312,7 +334,7 @@ export class UsageFetcher {
       this.lastUsage = usage
     }
 
-    this.pushToRenderer(this.lastUsage)
+    this.publish(this.lastUsage)
     this.scheduleCacheWrite()
     this.scheduleExpiryFetch()
 
@@ -377,6 +399,18 @@ export class UsageFetcher {
    */
   private async trackActiveAccount(): Promise<void> {
     const dir = getSecurestorageEnv()?.dir
+    // Multi-account is ON but no dir has been applied to this process: the
+    // shared file names whichever account some cli.js refetched last, and the
+    // pointer says that is not necessarily the active one. A record written
+    // here re-attributes every turn after it (incident, 2026-09-21), so the
+    // path refuses outright — no read, no record, no repair marker.
+    //
+    // A NULL account state is not this case: headless and the test harness
+    // wire no host, and there the single credential is what the file describes.
+    if (!dir && accountState()?.enabled === true) {
+      logger.debug('UsageFetcher', 'multi-account enabled with no dir applied — account not read')
+      return
+    }
     try {
       if (dir) await this.trackAccountFromDir(dir)
       else await this.trackAccountFromClaudeJson()
@@ -459,11 +493,16 @@ export class UsageFetcher {
         organizationName?: string
         billingType?: string
       }
+      /** cli.js's `/login` with a managed key: "the key, source /login managed key". */
+      primaryApiKey?: string
     }
     const oauthAccount = parsed.oauthAccount
     const uuid = oauthAccount?.accountUuid
     const email = oauthAccount?.emailAddress
-    if (!uuid || !email) return
+    if (!uuid || !email) {
+      await this.trackApiKeyAccount(parsed.primaryApiKey)
+      return
+    }
     const organizationUuid = oauthAccount?.organizationUuid
     const organizationName = oauthAccount?.organizationName
     // Resolved on EVERY read, not only when a record is appended below: the
@@ -485,6 +524,54 @@ export class UsageFetcher {
     // One credential file, so the shared `~/.claude.json` described it
     // correctly and there is nothing for S2e's re-key to move.
     skipClaudeIdentityRepair('single-account mode')
+  }
+
+  /**
+   * The API-key path: a Claude user with no `oauthAccount` at all (S2f).
+   *
+   * Every row such a machine writes used to be `unknown`, because the only
+   * identity the fetcher looked for was an OAuth one. The account is the KEY —
+   * `anthropic:key:<digest>` (ADR-071 §3) — so two keys are two accounts and
+   * the same key on two machines is one, which is what ADR-072's hub needs.
+   *
+   * The environment comes first because it is the same environment cli.js is
+   * spawned into, so `ANTHROPIC_API_KEY` is the key the turns will actually be
+   * billed against, whatever the file says. `apiKeyHelper` is out of scope: it
+   * is a user command, and running one on every poll is a different decision
+   * from reading a file.
+   *
+   * CREDENTIAL BOUNDARY: `key` lives in this function and reaches nothing but
+   * {@link apiKeyAccountKey} and {@link apiKeyAccountLabel}. What leaves is a
+   * digest and the last four characters — never the key, in the log record, on
+   * disk, or in a logger call.
+   */
+  private async trackApiKeyAccount(fileKey: string | undefined): Promise<void> {
+    // `||`, not `??`: an env var set to the empty string is not a key, and the
+    // file's is the better answer than none (ADR-070 Slice J's rule).
+    const key = process.env.ANTHROPIC_API_KEY?.trim() || fileKey?.trim()
+    if (!key) return
+
+    const { accountKey } = apiKeyAccountKey('anthropic', key)
+    const label = apiKeyAccountLabel('anthropic', key)
+
+    this.activeAccountDir = null
+    this.activeAccount = {
+      // `usage_window_sample.account_uuid` is NOT NULL and an API key has no
+      // uuid, so the key goes there — the same thing the ChatGPT accounts do.
+      uuid: accountKey,
+      email: label,
+      accountKey,
+      billingType: 'apiKey'
+    }
+    // No `rememberAccountIdentity`: that writes the identity onto an ACCOUNT
+    // ROW, and this path only runs with no credential dir set — an API key is
+    // not per dir. Under a dir the profile read above owns the identity.
+
+    await this.seedAccountLog()
+    await this.appendAccountLogIfMoved(this.activeAccount)
+    // No per-dir credential, so there is no mis-attributed dir for S2e's
+    // one-shot re-key to move.
+    skipClaudeIdentityRepair('api-key account')
   }
 
   /**
@@ -551,7 +638,11 @@ export class UsageFetcher {
           if (typeof record.ts !== 'number' || typeof record.email !== 'string') continue
           this.lastLoggedRecord = record
           this.lastLoggedAccountPair = record.accountUuid
-            ? { accountUuid: record.accountUuid, organizationUuid: record.organizationUuid }
+            ? {
+                accountUuid: record.accountUuid,
+                organizationUuid: record.organizationUuid,
+                accountKey: record.accountKey
+              }
             : null
           return
         } catch {
@@ -568,10 +659,13 @@ export class UsageFetcher {
   private async appendAccountLogIfMoved(account: ActiveAccount): Promise<void> {
     // A pre-ADR-071 last record names no organization, so the first run after
     // the upgrade sees a changed pair and appends one that does. That is how
-    // an existing log starts naming subscriptions at all.
+    // an existing log starts naming subscriptions at all. S2f adds the KEY to
+    // the comparison: an API-key account and an OAuth one are different
+    // subscriptions, and the key is the only field that says which is which.
     const pair: LoggedAccountPair = {
       accountUuid: account.uuid,
-      organizationUuid: account.organizationUuid
+      organizationUuid: account.organizationUuid,
+      accountKey: account.accountKey
     }
     if (samePair(this.lastLoggedAccountPair, pair)) return
     this.lastLoggedAccountPair = pair
@@ -581,6 +675,7 @@ export class UsageFetcher {
       email: account.email,
       ...(account.organizationUuid ? { organizationUuid: account.organizationUuid } : {}),
       ...(account.organizationName ? { organizationName: account.organizationName } : {}),
+      ...(account.accountKey ? { accountKey: account.accountKey } : {}),
       billingType: account.billingType
     }
     await mkdir(ACCOUNT_LOG_DIR, { recursive: true })
@@ -707,7 +802,7 @@ export class UsageFetcher {
       error: null
     }
 
-    this.pushToRenderer(this.lastUsage)
+    this.publish(this.lastUsage)
     this.scheduleCacheWrite()
     this.scheduleExpiryFetch()
   }
@@ -753,7 +848,7 @@ export class UsageFetcher {
       error: null
     }
 
-    this.pushToRenderer(this.lastUsage)
+    this.publish(this.lastUsage)
     this.scheduleCacheWrite()
     this.scheduleExpiryFetch()
   }
@@ -768,8 +863,14 @@ export class UsageFetcher {
       const raw = await readFile(CACHE_PATH, 'utf-8')
       const data = JSON.parse(raw) as AccountUsage
       if (!data.fetchedAt || Date.now() - data.fetchedAt > CACHE_STALE_MS) return null
-      // A cache written before sevenDayModels existed has no such key.
-      return { ...data, sevenDayModels: data.sevenDayModels ?? null }
+      // A cache written before sevenDayModels or accountLabel existed has no
+      // such key. The label is re-stamped on publish anyway; this keeps the
+      // object honest for anything that reads it in between.
+      return {
+        ...data,
+        sevenDayModels: data.sevenDayModels ?? null,
+        accountLabel: data.accountLabel ?? null
+      }
     } catch {
       return null
     }
@@ -799,13 +900,32 @@ export class UsageFetcher {
       extraUsage: null,
       planName: null,
       fetchedAt: Date.now(),
-      error: null
+      error: null,
+      accountLabel: null
     }
   }
 
   // -------------------------------------------------------------------------
   // Internal
   // -------------------------------------------------------------------------
+
+  /**
+   * Record `usage` as the last reading, stamped with the account it describes,
+   * and push it.
+   *
+   * The stamp lands on `lastUsage` rather than only on the pushed copy because
+   * `usage:fetch` hands that object straight back to the renderer — a label
+   * carried by the push alone would vanish the moment the popup refreshed
+   * itself. Every path that produces a reading goes through here, so there is
+   * one place that answers "whose meters are these".
+   */
+  private publish(usage: AccountUsage): void {
+    this.lastUsage = {
+      ...usage,
+      accountLabel: this.activeAccount ? claudeAccountLabel(this.activeAccount) : null
+    }
+    this.pushToRenderer(this.lastUsage)
+  }
 
   private pushToRenderer(usage: AccountUsage): void {
     // Phase 7: record a window-utilization sample so the WLS apiPercent
@@ -981,7 +1101,8 @@ export class UsageFetcher {
       extraUsage: null,
       planName: null,
       fetchedAt: Date.now(),
-      error: message
+      error: message,
+      accountLabel: null
     }
   }
 }

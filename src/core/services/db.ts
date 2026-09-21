@@ -30,7 +30,6 @@ import type {
   EngineId,
   ModelRef,
   AccountInfo,
-  DispatchedUsageSummary,
   RemoteAuthPolicy,
   StepUpTier,
   UsageOrigin,
@@ -2928,59 +2927,10 @@ const DISPATCH_LEDGER_COLUMNS = `engine_id, vendor_id, model_id, billing_type,
   input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
   api_cost_usd, billed_cost_usd`
 
-/**
- * Aggregate dispatched turns by (target engine, target model) since `sinceTs`
- * (default: all-time) — the dashboard's Delegated section.
- *
- * A turn nothing could price adds NOTHING to the total (it is not a zero), but
- * it is still counted as a dispatch: the section says how many turns ran, and
- * dropping the unpriced ones would understate that too. Grouping happens here
- * rather than in SQL because the cost rule is TypeScript and must not be
- * restated as a CASE expression — there is exactly one copy of it (ADR-071 §2).
- *
- * `cache_write_1h_tokens` is deliberately not in the token total: it is the
- * 1h-TTL SUBSET of `cache_write_tokens`, so adding it would count those tokens
- * twice.
- */
-export function dispatchedUsageSummary(sinceTs = 0): DispatchedUsageSummary[] {
-  const db = getDb()
-  const rows = db
-    .prepare(
-      `SELECT ${DISPATCH_LEDGER_COLUMNS}
-       FROM usage_event
-       WHERE origin = 'dispatch' AND ts >= ?`
-    )
-    .all(sinceTs) as DispatchLedgerDbRow[]
-
-  const byTarget = new Map<string, DispatchedUsageSummary>()
-  for (const row of rows) {
-    const targetModel = dispatchTargetModel(row.engine_id, row.vendor_id, row.model_id)
-    const key = `${row.engine_id}|${targetModel}`
-    let agg = byTarget.get(key)
-    if (!agg) {
-      agg = {
-        targetEngine: row.engine_id,
-        targetModel,
-        dispatches: 0,
-        totalTokens: 0,
-        costUsd: 0
-      }
-      byTarget.set(key, agg)
-    }
-    agg.dispatches += 1
-    agg.totalTokens +=
-      row.input_tokens + row.output_tokens + row.cache_write_tokens + row.cache_read_tokens
-    agg.costUsd += dispatchRowCostUsd(row) ?? 0
-  }
-  return [...byTarget.values()].sort((a, b) => b.costUsd - a.costUsd)
-}
-
 // ---------------------------------------------------------------------------
 // Slice C — cross-engine dispatched cost in the dispatching session's own
-// cost breakdown (TopBar tooltip). Distinct from dispatchedUsageSummary above
-// (a GLOBAL all-sessions rollup for the usage dashboard) — this is scoped to
-// ONE dispatching session, for BaseSession.seedDispatchedCosts()'s
-// durability-across-reloads seed.
+// cost breakdown (TopBar tooltip). Scoped to ONE dispatching session, for
+// BaseSession.seedDispatchedCosts()'s durability-across-reloads seed.
 // ---------------------------------------------------------------------------
 
 /**

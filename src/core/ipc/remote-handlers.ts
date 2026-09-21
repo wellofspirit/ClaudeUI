@@ -61,7 +61,7 @@ import type {
 } from '../../shared/types'
 import { getSdkExecutableOpts } from '../services/claude-session'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
-import { dispatchedUsageSummary, getSessionMeta } from '../services/db'
+import { getSessionMeta } from '../services/db'
 import { emitEvent } from '../services/sync-host'
 import { listAllDirectories } from '../services/sync-seed'
 import { getHostWindow } from '../services/host-window'
@@ -1121,17 +1121,6 @@ export function registerRemoteHandlers(
     kind: 'command',
     handler: async (account: string | null) => {
       blockUsageService.setAccountFilter(account)
-    }
-  })
-
-  // ADR-033 M4-B: cross-engine dispatched usage, all-time, grouped by
-  // (targetEngine, targetModel). Read-only DB aggregate — safe over remote.
-  handleRemote({
-    channel: 'usage:fetch-dispatched',
-    capability: 'config',
-    kind: 'query',
-    handler: async () => {
-      return dispatchedUsageSummary()
     }
   })
 

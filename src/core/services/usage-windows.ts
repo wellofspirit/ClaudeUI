@@ -50,6 +50,13 @@ export interface AccountLogRecord {
   organizationName?: string
   /** How the account was billed when the record was written. */
   billingType?: BillingType
+  /**
+   * The account key OUTRIGHT, for an account whose key is not built from the
+   * uuid pair: a Claude API key, whose identity is a digest of the key itself
+   * (S2f). Present only on those records; an OAuth one still derives its key
+   * from `organizationUuid` + `accountUuid`.
+   */
+  accountKey?: string
 }
 
 /**
@@ -140,6 +147,18 @@ export function claudeAccountAttribution(
       billingType: 'unknown'
     }
   }
+  // A record that states its key outright (an API-key account) is taken at its
+  // word: there is no pair to derive one from, and its email IS the label —
+  // `<vendor> key …abcd`, which is already the display form.
+  if (rec.accountKey) {
+    return {
+      email: rec.email,
+      accountUuid: rec.accountUuid,
+      accountKey: rec.accountKey,
+      accountLabel: rec.email,
+      billingType: rec.billingType ?? 'unknown'
+    }
+  }
   // Both halves or neither: the log reader only validates `ts` and `email`, so
   // a truncated line could otherwise mint `anthropic:<org>:undefined` — a key
   // that would travel to ADR-072's hub as if it named something.
@@ -178,6 +197,8 @@ export interface ActiveClaudeAccount {
   email: string
   organizationUuid?: string
   organizationName?: string
+  /** Set only for an account keyed by its API key rather than by a uuid pair. */
+  accountKey?: string
   billingType: BillingType
 }
 
@@ -210,6 +231,7 @@ export function activeClaudeAttribution(
     email: active.email,
     ...(active.organizationUuid ? { organizationUuid: active.organizationUuid } : {}),
     ...(active.organizationName ? { organizationName: active.organizationName } : {}),
+    ...(active.accountKey ? { accountKey: active.accountKey } : {}),
     billingType:
       active.billingType !== 'unknown' ? active.billingType : (fallbackBillingType ?? 'unknown')
   }

@@ -210,6 +210,18 @@ export function UsagePanel({
         <div className="text-[10px] text-red-400">{usage.error}</div>
       ) : usage ? (
         <>
+          {/* Whose meters these are. Omitted rather than blank when the fetcher
+              has not resolved an account — the ChatGPT blocks below name theirs,
+              and an unnamed heading would read as a third, empty account. */}
+          {usage.accountLabel && (
+            <div
+              data-testid="UsagePanel.claudeAccount"
+              data-id={usage.accountLabel}
+              className="text-[10px] text-text-secondary font-medium truncate mb-1"
+            >
+              {usage.accountLabel}
+            </div>
+          )}
           <UsageProgressBar label="5-Hour Session" window={usage.fiveHour} />
           {usage.sevenDay && (
             <UsageProgressBar label="7-Day (all models)" window={usage.sevenDay} />

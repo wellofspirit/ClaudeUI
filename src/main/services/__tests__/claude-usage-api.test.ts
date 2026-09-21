@@ -283,6 +283,7 @@ describe('the windows a reading carries', () => {
     planName: 'max',
     fetchedAt: 1,
     error: null,
+    accountLabel: null,
     ...over
   })
 

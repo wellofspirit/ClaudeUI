@@ -1035,7 +1035,8 @@ describe('useClaudeEvents extended component tests', () => {
         extraUsage: null,
         planName: 'claude_max_5x',
         fetchedAt: Date.now(),
-        error: null
+        error: null,
+        accountLabel: 'alice@example.test'
       }
 
       app.emit('usage:data', usageData)
@@ -1053,7 +1054,8 @@ describe('useClaudeEvents extended component tests', () => {
         extraUsage: null,
         planName: null,
         fetchedAt: Date.now(),
-        error: null
+        error: null,
+        accountLabel: null
       }
       const second: AccountUsage = { ...first, fiveHour: { usedPercent: 90, resetsAt: null } }
 

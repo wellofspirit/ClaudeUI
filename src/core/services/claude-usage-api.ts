@@ -421,7 +421,10 @@ export function parseUsageResponse(data: Record<string, unknown>): AccountUsage 
     extraUsage,
     planName,
     fetchedAt: Date.now(),
-    error: null
+    error: null,
+    // The response says nothing about WHICH account it describes; the fetcher
+    // stamps that on, from the account it resolved in the same pass.
+    accountLabel: null
   }
 }
 

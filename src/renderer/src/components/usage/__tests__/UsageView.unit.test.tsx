@@ -65,6 +65,7 @@ function makeBlockUsage(overrides: Partial<BlockUsageData> = {}): BlockUsageData
 let mockFetchDashboard: ReturnType<typeof vi.fn>
 let mockFetchLimits: ReturnType<typeof vi.fn>
 let mockFetchWindows: ReturnType<typeof vi.fn>
+let mockRefreshPrices: ReturnType<typeof vi.fn>
 
 beforeEach(() => {
   syncHandlers.clear()
@@ -74,6 +75,7 @@ beforeEach(() => {
   mockFetchLimits = vi.fn().mockResolvedValue([makeLimits()])
   // `WindowValue` does its own read; without it the widget throws on mount.
   mockFetchWindows = vi.fn().mockResolvedValue([])
+  mockRefreshPrices = vi.fn().mockResolvedValue({ count: 412, refreshedAt: Date.now() })
 
   // Assign api directly on the existing window object — do NOT replace window
   // itself, as that breaks waitFor's container check (it loses the document ref).
@@ -81,7 +83,8 @@ beforeEach(() => {
     setUsageAccountFilter: vi.fn().mockResolvedValue(undefined),
     fetchUsageDashboard: mockFetchDashboard,
     fetchAccountLimits: mockFetchLimits,
-    fetchUsageWindows: mockFetchWindows
+    fetchUsageWindows: mockFetchWindows,
+    refreshPrices: mockRefreshPrices
   }
 
   useSessionStore.setState({ blockUsage: null, accountUsage: null } as any)
@@ -269,6 +272,62 @@ describe('UsageView — limits refresh', () => {
     fireEvent.click(screen.getByTestId('UsageView.refreshLimits'))
     await waitFor(() => expect(screen.getByTestId('UsageView.refreshLimits')).not.toBeDisabled())
     expect(screen.getByTestId('AccountsPanel.meter')).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Prices (S2f change 4)
+// ---------------------------------------------------------------------------
+
+describe('UsageView — refresh prices', () => {
+  it('fetches once per press, spins while it runs, and re-reads the ledger', async () => {
+    let resolve!: (r: unknown) => void
+    mockRefreshPrices.mockReturnValue(new Promise((r) => (resolve = r)))
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledTimes(1))
+
+    const btn = screen.getByTestId('UsageView.refreshPrices')
+    fireEvent.click(btn)
+    await waitFor(() =>
+      expect(screen.getByTestId('UsageView.refreshPrices.spinner')).toBeInTheDocument()
+    )
+    // A second press while the first is in flight is one intent, not two.
+    fireEvent.click(btn)
+    expect(mockRefreshPrices).toHaveBeenCalledTimes(1)
+
+    resolve({ count: 412, refreshedAt: Date.now() })
+    await waitFor(() =>
+      expect(screen.queryByTestId('UsageView.refreshPrices.spinner')).not.toBeInTheDocument()
+    )
+    // A model the catalog has just learned about can price a turn that had
+    // none, so the ledger read goes again.
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledTimes(2))
+  })
+
+  it('names the catalog it fetched in the tooltip, and only after a run', async () => {
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalled())
+
+    const btn = screen.getByTestId('UsageView.refreshPrices')
+    expect(btn.getAttribute('title')).toBe('Fetch the latest model prices from models.dev')
+
+    fireEvent.click(btn)
+    await waitFor(() =>
+      expect(btn.getAttribute('title')).toBe(
+        'Fetch the latest model prices from models.dev (412 models · refreshed 0s ago)'
+      )
+    )
+  })
+
+  it('keeps the dashboard when the catalog cannot be fetched', async () => {
+    mockRefreshPrices.mockRejectedValueOnce(new Error('offline'))
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(screen.getByTestId('Summary')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('UsageView.refreshPrices'))
+    await waitFor(() => expect(screen.getByTestId('UsageView.refreshPrices')).not.toBeDisabled())
+    expect(screen.getByTestId('Summary')).toBeInTheDocument()
+    expect(mockFetchDashboard).toHaveBeenCalledTimes(1)
   })
 })
 
