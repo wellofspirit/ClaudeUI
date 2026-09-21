@@ -50,35 +50,35 @@ run 2   task_started      task_id=aec60e185d4e7eb6d  tool_use_id=toolu_01MYC4…
 
 ### 1.2 Where the current behaviour lives
 
-| What | Where |
-| --- | --- |
-| `taskIdMap` (agentId → toolUseId), evicted on terminal | `src/core/services/claude-session.ts:239`, evictions at `:1431`, `:1460`, `:2488` |
-| `handleTaskStarted` / `handleTaskUpdated` / `handleTaskNotification` | `claude-session.ts:1396` / `:1416` / `:1448` |
-| subagent message emit (owner tool_use id) | `claude-session.ts:228`, `:1242`; tool results `:2613` |
-| item-stream ownership (`ownerToolUseId`, `sealOwner`) | `src/core/shared/sync/item-stream.ts` |
-| sync channels for the three task events | `src/core/shared/sync/channels.ts:216`, `:222`, `:228` |
-| reducer arms/disarms `activeTasks` | `src/core/shared/sync/reducer.ts:1009` (started), `:1021` (progress), `:1030` (notification) |
-| replicated state shape | `src/core/shared/sync/state.ts:54-56`, `:143-145`, `:218-220`, `:285-287` |
-| wire types | `src/shared/types.ts:960` `TaskProgress`, `:979` `TaskStartedData`, `:985` `TaskNotification` |
-| **the duplicated running predicate** | `src/renderer/src/components/chat/TaskCard.tsx:118` and `src/renderer/src/components/TaskDetailPanel/TaskEntry.tsx:119` |
-| `.find()` on notifications | `TaskCard.tsx:104`, `TaskEntry.tsx` (`bgNotification`), `ToolCallBlock.tsx:69` (background **Bash** only — single-run, unaffected, but should use the same helper) |
-| the panel and its entries | `src/renderer/src/components/TaskDetailPanel/{TaskDetailPanel,View,TaskEntry,BashBackgroundEntry,utils}.tsx` |
-| panel open/close + `openedTaskToolUseIds` | `src/renderer/src/stores/session-store.ts:2591-2609`, `rightPanel` union at `:789` |
-| top bar + its tiers | `src/renderer/src/components/chat/ChatPanel/TopBar.tsx`, `…/top-bar-tiers.ts`, measured by `src/layout/TopBar.layout.test.tsx` |
-| the composer's mode tab (the pattern the agent tab mirrors) | `src/renderer/src/components/chat/InputBox/View.tsx:525-541` (`absolute bottom-full left-3`) |
-| composer stack above the input | `ChatPanel.tsx:370-372` (`QueuedMessageCard`, `BtwCard`, `InputBox`) |
-| `AppSettings` + defaults | `session-store.ts:389` / `:463`; persisted via `saveSettings` (`:513`) into `UISettings`, which is `[key: string]: unknown` — **no migration needed for new keys** |
-| settings pages/sections | `SettingsDialog/settings-pages.tsx:356-369` (Appearance groups), `settings-sections.tsx:1867+` (the Appearance section), section→page map at `settings-pages.tsx:1012` |
+| What                                                                 | Where                                                                                                                                                                  |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `taskIdMap` (agentId → toolUseId), evicted on terminal               | `src/core/services/claude-session.ts:239`, evictions at `:1431`, `:1460`, `:2488`                                                                                      |
+| `handleTaskStarted` / `handleTaskUpdated` / `handleTaskNotification` | `claude-session.ts:1396` / `:1416` / `:1448`                                                                                                                           |
+| subagent message emit (owner tool_use id)                            | `claude-session.ts:228`, `:1242`; tool results `:2613`                                                                                                                 |
+| item-stream ownership (`ownerToolUseId`, `sealOwner`)                | `src/core/shared/sync/item-stream.ts`                                                                                                                                  |
+| sync channels for the three task events                              | `src/core/shared/sync/channels.ts:216`, `:222`, `:228`                                                                                                                 |
+| reducer arms/disarms `activeTasks`                                   | `src/core/shared/sync/reducer.ts:1009` (started), `:1021` (progress), `:1030` (notification)                                                                           |
+| replicated state shape                                               | `src/core/shared/sync/state.ts:54-56`, `:143-145`, `:218-220`, `:285-287`                                                                                              |
+| wire types                                                           | `src/shared/types.ts:960` `TaskProgress`, `:979` `TaskStartedData`, `:985` `TaskNotification`                                                                          |
+| **the duplicated running predicate**                                 | `src/renderer/src/components/chat/TaskCard.tsx:118` and `src/renderer/src/components/TaskDetailPanel/TaskEntry.tsx:119`                                                |
+| `.find()` on notifications                                           | `TaskCard.tsx:104`, `TaskEntry.tsx` (`bgNotification`), `ToolCallBlock.tsx:69` (background **Bash** only — single-run, unaffected, but should use the same helper)     |
+| the panel and its entries                                            | `src/renderer/src/components/TaskDetailPanel/{TaskDetailPanel,View,TaskEntry,BashBackgroundEntry,utils}.tsx`                                                           |
+| panel open/close + `openedTaskToolUseIds`                            | `src/renderer/src/stores/session-store.ts:2591-2609`, `rightPanel` union at `:789`                                                                                     |
+| top bar + its tiers                                                  | `src/renderer/src/components/chat/ChatPanel/TopBar.tsx`, `…/top-bar-tiers.ts`, measured by `src/layout/TopBar.layout.test.tsx`                                         |
+| the composer's mode tab (the pattern the agent tab mirrors)          | `src/renderer/src/components/chat/InputBox/View.tsx:525-541` (`absolute bottom-full left-3`)                                                                           |
+| composer stack above the input                                       | `ChatPanel.tsx:370-372` (`QueuedMessageCard`, `BtwCard`, `InputBox`)                                                                                                   |
+| `AppSettings` + defaults                                             | `session-store.ts:389` / `:463`; persisted via `saveSettings` (`:513`) into `UISettings`, which is `[key: string]: unknown` — **no migration needed for new keys**     |
+| settings pages/sections                                              | `SettingsDialog/settings-pages.tsx:356-369` (Appearance groups), `settings-sections.tsx:1867+` (the Appearance section), section→page map at `settings-pages.tsx:1012` |
 
 ### 1.3 Engine coverage (all four already produce the `task` ToolView kind)
 
-| Engine | Spawn tool | Name source | Lifecycle events |
-| --- | --- | --- | --- |
-| claude | `Task` / `Agent` | `input.name` → `subagent_type` | exact (`task_started`/`task_notification`) |
-| opencode | `task` | `subagent_type` | none — legacy heuristic |
-| pi | `subagent` (`{tasks:[{agent,task}]}`) | `tasks[].agent` | none — legacy heuristic |
-| codex | `collab:spawnAgent` | leaf of `agentPath` | none — legacy heuristic |
-| any | `dispatch_agent` (ADR-033) | `engine · model` | synthesized notifications |
+| Engine   | Spawn tool                            | Name source                    | Lifecycle events                           |
+| -------- | ------------------------------------- | ------------------------------ | ------------------------------------------ |
+| claude   | `Task` / `Agent`                      | `input.name` → `subagent_type` | exact (`task_started`/`task_notification`) |
+| opencode | `task`                                | `subagent_type`                | none — legacy heuristic                    |
+| pi       | `subagent` (`{tasks:[{agent,task}]}`) | `tasks[].agent`                | none — legacy heuristic                    |
+| codex    | `collab:spawnAgent`                   | leaf of `agentPath`            | none — legacy heuristic                    |
+| any      | `dispatch_agent` (ADR-033)            | `engine · model`               | synthesized notifications                  |
 
 Normalizers: `ClaudeEngineToolMap.ts:191-204`, `OpencodeEngineToolMap.ts:154-161`,
 `PiEngineToolMap.ts:204-230`, `CodexEngineToolMap.ts:141-160`.
@@ -114,10 +114,22 @@ Each slice is one commit. Do not start the next until the orchestrator has revie
 1. New `src/renderer/src/components/chat/task-state.ts` (or `src/shared/` if the server replica needs
    it — check before choosing; renderer-only is fine if nothing in `src/core` derives it):
    ```ts
-   export interface TaskLifecycleInput { isHistorical: boolean; hasActiveTask: boolean;
-     isBackground: boolean; hasResult: boolean; notification?: TaskNotification }
-   export function latestNotification(list: TaskNotification[], toolUseId: string): TaskNotification | undefined
-   export function deriveTaskState(input: TaskLifecycleInput): { isRunning: boolean; isError: boolean; isLoaded: boolean }
+   export interface TaskLifecycleInput {
+     isHistorical: boolean
+     hasActiveTask: boolean
+     isBackground: boolean
+     hasResult: boolean
+     notification?: TaskNotification
+   }
+   export function latestNotification(
+     list: TaskNotification[],
+     toolUseId: string
+   ): TaskNotification | undefined
+   export function deriveTaskState(input: TaskLifecycleInput): {
+     isRunning: boolean
+     isError: boolean
+     isLoaded: boolean
+   }
    ```
 2. `latestNotification` returns the **last** match, not the first. This is a behaviour change and it
    is the point: it is what makes a resumed agent report the run that actually finished.
@@ -157,6 +169,7 @@ untouched — if one needs editing, stop and report why.
    no running state (it is not a task); leave it alone this slice.
 
 **Tests (guard tests — each must be shown failing against the pre-fix code):**
+
 - a second `task_started` for a known task id arms `activeTasks` under the **origin** id, not the new one;
 - a subagent message arriving under the run id is stored under the origin id;
 - `task_notification` for run 2 disarms the origin id and is the one `latestNotification` returns;
@@ -272,14 +285,26 @@ last, DOM first.
 
 ---
 
+## 6a. Deviations from this spec, and why
+
+- **S2 does not re-arm on a non-terminal `task_updated`.** The spec asked for it as a second path
+  into the re-arm. The probe then showed `task_started` IS re-emitted on every resume, making the
+  `task_updated` path redundant — and it is not harmless: `task_updated` is a patch diff that fires
+  on transitions we do not enumerate, so a non-terminal patch arriving after a notification (or out
+  of order) would strand a finished card as "running" forever, which is worse than the bug being
+  fixed. The authoritative signal is handled; the speculative one is not.
+- **S3 was larger than written.** The spec said `TaskProgress` "discards" the wire's usage. In fact
+  `system/task_progress` had no handler at all — what the session consumes is the unrelated
+  `tool_progress` message. Handling it meant a new handler plus a merging reducer.
+
 ## 7. Status
 
-| Slice | State | Commit | Notes |
-| --- | --- | --- | --- |
-| Probe + ADR-073 + protocol §4.5 | done, uncommitted | — | `scripts/probe-agent-resume.mjs`, ADR, doc amendment |
-| S1 predicate extraction | not started | — | |
-| S2 lifecycle normalization | not started | — | |
-| S3 data gaps | not started | — | |
-| S4 roster | not started | — | |
-| S5 pill + tab | not started | — | |
-| S6 settings | not started | — | |
+| Slice                           | State       | Commit                 | Notes                                                                                                                          |
+| ------------------------------- | ----------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Probe + ADR-073 + protocol §4.5 | done        | `411d5250`, `4331bc21` |                                                                                                                                |
+| S1 predicate extraction         | done        | `231f37b1`             | Also fixed TaskEntry's isError, which missed a failed async-launched agent                                                     |
+| S2 lifecycle normalization      | done        | `d0ce1773`             | DEVIATION: no `task_updated` re-arm — see below. Also fixed `stopTask`, which after a resume missed and aborted the whole turn |
+| S3 data gaps                    | done        | `6d8bf24b`             | `system/task_progress` was not handled AT ALL; the progress reducer now merges two sources                                     |
+| S4 roster                       | not started | —                      |                                                                                                                                |
+| S5 pill + tab                   | not started | —                      |                                                                                                                                |
+| S6 settings                     | not started | —                      |                                                                                                                                |
