@@ -1279,7 +1279,7 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
 
   private handleToolProgress(msg: ToolProgressMessage): void {
     this.send('session:task-progress', {
-      toolUseId: msg.tool_use_id || '',
+      toolUseId: this.resolveTaskOwner(msg.tool_use_id || '') || '',
       toolName: msg.tool_name || '',
       parentToolUseId: this.resolveTaskOwner(msg.parent_tool_use_id ?? undefined) ?? null,
       elapsedTimeSeconds: msg.elapsed_time_seconds || 0
@@ -1301,6 +1301,10 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
     }
     if (msg.subtype === 'task_started') {
       this.handleTaskStarted(msg)
+      return
+    }
+    if (msg.subtype === 'task_progress') {
+      this.handleTaskProgressSnapshot(msg)
       return
     }
     if (msg.subtype === 'task_updated') {
@@ -1458,6 +1462,35 @@ You have a \`mcp__claude-ui-collab__dispatch_agent\` tool that delegates a task 
       taskType,
       runToolUseId: toolUseId,
       runIndex
+    })
+  }
+
+  /**
+   * `system/task_progress` (§4.7) — the periodic snapshot cli.js already sends
+   * and we used to drop on the floor. It is the only live source of a running
+   * task's token spend and of the tool it is on right now; `tool_progress`
+   * (the separate message handled in handleToolProgress) carries the elapsed
+   * clock and nothing else. Both land on `session:task-progress`, each
+   * contributing the fields it knows, and the reducer merges them — so neither
+   * can blank the other's half of the row.
+   */
+  private handleTaskProgressSnapshot(msg: SystemMessage): void {
+    const toolUseId = this.resolveTaskOwner(msg.tool_use_id || '')
+    if (!toolUseId) return
+
+    const rawUsage = msg.usage
+    this.send('session:task-progress', {
+      toolUseId,
+      ...(msg.last_tool_name ? { lastToolName: msg.last_tool_name } : {}),
+      ...(rawUsage
+        ? {
+            usage: {
+              totalTokens: rawUsage.total_tokens || 0,
+              toolUses: rawUsage.tool_uses || 0,
+              durationMs: rawUsage.duration_ms || 0
+            }
+          }
+        : {})
     })
   }
 

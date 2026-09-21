@@ -102,6 +102,7 @@ export interface SystemMessage extends BaseSDKMessage {
     | 'task_started'
     | 'task_updated'
     | 'task_notification'
+    | 'task_progress'
     | 'queued_command_consumed'
     | 'compact_boundary'
     | 'model_refusal_fallback'
@@ -126,6 +127,8 @@ export interface SystemMessage extends BaseSDKMessage {
     end_time?: number
     [k: string]: unknown
   }
+  /** task_progress-only: the tool the task ran most recently (§4.7). */
+  last_tool_name?: string
   /** task_notification-only fields */
   output_file?: string
   status?: string

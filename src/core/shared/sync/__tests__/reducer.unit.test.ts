@@ -1313,6 +1313,79 @@ describe('reducer — subagents', () => {
     expect(s.sessions['rid'].taskNotifications).toHaveLength(1)
   })
 
+  it('carries runIndex on the active record, so a resumed agent can say so', () => {
+    const s = fold([
+      created(),
+      ['session:task-started', 'rid', { toolUseId: 't1', taskId: 'a', taskType: 'local_agent' }],
+      // The resume arrives under the ORIGIN id, normalized by ClaudeSession.
+      [
+        'session:task-started',
+        'rid',
+        {
+          toolUseId: 't1',
+          taskId: 'a',
+          taskType: 'local_agent',
+          runToolUseId: 'toolu_sendmessage',
+          runIndex: 2
+        }
+      ]
+    ])
+    expect(s.sessions['rid'].activeTasks).toEqual({
+      t1: { taskId: 'a', taskType: 'local_agent', runIndex: 2 }
+    })
+  })
+
+  it('merges the two task-progress sources instead of letting them blank each other', () => {
+    // tool_progress knows the clock; system/task_progress knows the usage and
+    // the current tool. Each sends only its half (ADR-073).
+    const s = fold([
+      created(),
+      [
+        'session:task-progress',
+        'rid',
+        { toolUseId: 't1', toolName: 'Task', parentToolUseId: null, elapsedTimeSeconds: 42 }
+      ],
+      [
+        'session:task-progress',
+        'rid',
+        {
+          toolUseId: 't1',
+          lastToolName: 'Grep',
+          usage: { totalTokens: 34000, toolUses: 12, durationMs: 42000 }
+        }
+      ]
+    ])
+    expect(s.sessions['rid'].taskProgressMap['t1']).toEqual({
+      toolUseId: 't1',
+      toolName: 'Task',
+      parentToolUseId: null,
+      elapsedTimeSeconds: 42,
+      lastToolName: 'Grep',
+      usage: { totalTokens: 34000, toolUses: 12, durationMs: 42000 }
+    })
+
+    // And the clock keeps ticking without wiping the usage back out.
+    const later = fold([
+      created(),
+      [
+        'session:task-progress',
+        'rid',
+        { toolUseId: 't1', usage: { totalTokens: 1, toolUses: 1, durationMs: 1 } }
+      ],
+      [
+        'session:task-progress',
+        'rid',
+        { toolUseId: 't1', toolName: 'Task', parentToolUseId: null, elapsedTimeSeconds: 99 }
+      ]
+    ])
+    expect(later.sessions['rid'].taskProgressMap['t1'].usage).toEqual({
+      totalTokens: 1,
+      toolUses: 1,
+      durationMs: 1
+    })
+    expect(later.sessions['rid'].taskProgressMap['t1'].elapsedTimeSeconds).toBe(99)
+  })
+
   it('drops activeTasks on `disconnected` — they lived in the dead process', () => {
     const s = fold([
       created(),

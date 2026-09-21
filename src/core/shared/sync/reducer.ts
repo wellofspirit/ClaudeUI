@@ -1027,10 +1027,23 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
 
     case 'session:task-progress': {
       const routingId = routingIdOf(event)
-      const progress = arg<TaskProgress>(event, 1)
+      // PARTIAL by design: two wire messages feed this channel and each knows
+      // only half the row — `tool_progress` the elapsed clock, the
+      // `system/task_progress` snapshot the usage and last tool (ADR-073).
+      // Merging is what lets a usage tick arrive without blanking the clock.
+      const progress = arg<Partial<TaskProgress> & { toolUseId?: string }>(event, 1)
       if (!routingId || !progress?.toolUseId) return state
+      const toolUseId = progress.toolUseId
+      const EMPTY_PROGRESS = { toolName: '', parentToolUseId: null, elapsedTimeSeconds: 0 }
       return withSession(state, routingId, (s) => ({
-        taskProgressMap: { ...s.taskProgressMap, [progress.toolUseId]: progress }
+        taskProgressMap: {
+          ...s.taskProgressMap,
+          [toolUseId]: {
+            ...(s.taskProgressMap[toolUseId] ?? EMPTY_PROGRESS),
+            ...progress,
+            toolUseId
+          }
+        }
       }))
     }
 

@@ -222,6 +222,9 @@ function piNormalize(
         return {
           kind: 'task',
           description: `Subagents: ${names.join(', ')}`,
+          // One tool_use id spawns N agents here, so the row names its members
+          // rather than pretending to be one agent (ADR-073 §3).
+          name: names.length > 1 ? `${names.length} subagents` : names[0],
           prompt: list
             .map(
               (t) =>
@@ -237,6 +240,7 @@ function piNormalize(
           kind: 'task',
           description: `Subagent: ${inp.agent}`,
           prompt: inp.task != null ? String(inp.task) : '',
+          name: inp.agent,
           subagent: inp.agent
         }
       }

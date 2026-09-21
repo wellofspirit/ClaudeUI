@@ -962,6 +962,15 @@ export interface TaskProgress {
   toolName: string
   parentToolUseId: string | null
   elapsedTimeSeconds: number
+  /**
+   * Cumulative usage for the task so far, from `system/task_progress` (§4.7).
+   * Claude-only, and only while the task is running — the terminal figure lives
+   * on `TaskNotification.usage`. Absent for every engine that reports no
+   * periodic progress.
+   */
+  usage?: { totalTokens: number; toolUses: number; durationMs: number }
+  /** The tool the task ran most recently, from `system/task_progress`. */
+  lastToolName?: string
 }
 
 /**
