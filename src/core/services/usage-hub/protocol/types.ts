@@ -137,6 +137,19 @@ export interface PushEventsRequest extends HubRequestEnvelope {
   appVersion: string
   /** `process.platform` — `win32`, `darwin`, `linux`. The OS FAMILY, not a build. */
   os: string
+  /**
+   * The batch, at most {@link MAX_EVENTS_PER_PUSH} rows — and **an empty array
+   * is valid**: it is how a device announces itself.
+   *
+   * The hub learns a device exists only from this route, and the three facts
+   * above only travel on it. A machine that enables sync starts its cursor at
+   * the newest row it holds (ADR-072 §2), so it may have nothing to send for
+   * days; without an empty push it would pull the combined view while the hub's
+   * machine list never mentioned it. The hub must therefore record the device
+   * and answer `{ accepted: 0, duplicates: 0, epoch }` — which satisfies the
+   * promise below as 0 of 0. Clients send one when they have never pushed and
+   * whenever `deviceName`, `appVersion` or `os` has changed since their last.
+   */
   events: HubEvent[]
 }
 

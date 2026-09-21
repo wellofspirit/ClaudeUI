@@ -67,7 +67,15 @@ import { onUsageEventWritten } from '../db'
 import { onLimitSamplesWritten, type LimitReadingWritten } from '../window-samples'
 import type { UsageHubState, UsageHubStatus } from '../../../shared/types'
 import { getHubConfig, hubCredential, resetRemoteCache } from './config'
-import { deviceAppVersion, deviceId, deviceOs, hubDeviceName, storedDeviceId } from './device'
+import {
+  deviceFacts,
+  deviceId,
+  lastAnnounced,
+  rememberAnnounced,
+  sameDeviceFacts,
+  storedDeviceId,
+  type DeviceFacts
+} from './device'
 import { nextEventBatch, pendingEventCount } from './ledger-cursor'
 import {
   decodePullBucketsResponse,
@@ -492,8 +500,79 @@ export class UsageHubClient {
     return !this.stopped
   }
 
+  /**
+   * One events push, empty or not, and everything that must hold about its
+   * answer.
+   *
+   * Factored out because the EMPTY push is a real case: it is how a device
+   * announces itself (see {@link push}). Returns false when the pass must stop.
+   */
+  private async sendEvents(
+    url: string,
+    facts: DeviceFacts,
+    events: ReadonlyArray<unknown>
+  ): Promise<boolean> {
+    const result = await this.send(
+      url,
+      HUB_ROUTES.events,
+      encodePushEvents({
+        deviceId: deviceId(),
+        deviceName: facts.deviceName,
+        appVersion: facts.appVersion,
+        os: facts.os,
+        events
+      })
+    )
+    if (result.kind !== 'ok') {
+      this.applyFailure(result)
+      return false
+    }
+    const answer = decodePushEventsResponse(result.payload)
+    // EVERY row accounted for, as new or as already held (ADR-072 §2's
+    // promise). A short answer means the hub dropped rows without saying so,
+    // and advancing the cursor past turns that never landed would lose them
+    // silently — which is the one failure mode a ledger sync must not have.
+    // It holds for the empty push too: 0 of 0.
+    const accounted = answer.accepted + answer.duplicates
+    if (accounted !== events.length) {
+      this.applyFailure({
+        kind: 'error',
+        detail:
+          `the hub accounted for ${accounted} of ${events.length} event(s) ` +
+          `(${answer.accepted} new, ${answer.duplicates} already held) — cursor held back`
+      })
+      return false
+    }
+    logger.info(
+      LOG_SOURCE,
+      events.length === 0
+        ? 'announced this device to the hub (nothing to push)'
+        : `pushed ${events.length} event(s): ${answer.accepted} new, ${answer.duplicates} already held`
+    )
+    if (!this.noteEpoch(answer.epoch)) return false
+    // The facts travelled WITH this request, so they are now what the hub holds.
+    if (this.writable()) rememberAnnounced(facts)
+    return true
+  }
+
   /** Returns false when the pass ended in a failure state. */
   private async push(url: string): Promise<boolean> {
+    const opening = getHubConfigRow()
+    if (!opening) return false
+    const facts = deviceFacts(opening.deviceName)
+    /**
+     * Whether the hub still has to be TOLD about this machine.
+     *
+     * The hub learns a device exists only from an events push, and a rename
+     * only travels on one. A fresh device's cursor starts at `MAX(rowid)`
+     * (ADR-072 §2), so a machine that enables sync and presses Sync now has
+     * nothing to send — and without this it would pull happily while the hub's
+     * machine list never mentioned it, which is what the S5b verifier found.
+     */
+    const announced = lastAnnounced()
+    let mustAnnounce =
+      opening.lastPushAt === null || announced === null || !sameDeviceFacts(announced, facts)
+
     // Events first, in batches, until the ledger is caught up. `full` rather
     // than "the batch was non-empty": a run of `unknown` rows is read, advances
     // the cursor and sends nothing, and the loop has to keep going through it.
@@ -503,41 +582,9 @@ export class UsageHubClient {
       const batch = nextEventBatch(config.cursorRowid, MAX_EVENTS_PER_PUSH)
       if (batch.rowsRead === 0) break
       if (batch.events.length > 0) {
-        const result = await this.send(
-          url,
-          HUB_ROUTES.events,
-          encodePushEvents({
-            deviceId: deviceId(),
-            deviceName: hubDeviceName(config.deviceName),
-            appVersion: deviceAppVersion(),
-            os: deviceOs(),
-            events: batch.events
-          })
-        )
-        if (result.kind !== 'ok') {
-          this.applyFailure(result)
-          return false
-        }
-        const answer = decodePushEventsResponse(result.payload)
-        // EVERY row accounted for, as new or as already held (ADR-072 §2's
-        // promise). A short answer means the hub dropped rows without saying so,
-        // and advancing the cursor past turns that never landed would lose them
-        // silently — which is the one failure mode a ledger sync must not have.
-        const accounted = answer.accepted + answer.duplicates
-        if (accounted !== batch.events.length) {
-          this.applyFailure({
-            kind: 'error',
-            detail:
-              `the hub accounted for ${accounted} of ${batch.events.length} event(s) ` +
-              `(${answer.accepted} new, ${answer.duplicates} already held) — cursor held back`
-          })
-          return false
-        }
-        logger.info(
-          LOG_SOURCE,
-          `pushed ${batch.events.length} event(s): ${answer.accepted} new, ${answer.duplicates} already held`
-        )
-        if (!this.noteEpoch(answer.epoch)) return false
+        if (!(await this.sendEvents(url, facts, batch.events))) return false
+        // A real batch carries the same facts, so no separate hello is owed.
+        mustAnnounce = false
       }
       // ONLY after the hub has the batch. A cursor advanced first would lose the
       // rows on any failure, and the hub's idempotency makes the other order
@@ -545,6 +592,12 @@ export class UsageHubClient {
       if (!this.writable()) return false
       upsertHubConfig({ cursorRowid: batch.nextCursor, lastPushAt: this.now() })
       if (!batch.full) break
+    }
+
+    if (mustAnnounce) {
+      if (!(await this.sendEvents(url, facts, []))) return false
+      if (!this.writable()) return false
+      upsertHubConfig({ lastPushAt: this.now() })
     }
 
     if (this.queuedReadings.length > 0) {

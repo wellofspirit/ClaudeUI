@@ -14,11 +14,14 @@
 
 import { hostname } from 'node:os'
 import { randomUUID } from 'node:crypto'
-import { getMeta, setMeta } from '../db'
+import { deleteMeta, getMeta, setMeta } from '../db'
 import { hostAppVersion } from '../../host'
 
 /** Where the id lives. `meta` is the key/value table v23 added for exactly this kind of marker. */
 export const DEVICE_ID_META_KEY = 'hub.device_id'
+
+/** Where the last announced facts live — see {@link lastAnnounced}. */
+export const ANNOUNCED_META_KEY = 'hub.announced'
 
 /**
  * This device's id, generated on first use and kept for the machine's life.
@@ -84,4 +87,74 @@ export function deviceAppVersion(): string {
  */
 export function hubDeviceName(stored: string): string {
   return stored.trim() === '' ? defaultDeviceName() : stored
+}
+
+/** What every events push tells the hub about this machine (ADR-072 §5). */
+export interface DeviceFacts {
+  deviceName: string
+  appVersion: string
+  os: string
+}
+
+/** The three facts as they are right now, from the stored name. */
+export function deviceFacts(storedName: string): DeviceFacts {
+  return {
+    deviceName: hubDeviceName(storedName),
+    appVersion: deviceAppVersion(),
+    os: deviceOs()
+  }
+}
+
+export function sameDeviceFacts(a: DeviceFacts, b: DeviceFacts): boolean {
+  return a.deviceName === b.deviceName && a.appVersion === b.appVersion && a.os === b.os
+}
+
+/**
+ * The facts this machine last told the hub, or null if it never has.
+ *
+ * The hub only learns a device exists from a push, and a device's facts only
+ * travel ON a push — so a machine that has nothing to send would never appear
+ * in the machine list at all, and a rename would not reach the hub until the
+ * next turn was spent. `client.ts` compares this against {@link deviceFacts} and
+ * sends an empty "hello" batch when they differ.
+ *
+ * Stored in `meta` rather than in `usage_hub_config` because it is a marker
+ * about a conversation with the hub, not a setting — the same reason the device
+ * id is there. Deliberately NOT cleared by `forgetHub()`: that deletes the
+ * config row, so `lastPushAt` becomes null and the announce fires on its own.
+ */
+export function lastAnnounced(): DeviceFacts | null {
+  const raw = getMeta(ANNOUNCED_META_KEY)
+  if (raw === null || raw.trim() === '') return null
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null) return null
+    const facts = parsed as Record<string, unknown>
+    if (
+      typeof facts.deviceName !== 'string' ||
+      typeof facts.appVersion !== 'string' ||
+      typeof facts.os !== 'string'
+    ) {
+      return null
+    }
+    return { deviceName: facts.deviceName, appVersion: facts.appVersion, os: facts.os }
+  } catch {
+    // A marker we cannot read is a marker we have not sent: re-announcing is
+    // one empty request, and the hub takes it as an upsert.
+    return null
+  }
+}
+
+export function rememberAnnounced(facts: DeviceFacts): void {
+  setMeta(ANNOUNCED_META_KEY, JSON.stringify(facts))
+}
+
+/**
+ * Drop the marker with the configuration it belongs to. `hub.device_id` stays
+ * (a re-added machine must come back as the device it was); the announce
+ * marker does not, because what was announced was announced to a hub this
+ * machine no longer talks to.
+ */
+export function forgetAnnounced(): void {
+  deleteMeta(ANNOUNCED_META_KEY)
 }

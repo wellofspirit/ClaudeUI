@@ -18,13 +18,14 @@ import {
   insertUsageEvent,
   insertUsageEvents,
   resetUsageEventWrittenListeners,
+  upsertHubConfig,
   type UsageEventInsert
 } from '../../db'
 import { logger } from '../../logger'
 import { recordLimitSamples, resetWindowSampleDedup } from '../../window-samples'
 import { getMeta } from '../../db'
 import { configureHub, setHubSecret } from '../config'
-import { DEVICE_ID_META_KEY } from '../device'
+import { DEVICE_ID_META_KEY, deviceFacts, rememberAnnounced } from '../device'
 import { UsageHubClient } from '../client'
 
 const TS = 1_758_412_800_000
@@ -223,11 +224,106 @@ describe('the push advances the cursor, and only after the hub has the batch', (
 
   it('sends no events request at all when every waiting row is unattributed', async () => {
     enable()
+    // Already announced, so ROWS are the only reason left to call the route —
+    // a fresh device's hello has its own section below.
+    upsertHubConfig({ lastPushAt: TS })
+    rememberAnnounced(deviceFacts('workshop'))
     insertUsageEvents([row('msg-a', { accountKey: 'unknown' })])
     await build(happyHub()).syncNow()
     expect(calls.some((call) => call.url.includes('/v1/events'))).toBe(false)
     // The cursor still moved past it.
     expect(getHubConfigRow()?.cursorRowid).toBe(1)
+  })
+})
+
+/**
+ * A device the hub has never heard of (ADR-072 §7, amended by S5b).
+ *
+ * The hub learns a machine exists only from an events push, and a fresh
+ * machine's cursor starts at `MAX(rowid)` — so without an empty "hello" a
+ * machine could sync for days, pulling the combined view, while the hub's
+ * machine list never mentioned it. The verifier found exactly that.
+ */
+describe('a device announces itself', () => {
+  function eventPushes(): Array<Record<string, unknown>> {
+    return calls
+      .filter((call) => call.url.includes('/v1/events'))
+      .map((call) => JSON.parse(call.init.body as string) as Record<string, unknown>)
+  }
+
+  it('pushes an empty batch when it has never pushed and has nothing to send', async () => {
+    enable()
+    const client = build(happyHub())
+    await client.syncNow()
+
+    const pushes = eventPushes()
+    expect(pushes).toHaveLength(1)
+    expect(pushes[0].events).toEqual([])
+    // The hello carries the same three facts a real batch would.
+    expect(pushes[0]).toMatchObject({
+      deviceId: myDeviceId(client),
+      deviceName: 'workshop',
+      os: process.platform
+    })
+    expect(typeof pushes[0].appVersion).toBe('string')
+    expect(client.status().state).toBe('idle')
+    expect(getHubConfigRow()?.lastPushAt).toBe(TS)
+  })
+
+  it('does it once — a second sync with nothing pending pushes nothing', async () => {
+    enable()
+    const client = build(happyHub())
+    await client.syncNow()
+    expect(eventPushes()).toHaveLength(1)
+
+    calls = []
+    await client.syncNow()
+    expect(eventPushes()).toHaveLength(0)
+  })
+
+  it('announces again when the device name changed, and only then', async () => {
+    enable()
+    const client = build(happyHub())
+    await client.syncNow()
+    calls = []
+
+    // A rename is a `configure`, which is also what the settings group sends.
+    configureHub({ url: HUB, deviceName: 'renamed', clientId: 'client-a', enabled: true })
+    await client.syncNow()
+    const pushes = eventPushes()
+    expect(pushes).toHaveLength(1)
+    expect(pushes[0]).toMatchObject({ deviceName: 'renamed', events: [] })
+
+    // And it settles again: the facts the hub holds are now the current ones.
+    calls = []
+    await client.syncNow()
+    expect(eventPushes()).toHaveLength(0)
+  })
+
+  it('a real batch is the announce — no separate hello beside it', async () => {
+    enable()
+    insertUsageEvents([row('msg-a')])
+    const client = build(happyHub())
+    await client.syncNow()
+
+    const pushes = eventPushes()
+    expect(pushes).toHaveLength(1)
+    expect((pushes[0].events as unknown[]).length).toBe(1)
+
+    calls = []
+    await client.syncNow()
+    expect(eventPushes()).toHaveLength(0)
+  })
+
+  it('does not record the announce when the hub refused it', async () => {
+    enable()
+    const client = build(alwaysHub(() => jsonResponse({ error: 'down' }, 503)))
+    await client.syncNow()
+    expect(client.status().state).toBe('backoff')
+
+    calls = []
+    await build(happyHub()).syncNow()
+    expect(eventPushes()).toHaveLength(1)
   })
 })
 

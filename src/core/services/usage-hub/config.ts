@@ -37,7 +37,7 @@ import {
   type HubConfigRow
 } from '../db'
 import { logger } from '../logger'
-import { defaultDeviceName, deviceId } from './device'
+import { defaultDeviceName, deviceId, forgetAnnounced } from './device'
 
 const LOG_SOURCE = 'UsageHub'
 
@@ -117,7 +117,18 @@ export function sanitizeHubConfigureInput(raw: unknown): HubConfigureInput {
   }
   const input = raw as Record<string, unknown>
   const enabled = input.enabled === true
-  const url = sanitizeHubUrl(input.url)
+  // An empty URL is accepted only while sync is OFF — the same rule
+  // {@link configureHub} applies to the stored row. Turning the hub off must not
+  // require re-typing its address, and enabling it without one would arm a
+  // client that can never reach anything. Only an ABSENT or blank string counts
+  // as empty: a number or an object still goes through `sanitizeHubUrl` and is
+  // refused, so junk from the wire is never read as "clear the address".
+  const offered = input.url
+  const blank =
+    offered === undefined ||
+    offered === null ||
+    (typeof offered === 'string' && offered.trim() === '')
+  const url = blank && !enabled ? '' : sanitizeHubUrl(offered)
   return {
     url,
     deviceName: clamp(input.deviceName, MAX_FIELD_LENGTH),
@@ -231,6 +242,7 @@ export function setHubSecret(secret: string): void {
 /** Forget the hub entirely: the row, the secret, and every cached remote row. */
 export function forgetHub(): void {
   deleteHubConfig()
+  forgetAnnounced()
   logger.info(LOG_SOURCE, 'hub forgotten — config and cached remote rows deleted')
 }
 

@@ -64,6 +64,19 @@ const REPLAYS: Array<[string, (parsed: Record<string, unknown>) => unknown]> = [
         events: p.events as unknown[]
       })
   ],
+  [
+    // The announce: an events push with an empty batch, which is how a device
+    // that has nothing to send tells the hub it exists (ADR-072 §7).
+    'events-announce-request.json',
+    (p) =>
+      encodePushEvents({
+        deviceId: p.deviceId as string,
+        deviceName: p.deviceName as string,
+        appVersion: p.appVersion as string,
+        os: p.os as string,
+        events: p.events as unknown[]
+      })
+  ],
   ['events-response.json', decodePushEventsResponse],
   [
     'limits-push-request.json',

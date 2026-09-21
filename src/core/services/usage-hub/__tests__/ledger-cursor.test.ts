@@ -354,6 +354,28 @@ describe('the perimeter sanitises what arrives from the wire', () => {
     expect(() => sanitizeHubConfigureInput([])).toThrow(HubUrlError)
   })
 
+  /**
+   * The rule `configureHub` already applied to the stored row, applied HERE as
+   * well. It was only half wired: the sanitiser validated the URL before the
+   * switch was consulted, so the settings group could not clear the address and
+   * save with sync off — the one payload the rule exists to allow.
+   */
+  it('accepts a blank URL while sync is off, and refuses one while it is on', () => {
+    expect(sanitizeHubConfigureInput({ url: '', deviceName: 'n', clientId: 'c' }).url).toBe('')
+    expect(sanitizeHubConfigureInput({ url: '   ', enabled: false }).url).toBe('')
+    // A missing key is the same case as an empty one.
+    expect(sanitizeHubConfigureInput({ enabled: false }).url).toBe('')
+    expect(() => sanitizeHubConfigureInput({ url: '', enabled: true })).toThrow(HubUrlError)
+    // Blank means absent or whitespace, nothing else: junk is still refused, so
+    // a malformed payload can never read as "clear the address".
+    expect(() => sanitizeHubConfigureInput({ url: 42, enabled: false })).toThrow(HubUrlError)
+    expect(() => sanitizeHubConfigureInput({ url: {}, enabled: false })).toThrow(HubUrlError)
+    // And a URL that IS offered is validated whatever the switch says.
+    expect(() =>
+      sanitizeHubConfigureInput({ url: 'http://hub.example.com', enabled: false })
+    ).toThrow(HubUrlError)
+  })
+
   it('bounds the secret and refuses a non-string', () => {
     expect(sanitizeHubSecret('  abc  ')).toBe('abc')
     expect(sanitizeHubSecret('')).toBe('')
@@ -406,6 +428,26 @@ describe('the channel surface', () => {
     expect(forgotten.hasSecret).toBe(false)
     expect(forgotten.url).toBe('')
     expect(getHubConfigRow()).toBeNull()
+  })
+
+  it('lets a caller clear the URL and turn sync off in one write', async () => {
+    const configure = usageHubCommands().find((c) => c.channel === 'usage-hub:configure')!
+    await configure.handler({
+      url: 'https://hub.example.com',
+      deviceName: 'workshop',
+      clientId: 'client-a',
+      enabled: true
+    })
+    // What the settings group sends when the URL field has been cleared and the
+    // switch turned off. It used to be refused at the perimeter.
+    const status = (await configure.handler({
+      url: '',
+      deviceName: 'workshop',
+      clientId: 'client-a',
+      enabled: false
+    })) as { url: string; enabled: boolean }
+    expect(status).toMatchObject({ url: '', enabled: false })
+    expect(getHubConfigRow()).toMatchObject({ url: '', enabled: false })
   })
 
   it('refuses a hub URL the perimeter does not accept, and stores nothing', async () => {

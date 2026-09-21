@@ -364,6 +364,11 @@ async function handle(request: Request): Promise<Response> {
     }
     const deviceId = body.deviceId ?? ''
     if (deviceId === '') return json({ error: 'no deviceId' }, 400)
+    // BEFORE the batch is looked at, and with no check that there is one: an
+    // empty `events` array is a valid request and is how a device that has
+    // nothing to send announces itself (ADR-072 §7). Recording it here is what
+    // makes `{ accepted: 0, duplicates: 0 }` a complete answer, and it is part
+    // of the contract the hub repository inherits with this file.
     const known = devices.get(deviceId)
     devices.set(deviceId, {
       deviceId,

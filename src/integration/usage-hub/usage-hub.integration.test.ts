@@ -288,6 +288,25 @@ describe('the client and the fake hub agree on the wire', () => {
     })
   })
 
+  it('registers a device that has nothing to push, with one empty batch', async () => {
+    const hub = await startFakeHub()
+    enable(hub)
+    await withClient(async (client) => {
+      // No ledger rows at all: a freshly enabled machine's cursor sits at the
+      // newest row it holds, so it may have nothing to send for days (ADR-072
+      // §2). Without the announce the hub would never learn it exists.
+      await client.syncNow()
+      expect(client.status().state).toBe('idle')
+
+      const store = await readStore(hub)
+      expect(store.events).toHaveLength(0)
+      expect(store.devices).toHaveLength(1)
+      expect(store.devices[0]).toMatchObject({ deviceName: 'fixture', os: process.platform })
+      expect(store.devices[0].lastPushAt).toBeGreaterThan(0)
+      expect(getHubConfigRow()?.lastPushAt).not.toBeNull()
+    })
+  })
+
   it('refuses a GET that states no schema version', async () => {
     const hub = await startFakeHub()
     const answer = await fetch(`${hub.url}/v1/buckets?since=0`, { headers: AUTH_HEADERS })

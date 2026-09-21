@@ -29,6 +29,7 @@ import { engineMeta } from '../../../../shared/engine-meta'
 import { SECTIONS, type Section, type SettingItem } from './settings-sections'
 import { SettingRow, ActionRow, type AppliesOn } from './settings-controls'
 import type { SettingsPageId } from './settings-target'
+import { UsageHubSettings } from './UsageHubSettings'
 
 export type { SettingsPageId, SettingsTarget } from './settings-target'
 
@@ -211,11 +212,26 @@ const CODEX_ACCOUNT: SettingItem = {
   keywords: 'codex chatgpt openai native account login authentication vault',
   render: () => <CodexAccount />
 }
+
+/**
+ * The usage hub (ADR-072). Page-local rather than a `SECTIONS` item because
+ * none of it is a ClaudeUI setting: the whole group writes `usage_hub_config`
+ * in the operational database through its own channels, the way the remote
+ * server config does.
+ */
+const USAGE_HUB: SettingItem = {
+  key: 'usageHub',
+  label: 'Usage hub',
+  keywords:
+    'usage hub sync metering device token cloudflare access service token machines resync forget combined spend',
+  render: () => <UsageHubSettings />
+}
 export const PAGE_LOCAL_ITEMS: readonly SettingItem[] = [
   SANDBOX_CROSS_LINK,
   OTHER_ENGINE_PERMISSIONS,
   VERSIONS,
-  CODEX_ACCOUNT
+  CODEX_ACCOUNT,
+  USAGE_HUB
 ]
 
 // ── Icons (14px, stroke 1.8 — the rail size on the boards) ───────────
@@ -623,7 +639,20 @@ export const PAGES: SettingsPage[] = [
       },
       // BELOW security on purpose: the locked-state copy inside AccessLinks
       // reads "Unlock in Session security above".
-      { id: 'links', label: 'Access links', items: itemsOf('remote', ['remoteLinks']) }
+      { id: 'links', label: 'Access links', items: itemsOf('remote', ['remoteLinks']) },
+      // LAST, and on this page rather than beside the usage dials on Advanced:
+      // every other group here configures how this machine talks to the network
+      // and holds its credential in the same database, which is the
+      // neighbourhood a reader looking for "where does my usage go" searches
+      // (ADR-072 §7). No applies-later badge — `usage-hub:configure` re-arms
+      // the client on the spot, so every row here binds immediately.
+      {
+        id: 'usage-hub',
+        label: 'Usage hub',
+        storage: 'usage_hub_config',
+        note: 'Applies as soon as it is saved.',
+        items: [USAGE_HUB]
+      }
     ]
   },
   {
