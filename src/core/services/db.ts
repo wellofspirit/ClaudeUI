@@ -1187,6 +1187,137 @@ export const MIGRATIONS: Migration[] = [
           WHERE account_key LIKE 'chatgpt:%' OR account_key = 'codex:openai:native';
       `)
     }
+  },
+  {
+    // v26 — ADR-072: the usage hub's client state, and the other machines' rows.
+    //
+    // FOUR tables, and the split is the point.
+    //
+    // `usage_hub_config` holds the hub's URL, this device's name, and the Access
+    // service token's id AND SECRET. The secret is here rather than in
+    // `settings.json` or the vault for the reason `remote_config` gives two
+    // hundred lines above: `config:save-settings` is reachable from a remote
+    // client, so anything a settings file carries is remotely writable, and the
+    // vault is plaintext JSON at mode 0600 (ADR-072 §6, amended). Single row,
+    // `id = 1` by CHECK, like `remote_config` — there is one hub per machine.
+    //
+    // `cursor_rowid` is the high-water mark over `usage_event`'s hidden rowid.
+    // Not `id` (a random uuid) and not `ts` (the reconciler backfills, so it goes
+    // BACKWARDS): rowid is the only column that rises with every insert, and
+    // pruning deletes the OLDEST rows so the maximum is never reused.
+    //
+    // The `remote_*` tables are the OTHER machines' rows, pulled and cached so
+    // the combined view works offline. `remote_usage_bucket` and
+    // `remote_usage_window` each mirror their local twin plus a `device_id`,
+    // which joins the primary key — two machines legitimately hold the same
+    // hour, account, model and origin, and merging them here would be the double
+    // counting ADR-072 §2 exists to prevent. `remote_limits` is the exception: it
+    // keeps the LATEST reading per account key and window kind across all
+    // devices, so `device_id` is a column and not a key — it records which
+    // machine saw it, and a newer reading from another machine replaces it.
+    // `remote_device` is the machine list as `GET /v1/devices` answers it, which
+    // is the only place a peer's NAME can come from (the hub knows it; a bucket
+    // does not).
+    //
+    // No foreign keys to the local tables: a remote row is about an account this
+    // machine may never have held credentials for.
+    version: 26,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS usage_hub_config (
+          id            INTEGER PRIMARY KEY CHECK (id = 1),
+          url           TEXT    NOT NULL DEFAULT '',
+          device_name   TEXT    NOT NULL DEFAULT '',
+          client_id     TEXT    NOT NULL DEFAULT '',
+          client_secret TEXT,
+          enabled       INTEGER NOT NULL DEFAULT 0,
+          cursor_rowid  INTEGER NOT NULL DEFAULT 0,
+          remote_rev    INTEGER NOT NULL DEFAULT 0,
+          remote_window_rev INTEGER NOT NULL DEFAULT 0,
+          remote_epoch  INTEGER,
+          last_push_at  INTEGER,
+          last_pull_at  INTEGER,
+          last_error    TEXT,
+          updated_at    INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS remote_usage_bucket (
+          device_id                 TEXT    NOT NULL,
+          hour_utc                  INTEGER NOT NULL,
+          account_key               TEXT    NOT NULL,
+          billing_type              TEXT    NOT NULL,
+          engine_id                 TEXT    NOT NULL,
+          vendor_id                 TEXT    NOT NULL,
+          model_id                  TEXT    NOT NULL,
+          origin                    TEXT    NOT NULL,
+          input_tokens              INTEGER NOT NULL DEFAULT 0,
+          output_tokens             INTEGER NOT NULL DEFAULT 0,
+          cache_write_tokens        INTEGER NOT NULL DEFAULT 0,
+          cache_write_1h_tokens     INTEGER NOT NULL DEFAULT 0,
+          cache_read_tokens         INTEGER NOT NULL DEFAULT 0,
+          api_cost_usd              REAL    NOT NULL DEFAULT 0,
+          billed_cost_usd           REAL    NOT NULL DEFAULT 0,
+          unbilled_api_cost_usd     REAL    NOT NULL DEFAULT 0,
+          unknown_api_cost_count    INTEGER NOT NULL DEFAULT 0,
+          unknown_billed_cost_count INTEGER NOT NULL DEFAULT 0,
+          request_count             INTEGER NOT NULL DEFAULT 0,
+          source                    TEXT    NOT NULL DEFAULT 'rollup',
+          rev                       INTEGER NOT NULL,
+          PRIMARY KEY (device_id, hour_utc, account_key, billing_type,
+                       engine_id, vendor_id, model_id, origin)
+        );
+        CREATE INDEX IF NOT EXISTS idx_remote_usage_bucket_hour
+          ON remote_usage_bucket(hour_utc);
+        CREATE INDEX IF NOT EXISTS idx_remote_usage_bucket_device
+          ON remote_usage_bucket(device_id);
+
+        CREATE TABLE IF NOT EXISTS remote_usage_window (
+          device_id          TEXT    NOT NULL,
+          account_key        TEXT    NOT NULL,
+          window_kind        TEXT    NOT NULL,
+          canonical_end      INTEGER NOT NULL,
+          window_start       INTEGER NOT NULL,
+          window_minutes     INTEGER,
+          peak_percent       REAL    NOT NULL DEFAULT 0,
+          api_cost_usd       REAL    NOT NULL DEFAULT 0,
+          billed_cost_usd    REAL    NOT NULL DEFAULT 0,
+          unknown_cost_count INTEGER NOT NULL DEFAULT 0,
+          input_tokens       INTEGER NOT NULL DEFAULT 0,
+          output_tokens      INTEGER NOT NULL DEFAULT 0,
+          cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+          sample_count       INTEGER NOT NULL DEFAULT 0,
+          closed             INTEGER NOT NULL DEFAULT 0,
+          updated_at         INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (device_id, account_key, window_kind, canonical_end)
+        );
+        CREATE INDEX IF NOT EXISTS idx_remote_usage_window_end
+          ON remote_usage_window(canonical_end);
+
+        CREATE TABLE IF NOT EXISTS remote_limits (
+          account_key    TEXT    NOT NULL,
+          window_kind    TEXT    NOT NULL,
+          device_id      TEXT    NOT NULL,
+          label_masked   TEXT,
+          vendor_id      TEXT    NOT NULL,
+          plan           TEXT,
+          window_minutes INTEGER,
+          used_percent   REAL    NOT NULL DEFAULT 0,
+          resets_at      TEXT,
+          observed_at    INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (account_key, window_kind)
+        );
+
+        CREATE TABLE IF NOT EXISTS remote_device (
+          device_id    TEXT PRIMARY KEY,
+          device_name  TEXT    NOT NULL DEFAULT '',
+          os           TEXT    NOT NULL DEFAULT 'unknown',
+          app_version  TEXT    NOT NULL DEFAULT 'unknown',
+          last_push_at INTEGER NOT NULL DEFAULT 0,
+          retired      INTEGER NOT NULL DEFAULT 0
+        );
+      `)
+    }
   }
 ]
 
@@ -1965,6 +2096,50 @@ function rowToUsageEvent(row: UsageEventDbRow): UsageEventRow {
   }
 }
 
+// ---------------------------------------------------------------------------
+// The row-written notifier (ADR-072 §7)
+//
+// Until ADR-072 nothing fired after a ledger write, so the hub client had no way
+// to learn that a turn had landed short of polling the table. Module-level, like
+// `onSecurestorageEnvChange`: it is one fact about the STORE, every writer goes
+// through the two functions below, and a subscriber must outlive any single one
+// of them.
+//
+// It fires ONCE PER CALL that actually inserted a row, not once per row: the
+// subscriber debounces to a push a minute, so a batch of 300 backfilled turns
+// has nothing to gain from 300 notifications. A call whose every row was a
+// duplicate (`ON CONFLICT DO NOTHING`) fires nothing at all — there is no new
+// spend to push.
+// ---------------------------------------------------------------------------
+
+type UsageEventWrittenListener = () => void
+
+const usageEventWrittenListeners = new Set<UsageEventWrittenListener>()
+
+/** Be told when a ledger write actually inserted something. Returns the unsubscribe. */
+export function onUsageEventWritten(listener: UsageEventWrittenListener): () => void {
+  usageEventWrittenListeners.add(listener)
+  return () => {
+    usageEventWrittenListeners.delete(listener)
+  }
+}
+
+/** Drop every subscriber. Tests only — production keeps them for the process's life. */
+export function resetUsageEventWrittenListeners(): void {
+  usageEventWrittenListeners.clear()
+}
+
+function notifyUsageEventWritten(): void {
+  for (const listener of usageEventWrittenListeners) {
+    try {
+      listener()
+    } catch {
+      // A listener that throws must not fail the write it is only observing —
+      // the same rule `recordUsageEvent` already follows for the write itself.
+    }
+  }
+}
+
 const INSERT_USAGE_EVENT_SQL = `
   INSERT INTO usage_event (
     id, ts, engine_id, vendor_id, account_id, account_uuid,
@@ -2016,7 +2191,8 @@ function usageEventParams(event: UsageEventInsert): unknown[] {
  */
 export function insertUsageEvent(event: UsageEventInsert): void {
   const db = getDb()
-  db.prepare(INSERT_USAGE_EVENT_SQL).run(...usageEventParams(event))
+  const inserted = db.prepare(INSERT_USAGE_EVENT_SQL).run(...usageEventParams(event)).changes
+  if (inserted > 0) notifyUsageEventWritten()
 }
 
 /**
@@ -2029,14 +2205,18 @@ export function insertUsageEvents(events: UsageEventInsert[]): void {
   const stmt = db.prepare(INSERT_USAGE_EVENT_SQL)
   // Wrap in a manual BEGIN/COMMIT for bulk efficiency. This is the same pattern
   // the reconciler will use in Pass 2 (bulk JSONL backfill).
+  let inserted = 0
   db.prepare('BEGIN').run()
   try {
-    for (const event of events) stmt.run(...usageEventParams(event))
+    for (const event of events) inserted += stmt.run(...usageEventParams(event)).changes
     db.prepare('COMMIT').run()
   } catch (err) {
     db.prepare('ROLLBACK').run()
     throw err
   }
+  // After the COMMIT, so a subscriber that reads the table straight away sees
+  // the rows it is being told about.
+  if (inserted > 0) notifyUsageEventWritten()
 }
 
 /** Retrieve a single usage event by message_id (used in tests). */
@@ -2068,6 +2248,76 @@ export function getUsageEventsSince(cutoffTs: number, engineId?: string): UsageE
         .prepare('SELECT * FROM usage_event WHERE ts >= ? ORDER BY ts ASC')
         .all(cutoffTs) as UsageEventDbRow[])
   return rows.map(rowToUsageEvent)
+}
+
+// ---------------------------------------------------------------------------
+// The hub cursor's reader (ADR-072 §2)
+//
+// `rowid`, and nothing else, because the hub's high-water mark has to be
+// MONOTONIC: `id` is a random uuid and `ts` moves backwards every time the
+// reconciler backfills a turn from a transcript. The three functions below are
+// the only place in the app that names `usage_event`'s implicit rowid; every
+// other reader is `ts`-keyed and stays that way.
+// ---------------------------------------------------------------------------
+
+/** A ledger row with the cursor value that orders it. */
+export interface UsageEventCursorRow extends UsageEventRow {
+  /** SQLite's implicit rowid — the hub's high-water mark, never displayed. */
+  rowid: number
+}
+
+/**
+ * The next `limit` rows after `rowid`, in rowid order.
+ *
+ * `unknown` rows are RETURNED, not filtered, even though ADR-072 §2 forbids
+ * pushing them: the caller advances its cursor past whatever it read, and a row
+ * the query hid would be a rowid the cursor could never pass. The skip is the
+ * caller's, applied to the payload; the cursor moves either way.
+ */
+export function readUsageEventsAfterRowid(rowid: number, limit: number): UsageEventCursorRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT rowid AS rowid, * FROM usage_event WHERE rowid > ? ORDER BY rowid ASC LIMIT ?')
+    .all(rowid, limit) as Array<UsageEventDbRow & { rowid: number }>
+  return rows.map((row) => ({ ...rowToUsageEvent(row), rowid: row.rowid }))
+}
+
+/**
+ * The highest rowid in the ledger, or 0 when it is empty.
+ *
+ * This is what enabling sync sets the cursor to (owner: start fresh) — the hub's
+ * combined view begins at the moment a machine joined it, and nothing older is
+ * ever pushed.
+ */
+export function maxUsageEventRowid(): number {
+  const db = getDb()
+  const row = db.prepare('SELECT MAX(rowid) AS max_rowid FROM usage_event').get() as
+    { max_rowid: number | null } | undefined
+  return row?.max_rowid ?? 0
+}
+
+/** How many PUSHABLE rows sit past the cursor — attributed ones only (ADR-072 §2). */
+export function countUsageEventsAfterRowid(rowid: number): number {
+  const db = getDb()
+  const row = db
+    .prepare('SELECT COUNT(*) AS n FROM usage_event WHERE rowid > ? AND account_key <> ?')
+    .get(rowid, UNKNOWN_ACCOUNT_KEY) as { n: number } | undefined
+  return row?.n ?? 0
+}
+
+/**
+ * The timestamp of the OLDEST ledger row, or null when the ledger is empty.
+ *
+ * `POST /v1/devices/self/resync` sends it, and the 90-day prune keeps moving it
+ * forward — so a resync repairs at most the last 90 days on the hub and older
+ * rows there are left alone. That is the designed bound (ADR-072 §2), not a
+ * shortfall.
+ */
+export function oldestUsageEventTs(): number | null {
+  const db = getDb()
+  const row = db.prepare('SELECT MIN(ts) AS min_ts FROM usage_event').get() as
+    { min_ts: number | null } | undefined
+  return row?.min_ts ?? null
 }
 
 /**
@@ -3879,4 +4129,449 @@ export function pruneAuditLog(now: number = Date.now(), retentionDays?: number):
   }
   const cutoff = now - days * MS_PER_DAY
   return db.prepare('DELETE FROM audit_log WHERE ts < ?').run(cutoff).changes
+}
+
+// ---------------------------------------------------------------------------
+// The usage hub (ADR-072) — this device's client state, and the other machines'
+// rows.
+//
+// NEVER expose `client_secret` past the one caller that needs it.
+// `getHubConfigRow` returns it because exactly one does — the request signer in
+// `usage-hub/config.ts`, which hands it straight to a header and returns it to
+// nothing. Every read that reaches an IPC channel goes through `getHubConfig()`
+// there, which answers `hasSecret: boolean`. Same discipline as `remote_config`'s
+// password hash, and for the same reason: a remote client can write settings, so
+// the credential is in the database.
+// ---------------------------------------------------------------------------
+
+/** The `usage_hub_config` row as stored, secret included. */
+export interface HubConfigRow {
+  url: string
+  deviceName: string
+  clientId: string
+  /** The Access service-token secret. Never crosses an IPC boundary. */
+  clientSecret: string | null
+  enabled: boolean
+  /** High-water mark over `usage_event`'s rowid (ADR-072 §2). */
+  cursorRowid: number
+  /** Highest bucket `rev` pulled from the hub. */
+  remoteRev: number
+  /** Highest window `rev` pulled from the hub — its own counter, not the buckets'. */
+  remoteWindowRev: number
+  /** The hub's bucket-rebuild generation; a change truncates the remote tables. */
+  remoteEpoch: number | null
+  lastPushAt: number | null
+  lastPullAt: number | null
+  lastError: string | null
+  updatedAt: number
+}
+
+interface HubConfigDbRow {
+  url: string
+  device_name: string
+  client_id: string
+  client_secret: string | null
+  enabled: number
+  cursor_rowid: number
+  remote_rev: number
+  remote_window_rev: number
+  remote_epoch: number | null
+  last_push_at: number | null
+  last_pull_at: number | null
+  last_error: string | null
+  updated_at: number
+}
+
+/** The stored hub row, or null when sync has never been configured on this machine. */
+export function getHubConfigRow(): HubConfigRow | null {
+  const db = getDb()
+  const row = db.prepare('SELECT * FROM usage_hub_config WHERE id = 1').get() as
+    HubConfigDbRow | undefined
+  if (!row) return null
+  return {
+    url: row.url,
+    deviceName: row.device_name,
+    clientId: row.client_id,
+    clientSecret: row.client_secret,
+    enabled: row.enabled !== 0,
+    cursorRowid: row.cursor_rowid,
+    remoteRev: row.remote_rev,
+    remoteWindowRev: row.remote_window_rev,
+    remoteEpoch: row.remote_epoch,
+    lastPushAt: row.last_push_at,
+    lastPullAt: row.last_pull_at,
+    lastError: row.last_error,
+    updatedAt: row.updated_at
+  }
+}
+
+/**
+ * The columns a patch may name, mapped to their SQL names.
+ *
+ * A table, not string interpolation of the caller's keys: this is the one place
+ * a column name reaches an UPDATE statement, and a map means an unknown key is
+ * ignored rather than concatenated.
+ */
+const HUB_CONFIG_COLUMNS: Record<string, string> = {
+  url: 'url',
+  deviceName: 'device_name',
+  clientId: 'client_id',
+  clientSecret: 'client_secret',
+  enabled: 'enabled',
+  cursorRowid: 'cursor_rowid',
+  remoteRev: 'remote_rev',
+  remoteWindowRev: 'remote_window_rev',
+  remoteEpoch: 'remote_epoch',
+  lastPushAt: 'last_push_at',
+  lastPullAt: 'last_pull_at',
+  lastError: 'last_error'
+}
+
+/**
+ * Create or update the single hub row, touching only the fields the patch names.
+ *
+ * A patch, not a whole row, because the writers are unrelated: the settings
+ * channel writes the URL and the name, the push loop the cursor, the pull loop
+ * the rev and the epoch. Each must be able to write its own field without
+ * restating — or accidentally reverting — another's.
+ */
+export function upsertHubConfig(patch: Partial<HubConfigRow>, now: number = Date.now()): void {
+  const db = getDb()
+  const columns: string[] = []
+  const params: unknown[] = []
+  for (const [key, column] of Object.entries(HUB_CONFIG_COLUMNS)) {
+    if (!(key in patch)) continue
+    const value = patch[key as keyof HubConfigRow]
+    if (value === undefined) continue
+    columns.push(column)
+    params.push(typeof value === 'boolean' ? (value ? 1 : 0) : value)
+  }
+  db.prepare('INSERT OR IGNORE INTO usage_hub_config (id, updated_at) VALUES (1, ?)').run(now)
+  if (columns.length === 0) return
+  const assignments = columns.map((column) => `${column} = ?`).join(', ')
+  db.prepare(`UPDATE usage_hub_config SET ${assignments}, updated_at = ? WHERE id = 1`).run(
+    ...params,
+    now
+  )
+}
+
+/**
+ * Forget the hub: the row, the secret with it, and every cached remote row.
+ *
+ * One transaction, because a half-forgotten hub is the worst of the three
+ * states — other machines' rows still on screen with no credential left to
+ * refresh them.
+ */
+export function deleteHubConfig(): void {
+  const db = getDb()
+  db.prepare('BEGIN').run()
+  try {
+    db.prepare('DELETE FROM usage_hub_config WHERE id = 1').run()
+    db.prepare('DELETE FROM remote_usage_bucket').run()
+    db.prepare('DELETE FROM remote_usage_window').run()
+    db.prepare('DELETE FROM remote_limits').run()
+    db.prepare('DELETE FROM remote_device').run()
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+/**
+ * Drop every cached remote row, leaving the config alone.
+ *
+ * What a changed hub `epoch` triggers: a bucket rebuild on the hub can REMOVE an
+ * hour outright, and "everything since rev N" has no way to say that something
+ * is gone (ADR-072 §3). The only correct answer is to forget and pull from zero.
+ */
+export function truncateHubRemoteTables(): void {
+  const db = getDb()
+  db.prepare('BEGIN').run()
+  try {
+    db.prepare('DELETE FROM remote_usage_bucket').run()
+    db.prepare('DELETE FROM remote_usage_window').run()
+    db.prepare('DELETE FROM remote_limits').run()
+    // The device list is pulled whole on every pass, so dropping it costs one
+    // request and keeps "forget the cache" meaning all of it.
+    db.prepare('DELETE FROM remote_device').run()
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+/** One other machine's hourly bucket — {@link UsageBucketRow} plus whose it is. */
+export interface RemoteUsageBucketRow extends UsageBucketRow {
+  deviceId: string
+}
+
+/** One other machine's window-value row — {@link UsageWindowRow} plus whose it is. */
+export interface RemoteUsageWindowRow extends UsageWindowRow {
+  deviceId: string
+}
+
+/** The latest limit reading for one account key and window kind, from whichever machine saw it. */
+export interface RemoteLimitRow {
+  accountKey: string
+  windowKind: string
+  deviceId: string
+  /**
+   * The label as the HUB returned it — masked for a device caller (ADR-072 §6).
+   * A machine that holds a credential for the key shows its own full label
+   * instead; this is the fallback for an account only another machine uses.
+   */
+  labelMasked: string | null
+  vendorId: string
+  plan: string | null
+  windowMinutes: number | null
+  usedPercent: number
+  resetsAt: string | null
+  observedAt: number
+}
+
+/** Store a page of pulled buckets, replacing any row already held for the same key. */
+export function upsertRemoteUsageBuckets(rows: ReadonlyArray<RemoteUsageBucketRow>): void {
+  if (rows.length === 0) return
+  const db = getDb()
+  const stmt = db.prepare(
+    `INSERT INTO remote_usage_bucket (
+       device_id, hour_utc, account_key, billing_type, engine_id, vendor_id, model_id, origin,
+       input_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens, cache_read_tokens,
+       api_cost_usd, billed_cost_usd, unbilled_api_cost_usd,
+       unknown_api_cost_count, unknown_billed_cost_count, request_count, source, rev
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(device_id, hour_utc, account_key, billing_type, engine_id, vendor_id,
+                 model_id, origin)
+     DO UPDATE SET
+       input_tokens              = excluded.input_tokens,
+       output_tokens             = excluded.output_tokens,
+       cache_write_tokens        = excluded.cache_write_tokens,
+       cache_write_1h_tokens     = excluded.cache_write_1h_tokens,
+       cache_read_tokens         = excluded.cache_read_tokens,
+       api_cost_usd              = excluded.api_cost_usd,
+       billed_cost_usd           = excluded.billed_cost_usd,
+       unbilled_api_cost_usd     = excluded.unbilled_api_cost_usd,
+       unknown_api_cost_count    = excluded.unknown_api_cost_count,
+       unknown_billed_cost_count = excluded.unknown_billed_cost_count,
+       request_count             = excluded.request_count,
+       source                    = excluded.source,
+       rev                       = excluded.rev`
+  )
+  db.prepare('BEGIN').run()
+  try {
+    for (const r of rows) {
+      stmt.run(
+        r.deviceId,
+        r.hourUtc,
+        r.accountKey,
+        r.billingType,
+        r.engineId,
+        r.vendorId,
+        r.modelId,
+        r.origin,
+        r.inputTokens,
+        r.outputTokens,
+        r.cacheWriteTokens,
+        r.cacheWrite1hTokens,
+        r.cacheReadTokens,
+        r.apiCostUsd,
+        r.billedCostUsd,
+        r.unbilledApiCostUsd,
+        r.unknownApiCostCount,
+        r.unknownBilledCostCount,
+        r.requestCount,
+        r.source,
+        r.rev
+      )
+    }
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+/** Store pulled window-value rows, replacing what was held for the same window. */
+export function upsertRemoteUsageWindows(rows: ReadonlyArray<RemoteUsageWindowRow>): void {
+  if (rows.length === 0) return
+  const db = getDb()
+  const stmt = db.prepare(
+    `INSERT INTO remote_usage_window (
+       device_id, account_key, window_kind, canonical_end, window_start, window_minutes,
+       peak_percent, api_cost_usd, billed_cost_usd, unknown_cost_count,
+       input_tokens, output_tokens, cache_write_tokens, cache_read_tokens,
+       sample_count, closed, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(device_id, account_key, window_kind, canonical_end) DO UPDATE SET
+       window_start       = excluded.window_start,
+       window_minutes     = excluded.window_minutes,
+       peak_percent       = excluded.peak_percent,
+       api_cost_usd       = excluded.api_cost_usd,
+       billed_cost_usd    = excluded.billed_cost_usd,
+       unknown_cost_count = excluded.unknown_cost_count,
+       input_tokens       = excluded.input_tokens,
+       output_tokens      = excluded.output_tokens,
+       cache_write_tokens = excluded.cache_write_tokens,
+       cache_read_tokens  = excluded.cache_read_tokens,
+       sample_count       = excluded.sample_count,
+       closed             = excluded.closed,
+       updated_at         = excluded.updated_at`
+  )
+  db.prepare('BEGIN').run()
+  try {
+    for (const r of rows) {
+      stmt.run(
+        r.deviceId,
+        r.accountKey,
+        r.windowKind,
+        r.canonicalEnd,
+        r.windowStart,
+        r.windowMinutes,
+        r.peakPercent,
+        r.apiCostUsd,
+        r.billedCostUsd,
+        r.unknownCostCount,
+        r.inputTokens,
+        r.outputTokens,
+        r.cacheWriteTokens,
+        r.cacheReadTokens,
+        r.sampleCount,
+        r.closed ? 1 : 0,
+        r.updatedAt
+      )
+    }
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+/**
+ * Store the hub's latest reading per account key and window kind.
+ *
+ * Keyed WITHOUT the device: this table answers "what is the account at", which is
+ * one number however many machines watched it, and `device_id` records which one
+ * saw it last. A reading OLDER than the stored one is dropped rather than
+ * written, so two pulls landing out of order cannot move a meter backwards.
+ */
+export function upsertRemoteLimits(rows: ReadonlyArray<RemoteLimitRow>): void {
+  if (rows.length === 0) return
+  const db = getDb()
+  const stmt = db.prepare(
+    `INSERT INTO remote_limits (
+       account_key, window_kind, device_id, label_masked, vendor_id, plan,
+       window_minutes, used_percent, resets_at, observed_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(account_key, window_kind) DO UPDATE SET
+       device_id      = excluded.device_id,
+       label_masked   = excluded.label_masked,
+       vendor_id      = excluded.vendor_id,
+       plan           = excluded.plan,
+       window_minutes = excluded.window_minutes,
+       used_percent   = excluded.used_percent,
+       resets_at      = excluded.resets_at,
+       observed_at    = excluded.observed_at
+     WHERE excluded.observed_at >= remote_limits.observed_at`
+  )
+  db.prepare('BEGIN').run()
+  try {
+    for (const r of rows) {
+      stmt.run(
+        r.accountKey,
+        r.windowKind,
+        r.deviceId,
+        r.labelMasked,
+        r.vendorId,
+        r.plan,
+        r.windowMinutes,
+        r.usedPercent,
+        r.resetsAt,
+        r.observedAt
+      )
+    }
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+/**
+ * The cached remote buckets at or after `sinceHourUtc`, oldest hour first.
+ *
+ * The twin of {@link getUsageBucketsSince}, and bounded for the same reason.
+ * S5c's combined scope folds these in beside the local ones through the same
+ * code; S5a needs it so "the calling device's own rows are never stored" is
+ * asserted against the table rather than inferred.
+ */
+export function getRemoteUsageBucketsSince(sinceHourUtc: number): RemoteUsageBucketRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT * FROM remote_usage_bucket WHERE hour_utc >= ? ORDER BY hour_utc ASC')
+    .all(sinceHourUtc) as Array<UsageBucketDbRow & { device_id: string }>
+  return rows.map((row) => ({ ...rowToUsageBucket(row), deviceId: row.device_id }))
+}
+
+/** One other machine, as `GET /v1/devices` described it (ADR-072 §6). */
+export interface RemoteDeviceRow {
+  deviceId: string
+  deviceName: string
+  os: string
+  appVersion: string
+  /** When the hub last accepted a write from that device. */
+  lastPushAt: number
+  retired: boolean
+}
+
+/**
+ * Replace the cached machine list with what the hub just answered.
+ *
+ * REPLACE, not upsert: `GET /v1/devices` returns the whole list every time, so a
+ * merge would keep a device the hub no longer knows about — and the only reason
+ * a device disappears from that answer is that the owner removed it.
+ */
+export function replaceRemoteDevices(rows: ReadonlyArray<RemoteDeviceRow>): void {
+  const db = getDb()
+  db.prepare('BEGIN').run()
+  try {
+    db.prepare('DELETE FROM remote_device').run()
+    const stmt = db.prepare(
+      `INSERT INTO remote_device
+         (device_id, device_name, os, app_version, last_push_at, retired)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    )
+    for (const r of rows) {
+      stmt.run(r.deviceId, r.deviceName, r.os, r.appVersion, r.lastPushAt, r.retired ? 1 : 0)
+    }
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+/** The cached machine list, most recently pushed first. */
+export function listRemoteDevices(): RemoteDeviceRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT * FROM remote_device ORDER BY last_push_at DESC, device_id ASC')
+    .all() as Array<{
+    device_id: string
+    device_name: string
+    os: string
+    app_version: string
+    last_push_at: number
+    retired: number
+  }>
+  return rows.map((row) => ({
+    deviceId: row.device_id,
+    deviceName: row.device_name,
+    os: row.os,
+    appVersion: row.app_version,
+    lastPushAt: row.last_push_at,
+    retired: row.retired !== 0
+  }))
 }

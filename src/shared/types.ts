@@ -1910,6 +1910,21 @@ interface AccountAPI {
    * grouped provider → account → model for the given range.
    */
   fetchUsageDashboard(range: DashboardRange): Promise<UsageDashboardData>
+  /** The usage hub's client state (ADR-072 §7). Never carries the device secret. */
+  usageHubStatus(): Promise<UsageHubStatus>
+  /** Write the hub's URL, this device's name, the service-token id, and the on/off switch. */
+  configureUsageHub(input: UsageHubConfigureInput): Promise<UsageHubStatus>
+  /**
+   * Store the device secret. WRITE-ONLY: nothing reads it back, and the answer
+   * is the status, whose `hasSecret` is all a surface is told.
+   */
+  setUsageHubSecret(secret: string): Promise<UsageHubStatus>
+  /** Push then pull, now. Ignores the non-essential-traffic gate — the user asked. */
+  syncUsageHubNow(): Promise<UsageHubStatus>
+  /** ADR-072 §2's repair: have the hub drop this device's recent rows and re-push them. */
+  resyncUsageHub(): Promise<UsageHubStatus>
+  /** Forget the hub: the config, the secret and every cached remote row. */
+  forgetUsageHub(): Promise<UsageHubStatus>
 }
 
 export interface NetworkInterfaceInfo {
@@ -2860,6 +2875,84 @@ export interface AccountLimits {
   source: 'local' | { deviceId: string }
   state: 'ok' | 'stale' | 'needs-sign-in' | 'unavailable'
   error?: string
+}
+
+// ---------------------------------------------------------------------------
+// The usage hub (ADR-072)
+//
+// What the `usage-hub:*` channels carry. The SECRET is not here and is not in
+// any shape below: the device credential lives in the operational database and
+// no query returns it — `hasSecret` is the whole answer a surface gets.
+// ---------------------------------------------------------------------------
+
+/**
+ * What the client is doing, or why it is not.
+ *
+ *  - `off` — no hub configured, or sync disabled;
+ *  - `idle` — configured and up to date;
+ *  - `syncing` — a pass is in flight;
+ *  - `backoff` — a 5xx, a network failure or a 429; a retry is scheduled;
+ *  - `needs-credentials` — the hub refused the service token (a 401, or the 302
+ *    to the Access login page that a bad token actually gets). Only a person can
+ *    fix it, so nothing is retried;
+ *  - `update-hub` — the hub speaks an older schema (`426`). The cursor is
+ *    untouched, so nothing is lost;
+ *  - `error` — a request the hub refused for some other reason.
+ */
+export type UsageHubState =
+  'off' | 'idle' | 'syncing' | 'backoff' | 'needs-credentials' | 'update-hub' | 'error'
+
+/**
+ * One other machine, as `GET /v1/devices` describes it (ADR-072 §6).
+ *
+ * A device caller may read this: a name the user chose, an OS family, a build
+ * and an instant are not sensitive, and without them the machine list can only
+ * show opaque uuids and guess "behind" from the newest hour it holds — so a
+ * machine that synced but spent nothing would read as stale.
+ */
+export interface UsageHubDevice {
+  deviceId: string
+  deviceName: string
+  os: string
+  appVersion: string
+  /** When the hub last accepted a write from that machine. */
+  lastPushAt: number
+  /** The owner marked it retired, so the machine list stops flagging it. */
+  retired: boolean
+}
+
+/** Everything `usage-hub:status` answers. Carries no credential. */
+export interface UsageHubStatus {
+  enabled: boolean
+  url: string
+  /** Null until sync has been enabled once — reading the status never creates one. */
+  deviceId: string | null
+  deviceName: string
+  /** The Access service token's client id. Public by design, so the form can show it. */
+  clientId: string
+  /** Whether a device secret is stored. Never the secret. */
+  hasSecret: boolean
+  state: UsageHubState
+  lastPushAt: number | null
+  lastPullAt: number | null
+  lastError: string | null
+  /** Attributed ledger rows waiting past the cursor. `unknown` rows are not counted. */
+  pendingEvents: number
+  remote: {
+    devices: UsageHubDevice[]
+    /** The hub's bucket-rebuild generation, or null before the first pull. */
+    epoch: number | null
+  }
+}
+
+/** What `usage-hub:configure` takes. The secret has its own write-only channel. */
+export interface UsageHubConfigureInput {
+  /** `https:` only, except `http://localhost` / `http://127.0.0.1`. No path, no credentials. */
+  url: string
+  deviceName: string
+  /** The Access service token's client id. Not a secret — the id is public by design. */
+  clientId: string
+  enabled: boolean
 }
 
 // ---------------------------------------------------------------------------

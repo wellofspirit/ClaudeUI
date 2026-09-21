@@ -49,9 +49,9 @@ describe('DB migrations — v3 usage_event + v4 usage_window_sample', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      // Bump alongside MIGRATIONS in db.ts — currently v25 (a limit window's
-      // stated length, and the drop of the position-kinded ChatGPT rows).
-      expect(userVersion(db)).toBe(25)
+      // Bump alongside MIGRATIONS in db.ts — currently v26 (the usage hub's
+      // client state and the cached remote rows).
+      expect(userVersion(db)).toBe(26)
     } finally {
       db.close()
     }

@@ -18,7 +18,13 @@ vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
-import { recordLimitSamples, resetWindowSampleDedup } from '../../../core/services/window-samples'
+import {
+  onLimitSamplesWritten,
+  recordLimitSamples,
+  resetLimitSamplesWrittenListeners,
+  resetWindowSampleDedup,
+  type LimitReadingWritten
+} from '../../../core/services/window-samples'
 
 const NOW = 1_700_000_000_000
 const KEY = 'anthropic:org_x:uuid_x'
@@ -27,6 +33,7 @@ const later = (ms: number): string => new Date(NOW + ms).toISOString()
 beforeEach(() => {
   recordWindowSample.mockReset()
   resetWindowSampleDedup()
+  resetLimitSamplesWrittenListeners()
 })
 
 function rows(): Array<Record<string, unknown>> {
@@ -186,5 +193,85 @@ describe('recordLimitSamples', () => {
     })
 
     expect(rows().map((r) => r.accountUuid)).toEqual(['uuid_a', 'uuid_b'])
+  })
+})
+
+/**
+ * The hub's seam (ADR-072 §4). ONE notifier here rather than a hook at each of
+ * the three callers: they already agree here on what makes a sample comparable,
+ * and the hub needs the same agreement.
+ */
+describe('onLimitSamplesWritten', () => {
+  it('reports the readings a write actually produced, with the canonical end', () => {
+    const seen: LimitReadingWritten[][] = []
+    onLimitSamplesWritten((readings) => seen.push(readings))
+
+    recordLimitSamples({
+      accountKey: KEY,
+      accountUuid: 'uuid_x',
+      accountLabel: 'someone@example.com',
+      vendorId: 'anthropic',
+      plan: 'max_20x',
+      now: NOW,
+      windows: [
+        { kind: '5h', usedPercent: 42, resetsAt: later(60_000), windowMinutes: 300 },
+        { kind: '7d', usedPercent: 7, resetsAt: later(600_000), windowMinutes: 10_080 }
+      ]
+    })
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toHaveLength(2)
+    expect(seen[0][0]).toMatchObject({
+      accountKey: KEY,
+      accountLabel: 'someone@example.com',
+      vendorId: 'anthropic',
+      plan: 'max_20x',
+      windowKind: '5h',
+      windowMinutes: 300,
+      usedPercent: 42,
+      observedAt: NOW
+    })
+    // The canonical end, not the raw reset: two machines reading the same window
+    // a minute apart must name the same instant or the hub keys two windows.
+    expect(seen[0][0].resetsAt).toBe(new Date(rows()[0].canonicalEnd as number).toISOString())
+  })
+
+  it('does not fire when every window was unchanged', () => {
+    const listener = vi.fn()
+    onLimitSamplesWritten(listener)
+    const windows = [{ kind: '5h', usedPercent: 42, resetsAt: later(60_000) }]
+
+    recordLimitSamples({ accountKey: KEY, accountUuid: 'uuid_x', now: NOW, windows })
+    expect(listener).toHaveBeenCalledTimes(1)
+
+    recordLimitSamples({ accountKey: KEY, accountUuid: 'uuid_x', now: NOW, windows })
+    expect(listener).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not fire for a reading whose window cannot be dated', () => {
+    const listener = vi.fn()
+    onLimitSamplesWritten(listener)
+    recordLimitSamples({
+      accountKey: KEY,
+      accountUuid: 'uuid_x',
+      now: NOW,
+      windows: [{ kind: '5h', usedPercent: 42, resetsAt: null }]
+    })
+    expect(listener).not.toHaveBeenCalled()
+  })
+
+  it('a subscriber that throws does not fail the reading', () => {
+    onLimitSamplesWritten(() => {
+      throw new Error('subscriber is broken')
+    })
+    expect(() =>
+      recordLimitSamples({
+        accountKey: KEY,
+        accountUuid: 'uuid_x',
+        now: NOW,
+        windows: [{ kind: '5h', usedPercent: 42, resetsAt: later(60_000) }]
+      })
+    ).not.toThrow()
+    expect(rows()).toHaveLength(1)
   })
 })

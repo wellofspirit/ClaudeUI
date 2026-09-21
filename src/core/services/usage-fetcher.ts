@@ -1481,6 +1481,12 @@ export class UsageFetcher {
         accountKey: activeClaudeAttribution(active, buildClaudeAccountRef()?.billingType)
           .accountKey,
         accountUuid: active.uuid,
+        // Display-only, and for the hub relay alone (ADR-072 §4): a machine
+        // where this account is not active shows the reading this one paid for,
+        // and it has to be able to name whose it is.
+        accountLabel: claudeAccountLabel(active),
+        vendorId: 'anthropic',
+        plan: usage.planName ?? null,
         windows: claudeLimitWindows(usage)
       })
       // ADR-071 §6's nudge, beside `usage:data`: a client watching LIMITS across

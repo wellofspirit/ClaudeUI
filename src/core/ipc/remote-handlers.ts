@@ -84,6 +84,7 @@ import {
 import { opt } from './wire-args'
 import { configCommands } from './config-commands'
 import { ideCommands, type IdeCommandHost } from './ide-commands'
+import { usageHubCommands } from './usage-hub-commands'
 import { remoteViewCommands, type RemoteStatusHost } from './remote-view-commands'
 import { authCommands, type AuthCommandDeps } from './auth-commands'
 import { AUTOMATION_COMMANDS } from './automation-commands'
@@ -1526,6 +1527,18 @@ export function registerRemoteHandlers(
   // different one). Absent (tests, remote-disabled harnesses) the channels still
   // register and throw — the channel SET must not depend on runtime config.
   for (const cmd of ideCommands(enrollTokens ?? null)) {
+    handleRemote(cmd)
+  }
+
+  // -------------------------------------------------------------------------
+  // The usage hub (ADR-072 §7)
+  // -------------------------------------------------------------------------
+  //
+  // From the same declarations the desktop transport spreads. Remote on purpose:
+  // the combined dashboard the hub feeds is not desktop-only, and neither is the
+  // settings group that configures it. `capability: 'config'`, like the rest of
+  // the metering surface — and no shape here can return the device secret.
+  for (const cmd of usageHubCommands()) {
     handleRemote(cmd)
   }
 

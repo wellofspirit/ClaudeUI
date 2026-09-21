@@ -330,6 +330,12 @@ describe('a STORED (inactive) Claude account', () => {
     expect(mockRecordLimitSamples).toHaveBeenCalledWith({
       accountKey: STORED_KEY,
       accountUuid: 'acct-uuid-b',
+      // Display-only, and for the hub relay alone (ADR-072 §4): a machine where
+      // this account is not active shows the reading this one paid for, so it
+      // has to be able to name whose it is.
+      accountLabel: expect.any(String),
+      vendorId: 'anthropic',
+      plan: 'pro',
       windows: expect.arrayContaining([expect.objectContaining({ kind: '5h' })])
     })
     expect(mockEmitEvent).toHaveBeenCalledWith('usage:limits-changed', [])

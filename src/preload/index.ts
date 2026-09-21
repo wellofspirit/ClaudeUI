@@ -372,6 +372,15 @@ const api: ClaudeAPI = {
   fetchUsageWindows: (query) => ipcRenderer.invoke('usage:windows', query ?? {}),
   fetchUsageDashboard: (range) => ipcRenderer.invoke('usage:dashboard', { range }),
 
+  // The usage hub (ADR-072). `setUsageHubSecret` is write-only — no channel here
+  // reads a device credential back.
+  usageHubStatus: () => ipcRenderer.invoke('usage-hub:status'),
+  configureUsageHub: (input) => ipcRenderer.invoke('usage-hub:configure', input),
+  setUsageHubSecret: (secret: string) => ipcRenderer.invoke('usage-hub:set-secret', secret),
+  syncUsageHubNow: () => ipcRenderer.invoke('usage-hub:sync-now'),
+  resyncUsageHub: () => ipcRenderer.invoke('usage-hub:resync'),
+  forgetUsageHub: () => ipcRenderer.invoke('usage-hub:forget'),
+
   // Native Anthropic OAuth (ADR-014)
   signIn: () => ipcRenderer.invoke('auth:sign-in'),
   submitOAuthCode: (code: string) => ipcRenderer.invoke('auth:submit-code', code),

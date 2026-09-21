@@ -309,6 +309,11 @@ async function storedClaudeLimits(refresh: boolean): Promise<{
       const written = recordLimitSamples({
         accountKey,
         accountUuid,
+        // Display-only, for the hub relay (ADR-072 §4) — the same three fields
+        // the active poll passes, from the base this loop already built.
+        accountLabel: base.label,
+        vendorId: base.vendorId,
+        plan: result.usage.planName ?? account.subscriptionType,
         windows
       })
       persisted += written

@@ -289,9 +289,21 @@ async function persistChatgptSamples(
   windows: LimitSampleWindow[]
 ): Promise<void> {
   try {
-    const { accountKey } = await credentialSync.accountIdentity(vaultAccountId)
+    const { accountKey, accountLabel } = await credentialSync.accountIdentity(vaultAccountId)
     if (accountKey === UNKNOWN_ACCOUNT_KEY) return
-    recordLimitSamples({ accountKey, windows })
+    // The plan comes from the entry `record()` has just folded in, which is the
+    // merged one — a sparse push carries no `planType` and must not un-name the
+    // plan the last full read established. Label and plan are display-only here:
+    // the SAMPLE stores neither, and they exist for the hub relay (ADR-072 §4),
+    // where a machine that does not hold this credential still has to say whose
+    // meter it is looking at.
+    recordLimitSamples({
+      accountKey,
+      accountLabel,
+      vendorId: 'openai',
+      plan: chatgptRateLimits.snapshot()[vaultAccountId]?.planType ?? null,
+      windows
+    })
   } catch {
     /* advisory */
   }

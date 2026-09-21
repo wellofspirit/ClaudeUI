@@ -18,6 +18,7 @@
 import { randomUUID } from 'node:crypto'
 import { recordWindowSample } from './db'
 import { canonicalizeWindowEnd } from './usage-windows'
+import { windowKindLabel } from '../../shared/window-kind'
 import { logger } from './logger'
 
 /** One window of a reading, as a writer sees it. */
@@ -38,6 +39,17 @@ export interface LimitSampleWindow {
 export interface LimitSampleInput {
   accountKey: string
   /**
+   * The vendor, the plan and the account's display label — three fields the
+   * SAMPLE does not store and the hub relay needs (ADR-072 §4). A sample is
+   * keyed by the account key and the window kind, and that is all a local reader
+   * ever wants; the hub's answer names the account so a machine where it is not
+   * active can show whose meter it is looking at. Optional because the ChatGPT
+   * store knows two of the three and the provider knows all of them.
+   */
+  vendorId?: string
+  plan?: string | null
+  accountLabel?: string | null
+  /**
    * The Claude account uuid, when the vendor has one. It is what the WLS
    * projection still reads by (`getWindowSamples`), so a Claude sample without
    * it would vanish from the projection; a ChatGPT sample has none and files
@@ -46,6 +58,53 @@ export interface LimitSampleInput {
   accountUuid?: string | null
   windows: LimitSampleWindow[]
   now?: number
+}
+
+/**
+ * One reading as it was WRITTEN — what the hub pushes (ADR-072 §4).
+ *
+ * The same fields the sample row carries plus the three display facts it does
+ * not, assembled here because this is the one place that knows which windows
+ * actually produced a row: a reading whose every window was unchanged writes
+ * nothing, and pushing it would restate an old observation under a new instant.
+ */
+export interface LimitReadingWritten {
+  accountKey: string
+  accountLabel: string | null
+  vendorId: string
+  plan: string | null
+  windowKind: string
+  windowMinutes: number | null
+  label: string
+  usedPercent: number
+  /** The CANONICAL end as an ISO string — the window's identity, not the raw reading. */
+  resetsAt: string
+  observedAt: number
+}
+
+type LimitSamplesWrittenListener = (readings: LimitReadingWritten[]) => void
+
+const limitSamplesWrittenListeners = new Set<LimitSamplesWrittenListener>()
+
+/**
+ * Be told which readings a write actually produced. Returns the unsubscribe.
+ *
+ * ONE seam rather than a hook at each of the three callers (the active Claude
+ * poll, the provider's stored-account read, the ChatGPT store). They already
+ * agree here on the two things that make a sample comparable; the hub needs the
+ * same agreement, and a subscriber wired at three call sites would be three
+ * chances to miss one.
+ */
+export function onLimitSamplesWritten(listener: LimitSamplesWrittenListener): () => void {
+  limitSamplesWrittenListeners.add(listener)
+  return () => {
+    limitSamplesWrittenListeners.delete(listener)
+  }
+}
+
+/** Drop every subscriber. Tests only. */
+export function resetLimitSamplesWrittenListeners(): void {
+  limitSamplesWrittenListeners.clear()
 }
 
 /** How many canonical ends to remember per series — a window lives 5 h or 7 d. */
@@ -86,6 +145,7 @@ export function resetWindowSampleDedup(): void {
 export function recordLimitSamples(input: LimitSampleInput): number {
   const now = input.now ?? Date.now()
   let written = 0
+  const readings: LimitReadingWritten[] = []
   for (const window of input.windows) {
     try {
       if (!window.resetsAt) continue
@@ -120,10 +180,36 @@ export function recordLimitSamples(input: LimitSampleInput): number {
       // the next identical reading would dedup against a row that is not there.
       lastSample.set(series, key)
       written++
+      readings.push({
+        accountKey: input.accountKey,
+        accountLabel: input.accountLabel ?? null,
+        vendorId: input.vendorId ?? '',
+        plan: input.plan ?? null,
+        windowKind: window.kind,
+        windowMinutes: window.windowMinutes ?? null,
+        usedPercent: window.usedPercent,
+        // The one rule every surface labels a window by (S3c), so two machines
+        // that disagree about nothing else cannot disagree about this.
+        label: windowKindLabel(window.kind),
+        // The CANONICAL end, not the raw `resetsAt`: it is the window's identity
+        // (ADR-011's snap rule), and two machines reading the same window a
+        // minute apart must name the same instant or the hub keys two windows.
+        resetsAt: new Date(canonicalEnd).toISOString(),
+        observedAt: now
+      })
     } catch (err) {
       // Advisory, like every other write on this path: a failed sample must not
       // fail the reading it came from.
       logger.debug('WindowSamples', `recordWindowSample failed: ${err}`)
+    }
+  }
+  if (readings.length > 0) {
+    for (const listener of limitSamplesWrittenListeners) {
+      try {
+        listener(readings)
+      } catch {
+        // Advisory, like the writes above: a subscriber must not fail a reading.
+      }
     }
   }
   return written

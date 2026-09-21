@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "deviceId": "9f1c7a42-3b18-4d55-9e0a-6c21f4b8ad30",
+  "readings": [
+    {
+      "accountKey": "anthropic:org-4f2a1c:acct-91c3d7",
+      "accountLabel": "someone@example.com",
+      "vendorId": "anthropic",
+      "plan": "max_20x",
+      "windowKind": "5h",
+      "windowMinutes": 300,
+      "label": "5-hour",
+      "usedPercent": 37.5,
+      "resetsAt": "2026-09-21T03:00:00.000Z",
+      "observedAt": 1758412860000
+    },
+    {
+      "accountKey": "anthropic:org-4f2a1c:acct-91c3d7",
+      "accountLabel": "someone@example.com",
+      "vendorId": "anthropic",
+      "plan": "max_20x",
+      "windowKind": "7d",
+      "windowMinutes": 10080,
+      "label": "7-day",
+      "usedPercent": 12.25,
+      "resetsAt": "2026-09-25T00:00:00.000Z",
+      "observedAt": 1758412860000
+    },
+    {
+      "accountKey": "chatgpt:plus:user-7a41e9",
+      "accountLabel": "someone.else@example.com",
+      "vendorId": "openai",
+      "plan": "prolite",
+      "windowKind": "7d",
+      "windowMinutes": 10080,
+      "label": "7-day",
+      "usedPercent": 51,
+      "resetsAt": "2026-09-22T23:39:00.000Z",
+      "observedAt": 1758412900000
+    }
+  ]
+}

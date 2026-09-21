@@ -1,0 +1,46 @@
+{
+  "epoch": 3,
+  "rev": 205,
+  "windows": [
+    {
+      "deviceId": "2d6e8b11-7c04-49af-8f37-15ba90cd6e72",
+      "accountKey": "anthropic:org-4f2a1c:acct-91c3d7",
+      "windowKind": "5h",
+      "canonicalEnd": 1758409200000,
+      "windowStart": 1758391200000,
+      "windowMinutes": 300,
+      "peakPercent": 64.5,
+      "apiCostUsd": 3.8812,
+      "billedCostUsd": 0,
+      "unknownCostCount": 2,
+      "inputTokens": 141000,
+      "outputTokens": 9800,
+      "cacheWriteTokens": 38400,
+      "cacheReadTokens": 502000,
+      "sampleCount": 26,
+      "closed": true,
+      "updatedAt": 1758409500000,
+      "rev": 204
+    },
+    {
+      "deviceId": "2d6e8b11-7c04-49af-8f37-15ba90cd6e72",
+      "accountKey": "chatgpt:plus:user-7a41e9",
+      "windowKind": "7d",
+      "canonicalEnd": 1758844800000,
+      "windowStart": 1758240000000,
+      "windowMinutes": 10080,
+      "peakPercent": 51,
+      "apiCostUsd": 0.7104,
+      "billedCostUsd": 0,
+      "unknownCostCount": 0,
+      "inputTokens": 88000,
+      "outputTokens": 10400,
+      "cacheWriteTokens": 0,
+      "cacheReadTokens": 61000,
+      "sampleCount": 9,
+      "closed": false,
+      "updatedAt": 1758412900000,
+      "rev": 205
+    }
+  ]
+}

@@ -95,6 +95,7 @@ import { safeHandler } from './safe-handler'
 import { handleIpc, unbindDesktopChannels } from './desktop-transport-binding'
 import { configCommands } from './config-commands'
 import { authCommands, type AuthCommandDeps } from './auth-commands'
+import { usageHubCommands, USAGE_HUB_CHANNELS } from './usage-hub-commands'
 import {
   sendPrompt,
   watchBackground,
@@ -464,7 +465,7 @@ export function getSessionManager(): SessionManager | null {
 export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
   // Remove previous handlers to allow re-registration (e.g. a second bootCore in
   // a test; production boots core exactly once).
-  unbindDesktopChannels([...SESSION_IPC_CHANNELS, ...CODEX_CHANNELS])
+  unbindDesktopChannels([...SESSION_IPC_CHANNELS, ...CODEX_CHANNELS, ...USAGE_HUB_CHANNELS])
 
   const manager = new SessionManager()
   sharedManager = manager
@@ -1772,6 +1773,14 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: async () => accountState()
   })
   for (const cmd of authCommands(authDeps)) {
+    handleIpc(cmd)
+  }
+
+  // The usage hub (ADR-072 §7), from the same shared declarations the remote
+  // transport spreads. Not inline like the `usage:*` family above: six channels,
+  // one of them a credential write, and one declaration is what keeps the
+  // capability and the sanitiser identical on both transports.
+  for (const cmd of usageHubCommands()) {
     handleIpc(cmd)
   }
 

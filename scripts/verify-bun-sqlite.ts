@@ -72,7 +72,11 @@ const REQUIRED_TABLES = [
   'webauthn_credential',
   'codex_session_overrides',
   'codex_forks',
-  'meta'
+  'meta',
+  'usage_hub_config',
+  'remote_usage_bucket',
+  'remote_usage_window',
+  'remote_limits'
 ]
 
 /** The full production migration list, on an in-memory `bun:sqlite` database. */
