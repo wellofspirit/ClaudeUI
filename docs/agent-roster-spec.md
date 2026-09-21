@@ -285,6 +285,24 @@ last, DOM first.
 
 ---
 
+## 6b. What is left
+
+**Real-app verification has not been run.** Every gate that can run without installed dependencies
+is green, but driving the actual Electron app needs `electron` and a correctly-ABI'd
+`better-sqlite3` in THIS worktree. Node's ancestor resolution covers imports — which is why
+typecheck, vitest and `electron-vite build` all work here with no local `node_modules` — but not
+`node_modules/.bin` lookups, which is also why `bun run build`'s `ensure-cli` stage cannot run here.
+Two ways forward, both needing an owner decision:
+
+- junction the main checkout's `node_modules` into the worktree: instant, but the two checkouts
+  would then share `node_modules/.vite`, and the main checkout is where the metering arc is live;
+- `bun install` in the worktree followed by `bun run rebuild:native` (mandatory — bun leaves a
+  Node-ABI `better-sqlite3` that crashes the app on boot).
+
+The brief when it runs: assert `AgentPill`, `AgentTab`, `AgentOverlay`, `AgentRoster` and `AgentRow`
+in the live DOM; spawn two agents; then resume a finished one with `SendMessage` and check the card
+re-arms and shows `TaskCard.resumed`.
+
 ## 6a. Deviations from this spec, and why
 
 - **S2 does not re-arm on a non-terminal `task_updated`.** The spec asked for it as a second path
@@ -299,12 +317,14 @@ last, DOM first.
 
 ## 7. Status
 
-| Slice                           | State       | Commit                 | Notes                                                                                                                          |
-| ------------------------------- | ----------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| Probe + ADR-073 + protocol §4.5 | done        | `411d5250`, `4331bc21` |                                                                                                                                |
-| S1 predicate extraction         | done        | `231f37b1`             | Also fixed TaskEntry's isError, which missed a failed async-launched agent                                                     |
-| S2 lifecycle normalization      | done        | `d0ce1773`             | DEVIATION: no `task_updated` re-arm — see below. Also fixed `stopTask`, which after a resume missed and aborted the whole turn |
-| S3 data gaps                    | done        | `6d8bf24b`             | `system/task_progress` was not handled AT ALL; the progress reducer now merges two sources                                     |
-| S4 roster                       | not started | —                      |                                                                                                                                |
-| S5 pill + tab                   | not started | —                      |                                                                                                                                |
-| S6 settings                     | not started | —                      |                                                                                                                                |
+| Slice                           | State        | Commit                 | Notes                                                                                                                          |
+| ------------------------------- | ------------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Probe + ADR-073 + protocol §4.5 | done         | `411d5250`, `4331bc21` |                                                                                                                                |
+| S1 predicate extraction         | done         | `231f37b1`             | Also fixed TaskEntry's isError, which missed a failed async-launched agent                                                     |
+| S2 lifecycle normalization      | done         | `d0ce1773`             | DEVIATION: no `task_updated` re-arm — see below. Also fixed `stopTask`, which after a resume missed and aborted the whole turn |
+| S3 data gaps                    | done         | `6d8bf24b`             | `system/task_progress` was not handled AT ALL; the progress reducer now merges two sources                                     |
+| S4 roster                       | done         | `b54116c5`             | Also made a terminal notification settle a FOREGROUND task (ADR-040 calls it authoritative; the foreground branch ignored it)  |
+| S5 pill + tab                   | done         | `cb4f8d80`             | Tier 1 re-measured 1000 → 1100; `AgentPill` is 81.6px; cluster floor 302 → 396                                                 |
+| S6 settings                     | done         | `1e434353`             |                                                                                                                                |
+| Gates                           | green        | —                      | typecheck, lint, `test:ci` (772 files / 14398 tests), layout (16), `electron-vite build`                                       |
+| Real-app verification           | **NOT DONE** | —                      | needs deps in this worktree — see §6b                                                                                          |
