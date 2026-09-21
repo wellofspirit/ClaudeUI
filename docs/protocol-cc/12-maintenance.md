@@ -96,6 +96,26 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
 
    Update `docs/protocol-cc/README.md`'s version banner to the new cli.js version. Update any "verified against cli.js X.Y.Z" annotations in sub-docs.
 
+10. **Re-verify the OAuth token endpoint, client id and refresh body**
+
+    `src/core/services/claude-usage-api.ts`'s `CLI_OAUTH` block mirrors cli.js's
+    own refresh exchange, and a wrong value there is silent: the refresh just
+    returns 400 and the account reads as needing sign-in.
+
+    ```bash
+    grep -a -o 'TOKEN_URL:"[^"]*"' .cache/claude-cli/claude-<version>-win32-x64.exe
+    grep -a -o 'CLIENT_ID:"[^"]*"' .cache/claude-cli/claude-<version>-win32-x64.exe
+    grep -a -b -o 'grant_type:"refresh_token"' .cache/claude-cli/claude-<version>-win32-x64.exe
+    ```
+
+    Several client ids appear. Read the bytes around each hit (`dd bs=1 skip=…`)
+    and take the one in the PRODUCTION config object — the object whose
+    `BASE_API_URL` is `https://api.anthropic.com`; the others belong to a
+    localhost object and to a second scope family (`DESIGN_CLIENT_ID`). Read
+    around the `grant_type` hit too: the body's fields, its `Content-Type` and
+    the default scope list are all part of the request, and cli.js's own refresh
+    posts JSON (the form-encoded one nearby is the unrelated gateway refresh).
+
 ---
 
 ## 12.2 When the SDK layer changes

@@ -27,9 +27,15 @@ import {
   canonicalizeWindowEnd,
   accountForTimestamp,
   claudeAccountAttribution,
-  type AccountLogRecord,
-  type ClaudeAccountAttribution
+  isUnresolvedMarker,
+  unattributedClaude,
+  ATTRIBUTION_DEFERRED,
+  type AccountLogEntry,
+  type ClaudeAccountAttribution,
+  type ClaudeAttributionResult
 } from './usage-windows'
+import { APP_ENTRYPOINT } from '../sdk/args'
+import { getSecurestorageEnv } from '../sdk/securestorage-env'
 import {
   groupEntriesIntoBlocks,
   computeProjectionWLS as computeWLS,
@@ -195,6 +201,17 @@ export interface ParsedEntry {
   /** Session UUID this entry belongs to, derived from the JSONL file path
    *  (Slice B backfill-attribution fix). Null only if derivation somehow fails. */
   sessionId: string | null
+  /**
+   * `CLAUDE_CODE_ENTRYPOINT` as the transcript line recorded it — `claude-desktop`
+   * for a session this app spawned, `cli` / `sdk-cli` / `sdk-ts` otherwise, and
+   * null for a line that carries no field at all.
+   *
+   * It is what separates a turn the app's active credential dir ran from one the
+   * default `~/.claude` login ran, which under multi-account are different
+   * accounts (S2g part 5) — `setSecurestorageEnv` is a module value overlaid onto
+   * our own spawns, not an environment the user's terminal inherits.
+   */
+  entrypoint: string | null
 }
 
 /**
@@ -353,7 +370,7 @@ export class BlockUsageService {
   /** Account filter for the usage view (email, null = all accounts). */
   private accountFilter: string | null = null
   /** Cached account log + file mtime for invalidation. */
-  private accountLog: AccountLogRecord[] = []
+  private accountLog: AccountLogEntry[] = []
   private accountLogMtime = 0
 
   /** Update the debounce interval for incremental recalculations. */
@@ -376,13 +393,57 @@ export class BlockUsageService {
   async getClaudeEntriesForReconcile(): Promise<
     Array<ParsedEntry & { account: ClaudeAccountAttribution }>
   > {
-    const cutoff = Date.now() - SCAN_WINDOW_MS
-    const entries = await this.scanJsonlWithCutoff(cutoff)
+    const now = Date.now()
+    const entries = await this.scanJsonlWithCutoff(now - SCAN_WINDOW_MS)
     const accountLog = this.loadAccountLog()
-    return entries.map((e) => ({
-      ...e,
-      account: claudeAccountAttribution(accountLog, e.timestamp)
-    }))
+    const out: Array<ParsedEntry & { account: ClaudeAccountAttribution }> = []
+    // ONE `now` for the whole pass: the deferral bound is a comparison against
+    // the clock, and letting each entry read it separately would let two
+    // entries under one marker straddle the bound (round 3, item 3).
+    for (const e of entries) {
+      const account = this.attributionForEntry(e, accountLog, now)
+      // Deferred: the account that ran this turn is not knowable yet, so the
+      // entry is withheld from the reconciler rather than handed over under the
+      // previous account's key (S2g). It comes back on a later pass — once the
+      // identity resolves, or once `DEFERRAL_MAX_MS` has passed and the entry
+      // is attributed to `unknown` instead. See {@link attributionForEntry}.
+      if (account === ATTRIBUTION_DEFERRED) continue
+      out.push({ ...e, account })
+    }
+    return out
+  }
+
+  /**
+   * Which account a transcript entry's row is keyed to — ADR-011's time-based
+   * attribution, plus the two rules the account log alone cannot express (S2g).
+   *
+   * DEFERRED, not `unknown`, while the log says the active folder moved and its
+   * identity could not be read: no row is ever re-keyed once written (ADR-072's
+   * hub reads the ledger as append-only), so a row that cannot be keyed yet is
+   * not written at all. The entry is offered again on every scan, and the pass
+   * that runs after the identity resolves writes it with its original
+   * timestamp. The dashboard therefore lags by the length of the gap, and is
+   * never wrong about whose spend it is showing. A gap that never resolves
+   * stops deferring after `DEFERRAL_MAX_MS` and its rows are written to the
+   * `unknown` account — a first write, not a re-key.
+   *
+   * `unknown` for a session this app did not spawn, when a credential dir is
+   * applied: such a turn ran on the DEFAULT `~/.claude` login, not on the
+   * active folder, so the log's record — which follows the app's switches —
+   * would name the wrong subscription. In single-account mode the app and a
+   * terminal `claude` share the one login, so nothing changes there. Owner's
+   * ruling: these rows show locally under the unknown account and no attempt is
+   * made to identify the default login.
+   */
+  private attributionForEntry(
+    entry: ParsedEntry,
+    accountLog: AccountLogEntry[],
+    now: number
+  ): ClaudeAttributionResult {
+    if (getSecurestorageEnv() !== null && entry.entrypoint !== APP_ENTRYPOINT) {
+      return unattributedClaude()
+    }
+    return claudeAccountAttribution(accountLog, entry.timestamp, now)
   }
 
   /** Set the account filter (email, null = all) and rebuild the view. */
@@ -455,17 +516,24 @@ export class BlockUsageService {
   // Account log
   // -------------------------------------------------------------------------
 
-  /** Load (and cache) the account log written by UsageFetcher. */
-  private loadAccountLog(): AccountLogRecord[] {
+  /**
+   * Load (and cache) the account log written by UsageFetcher.
+   *
+   * The sort is STABLE (V8), which S2g relies on: a resolved switch appends its
+   * real record at the marker's own `ts`, and the reader's "last entry at or
+   * before `ts` wins" only supersedes the marker while the two keep their file
+   * order.
+   */
+  private loadAccountLog(): AccountLogEntry[] {
     try {
       const mtime = fs.statSync(ACCOUNT_LOG_PATH).mtimeMs
       if (mtime === this.accountLogMtime) return this.accountLog
       const lines = fs.readFileSync(ACCOUNT_LOG_PATH, 'utf-8').split('\n')
-      const log: AccountLogRecord[] = []
+      const log: AccountLogEntry[] = []
       for (const line of lines) {
         if (!line.trim()) continue
         try {
-          const rec = JSON.parse(line) as AccountLogRecord
+          const rec = JSON.parse(line) as AccountLogEntry
           if (typeof rec.ts === 'number' && typeof rec.email === 'string') log.push(rec)
         } catch {
           // Skip malformed lines
@@ -480,9 +548,20 @@ export class BlockUsageService {
     }
   }
 
-  /** Distinct account emails known from the log. */
+  /**
+   * Distinct account emails known from the log — the usage view's filter list.
+   *
+   * S2g's markers are skipped: one names no account (its email is the empty
+   * string), so it would otherwise show up as a nameless entry in the picker.
+   */
   private knownAccounts(): string[] {
-    return [...new Set(this.loadAccountLog().map((r) => r.email))]
+    return [
+      ...new Set(
+        this.loadAccountLog()
+          .filter((entry) => !isUnresolvedMarker(entry))
+          .map((entry) => entry.email)
+      )
+    ]
   }
 
   /**
@@ -648,7 +727,7 @@ export class BlockUsageService {
     // entries BACK from the DB for grouping. The reconciler keeps usage_event
     // complete for out-of-tool sessions; this inline upsert guarantees block-
     // usage's own JSONL data is present before it reads (no flash of empty).
-    this.upsertClaudeEntriesToDb(entries, accountLog)
+    this.upsertClaudeEntriesToDb(entries, accountLog, now)
     const dbEntries = this.claudeEntriesFromDb(now)
 
     // Apply the account filter for the view (persisted summaries stay unfiltered)
@@ -796,20 +875,38 @@ export class BlockUsageService {
    * table; engine_cost carries the exact calculateCostFromTokens value (so the
    * SQL-sourced block costs == the old JSONL block costs byte-for-byte).
    */
-  private upsertClaudeEntriesToDb(entries: ParsedEntry[], accountLog: AccountLogRecord[]): void {
+  private upsertClaudeEntriesToDb(
+    entries: ParsedEntry[],
+    accountLog: AccountLogEntry[],
+    now: number
+  ): void {
     try {
       const rows: UsageEventInsert[] = []
+      let deferred = 0
+      // ONE `now` for the whole pass — the rebuild's own, so an hour of the
+      // ledger cannot be half deferred and half `unknown` (round 3, item 3).
       for (const e of entries) {
         if (!e.messageId) continue
-        rows.push(
-          claudeTranscriptRow({
-            entry: e,
-            account: claudeAccountAttribution(accountLog, e.timestamp),
-            sessionId: e.sessionId
-          })
-        )
+        const account = this.attributionForEntry(e, accountLog, now)
+        // Deferred entries are SKIPPED, not written as `unknown`: the row would
+        // have to be re-keyed once the identity resolves, and the ledger is
+        // append-only (S2g). The entry is offered again on the next pass; the
+        // dashboard lags by the length of the gap and is never wrong. A gap
+        // that never resolves stops deferring after `DEFERRAL_MAX_MS`, and the
+        // rows are then written to the `unknown` account rather than lost.
+        if (account === ATTRIBUTION_DEFERRED) {
+          deferred++
+          continue
+        }
+        rows.push(claudeTranscriptRow({ entry: e, account, sessionId: e.sessionId }))
       }
       insertUsageEvents(rows)
+      if (deferred > 0) {
+        logger.debug(
+          'BlockUsage',
+          `${deferred} entr${deferred === 1 ? 'y' : 'ies'} deferred — the account that ran them is not resolved yet`
+        )
+      }
     } catch (err) {
       logger.debug('BlockUsage', `upsertClaudeEntriesToDb failed: ${err}`)
     }
@@ -841,7 +938,10 @@ export class BlockUsageService {
       cacheReadTokens: r.cacheReadTokens,
       costUsd: selectRowCostUsd(r),
       messageId: r.messageId,
-      sessionId: r.sessionId
+      sessionId: r.sessionId,
+      // A row that is already IN the ledger was attributed when it was written;
+      // these entries only ever feed the block grouping, which never asks.
+      entrypoint: null
     }))
   }
 
@@ -1445,7 +1545,8 @@ export class BlockUsageService {
             cacheReadTokens: cacheRead,
             costUsd,
             messageId,
-            sessionId: deriveSessionIdFromPath(filePath)
+            sessionId: deriveSessionIdFromPath(filePath),
+            entrypoint: typeof data.entrypoint === 'string' ? data.entrypoint : null
           })
         } catch {
           // Skip malformed lines

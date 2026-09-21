@@ -38,10 +38,55 @@ export interface CredentialsFile {
 }
 
 const USAGE_API_URL = 'https://api.anthropic.com/api/oauth/usage'
-const TOKEN_REFRESH_URL = 'https://console.anthropic.com/v1/oauth/token'
+
+/**
+ * The refresh exchange, exactly as the PINNED cli.js performs it.
+ *
+ * Read out of the binary `package.json#claudeCliVersion` pins (2.1.268,
+ * `.cache/claude-cli/claude-2.1.268-win32-x64.exe`) with:
+ *
+ *     grep -a -o 'CLIENT_ID:"[^"]*"' <binary>
+ *     grep -a -o 'TOKEN_URL:"[^"]*"' <binary>
+ *     grep -a -o 'grant_type:"refresh_token"' <binary>   # then read around it
+ *
+ * FOUR client ids sit in that bundle, so the string alone is not the answer —
+ * the CONFIG BLOCK it belongs to is. A `local | staging | prod` switch picks
+ * between three objects; the production one is the object whose `BASE_API_URL`
+ * is `https://api.anthropic.com`, and it holds the id below beside
+ * `TOKEN_URL`. The second pair belongs to a localhost object
+ * (`OAUTH_FILE_SUFFIX: '-local-oauth'`), and each object also carries a
+ * `DESIGN_CLIENT_ID` for a different scope family. Staging falls back to the
+ * production object.
+ *
+ * WHAT WAS HERE BEFORE S2g: `console.anthropic.com/v1/oauth/token`,
+ * `client_id: 'cli'` and a form-encoded body, unchanged since `6cde0e7c`. Both
+ * refresh attempts in 14 days of the owner's logs were rejected with a 400, so
+ * that request had probably never worked. It is rarely reached because cli.js
+ * keeps the ACTIVE folder's token fresh; a switch to a folder left idle longer
+ * than its token's life is exactly the case that reaches it. A rejected
+ * `client_id` does not consume the grant, so nothing was lost.
+ *
+ * `docs/protocol-cc/12-maintenance.md` §12.1 tells a CLI bump to re-check all
+ * three: the URL, the id, and the body's encoding.
+ */
+const CLI_OAUTH = {
+  tokenUrl: 'https://platform.claude.com/v1/oauth/token',
+  clientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
+  /** cli.js's default scope list, sent when the stored credential names none. */
+  defaultScopes: [
+    'user:profile',
+    'user:inference',
+    'user:sessions:claude_code',
+    'user:mcp_servers',
+    'user:file_upload'
+  ]
+} as const
+
 /** The anthropic-beta header value — BZ in the CLI's minified code. */
 const ANTHROPIC_BETA = 'oauth-2025-04-20'
 const FETCH_TIMEOUT_MS = 5_000 // same as CLI's k9q (5s)
+/** cli.js's timeout on the token exchange itself — six times the read's. */
+const REFRESH_TIMEOUT_MS = 30_000
 /** Refresh this long before the token actually expires. */
 const EXPIRY_BUFFER_MS = 60_000
 
@@ -49,15 +94,34 @@ const EXPIRY_BUFFER_MS = 60_000
  * Why a reading could not be taken.
  *
  *  - `needs-sign-in` — the stored credential cannot authenticate any more
- *    (no credential, refresh refused). ADR-071 §6: mark it and STOP. Retrying
- *    spends refresh grants on an account nobody is using.
+ *    (no credential, or the endpoint ANSWERED and refused the grant). ADR-071
+ *    §6: mark it and STOP. Retrying spends refresh grants on an account nobody
+ *    is using, and this is the state ADR-070's "Sign in again" chip reads.
  *  - `rate-limited` — a 429. The account is fine; the answer is to wait.
- *  - `unavailable` — everything else (network, timeout, a 5xx).
+ *  - `unavailable` — everything else (network, timeout, a 5xx, a refresh that
+ *    never got an answer). The active account retries these on a backoff.
  */
 export type ClaudeUsageError = 'needs-sign-in' | 'rate-limited' | 'unavailable'
 
-export type ClaudeUsageResult =
-  { usage: AccountUsage } | { error: ClaudeUsageError; detail: string }
+/** Why a read failed, and whether it spent a refresh grant getting there. */
+export interface ClaudeUsageFailure {
+  error: ClaudeUsageError
+  detail: string
+  /**
+   * A refresh grant was POSTed and the endpoint ANSWERED with a refusal (S2g).
+   *
+   * The retry loop in `usage-fetcher.ts` reads it to honour ADR-071 §6: at most
+   * one refresh attempt per version of a credentials file. Without it a caller
+   * that retries has no way to tell "the token was rejected" from "the network
+   * was down", and would keep offering a grant the endpoint has already said
+   * no to. A timeout or a dropped connection is NOT a refusal and does not set
+   * it: the grant may well still be good, and latching on an outage would leave
+   * the account unrefreshable until its file happened to change (round 2, M2).
+   */
+  refreshFailed?: boolean
+}
+
+export type ClaudeUsageResult = { usage: AccountUsage } | ClaudeUsageFailure
 
 export interface ClaudeUsageOptions {
   /** The `.credentials.json` to read — and, on a rotation, to write back to. */
@@ -85,6 +149,38 @@ export async function readCredentialsFile(path: string): Promise<OAuthCredential
   } catch {
     return null
   }
+}
+
+/**
+ * The endpoint ANSWERED and refused the grant.
+ *
+ * Distinguished from every other way a refresh can fail — a timeout, a dropped
+ * connection, an unparseable body — because only a refusal says anything about
+ * the token: it is what lets a caller latch "do not offer this file's grant
+ * again until the file changes" without latching on an outage (round 2, M2).
+ */
+class RefreshRejectedError extends Error {
+  constructor(readonly status: number) {
+    super(`Refresh failed: ${status}`)
+    this.name = 'RefreshRejectedError'
+  }
+}
+
+/**
+ * What a failed refresh answers.
+ *
+ * `needs-sign-in` ONLY for a refusal, because that is the answer the UI acts
+ * on: `usage-provider.ts` turns it into ADR-070's "Sign in again" chip, and a
+ * dropped connection — or the 30-second timeout above, on a slow link — was
+ * telling the user to re-authenticate a perfectly healthy account. Everything
+ * that is not an answer from the endpoint is `unavailable`, which is also what
+ * arms the retry in `usage-fetcher.ts` (owner ruling, round 3).
+ */
+function refreshFailure(err: unknown): ClaudeUsageFailure {
+  if (err instanceof RefreshRejectedError) {
+    return { error: 'needs-sign-in', detail: `token refresh failed: ${err}`, refreshFailed: true }
+  }
+  return { error: 'unavailable', detail: `token refresh failed: ${err}` }
 }
 
 /** Refresh exchanges in flight, keyed by the file whose grant they are spending. */
@@ -123,17 +219,27 @@ async function exchangeRefreshToken(
   creds: OAuthCredentials,
   path: string
 ): Promise<OAuthCredentials> {
-  const resp = await fetch(TOKEN_REFRESH_URL, {
+  // JSON, not a form: cli.js posts this body as `application/json` (see
+  // {@link CLI_OAUTH}), and the `scope` field is part of the request it makes.
+  // The credential's OWN scopes are sent when it has them, so the refreshed
+  // token is granted no more than the one it replaces.
+  const resp = await fetch(CLI_OAUTH.tokenUrl, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
       grant_type: 'refresh_token',
       refresh_token: creds.refreshToken,
-      client_id: 'cli'
-    })
+      client_id: CLI_OAUTH.clientId,
+      scope: (creds.scopes?.length ? creds.scopes : CLI_OAUTH.defaultScopes).join(' ')
+    }),
+    // cli.js's own timeout for this call. A hung refresh is not free here: the
+    // account-switch marker is only written once the read has FAILED, so every
+    // second this hangs is a second in which a turn's rows still resolve to the
+    // account the user switched away from (round 2, M1).
+    signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS)
   })
 
-  if (!resp.ok) throw new Error(`Refresh failed: ${resp.status}`)
+  if (!resp.ok) throw new RefreshRejectedError(resp.status)
 
   const data = (await resp.json()) as {
     access_token: string
@@ -228,8 +334,7 @@ export interface AuthorizedGetOptions extends ClaudeUsageOptions {
   extraHeaders?: Record<string, string>
 }
 
-export type AuthorizedGetResult =
-  { body: Record<string, unknown> } | { error: ClaudeUsageError; detail: string }
+export type AuthorizedGetResult = { body: Record<string, unknown> } | ClaudeUsageFailure
 
 /**
  * One authenticated GET against an `/api/oauth/*` endpoint, with the whole
@@ -264,7 +369,7 @@ export async function authorizedOAuthGet(
       creds = await refreshClaudeToken(creds, credentialsPath)
       token = creds.accessToken
     } catch (err) {
-      return { error: 'needs-sign-in', detail: `token refresh failed: ${err}` }
+      return refreshFailure(err)
     }
   }
 
@@ -287,7 +392,7 @@ export async function authorizedOAuthGet(
       try {
         creds = await refreshClaudeToken(creds, credentialsPath)
       } catch (err) {
-        return { error: 'needs-sign-in', detail: `token refresh failed: ${err}` }
+        return refreshFailure(err)
       }
       const retry = await get(creds.accessToken)
       if (retry.status === 401)

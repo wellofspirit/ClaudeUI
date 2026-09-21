@@ -31,7 +31,8 @@ vi.mock('../db', () => ({
 import { resolveClaudeDirIdentity } from '../claude-account-identity'
 
 const PROFILE_URL = 'https://api.anthropic.com/api/oauth/profile'
-const TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token'
+/** cli.js's own token endpoint (S2g fixed ours to match it — `CLI_OAUTH`). */
+const TOKEN_URL = 'https://platform.claude.com/v1/oauth/token'
 
 let root = ''
 let credentialsPath = ''

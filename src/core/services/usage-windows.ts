@@ -57,6 +57,46 @@ export interface AccountLogRecord {
    * from `organizationUuid` + `accountUuid`.
    */
   accountKey?: string
+  /** Never set on a real record — the discriminant of {@link AccountLogMarker}. */
+  unresolved?: undefined
+}
+
+/**
+ * A MARKER line in account-log.jsonl: at `ts` the active credential folder
+ * moved and the app could not read whose it is (S2g).
+ *
+ * It names no account on purpose. The folder changed, so every turn after `ts`
+ * ran on the new credential — and the previous record, which names the OLD
+ * subscription, must not be allowed to claim those turns. A row whose timestamp
+ * falls under a marker is DEFERRED (see {@link claudeAccountAttribution}): not
+ * written at all until the identity resolves and the real record lands at this
+ * same instant. The owner's rule is that no row is ever re-keyed after it is
+ * written, so a row that cannot be keyed yet waits — but only for
+ * {@link DEFERRAL_MAX_MS}, after which it is written as `unknown` rather than
+ * lost.
+ *
+ * `email` is the empty string rather than absent because every reader of the
+ * log validates that field before accepting a line. The record fields are
+ * declared as `undefined` so a marker and a record can be read out of one array
+ * without a cast, and so the shape says outright that it carries none of them.
+ */
+export interface AccountLogMarker {
+  ts: number
+  email: string
+  unresolved: true
+  accountUuid?: undefined
+  organizationUuid?: undefined
+  organizationName?: undefined
+  billingType?: undefined
+  accountKey?: undefined
+}
+
+/** Anything a line of account-log.jsonl can be. */
+export type AccountLogEntry = AccountLogRecord | AccountLogMarker
+
+/** Is this entry S2g's "the folder moved and we cannot say whose it is"? */
+export function isUnresolvedMarker(entry: AccountLogEntry): entry is AccountLogMarker {
+  return entry.unresolved === true
 }
 
 /**
@@ -95,20 +135,30 @@ export function claudeBillingTypeFromProfile(value: unknown): BillingType | null
  * Resolve which account was active at `ts` from the (ts-ascending) log.
  * Timestamps before the first record are unattributable → null.
  */
-export function accountForTimestamp(log: AccountLogRecord[], ts: number): string | null {
-  return accountRecordForTimestamp(log, ts)?.email ?? null
+export function accountForTimestamp(log: AccountLogEntry[], ts: number): string | null {
+  const entry = accountRecordForTimestamp(log, ts)
+  // A marker names no account, so a timestamp under one is as unattributable as
+  // one before the log's first record. Callers that must not WRITE such a row
+  // go through {@link claudeAccountAttribution}, which says "deferred" instead.
+  if (!entry || isUnresolvedMarker(entry)) return null
+  return entry.email
 }
 
 /**
- * The whole record active at `ts`, for callers that need more than the email.
- * Same binary-search semantics as {@link accountForTimestamp}: the last record
- * at or before `ts` wins, and nothing before the first record is attributable.
+ * The whole entry active at `ts`, for callers that need more than the email.
+ *
+ * A forward scan of a ts-ascending log, stopping at the first entry after `ts`:
+ * the last entry at or before `ts` wins, and nothing before the first one is
+ * attributable. Of two entries with the SAME `ts` the later line wins, which is
+ * how S2g's real record supersedes the marker it closes. Linear, and
+ * deliberately so — the log holds one line per account SWITCH, so it is tens of
+ * entries on a machine years old.
  */
 export function accountRecordForTimestamp(
-  log: AccountLogRecord[],
+  log: AccountLogEntry[],
   ts: number
-): AccountLogRecord | null {
-  let result: AccountLogRecord | null = null
+): AccountLogEntry | null {
+  let result: AccountLogEntry | null = null
   for (const rec of log) {
     if (rec.ts > ts) break
     result = rec
@@ -125,6 +175,52 @@ export interface ClaudeAccountAttribution extends AccountIdentity {
 }
 
 /**
+ * The third answer {@link claudeAccountAttribution} can give: this timestamp
+ * falls under an {@link AccountLogMarker}, so the account that ran the turn is
+ * not knowable YET and the row must not be written.
+ *
+ * A sentinel rather than an `unknown` attribution, and a union rather than a
+ * flag, so a writer cannot reach the row builder without deciding what to do
+ * about it — writing the row as `unknown` and re-keying it later is exactly
+ * what the owner ruled out (ADR-072's hub reads the ledger as append-only).
+ */
+export const ATTRIBUTION_DEFERRED = 'deferred'
+
+export type ClaudeAttributionResult = ClaudeAccountAttribution | typeof ATTRIBUTION_DEFERRED
+
+/**
+ * How long a marker may hold rows back before they are written as `unknown`
+ * (orchestrator ruling, 2026-09-21; the number is pending the owner's word).
+ *
+ * IN PRACTICE A DEFERRAL LASTS SECONDS TO MINUTES: the retry loop re-reads the
+ * identity at 5 s, 15 s and 60 s, and the usual recovery is cli.js rewriting
+ * the credential on the user's next turn. This bound is not that story. It is
+ * here so that no row can be held back FOR EVER by a fault nobody anticipated,
+ * and so that an abandoned gap ends — a folder switched away from before its
+ * identity resolved is never revisited, and its rows would otherwise sit unread
+ * until they aged out of the transcript scan window and were lost.
+ *
+ * Past the bound the row is written to the `unknown` account. That is a FIRST
+ * write, not a re-key, so the append-only rule ADR-072's hub relies on still
+ * holds; such a row shows locally under the unknown account and never reaches
+ * the hub. If the identity resolves after the bound, the real record still
+ * lands at the marker's instant and the rows still unwritten are keyed to it —
+ * only the ones already written as `unknown` stay `unknown`.
+ */
+export const DEFERRAL_MAX_MS = 24 * 60 * 60 * 1000
+
+/** The `unknown` bucket: a turn whose account nothing on disk can name. */
+export function unattributedClaude(): ClaudeAccountAttribution {
+  return {
+    email: null,
+    accountUuid: null,
+    accountKey: UNKNOWN_ACCOUNT_KEY,
+    accountLabel: null,
+    billingType: 'unknown'
+  }
+}
+
+/**
  * ADR-011's time-based attribution, resolved into ADR-071's row columns.
  *
  * A record written before ADR-071 §3 names no organization, and half of
@@ -132,21 +228,33 @@ export interface ClaudeAccountAttribution extends AccountIdentity {
  * account uuid would collapse into it. Such a row goes in the `unknown`
  * bucket, WITHOUT a label: the bucket holds every unattributable row from
  * every account, so naming it after one of them would be a lie on screen.
+ *
+ * {@link ATTRIBUTION_DEFERRED} is the answer under a marker (S2g), for as long
+ * as {@link DEFERRAL_MAX_MS} allows. `now` is a parameter so a caller — and a
+ * test — can ask the question at a definite instant.
  */
 export function claudeAccountAttribution(
-  log: AccountLogRecord[],
-  ts: number
-): ClaudeAccountAttribution {
+  log: AccountLogEntry[],
+  ts: number,
+  now: number = Date.now()
+): ClaudeAttributionResult {
   const rec = accountRecordForTimestamp(log, ts)
-  if (!rec) {
-    return {
-      email: null,
-      accountUuid: null,
-      accountKey: UNKNOWN_ACCOUNT_KEY,
-      accountLabel: null,
-      billingType: 'unknown'
-    }
+  if (!rec) return unattributedClaude()
+  if (isUnresolvedMarker(rec)) {
+    // The bound is on the MARKER's age, not the row's: everything under one
+    // marker becomes writable at the same moment, so an hour of the ledger
+    // cannot be half deferred and half `unknown` for ever.
+    return now - rec.ts < DEFERRAL_MAX_MS ? ATTRIBUTION_DEFERRED : unattributedClaude()
   }
+  return claudeAttributionFromRecord(rec)
+}
+
+/**
+ * One log record as row columns — the answer for a caller that already HOLDS a
+ * record, so there is no marker to fall under and no deferred answer to handle.
+ * Shared with the live path below and with S2e's one-shot repair.
+ */
+export function claudeAttributionFromRecord(rec: AccountLogRecord): ClaudeAccountAttribution {
   // A record that states its key outright (an API-key account) is taken at its
   // word: there is no pair to derive one from, and its email IS the label —
   // `<vendor> key …abcd`, which is already the display form.
@@ -224,8 +332,10 @@ export function activeClaudeAttribution(
   active: ActiveClaudeAccount | null,
   fallbackBillingType?: BillingType | null
 ): ClaudeAccountAttribution {
-  if (!active) return claudeAccountAttribution([], 0)
-  const record: AccountLogRecord = {
+  if (!active) return unattributedClaude()
+  // Never deferred: the caller HAS the account, so there is no marker to fall
+  // under — which is why this returns the attribution outright.
+  return claudeAttributionFromRecord({
     ts: 0,
     accountUuid: active.uuid,
     email: active.email,
@@ -234,6 +344,5 @@ export function activeClaudeAttribution(
     ...(active.accountKey ? { accountKey: active.accountKey } : {}),
     billingType:
       active.billingType !== 'unknown' ? active.billingType : (fallbackBillingType ?? 'unknown')
-  }
-  return claudeAccountAttribution([record], Date.now())
+  })
 }

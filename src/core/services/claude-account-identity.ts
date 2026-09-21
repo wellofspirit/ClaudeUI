@@ -26,13 +26,14 @@
 
 import { anthropicAccountKey, UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
 import type { BillingType } from '../../shared/types'
-import { authorizedOAuthGet, type ClaudeUsageError } from './claude-usage-api'
+import { authorizedOAuthGet, type ClaudeUsageFailure } from './claude-usage-api'
 import { getMeta, repairClaudeAccountKey, setMeta } from './db'
 import { logger } from './logger'
 import {
-  claudeAccountAttribution,
   claudeAccountLabel,
+  claudeAttributionFromRecord,
   claudeBillingTypeFromProfile,
+  unattributedClaude,
   type AccountLogRecord
 } from './usage-windows'
 
@@ -61,8 +62,7 @@ export interface ClaudeDirIdentity {
   billingType: BillingType
 }
 
-export type ClaudeIdentityResult =
-  { identity: ClaudeDirIdentity } | { error: ClaudeUsageError; detail: string }
+export type ClaudeIdentityResult = { identity: ClaudeDirIdentity } | ClaudeUsageFailure
 
 export interface ClaudeIdentityOptions {
   /** The `.credentials.json` whose owner is being asked about. */
@@ -222,9 +222,11 @@ export function repairClaudeIdentityOnce(input: ClaudeIdentityRepairInput): void
 
     const now = input.now ?? Date.now()
     const dirKey = claudeDirAccountKey(input.identity)
+    // A REAL record, never S2g's marker: the fetcher hands over the last record
+    // the log names an account in, so there is no deferred answer to handle.
     const stale = input.lastRecord
-      ? claudeAccountAttribution([input.lastRecord], now)
-      : claudeAccountAttribution([], now)
+      ? claudeAttributionFromRecord(input.lastRecord)
+      : unattributedClaude()
 
     if (stale.accountKey === dirKey || stale.accountKey === UNKNOWN_ACCOUNT_KEY) {
       // `unknown` is the bucket EVERY unattributable row shares, across every

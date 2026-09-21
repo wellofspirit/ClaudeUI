@@ -49,11 +49,24 @@ const SESSION_ID = '11111111-2222-3333-4444-555555555555'
 
 let testHome: string
 
-/** One assistant line in the shape cli.js writes. Every value is invented. */
-function assistantLine(ts: number, messageId: string): string {
+/**
+ * One assistant line in the shape cli.js writes. Every value is invented.
+ *
+ * `entrypoint` is a real top-level field on every transcript line — `claude-desktop`
+ * on the sessions this app spawns (`src/core/sdk/args.ts` sets it), and `cli` /
+ * `sdk-cli` / `sdk-ts` on the ones it does not.
+ */
+function assistantLine(
+  ts: number,
+  messageId: string,
+  entrypoint: string | null = 'claude-desktop'
+): string {
   return JSON.stringify({
     type: 'assistant',
     timestamp: new Date(ts).toISOString(),
+    // null writes no field at all — the shape of a transcript from a client
+    // that does not record one.
+    ...(entrypoint === null ? {} : { entrypoint }),
     message: {
       id: messageId,
       model: 'claude-opus-4-8',
@@ -62,10 +75,18 @@ function assistantLine(ts: number, messageId: string): string {
   })
 }
 
-function seedTranscript(ts: number, messageId = MESSAGE_ID): void {
+function seedTranscript(
+  ts: number,
+  messageId = MESSAGE_ID,
+  entrypoint: string | null = 'claude-desktop'
+): void {
   const dir = join(testHome, '.claude', 'projects', '-fake-project')
   mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, `${SESSION_ID}.jsonl`), assistantLine(ts, messageId) + '\n', 'utf-8')
+  writeFileSync(
+    join(dir, `${SESSION_ID}.jsonl`),
+    assistantLine(ts, messageId, entrypoint) + '\n',
+    'utf-8'
+  )
 }
 
 function seedAccountLog(records: Array<Record<string, unknown>>): void {
@@ -78,10 +99,17 @@ function seedAccountLog(records: Array<Record<string, unknown>>): void {
   )
 }
 
-/** A block-usage + db pair from one fresh module graph. */
+/**
+ * A block-usage + db pair from one fresh module graph.
+ *
+ * `securestorage` comes from the SAME graph on purpose: the applied credential
+ * dir is module state, so setting it on the outer graph's copy would leave the
+ * block-usage under test reading a different (empty) one.
+ */
 async function freshModules(): Promise<{
   blockUsage: typeof import('../../../core/services/block-usage')
   db: typeof import('../../../core/services/db')
+  securestorage: typeof import('../../../core/sdk/securestorage-env')
 }> {
   vi.resetModules()
   // The driver seam is module state too, and the vitest setup file installed
@@ -92,7 +120,8 @@ async function freshModules(): Promise<{
   setSqliteDriver(betterSqlite3Driver())
   return {
     blockUsage: await import('../../../core/services/block-usage'),
-    db: await import('../../../core/services/db')
+    db: await import('../../../core/services/db'),
+    securestorage: await import('../../../core/sdk/securestorage-env')
   }
 }
 
@@ -178,5 +207,246 @@ describe('block-usage — Claude rows name the subscription', () => {
       billingType: 'apiKey'
     })
     db.closeDb()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// S2g — a switch whose identity could not be read defers rows; it never lends
+// them to the account the user just switched AWAY from.
+//
+// The 2026-09-21 incident: the switch's own record landed thirteen minutes
+// late, and 65 rows ($6.78) written in between were keyed to the OLD
+// subscription because the log's last record still named it.
+// ---------------------------------------------------------------------------
+
+const COMPANY = {
+  accountUuid: 'acc_company',
+  email: 'work@example.test',
+  organizationUuid: 'org_company',
+  billingType: 'subscription'
+}
+const PERSONAL = {
+  accountUuid: 'acc_personal',
+  email: 'me@example.test',
+  organizationUuid: 'org_personal',
+  billingType: 'subscription'
+}
+
+describe('block-usage — rows under an unresolved account switch', () => {
+  it('writes NO row while the switch is unresolved', async () => {
+    const switchAt = Date.now() - 120_000
+    seedAccountLog([
+      { ts: switchAt - 60_000, ...COMPANY },
+      { ts: switchAt, email: '', unresolved: true }
+    ])
+    seedTranscript(switchAt + 30_000)
+    const { blockUsage, db } = await freshModules()
+
+    await blockUsage.blockUsageService.recalculate()
+
+    // Not `unknown`, not the company's key: no row at all. A row cannot be
+    // re-keyed once written, so one that cannot be keyed yet waits.
+    expect(db.getUsageEventByMessageId(MESSAGE_ID)).toBeUndefined()
+    expect(db.countUsageEvents()).toBe(0)
+    db.closeDb()
+  })
+
+  it('hands the reconciler nothing for a deferred entry either', async () => {
+    const switchAt = Date.now() - 120_000
+    seedAccountLog([
+      { ts: switchAt - 60_000, ...COMPANY },
+      { ts: switchAt, email: '', unresolved: true }
+    ])
+    seedTranscript(switchAt + 30_000)
+    const { blockUsage, db } = await freshModules()
+
+    expect(await blockUsage.blockUsageService.getClaudeEntriesForReconcile()).toEqual([])
+    db.closeDb()
+  })
+
+  it('keeps the rows BEFORE the switch on the account that ran them', async () => {
+    const switchAt = Date.now() - 120_000
+    seedAccountLog([
+      { ts: switchAt - 60_000, ...COMPANY },
+      { ts: switchAt, email: '', unresolved: true }
+    ])
+    seedTranscript(switchAt - 30_000)
+    const { blockUsage, db } = await freshModules()
+
+    await blockUsage.blockUsageService.recalculate()
+
+    expect(db.getUsageEventByMessageId(MESSAGE_ID)!.accountKey).toBe(
+      'anthropic:org_company:acc_company'
+    )
+    db.closeDb()
+  })
+
+  it('writes the deferred rows under the NEW account, at their own timestamps, once it resolves', async () => {
+    const switchAt = Date.now() - 120_000
+    const turnAt = switchAt + 30_000
+    // The real record carries the MARKER's ts and is the later line, which is
+    // how the fetcher closes a deferral.
+    seedAccountLog([
+      { ts: switchAt - 60_000, ...COMPANY },
+      { ts: switchAt, email: '', unresolved: true },
+      { ts: switchAt, ...PERSONAL }
+    ])
+    seedTranscript(turnAt)
+    const { blockUsage, db } = await freshModules()
+
+    await blockUsage.blockUsageService.recalculate()
+
+    const row = db.getUsageEventByMessageId(MESSAGE_ID)
+    expect(row!.accountKey).toBe('anthropic:org_personal:acc_personal')
+    expect(row!.accountLabel).toBe('me@example.test')
+    expect(row!.ts).toBe(turnAt)
+    db.closeDb()
+  })
+
+  // Round 2, R5 — the bound. A gap the app can never close (a profile endpoint
+  // that never answers, or a folder switched away from before it resolved)
+  // would otherwise take its rows to the grave once they left the scan window.
+  it('writes a row under a marker older than the deferral bound as `unknown`', async () => {
+    const switchAt = Date.now() - 25 * 60 * 60 * 1000
+    seedAccountLog([
+      { ts: switchAt - 60_000, ...COMPANY },
+      { ts: switchAt, email: '', unresolved: true }
+    ])
+    seedTranscript(switchAt + 60_000)
+    const { blockUsage, db } = await freshModules()
+
+    await blockUsage.blockUsageService.recalculate()
+
+    const row = db.getUsageEventByMessageId(MESSAGE_ID)
+    // A FIRST write, not a re-key: nothing under the old key, nothing to move.
+    expect(row!.accountKey).toBe('unknown')
+    expect(row!.accountLabel).toBeNull()
+    expect(row!.billingType).toBe('unknown')
+    db.closeDb()
+  })
+
+  it('still defers under a marker that is inside the bound', async () => {
+    const switchAt = Date.now() - 23 * 60 * 60 * 1000
+    seedAccountLog([
+      { ts: switchAt - 60_000, ...COMPANY },
+      { ts: switchAt, email: '', unresolved: true }
+    ])
+    seedTranscript(switchAt + 60_000)
+    const { blockUsage, db } = await freshModules()
+
+    await blockUsage.blockUsageService.recalculate()
+
+    expect(db.getUsageEventByMessageId(MESSAGE_ID)).toBeUndefined()
+    db.closeDb()
+  })
+
+  // Round 3, item 3 — the bound is a comparison against the clock, so the
+  // clock has to be read ONCE per pass. Letting each entry read it separately
+  // lets two entries under one marker straddle the bound: the hour would be
+  // half deferred and half `unknown`, for ever.
+  it('samples `now` once per pass and hands it to every entry', async () => {
+    const ts = Date.now() - 60_000
+    seedAccountLog([{ ts: ts - 10_000, ...PERSONAL }])
+    const dir = join(testHome, '.claude', 'projects', '-fake-project')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, `${SESSION_ID}.jsonl`),
+      `${assistantLine(ts, 'msg_one')}\n${assistantLine(ts + 1_000, 'msg_two')}\n`,
+      'utf-8'
+    )
+
+    const MODULE = '../../../core/services/usage-windows'
+    const args: unknown[][] = []
+    vi.doMock(MODULE, async () => {
+      const actual =
+        await vi.importActual<typeof import('../../../core/services/usage-windows')>(MODULE)
+      return {
+        ...actual,
+        claudeAccountAttribution: (...call: unknown[]) => {
+          args.push(call)
+          return (actual.claudeAccountAttribution as (...c: unknown[]) => unknown)(...call)
+        }
+      }
+    })
+    try {
+      const { blockUsage, db } = await freshModules()
+      await blockUsage.blockUsageService.recalculate()
+      db.closeDb()
+    } finally {
+      vi.doUnmock(MODULE)
+    }
+
+    // Both entries were attributed, and both were asked about the same instant.
+    expect(args.length).toBeGreaterThan(1)
+    expect(typeof args[0][2]).toBe('number')
+    expect(new Set(args.map((call) => call[2])).size).toBe(1)
+  })
+
+  it('leaves the marker out of the account filter’s email list', async () => {
+    const switchAt = Date.now() - 120_000
+    seedAccountLog([
+      { ts: switchAt - 60_000, ...COMPANY },
+      { ts: switchAt, email: '', unresolved: true }
+    ])
+    seedTranscript(switchAt - 30_000)
+    const { blockUsage, db } = await freshModules()
+
+    const data = await blockUsage.blockUsageService.recalculate()
+
+    expect(data.accounts).toEqual(['work@example.test'])
+    db.closeDb()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// S2g part 5 — a session this app did not spawn is `unknown` under
+// multi-account. `setSecurestorageEnv` is a module value overlaid onto OUR
+// spawns, so a terminal `claude` uses the default `~/.claude` login and its
+// turns belong to no account the app can name.
+// ---------------------------------------------------------------------------
+
+describe('block-usage — the entrypoint decides whether time-based attribution applies', () => {
+  const ACCOUNT_DIR = '/nowhere/.claude/ui/accounts/acct-a'
+
+  async function rowFor(
+    entrypoint: string | null,
+    dir: string | null
+  ): Promise<{ [k: string]: unknown }> {
+    const ts = Date.now() - 60_000
+    seedAccountLog([{ ts: ts - 10_000, ...PERSONAL }])
+    seedTranscript(ts, MESSAGE_ID, entrypoint)
+    const { blockUsage, db, securestorage } = await freshModules()
+    securestorage.setSecurestorageEnv(dir ? { dir } : null)
+    await blockUsage.blockUsageService.recalculate()
+    const row = db.getUsageEventByMessageId(MESSAGE_ID)
+    db.closeDb()
+    return row as unknown as { [k: string]: unknown }
+  }
+
+  it('attributes a session the app spawned', async () => {
+    const row = await rowFor('claude-desktop', ACCOUNT_DIR)
+    expect(row.accountKey).toBe('anthropic:org_personal:acc_personal')
+  })
+
+  it('keys a terminal session `unknown`, with no label and no billing type', async () => {
+    const row = await rowFor('cli', ACCOUNT_DIR)
+    expect(row.accountKey).toBe('unknown')
+    expect(row.accountLabel).toBeNull()
+    expect(row.billingType).toBe('unknown')
+    // The row still exists and still counts as spend — it is the ACCOUNT that
+    // is unknown, not the usage.
+    expect(row.inputTokens).toBe(1000)
+  })
+
+  it('keys a line with no entrypoint at all `unknown` too', async () => {
+    const row = await rowFor(null, ACCOUNT_DIR)
+    expect(row.accountKey).toBe('unknown')
+  })
+
+  it('changes nothing in single-account mode, where both share one login', async () => {
+    expect((await rowFor('cli', null)).accountKey).toBe('anthropic:org_personal:acc_personal')
+    expect((await rowFor('claude-desktop', null)).accountKey).toBe(
+      'anthropic:org_personal:acc_personal'
+    )
   })
 })
