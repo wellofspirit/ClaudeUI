@@ -141,9 +141,9 @@ The hub is a standalone project and owns its protocol: the wire types, the golde
 
 ### 9. The hub dashboard
 
-One HTML page, no build step, served by the Worker. It shows the combined view only: the summary, accounts and limits, window value, spend over time, the breakdown and the machine list, following ADR-071 §8's layout. It exists for when no ClaudeUI instance is running. It reads `/dash/*` routes backed by the buckets, never the raw events.
+~~One HTML page, no build step, served by the Worker.~~ **Amended 2026-09-22 (H3, owner ruling on the mock):** a React 19 page built with Vite and served by the Worker as static assets from its own origin, behind the same Access application; the owner reversed the no-build-step choice on seeing the mock ("single HTML won't work well enough"). It shows the combined view only: the summary, accounts and limits, plan value, spend over time, the breakdown and the machine list on three tabs (Spend, Plan value, Machines), following ADR-071 §8's layout and the app's three themes from its own tokens. It exists for when no ClaudeUI instance is running. It reads the same `/v1/*` routes a machine does, as the owner: the browser's Access cookie makes every same-origin fetch an owner call, so it gets full labels and the owner-only fields (`accountLabel`, `clientId`, `firstClientId`) with no auth code of its own. There are no `/dash/*` routes. The owner writes are `PATCH /v1/devices/<id>` (rename, retire, rebind the Resync token) and the status line is `GET /v1/hub`; both refuse a device caller. Retention landed with it: a nightly cron archives the oldest whole machine-month of raw rows older than 360 days to R2 as gzip NDJSON when a bucket is bound, and deletes nothing when it is not.
 
-It will repeat some of ClaudeUI's chart code. Sharing React components across two repositories means publishing a package, and a page this size does not justify one.
+It repeats some of ClaudeUI's chart code as hand-drawn SVG and shares only `protocol/`. Sharing React components across two repositories means publishing a package, and a page this size does not justify one.
 
 ## Slices
 
@@ -152,7 +152,7 @@ It will repeat some of ClaudeUI's chart code. Sharing React components across tw
 | H1    | hub        | Worker, D1 schema and migrations, Access JWT verification with the two caller kinds, `/v1/events` ingest with bucket upkeep, the resync route and `epoch`, fixtures. LANDED 2026-09-22 (`aa11d6c`). |
 | H2    | hub        | `/v1/buckets`, `/v1/limits`, `/v1/windows` with label masking for device callers.                                                                                                                   |
 | S5    | ClaudeUI   | The draft protocol, the client, settings group with resync, scope switch, sync chip and machine list. Built against fixtures until H2 exists.                                                       |
-| H3    | hub        | The HTML dashboard, device rename and retire, the R2 archive job.                                                                                                                                   |
+| H3    | hub        | The dashboard (React, built), device rename, retire and rebind, the R2 archive job. LANDED 2026-09-22.                                                                                              |
 
 ## Consequences
 

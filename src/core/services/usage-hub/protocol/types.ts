@@ -33,14 +33,25 @@
 /** The protocol version every request carries, and the one this build speaks. */
 export const SCHEMA_VERSION = 1
 
-/** Routes, all under `<hubUrl>/v1/`. */
+/**
+ * Routes, all under `<hubUrl>/v1/`.
+ *
+ * `devicePrefix` is the one entry that is not a whole path: `PATCH /v1/devices/<id>`
+ * names the machine in its URL. A hub matches the exact paths first and only then
+ * this prefix, so `/v1/devices/self/resync` is matched as itself and never read as
+ * a device id.
+ */
 export const HUB_ROUTES = {
   events: '/v1/events',
   limits: '/v1/limits',
   buckets: '/v1/buckets',
   windows: '/v1/windows',
   devices: '/v1/devices',
-  resync: '/v1/devices/self/resync'
+  resync: '/v1/devices/self/resync',
+  /** The hub's own status line, for its dashboard. OWNER ONLY. */
+  hub: '/v1/hub',
+  /** `PATCH /v1/devices/<deviceId>`: rename, retire, rebind. OWNER ONLY. */
+  devicePrefix: '/v1/devices/'
 } as const
 
 /**
@@ -248,6 +259,15 @@ export interface PullBucketsQuery {
   schemaVersion: number
   since: number
   excludeDevice: string
+  /**
+   * The oldest hour worth answering, ms since the epoch — `hour_utc >= from`.
+   *
+   * Absent means no bound, which is what a machine sends: it is catching up on
+   * everything it has not seen. The hub's own dashboard sends one, because a
+   * 30-day view has no use for the hub's whole history and pages it would only
+   * throw away cost the same as pages it keeps.
+   */
+  from?: number
 }
 
 export interface PullBucketsResponse extends HubEpochEnvelope {
@@ -378,6 +398,15 @@ export interface HubDevice {
    * which machine; a machine is never told another machine's credential.
    */
   clientId?: string
+  /**
+   * The Access service token this machine FIRST pushed under — OWNER ONLY, and
+   * absent for a device caller, like {@link clientId}.
+   *
+   * It is the one the resync guard is checked against, so a dashboard that can
+   * see both can say "rotated" for a machine whose two differ, and offer the
+   * rebind that makes Resync work again.
+   */
+  firstClientId?: string
 }
 
 export interface PullDevicesQuery {
@@ -386,6 +415,63 @@ export interface PullDevicesQuery {
 
 export interface PullDevicesResponse extends HubEpochEnvelope {
   devices: HubDevice[]
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /v1/devices/<deviceId>
+// ---------------------------------------------------------------------------
+
+/**
+ * The owner's three edits to one machine, any combination of them (ADR-072 §6).
+ *
+ * At least one has to be present: a body that changes nothing is refused rather
+ * than answered, because a client that meant to send a name and sent none would
+ * otherwise read the unchanged device back as a successful rename.
+ *
+ * None of the three touches a row of usage. Retiring keeps a machine's events,
+ * buckets and name and only stops it being counted as active; revoking its
+ * credential is done in Zero Trust and not here.
+ */
+export interface PatchDeviceRequest {
+  schemaVersion: number
+  /** 1–120 characters after trimming. */
+  deviceName?: string
+  retired?: boolean
+  /**
+   * Bind Resync to the token this machine is pushing under NOW.
+   *
+   * Only `true`: there is no un-rebind, because the old token is not recorded
+   * anywhere after this and a machine's current token is the only value the hub
+   * could put back.
+   */
+  rebindToken?: true
+}
+
+export interface PatchDeviceResponse extends HubEpochEnvelope {
+  /** The machine as it now stands, in the owner's shape (both token fields). */
+  device: HubDevice
+}
+
+// ---------------------------------------------------------------------------
+// GET /v1/hub
+// ---------------------------------------------------------------------------
+
+/**
+ * What the hub says about itself, for the one line at the top of its dashboard.
+ *
+ * OWNER ONLY, and deliberately not a health route: every path on this hub is
+ * behind Access, so this answers a signed-in browser and nobody else.
+ */
+export interface HubStatusResponse extends HubEpochEnvelope {
+  /** The version this build speaks, which is what a dashboard renders itself against. */
+  schemaVersion: number
+  /** When the window ledger was last recomputed, ms, or 0 when it never has been. */
+  recomputedAt: number
+  /** How long raw events are kept before the nightly job archives and deletes them. */
+  retentionDays: number
+  /** Whether an R2 bucket is bound. With none, nothing is archived and nothing is deleted. */
+  archiveBound: boolean
+  deviceCount: number
 }
 
 // ---------------------------------------------------------------------------

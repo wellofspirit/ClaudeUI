@@ -35,6 +35,9 @@ import {
   type HubEvent,
   type HubLimitReading,
   type HubDevice,
+  type HubStatusResponse,
+  type PatchDeviceRequest,
+  type PatchDeviceResponse,
   type PullBucketsQuery,
   type PullBucketsResponse,
   type PullDevicesQuery,
@@ -261,11 +264,17 @@ function decodeBucket(source: unknown): RemoteBucket | null {
 export function encodePullBucketsQuery(input: {
   since: number
   excludeDevice: string
+  from?: number
 }): PullBucketsQuery {
   return {
     schemaVersion: SCHEMA_VERSION,
     since: num(input.since),
-    excludeDevice: input.excludeDevice
+    excludeDevice: input.excludeDevice,
+    // Only when the caller asked for a bound. A machine sends none — it is
+    // catching up on everything — and the query fixture is a machine's, so an
+    // always-present key would break its replay as well as meaning something
+    // (`from: 0` is "since the epoch", not "no bound").
+    ...(input.from === undefined ? {} : { from: num(input.from) })
   }
 }
 
@@ -378,7 +387,8 @@ function decodeDevice(source: unknown): HubDevice | null {
     lastPushAt: num(source.lastPushAt),
     retired: bool(source.retired),
     // As with a reading's full label: owner only, and only when it was sent.
-    ...('clientId' in source ? { clientId: str(source.clientId) } : {})
+    ...('clientId' in source ? { clientId: str(source.clientId) } : {}),
+    ...('firstClientId' in source ? { firstClientId: str(source.firstClientId) } : {})
   }
 }
 
@@ -404,6 +414,55 @@ export function encodeResync(input: { deviceId: string; since: number }): Resync
 export function decodeResyncResponse(payload: unknown): ResyncResponse {
   if (!isRecord(payload)) throw new ProtocolError('resync response is not an object')
   return { deleted: num(payload.deleted), epoch: num(payload.epoch) }
+}
+
+// ---------------------------------------------------------------------------
+// The owner's writes: PATCH /v1/devices/<deviceId>
+// ---------------------------------------------------------------------------
+
+/**
+ * One machine's edit, in canonical order, carrying only what was asked for.
+ *
+ * Absent and present-but-false are different requests — `retired: false` is an
+ * UNRETIRE — so the three fields are spread in rather than assigned, and a
+ * falsy value is as much a change as a truthy one.
+ */
+export function encodePatchDevice(input: {
+  deviceName?: string
+  retired?: boolean
+  rebindToken?: true
+}): PatchDeviceRequest {
+  const request: PatchDeviceRequest = { schemaVersion: SCHEMA_VERSION }
+  if (input.deviceName !== undefined) request.deviceName = input.deviceName
+  if (input.retired !== undefined) request.retired = input.retired
+  if (input.rebindToken !== undefined) request.rebindToken = input.rebindToken
+  if (Object.keys(request).length === 1) {
+    throw new ProtocolError('a device patch must change something')
+  }
+  return request
+}
+
+export function decodePatchDeviceResponse(payload: unknown): PatchDeviceResponse {
+  if (!isRecord(payload)) throw new ProtocolError('device patch response is not an object')
+  const device = decodeDevice(payload.device)
+  if (device === null) throw new ProtocolError('device patch response carries no device')
+  return { epoch: num(payload.epoch), device }
+}
+
+// ---------------------------------------------------------------------------
+// The hub's own status: GET /v1/hub
+// ---------------------------------------------------------------------------
+
+export function decodeHubStatus(payload: unknown): HubStatusResponse {
+  if (!isRecord(payload)) throw new ProtocolError('hub status is not an object')
+  return {
+    epoch: num(payload.epoch),
+    schemaVersion: num(payload.schemaVersion),
+    recomputedAt: num(payload.recomputedAt),
+    retentionDays: num(payload.retentionDays),
+    archiveBound: bool(payload.archiveBound),
+    deviceCount: num(payload.deviceCount)
+  }
 }
 
 // ---------------------------------------------------------------------------

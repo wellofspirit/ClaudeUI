@@ -3,8 +3,9 @@
  *
  * The usage hub protocol's contract (ADR-072 §8).
  *
- * Two guarantees, and the hub repository will run the same two against its own
- * implementation once it exists:
+ * Two guarantees, run here against the codec every client vendors. ClaudeUI runs
+ * the same file against its vendored copy, so the two repositories can only
+ * drift by failing on one side:
  *
  * 1. **Replay.** Every golden fixture parses into its type and re-encodes to the
  *    same bytes. A field renamed on either side of the wire stops being a silent
@@ -26,9 +27,12 @@ import {
   decodePullWindowsResponse,
   decodePushEventsResponse,
   decodePushLimitsResponse,
+  decodeHubStatus,
+  decodePatchDeviceResponse,
   decodeResyncResponse,
   decodeSchemaTooNew,
   encodeEvent,
+  encodePatchDevice,
   encodePullBucketsQuery,
   encodePullDevicesQuery,
   encodePullWindowsQuery,
@@ -93,6 +97,18 @@ const REPLAYS: Array<[string, (parsed: Record<string, unknown>) => unknown]> = [
   ['windows-response.json', decodePullWindowsResponse],
   ['devices-query.json', encodePullDevicesQuery],
   ['devices-response.json', decodePullDevicesResponse],
+  [
+    // The owner's write: a rename and a rebind in one request, with `retired`
+    // absent, which is what "only what was asked for" has to look like.
+    'device-patch-request.json',
+    (p) =>
+      encodePatchDevice({
+        deviceName: p.deviceName as string,
+        rebindToken: p.rebindToken as true
+      })
+  ],
+  ['device-patch-response.json', decodePatchDeviceResponse],
+  ['hub-response.json', decodeHubStatus],
   ['limits-response.json', decodePullLimitsResponse],
   [
     'resync-request.json',
@@ -199,6 +215,32 @@ describe('the encoder is the privacy boundary (ADR-072 §5)', () => {
   })
 })
 
+describe('the owner writes (ADR-072 §6)', () => {
+  it('sends only the fields that were asked for', () => {
+    expect(encodePatchDevice({ deviceName: 'studio' })).toEqual({
+      schemaVersion: SCHEMA_VERSION,
+      deviceName: 'studio'
+    })
+  })
+
+  it('treats an unretire as a change, because absent and false are different', () => {
+    // `retired: false` is the Unretire button. An encoder that tested truthiness
+    // would drop it and send a body the hub refuses as "nothing to change".
+    expect(encodePatchDevice({ retired: false })).toEqual({
+      schemaVersion: SCHEMA_VERSION,
+      retired: false
+    })
+  })
+
+  it('refuses a patch that changes nothing at all', () => {
+    expect(() => encodePatchDevice({})).toThrow(ProtocolError)
+  })
+
+  it('refuses an answer with no device in it', () => {
+    expect(() => decodePatchDeviceResponse({ epoch: 1 })).toThrow(ProtocolError)
+  })
+})
+
 describe('decoding is defensive', () => {
   it('drops a bucket with no device or no account rather than the whole page', () => {
     const answer = decodePullBucketsResponse({
@@ -225,6 +267,62 @@ describe('decoding is defensive', () => {
   it('throws on an answer that is not an object at all', () => {
     expect(() => decodePullWindowsResponse('<html>login</html>')).toThrow(ProtocolError)
     expect(() => decodePullLimitsResponse(null)).toThrow(ProtocolError)
+  })
+
+  it('carries the two owner-only fields through when the hub sent them', () => {
+    // A browser sign-in gets an account label in full and a machine's client id;
+    // the hub's dashboard is the only thing that asks for them.
+    const limits = decodePullLimitsResponse({
+      epoch: 3,
+      readings: [
+        {
+          accountKey: 'anthropic:org-a:acct-a',
+          windowKind: '5h',
+          labelMasked: 's•••@e•••.com',
+          accountLabel: 'someone@example.com'
+        }
+      ]
+    })
+    expect(limits.readings[0].accountLabel).toBe('someone@example.com')
+
+    const devices = decodePullDevicesResponse({
+      epoch: 3,
+      devices: [{ deviceId: 'd', clientId: '0123456789abcdef0123456789abcdef.access' }]
+    })
+    expect(devices.devices[0].clientId).toBe('0123456789abcdef0123456789abcdef.access')
+  })
+
+  it('leaves the owner-only keys OUT of a device answer, rather than nulling them', () => {
+    // Absent and null are different answers: a device that saw `accountLabel: null`
+    // would read "the hub knows no label for this account". It is also what keeps
+    // the device fixtures replaying byte for byte.
+    const limits = decodePullLimitsResponse({
+      epoch: 3,
+      readings: [{ accountKey: 'a', windowKind: '5h', labelMasked: null }]
+    })
+    expect('accountLabel' in limits.readings[0]).toBe(false)
+
+    const devices = decodePullDevicesResponse({ epoch: 3, devices: [{ deviceId: 'd' }] })
+    expect('clientId' in devices.devices[0]).toBe(false)
+  })
+
+  it('carries firstClientId to the owner and leaves it out for a device', () => {
+    const rotated = decodePullDevicesResponse({
+      epoch: 3,
+      devices: [
+        {
+          deviceId: 'd',
+          clientId: '99887766554433221100aabbccddeeff.access',
+          firstClientId: '0123456789abcdef0123456789abcdef.access'
+        }
+      ]
+    })
+    // The two differ, which is what the dashboard reads as "rotated": ordinary
+    // pushes work and Resync is still bound to the first one.
+    expect(rotated.devices[0].firstClientId).toBe('0123456789abcdef0123456789abcdef.access')
+    expect(
+      decodePullDevicesResponse({ devices: [{ deviceId: 'd' }] }).devices[0]
+    ).not.toHaveProperty('firstClientId')
   })
 
   it('reads a 426 body, and tolerates one that says nothing', () => {
