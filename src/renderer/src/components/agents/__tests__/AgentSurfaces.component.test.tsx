@@ -93,7 +93,7 @@ describe('agent roster surfaces', () => {
       })
       await renderEl(<AgentPill />)
       expect(screen.getByTestId('AgentPill').getAttribute('data-running')).toBe('false')
-      expect(screen.getByTestId('AgentPill.count').textContent).toBe('2')
+      expect(screen.getByTestId('AgentPill.count').textContent).toBe('2 agents')
     })
 
     it('toggles the panel without selecting an agent', async () => {

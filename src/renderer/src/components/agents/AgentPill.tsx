@@ -25,7 +25,11 @@ export function AgentPill(): React.JSX.Element | null {
 
   const isActive = rightPanel === 'task'
   const running = runningCount > 0
-  const label = running ? `${runningCount} agent${runningCount > 1 ? 's' : ''}` : `${totalCount}`
+  // Same form in both states — a bare number in the top bar reads as a
+  // counter, not as agents (owner ruling, 2026-09-22). Running shows how many
+  // are running; finished shows how many there were.
+  const shown = running ? runningCount : totalCount
+  const label = `${shown} agent${shown > 1 ? 's' : ''}`
 
   return (
     <button
