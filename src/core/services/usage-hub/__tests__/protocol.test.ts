@@ -29,10 +29,12 @@ import {
   decodePushLimitsResponse,
   decodeHubStatus,
   decodePatchDeviceResponse,
+  decodePullAccountsResponse,
   decodeResyncResponse,
   decodeSchemaTooNew,
   encodeEvent,
   encodePatchDevice,
+  encodePullAccountsQuery,
   encodePullBucketsQuery,
   encodePullDevicesQuery,
   encodePullWindowsQuery,
@@ -97,6 +99,14 @@ const REPLAYS: Array<[string, (parsed: Record<string, unknown>) => unknown]> = [
   ['windows-response.json', decodePullWindowsResponse],
   ['devices-query.json', encodePullDevicesQuery],
   ['devices-response.json', decodePullDevicesResponse],
+  ['accounts-query.json', encodePullAccountsQuery],
+  [
+    // A DEVICE's answer: masked labels and no `accountLabel` key at all, which is
+    // what makes it replay byte for byte. The third row is an account the hub was
+    // never told a name for.
+    'accounts-response.json',
+    decodePullAccountsResponse
+  ],
   [
     // The owner's write: a rename and a rebind in one request, with `retired`
     // absent, which is what "only what was asked for" has to look like.
@@ -267,6 +277,41 @@ describe('decoding is defensive', () => {
   it('throws on an answer that is not an object at all', () => {
     expect(() => decodePullWindowsResponse('<html>login</html>')).toThrow(ProtocolError)
     expect(() => decodePullLimitsResponse(null)).toThrow(ProtocolError)
+  })
+
+  it('drops an account with no key, and leaves accountLabel out for a device', () => {
+    const answer = decodePullAccountsResponse({
+      epoch: 4,
+      accounts: [
+        { accountKey: '', vendorId: 'anthropic' },
+        'not an object',
+        { accountKey: 'apikey:openai:abcd', vendorId: 'openai', labelMasked: null }
+      ]
+    })
+    expect(answer.accounts).toHaveLength(1)
+    expect(answer.accounts[0]).toEqual({
+      accountKey: 'apikey:openai:abcd',
+      vendorId: 'openai',
+      labelMasked: null,
+      lastSeenAt: 0
+    })
+    expect('accountLabel' in answer.accounts[0]).toBe(false)
+  })
+
+  it('carries an account label in full to the owner', () => {
+    const answer = decodePullAccountsResponse({
+      epoch: 4,
+      accounts: [
+        {
+          accountKey: 'anthropic:org-a:acct-a',
+          vendorId: 'anthropic',
+          labelMasked: 's•••@e•••.com',
+          lastSeenAt: 12,
+          accountLabel: 'someone@example.com'
+        }
+      ]
+    })
+    expect(answer.accounts[0].accountLabel).toBe('someone@example.com')
   })
 
   it('carries the two owner-only fields through when the hub sent them', () => {

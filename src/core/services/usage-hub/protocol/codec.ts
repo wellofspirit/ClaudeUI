@@ -32,12 +32,15 @@ import {
   FORBIDDEN_EVENT_FIELDS,
   MAX_EVENTS_PER_PUSH,
   SCHEMA_VERSION,
+  type HubAccount,
   type HubEvent,
   type HubLimitReading,
   type HubDevice,
   type HubStatusResponse,
   type PatchDeviceRequest,
   type PatchDeviceResponse,
+  type PullAccountsQuery,
+  type PullAccountsResponse,
   type PullBucketsQuery,
   type PullBucketsResponse,
   type PullDevicesQuery,
@@ -397,6 +400,39 @@ export function decodePullDevicesResponse(payload: unknown): PullDevicesResponse
   const raw = Array.isArray(payload.devices) ? payload.devices : []
   const devices = raw.map(decodeDevice).filter((device): device is HubDevice => device !== null)
   return { epoch: num(payload.epoch), devices }
+}
+
+// ---------------------------------------------------------------------------
+// Accounts: GET /v1/accounts
+// ---------------------------------------------------------------------------
+
+export function encodePullAccountsQuery(): PullAccountsQuery {
+  return { schemaVersion: SCHEMA_VERSION }
+}
+
+function decodeAccount(source: unknown): HubAccount | null {
+  if (!isRecord(source)) return null
+  const accountKey = str(source.accountKey)
+  // An account with no key names nothing: the key is what a bucket carries and
+  // what this row exists to translate.
+  if (accountKey === '') return null
+  return {
+    accountKey,
+    vendorId: str(source.vendorId),
+    labelMasked: nullableStr(source.labelMasked),
+    lastSeenAt: num(source.lastSeenAt),
+    // Owner only, and only when the hub sent it — the reading rule exactly.
+    ...('accountLabel' in source ? { accountLabel: nullableStr(source.accountLabel) } : {})
+  }
+}
+
+export function decodePullAccountsResponse(payload: unknown): PullAccountsResponse {
+  if (!isRecord(payload)) throw new ProtocolError('accounts response is not an object')
+  const raw = Array.isArray(payload.accounts) ? payload.accounts : []
+  const accounts = raw
+    .map(decodeAccount)
+    .filter((account): account is HubAccount => account !== null)
+  return { epoch: num(payload.epoch), accounts }
 }
 
 // ---------------------------------------------------------------------------

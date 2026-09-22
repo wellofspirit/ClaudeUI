@@ -38,11 +38,34 @@
  *   - both Access headers are checked, and a mismatch is answered with a **302
  *     to a `cloudflareaccess.com` address**, not a 403. That is what the spike
  *     found a bad service token actually gets, and a client that follows
- *     redirects would parse a login page as the hub's answer.
+ *     redirects would parse a login page as the hub's answer;
+ *   - accounts are registered and NAMED at ingest by the Worker's rule, so the
+ *     two targets answer `GET /v1/accounts` with the same list for the same
+ *     pushes;
+ *   - the two owner routes exist and refuse a machine the way the real hub does,
+ *     BEFORE the version is checked, exactly where a device route refuses the
+ *     owner.
  *
  * Thin, because it is a test double and not a deployment: no D1, no Access JWT
- * verification (the headers stand in for it), no owner sign-in, no `/dash`
+ * verification (the headers stand in for it), no Google sign-in, no `/dash`
  * routes, no R2 archive, and the whole store dies with the process.
+ *
+ * ## The two callers
+ *
+ * A request carrying `Cf-Access-Authenticated-User-Email` — the header Access
+ * itself sets on an identity login — is the OWNER; one carrying the two
+ * service-token headers is a device, as before; one carrying neither is refused
+ * the way a bad token is, with a 302 to a hosted login page — unless the gate is
+ * off, which it is when no `--client-id`/`--client-secret` was given, and then
+ * every caller that is not the owner is a machine. There is no sign-in to
+ * perform: the header IS the sign-in here, exactly as the two token headers
+ * stand in for a verified service-token assertion.
+ *
+ * What the owner is shown and a machine is not: account labels in full
+ * (`accountLabel` beside the mask, on `GET /v1/limits` and `GET /v1/accounts`),
+ * both service-token ids on `GET /v1/devices`, and the two routes that are the
+ * owner's alone — `GET /v1/hub` and `PATCH /v1/devices/<id>`, which answer a
+ * machine `403 { error: 'owner route' }`.
  *
  * Thin in one way worth naming, because it is visible on the wire: this computes
  * no window ledger. The real hub owns that rollup — a window's numerator is EVERY
@@ -50,10 +73,10 @@
  * it answers the literal `deviceId: 'hub'` for every window row, since the row
  * belongs to no one machine. Here a window exists only if `--seed` stated it, and
  * it keeps whatever `deviceId` the file gave it: a fake that rewrote the field
- * would hide which of the two a client's merge is actually reading. The real hub
- * also sends a browser sign-in two fields a machine never sees (an account label
- * in full, a machine's service-token id); this has no owner caller, so it sends
- * neither to anybody.
+ * would hide which of the two a client's merge is actually reading. The CALLER
+ * changes nothing about a window row on either target — a window names no account
+ * label and no service token, so there is nothing in one to withhold from a
+ * machine; what differs is where the rows come from, and here that is `--seed`.
  *
  * ## Flags
  *
@@ -174,9 +197,33 @@ interface StoredDevice {
   os: string
   lastPushAt: number
   retired: boolean
+  /** The service token this machine LAST announced under. Owner only on the wire. */
+  clientId: string
+  /** The one it FIRST announced under, which a rebind moves. Owner only too. */
+  firstClientId: string
 }
 
-const SCHEMA_VERSION = 1
+/** One account the hub has seen, and the newest name it was told for it. */
+interface StoredAccount {
+  accountKey: string
+  vendorId: string
+  label: string | null
+  /** The instant of the row `label` came from; 0 when there is none. */
+  labelTs: number
+  firstSeenAt: number
+  lastSeenAt: number
+}
+
+const SCHEMA_VERSION = 2
+
+/** What the real hub's `RETENTION_DAYS` says, quoted back by `GET /v1/hub`. */
+const RETENTION_DAYS = 360
+
+/** 1-120 characters after trimming, the Worker's rule for a name the owner sets. */
+const MAX_DEVICE_NAME = 120
+
+/** `PATCH /v1/devices/<id>` names the machine in its URL; every other path is exact. */
+const DEVICE_PREFIX = '/v1/devices/'
 const HOUR_MS = 60 * 60 * 1000
 
 // ---------------------------------------------------------------------------
@@ -207,6 +254,7 @@ const events = new Map<string, StoredEvent>()
 const buckets = new Map<string, StoredBucket>()
 const readings = new Map<string, StoredReading>()
 const devices = new Map<string, StoredDevice>()
+const accounts = new Map<string, StoredAccount>()
 let nextRev = 1
 let epoch = options.epoch
 
@@ -292,7 +340,52 @@ function foldIntoBucket(event: StoredEvent): void {
   buckets.set(key, bucket)
 }
 
-/** Rebuild every bucket of one device from the raw rows it still holds. */
+/**
+ * Register an account, and take the name if it is the newest one seen.
+ *
+ * The Worker's `UPSERT_ACCOUNTS` rule, restated (see the header on why it is not
+ * imported): a key is registered whatever it is called, so an account with no
+ * rate-limit meter is still named; the label moves only when the incoming row
+ * has one AND its instant is at or past the stored one, so a backlog push cannot
+ * undo a rename that happened since; `firstSeenAt` never moves.
+ */
+function registerAccount(
+  accountKey: string,
+  vendorId: string,
+  label: string | null,
+  instant: number
+): void {
+  // The Worker's validator refuses both of these before a statement runs, so a
+  // fake that registered them would answer a list the real hub never would.
+  if (accountKey === '' || accountKey === 'unknown') return
+  const named = label !== null && label !== ''
+  const held = accounts.get(accountKey)
+  if (held === undefined) {
+    accounts.set(accountKey, {
+      accountKey,
+      vendorId,
+      label: named ? label : null,
+      labelTs: named ? instant : 0,
+      firstSeenAt: instant,
+      lastSeenAt: instant
+    })
+    return
+  }
+  if (named && instant >= held.labelTs) {
+    held.label = label
+    // The vendor moves WITH the name, so the two always come from one row.
+    held.vendorId = vendorId
+    held.labelTs = instant
+  }
+  held.lastSeenAt = Math.max(held.lastSeenAt, instant)
+}
+
+/**
+ * Rebuild every bucket of one device from the raw rows it still holds.
+ *
+ * `accounts` is deliberately untouched, as on the real hub: a name is not a
+ * per-device fact, and the epoch bump tells every client to re-pull the list.
+ */
 function rebuildDevice(deviceId: string): void {
   for (const [key, bucket] of buckets) if (bucket.deviceId === deviceId) buckets.delete(key)
   for (const event of events.values()) if (event.deviceId === deviceId) foldIntoBucket(event)
@@ -349,7 +442,9 @@ function applySeed(seed: SeedFile): void {
       appVersion: device.appVersion ?? 'unknown',
       os: device.os ?? 'unknown',
       lastPushAt: device.lastPushAt ?? Date.now(),
-      retired: device.retired ?? false
+      retired: device.retired ?? false,
+      clientId: device.clientId ?? '',
+      firstClientId: device.firstClientId ?? device.clientId ?? ''
     })
   }
 
@@ -387,9 +482,16 @@ function applySeed(seed: SeedFile): void {
         appVersion: 'unknown',
         os: 'unknown',
         lastPushAt: Date.now(),
-        retired: false
+        retired: false,
+        clientId: '',
+        firstClientId: ''
       })
     }
+    // And the account: on the real hub the events behind this hour registered
+    // it, so a seeded peer whose buckets name a key nothing knows would be a
+    // shape the real hub cannot produce. A bucket carries no label, so it
+    // registers the key unnamed and a seeded reading may name it below.
+    registerAccount(bucket.accountKey, bucket.vendorId, null, bucket.hourUtc)
   }
 
   for (const window of seed.windows ?? []) {
@@ -397,7 +499,7 @@ function applySeed(seed: SeedFile): void {
   }
 
   for (const given of seed.readings ?? []) {
-    readings.set(JSON.stringify([given.accountKey, given.windowKind]), {
+    const reading: StoredReading = {
       deviceId: given.deviceId ?? '',
       accountKey: given.accountKey,
       windowKind: given.windowKind,
@@ -408,7 +510,9 @@ function applySeed(seed: SeedFile): void {
       usedPercent: given.usedPercent ?? 0,
       resetsAt: given.resetsAt ?? null,
       observedAt: given.observedAt ?? Date.now()
-    })
+    }
+    readings.set(JSON.stringify([reading.accountKey, reading.windowKind]), reading)
+    registerAccount(reading.accountKey, reading.vendorId, reading.accountLabel, reading.observedAt)
   }
 }
 
@@ -424,16 +528,55 @@ function json(body: unknown, status = 200): Response {
 }
 
 /**
+ * The version a request states, or null when it states none.
+ *
+ * An ABSENT value is refused rather than defaulted, in a body and in a query
+ * alike: `Number('')` and `Number(null)` are both 0, which is finite, so a
+ * lenient read would let an unversioned request through and there is no such
+ * request. The Worker's `schemaVersionOf` does exactly this.
+ */
+function statedVersion(raw: unknown): number | null {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null
+  if (typeof raw !== 'string') return null
+  const trimmed = raw.trim()
+  if (trimmed === '') return null
+  const parsed = Number(trimmed)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+/** The refusal a stated version earns, or null to carry on. The Worker's order. */
+function versionRefusal(raw: unknown): Response | null {
+  const stated = statedVersion(raw)
+  if (stated === null) return json({ error: 'no schemaVersion' }, 400)
+  if (stated > SCHEMA_VERSION) return json({ hubSchemaVersion: SCHEMA_VERSION }, 426)
+  if (stated < 1) return json({ error: 'bad schemaVersion' }, 400)
+  return null
+}
+
+/** Who is calling, once the stand-in for Access has looked at the headers. */
+type Caller = 'owner' | 'device'
+
+/**
  * The Access gate, as the spike found it: a bad service token is answered with a
  * 302 to the hosted login page. The deployer can turn on a 401 instead, so both
  * shapes are legal and a client has to read either as "credentials rejected".
+ *
+ * `Cf-Access-Authenticated-User-Email` is the header Access sets on an identity
+ * login, and it is the owner here — checked FIRST, and without the token gate,
+ * because a browser sign-in carries no service token and never will. Null is
+ * "neither caller", which is refused.
  */
-function authorized(request: Request): boolean {
-  if (options.clientId === undefined || options.clientSecret === undefined) return true
-  return (
+function callerOf(request: Request): Caller | null {
+  if ((request.headers.get('Cf-Access-Authenticated-User-Email') ?? '').trim() !== '') {
+    return 'owner'
+  }
+  // With no `--client-id`/`--client-secret` the gate is off and any caller is a
+  // machine, which is the convenient default for a poke with `curl`.
+  if (options.clientId === undefined || options.clientSecret === undefined) return 'device'
+  const matched =
     request.headers.get('CF-Access-Client-Id') === options.clientId &&
     request.headers.get('CF-Access-Client-Secret') === options.clientSecret
-  )
+  return matched ? 'device' : null
 }
 
 function rejected(): Response {
@@ -444,7 +587,8 @@ function rejected(): Response {
 }
 
 async function handle(request: Request): Promise<Response> {
-  if (!authorized(request)) return rejected()
+  const caller = callerOf(request)
+  if (caller === null) return rejected()
 
   const url = new URL(request.url)
   const path = url.pathname
@@ -462,7 +606,8 @@ async function handle(request: Request): Promise<Response> {
       events: [...events.values()],
       buckets: [...buckets.values()],
       readings: [...readings.values()],
-      devices: [...devices.values()]
+      devices: [...devices.values()],
+      accounts: [...accounts.values()]
     })
   }
 
@@ -474,19 +619,23 @@ async function handle(request: Request): Promise<Response> {
     return json({ error: 'injected failure' }, 503)
   }
 
+  // WHO may call a route does not depend on WHAT they sent, so this runs before
+  // the version gate and before any body is read — the Worker's own order
+  // (`router.ts`), where an owner route refuses a machine exactly where a device
+  // route refuses the owner. A machine calling `/v1/hub` with no version at all
+  // has to get the 403 and not a 400 about the version.
+  const ownerOnly =
+    (request.method === 'GET' && path === '/v1/hub') ||
+    (request.method === 'PATCH' && path.startsWith(DEVICE_PREFIX))
+  if (ownerOnly && caller !== 'owner') return json({ error: 'owner route' }, 403)
+
   // `schemaVersion` on EVERY route (ADR-072 §8): the body for a POST, the query
   // for a GET, and any route may answer 426. A hub that checked only the writes
   // would hand a client a response shape it cannot parse, and the client would
   // read the mismatch as corrupt data rather than as "update your hub".
   if (request.method === 'GET' && path.startsWith('/v1/')) {
-    const raw = url.searchParams.get('schemaVersion')
-    // An ABSENT parameter is refused, not defaulted: `Number('')` is 0, which is
-    // finite, so a lenient read would have let an unversioned request through
-    // and the whole point of P4 is that there is no such request.
-    if (raw === null || raw.trim() === '' || !Number.isFinite(Number(raw))) {
-      return json({ error: 'no schemaVersion' }, 400)
-    }
-    if (Number(raw) > SCHEMA_VERSION) return json({ hubSchemaVersion: SCHEMA_VERSION }, 426)
+    const refused = versionRefusal(url.searchParams.get('schemaVersion'))
+    if (refused !== null) return refused
   }
 
   if (request.method === 'POST' && path === '/v1/events') {
@@ -498,9 +647,8 @@ async function handle(request: Request): Promise<Response> {
       os?: string
       events?: HubEvent[]
     }
-    if ((body.schemaVersion ?? 0) > SCHEMA_VERSION) {
-      return json({ hubSchemaVersion: SCHEMA_VERSION }, 426)
-    }
+    const refused = versionRefusal(body.schemaVersion)
+    if (refused) return refused
     const deviceId = body.deviceId ?? ''
     if (deviceId === '') return json({ error: 'no deviceId' }, 400)
     // BEFORE the batch is looked at, and with no check that there is one: an
@@ -509,13 +657,18 @@ async function handle(request: Request): Promise<Response> {
     // makes `{ accepted: 0, duplicates: 0 }` a complete answer, and it is part
     // of the contract the hub repository inherits with this file.
     const known = devices.get(deviceId)
+    const clientId = request.headers.get('CF-Access-Client-Id') ?? ''
     devices.set(deviceId, {
       deviceId,
       deviceName: body.deviceName ?? deviceId,
       appVersion: body.appVersion ?? 'unknown',
       os: body.os ?? 'unknown',
       lastPushAt: Date.now(),
-      retired: known?.retired ?? false
+      retired: known?.retired ?? false,
+      clientId,
+      // Written once and never by a later push: it is what the real hub's resync
+      // guard is checked against, and only a rebind may move it.
+      firstClientId: known?.firstClientId ?? clientId
     })
     const batch = body.events ?? []
     let accepted = 0
@@ -528,6 +681,10 @@ async function handle(request: Request): Promise<Response> {
         duplicates++
         continue
       }
+      // The account is registered from EVERY row of the batch, the new ones and
+      // the ones already held alike: the real hub's upsert runs over the whole
+      // bound JSON, and a name it was told again is a name it was told.
+      registerAccount(event.accountKey, event.vendorId, event.accountLabel, event.ts)
       if (events.has(event.messageId)) {
         duplicates++
         continue
@@ -546,13 +703,18 @@ async function handle(request: Request): Promise<Response> {
       deviceId?: string
       readings?: StoredReading[]
     }
-    if ((body.schemaVersion ?? 0) > SCHEMA_VERSION) {
-      return json({ hubSchemaVersion: SCHEMA_VERSION }, 426)
-    }
+    const refused = versionRefusal(body.schemaVersion)
+    if (refused) return refused
     const deviceId = body.deviceId ?? ''
     let accepted = 0
     for (const reading of body.readings ?? []) {
       if (!reading?.accountKey || !reading.windowKind) continue
+      registerAccount(
+        reading.accountKey,
+        reading.vendorId,
+        reading.accountLabel,
+        reading.observedAt
+      )
       const key = JSON.stringify([reading.accountKey, reading.windowKind])
       const existing = readings.get(key)
       // Taken, whether or not it is the newest: a real hub keeps every reading as a
@@ -571,9 +733,8 @@ async function handle(request: Request): Promise<Response> {
       deviceId?: string
       since?: number
     }
-    if ((body.schemaVersion ?? 0) > SCHEMA_VERSION) {
-      return json({ hubSchemaVersion: SCHEMA_VERSION }, 426)
-    }
+    const refused = versionRefusal(body.schemaVersion)
+    if (refused) return refused
     const deviceId = body.deviceId ?? ''
     const since = body.since ?? 0
     let deleted = 0
@@ -589,8 +750,15 @@ async function handle(request: Request): Promise<Response> {
   if (request.method === 'GET' && path === '/v1/buckets') {
     const since = Number(url.searchParams.get('since') ?? 0)
     const exclude = url.searchParams.get('exclude_device') ?? ''
+    // The optional lower bound on the HOUR. Absent is no bound, which is what a
+    // machine sends: it is catching up on everything. The hub's own dashboard
+    // sends one, because a 30-day view has no use for a year of hours.
+    const fromRaw = url.searchParams.get('from')
+    const from = fromRaw === null || fromRaw.trim() === '' ? 0 : Number(fromRaw)
     const page = [...buckets.values()]
-      .filter((bucket) => bucket.rev > since && bucket.deviceId !== exclude)
+      .filter(
+        (bucket) => bucket.rev > since && bucket.deviceId !== exclude && bucket.hourUtc >= from
+      )
       .sort((a, b) => a.rev - b.rev)
       .slice(0, 500)
     const rev = page.reduce((max, bucket) => Math.max(max, bucket.rev), since)
@@ -626,9 +794,28 @@ async function handle(request: Request): Promise<Response> {
       windowMinutes: reading.windowMinutes,
       usedPercent: reading.usedPercent,
       resetsAt: reading.resetsAt,
-      observedAt: reading.observedAt
+      observedAt: reading.observedAt,
+      // Owner only, and ABSENT rather than null for a machine: a key that is not
+      // there cannot be read as "the hub knows no label for this account".
+      ...(caller === 'owner' ? { accountLabel: reading.accountLabel } : {})
     }))
     return json({ epoch, readings: page })
+  }
+
+  // The names behind the account keys every other read carries, for both
+  // callers. It is the only route that can name an account no reading ever will:
+  // an API-key account has no rate-limit meter, so the relay is silent about it.
+  if (request.method === 'GET' && path === '/v1/accounts') {
+    const page = [...accounts.values()]
+      .sort((one, other) => (one.accountKey < other.accountKey ? -1 : 1))
+      .map((account) => ({
+        accountKey: account.accountKey,
+        vendorId: account.vendorId,
+        labelMasked: maskLabel(account.label),
+        lastSeenAt: account.lastSeenAt,
+        ...(caller === 'owner' ? { accountLabel: account.label } : {})
+      }))
+    return json({ epoch, accounts: page })
   }
 
   // The machine list, readable by a device (ADR-072 §6): names, OS families,
@@ -643,8 +830,86 @@ async function handle(request: Request): Promise<Response> {
         os: device.os,
         appVersion: device.appVersion,
         lastPushAt: device.lastPushAt,
-        retired: device.retired
+        retired: device.retired,
+        // Which token is which machine, and which one Resync is bound to. A
+        // machine is never told another machine's credential, its own included.
+        ...(caller === 'owner'
+          ? { clientId: device.clientId, firstClientId: device.firstClientId }
+          : {})
       }))
+    })
+  }
+
+  // The hub's own status line, for its dashboard. Owner only, like the patch
+  // below: a machine is refused here exactly where the owner is refused a push.
+  if (request.method === 'GET' && path === '/v1/hub') {
+    // The caller was settled above, with the other owner route.
+    return json({
+      epoch,
+      schemaVersion: SCHEMA_VERSION,
+      // Nothing here recomputes a window ledger and nothing here archives, so
+      // both are stated as what they are rather than invented.
+      recomputedAt: 0,
+      retentionDays: RETENTION_DAYS,
+      archiveBound: false,
+      deviceCount: devices.size
+    })
+  }
+
+  // The owner's three edits to one machine: rename, retire or unretire, rebind.
+  // The exact paths are matched above, so `/v1/devices/self/resync` stays the
+  // resync route and is never read as a machine called `self/resync`.
+  if (request.method === 'PATCH' && path.startsWith(DEVICE_PREFIX)) {
+    // A machine was already refused above, before this body was read at all.
+    const body = (await request.json()) as {
+      schemaVersion?: unknown
+      deviceName?: unknown
+      retired?: unknown
+      rebindToken?: unknown
+    }
+    const refused = versionRefusal(body.schemaVersion)
+    if (refused !== null) return refused
+
+    let deviceName: string | undefined
+    if (body.deviceName !== undefined) {
+      const trimmed = typeof body.deviceName === 'string' ? body.deviceName.trim() : ''
+      // Refused, never cut: a truncated name is a wrong name in somebody's list.
+      if (trimmed === '' || trimmed.length > MAX_DEVICE_NAME) {
+        return json({ error: 'bad deviceName' }, 400)
+      }
+      deviceName = trimmed
+    }
+    if (body.retired !== undefined && typeof body.retired !== 'boolean') {
+      return json({ error: 'bad retired' }, 400)
+    }
+    // Only `true`: no history of tokens is kept, so `false` could only ask the
+    // hub to put back a value it does not have.
+    if (body.rebindToken !== undefined && body.rebindToken !== true) {
+      return json({ error: 'bad rebindToken' }, 400)
+    }
+    if (deviceName === undefined && body.retired === undefined && body.rebindToken === undefined) {
+      // Refused rather than answered: a caller that meant to send a name and sent
+      // none would otherwise read the unchanged machine back as a rename.
+      return json({ error: 'nothing to change' }, 400)
+    }
+
+    const device = devices.get(path.slice(DEVICE_PREFIX.length))
+    if (device === undefined) return json({ error: 'no such device' }, 404)
+    if (deviceName !== undefined) device.deviceName = deviceName
+    if (typeof body.retired === 'boolean') device.retired = body.retired
+    if (body.rebindToken === true) device.firstClientId = device.clientId
+    return json({
+      epoch,
+      device: {
+        deviceId: device.deviceId,
+        deviceName: device.deviceName,
+        os: device.os,
+        appVersion: device.appVersion,
+        lastPushAt: device.lastPushAt,
+        retired: device.retired,
+        clientId: device.clientId,
+        firstClientId: device.firstClientId
+      }
     })
   }
 

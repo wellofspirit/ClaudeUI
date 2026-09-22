@@ -1,5 +1,5 @@
 /**
- * The usage hub's wire protocol, version 1 (ADR-072 §8).
+ * The usage hub's wire protocol, version 2 (ADR-072 §8).
  *
  * ## This folder is the protocol's home
  *
@@ -30,8 +30,16 @@
  * rather than trusting every caller upstream of it.
  */
 
-/** The protocol version every request carries, and the one this build speaks. */
-export const SCHEMA_VERSION = 1
+/**
+ * The protocol version every request carries, and the one this build speaks.
+ *
+ * 2 added `GET /v1/accounts`, and a new DEVICE-facing route is what a version
+ * exists to state: a client that pulls it from a hub still on 1 would be
+ * answered `404` and could only read that as a broken hub. The version says the
+ * truth instead — such a hub answers `426` on every route, and the client pauses
+ * with "update your hub" and leaves its cursor exactly where it was (ADR-072 §8).
+ */
+export const SCHEMA_VERSION = 2
 
 /**
  * Routes, all under `<hubUrl>/v1/`.
@@ -47,6 +55,8 @@ export const HUB_ROUTES = {
   buckets: '/v1/buckets',
   windows: '/v1/windows',
   devices: '/v1/devices',
+  /** Every account the hub has seen, NAMED. Both callers; see {@link HubAccount}. */
+  accounts: '/v1/accounts',
   resync: '/v1/devices/self/resync',
   /** The hub's own status line, for its dashboard. OWNER ONLY. */
   hub: '/v1/hub',
@@ -222,7 +232,14 @@ export interface PushLimitsResponse extends HubEpochEnvelope {
 // GET /v1/buckets
 // ---------------------------------------------------------------------------
 
-/** One hour of another machine's spend — ADR-071's `usage_bucket` in camelCase. */
+/**
+ * One hour of another machine's spend — ADR-071's `usage_bucket` in camelCase.
+ *
+ * A bucket carries an `accountKey` and no label, deliberately: the key is the
+ * grouping fact and a label repeated on every hour would be the same string a
+ * hundred thousand times. `GET /v1/accounts` is where the name for a key comes
+ * from, for a caller that holds no credential of its own for that account.
+ */
 export interface RemoteBucket {
   deviceId: string
   /** Monotonic on the hub. The client pages with it and never displays it. */
@@ -415,6 +432,46 @@ export interface PullDevicesQuery {
 
 export interface PullDevicesResponse extends HubEpochEnvelope {
   devices: HubDevice[]
+}
+
+// ---------------------------------------------------------------------------
+// GET /v1/accounts
+// ---------------------------------------------------------------------------
+
+/**
+ * One account the hub has seen, named — the label buckets do not carry.
+ *
+ * The hub learns a name from the `accountLabel` on an event and on a limit
+ * reading, and keeps the NEWEST one it was ever told. That matters for the
+ * accounts a reading can never name: an API-key account has no rate-limit meter,
+ * so `GET /v1/limits` says nothing about it, and a machine holding no credential
+ * for it could only show the raw key.
+ */
+export interface HubAccount {
+  accountKey: string
+  vendorId: string
+  /** Masked BY THE HUB for a device caller, `maskLabel`'s rule; null when the hub was never told a label. */
+  labelMasked: string | null
+  /**
+   * The newest instant the hub saw this account on any row: an event's `ts` or a
+   * reading's `observedAt`, whether or not that row carried a label. Milliseconds.
+   */
+  lastSeenAt: number
+  /** The label in full — OWNER ONLY, absent for a device caller (the {@link RemoteLimitReading} rule). */
+  accountLabel?: string | null
+}
+
+export interface PullAccountsQuery {
+  schemaVersion: number
+}
+
+/**
+ * Every account, whole. It is not paged by `rev`: the list is one row per
+ * account rather than one per hour, and a client re-reads it on every pass the
+ * way it re-reads the machine list.
+ */
+export interface PullAccountsResponse extends HubEpochEnvelope {
+  accounts: HubAccount[]
 }
 
 // ---------------------------------------------------------------------------
