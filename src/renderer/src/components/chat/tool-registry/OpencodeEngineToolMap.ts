@@ -155,6 +155,9 @@ function opencodeNormalize(
         kind: 'task',
         description: inp.description != null ? String(inp.description) : '',
         prompt: inp.prompt != null ? String(inp.prompt) : '',
+        // opencode's task tool has no per-agent name; its type is the best
+        // label a roster row can carry (ADR-073).
+        ...(inp.subagent_type != null ? { name: String(inp.subagent_type) } : {}),
         subagent: inp.subagent_type != null ? String(inp.subagent_type) : undefined,
         model: inp.model != null ? String(inp.model) : undefined,
         background: inp.background != null ? Boolean(inp.background) : undefined

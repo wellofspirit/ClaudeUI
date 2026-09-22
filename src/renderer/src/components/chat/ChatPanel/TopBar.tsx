@@ -11,6 +11,7 @@ import {
 import { BRANCH_MARK, GitBranchPill, useBranchPillName } from '../../git/GitBranchPill'
 import { GitBranchDropdown } from '../../git/GitBranchDropdown'
 import { GitChangesPill } from '../../git/GitChangesPill'
+import { AgentPill } from '../../agents/AgentPill'
 import { AuthPillSlot } from '../AuthPill'
 import { useEscapeLayer } from '../../shared/use-escape-layer'
 import {
@@ -1073,6 +1074,12 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
           <div className={`contents ${TIER1_HIDE}`}>
             <GitBranchPill />
           </div>
+          {/* Never dropped, for the same reason the changes pill is not: each is
+              a panel's only entry point. The agent pill also has no ⋯ row - a
+              menu row is the exact complement of a bar form, and this one has
+              no width at which it disappears. It self-hides in a session that
+              has spawned no agents (ADR-073). */}
+          <AgentPill />
           {/* Never dropped: the changes pill doubles as the git-panel entry
               point (MobileGitView) and self-hides outside a git repo. */}
           <GitChangesPill />

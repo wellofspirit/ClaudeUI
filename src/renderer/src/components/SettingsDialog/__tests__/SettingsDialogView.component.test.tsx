@@ -201,6 +201,7 @@ describe('the rail accordion', () => {
     expect(screen.getAllByTestId('SettingsGroup').map((el) => el.dataset.id)).toEqual([
       'theme',
       'layout',
+      'agents',
       'diff',
       'status-line',
       'git-panel'
@@ -217,6 +218,7 @@ describe('the rail accordion', () => {
     expect(screen.getAllByTestId('SettingsDialog.railSub').map((el) => el.dataset.id)).toEqual([
       'theme',
       'layout',
+      'agents',
       'diff',
       'status-line',
       'git-panel'
@@ -352,6 +354,7 @@ describe('the page pane', () => {
     expect(screen.getAllByTestId('SettingsGroup').map((el) => el.dataset.id)).toEqual([
       'theme',
       'layout',
+      'agents',
       'diff',
       'status-line',
       'git-panel'

@@ -424,6 +424,34 @@ export function rekeyTargetFor(
  * "did this event change state?" answerable from the table alone.
  *
  */
+/**
+ * One terminal event per RUN. cli.js reports a run's end twice — a
+ * `task_updated` patch, which ClaudeSession forwards with an empty summary and
+ * no usage, and then the `task_notification` with the full record — and the
+ * wire does not promise that order. A second event for the same tool_use id and
+ * run index folds into the first, keeping whichever side carries the summary,
+ * output file and usage, so `latestNotification` reads a complete entry
+ * whatever arrived last (ADR-073 §4). A different run index appends: that is
+ * the resume case, and the runs must stay distinguishable.
+ */
+function foldTerminalEvent(list: TaskNotification[], next: TaskNotification): TaskNotification[] {
+  if (!next.toolUseId) return [...list, next]
+  for (let i = list.length - 1; i >= 0; i--) {
+    const prev = list[i]
+    if (prev.toolUseId !== next.toolUseId) continue
+    if (prev.runIndex !== next.runIndex) break
+    const merged: TaskNotification = {
+      ...prev,
+      ...next,
+      summary: next.summary || prev.summary,
+      outputFile: next.outputFile || prev.outputFile,
+      usage: next.usage ?? prev.usage
+    }
+    return [...list.slice(0, i), merged, ...list.slice(i + 1)]
+  }
+  return [...list, next]
+}
+
 export function applyEvent(state: CanonicalState, event: ReducerEvent): CanonicalState {
   const spec = channelSpec(event.channel)
   if (!spec || !spec.canonical) return state
@@ -1002,23 +1030,48 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
     // -----------------------------------------------------------------------
     case 'session:task-started': {
       const routingId = routingIdOf(event)
-      const data = arg<{ toolUseId?: string; taskId?: string; taskType?: string }>(event, 1)
+      const data = arg<{
+        toolUseId?: string
+        taskId?: string
+        taskType?: string
+        runIndex?: number
+      }>(event, 1)
       if (!routingId || !data?.toolUseId) return state
       const toolUseId = data.toolUseId
+      // toolUseId is the agent's ORIGIN call, normalized by ClaudeSession — so a
+      // resumed agent re-arms the record it already had rather than opening a
+      // second one under the SendMessage call's id (ADR-073).
       return withSession(state, routingId, (s) => ({
         activeTasks: {
           ...s.activeTasks,
-          [toolUseId]: { taskId: data.taskId ?? '', taskType: data.taskType ?? '' }
+          [toolUseId]: {
+            taskId: data.taskId ?? '',
+            taskType: data.taskType ?? '',
+            ...(data.runIndex !== undefined ? { runIndex: data.runIndex } : {})
+          }
         }
       }))
     }
 
     case 'session:task-progress': {
       const routingId = routingIdOf(event)
-      const progress = arg<TaskProgress>(event, 1)
+      // PARTIAL by design: two wire messages feed this channel and each knows
+      // only half the row — `tool_progress` the elapsed clock, the
+      // `system/task_progress` snapshot the usage and last tool (ADR-073).
+      // Merging is what lets a usage tick arrive without blanking the clock.
+      const progress = arg<Partial<TaskProgress> & { toolUseId?: string }>(event, 1)
       if (!routingId || !progress?.toolUseId) return state
+      const toolUseId = progress.toolUseId
+      const EMPTY_PROGRESS = { toolName: '', parentToolUseId: null, elapsedTimeSeconds: 0 }
       return withSession(state, routingId, (s) => ({
-        taskProgressMap: { ...s.taskProgressMap, [progress.toolUseId]: progress }
+        taskProgressMap: {
+          ...s.taskProgressMap,
+          [toolUseId]: {
+            ...(s.taskProgressMap[toolUseId] ?? EMPTY_PROGRESS),
+            ...progress,
+            toolUseId
+          }
+        }
       }))
     }
 
@@ -1032,7 +1085,10 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
               Object.entries(s.activeTasks).filter(([id]) => id !== notification.toolUseId)
             )
           : s.activeTasks
-        return { taskNotifications: [...s.taskNotifications, notification], activeTasks }
+        return {
+          taskNotifications: foldTerminalEvent(s.taskNotifications, notification),
+          activeTasks
+        }
       })
     }
 

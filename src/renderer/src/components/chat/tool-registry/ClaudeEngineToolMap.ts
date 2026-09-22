@@ -188,10 +188,20 @@ function claudeNormalize(
           subagent: inp.model != null ? `${inp.engine} · ${String(inp.model)}` : String(inp.engine)
         }
       }
+      // `name` is what SendMessage addresses the agent by, and the only thing
+      // that tells two siblings of the same type apart in a roster (ADR-073).
+      const subagentType =
+        inp.subagent_type != null
+          ? String(inp.subagent_type)
+          : inp.subagentType != null
+            ? String(inp.subagentType)
+            : undefined
+      const agentName = inp.name != null ? String(inp.name) : subagentType
       return {
         kind: 'task',
         description: inp.description != null ? String(inp.description) : '',
         prompt: inp.prompt != null ? String(inp.prompt) : '',
+        ...(agentName ? { name: agentName } : {}),
         // Claude uses snake_case subagent_type; fall back to camelCase for older transcripts
         subagent:
           inp.subagent_type != null

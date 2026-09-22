@@ -962,6 +962,15 @@ export interface TaskProgress {
   toolName: string
   parentToolUseId: string | null
   elapsedTimeSeconds: number
+  /**
+   * Cumulative usage for the task so far, from `system/task_progress` (§4.7).
+   * Claude-only, and only while the task is running — the terminal figure lives
+   * on `TaskNotification.usage`. Absent for every engine that reports no
+   * periodic progress.
+   */
+  usage?: { totalTokens: number; toolUses: number; durationMs: number }
+  /** The tool the task ran most recently, from `system/task_progress`. */
+  lastToolName?: string
 }
 
 /**
@@ -977,9 +986,23 @@ export interface TaskProgress {
  * falls back to the pre-existing tool_result/background-flag heuristic.
  */
 export interface TaskStartedData {
+  /**
+   * The agent's ORIGIN tool_use id — the call that first spawned it, which is
+   * the id every other subagent channel is keyed by. On a resume this is NOT
+   * the id the wire reported (see `runToolUseId`); ClaudeSession normalizes it
+   * so a resumed agent re-arms the card that spawned it (ADR-073).
+   */
   toolUseId: string
   taskId: string
   taskType: string
+  /**
+   * The tool_use id cli.js actually reported for THIS run, when it differs from
+   * the origin — i.e. the `SendMessage` call that resumed a finished agent.
+   * Absent on a first run. Carried for diagnostics; nothing keys off it.
+   */
+  runToolUseId?: string
+  /** 1-based run counter for this agent. `> 1` means it was resumed. */
+  runIndex?: number
 }
 
 export interface TaskNotification {
@@ -989,6 +1012,12 @@ export interface TaskNotification {
   outputFile: string
   summary: string
   usage?: { totalTokens: number; toolUses: number; durationMs: number }
+  /**
+   * Which run of the agent this terminal event ends (1-based). Kept on the
+   * notification as well as on the active record because `activeTasks` drops
+   * the task at terminal — this is what still knows "resumed ×2" afterwards.
+   */
+  runIndex?: number
 }
 
 export interface SubagentMessageData {

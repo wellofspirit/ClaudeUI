@@ -175,6 +175,8 @@ describe('CodexEngineToolMap — v2 sub-agent activity cards', () => {
       kind: 'task',
       description: 'Agent',
       prompt: '',
+      // The path's leaf is also the agent's roster name (ADR-073).
+      name: 'fixture_child',
       subagent: '/root/fixture_child'
     })
   })

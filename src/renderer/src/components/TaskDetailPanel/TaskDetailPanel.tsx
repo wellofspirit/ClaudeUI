@@ -1,5 +1,6 @@
-import { useMemo } from 'react'
+import { useCallback, useMemo } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
+import { useAgentRoster } from '../../hooks/useAgentRoster'
 import { findTaskBlocks } from './utils'
 import { TaskDetailPanelView, type TaskEntryDescriptor } from './View'
 
@@ -15,6 +16,8 @@ export function TaskDetailPanel({
   const openedTaskToolUseIds = useActiveSession((s) => s.openedTaskToolUseIds)
   const messages = useActiveSession((s) => s.messages)
   const closeTaskPanel = useSessionStore((s) => s.closeTaskPanel)
+  const openTaskPanel = useSessionStore((s) => s.openTaskPanel)
+  const roster = useAgentRoster()
 
   const entries = useMemo<TaskEntryDescriptor[]>(() => {
     return openedTaskToolUseIds.map((toolUseId) => {
@@ -27,13 +30,26 @@ export function TaskDetailPanel({
     })
   }, [openedTaskToolUseIds, messages])
 
-  if (!taskPanelOpen || openedTaskToolUseIds.length === 0) return null
+  const handleOpen = useCallback(
+    (toolUseId: string) => {
+      if (activeSessionId) openTaskPanel(activeSessionId, toolUseId)
+    },
+    [activeSessionId, openTaskPanel]
+  )
+
+  // Open with NO entries is a valid state now: the top-bar pill opens the
+  // roster without picking an agent, which is the whole point of having a door
+  // that does not depend on a card still being on screen (ADR-073).
+  if (!taskPanelOpen) return null
 
   return (
     <TaskDetailPanelView
       style={style}
       variant={variant}
       entries={entries}
+      roster={roster}
+      openedToolUseIds={openedTaskToolUseIds}
+      onOpenAgent={handleOpen}
       onClose={() => activeSessionId && closeTaskPanel(activeSessionId)}
     />
   )
