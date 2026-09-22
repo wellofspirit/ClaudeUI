@@ -173,6 +173,16 @@ spec that first held it did not ship (the ADR and the protocol doc are the durab
 - The transcript walk behind `useAgentRoster` is cached by message-array identity and shared by the
   three surfaces, so a streaming delta walks the transcript once, not once per surface.
 - `AgentPill` measured 81.6px; tier 1 moved 1000 → 1100 (see §2).
+- One terminal event per run in `taskNotifications`. cli.js reports a run's end twice — the
+  `task_updated` patch (forwarded with an empty summary and no usage) and then the
+  `task_notification` with the full record — and the wire does not promise that order. The reducer
+  folds a second event for the same tool_use id and run index into the first, keeping whichever
+  side has the summary, output file and usage; a different run index appends. Live verification
+  surfaced this: two agents and one resume produced six entries, correct only by arrival order.
+- Live-verified 2026-09-22 against cli.js 2.1.268 in the built Electron app: two named Haiku 4.5
+  agents spawned in parallel, then one resumed with `SendMessage`. The pill, tab, overlay and panel
+  roster, the re-armed card with `resumed ×1`, the origin-keyed `runIndex: 2` notification, and the
+  two Appearance toggles all asserted by `data-testid` before the screenshots were read.
 
 ## Consequences
 
