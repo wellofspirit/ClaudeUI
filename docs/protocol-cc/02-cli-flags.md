@@ -1,5 +1,9 @@
 # 02 — CLI flags
 
+2.1.280 partial check: `vendor/claude-cli/bun-claude.exe --help` exits 0;
+all 66 long flags in its top-level help occur in this manual. Hidden flags,
+subcommand-specific help and flag semantics have not been re-verified.
+
 Every flag cli.js accepts. Verified against 2.1.114; flag inventory re-diffed against 2.1.261 `--help` (new flags in §2.14b). Commander builder `Ft1` at char `12942893`; action handler at `~12953900`; pre-parse at `12940601`. Permission-mode enum `bG`/`g6H` at char `1007993`.
 
 > **Anchor staleness (2.1.261):** all char anchors in this doc reference the

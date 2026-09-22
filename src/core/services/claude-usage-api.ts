@@ -41,8 +41,8 @@ const USAGE_API_URL = 'https://api.anthropic.com/api/oauth/usage'
 /**
  * The refresh exchange, exactly as the PINNED cli.js performs it.
  *
- * Read out of the binary `package.json#claudeCliVersion` pins (2.1.268,
- * `.cache/claude-cli/claude-2.1.268-win32-x64.exe`) with:
+ * Read out of the binary `package.json#claudeCliVersion` pins (2.1.280,
+ * `.cache/claude-cli/claude-2.1.280-win32-x64.exe`) with:
  *
  *     grep -a -o 'CLIENT_ID:"[^"]*"' <binary>
  *     grep -a -o 'TOKEN_URL:"[^"]*"' <binary>

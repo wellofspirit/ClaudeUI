@@ -61,7 +61,8 @@ function findBinary(): string | null {
 /** Read-only check for a real openai-codex credential — never writes to auth.json. */
 function hasCodexCredentials(): boolean {
   try {
-    const raw = readFileSync(join(homedir(), '.pi', 'agent', 'auth.json'), 'utf-8')
+    const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent')
+    const raw = readFileSync(join(agentDir, 'auth.json'), 'utf-8')
     const parsed = JSON.parse(raw) as Record<string, unknown>
     return Boolean(parsed['openai-codex'])
   } catch {

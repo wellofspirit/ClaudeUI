@@ -319,8 +319,8 @@ describe('modelDefaultThinkingMode', () => {
 
 describe('canonicalizeModelValue', () => {
   it('maps known aliases to current canonical ids (mirrors cli.js alias map, 2.1.261)', () => {
-    expect(canonicalizeModelValue('opus')).toBe('claude-opus-5')
-    expect(canonicalizeModelValue('opus[1m]')).toBe('claude-opus-5')
+    expect(canonicalizeModelValue('opus')).toBe('claude-opus-5-5')
+    expect(canonicalizeModelValue('opus[1m]')).toBe('claude-opus-5-5')
     expect(canonicalizeModelValue('sonnet')).toBe('claude-sonnet-5')
     expect(canonicalizeModelValue('sonnet[1m]')).toBe('claude-sonnet-5')
     expect(canonicalizeModelValue('haiku')).toBe('claude-haiku-4-5')

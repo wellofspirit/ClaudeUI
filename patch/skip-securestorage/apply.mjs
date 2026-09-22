@@ -123,7 +123,12 @@ const composerLit = composer.replace(/[$]/g, '\\$&') // escape $ for regex
 const siteRe = new RegExp(
   `function (${V})\\(\\)\\{([^{}]*?${composerLit}\\((${V}),(${V})\\)[^{}]*?)\\}`
 )
-const matches = [...src.matchAll(new RegExp(siteRe, 'g'))]
+const matches = [...src.matchAll(new RegExp(siteRe, 'g'))].filter(
+  (m) =>
+    m[2].includes('return ' + composer + '(') &&
+    m[2].includes('return ' + m[4]) &&
+    /(?:CREDMAN|credman)/.test(src.slice(Math.max(0, m.index - 600), m.index + 200))
+)
 if (matches.length !== 1) {
   console.error(`ERROR: expected exactly 1 store-getter match, found ${matches.length}. Aborting.`)
   process.exit(1)
@@ -134,7 +139,10 @@ if (matches.length !== 1) {
 // are NOT re-interpreted by replace(), so no escaping is needed.
 const replacement = `function $1(){${MARKER}if(process.env.SKIP_SECURESTORAGE)return $4;$2}`
 
-src = src.replace(siteRe, replacement)
+src =
+  src.slice(0, matches[0].index) +
+  matches[0][0].replace(siteRe, replacement) +
+  src.slice(matches[0].index + matches[0][0].length)
 
 writeFileSync(cliPath, src, 'utf-8')
 const m = matches[0]

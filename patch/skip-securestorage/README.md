@@ -281,3 +281,7 @@ ClaudeUI sets `SKIP_SECURESTORAGE=1` (and per-account `CLAUDE_SECURESTORAGE_CONF
 | `README.md` | This document            |
 | `apply.mjs` | Patch script             |
 | `test.mjs`  | Behavioural test harness |
+
+## 2.1.280 maintenance note
+
+2.1.280: The composer `U(primary,fallback)` has three zero-arg callers. The actual getter has a credman gate and both `return U(...)` and `return <fallback>`; filter candidates and splice by the selected offset, not a first-match replace. Find `"CLAUDE_CODE_FORCE_WINDOWS_CREDMAN"` via bundle-analyzer.

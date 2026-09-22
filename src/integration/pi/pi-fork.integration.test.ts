@@ -58,7 +58,8 @@ function findBinary(): string | null {
 /** Read-only check for a real openai-codex credential — never writes to auth.json. */
 function hasCodexCredentials(): boolean {
   try {
-    const raw = readFileSync(join(homedir(), '.pi', 'agent', 'auth.json'), 'utf-8')
+    const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent')
+    const raw = readFileSync(join(agentDir, 'auth.json'), 'utf-8')
     const parsed = JSON.parse(raw) as Record<string, unknown>
     return Boolean(parsed['openai-codex'])
   } catch {
@@ -99,6 +100,8 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
     let firstUserEntryId: string
     let secondUserEntryId: string
     let sourceHashBaseline: string
+    let sourceMessages: Array<{ role: string }>
+    let secondUserIndex: number
 
     beforeAll(async () => {
       const binary = findBinary()!
@@ -131,6 +134,14 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
       sourceSessionId = state.data!.sessionId as string
       sourceFile = state.data!.sessionFile as string
 
+      const transcript = await send({ type: 'get_messages' })
+      expect(transcript.success).toBe(true)
+      sourceMessages = transcript.data!.messages as Array<{ role: string }>
+      expect(
+        sourceMessages.filter((message) => message.role !== 'system').map((message) => message.role)
+      ).toEqual(['user', 'assistant', 'user', 'assistant'])
+      secondUserIndex = sourceMessages.findLastIndex((message) => message.role === 'user')
+
       const forkMessages = await send({ type: 'get_fork_messages' })
       expect(forkMessages.success).toBe(true)
       const messages =
@@ -150,6 +161,8 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
     }, 180_000)
 
     afterAll(async () => {
+      sourceClient?.dispose()
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
       if (tmpDir) rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
     })
 
@@ -196,8 +209,12 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
           const forkedState = await send({ type: 'get_state' })
           expect(forkedState.success).toBe(true)
           expect(forkedState.data!.sessionId).not.toBe(sourceSessionId)
-          // Only the first turn (1 user + 1 assistant message) survives.
-          expect(forkedState.data!.messageCount).toBe(2)
+          // 0.87.1 also persists system messages. Prove exact truncation,
+          // including those messages, instead of assuming a fixed role count.
+          const transcript = await send({ type: 'get_messages' })
+          expect(transcript.success).toBe(true)
+          expect(transcript.data!.messages).toEqual(sourceMessages.slice(0, secondUserIndex))
+          expect(forkedState.data!.messageCount).toBe(secondUserIndex)
 
           const filesAfter = listSessionFiles(tmpDir)
           const newFiles = filesAfter.filter((f) => !filesBefore.includes(f))
@@ -234,8 +251,11 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
           const clonedState = await send({ type: 'get_state' })
           expect(clonedState.success).toBe(true)
           expect(clonedState.data!.sessionId).not.toBe(sourceSessionId)
-          // Both turns survive — clone duplicates the FULL active branch.
-          expect(clonedState.data!.messageCount).toBe(4)
+          // Clone duplicates the full active branch, including system messages.
+          const transcript = await send({ type: 'get_messages' })
+          expect(transcript.success).toBe(true)
+          expect(transcript.data!.messages).toEqual(sourceMessages)
+          expect(clonedState.data!.messageCount).toBe(sourceMessages.length)
 
           const filesAfter = listSessionFiles(tmpDir)
           const newFiles = filesAfter.filter((f) => !filesBefore.includes(f))

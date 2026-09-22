@@ -56,6 +56,15 @@ describe('equivalentCostUsd — anthropic pricing', () => {
     expect(cost).toBeCloseTo(5.0)
   })
 
+  it('opus-5-5: input/output/cache tier mirrors cli.js 2.1.280', () => {
+    const cost = equivalentCostUsd(
+      'anthropic',
+      'claude-opus-5-5',
+      oneMTok({ inputTokens: 1_000_000, outputTokens: 1_000_000, cacheReadTokens: 1_000_000 })
+    )
+    expect(cost).toBeCloseTo(24.2)
+  })
+
   it('opus-4 (classic): input rate = $15/MTok', () => {
     const cost = equivalentCostUsd(
       'anthropic',
@@ -735,6 +744,7 @@ describe('ANTHROPIC_MODEL_PRICING (the view block-usage derives from)', () => {
       'opus-4-7',
       'opus-4-8',
       'opus-4',
+      'opus-5-5',
       'opus',
       'sonnet',
       'haiku-4',

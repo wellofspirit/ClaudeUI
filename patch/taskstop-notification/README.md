@@ -264,3 +264,7 @@ bundle-analyzer find cli.js "was stopped by Claude" --compact
 | `README.md` | This document                                                        |
 | `apply.mjs` | Patch/detection script (currently a no-op detector on 2.1.198)       |
 | `test.mjs`  | End-to-end behavioral test against the rebundled `bun-claude` binary |
+
+## 2.1.280 maintenance note
+
+2.1.280: TaskStop calls `hme`, whose transition-gated notification is `if(r.update(C,(he)=>{if(he.notified)return he;return ue=!0,{...he,notified:!0}}),ue)ii(C,"stopped",{toolUseId:w.toolUseId,summary:w.description})`. The patch detects this upstream fix instead of injecting a second notification. It resolves the stopped helper from TaskStop's `await <helper>(taskId,{taskRegistry:...})` call and only searches that bounded helper body (not the entire bundle), requiring its kill and app-state path too. Find `"Successfully stopped task:"` and `"notified:!0"` via bundle-analyzer.

@@ -26,6 +26,9 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
+const require = createRequire(import.meta.url)
+const { parseExpressionAt } = require('acorn')
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const projectRoot = resolve(__dirname, '../..')
@@ -771,18 +774,14 @@ for (const [anchorLabel, findAnchor] of genericAnchorFinders) {
     const parenIdx = src.indexOf('(', i)
     const braceIdx = src.indexOf('{', parenIdx)
     if (parenIdx === -1 || braceIdx === -1 || braceIdx > anchorIdx) continue
-    let depth = 0
     let end = -1
-    for (let j = braceIdx; j < src.length; j++) {
-      const ch = src[j]
-      if (ch === '{') depth++
-      else if (ch === '}') {
-        depth--
-        if (depth === 0) {
-          end = j
-          break
-        }
-      }
+    // Parse the function itself: raw brace counting misidentifies nested
+    // template/regex/quoted braces as the function's closing brace.
+    try {
+      const parsed = parseExpressionAt(src, i, { ecmaVersion: 'latest' })
+      if (parsed.type === 'FunctionExpression') end = parsed.end - 1
+    } catch {
+      continue
     }
     if (end > anchorIdx) {
       fnStart = i
@@ -1539,7 +1538,11 @@ if (!shape) {
   }
 } // end version ladder
 
-src = src.replace(full, newFn)
+const replaceAt = src.indexOf(full)
+if (replaceAt < 0 || src.indexOf(full, replaceAt + 1) !== -1) {
+  throw Error('env-builder replacement is absent or ambiguous')
+}
+src = src.slice(0, replaceAt) + newFn + src.slice(replaceAt + full.length)
 console.log(`Wrapped every return with proxy-strip helper (${shape} shape)`)
 
 // ---------------------------------------------------------------------------

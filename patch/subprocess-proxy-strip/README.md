@@ -610,3 +610,7 @@ function Pi() {
 | `README.md` | This document                                                                       |
 | `apply.mjs` | Patch script — generic anchor path first, legacy `fnReV114`…`fnReV198` ladder after |
 | `test.mjs`  | Behavioral harness (spawns the REAL rebundled `bun-claude`; needs the main repo)    |
+
+## 2.1.280 maintenance note
+
+2.1.280: Raw brace counting on the OTEL_ anchor truncated `Zs()` inside nested syntax and broke the chunk at `if(T===Mfunction Zs()`. Parse its function expression with Acorn instead. String.replace with a replacement containing minified `$` names also performed substitution; splice by exact offset. Always use rebundle-cli per-chunk syntax verification.

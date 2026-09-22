@@ -1,5 +1,7 @@
 # pi wire protocol — verified integration notes
 
+Current pin: **0.87.1** ([stable release](https://github.com/earendil-works/pi/releases/tag/v0.87.1)). The dated 0.84.3 findings below are historical probes, not fresh verification of every behavior on 0.87.1. On Windows, all 13 gated pi integration tests passed, including live approval, hosted tools, subagents, dispatch, fork and clone. The run used an isolated `PI_CODING_AGENT_DIR`, an explicit `openai-codex/gpt-5.6-luna` model entry, and a credential command that supplied the active vault access token over a pipe without copying tokens to disk or refreshing them. The credential gates now honor `PI_CODING_AGENT_DIR`. Pi 0.87.1 persists system messages; fork/clone tests compare the complete expected transcript rather than assuming only user/assistant messages contribute to `messageCount`.
+
 How ClaudeUI drives the [pi coding agent](https://github.com/earendil-works/pi) and what we
 verified against the real binary. Everything here was probed on Windows against the pinned
 standalone build (`package.json#piCliVersion`). The **authoritative protocol reference for the

@@ -731,22 +731,9 @@ it.skipIf(!enabled)(
 
     // ---- the override is not a WRITE ---------------------------------------
     const after = readFileSync(fixture.configPath, 'utf8')
-    // Not `toBe(before)`: the BINARY appends its own `[projects."<cwd>"]
-    // trust_level = "trusted"` block the first time it opens a directory
-    // (recorded 2026-09-16), which is the user's own state and none of this
-    // slice's business. What must hold is that everything the fixture wrote is
-    // still there byte for byte and that nothing was flipped off in the file —
-    // an override is a per-thread overlay, not an edit.
-    expect(after.startsWith(before), 'config.toml was rewritten, not appended to').toBe(true)
-    expect(
-      after.slice(before.length).trim(),
-      'something other than the trust block was appended'
-    ).toMatch(/^\[projects\.[^\]]+\]\s*\ntrust_level = "trusted"$/)
-    // (The two assertions above are the whole statement: everything the fixture
-    // wrote survives byte for byte and the ONLY addition is the binary's trust
-    // block, so no `enabled = false` and no feature key was written by us. A
-    // blanket `not.toContain('enabled = false')` would be wrong here — the
-    // fixture's own `[analytics]` and `[feedback]` tables carry that text.)
+    // Since 0.156.0, Codex does not persist trust for this projectless cwd.
+    // The per-thread override must leave the user's config byte-identical.
+    expect(after, 'the thread override mutated config.toml').toBe(before)
     service = new CodexService({
       cwd: fixture.cwd,
       env: fixture.env,

@@ -69,7 +69,7 @@ function frame(value: unknown): void {
 async function start(options: Partial<CodexClientOptions> = {}): Promise<void> {
   client = new CodexAppServerClient({ cwd: '/isolated', onDisconnect: disconnect, ...options })
   const promise = client.start(init)
-  version.stdout.write('codex-cli 0.154.0\n')
+  version.stdout.write('codex-cli 0.156.0\n')
   version.emit('close', 0)
   await ticks()
   expect(writes[0]).toMatchObject({ id: 0, method: 'initialize' })
@@ -210,7 +210,7 @@ describe('Codex JSONL client', () => {
     client = new CodexAppServerClient({ cwd: '/isolated', onDisconnect: disconnect })
     const promise = client.start(init)
     const rejection = expect(promise).rejects.toMatchObject({ code: 'write-error' })
-    version.stdout.write('codex-cli 0.154.0\n')
+    version.stdout.write('codex-cli 0.156.0\n')
     version.emit('close', 0)
     await ticks()
     expect(writes).toEqual([{ id: 0, method: 'initialize', params: init }])
@@ -269,7 +269,7 @@ describe('Codex JSONL client', () => {
     client = new CodexAppServerClient({ cwd: '/isolated', onDisconnect: disconnect })
     const promise = client.start(init)
     const rejection = expect(promise).rejects.toMatchObject({ code: 'process-exited' })
-    version.stdout.write('codex-cli 0.154.0\n')
+    version.stdout.write('codex-cli 0.156.0\n')
     version.emit('close', 0)
     await ticks()
     app.emit('exit', 0)
@@ -511,7 +511,7 @@ describe('Codex JSONL client', () => {
     client = new CodexAppServerClient({ cwd: '/isolated', onDisconnect: disconnect })
     const promise = client.start(init)
     const rejection = expect(promise).rejects.toMatchObject({ code: 'spawn-failed' })
-    version.stdout.write('codex-cli 0.154.0\n')
+    version.stdout.write('codex-cli 0.156.0\n')
     version.emit('close', 0)
     await ticks()
     app.emit('error', new Error('private-path'))
@@ -586,7 +586,7 @@ describe('ChatGPT token injection', () => {
     typed = new CodexClient({ cwd: '/isolated', onDisconnect: disconnect })
     const started = typed.start(init, auth)
     void started.catch(() => {})
-    version.stdout.write('codex-cli 0.154.0\n')
+    version.stdout.write('codex-cli 0.156.0\n')
     version.emit('close', 0)
     await ticks()
     frame({ id: 0, result: initialized })
@@ -927,7 +927,7 @@ describe('first app-server on a Codex home with no state database', () => {
     // unhandled rejection in a test that never awaited it.
     ready.catch(() => {})
     const probe = versions[versions.length - 1]
-    probe.stdout.write('codex-cli 0.154.0\n')
+    probe.stdout.write('codex-cli 0.156.0\n')
     probe.emit('close', 0)
     return { client, ready }
   }

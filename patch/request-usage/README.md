@@ -195,3 +195,7 @@ Type: `RequestUsageMessage` in `src/main/sdk/types.ts` (`{ type:'request_usage',
 | ----------- | ------------- |
 | `README.md` | This document |
 | `apply.mjs` | Patch script  |
+
+## 2.1.280 maintenance note
+
+2.1.280: `case"stream_event"` now merges message_start and message_delta into `Ln`, with `message_stop` finalizing `Ze=x_t(Ze,Ln)`. The patch captures event, accumulator, merge and turn variables structurally from one bounded branch; requires both branches of the upstream conditional delta merge to update that same accumulator and checks its declaration is in the enclosing turn; emits at the stop boundary and holds the model in a per-turn local updated at every message_start. `node patch/request-usage/anchor.test.mjs` exercises minified `$` identifiers and absent/ambiguous anchors on temporary files, never the vendor bundle. The localhost SSE contract test asserts usage/model for two **separate query sessions** with different response models; it does not exercise same-turn retries. Find `"message_stop"` via bundle-analyzer.

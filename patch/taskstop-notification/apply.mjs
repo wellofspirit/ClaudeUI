@@ -216,6 +216,20 @@ console.log('\n--- Part B: Inject notification call into TaskStop ---')
 
 const patchBMarker = '/*PATCHED:taskstop-notification-B*/'
 
+function stoppedHelper(text) {
+  const anchor = text.indexOf('Successfully stopped task:')
+  if (anchor < 0) return ''
+  const call = text
+    .slice(Math.max(0, anchor - 500), anchor)
+    .match(new RegExp(`let ${V}=await (${V})\\(${V},\\{taskRegistry:`))
+  if (!call) return ''
+  const signature = `async function ${call[1]}(`
+  const start = text.indexOf(signature)
+  if (start < 0 || text.indexOf(signature, start + 1) !== -1) return ''
+  const end = text.indexOf('async function ', start + signature.length)
+  return end < 0 ? '' : text.slice(start, end)
+}
+
 if (src.includes(patchBMarker)) {
   console.log('Already applied. Skipping.')
 } else {
@@ -244,7 +258,17 @@ if (src.includes(patchBMarker)) {
     `notified:!0[\\s\\S]{1,300}?` + `(${V})\\(${V},"stopped",\\{toolUseId:`
   )
 
-  if (wideContext.match(upstreamNotifyRe)) {
+  // 2.1.280 marks notified via registry.update and emits only on transition.
+  const registryNotifyRe =
+    /if\(([\w$]+)\.update\(([\w$]+),\(([\w$]+)\)=>\{if\(\3\.notified\)return \3;return [\s\S]{1,100}?notified:!0\}\}\),([\w$]+)\)([\w$]+)\(\2,"stopped",\{toolUseId:/
+  const helperBody = stoppedHelper(src)
+  const registryNotifyMatch = helperBody.match(registryNotifyRe)
+  const registryNotifyUpstreamed =
+    helperBody.length < 8000 &&
+    !!registryNotifyMatch &&
+    helperBody.includes('setAppState:') &&
+    helperBody.includes('.kill(')
+  if (wideContext.match(upstreamNotifyRe) || registryNotifyUpstreamed) {
     console.log('Upstreamed in this SDK version (rx8 calls cN with "stopped"). Skipping.')
   } else {
     // Legacy path for older SDK versions
@@ -392,7 +416,15 @@ const partAOk =
 const partBUpstreamed = new RegExp(
   `notified:!0[\\s\\S]{1,300}?` + `[\\w$]+\\([\\w$]+,"stopped",\\{toolUseId:`
 ).test(verify)
-const partBOk = verify.includes(patchBMarker) || partBUpstreamed
+const verifyHelperBody = stoppedHelper(verify)
+const registryNotifyVerified =
+  /if\(([\w$]+)\.update\(([\w$]+),\(([\w$]+)\)=>\{if\(\3\.notified\)return \3;return [\s\S]{1,100}?notified:!0\}\}\),([\w$]+)\)([\w$]+)\(\2,"stopped",\{toolUseId:/.test(
+    verifyHelperBody
+  ) &&
+  verifyHelperBody.length < 8000 &&
+  verifyHelperBody.includes('setAppState:') &&
+  verifyHelperBody.includes('.kill(')
+const partBOk = verify.includes(patchBMarker) || partBUpstreamed || registryNotifyVerified
 
 console.log(
   `  ${partAOk ? 'OK' : 'MISSING'} Part A: killed → stopped mapping ${verify.includes(patchAMarker) ? '(patched)' : '(upstreamed)'}`
