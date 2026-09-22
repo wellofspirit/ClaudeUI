@@ -235,7 +235,51 @@ describe('loadOpencodeSessionHistory (HTTP, global-by-id)', () => {
 
   it('has no status line to paint when the session stored no messages', async () => {
     mockListMessages.mockResolvedValue([])
-    expect(await loadOpencodeSessionHistory('ses_a')).toEqual({ messages: [], statusLine: null })
+    expect(await loadOpencodeSessionHistory('ses_a')).toEqual({
+      messages: [],
+      statusLine: null,
+      lastModel: null
+    })
+  })
+
+  // R1b — a session opencode created on its own has no model persisted on our
+  // side, so the transcript's last assistant message is where the reopened
+  // session's model comes from.
+  it('names the model the LAST assistant message answered on', async () => {
+    mockListMessages.mockResolvedValue([
+      {
+        info: {
+          id: 'm1',
+          role: 'assistant',
+          providerID: 'openai',
+          modelID: 'gpt-old',
+          time: { created: 1, completed: 2 }
+        },
+        parts: []
+      },
+      {
+        info: {
+          id: 'm2',
+          role: 'assistant',
+          providerID: 'alicloud',
+          modelID: 'qwen-x',
+          time: { created: 3, completed: 4 }
+        },
+        parts: []
+      }
+    ])
+
+    const { lastModel } = await loadOpencodeSessionHistory('ses_a')
+    expect(lastModel).toEqual({ engineId: 'opencode', vendorId: 'alicloud', modelId: 'qwen-x' })
+  })
+
+  it('names no model when the transcript has no assistant message', async () => {
+    mockListMessages.mockResolvedValue([
+      { info: { id: 'm1', role: 'user', time: { created: 1 } }, parts: [] }
+    ])
+
+    const { lastModel } = await loadOpencodeSessionHistory('ses_a')
+    expect(lastModel).toBeNull()
   })
 })
 

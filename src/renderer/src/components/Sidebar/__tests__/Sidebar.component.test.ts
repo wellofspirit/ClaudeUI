@@ -364,6 +364,95 @@ describe('Sidebar FC', () => {
     expect(useSessionStore.getState().sessions['oc-dead'].statusLine).toBeNull()
   })
 
+  // R1b — a session opencode (or pi) created on its own has no model persisted
+  // here, so the transcript's last model is what the reopened session runs on.
+  const QWEN = { engineId: 'opencode' as const, vendorId: 'alicloud', modelId: 'qwen-x' }
+
+  it("seeds an unseen opencode session's model from the transcript", async () => {
+    app.bridge.ipcMain.handle('session:load-opencode-history', async () => ({
+      messages: [],
+      statusLine: null,
+      lastModel: QWEN
+    }))
+
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      viewProps.onClickSession({ ...makeSessionInfo('oc-model'), engineId: 'opencode' })
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    const state = useSessionStore.getState()
+    expect(state.sessionEngines['oc-model']).toEqual({ engineId: 'opencode', model: QWEN })
+    // …and `loadHistoricalSession` restores it onto the session from there.
+    expect(state.sessions['oc-model'].selectedModel).toBe('alicloud/qwen-x')
+  })
+
+  it('never overwrites a model already persisted for the session', async () => {
+    const MINE = { engineId: 'opencode' as const, vendorId: 'anthropic', modelId: 'my-pick' }
+    useSessionStore.setState({
+      sessionEngines: { 'oc-kept': { engineId: 'opencode', model: MINE } }
+    })
+    app.bridge.ipcMain.handle('session:load-opencode-history', async () => ({
+      messages: [],
+      statusLine: null,
+      lastModel: QWEN
+    }))
+
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      viewProps.onClickSession({ ...makeSessionInfo('oc-kept'), engineId: 'opencode' })
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(useSessionStore.getState().sessionEngines['oc-kept'].model).toEqual(MINE)
+  })
+
+  it("seeds an unseen pi session's model from the transcript", async () => {
+    const PI_MODEL = { engineId: 'pi' as const, vendorId: 'alicloud', modelId: 'qwen-x' }
+    app.bridge.ipcMain.handle('session:load-pi-history', async () => ({
+      messages: [],
+      statusLine: null,
+      lastModel: PI_MODEL
+    }))
+
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      viewProps.onClickSession({ ...makeSessionInfo('pi-model'), engineId: 'pi' })
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(useSessionStore.getState().sessionEngines['pi-model']).toEqual({
+      engineId: 'pi',
+      model: PI_MODEL
+    })
+  })
+
+  it('leaves the model unset when the transcript names none', async () => {
+    app.bridge.ipcMain.handle('session:load-opencode-history', async () => ({
+      messages: [],
+      statusLine: null,
+      lastModel: null
+    }))
+
+    await act(async () => {
+      await renderFC()
+    })
+    await act(async () => {
+      viewProps.onClickSession({ ...makeSessionInfo('oc-nomodel'), engineId: 'opencode' })
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(useSessionStore.getState().sessionEngines['oc-nomodel']).toEqual({
+      engineId: 'opencode'
+    })
+  })
+
   // -------------------------------------------------------------------------
   // 5. onPin / onUnpin — store mutations
   // -------------------------------------------------------------------------

@@ -3514,6 +3514,14 @@ export interface ModelCostEntry {
 export interface EngineHistoryLoad {
   messages: ChatMessage[]
   statusLine: StatusLineData | null
+  /**
+   * The model the transcript's LAST assistant message names, or null when it
+   * names none. A session created outside this app has no persisted model
+   * entry, so without this it reopens on the configured default — a model it
+   * never ran and will not resume on. Null/absent leaves the existing
+   * fallback in place.
+   */
+  lastModel?: ModelRef | null
 }
 
 /**
