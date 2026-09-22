@@ -32,11 +32,11 @@ started that run** — the `Agent` call for run 1, the `SendMessage` call for ru
 
 The child's own output is split between the two ids, which is where the visible bug comes from:
 
-| run 2 signal | carries the tool_use_id of |
-| --- | --- |
-| `task_started` / `task_updated` / `task_notification` | the SendMessage call |
-| `stream_event` partials (item streams) | the SendMessage call |
-| the completed `assistant` message | **the original Agent call** |
+| run 2 signal                                          | carries the tool_use_id of  |
+| ----------------------------------------------------- | --------------------------- |
+| `task_started` / `task_updated` / `task_notification` | the SendMessage call        |
+| `stream_event` partials (item streams)                | the SendMessage call        |
+| the completed `assistant` message                     | **the original Agent call** |
 
 So today: `activeTasks` is armed under the SendMessage id, which renders as a `detail` card and shows
 no running state; `TaskCard`'s `overlayItemStreams(subagentMsgs[id], itemStreams, id)` looks up the
@@ -111,8 +111,10 @@ One `useAgentRoster()` selector, one row component, three placements:
 The pill is **never dropped** by the tier system, for the same reason `GitChangesPill` is not: it is
 a panel's only entry point. It therefore has no `⋯` row — the bar's rule is that a menu row is the
 exact complement of the bar form, one row per control, never two. Adding it raises the never-dropped
-floor by roughly 110px, which moves tier 1's threshold from 1000 to about 1110;
-`src/layout/TopBar.layout.test.tsx` re-measures. The post-tier-2 floor stays far below the 768px
+floor by a measured 93.6px (`AgentPill` 81.6 + its gap), which moved tier 1's threshold from 1000
+to 1100. That was measured on 2026-09-21 by the Chromium layout harness the repository had at the
+time; the harness was removed with its CI job on 2026-09-22, so the comment block in
+`top-bar-tiers.ts` is now the record of the numbers. The post-tier-2 floor stays far below the 768px
 mobile breakpoint, so the five tools keep dropping before the pill does, which is the ordering the
 owner asked for.
 
@@ -151,8 +153,9 @@ a `task_progress` tick does not re-scan a long transcript once per agent per tic
 - A resumed agent re-arms its own card, streams into it live, and reports the run that actually
   finished. The fix lands once, at the extraction seam, rather than in each view.
 - "Is anything running?" is answerable without scrolling, from a surface that cannot scroll away.
-- The top bar's measured tier thresholds move for the first time since ADR-070; the layout test is
-  the record of that, as before.
+- The top bar's measured tier thresholds move for the first time since ADR-070. The measuring
+  harness no longer exists, so the record is the comment block in `top-bar-tiers.ts`; the next
+  never-dropped control will need a one-off measurement the same way.
 - `originByTaskId` grows by one entry per agent per session and is never pruned within a session.
   That is bounded by how many agents a session spawns and is not worth an eviction policy; it is
   cleared with the session.

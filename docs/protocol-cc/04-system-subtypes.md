@@ -280,11 +280,11 @@ already reached a terminal `task_notification` **restarts it, and the full lifec
 
 The resumed child's own output is **split across both ids**, which is the trap:
 
-| run 2 signal | carries the tool_use_id of |
-| --- | --- |
-| `task_started` / `task_updated` / `task_notification` | the SendMessage call |
-| `stream_event` partials | the SendMessage call |
-| the completed `assistant` message | **the original Agent call** |
+| run 2 signal                                          | carries the tool_use_id of  |
+| ----------------------------------------------------- | --------------------------- |
+| `task_started` / `task_updated` / `task_notification` | the SendMessage call        |
+| `stream_event` partials                               | the SendMessage call        |
+| the completed `assistant` message                     | **the original Agent call** |
 
 A consumer that keys subagent state by `tool_use_id` (as ClaudeUI does) must therefore map each
 run's id back to the agent's ORIGIN tool_use id via `task_id`, and must not evict that mapping on a
