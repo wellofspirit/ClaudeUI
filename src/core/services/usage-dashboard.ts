@@ -24,6 +24,16 @@
  *    gaps to interpret. The `today` range adds an HOURLY series beside the
  *    daily one, which needs no such grouping: an hour of the ledger is already
  *    a column.
+ *
+ * THE COMBINED SCOPE (ADR-072 §3, slice S5c) adds one more bounded read —
+ * `remote_usage_bucket`, the other machines' hours as the last pull left them —
+ * and folds those rows through THE SAME loop. Nothing downstream re-derives a
+ * combined figure: every existing equality (a breakdown root equals its provider
+ * subtotal equals its share of the hero) holds because there is still one fold,
+ * and the only thing the device id adds is which side of `localUsd` /
+ * `remoteUsd` a bucket's dollars land on. The hub never returns the calling
+ * device's own rows and the client drops them if it does, so no hour is counted
+ * twice.
  */
 
 import type {
@@ -32,16 +42,27 @@ import type {
   DashboardAccount,
   DashboardDay,
   DashboardHour,
+  DashboardMachine,
+  DashboardMachineAccount,
   DashboardModel,
   DashboardProvider,
   DashboardRange,
+  DashboardScope,
   UsageDashboardData
 } from '../../shared/types'
 import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
 import { providerIdForBucket, providerLabel } from '../../shared/provider-label'
-import { getUsageBucketsSince, latestAccountLabels, type UsageBucketRow } from './db'
+import {
+  getRemoteUsageBucketsSince,
+  getUsageBucketsSince,
+  latestAccountLabels,
+  listRemoteDevices,
+  type UsageBucketRow
+} from './db'
 import { bucketDisplayCostUsd, floorToHour } from './usage-aggregation'
 import { readAccountLimits } from './usage-provider'
+import { getHubConfig } from './usage-hub/config'
+import { deviceAppVersion, deviceOs, storedDeviceId } from './usage-hub/device'
 import { logger } from './logger'
 
 const MS_PER_HOUR = 60 * 60 * 1000
@@ -80,6 +101,20 @@ const RANGE_KEYS: ReadonlySet<string> = new Set(Object.keys(RANGE_DAYS))
 const DEFAULT_RANGE: DashboardRange = '30d'
 
 /**
+ * What a caller that names no scope means. `local` for the same reason the
+ * renderer's stored scope falls back to it: the combined view is an opt-in that
+ * only exists once a hub is configured, and answering `all` by default would
+ * silently change what every existing reader of this channel is shown.
+ */
+const DEFAULT_SCOPE: DashboardScope = 'local'
+
+const SCOPE_KEYS: ReadonlySet<string> = new Set<DashboardScope>(['local', 'all'])
+
+function isDashboardScope(value: unknown): value is DashboardScope {
+  return typeof value === 'string' && SCOPE_KEYS.has(value)
+}
+
+/**
  * How long the limits providers' labels are reused for.
  *
  * The read is local and cheap (`refresh: false` spends no refresh grant and
@@ -93,6 +128,14 @@ const LIMITS_LABEL_TTL_MS = 60_000
 
 /** What the `unknown` account is called — the history that predates attribution. */
 const UNATTRIBUTED_LABEL = 'Unattributed (before attribution)'
+
+/**
+ * The separator every composite grouping key is joined with.
+ *
+ * NUL, because engine, vendor, model and account ids are all free strings and a
+ * separator any of them could contain would merge two rows that are not one.
+ */
+const KEY_SEP = '\u0000'
 
 // ---------------------------------------------------------------------------
 // Local calendar days
@@ -178,8 +221,28 @@ function addDispatched(current: CostTotals | null, bucket: UsageBucketRow): Cost
 // Account labels
 // ---------------------------------------------------------------------------
 
-/** The last limits read, reused for {@link LIMITS_LABEL_TTL_MS}. Process-local. */
-let limitsLabelCache: { readAt: number; labels: Map<string, string> } | null = null
+/**
+ * The last limits read, reused for {@link LIMITS_LABEL_TTL_MS}. Process-local.
+ *
+ * Keyed by SCOPE: the two scopes read different sources (`local` reads no
+ * `remote_*` table at all), so one cache would let whichever scope asked first
+ * answer for the other.
+ */
+const limitsLabelCache = new Map<DashboardScope, { readAt: number; labels: LimitsLabels }>()
+
+/**
+ * The two kinds of name a limits reading can give an account.
+ *
+ * Separate maps rather than one, because they rank differently against the
+ * ledger's own label: a name this machine READ beats it, and a name the hub
+ * MASKED loses to it.
+ */
+interface LimitsLabels {
+  /** Names this machine read for itself. */
+  own: Map<string, string>
+  /** `d•••@e•••.com` — as much as the hub gives a device caller (ADR-072 §6). */
+  masked: Map<string, string>
+}
 
 /**
  * What each account this machine holds credentials for is called.
@@ -189,25 +252,41 @@ let limitsLabelCache: { readAt: number; labels: Map<string, string> } | null = n
  * it too (`storedAccountKey`), so taking a label from it would put one
  * account's name on everybody's unattributed history.
  *
+ * A MASKED LABEL IS KEPT APART (S5c round 2 R3, refined in round 3). It is a
+ * real name for an account nothing else here can name — the alternative was the
+ * key's own fallback (`ws-9`), and that made ONE account read two ways: under
+ * `local` it is a credential row showing the mask, under `all` it becomes a
+ * ledger row and showed the fallback. So the mask is used, ranked BELOW the
+ * ledger's label, and whatever takes it carries `labelMasked` so the row can say
+ * the name is partial. What must never happen is the silent rename: a masked
+ * label with nothing on screen admitting it.
+ *
+ * Under `local` nothing relayed is read at all, which costs this nothing: a key
+ * only another machine has spent on has no local bucket, so it is never a ledger
+ * row under that scope.
+ *
  * A failure yields the last labels rather than none — a provider being briefly
  * unreadable should not rename every account on the dashboard.
  */
-async function limitsLabels(): Promise<Map<string, string>> {
+async function limitsLabels(scope: DashboardScope): Promise<LimitsLabels> {
   const readAt = Date.now()
-  if (limitsLabelCache && readAt - limitsLabelCache.readAt < LIMITS_LABEL_TTL_MS) {
-    return limitsLabelCache.labels
-  }
+  const cached = limitsLabelCache.get(scope)
+  if (cached && readAt - cached.readAt < LIMITS_LABEL_TTL_MS) return cached.labels
   try {
-    const labels = new Map<string, string>()
-    for (const account of await readAccountLimits({ refresh: false })) {
+    const labels: LimitsLabels = { own: new Map(), masked: new Map() }
+    for (const account of await readAccountLimits({
+      refresh: false,
+      relayed: scope === 'all'
+    })) {
       if (account.accountKey === UNKNOWN_ACCOUNT_KEY || !account.label) continue
-      labels.set(account.accountKey, account.label)
+      const into = account.labelMasked === true ? labels.masked : labels.own
+      into.set(account.accountKey, account.label)
     }
-    limitsLabelCache = { readAt, labels }
+    limitsLabelCache.set(scope, { readAt, labels })
     return labels
   } catch (err) {
     logger.debug('UsageDashboard', `account limits unavailable for labels: ${err}`)
-    return limitsLabelCache?.labels ?? new Map()
+    return limitsLabelCache.get(scope)?.labels ?? { own: new Map(), masked: new Map() }
   }
 }
 
@@ -247,6 +326,10 @@ interface AccountAgg {
   models: Map<string, ModelAgg>
   /** Display cost per billing type, insertion-ordered — see {@link representativeBillingType}. */
   billing: Map<BillingType, number>
+  /** Device ids this account's spend came from, in first-seen order. */
+  machines: Set<string>
+  /** Whether any of it was written on THIS machine. */
+  local: boolean
 }
 
 interface ProviderAgg {
@@ -255,10 +338,45 @@ interface ProviderAgg {
   accounts: Map<string, AccountAgg>
 }
 
+interface MachineAccountAgg {
+  providerId: string
+  accountKey: string
+  totals: CostTotals
+  dispatched: CostTotals | null
+}
+
+/** What one machine spent over the range, and the (provider, account) slices of it. */
+interface MachineAgg {
+  totals: CostTotals
+  accounts: Map<string, MachineAccountAgg>
+}
+
+type ProviderCosts = { apiCostUsd: number; billedCostUsd: number; displayCostUsd: number }
+
 /** One cell of a time series — a local day, or an hour of today. */
 interface SeriesCell {
   totals: CostTotals
-  byProvider: Map<string, { apiCostUsd: number; billedCostUsd: number; displayCostUsd: number }>
+  byProvider: Map<string, ProviderCosts>
+  /**
+   * The remote part of {@link byProvider} — a SUBSET, folded from the same
+   * buckets, so the two can never disagree about a column's total.
+   */
+  byProviderRemote: Map<string, ProviderCosts>
+  /** The same cell by device rather than by provider — see the type's comment. */
+  byMachine: Map<string, ProviderCosts>
+}
+
+function addProviderCosts(
+  into: Map<string, ProviderCosts>,
+  providerId: string,
+  bucket: UsageBucketRow,
+  display: number
+): void {
+  const costs = into.get(providerId) ?? { apiCostUsd: 0, billedCostUsd: 0, displayCostUsd: 0 }
+  costs.apiCostUsd += bucket.apiCostUsd
+  costs.billedCostUsd += bucket.billedCostUsd
+  costs.displayCostUsd += display
+  into.set(providerId, costs)
 }
 
 /**
@@ -272,23 +390,25 @@ function addToSeries<K>(
   key: K,
   bucket: UsageBucketRow,
   providerId: string,
-  display: number
+  display: number,
+  remote: boolean,
+  /** The device to attribute the slot to, or null when the split is not wanted. */
+  deviceId: string | null
 ): void {
   let cell = series.get(key)
   if (!cell) {
-    cell = { totals: emptyTotals(), byProvider: new Map() }
+    cell = {
+      totals: emptyTotals(),
+      byProvider: new Map(),
+      byProviderRemote: new Map(),
+      byMachine: new Map()
+    }
     series.set(key, cell)
   }
   addBucket(cell.totals, bucket)
-  const cellProvider = cell.byProvider.get(providerId) ?? {
-    apiCostUsd: 0,
-    billedCostUsd: 0,
-    displayCostUsd: 0
-  }
-  cellProvider.apiCostUsd += bucket.apiCostUsd
-  cellProvider.billedCostUsd += bucket.billedCostUsd
-  cellProvider.displayCostUsd += display
-  cell.byProvider.set(providerId, cellProvider)
+  addProviderCosts(cell.byProvider, providerId, bucket, display)
+  if (remote) addProviderCosts(cell.byProviderRemote, providerId, bucket, display)
+  if (deviceId !== null) addProviderCosts(cell.byMachine, deviceId, bucket, display)
 }
 
 /**
@@ -330,6 +450,36 @@ export function sanitizeDashboardRange(raw: unknown): DashboardRange {
   return isDashboardRange(range) ? range : DEFAULT_RANGE
 }
 
+/** The same perimeter for `{ scope }` — one narrowing per wire field (S5c). */
+export function sanitizeDashboardScope(raw: unknown): DashboardScope {
+  if (typeof raw !== 'object' || raw === null) return DEFAULT_SCOPE
+  const { scope } = raw as Record<string, unknown>
+  return isDashboardScope(scope) ? scope : DEFAULT_SCOPE
+}
+
+/** The three facts about THIS machine that the combined view needs. */
+interface SelfMachine {
+  deviceId: string
+  deviceName: string
+  lastPushAt: number | null
+}
+
+/**
+ * This machine's own identity in the combined view, or null when there is none.
+ *
+ * `all` needs BOTH a hub that is on and a device id: without the id nothing can
+ * say which of two rows is this machine's, which is the one distinction the
+ * whole scope rests on. Either missing and the query answers `local` — an honest
+ * downgrade rather than a combined view with an anonymous machine in it.
+ */
+function selfMachine(): SelfMachine | null {
+  const config = getHubConfig()
+  if (!config.enabled) return null
+  const id = storedDeviceId()
+  if (id === null) return null
+  return { deviceId: id, deviceName: config.deviceName, lastPushAt: config.lastPushAt }
+}
+
 /**
  * The dashboard's data, from one bounded read of `usage_bucket`.
  *
@@ -355,19 +505,36 @@ export function sanitizeDashboardRange(raw: unknown): DashboardRange {
  */
 export async function buildUsageDashboard(opts: {
   range: DashboardRange
+  scope?: DashboardScope
   now?: number
 }): Promise<UsageDashboardData> {
   const now = opts.now ?? Date.now()
   const range = isDashboardRange(opts.range) ? opts.range : DEFAULT_RANGE
   const fromTs = floorToHour(startOfLocalDay(now - RANGE_DAYS[range] * MS_PER_DAY))
+  // WHERE THE SERIES ENDS, and therefore where the totals do.
+  //
+  // An hour ABOVE the last column used to count in the hero and have nowhere to
+  // be drawn, which made `Σ series = hero` false. That was reachable only from a
+  // clock that had moved backwards; with another machine's rows folded in it is
+  // reachable from ANOTHER machine's clock running fast, which is neither rare
+  // nor this machine's to fix. So the bound excludes such a bucket from the fold
+  // outright — the same rule for local and remote rows, because a figure that
+  // depends on which source a row came from is not one figure.
+  const untilTs = range === 'today' ? floorToHour(now) : nextLocalDay(now) - 1
+  // The ASKED scope is downgraded HERE and nowhere else, so everything below —
+  // and every reader of the answer — sees one scope.
+  const self = isDashboardScope(opts.scope) && opts.scope === 'all' ? selfMachine() : null
+  const scope: DashboardScope = self ? 'all' : 'local'
 
   const started = Date.now()
   const buckets = getUsageBucketsSince(fromTs)
+  const remoteBuckets = self ? getRemoteUsageBucketsSince(fromTs) : []
   const ledgerLabels = latestAccountLabels()
-  const limits = await limitsLabels()
+  const limits = await limitsLabels(scope)
   logger.debug(
     'UsageDashboard',
-    `range ${range}: ${buckets.length} bucket(s) read in ${Date.now() - started} ms`
+    `range ${range} (${scope}): ${buckets.length} local + ${remoteBuckets.length} remote ` +
+      `bucket(s) read in ${Date.now() - started} ms`
   )
 
   const totals = emptyTotals()
@@ -375,16 +542,37 @@ export async function buildUsageDashboard(opts: {
   const days = new Map<string, SeriesCell>()
   // Only `today` shows hours, and only `today` pays for building them.
   const hours = range === 'today' ? new Map<number, SeriesCell>() : null
+  const machines = new Map<string, MachineAgg>()
   let coveredUsd = 0
   let unattributedUsd = 0
+  let localUsd = 0
+  let remoteUsd = 0
 
-  for (const bucket of buckets) {
+  // ONE loop over both sources, so every equality the single fold guaranteed
+  // still holds. Local rows first, so a first-seen tie — the representative
+  // billing type, the machine order inside an account — resolves to THIS
+  // machine rather than to whichever peer the hub happened to answer with.
+  const rows: Array<{ bucket: UsageBucketRow; deviceId: string; remote: boolean }> = [
+    ...buckets.map((bucket) => ({ bucket, deviceId: self?.deviceId ?? '', remote: false })),
+    ...remoteBuckets
+      // A row the hub attributed to THIS device is already in the local table,
+      // so folding it would double the hour. The hub excludes the caller and the
+      // client drops such a row on the way in; this is the third guard, because
+      // the failure is silent and the fix is one comparison.
+      .filter((bucket) => bucket.deviceId !== self?.deviceId)
+      .map((bucket) => ({ bucket, deviceId: bucket.deviceId, remote: true }))
+  ]
+
+  for (const { bucket, deviceId, remote } of rows) {
+    if (bucket.hourUtc > untilTs) continue
     const display = bucketDisplayCostUsd(bucket)
     const providerId = providerIdForBucket(bucket.accountKey, bucket.vendorId)
 
     addBucket(totals, bucket)
     if (bucket.billingType === 'subscription') coveredUsd += display
     if (bucket.accountKey === UNKNOWN_ACCOUNT_KEY) unattributedUsd += display
+    if (remote) remoteUsd += display
+    else localUsd += display
 
     let provider = providers.get(providerId)
     if (!provider) {
@@ -401,7 +589,9 @@ export async function buildUsageDashboard(opts: {
         totals: emptyTotals(),
         dispatched: null,
         models: new Map(),
-        billing: new Map()
+        billing: new Map(),
+        machines: new Set(),
+        local: false
       }
       provider.accounts.set(bucket.accountKey, account)
     }
@@ -411,10 +601,12 @@ export async function buildUsageDashboard(opts: {
       bucket.billingType,
       (account.billing.get(bucket.billingType) ?? 0) + display
     )
+    if (scope === 'all') {
+      account.machines.add(deviceId)
+      if (!remote) account.local = true
+    }
 
-    // NUL-joined: engine, vendor and model ids are all free strings, and a
-    // separator any of them could contain would merge two model rows.
-    const modelKey = `${bucket.engineId}\u0000${bucket.vendorId}\u0000${bucket.modelId}`
+    const modelKey = `${bucket.engineId}${KEY_SEP}${bucket.vendorId}${KEY_SEP}${bucket.modelId}`
     let model = account.models.get(modelKey)
     if (!model) {
       model = {
@@ -429,28 +621,151 @@ export async function buildUsageDashboard(opts: {
     addBucket(model.totals, bucket)
     model.dispatched = addDispatched(model.dispatched, bucket)
 
-    addToSeries(days, dateStrFromTimestamp(bucket.hourUtc), bucket, providerId, display)
-    if (hours) addToSeries(hours, bucket.hourUtc, bucket, providerId, display)
+    if (scope === 'all') addToMachine(machines, deviceId, bucket, providerId)
+
+    // `null` under `local`: there is one machine, and a per-device split of a
+    // single machine's hours is a map nothing reads (M4).
+    const machineKey = scope === 'all' ? deviceId : null
+    addToSeries(
+      days,
+      dateStrFromTimestamp(bucket.hourUtc),
+      bucket,
+      providerId,
+      display,
+      remote,
+      machineKey
+    )
+    if (hours) {
+      addToSeries(hours, bucket.hourUtc, bucket, providerId, display, remote, machineKey)
+    }
   }
 
   return {
     range,
+    scope,
     fromTs,
     toTs: now,
     generatedAt: Date.now(),
     totals,
     coveredUsd,
-    providers: toProviders(providers, limits, ledgerLabels),
-    days: toDays(days, fromTs, now),
-    ...(hours ? { hours: toHours(hours, fromTs, now) } : {}),
-    unattributedUsd
+    providers: toProviders(providers, limits, ledgerLabels, scope),
+    days: toDays(days, fromTs, now, scope),
+    ...(hours ? { hours: toHours(hours, fromTs, now, scope) } : {}),
+    unattributedUsd,
+    localUsd,
+    remoteUsd,
+    machines: self ? toMachines(machines, self, totals.displayCostUsd) : []
   }
+}
+
+/** Fold one bucket into its machine's totals and into that machine's (provider, account) slice. */
+function addToMachine(
+  machines: Map<string, MachineAgg>,
+  deviceId: string,
+  bucket: UsageBucketRow,
+  providerId: string
+): void {
+  let machine = machines.get(deviceId)
+  if (!machine) {
+    machine = { totals: emptyTotals(), accounts: new Map() }
+    machines.set(deviceId, machine)
+  }
+  addBucket(machine.totals, bucket)
+  const key = `${providerId}${KEY_SEP}${bucket.accountKey}`
+  let slice = machine.accounts.get(key)
+  if (!slice) {
+    slice = { providerId, accountKey: bucket.accountKey, totals: emptyTotals(), dispatched: null }
+    machine.accounts.set(key, slice)
+  }
+  addBucket(slice.totals, bucket)
+  slice.dispatched = addDispatched(slice.dispatched, bucket)
+}
+
+/**
+ * The machine list: this one first, then the hub's peers.
+ *
+ * THE HUB'S LIST DRIVES IT, not the buckets. A machine that synced and spent
+ * nothing in the range is a row with zero totals, because "up to date and idle"
+ * and "has stopped syncing" are different facts and an absent row spells them
+ * the same way. A device that has cached buckets but no `remote_device` row — a
+ * peer the hub has since removed — is appended anyway, so no dollars sit in the
+ * hero without a row accounting for them.
+ *
+ * Retired machines sort last whatever they spent: the owner has said they are
+ * history, and a retired machine at the top of the list reads as the busiest.
+ */
+function toMachines(
+  machines: Map<string, MachineAgg>,
+  self: SelfMachine,
+  grandTotal: number
+): DashboardMachine[] {
+  const build = (
+    facts: Omit<DashboardMachine, 'totals' | 'share' | 'accounts'>
+  ): DashboardMachine => {
+    const agg = machines.get(facts.deviceId)
+    const totals = agg?.totals ?? emptyTotals()
+    const accounts: DashboardMachineAccount[] = [...(agg?.accounts.values() ?? [])].map(
+      (slice) => ({
+        providerId: slice.providerId,
+        accountKey: slice.accountKey,
+        totals: slice.totals,
+        dispatched: slice.dispatched
+      })
+    )
+    return {
+      ...facts,
+      totals,
+      share: grandTotal > 0 ? totals.displayCostUsd / grandTotal : 0,
+      accounts: accounts.sort(byDisplayCostThen((slice) => slice.accountKey))
+    }
+  }
+
+  const selfRow = build({
+    deviceId: self.deviceId,
+    deviceName: self.deviceName,
+    os: deviceOs(),
+    appVersion: deviceAppVersion(),
+    lastPushAt: self.lastPushAt,
+    retired: false,
+    self: true
+  })
+
+  const known = new Set<string>([self.deviceId])
+  const peers: DashboardMachine[] = []
+  for (const device of listRemoteDevices()) {
+    if (device.deviceId === self.deviceId) continue
+    known.add(device.deviceId)
+    peers.push(build({ ...device, self: false }))
+  }
+  for (const deviceId of machines.keys()) {
+    if (known.has(deviceId)) continue
+    peers.push(
+      build({
+        deviceId,
+        deviceName: '',
+        os: 'unknown',
+        appVersion: 'unknown',
+        lastPushAt: null,
+        retired: false,
+        self: false
+      })
+    )
+  }
+
+  peers.sort(
+    (a, b) =>
+      Number(a.retired) - Number(b.retired) ||
+      b.totals.displayCostUsd - a.totals.displayCostUsd ||
+      a.deviceId.localeCompare(b.deviceId)
+  )
+  return [selfRow, ...peers]
 }
 
 function toProviders(
   providers: Map<string, ProviderAgg>,
-  limits: Map<string, string>,
-  ledgerLabels: Map<string, string>
+  limits: LimitsLabels,
+  ledgerLabels: Map<string, string>,
+  scope: DashboardScope
 ): DashboardProvider[] {
   const out: DashboardProvider[] = []
   for (const provider of providers.values()) {
@@ -465,22 +780,34 @@ function toProviders(
           dispatched: model.dispatched
         }))
         .sort(byDisplayCostThen((model) => model.modelId))
+      // The name, in the order the sources deserve: one this machine READ, then
+      // the ledger's own, then the hub's MASKED form, then the key itself.
+      // `unknown` is checked before all of them — it is a bucket rather than an
+      // account, so any label found under it belongs to something else.
+      const own =
+        account.accountKey === UNKNOWN_ACCOUNT_KEY
+          ? undefined
+          : (limits.own.get(account.accountKey) ?? ledgerLabels.get(account.accountKey))
+      const masked =
+        own === undefined && account.accountKey !== UNKNOWN_ACCOUNT_KEY
+          ? limits.masked.get(account.accountKey)
+          : undefined
       accounts.push({
         accountKey: account.accountKey,
-        // `unknown` is checked before the sources, not after: it is a bucket
-        // rather than an account, so any label found under it belongs to
-        // something else.
         label:
           account.accountKey === UNKNOWN_ACCOUNT_KEY
             ? UNATTRIBUTED_LABEL
-            : (limits.get(account.accountKey) ??
-              ledgerLabels.get(account.accountKey) ??
-              fallbackAccountLabel(account.accountKey)),
+            : (own ?? masked ?? fallbackAccountLabel(account.accountKey)),
+        ...(masked === undefined ? {} : { labelMasked: true }),
         providerId: account.providerId,
         billingType: representativeBillingType(account.billing),
         totals: account.totals,
         models,
-        dispatched: account.dispatched
+        dispatched: account.dispatched,
+        // Under `local` these two are absent rather than trivially true, so the
+        // payload a reader that knows nothing of the hub receives is the one it
+        // received before this slice.
+        ...(scope === 'all' ? { machines: [...account.machines], remoteOnly: !account.local } : {})
       })
     }
     out.push({
@@ -494,7 +821,12 @@ function toProviders(
 }
 
 /** The range's local days, oldest first, with a cell for every day that has none. */
-function toDays(days: Map<string, SeriesCell>, fromTs: number, now: number): DashboardDay[] {
+function toDays(
+  days: Map<string, SeriesCell>,
+  fromTs: number,
+  now: number,
+  scope: DashboardScope
+): DashboardDay[] {
   const out: DashboardDay[] = []
   const lastDate = dateStrFromTimestamp(now)
   for (
@@ -507,6 +839,12 @@ function toDays(days: Map<string, SeriesCell>, fromTs: number, now: number): Das
     out.push({
       date,
       byProvider: day ? Object.fromEntries(day.byProvider) : {},
+      ...(scope === 'all'
+        ? {
+            byProviderRemote: day ? Object.fromEntries(day.byProviderRemote) : {},
+            byMachine: day ? Object.fromEntries(day.byMachine) : {}
+          }
+        : {}),
       totals: day?.totals ?? emptyTotals()
     })
   }
@@ -520,7 +858,12 @@ function toDays(days: Map<string, SeriesCell>, fromTs: number, now: number): Das
  * an hour long, so a clock change moves which LOCAL hour a column is labelled
  * with but never how far apart two columns are.
  */
-function toHours(hours: Map<number, SeriesCell>, fromTs: number, now: number): DashboardHour[] {
+function toHours(
+  hours: Map<number, SeriesCell>,
+  fromTs: number,
+  now: number,
+  scope: DashboardScope
+): DashboardHour[] {
   const out: DashboardHour[] = []
   const lastHour = floorToHour(now)
   for (let cursor = fromTs; cursor <= lastHour; cursor += MS_PER_HOUR) {
@@ -528,6 +871,15 @@ function toHours(hours: Map<number, SeriesCell>, fromTs: number, now: number): D
     out.push({
       hourUtc: cursor,
       byProvider: hour ? Object.fromEntries(hour.byProvider) : {},
+      // The hourly series carries the remote split for the same reason the
+      // daily one does: on `today` the hours ARE the chart's columns, so a
+      // hatch that only knew about days would not be drawn at all.
+      ...(scope === 'all'
+        ? {
+            byProviderRemote: hour ? Object.fromEntries(hour.byProviderRemote) : {},
+            byMachine: hour ? Object.fromEntries(hour.byMachine) : {}
+          }
+        : {}),
       totals: hour?.totals ?? emptyTotals()
     })
   }

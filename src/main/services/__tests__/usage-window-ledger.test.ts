@@ -541,6 +541,128 @@ describe('the trigger', () => {
   })
 })
 
+describe('usageWindowSummary — the combined scope (ADR-072 §4)', () => {
+  /** One cached remote window row, as the hub's rollup answers it. */
+  function remoteWindow(
+    overrides: Partial<import('../../../core/services/db').RemoteUsageWindowRow> = {}
+  ): import('../../../core/services/db').RemoteUsageWindowRow {
+    return {
+      deviceId: 'dev-peer',
+      accountKey: ACCOUNT_A,
+      windowKind: '5h',
+      canonicalEnd: END,
+      windowStart: START,
+      windowMinutes: null,
+      peakPercent: 80,
+      apiCostUsd: 40,
+      billedCostUsd: 0,
+      unknownCostCount: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheWriteTokens: 0,
+      cacheReadTokens: 0,
+      sampleCount: 9,
+      closed: true,
+      updatedAt: END + HOUR,
+      ...overrides
+    }
+  }
+
+  /** A local window worth $10 at a 50% peak, materialised the normal way. */
+  function seedLocalWindow(db: DbModule, ledger: LedgerModule): void {
+    db.recordWindowSample(sample(ACCOUNT_A, START + HOUR, 50))
+    db.insertUsageEvents([event(ACCOUNT_A, START + HOUR, { apiCostUsd: 10 })])
+    ledger.recomputeUsageWindows(END + 3 * HOUR)
+  }
+
+  it('prefers the hub’s row for a window it holds, and keeps the bias flag', async () => {
+    const { db, ledger } = await fresh()
+    seedLocalWindow(db, ledger)
+    db.upsertRemoteUsageWindows([remoteWindow()])
+
+    const local = ledger.usageWindowSummary({ sinceTs: 0 })
+    const combined = ledger.usageWindowSummary({ sinceTs: 0, scope: 'all' })
+
+    // ONE row either way — the hub's is a better answer to the same window, not
+    // a second window.
+    expect(local).toHaveLength(1)
+    expect(combined).toHaveLength(1)
+    expect(local[0].apiCostUsd).toBeCloseTo(10, 6)
+    // The hub sums the numerator over every device, which is the half of
+    // ADR-071 §7's bias this closes.
+    expect(combined[0].apiCostUsd).toBeCloseTo(40, 6)
+    expect(combined[0].peakPercent).toBe(80)
+    expect(combined[0].sampleCount).toBe(9)
+    // Derived from the hub's figures, by the same rule.
+    expect(combined[0].usdPerPercent).toBeCloseTo(0.5, 6)
+    expect(combined[0].impliedFullWindowUsd).toBeCloseTo(50, 6)
+    // The claude.ai half is not closed by anything, so the flag stays.
+    expect(combined[0].biased).toBe(true)
+    // And no device id leaks into the row a surface reads.
+    expect('deviceId' in combined[0]).toBe(false)
+  })
+
+  it('adds a window only another machine has, in end order with the local ones', async () => {
+    const { db, ledger } = await fresh()
+    seedLocalWindow(db, ledger)
+    db.upsertRemoteUsageWindows([
+      remoteWindow({ accountKey: ACCOUNT_B, canonicalEnd: END + HOUR, apiCostUsd: 7 })
+    ])
+
+    const rows = ledger.usageWindowSummary({ sinceTs: 0, scope: 'all' })
+
+    expect(rows).toHaveLength(2)
+    // Newest end first, as `listUsageWindows` orders its own.
+    expect(rows.map((r) => [r.accountKey, r.canonicalEnd])).toEqual([
+      [ACCOUNT_B, END + HOUR],
+      [ACCOUNT_A, END]
+    ])
+  })
+
+  it('leaves the local rows untouched under the default scope', async () => {
+    const { db, ledger } = await fresh()
+    seedLocalWindow(db, ledger)
+    db.upsertRemoteUsageWindows([remoteWindow(), remoteWindow({ accountKey: ACCOUNT_B })])
+
+    const rows = ledger.usageWindowSummary({ sinceTs: 0 })
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0].accountKey).toBe(ACCOUNT_A)
+    expect(rows[0].apiCostUsd).toBeCloseTo(10, 6)
+  })
+
+  it('takes the last-touched of two devices’ rows for one window', async () => {
+    const { db, ledger } = await fresh()
+    seedLocalWindow(db, ledger)
+    db.upsertRemoteUsageWindows([
+      remoteWindow({ deviceId: 'dev-old', apiCostUsd: 20, updatedAt: END }),
+      remoteWindow({ deviceId: 'dev-new', apiCostUsd: 55, updatedAt: END + 2 * HOUR })
+    ])
+
+    const rows = ledger.usageWindowSummary({ sinceTs: 0, scope: 'all' })
+
+    // A rollup only ever grows, so the newest is the most complete.
+    expect(rows).toHaveLength(1)
+    expect(rows[0].apiCostUsd).toBeCloseTo(55, 6)
+  })
+
+  it('honours the account and kind filters on the remote rows too', async () => {
+    const { db, ledger } = await fresh()
+    db.upsertRemoteUsageWindows([
+      remoteWindow({ accountKey: ACCOUNT_A, windowKind: '5h' }),
+      remoteWindow({ accountKey: ACCOUNT_B, windowKind: '5h' }),
+      remoteWindow({ accountKey: ACCOUNT_A, windowKind: '7d', canonicalEnd: END + HOUR })
+    ])
+
+    expect(
+      ledger.usageWindowSummary({ sinceTs: 0, scope: 'all', accountKey: ACCOUNT_A }).length
+    ).toBe(2)
+    expect(ledger.usageWindowSummary({ sinceTs: 0, scope: 'all', kind: '7d' }).length).toBe(1)
+    // The window-end bound applies to them as well.
+    expect(ledger.usageWindowSummary({ sinceTs: END + 2 * HOUR, scope: 'all' })).toEqual([])
+  })
+})
+
 describe('sanitizeUsageWindowQuery', () => {
   it('keeps the three fields and drops everything else', async () => {
     const { db, ledger } = await fresh()
@@ -557,6 +679,12 @@ describe('sanitizeUsageWindowQuery', () => {
       expect(ledger.sanitizeUsageWindowQuery({ accountKey: 1, sinceTs: NaN })).toEqual({})
       expect(ledger.sanitizeUsageWindowQuery(undefined)).toEqual({})
       expect(ledger.sanitizeUsageWindowQuery('nope')).toEqual({})
+      // The scope: only `all` is worth carrying, and junk is dropped rather
+      // than echoed back (S5c).
+      expect(ledger.sanitizeUsageWindowQuery({ scope: 'all' })).toEqual({ scope: 'all' })
+      expect(ledger.sanitizeUsageWindowQuery({ scope: 'local' })).toEqual({})
+      expect(ledger.sanitizeUsageWindowQuery({ scope: 'everything' })).toEqual({})
+      expect(ledger.sanitizeUsageWindowQuery({ scope: 1 })).toEqual({})
     } finally {
       db.closeDb()
     }

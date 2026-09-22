@@ -4515,6 +4515,81 @@ export function getRemoteUsageBucketsSince(sinceHourUtc: number): RemoteUsageBuc
   return rows.map((row) => ({ ...rowToUsageBucket(row), deviceId: row.device_id }))
 }
 
+/**
+ * The cached remote window-value rows matching the filter, newest end first.
+ *
+ * The twin of {@link listUsageWindows} and takes the same three filters, because
+ * S5c's combined Plan value tab asks the two tables the same question and then
+ * prefers the hub's answer per window (ADR-072 §4). `device_id` rides along: a
+ * window the hub has rolled up over every machine still arrives attributed to
+ * whichever device last touched it, and a reader that has two rows for one
+ * window needs something to choose by.
+ */
+export function getRemoteUsageWindows(
+  opts: { accountKey?: string; kind?: string; sinceTs?: number } = {}
+): RemoteUsageWindowRow[] {
+  const db = getDb()
+  const clauses: string[] = ['canonical_end >= ?']
+  const params: Array<string | number> = [opts.sinceTs ?? 0]
+  if (opts.accountKey !== undefined) {
+    clauses.push('account_key = ?')
+    params.push(opts.accountKey)
+  }
+  if (opts.kind !== undefined) {
+    clauses.push('window_kind = ?')
+    params.push(opts.kind)
+  }
+  const rows = db
+    .prepare(
+      `SELECT * FROM remote_usage_window
+        WHERE ${clauses.join(' AND ')}
+        ORDER BY canonical_end DESC, account_key ASC, window_kind ASC`
+    )
+    .all(...params) as Array<UsageWindowDbRow & { device_id: string }>
+  return rows.map((row) => ({ ...rowToUsageWindow(row), deviceId: row.device_id }))
+}
+
+/**
+ * Every relayed limit reading, newest observation first.
+ *
+ * One row per account key and window kind — the table is keyed that way — so
+ * this is "what the hub last heard about every account", which is what ADR-072
+ * §4's relay is: a machine where an account is not active shows the reading
+ * another machine already paid a refresh grant for.
+ */
+export function listRemoteLimits(): RemoteLimitRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare(
+      `SELECT * FROM remote_limits
+        ORDER BY observed_at DESC, account_key ASC, window_kind ASC`
+    )
+    .all() as Array<{
+    account_key: string
+    window_kind: string
+    device_id: string
+    label_masked: string | null
+    vendor_id: string
+    plan: string | null
+    window_minutes: number | null
+    used_percent: number
+    resets_at: string | null
+    observed_at: number
+  }>
+  return rows.map((row) => ({
+    accountKey: row.account_key,
+    windowKind: row.window_kind,
+    deviceId: row.device_id,
+    labelMasked: row.label_masked,
+    vendorId: row.vendor_id,
+    plan: row.plan,
+    windowMinutes: row.window_minutes,
+    usedPercent: row.used_percent,
+    resetsAt: row.resets_at,
+    observedAt: row.observed_at
+  }))
+}
+
 /** One other machine, as `GET /v1/devices` described it (ADR-072 §6). */
 export interface RemoteDeviceRow {
   deviceId: string

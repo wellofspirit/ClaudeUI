@@ -27,18 +27,26 @@ vi.mock('os', async () => {
   }
 })
 
-const hoisted = vi.hoisted(() => ({ limits: [] as unknown[] }))
+const hoisted = vi.hoisted(() => ({
+  limits: [] as unknown[],
+  /** Every `readAccountLimits` argument, so a test can assert what was asked for. */
+  readLimitsCalls: [] as Array<Record<string, unknown>>
+}))
 
 // The limits providers read credential directories and the ChatGPT hosts; the
 // dashboard only ever takes `label` off what they return.
 vi.mock('../../../core/services/usage-provider', () => ({
-  readAccountLimits: vi.fn(async () => hoisted.limits)
+  readAccountLimits: vi.fn(async (opts: Record<string, unknown> = {}) => {
+    hoisted.readLimitsCalls.push(opts)
+    return hoisted.limits
+  })
 }))
 
 beforeEach(() => {
   TEMP_HOME = fs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), 'usage-dashboard-'))
   fs.mkdirSync(nodePath.join(TEMP_HOME, '.claude', 'ui'), { recursive: true })
   hoisted.limits = []
+  hoisted.readLimitsCalls = []
 })
 
 afterEach(() => {
@@ -52,6 +60,7 @@ type DbModule = typeof import('../../../core/services/db')
 type DashboardModule = typeof import('../../../core/services/usage-dashboard')
 type UsageBucketWrite = import('../../../core/services/db').UsageBucketWrite
 type UsageEventInsert = import('../../../core/services/db').UsageEventInsert
+type RemoteUsageBucketRow = import('../../../core/services/db').RemoteUsageBucketRow
 
 async function fresh(): Promise<{ db: DbModule; dashboard: DashboardModule }> {
   vi.resetModules()
@@ -82,6 +91,11 @@ function rangeStart(now: number, days: number): number {
   const midnight = new Date(back.getFullYear(), back.getMonth(), back.getDate()).getTime()
   return Math.floor(midnight / HOUR) * HOUR
 }
+
+const SELF_DEVICE = 'dev-self'
+const PEER_DEVICE = 'dev-peer'
+/** An account only the peer has ever spent on. */
+const PEER_ONLY_ACCOUNT = 'anthropic:org-2:acct-2'
 
 const ACCOUNT_A = 'anthropic:org-1:acct-1'
 const ACCOUNT_B = 'chatgpt:ws-1:user-1'
@@ -471,6 +485,462 @@ describe('buildUsageDashboard — the today range, hourly', () => {
   })
 })
 
+/**
+ * Turn the combined scope on: a hub row with `enabled`, and a device id in
+ * `meta`.
+ *
+ * Both are needed — `buildUsageDashboard` downgrades `all` to `local` without
+ * either, which is what the last case in this block pins. Written through the db
+ * module rather than through `configureHub`, so the fixture states the two facts
+ * the query reads instead of replaying the enable edge, which also moves the
+ * push cursor and has a suite of its own.
+ */
+function enableHub(db: DbModule, deviceId = SELF_DEVICE): void {
+  db.upsertHubConfig({ url: 'https://hub.example.test', deviceName: 'desk', enabled: true })
+  db.setMeta('hub.device_id', deviceId)
+}
+
+/** One other machine's bucket, keyed exactly as its own would be. */
+function remoteBucket(
+  deviceId: string,
+  overrides: Partial<UsageBucketWrite> & { hourUtc: number }
+): RemoteUsageBucketRow {
+  return { ...bucket(overrides), deviceId, rev: 1 }
+}
+
+describe('buildUsageDashboard — the combined scope', () => {
+  it('folds the other machines in through the same fold, and every equality holds', async () => {
+    const { db, dashboard } = await fresh()
+    seedTree(db)
+    enableHub(db)
+    db.replaceRemoteDevices([
+      {
+        deviceId: PEER_DEVICE,
+        deviceName: 'studio',
+        os: 'darwin',
+        appVersion: '3.3.0',
+        lastPushAt: NOW - HOUR,
+        retired: false
+      }
+    ])
+    db.upsertRemoteUsageBuckets([
+      remoteBucket(PEER_DEVICE, { hourUtc: DAY_D + 2 * HOUR, apiCostUsd: 3.0 })
+    ])
+
+    const data = await dashboard.buildUsageDashboard({ range: '7d', scope: 'all', now: NOW })
+
+    expect(data.scope).toBe('all')
+    // The hero grew by exactly the peer's bucket, and the two halves add to it.
+    expect(data.totals.displayCostUsd).toBeCloseTo(7.25, 6)
+    expect(data.localUsd).toBeCloseTo(4.25, 6)
+    expect(data.remoteUsd).toBeCloseTo(3.0, 6)
+    expect(data.localUsd + data.remoteUsd).toBeCloseTo(data.totals.displayCostUsd, 6)
+
+    // Hero = Sigma providers = Sigma machines, the property the ONE fold buys.
+    const byProvider = data.providers.reduce((sum, p) => sum + p.totals.displayCostUsd, 0)
+    const byMachine = data.machines.reduce((sum, m) => sum + m.totals.displayCostUsd, 0)
+    expect(byProvider).toBeCloseTo(data.totals.displayCostUsd, 6)
+    expect(byMachine).toBeCloseTo(data.totals.displayCostUsd, 6)
+    // The shares divide that same denominator.
+    expect(data.machines.reduce((sum, m) => sum + m.share, 0)).toBeCloseTo(1, 6)
+
+    // The peer's dollars landed on the account they belong to, not on a new one.
+    const anthropic = data.providers.find((p) => p.providerId === 'anthropic')!
+    const accountA = anthropic.accounts.find((a) => a.accountKey === ACCOUNT_A)!
+    expect(accountA.totals.displayCostUsd).toBeCloseTo(4.25, 6)
+    expect(accountA.machines).toEqual([SELF_DEVICE, PEER_DEVICE])
+    expect(accountA.remoteOnly).toBe(false)
+    // Coverage counts the combined subscription rows too.
+    expect(data.coveredUsd).toBeCloseTo(6.25, 6)
+  })
+
+  it('reads exactly as before under local: no remote row folded, and no machines', async () => {
+    const { db, dashboard } = await fresh()
+    seedTree(db)
+    enableHub(db)
+    db.upsertRemoteUsageBuckets([
+      remoteBucket(PEER_DEVICE, { hourUtc: DAY_D + 2 * HOUR, apiCostUsd: 3.0 })
+    ])
+
+    const data = await dashboard.buildUsageDashboard({ range: '7d', now: NOW })
+
+    expect(data.scope).toBe('local')
+    expect(data.totals.displayCostUsd).toBeCloseTo(4.25, 6)
+    expect(data.localUsd).toBeCloseTo(4.25, 6)
+    expect(data.remoteUsd).toBe(0)
+    expect(data.machines).toEqual([])
+    // Absent, not trivially populated: a `local` payload is the pre-S5c one.
+    expect(data.providers[0].accounts[0].machines).toBeUndefined()
+    expect(data.providers[0].accounts[0].remoteOnly).toBeUndefined()
+    expect(data.days[0].byProviderRemote).toBeUndefined()
+  })
+
+  it('marks an account only another machine spent on, and names that machine', async () => {
+    const { db, dashboard } = await fresh()
+    seedTree(db)
+    enableHub(db)
+    db.upsertRemoteUsageBuckets([
+      remoteBucket(PEER_DEVICE, {
+        hourUtc: DAY_D + 2 * HOUR,
+        accountKey: PEER_ONLY_ACCOUNT,
+        apiCostUsd: 5.0
+      })
+    ])
+
+    const data = await dashboard.buildUsageDashboard({ range: '7d', scope: 'all', now: NOW })
+    const accounts = data.providers.flatMap((p) => p.accounts)
+
+    const peerOnly = accounts.find((a) => a.accountKey === PEER_ONLY_ACCOUNT)!
+    expect(peerOnly.remoteOnly).toBe(true)
+    expect(peerOnly.machines).toEqual([PEER_DEVICE])
+    // An account this machine also spent on is not remote-only.
+    expect(accounts.find((a) => a.accountKey === ACCOUNT_A)!.remoteOnly).toBe(false)
+  })
+
+  it('splits each day by the remote share, as a subset of the day itself', async () => {
+    const { db, dashboard } = await fresh()
+    seedTree(db)
+    enableHub(db)
+    db.upsertRemoteUsageBuckets([
+      remoteBucket(PEER_DEVICE, { hourUtc: DAY_D + 2 * HOUR, apiCostUsd: 3.0 }),
+      remoteBucket(PEER_DEVICE, {
+        hourUtc: DAY_D + DAY + 4 * HOUR,
+        accountKey: ACCOUNT_B,
+        vendorId: 'openai',
+        apiCostUsd: 1.0
+      })
+    ])
+
+    const data = await dashboard.buildUsageDashboard({ range: '7d', scope: 'all', now: NOW })
+
+    const dayOne = data.days.find((d) => d.date === dateStr(DAY_D))!
+    expect(dayOne.byProvider.anthropic.displayCostUsd).toBeCloseTo(4.25, 6)
+    expect(dayOne.byProviderRemote!.anthropic.displayCostUsd).toBeCloseTo(3.0, 6)
+    // A SUBSET: never more than the column it qualifies.
+    for (const day of data.days) {
+      for (const [id, costs] of Object.entries(day.byProviderRemote ?? {})) {
+        expect(costs.displayCostUsd).toBeLessThanOrEqual(day.byProvider[id].displayCostUsd + 1e-9)
+      }
+    }
+    // And over the whole series it is the range's remote half.
+    const seriesRemote = data.days.reduce(
+      (sum, day) =>
+        sum + Object.values(day.byProviderRemote ?? {}).reduce((s, c) => s + c.displayCostUsd, 0),
+      0
+    )
+    expect(seriesRemote).toBeCloseTo(data.remoteUsd, 6)
+
+    // A day only this machine spent on has an EMPTY remote split, not a missing one.
+    expect(data.days.find((d) => d.date === dateStr(DAY_D + 2 * DAY))!.byProviderRemote).toEqual({})
+  })
+
+  it('lists this machine first, a peer that spent nothing, and the retired one last', async () => {
+    const { db, dashboard } = await fresh()
+    seedTree(db)
+    enableHub(db)
+    db.replaceRemoteDevices([
+      {
+        deviceId: 'dev-retired',
+        deviceName: 'old-server',
+        os: 'linux',
+        appVersion: '3.1.0',
+        lastPushAt: NOW - 40 * DAY,
+        retired: true
+      },
+      {
+        deviceId: 'dev-idle',
+        deviceName: 'laptop',
+        os: 'darwin',
+        appVersion: '3.2.0',
+        lastPushAt: NOW - 2 * HOUR,
+        retired: false
+      },
+      {
+        deviceId: PEER_DEVICE,
+        deviceName: 'studio',
+        os: 'darwin',
+        appVersion: '3.3.0',
+        lastPushAt: NOW - HOUR,
+        retired: false
+      }
+    ])
+    db.upsertRemoteUsageBuckets([
+      remoteBucket(PEER_DEVICE, { hourUtc: DAY_D + 2 * HOUR, apiCostUsd: 3.0 })
+    ])
+
+    const data = await dashboard.buildUsageDashboard({ range: '7d', scope: 'all', now: NOW })
+
+    expect(data.machines.map((m) => m.deviceId)).toEqual([
+      SELF_DEVICE,
+      PEER_DEVICE,
+      'dev-idle',
+      'dev-retired'
+    ])
+    expect(data.machines[0]).toMatchObject({ self: true, deviceName: 'desk', retired: false })
+    expect(data.machines[0].totals.displayCostUsd).toBeCloseTo(4.25, 6)
+    expect(data.machines[1]).toMatchObject({ self: false, deviceName: 'studio', os: 'darwin' })
+    expect(data.machines[1].share).toBeCloseTo(3.0 / 7.25, 6)
+    // A machine that synced and spent nothing is a ROW with zero totals, never
+    // an absence: "idle" and "not syncing" must not read the same.
+    expect(data.machines[2].totals.displayCostUsd).toBe(0)
+    expect(data.machines[2].share).toBe(0)
+  })
+
+  it('gives each machine its own provider and account slices', async () => {
+    const { db, dashboard } = await fresh()
+    seedTree(db)
+    enableHub(db)
+    db.upsertRemoteUsageBuckets([
+      remoteBucket(PEER_DEVICE, { hourUtc: DAY_D + 2 * HOUR, apiCostUsd: 3.0 }),
+      remoteBucket(PEER_DEVICE, {
+        hourUtc: DAY_D + DAY + 4 * HOUR,
+        accountKey: ACCOUNT_B,
+        vendorId: 'openai',
+        apiCostUsd: 1.0
+      })
+    ])
+
+    const data = await dashboard.buildUsageDashboard({ range: '7d', scope: 'all', now: NOW })
+    const peer = data.machines.find((m) => m.deviceId === PEER_DEVICE)!
+
+    // Highest display cost first, and the slices sum to the machine's total.
+    expect(peer.accounts.map((a) => [a.providerId, a.accountKey])).toEqual([
+      ['anthropic', ACCOUNT_A],
+      ['openai', ACCOUNT_B]
+    ])
+    expect(peer.accounts.reduce((sum, a) => sum + a.totals.displayCostUsd, 0)).toBeCloseTo(
+      peer.totals.displayCostUsd,
+      6
+    )
+    // This machine's slices cover every account its own five buckets name.
+    expect([...data.machines[0].accounts.map((a) => a.accountKey)].sort()).toEqual(
+      [ACCOUNT_A, ACCOUNT_B, ACCOUNT_KEY_ROW, 'unknown'].sort()
+    )
+  })
+
+  it('still lists a machine whose hours are cached after the hub forgot it', async () => {
+    const { db, dashboard } = await fresh()
+    enableHub(db)
+    db.upsertRemoteUsageBuckets([
+      remoteBucket('dev-ghost', { hourUtc: DAY_D + 2 * HOUR, apiCostUsd: 2.0 })
+    ])
+
+    const data = await dashboard.buildUsageDashboard({ range: '7d', scope: 'all', now: NOW })
+
+    // Its dollars are in the hero, so a row has to account for them.
+    expect(data.totals.displayCostUsd).toBeCloseTo(2.0, 6)
+    expect(data.machines.map((m) => m.deviceId)).toEqual([SELF_DEVICE, 'dev-ghost'])
+    expect(data.machines[1].deviceName).toBe('')
+    expect(data.machines[1].lastPushAt).toBeNull()
+  })
+
+  it('downgrades all to local when the hub is off, or when this machine has no id', async () => {
+    const off = await fresh()
+    off.db.upsertRemoteUsageBuckets([
+      remoteBucket(PEER_DEVICE, { hourUtc: DAY_D + 2 * HOUR, apiCostUsd: 3.0 })
+    ])
+    const noHub = await off.dashboard.buildUsageDashboard({ range: '7d', scope: 'all', now: NOW })
+    expect(noHub.scope).toBe('local')
+    expect(noHub.totals.displayCostUsd).toBe(0)
+    expect(noHub.machines).toEqual([])
+
+    // Enabled, but this machine has never been given an identity.
+    const anon = await fresh()
+    anon.db.upsertHubConfig({ url: 'https://hub.example.test', enabled: true })
+    anon.db.upsertRemoteUsageBuckets([
+      remoteBucket(PEER_DEVICE, { hourUtc: DAY_D + 2 * HOUR, apiCostUsd: 3.0 })
+    ])
+    const anonymous = await anon.dashboard.buildUsageDashboard({
+      range: '7d',
+      scope: 'all',
+      now: NOW
+    })
+    expect(anonymous.scope).toBe('local')
+    expect(anonymous.machines).toEqual([])
+  })
+})
+
+describe('buildUsageDashboard — round 2 corrections', () => {
+  it('names an account by the hub mask when nothing else names it, and says so', async () => {
+    const { db, dashboard } = await fresh()
+    enableHub(db)
+    // A key with buckets, no ledger label and no local credential. Round 2 gave
+    // it the key's fallback (`org-1`) so the mask could not RENAME it silently —
+    // but the same account is a credential row under `local`, where it shows the
+    // mask, so one account read two ways. Round 3: the mask IS the name, and
+    // `labelMasked` is what stops the rename being silent.
+    db.upsertUsageBuckets([bucket({ hourUtc: DAY_D + 2 * HOUR, apiCostUsd: 1 })])
+    hoisted.limits = [
+      {
+        ...limitsReading(ACCOUNT_A, 'a•••@e•••.test'),
+        labelMasked: true,
+        source: { deviceId: PEER_DEVICE, deviceName: 'studio' }
+      }
+    ]
+
+    const data = await dashboard.buildUsageDashboard({ range: '7d', scope: 'all', now: NOW })
+    const account = data.providers.flatMap((p) => p.accounts)[0]
+
+    expect(account.accountKey).toBe(ACCOUNT_A)
+    expect(account.label).toBe('a•••@e•••.test')
+    expect(account.labelMasked).toBe(true)
+  })
+
+  it('gives the same account the same name under both scopes', async () => {
+    const { db, dashboard } = await fresh()
+    enableHub(db)
+    db.upsertUsageBuckets([bucket({ hourUtc: DAY_D + 2 * HOUR, apiCostUsd: 1 })])
+    const relayed = {
+      ...limitsReading(ACCOUNT_A, 'a•••@e•••.test'),
+      labelMasked: true,
+      source: { deviceId: PEER_DEVICE, deviceName: 'studio' }
+    }
+    hoisted.limits = [relayed]
+
+    const combined = await dashboard.buildUsageDashboard({ range: '7d', scope: 'all', now: NOW })
+    // `local` reads no relayed reading, so the mask is not in reach there — and
+    // that scope never puts such a key in the provider tree either, because a
+    // key only another machine spent on has no local bucket. What the two must
+    // agree on is the name of an account they BOTH show, which the panel takes
+    // from the reading under `local` and from here under `all`.
+    expect(combined.providers.flatMap((p) => p.accounts)[0].label).toBe(relayed.label)
+  })
+
+  it('lets a ledger label beat the mask, and then flags nothing', async () => {
+    const { db, dashboard } = await fresh()
+    enableHub(db)
+    db.upsertUsageBuckets([bucket({ hourUtc: DAY_D + 2 * HOUR, apiCostUsd: 1 })])
+    db.insertUsageEvents([labelEvent('e-known', ACCOUNT_A, 'work@example.test')])
+    hoisted.limits = [
+      {
+        ...limitsReading(ACCOUNT_A, 'a•••@e•••.test'),
+        labelMasked: true,
+        source: { deviceId: PEER_DEVICE, deviceName: 'studio' }
+      }
+    ]
+
+    const data = await dashboard.buildUsageDashboard({ range: '7d', scope: 'all', now: NOW })
+    const account = data.providers.flatMap((p) => p.accounts)[0]
+
+    expect(account.label).toBe('work@example.test')
+    expect(account.labelMasked).toBeUndefined()
+  })
+
+  it('still takes a LOCAL reading’s label, which is not masked', async () => {
+    const { db, dashboard } = await fresh()
+    db.upsertUsageBuckets([bucket({ hourUtc: DAY_D + 2 * HOUR, apiCostUsd: 1 })])
+    hoisted.limits = [limitsReading(ACCOUNT_A, 'work@example.test')]
+
+    const data = await dashboard.buildUsageDashboard({ range: '7d', now: NOW })
+    expect(data.providers.flatMap((p) => p.accounts)[0].label).toBe('work@example.test')
+  })
+
+  it('reads no relayed limits at all under local', async () => {
+    const { db, dashboard } = await fresh()
+    enableHub(db)
+    db.upsertUsageBuckets([bucket({ hourUtc: DAY_D + 2 * HOUR, apiCostUsd: 1 })])
+
+    await dashboard.buildUsageDashboard({ range: '7d', now: NOW })
+    expect(hoisted.readLimitsCalls.at(-1)).toMatchObject({ refresh: false, relayed: false })
+
+    await dashboard.buildUsageDashboard({ range: '7d', scope: 'all', now: NOW })
+    expect(hoisted.readLimitsCalls.at(-1)).toMatchObject({ refresh: false, relayed: true })
+  })
+
+  it('drops a remote row the hub attributed to this machine', async () => {
+    const { db, dashboard } = await fresh()
+    enableHub(db)
+    db.upsertUsageBuckets([bucket({ hourUtc: DAY_D + 2 * HOUR, apiCostUsd: 1 })])
+    // The same hour, echoed back under OUR id. The hub excludes the caller and
+    // the client filters on the way in; this is the third guard (M1), and
+    // without it the hour is counted twice.
+    db.upsertRemoteUsageBuckets([
+      remoteBucket(SELF_DEVICE, { hourUtc: DAY_D + 2 * HOUR, apiCostUsd: 1 })
+    ])
+
+    const data = await dashboard.buildUsageDashboard({ range: '7d', scope: 'all', now: NOW })
+
+    expect(data.totals.displayCostUsd).toBeCloseTo(1, 6)
+    expect(data.remoteUsd).toBe(0)
+    expect(data.localUsd).toBeCloseTo(1, 6)
+    expect(data.machines).toHaveLength(1)
+  })
+
+  it('drops a bucket dated past the end of the series, local or remote', async () => {
+    const { db, dashboard } = await fresh()
+    enableHub(db)
+    // A peer whose clock runs a day fast, and a local row from a clock that
+    // moved backwards. Either used to count in the hero with no column to be
+    // drawn in, which made `Σ series = hero` false (M2).
+    db.upsertUsageBuckets([
+      bucket({ hourUtc: DAY_D + 2 * HOUR, apiCostUsd: 1 }),
+      bucket({ hourUtc: NOW + 2 * DAY, apiCostUsd: 99 })
+    ])
+    db.upsertRemoteUsageBuckets([
+      remoteBucket(PEER_DEVICE, { hourUtc: NOW + 2 * DAY, apiCostUsd: 55 })
+    ])
+
+    const data = await dashboard.buildUsageDashboard({ range: '7d', scope: 'all', now: NOW })
+
+    expect(data.totals.displayCostUsd).toBeCloseTo(1, 6)
+    const series = data.days.reduce((sum, day) => sum + day.totals.displayCostUsd, 0)
+    expect(series).toBeCloseTo(data.totals.displayCostUsd, 6)
+  })
+
+  it('bounds the today range at the hour in progress, so the hours add to the hero', async () => {
+    const { db, dashboard } = await fresh()
+    enableHub(db)
+    const todayStart = startOfLocalDay(NOW)
+    db.upsertUsageBuckets([bucket({ hourUtc: floorHour(todayStart + HOUR), apiCostUsd: 2 })])
+    // Two hours into the future: inside today's DAY column, past the last HOUR.
+    db.upsertRemoteUsageBuckets([
+      remoteBucket(PEER_DEVICE, { hourUtc: floorHour(NOW) + 2 * HOUR, apiCostUsd: 7 })
+    ])
+
+    const data = await dashboard.buildUsageDashboard({ range: 'today', scope: 'all', now: NOW })
+
+    expect(data.totals.displayCostUsd).toBeCloseTo(2, 6)
+    const hourly = (data.hours ?? []).reduce((sum, h) => sum + h.totals.displayCostUsd, 0)
+    expect(hourly).toBeCloseTo(data.totals.displayCostUsd, 6)
+  })
+
+  it('accumulates no per-machine split under local', async () => {
+    const { db, dashboard } = await fresh()
+    seedTree(db)
+    enableHub(db)
+
+    const local = await dashboard.buildUsageDashboard({ range: '7d', now: NOW })
+    expect(local.days.every((day) => day.byMachine === undefined)).toBe(true)
+
+    const combined = await dashboard.buildUsageDashboard({ range: '7d', scope: 'all', now: NOW })
+    const withSpend = combined.days.filter((day) => day.totals.displayCostUsd > 0)
+    expect(withSpend.length).toBeGreaterThan(0)
+    expect(withSpend.every((day) => Object.keys(day.byMachine ?? {}).length > 0)).toBe(true)
+    // And the split adds back up to its own column.
+    for (const day of combined.days) {
+      const byMachine = Object.values(day.byMachine ?? {}).reduce(
+        (sum, c) => sum + c.displayCostUsd,
+        0
+      )
+      expect(byMachine).toBeCloseTo(day.totals.displayCostUsd, 6)
+    }
+  })
+})
+
+describe('sanitizeDashboardScope', () => {
+  it('takes the two scopes and nothing else', async () => {
+    const { dashboard } = await fresh()
+    expect(dashboard.sanitizeDashboardScope({ scope: 'local' })).toBe('local')
+    expect(dashboard.sanitizeDashboardScope({ scope: 'all' })).toBe('all')
+    expect(dashboard.sanitizeDashboardScope({ scope: 'everything' })).toBe('local')
+    expect(dashboard.sanitizeDashboardScope({ scope: 1 })).toBe('local')
+    expect(dashboard.sanitizeDashboardScope({ scope: 'toString' })).toBe('local')
+    expect(dashboard.sanitizeDashboardScope({})).toBe('local')
+    expect(dashboard.sanitizeDashboardScope(undefined)).toBe('local')
+    expect(dashboard.sanitizeDashboardScope('all')).toBe('local')
+  })
+})
+
 describe('sanitizeDashboardRange', () => {
   it('takes the four ranges and nothing else', async () => {
     const { dashboard } = await fresh()
@@ -485,6 +955,11 @@ describe('sanitizeDashboardRange', () => {
     expect(dashboard.sanitizeDashboardRange({ range: 'toString' })).toBe('30d')
   })
 })
+
+/** The UTC-hour floor of an instant — the key `usage_bucket` uses. */
+function floorHour(ts: number): number {
+  return Math.floor(ts / HOUR) * HOUR
+}
 
 /** Local midnight of the day containing `ts` — the query's own rule. */
 function startOfLocalDay(ts: number): number {

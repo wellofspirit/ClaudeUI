@@ -21,7 +21,7 @@
  */
 
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { resolve } from 'node:path'
 import {
   closeDb,
@@ -64,6 +64,50 @@ interface HubStore {
 
 const spawned: ChildProcess[] = []
 
+/**
+ * How a hub process is started, and why not through a shell.
+ *
+ * `shell: true` ON WINDOWS WAS A PROCESS LEAK. It runs `cmd.exe /c bun …`, so
+ * the child this suite holds is the shell and the hub is its GRANDchild;
+ * `child.kill()` then stopped `cmd.exe` and left a listening `bun.exe` behind,
+ * one per hub per run. They accumulated into the hundreds on the owner's
+ * machine. `CreateProcess` appends `.exe` and searches `PATH` by itself, so the
+ * shell bought nothing here in the first place.
+ *
+ * Stdin is a PIPE rather than `ignore`, because the hub exits when its stdin
+ * closes — the backstop for a run that is cancelled or times out before any
+ * `afterEach` gets to run.
+ */
+const SPAWN_OPTIONS: SpawnOptions = { stdio: ['pipe', 'pipe', 'pipe'] }
+
+/**
+ * Stop one hub and WAIT for it to be gone.
+ *
+ * `kill()` only asks. A test that returned on the signal left the port bound
+ * and the process listed for as long as it took to die, which is what made the
+ * leak invisible until someone counted.
+ */
+async function stopFakeHub(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return
+  const exited = new Promise<void>((done) => child.once('exit', () => done()))
+  // Both, in order: the polite signal the script itself listens for, then the
+  // blunt one for a process that is wedged mid-request.
+  child.stdin?.end()
+  child.kill()
+  await Promise.race([
+    exited,
+    new Promise<void>((done) => setTimeout(done, 5_000)).then(() => {
+      child.kill('SIGKILL')
+      return exited
+    })
+  ])
+}
+
+/** Stop every hub started so far, whatever happened to the test that started it. */
+async function stopAllFakeHubs(): Promise<void> {
+  await Promise.all(spawned.splice(0).map((child) => stopFakeHub(child)))
+}
+
 async function startFakeHub(extra: string[] = []): Promise<FakeHub> {
   const child = spawn(
     'bun',
@@ -82,15 +126,28 @@ async function startFakeHub(extra: string[] = []): Promise<FakeHub> {
       '--debug-store',
       ...extra
     ],
-    { stdio: ['ignore', 'pipe', 'pipe'], shell: process.platform === 'win32' }
+    SPAWN_OPTIONS
   )
+  // BEFORE the URL is awaited: a hub that starts and then never prints one must
+  // still be stopped by the teardown, not left for the process table.
   spawned.push(child)
 
-  const url = await new Promise<string>((resolveUrl, reject) => {
+  return { url: await hubUrl(child) }
+}
+
+/** The address the hub prints on stdout once it is listening. */
+function hubUrl(child: ChildProcess): Promise<string> {
+  return new Promise<string>((resolveUrl, reject) => {
     const timer = setTimeout(() => reject(new Error('the fake hub never printed a URL')), 20_000)
+    const stdout = child.stdout
+    if (stdout === null) {
+      clearTimeout(timer)
+      reject(new Error('the fake hub was started without a stdout pipe'))
+      return
+    }
     let buffered = ''
-    child.stdout.setEncoding('utf-8')
-    child.stdout.on('data', (chunk: string) => {
+    stdout.setEncoding('utf-8')
+    stdout.on('data', (chunk: string) => {
       buffered += chunk
       const match = /listening on (http:\/\/\S+)/.exec(buffered)
       if (match) {
@@ -107,8 +164,6 @@ async function startFakeHub(extra: string[] = []): Promise<FakeHub> {
       reject(new Error(`the fake hub exited with ${code}`))
     })
   })
-
-  return { url }
 }
 
 const AUTH_HEADERS = {
@@ -179,14 +234,14 @@ beforeEach(() => {
   resetWindowSampleDedup()
 })
 
-afterEach(() => {
-  for (const child of spawned.splice(0)) child.kill()
+afterEach(async () => {
+  await stopAllFakeHubs()
   closeDb()
   resetUsageEventWrittenListeners()
 })
 
-afterAll(() => {
-  for (const child of spawned.splice(0)) child.kill()
+afterAll(async () => {
+  await stopAllFakeHubs()
 })
 
 describe('the client and the fake hub agree on the wire', () => {
@@ -377,22 +432,9 @@ describe('the client and the fake hub agree on the wire', () => {
   it('serves no debug route without --debug-store', async () => {
     // It answers raw events with UNMASKED labels, which ADR-072 §6 forbids a
     // device caller, so a hub that served it by default would model a leak.
-    const child = spawn('bun', [SCRIPT, '--port', '0'], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: process.platform === 'win32'
-    })
+    const child = spawn('bun', [SCRIPT, '--port', '0'], SPAWN_OPTIONS)
     spawned.push(child)
-    const url = await new Promise<string>((resolveUrl, reject) => {
-      const timer = setTimeout(() => reject(new Error('no URL')), 20_000)
-      child.stdout.setEncoding('utf-8')
-      child.stdout.on('data', (chunk: string) => {
-        const match = /listening on (http:\/\/\S+)/.exec(chunk)
-        if (match) {
-          clearTimeout(timer)
-          resolveUrl(match[1])
-        }
-      })
-    })
+    const url = await hubUrl(child)
     expect((await fetch(`${url}/debug/store`)).status).toBe(404)
   })
 

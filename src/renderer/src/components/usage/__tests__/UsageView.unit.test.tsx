@@ -17,14 +17,32 @@
  *
  * The rule this file exists to guard is the refresh grant (ADR-071 §6): NOTHING
  * automatic may send `fetchAccountLimits(true)`.
+ *
+ * S5c added the scope, which is the shell's third owned control and the only one
+ * that can be absent: it exists only while a hub is enabled. Its own section is
+ * at the bottom. Every OTHER case in this file now asserts the `local` scope
+ * explicitly, which is the pin that the pre-hub reading of this screen has not
+ * moved.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { UsageView } from '../UsageView'
 import { useSessionStore } from '../../../stores/session-store'
-import type { BlockUsageData } from '../../../../../shared/types'
-import { makeDashboard, makeLimits, makeTotals, makeWindow } from './dashboard-fixtures'
+import type {
+  BlockUsageData,
+  UsageDashboardData,
+  UsageHubStatus
+} from '../../../../../shared/types'
+import {
+  makeAccount,
+  makeDashboard,
+  makeLimits,
+  makeMachine,
+  makeProvider,
+  makeTotals,
+  makeWindow
+} from './dashboard-fixtures'
 
 // The shell's two push subscriptions, captured so a test can fire them. The
 // real registry defers a listener when no transport client exists, which would
@@ -66,6 +84,27 @@ let mockFetchDashboard: ReturnType<typeof vi.fn>
 let mockFetchLimits: ReturnType<typeof vi.fn>
 let mockFetchWindows: ReturnType<typeof vi.fn>
 let mockRefreshPrices: ReturnType<typeof vi.fn>
+let mockHubStatus: ReturnType<typeof vi.fn>
+let mockSyncHub: ReturnType<typeof vi.fn>
+
+/** A hub status. `enabled` is what decides whether the scope exists at all. */
+function makeHubStatus(overrides: Partial<UsageHubStatus> = {}): UsageHubStatus {
+  return {
+    enabled: true,
+    url: 'https://hub.example.test',
+    deviceId: 'dev-self',
+    deviceName: 'desk',
+    clientId: 'abc.access',
+    hasSecret: true,
+    state: 'idle',
+    lastPushAt: Date.now(),
+    lastPullAt: Date.now(),
+    lastError: null,
+    pendingEvents: 0,
+    ...overrides,
+    remote: overrides.remote ?? { devices: [], epoch: 4 }
+  }
+}
 
 beforeEach(() => {
   syncHandlers.clear()
@@ -76,6 +115,10 @@ beforeEach(() => {
   // `WindowValue` does its own read; without it the widget throws on mount.
   mockFetchWindows = vi.fn().mockResolvedValue([])
   mockRefreshPrices = vi.fn().mockResolvedValue({ count: 412, refreshedAt: Date.now() })
+  // No hub by default: every case that is not about the scope reads the screen
+  // as a machine that has never configured one.
+  mockHubStatus = vi.fn().mockResolvedValue(makeHubStatus({ enabled: false, deviceId: null }))
+  mockSyncHub = vi.fn().mockResolvedValue(makeHubStatus())
 
   // Assign api directly on the existing window object — do NOT replace window
   // itself, as that breaks waitFor's container check (it loses the document ref).
@@ -84,7 +127,9 @@ beforeEach(() => {
     fetchUsageDashboard: mockFetchDashboard,
     fetchAccountLimits: mockFetchLimits,
     fetchUsageWindows: mockFetchWindows,
-    refreshPrices: mockRefreshPrices
+    refreshPrices: mockRefreshPrices,
+    usageHubStatus: mockHubStatus,
+    syncUsageHubNow: mockSyncHub
   }
 
   useSessionStore.setState({ blockUsage: null, accountUsage: null } as any)
@@ -112,7 +157,7 @@ describe('UsageView — load', () => {
 
   it('asks for today and the stored limits on mount', async () => {
     render(<UsageView onClose={vi.fn()} />)
-    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('today'))
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('today', 'local'))
     expect(mockFetchLimits).toHaveBeenCalledWith(false)
   })
 
@@ -139,30 +184,30 @@ describe('UsageView — load', () => {
 describe('UsageView — range control', () => {
   it('refetches with the new range and remembers it for next time', async () => {
     render(<UsageView onClose={vi.fn()} />)
-    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('today'))
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('today', 'local'))
 
     fireEvent.click(screen.getByTestId('UsageView.range.7d'))
-    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('7d'))
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('7d', 'local'))
     expect(window.localStorage.getItem('claudeui.usage.range')).toBe('7d')
   })
 
   it('opens on the stored range', async () => {
     window.localStorage.setItem('claudeui.usage.range', '90d')
     render(<UsageView onClose={vi.fn()} />)
-    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('90d'))
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('90d', 'local'))
     expect(screen.getByTestId('UsageView.range.90d')).toHaveAttribute('data-active', 'true')
   })
 
   it('ignores a stored value that is not a range', async () => {
     window.localStorage.setItem('claudeui.usage.range', 'all-time')
     render(<UsageView onClose={vi.fn()} />)
-    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('today'))
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('today', 'local'))
   })
 
   it('leaves a stored range alone — the default only applies to a fresh viewer', async () => {
     window.localStorage.setItem('claudeui.usage.range', '30d')
     render(<UsageView onClose={vi.fn()} />)
-    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('30d'))
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('30d', 'local'))
     expect(screen.getByTestId('UsageView.range.30d')).toHaveAttribute('data-active', 'true')
   })
 
@@ -237,7 +282,7 @@ describe('UsageView — limits refresh', () => {
     render(<UsageView onClose={vi.fn()} />)
     await waitFor(() => expect(mockFetchLimits).toHaveBeenCalled())
     fireEvent.click(screen.getByTestId('UsageView.range.7d'))
-    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('7d'))
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('7d', 'local'))
     expect(mockFetchLimits.mock.calls.every(([refresh]) => refresh === false)).toBe(true)
   })
 
@@ -495,12 +540,12 @@ describe('UsageView — tabs', () => {
 
   it('still refetches when the range changes on the Plan value tab', async () => {
     render(<UsageView onClose={vi.fn()} />)
-    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('today'))
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('today', 'local'))
 
     fireEvent.click(screen.getByTestId('UsageView.tab.plans'))
     fireEvent.click(screen.getByTestId('UsageView.range.7d'))
 
-    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('7d'))
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('7d', 'local'))
     expect(screen.getByTestId('UsageView.panel')).toHaveAttribute('data-tab', 'plans')
   })
 
@@ -511,6 +556,317 @@ describe('UsageView — tabs', () => {
     await waitFor(() => expect(screen.getByTestId('UsageView.tab')).toBeInTheDocument())
     for (const id of ['UsageView.tab.spend', 'UsageView.tab.plans']) {
       expect(screen.getByTestId(id).tagName).toBe('BUTTON')
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The scope (S5c)
+// ---------------------------------------------------------------------------
+
+describe('UsageView — the scope', () => {
+  it('offers no scope pills, and asks for local, on a machine with no hub', async () => {
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('today', 'local'))
+    expect(screen.queryByTestId('UsageView.scope')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('UsageView.hubChip')).not.toBeInTheDocument()
+    // `machine` is not a grouping when there is one machine.
+    expect(screen.queryByTestId('UsageView.groupBy.machine')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('MachinesPanel')).not.toBeInTheDocument()
+  })
+
+  it('offers them once a hub is enabled, starting on this machine', async () => {
+    mockHubStatus.mockResolvedValue(makeHubStatus())
+    render(<UsageView onClose={vi.fn()} />)
+
+    await waitFor(() => expect(screen.getByTestId('UsageView.scope')).toBeInTheDocument())
+    expect(screen.getByTestId('UsageView.scope')).toHaveAttribute('data-value', 'local')
+    const pills = screen.getByTestId('UsageView.scope').querySelectorAll('button')
+    expect([...pills].map((p) => p.getAttribute('data-value'))).toEqual(['local', 'all'])
+    expect(pills[0]).toHaveTextContent('This machine')
+    expect(pills[1]).toHaveTextContent('All machines')
+  })
+
+  it('refetches with the new scope and remembers it for next time', async () => {
+    mockHubStatus.mockResolvedValue(makeHubStatus())
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(screen.getByTestId('UsageView.scope.all')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('UsageView.scope.all'))
+
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('today', 'all'))
+    expect(window.localStorage.getItem('claudeui.usage.scope')).toBe('all')
+  })
+
+  it('opens on the stored scope, and the pills fall back when the hub is gone', async () => {
+    window.localStorage.setItem('claudeui.usage.scope', 'all')
+    mockHubStatus.mockResolvedValue(makeHubStatus())
+    const { unmount } = render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('today', 'all'))
+    unmount()
+
+    // The hub has since been forgotten. ONE read, with the stored preference —
+    // the query downgrades and reports the scope it used, so waiting for the
+    // status before the first read would only have cost a second fetch (M8).
+    mockFetchDashboard.mockClear()
+    mockHubStatus.mockResolvedValue(makeHubStatus({ enabled: false, deviceId: null }))
+    mockFetchDashboard.mockResolvedValue(makeDashboard({ scope: 'local' }))
+    render(<UsageView onClose={vi.fn()} />)
+
+    await waitFor(() => expect(screen.getByTestId('Summary')).toBeInTheDocument())
+    expect(mockFetchDashboard).toHaveBeenCalledTimes(1)
+    expect(mockFetchDashboard).toHaveBeenCalledWith('today', 'all')
+    // And no pills, because there is no hub to offer them for.
+    expect(screen.queryByTestId('UsageView.scope')).not.toBeInTheDocument()
+  })
+
+  it('reads the ledger once on mount when the stored scope is all', async () => {
+    window.localStorage.setItem('claudeui.usage.scope', 'all')
+    mockHubStatus.mockResolvedValue(makeHubStatus())
+    render(<UsageView onClose={vi.fn()} />)
+
+    await waitFor(() => expect(screen.getByTestId('UsageView.scope')).toBeInTheDocument())
+    expect(mockFetchDashboard).toHaveBeenCalledTimes(1)
+    expect(mockFetchDashboard).toHaveBeenCalledWith('today', 'all')
+  })
+
+  it('drops the machine group-by when the hub is disabled outside the pills (R1)', async () => {
+    window.localStorage.setItem('claudeui.usage.scope', 'all')
+    mockHubStatus.mockResolvedValue(makeHubStatus())
+    // A provider tree with a real leaf, so an empty breakdown can only mean the
+    // tree was rooted on a dimension the data does not have.
+    const withSpend = (scope: 'local' | 'all'): UsageDashboardData =>
+      makeDashboard({
+        scope,
+        providers: [
+          makeProvider({
+            accounts: [
+              makeAccount({
+                machines: ['dev-self'],
+                remoteOnly: false,
+                models: [
+                  {
+                    engineId: 'claude',
+                    vendorId: 'anthropic',
+                    modelId: 'claude-opus-5',
+                    totals: makeTotals({ displayCostUsd: 42, apiCostUsd: 42 }),
+                    dispatched: null
+                  }
+                ]
+              })
+            ]
+          })
+        ],
+        totals: makeTotals({ displayCostUsd: 42 }),
+        machines: [makeMachine({ totals: makeTotals({ displayCostUsd: 42 }) })]
+      })
+    mockFetchDashboard.mockImplementation(async (_range: string, scope: string) =>
+      withSpend(scope as 'local' | 'all')
+    )
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(screen.getByTestId('UsageView.groupBy.machine')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('UsageView.groupBy.machine'))
+    await waitFor(() =>
+      expect(screen.getByTestId('BreakdownTable')).toHaveAttribute('data-group-by', 'machine')
+    )
+
+    // The hub is forgotten in Settings — no click on this screen at all. The
+    // status re-read waits out the same debounce the other nudges use, so the
+    // assertion is given longer than it.
+    mockHubStatus.mockResolvedValue(makeHubStatus({ enabled: false, deviceId: null }))
+    syncHandlers.get('usage-hub:changed')!()
+
+    // Waited for on the GROUP-BY, not on the pill. The pill unmounts in the
+    // render where the scope flips, while the reset is an effect that runs after
+    // it — so waiting for the pill leaves a window in which the tree is still
+    // rooted on `machine`, and under suite load the next assertion landed in it.
+    await waitFor(
+      () =>
+        expect(screen.getByTestId('BreakdownTable')).toHaveAttribute('data-group-by', 'provider'),
+      { timeout: 5_000 }
+    )
+    expect(screen.queryByTestId('UsageView.groupBy.machine')).not.toBeInTheDocument()
+    // The breakdown must NOT be left rooted on a dimension the data no longer
+    // has, which drew "Nothing in this range to break down" under a $42 hero.
+    expect(screen.queryByTestId('BreakdownTable.empty')).not.toBeInTheDocument()
+  })
+
+  it('ignores a stored value that is not a scope', async () => {
+    window.localStorage.setItem('claudeui.usage.scope', 'everything')
+    mockHubStatus.mockResolvedValue(makeHubStatus())
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledWith('today', 'local'))
+  })
+
+  it('offers the machine grouping under all only, and drops it on the way back', async () => {
+    mockHubStatus.mockResolvedValue(makeHubStatus())
+    mockFetchDashboard.mockImplementation(async (_range: string, scope: string) =>
+      makeDashboard({ scope: scope as 'local' | 'all', machines: [makeMachine()] })
+    )
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(screen.getByTestId('UsageView.scope.all')).toBeInTheDocument())
+    expect(screen.queryByTestId('UsageView.groupBy.machine')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('UsageView.scope.all'))
+    await waitFor(() => expect(screen.getByTestId('UsageView.groupBy.machine')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('UsageView.groupBy.machine'))
+    await waitFor(() =>
+      expect(screen.getByTestId('BreakdownTable')).toHaveAttribute('data-group-by', 'machine')
+    )
+
+    // Back to this machine: the pill goes, and so does the selection — a
+    // breakdown rooted on a dimension the data no longer has is not a table.
+    fireEvent.click(screen.getByTestId('UsageView.scope.local'))
+    await waitFor(() =>
+      expect(screen.queryByTestId('UsageView.groupBy.machine')).not.toBeInTheDocument()
+    )
+    expect(screen.getByTestId('BreakdownTable')).toHaveAttribute('data-group-by', 'provider')
+  })
+
+  it('mounts the machines card last on Spend, and only when the answer is combined', async () => {
+    mockHubStatus.mockResolvedValue(makeHubStatus())
+    mockFetchDashboard.mockImplementation(async (_range: string, scope: string) =>
+      makeDashboard({ scope: scope as 'local' | 'all', machines: [makeMachine()] })
+    )
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(screen.getByTestId('Summary')).toBeInTheDocument())
+    expect(screen.queryByTestId('MachinesPanel')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('UsageView.scope.all'))
+    await waitFor(() => expect(screen.getByTestId('MachinesPanel')).toBeInTheDocument())
+
+    // LAST on the tab (the owner's ruling on the mockup).
+    const cards = [...screen.getByTestId('UsageView.panel').children]
+    expect(cards[cards.length - 1]).toBe(screen.getByTestId('MachinesPanel'))
+
+    // And never on the plans tab, whatever the scope.
+    fireEvent.click(screen.getByTestId('UsageView.tab.plans'))
+    await waitFor(() => expect(screen.getByTestId('WindowValue')).toBeInTheDocument())
+    expect(screen.queryByTestId('MachinesPanel')).not.toBeInTheDocument()
+  })
+
+  it('keeps the scope pills on the plans tab', async () => {
+    mockHubStatus.mockResolvedValue(makeHubStatus())
+    render(<UsageView onClose={vi.fn()} />)
+    await waitFor(() => expect(screen.getByTestId('UsageView.scope')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('UsageView.tab.plans'))
+    expect(screen.getByTestId('UsageView.scope')).toBeInTheDocument()
+  })
+})
+
+describe('UsageView — the hub chip', () => {
+  const HOUR = 60 * 60 * 1000
+
+  it('counts the machines, reports the state and says how fresh the view is', async () => {
+    mockHubStatus.mockResolvedValue(
+      makeHubStatus({
+        lastPullAt: Date.now() - 90_000,
+        remote: {
+          epoch: 4,
+          devices: [
+            {
+              deviceId: 'dev-peer',
+              deviceName: 'studio',
+              os: 'darwin',
+              appVersion: '3.3.0',
+              lastPushAt: Date.now() - HOUR,
+              retired: false
+            }
+          ]
+        }
+      })
+    )
+    render(<UsageView onClose={vi.fn()} />)
+
+    await waitFor(() => expect(screen.getByTestId('UsageView.hubChip')).toBeInTheDocument())
+    const chip = screen.getByTestId('UsageView.hubChip')
+    // This machine plus the peer.
+    expect(chip).toHaveTextContent('Hub · 2 machines')
+    expect(chip).toHaveTextContent('synced 1m ago')
+    expect(chip).toHaveAttribute('data-state', 'idle')
+    expect(chip).toHaveAttribute('data-severity', 'ok')
+    expect(chip).not.toHaveAttribute('data-behind')
+  })
+
+  it('flags a peer that has not pushed for a day, and never this machine', async () => {
+    mockHubStatus.mockResolvedValue(
+      makeHubStatus({
+        // This machine has not pushed for two days; that is its own connection's
+        // problem and the state dot's business, never a "behind" count.
+        lastPushAt: Date.now() - 48 * HOUR,
+        remote: {
+          epoch: 4,
+          devices: [
+            {
+              deviceId: 'dev-late',
+              deviceName: 'laptop',
+              os: 'darwin',
+              appVersion: '3.2.0',
+              lastPushAt: Date.now() - 31 * HOUR,
+              retired: false
+            },
+            {
+              deviceId: 'dev-retired',
+              deviceName: 'old-server',
+              os: 'linux',
+              appVersion: '3.1.0',
+              lastPushAt: Date.now() - 40 * 24 * HOUR,
+              retired: true
+            }
+          ]
+        }
+      })
+    )
+    render(<UsageView onClose={vi.fn()} />)
+
+    await waitFor(() => expect(screen.getByTestId('UsageView.hubChip')).toBeInTheDocument())
+    // One: the retired machine is history, not a gap.
+    expect(screen.getByTestId('UsageView.hubChip')).toHaveAttribute('data-behind', '1')
+    expect(screen.getByTestId('UsageView.hubChip.behind')).toHaveTextContent('1 behind')
+    // And it is not counted as a machine either (M3): this one plus the late
+    // peer is two, not three.
+    expect(screen.getByTestId('UsageView.hubChip')).toHaveTextContent('Hub · 2 machines')
+  })
+
+  it('grades a refused credential critical and carries the reason in the tooltip', async () => {
+    mockHubStatus.mockResolvedValue(
+      makeHubStatus({ state: 'needs-credentials', lastError: 'the hub refused the service token' })
+    )
+    render(<UsageView onClose={vi.fn()} />)
+
+    await waitFor(() => expect(screen.getByTestId('UsageView.hubChip')).toBeInTheDocument())
+    const chip = screen.getByTestId('UsageView.hubChip')
+    expect(chip).toHaveAttribute('data-severity', 'crit')
+    expect(chip.getAttribute('title')).toBe('the hub refused the service token')
+  })
+
+  it('re-reads the hub and the ledger a debounce after the client changes state', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      mockHubStatus.mockResolvedValue(makeHubStatus())
+      render(<UsageView onClose={vi.fn()} />)
+      await waitFor(() => expect(mockHubStatus).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledTimes(1))
+
+      const onHub = syncHandlers.get('usage-hub:changed')
+      expect(onHub).toBeDefined()
+      onHub!()
+      onHub!()
+      // A nudge is not a read.
+      expect(mockHubStatus).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(2_000)
+      // All THREE: a finished pull is a new machine list, new remote buckets to
+      // fold, AND new relayed limit readings. Without the third, a peer's meters
+      // only showed up the next time this screen was opened (F1).
+      await waitFor(() => expect(mockHubStatus).toHaveBeenCalledTimes(2))
+      expect(mockFetchDashboard).toHaveBeenCalledTimes(2)
+      expect(mockFetchLimits).toHaveBeenCalledTimes(2)
+      // Still never a refresh grant: the relayed read is local and free.
+      expect(mockFetchLimits.mock.calls.every(([refresh]) => refresh === false)).toBe(true)
+    } finally {
+      vi.useRealTimers()
     }
   })
 })

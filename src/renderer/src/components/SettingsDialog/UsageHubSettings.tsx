@@ -2,7 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { UsageHubState, UsageHubStatus } from '../../../../shared/types'
 import { onSyncEvent } from '../../../../core/shared/sync/client-registry'
 import { ActionRow, Button, SettingRow, SettingsToggle, TextField } from './settings-controls'
-import { formatDuration, SEVERITY_ICON, type MeterSeverity } from '../usage/usage-utils'
+import {
+  formatDuration,
+  HUB_STATE_SEVERITY,
+  SEVERITY_ICON,
+  SEVERITY_TEXT_CLASS
+} from '../usage/usage-utils'
 
 /**
  * Settings › Remote access › Usage hub — the group body (ADR-072 §7).
@@ -44,30 +49,6 @@ const STATE_WORDS: Record<UsageHubState, string> = {
   'needs-credentials': 'Needs credentials',
   'update-hub': 'Update your hub',
   error: 'Error'
-}
-
-/**
- * How bad each state is, in the dashboard's severity vocabulary.
- *
- * `backoff` and `update-hub` are warnings — sync is behind, but either time or
- * an upgrade clears them. `needs-credentials` and `error` are critical because
- * NOTHING is retried for them (ADR-072 §7): only a person lifts them, so a
- * machine left in one has stopped syncing for good.
- */
-const STATE_SEVERITY: Record<UsageHubState, MeterSeverity> = {
-  off: 'ok',
-  idle: 'ok',
-  syncing: 'ok',
-  backoff: 'warn',
-  'needs-credentials': 'crit',
-  'update-hub': 'warn',
-  error: 'crit'
-}
-
-const SEVERITY_TEXT_CLASS: Record<MeterSeverity, string> = {
-  ok: 'text-text-secondary',
-  warn: 'text-warning',
-  crit: 'text-danger'
 }
 
 /** The four fields `usage-hub:configure` takes, as the form holds them. */
@@ -330,7 +311,7 @@ export function UsageHubSettings(): React.JSX.Element {
     )
   }
 
-  const severity = STATE_SEVERITY[status.state]
+  const severity = HUB_STATE_SEVERITY[status.state]
   const machines = machinesOf(status)
   const now = Date.now()
   // `syncing` already has a pass in flight and `off` has nothing armed, so

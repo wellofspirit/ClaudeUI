@@ -370,7 +370,7 @@ const api: ClaudeAPI = {
   // The metering dashboard (ADR-071 §6/§7/§8)
   fetchAccountLimits: (refresh?: boolean) => ipcRenderer.invoke('usage:limits', refresh ?? false),
   fetchUsageWindows: (query) => ipcRenderer.invoke('usage:windows', query ?? {}),
-  fetchUsageDashboard: (range) => ipcRenderer.invoke('usage:dashboard', { range }),
+  fetchUsageDashboard: (range, scope) => ipcRenderer.invoke('usage:dashboard', { range, scope }),
 
   // The usage hub (ADR-072). `setUsageHubSecret` is write-only — no channel here
   // reads a device credential back.

@@ -1,4 +1,4 @@
-import type { DashboardRange, TokenCounts } from '../../../../shared/types'
+import type { DashboardRange, TokenCounts, UsageHubState } from '../../../../shared/types'
 import { isShortWindow } from '../../../../shared/window-kind'
 
 /** Model color palette — match by substring */
@@ -209,6 +209,63 @@ export const SEVERITY_FILL_CLASS: Record<MeterSeverity, string> = {
   ok: 'bg-accent',
   warn: 'bg-warning',
   crit: 'bg-danger'
+}
+
+/** The same three grades as text, for a chip or a status word. */
+export const SEVERITY_TEXT_CLASS: Record<MeterSeverity, string> = {
+  ok: 'text-text-secondary',
+  warn: 'text-warning',
+  crit: 'text-danger'
+}
+
+/**
+ * How many machines a combined figure is of: this one, plus every PEER the
+ * owner has not retired (ADR-072 §7).
+ *
+ * ONE definition, because three surfaces print this number — the sync chip, the
+ * summary's machines line and the Plan value subtitle — and two of them read it
+ * from the dashboard payload while the third reads the hub status. A retired
+ * machine is history the owner has closed the books on: counting it would make
+ * "3 machines" mean something different from the machine card's three live rows.
+ *
+ * Pass the PEERS only; this machine is added. `data.machines` carries self at
+ * its head, so filter it out (`m => !m.self`) before calling.
+ */
+export function combinedMachineCount(peers: ReadonlyArray<{ retired: boolean }>): number {
+  return 1 + peers.filter((peer) => !peer.retired).length
+}
+
+/**
+ * How far behind a machine is, in whole hours — `31h`.
+ *
+ * Not `formatDuration`, which would write `31h 0m`: the minutes are noise on a
+ * figure whose threshold is a whole day, and the two surfaces that print it (the
+ * machine card and the breakdown's machine rows) must read identically.
+ */
+export function formatBehind(ms: number): string {
+  return `${Math.floor(Math.max(0, ms) / 3_600_000)}h`
+}
+
+/**
+ * How bad each usage-hub state is, in the meter vocabulary (ADR-072 §7).
+ *
+ * `backoff` and `update-hub` are warnings — sync is behind, but either time or
+ * an upgrade clears them. `needs-credentials` and `error` are critical because
+ * NOTHING is retried for them: only a person lifts them, so a machine left in
+ * one has stopped syncing for good.
+ *
+ * Here rather than in either surface: the settings group and the dashboard chip
+ * grade the same seven states, and two copies would eventually disagree about
+ * which of them is worth a colour.
+ */
+export const HUB_STATE_SEVERITY: Record<UsageHubState, MeterSeverity> = {
+  off: 'ok',
+  idle: 'ok',
+  syncing: 'ok',
+  backoff: 'warn',
+  'needs-credentials': 'crit',
+  'update-hub': 'warn',
+  error: 'crit'
 }
 
 /**

@@ -621,8 +621,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       >,
     fetchUsageWindows: (query) =>
       connection.invoke('usage:windows', query ?? {}) as ReturnType<ClaudeAPI['fetchUsageWindows']>,
-    fetchUsageDashboard: (range) =>
-      connection.invoke('usage:dashboard', { range }) as ReturnType<
+    fetchUsageDashboard: (range, scope) =>
+      connection.invoke('usage:dashboard', { range, scope }) as ReturnType<
         ClaudeAPI['fetchUsageDashboard']
       >,
     usageHubStatus: () =>

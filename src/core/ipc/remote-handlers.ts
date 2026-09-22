@@ -50,7 +50,11 @@ import { usageFetcher } from '../services/usage-fetcher'
 import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
 import { readAccountLimits } from '../services/usage-provider'
 import { sanitizeUsageWindowQuery, usageWindowSummary } from '../services/usage-window-ledger'
-import { buildUsageDashboard, sanitizeDashboardRange } from '../services/usage-dashboard'
+import {
+  buildUsageDashboard,
+  sanitizeDashboardRange,
+  sanitizeDashboardScope
+} from '../services/usage-dashboard'
 import { blockUsageService } from '../services/block-usage'
 import type {
   ApprovalDecision,
@@ -1112,7 +1116,10 @@ export function registerRemoteHandlers(
     capability: 'config',
     kind: 'query',
     handler: async (opts?: unknown) => {
-      return buildUsageDashboard({ range: sanitizeDashboardRange(opts) })
+      return buildUsageDashboard({
+        range: sanitizeDashboardRange(opts),
+        scope: sanitizeDashboardScope(opts)
+      })
     }
   })
 

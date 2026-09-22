@@ -11,6 +11,7 @@ import type {
   DashboardAccount,
   DashboardDay,
   DashboardHour,
+  DashboardMachine,
   DashboardProvider,
   UsageDashboardData
 } from '../../../../../shared/types'
@@ -86,19 +87,48 @@ export function makeProvider(overrides: Partial<DashboardProvider> = {}): Dashbo
 
 export function makeDashboard(overrides: Partial<UsageDashboardData> = {}): UsageDashboardData {
   const providers = overrides.providers ?? [makeProvider()]
+  const totals =
+    overrides.totals ??
+    makeTotals({ displayCostUsd: providers.reduce((s, p) => s + p.totals.displayCostUsd, 0) })
   return {
     range: '30d',
+    // `local` by default: every widget's existing behaviour is its `local`
+    // behaviour, and S5c's rule is that the scope has to be asked for.
+    scope: 'local',
     fromTs: 0,
     toTs: 1,
     generatedAt: 1,
-    totals: makeTotals({
-      displayCostUsd: providers.reduce((s, p) => s + p.totals.displayCostUsd, 0)
-    }),
+    totals,
     coveredUsd: 0,
     unattributedUsd: 0,
     days: [],
+    // The hero is all this machine's until a combined answer says otherwise.
+    localUsd: totals.displayCostUsd,
+    remoteUsd: 0,
+    machines: [],
     ...overrides,
     providers
+  }
+}
+
+/**
+ * One machine of the combined view. `share` is a FRACTION, as the query emits
+ * it, so a test states `0.4` where the panel prints `40%`.
+ */
+export function makeMachine(overrides: Partial<DashboardMachine> = {}): DashboardMachine {
+  const totals = overrides.totals ?? makeTotals({ displayCostUsd: 10, apiCostUsd: 10 })
+  return {
+    deviceId: 'dev-self',
+    deviceName: 'desk',
+    os: 'win32',
+    appVersion: '3.3.0',
+    lastPushAt: Date.now(),
+    retired: false,
+    self: true,
+    share: 1,
+    accounts: [],
+    ...overrides,
+    totals
   }
 }
 

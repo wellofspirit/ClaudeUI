@@ -24,6 +24,12 @@
  * footnote says so once for the card rather than as a caveat per number
  * (ADR-071 §7; ADR-072's usage hub closes the other-machines half of it).
  *
+ * UNDER THE COMBINED SCOPE (S5c) the read asks for `all` and the query prefers
+ * the HUB's row for any window it holds, whose numerator is summed over every
+ * machine (ADR-072 §4). That narrows the bias to the part nothing can close —
+ * claude.ai and the provider's own web use — so the footnote stays exactly as it
+ * was and the subtitle says how many machines went into the figures.
+ *
  * ADR-030 runs through it: a window with unpriced turns says how many are
  * MISSING from its dollars rather than quietly summing them as zero.
  *
@@ -42,8 +48,27 @@ import type {
 } from '../../../../shared/types'
 import { providerIdForBucket, providerLabel } from '../../../../shared/provider-label'
 import { windowKindLabel, windowKindMinutes } from '../../../../shared/window-kind'
-import { PROVIDER_OVERFLOW_COLOR, formatCost, rangeWords } from './usage-utils'
+import {
+  PROVIDER_OVERFLOW_COLOR,
+  combinedMachineCount,
+  formatCost,
+  rangeWords
+} from './usage-utils'
 import { SelectMenu } from '../shared/SelectMenu'
+
+/**
+ * How many machines the hub summed the numerators over — the SAME count the sync
+ * chip and the summary print, so a reader is never told "3 machines" here and
+ * "2 machines" on the card above.
+ */
+function CombinedNote({ data }: { data: UsageDashboardData }): React.JSX.Element {
+  const n = combinedMachineCount(data.machines.filter((m) => !m.self))
+  return (
+    <span data-testid="WindowValue.combined">
+      {' · '}combined across {n} {n === 1 ? 'machine' : 'machines'}
+    </span>
+  )
+}
 
 /**
  * ADR-071 §7's noise floor. Under this peak the denominator is small enough that
@@ -174,10 +199,11 @@ export function WindowValue({
   // card would be worse than a figure two seconds stale.
   const sinceTs = data.fromTs
   const generatedAt = data.generatedAt
+  const scope = data.scope
   useEffect(() => {
     let cancelled = false
     window.api
-      .fetchUsageWindows({ sinceTs })
+      .fetchUsageWindows({ sinceTs, ...(scope === 'all' ? { scope } : {}) })
       .then((r) => {
         if (cancelled) return
         setRows(r)
@@ -190,7 +216,7 @@ export function WindowValue({
     return () => {
       cancelled = true
     }
-  }, [sinceTs, generatedAt])
+  }, [sinceTs, generatedAt, scope])
 
   // An account with windows but no spend in range is absent from the dashboard
   // and present in the credentials, so both name accounts. `unknown` is never
@@ -225,6 +251,7 @@ export function WindowValue({
         </h3>
         <span className="text-[9px] text-text-muted">
           what a subscription window delivers · {windowScope(range)}
+          {data.scope === 'all' && <CombinedNote data={data} />}
         </span>
       </div>
 

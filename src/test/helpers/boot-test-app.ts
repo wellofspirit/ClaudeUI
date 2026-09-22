@@ -283,7 +283,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     refreshPrices: async () => ({ count: 0, refreshedAt: Date.now() }),
     fetchAccountLimits: (refresh) => ipcRenderer.invoke('usage:limits', refresh ?? false),
     fetchUsageWindows: (query) => ipcRenderer.invoke('usage:windows', query ?? {}),
-    fetchUsageDashboard: (range) => ipcRenderer.invoke('usage:dashboard', { range }),
+    fetchUsageDashboard: (range, scope) => ipcRenderer.invoke('usage:dashboard', { range, scope }),
     usageHubStatus: () => ipcRenderer.invoke('usage-hub:status'),
     configureUsageHub: (input) => ipcRenderer.invoke('usage-hub:configure', input),
     setUsageHubSecret: (secret: string) => ipcRenderer.invoke('usage-hub:set-secret', secret),

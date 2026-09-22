@@ -178,12 +178,14 @@ export function SessionView(): React.JSX.Element {
     isMobile ? true : localStorage.getItem('sidebarCollapsed') === 'true'
   )
   /**
-   * Mobile-only settings host. On a phone the sidebar drawer is UNMOUNTED when
-   * it closes, and Settings is opened from inside it — so `SettingsPanel` (which
-   * hosts the dialog on desktop) cannot both close the drawer and keep the
-   * dialog alive. Hosting it here, outside the drawer, is what lets opening
-   * Settings dismiss the drawer. Desktop is untouched: `SettingsPanel` still
-   * owns the dialog there, and this branch never renders.
+   * The settings host for every state in which the sidebar's own is not mounted.
+   *
+   * `SettingsPanel` hosts the dialog from INSIDE the sidebar, which is unmounted
+   * on a phone whenever the drawer closes and on the desktop whenever the
+   * sidebar is collapsed — so it can neither close the drawer and keep the
+   * dialog alive, nor answer a deep link that arrives while it does not exist.
+   * This host lives outside both and covers exactly the complement (see
+   * `ownsSettings`).
    */
   // null = closed. `{}`-shaped detail opens with no target (the last page).
   const [mobileSettings, setMobileSettings] = useState<{ target?: SettingsTarget } | null>(null)
@@ -196,6 +198,16 @@ export function SessionView(): React.JSX.Element {
 
   // Kill orphaned terminal groups after 10min cold
   useTerminalColdCleanup()
+
+  /**
+   * Whether THIS host answers `open-settings`, rather than `SettingsPanel`.
+   *
+   * The desktop listener ships inside `Sidebar`, so it exists only while the
+   * sidebar is open. Every other state — mobile, or a collapsed desktop sidebar
+   * — is this host's, and the two conditions are exact complements, so no width
+   * or toggle can leave the channel unowned or owned twice.
+   */
+  const ownsSettings = isMobile || sidebarCollapsed
 
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsed((prev) => {
@@ -210,8 +222,16 @@ export function SessionView(): React.JSX.Element {
   }, [])
 
   // `open-settings` is the app-wide deep-link channel (the composer's sandbox
-  // pill, RemoteAccessModal, SettingsPanel's own button). On mobile it lands
-  // here and closes the drawer with it; on desktop SettingsPanel keeps it.
+  // pill, RemoteAccessModal, SettingsPanel's own button). This host answers it
+  // whenever the OTHER one is not mounted, which is two cases rather than one:
+  // mobile, and a desktop window whose sidebar is collapsed.
+  //
+  // The second case was a dead channel. `SettingsPanel` owns the desktop
+  // listener and lives inside `Sidebar`, which is rendered only while the
+  // sidebar is open — so on a collapsed desktop sidebar every deep link in the
+  // app (the sandbox pill, the remote modal, S5c's `Hub settings →`) fired into
+  // nothing. Exactly one host is mounted at any moment, so widening this
+  // condition cannot produce two dialogs.
   //
   // Crossing back over the breakpoint (rotating an iPad, resizing an Electron
   // window) must DROP this host's state, not park it: a stale `mobileSettings`
@@ -219,12 +239,14 @@ export function SessionView(): React.JSX.Element {
   // long after the user dismissed it. The two hosts hand ownership over, so
   // exactly one of them can be showing a dialog at any width.
   useEffect(() => {
-    if (!isMobile) {
+    if (!ownsSettings) {
       setMobileSettings(null)
       return
     }
     const handler = (event: Event): void => {
       setMobileSettings({ target: settingsTargetFromEvent(event) })
+      // Mobile opens over the drawer, so the drawer goes. On a collapsed
+      // desktop sidebar this is already true and the call is a no-op.
       setSidebarCollapsed(true)
     }
     // Same hand-off as the desktop host: a link out of settings closes it.
@@ -235,7 +257,7 @@ export function SessionView(): React.JSX.Element {
       window.removeEventListener('open-settings', handler)
       window.removeEventListener('open-mcp-servers', leave)
     }
-  }, [isMobile])
+  }, [ownsSettings])
 
   // Global Shift+Tab to cycle permission mode
   useEffect(() => {
@@ -402,7 +424,7 @@ export function SessionView(): React.JSX.Element {
           memory-constrained device buys nothing. Rendered BEFORE the settings
           dialog so an open Settings sits above it at equal z. */}
       {isMobile && terminalPanelOpen && <TerminalPanel />}
-      {isMobile && mobileSettings && (
+      {ownsSettings && mobileSettings && (
         <SettingsDialog
           onClose={() => setMobileSettings(null)}
           initialTarget={mobileSettings.target}

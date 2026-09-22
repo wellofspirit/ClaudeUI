@@ -45,7 +45,11 @@ import { usageFetcher } from '../services/usage-fetcher'
 import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
 import { readAccountLimits } from '../services/usage-provider'
 import { sanitizeUsageWindowQuery, usageWindowSummary } from '../services/usage-window-ledger'
-import { buildUsageDashboard, sanitizeDashboardRange } from '../services/usage-dashboard'
+import {
+  buildUsageDashboard,
+  sanitizeDashboardRange,
+  sanitizeDashboardScope
+} from '../services/usage-dashboard'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
 import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
@@ -1743,7 +1747,10 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'config',
     kind: 'query',
     handler: async (opts?: unknown) => {
-      return buildUsageDashboard({ range: sanitizeDashboardRange(opts) })
+      return buildUsageDashboard({
+        range: sanitizeDashboardRange(opts),
+        scope: sanitizeDashboardScope(opts)
+      })
     }
   })
 

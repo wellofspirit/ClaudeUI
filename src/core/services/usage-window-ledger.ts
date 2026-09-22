@@ -23,10 +23,12 @@
 import {
   getLedgerCostRows,
   getOpenUsageWindows,
+  getRemoteUsageWindows,
   insertMissingUsageWindows,
   listUsageWindows,
   upsertUsageWindows,
-  windowSampleGroups
+  windowSampleGroups,
+  type RemoteUsageWindowRow
 } from './db'
 import type { UsageWindowQuery, UsageWindowRow, UsageWindowSummaryRow } from '../../shared/types'
 import { windowKindMinutes } from '../../shared/window-kind'
@@ -242,12 +244,38 @@ export function recomputeUsageWindows(now: number): number {
  */
 export function sanitizeUsageWindowQuery(raw: unknown): UsageWindowQuery {
   if (typeof raw !== 'object' || raw === null) return {}
-  const { accountKey, kind, sinceTs } = raw as Record<string, unknown>
+  const { accountKey, kind, sinceTs, scope } = raw as Record<string, unknown>
   return {
     ...(typeof accountKey === 'string' ? { accountKey } : {}),
     ...(typeof kind === 'string' ? { kind } : {}),
-    ...(typeof sinceTs === 'number' && Number.isFinite(sinceTs) ? { sinceTs } : {})
+    ...(typeof sinceTs === 'number' && Number.isFinite(sinceTs) ? { sinceTs } : {}),
+    // Only `all` is a scope worth carrying; anything else, including junk, is
+    // the default and is dropped rather than echoed back.
+    ...(scope === 'all' ? { scope: 'all' as const } : {})
   }
+}
+
+/**
+ * The hub's row for a window, where it has one (ADR-072 §4).
+ *
+ * The hub keeps `usage_window` with the numerator summed over every device, so
+ * for a window it knows about its row is the better answer — it is the half of
+ * ADR-071 §7's bias this arc exists to close. Keyed on
+ * `(accountKey, windowKind, canonicalEnd)`, which is what makes two machines'
+ * readings of one window the same series; `device_id` is NOT in the key here,
+ * even though the cache table keys by it, because two devices reporting the same
+ * window are reporting one fact. When two rows do arrive for it, the
+ * LAST-TOUCHED one wins: a rollup only ever grows, so the newest is the most
+ * complete.
+ */
+function hubWindows(opts: UsageWindowQuery): Map<string, RemoteUsageWindowRow> {
+  const out = new Map<string, RemoteUsageWindowRow>()
+  for (const row of getRemoteUsageWindows(opts)) {
+    const key = `${row.accountKey}\u0000${row.windowKind}\u0000${row.canonicalEnd}`
+    const held = out.get(key)
+    if (held === undefined || row.updatedAt > held.updatedAt) out.set(key, row)
+  }
+  return out
 }
 
 /**
@@ -265,13 +293,15 @@ export function sanitizeUsageWindowQuery(raw: unknown): UsageWindowQuery {
  * without losing a row.
  */
 export function usageWindowSummary(opts: UsageWindowQuery = {}): UsageWindowSummaryRow[] {
-  const rows = listUsageWindows(opts)
+  const local = listUsageWindows(opts)
+  const rows = opts.scope === 'all' ? mergeHubWindows(local, opts) : local
   // The dashboard read logs its own line; this is the only trace the window read
   // leaves, so a surface that shows nothing can be told apart from one that
   // asked for nothing.
   logger.debug(
     'UsageWindows',
-    `${rows.length} window(s) read (kind ${opts.kind ?? 'any'}, account ${opts.accountKey ?? 'any'}, since ${opts.sinceTs ?? 0})`
+    `${rows.length} window(s) read (kind ${opts.kind ?? 'any'}, account ${opts.accountKey ?? 'any'}, ` +
+      `since ${opts.sinceTs ?? 0}, scope ${opts.scope ?? 'local'})`
   )
   return rows.map((row) => {
     const rate =
@@ -283,4 +313,50 @@ export function usageWindowSummary(opts: UsageWindowQuery = {}): UsageWindowSumm
       biased: true
     }
   })
+}
+
+/**
+ * The local rows with the hub's preferred where it has one, plus the hub's own
+ * windows for accounts this machine has none of.
+ *
+ * `biased` stays true on every row, including a merged one: the hub closes the
+ * other-MACHINES half of ADR-071 §7's bias and nothing closes the claude.ai
+ * half, so the footnote is still the honest thing to print.
+ *
+ * Order is restored at the end rather than assumed: a hub row can carry a
+ * `canonicalEnd` the local list never had, and the two inputs are each sorted
+ * only within themselves.
+ */
+function mergeHubWindows(
+  local: ReadonlyArray<UsageWindowRow>,
+  opts: UsageWindowQuery
+): UsageWindowRow[] {
+  const hub = hubWindows(opts)
+  if (hub.size === 0) return [...local]
+  const out: UsageWindowRow[] = []
+  const taken = new Set<string>()
+  for (const row of local) {
+    const key = `${row.accountKey}\u0000${row.windowKind}\u0000${row.canonicalEnd}`
+    const preferred = hub.get(key)
+    if (preferred === undefined) {
+      out.push(row)
+      continue
+    }
+    taken.add(key)
+    // `deviceId` is dropped: what a reader needs is the window, and every
+    // surface's account and kind labels already come from the key.
+    const { deviceId: _deviceId, ...window } = preferred
+    out.push(window)
+  }
+  for (const [key, row] of hub) {
+    if (taken.has(key)) continue
+    const { deviceId: _deviceId, ...window } = row
+    out.push(window)
+  }
+  return out.sort(
+    (a, b) =>
+      b.canonicalEnd - a.canonicalEnd ||
+      a.accountKey.localeCompare(b.accountKey) ||
+      a.windowKind.localeCompare(b.windowKind)
+  )
 }

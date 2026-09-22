@@ -1908,8 +1908,12 @@ interface AccountAPI {
   /**
    * The dashboard's one read over the ledger's hourly buckets (ADR-071 §8),
    * grouped provider → account → model for the given range.
+   *
+   * `scope` defaults to `local`, this machine's own ledger. `all` folds the
+   * cached rows of every other machine the hub knows about into the same totals
+   * (ADR-072 §3); a machine with no hub answers `local` and says so.
    */
-  fetchUsageDashboard(range: DashboardRange): Promise<UsageDashboardData>
+  fetchUsageDashboard(range: DashboardRange, scope?: DashboardScope): Promise<UsageDashboardData>
   /** The usage hub's client state (ADR-072 §7). Never carries the device secret. */
   usageHubStatus(): Promise<UsageHubStatus>
   /** Write the hub's URL, this device's name, the service-token id, and the on/off switch. */
@@ -2871,8 +2875,28 @@ export interface AccountLimits {
   windows: AccountLimitWindow[]
   credits?: { unlimited: boolean; balance: string | null }
   observedAt: number
-  /** Where the reading came from — ADR-072 relays readings from other machines. */
-  source: 'local' | { deviceId: string }
+  /**
+   * Where the reading came from — ADR-072 relays readings from other machines.
+   *
+   * The NAME travels with the reading, not only the id. A relayed reading is
+   * shown under both scopes (ADR-072 §4: a limit is a fact about the account,
+   * and the dashboard scope decides whose spend is summed), so it cannot borrow
+   * the machine list from a combined payload that may not exist — a `via` tag
+   * reading `via 3f2a1b9c` is not an answer to "who read this". The id is the
+   * fallback for a device the hub has since dropped from its list.
+   */
+  source: 'local' | { deviceId: string; deviceName: string }
+  /**
+   * True when {@link label} is the hub's MASKED form (`d•••@e•••.com`) rather
+   * than a name this machine read itself (S5c).
+   *
+   * A surface has to be able to say so: the masked label is not what the account
+   * is called, it is as much of it as a device caller is given (ADR-072 §6), and
+   * a reader who sees it without that qualification reads it as a corrupted
+   * address. Only a relayed reading for a key this machine has no ledger row for
+   * can carry it.
+   */
+  labelMasked?: boolean
   state: 'ok' | 'stale' | 'needs-sign-in' | 'unavailable'
   error?: string
 }
@@ -3025,6 +3049,12 @@ export interface UsageWindowQuery {
   accountKey?: string
   kind?: string
   sinceTs?: number
+  /**
+   * `all` prefers the hub's row for a window it holds (ADR-072 §4): its
+   * numerator is summed over every machine, which is the half of ADR-071 §7's
+   * bias this arc exists to close. Defaults to `local`.
+   */
+  scope?: DashboardScope
 }
 
 // ---------------------------------------------------------------------------
@@ -3037,6 +3067,18 @@ export interface UsageWindowQuery {
 
 /** The ranges the dashboard offers. `today` is the viewer's local calendar day. */
 export type DashboardRange = 'today' | '7d' | '30d' | '90d'
+
+/**
+ * Whose spend the dashboard is about (ADR-072 §3, slice S5c).
+ *
+ * `local` is this machine's ledger and is what every range meant before the
+ * usage hub existed; `all` folds the cached `remote_usage_bucket` rows in
+ * through the same arithmetic, so a combined figure is the same kind of number
+ * as a local one rather than a second, differently-derived total. `local` is the
+ * wire's default, and the answer says which scope it actually used — a hub that
+ * is off has no remote rows to fold and answers `local` whatever was asked.
+ */
+export type DashboardScope = 'local' | 'all'
 
 /**
  * What one grouping of buckets cost, in the three currencies ADR-071 §2 defines
@@ -3087,6 +3129,26 @@ export interface DashboardAccount {
   models: DashboardModel[]
   /** The `dispatch`-origin part of {@link totals}, or null when none of it was dispatched. */
   dispatched: CostTotals | null
+  /**
+   * The machines this account's spend came from, this one as its own device id
+   * (S5c). Emitted under the `all` scope only — under `local` there is one
+   * machine and naming it would be noise.
+   */
+  machines?: string[]
+  /** True when no bucket of this account's spend was written on THIS machine (S5c). */
+  remoteOnly?: boolean
+  /**
+   * True when {@link label} is the hub's MASKED form of the name rather than one
+   * this machine read (S5c round 3) — the same flag {@link AccountLimits} carries,
+   * for the same reason.
+   *
+   * The masked label IS the account's name when nothing else knows one: showing
+   * the key's fallback (`ws-9`) instead made the same account read differently
+   * under the two scopes, because under `local` it is a credential row that shows
+   * the mask and under `all` it is a ledger row that showed the fallback. A
+   * ledger label always wins over the mask, and then this is never set.
+   */
+  labelMasked?: boolean
 }
 
 /** One provider's spend over the range, and the accounts under it. */
@@ -3103,6 +3165,20 @@ export interface DashboardDay {
   date: string
   /** Only the providers that spent something that day; a missing one is zero. */
   byProvider: Record<string, { apiCostUsd: number; billedCostUsd: number; displayCostUsd: number }>
+  /**
+   * The OTHER machines' part of {@link byProvider}, under the `all` scope only
+   * (S5c) — a subset of it, never an addition, so a column's total is still
+   * `byProvider` alone and a chart hatches this much of each segment.
+   */
+  byProviderRemote?: DashboardDay['byProvider']
+  /**
+   * The same cell split by DEVICE instead of by provider, under the `all` scope
+   * only (S5c). A second split rather than a nesting: the two answer different
+   * questions and neither derives the other — `byProviderRemote` loses which
+   * machine, this loses which provider — and a `provider × machine` cell would
+   * be the product of both for a chart that draws one at a time.
+   */
+  byMachine?: Record<string, { apiCostUsd: number; billedCostUsd: number; displayCostUsd: number }>
   totals: CostTotals
 }
 
@@ -3119,7 +3195,62 @@ export interface DashboardHour {
   hourUtc: number
   /** Only the providers that spent something that hour; a missing one is zero. */
   byProvider: DashboardDay['byProvider']
+  /** The other machines' part of {@link byProvider} — see {@link DashboardDay.byProviderRemote}. */
+  byProviderRemote?: DashboardDay['byProvider']
+  /** The hour split by device — see {@link DashboardDay.byMachine}. */
+  byMachine?: DashboardDay['byMachine']
   totals: CostTotals
+}
+
+/**
+ * One (provider, account) slice of ONE machine's spend (S5c).
+ *
+ * The provider tree carries no device, and the buckets carry no engine or model
+ * per machine that a `machine → provider → account` tree would need to invent, so
+ * the machine group-by reads this list instead of re-folding the tree. Labels are
+ * not repeated here: every key in it also appears in `providers`, which is where
+ * a reader resolves both.
+ */
+export interface DashboardMachineAccount {
+  providerId: string
+  accountKey: string
+  totals: CostTotals
+  /** The `dispatch`-origin part of {@link totals}, or null when none of it was. */
+  dispatched: CostTotals | null
+}
+
+/**
+ * One machine that spent something in the range, or that the hub knows about
+ * (ADR-072 §7, slice S5c).
+ *
+ * THIS MACHINE IS ALWAYS FIRST and is the only row with `self: true`; the rest
+ * come from `remote_device`, which never holds this device. A machine the hub
+ * lists that spent nothing in the range is still a row, with zero totals — "it
+ * synced and spent nothing" and "it has not synced" are different facts and
+ * dropping the row would spell them the same way.
+ *
+ * `lastPushAt` is null when no push instant is known: for THIS machine before
+ * its first announce, and for a machine that has cached buckets but no
+ * `remote_device` row — a peer the hub has dropped since the last pull, whose
+ * hours are still in the combined total and so still need a row. Nothing
+ * derives "behind" from a null: an unknown last push is not a late one.
+ */
+export interface DashboardMachine {
+  deviceId: string
+  deviceName: string
+  /** `process.platform`'s family — `win32`, `darwin`, `linux`, or `unknown`. */
+  os: string
+  appVersion: string
+  lastPushAt: number | null
+  /** The owner marked it retired on the hub, so nothing flags it as behind. */
+  retired: boolean
+  /** The machine the reader is looking at. Exactly one row carries it. */
+  self: boolean
+  totals: CostTotals
+  /** Its display cost as a FRACTION of the range's, `0` when the range cost nothing. */
+  share: number
+  /** Its spend split by provider and account — the machine group-by's leaves. */
+  accounts: DashboardMachineAccount[]
 }
 
 /**
@@ -3131,6 +3262,13 @@ export interface DashboardHour {
  */
 export interface UsageDashboardData {
   range: DashboardRange
+  /**
+   * The scope this answer was actually built at (S5c). `all` only ever comes
+   * back from a machine with a hub enabled and a device id of its own; anything
+   * else answers `local`, because there is nothing to combine and no way to say
+   * which rows are this machine's.
+   */
+  scope: DashboardScope
   /**
    * Where the range begins: the local midnight `range` days before {@link toTs}
    * (today's own midnight for `today`), floored to the UTC hour `usage_bucket`
@@ -3155,6 +3293,18 @@ export interface UsageDashboardData {
   hours?: DashboardHour[]
   /** Σ display over the `unknown` account — history from before attribution. */
   unattributedUsd: number
+  /**
+   * The part of `totals.displayCostUsd` this machine's own ledger produced, and
+   * the part relayed from the others (S5c). They always add up to the hero: under
+   * `local` the first IS the hero and the second is zero.
+   */
+  localUsd: number
+  remoteUsd: number
+  /**
+   * Every machine in the combined view, this one first — empty under `local`,
+   * where there is one machine and the question does not arise.
+   */
+  machines: DashboardMachine[]
 }
 
 export interface AccountUsage {

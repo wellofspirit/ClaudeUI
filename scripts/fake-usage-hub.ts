@@ -51,6 +51,25 @@
  *   --flaky <p>            fail a fraction (0..1) of PROTOCOL requests with a 503
  *   --epoch <n>            the starting epoch (default 1)
  *   --debug-store          serve `GET /debug/store`, which a real hub never does
+ *   --seed <json|path>     preload another machine's rows before serving
+ *
+ * ## `--seed`, and why a fake hub needs one
+ *
+ * "All machines" cannot be looked at on a machine that is the only machine. The
+ * flag takes a JSON object — inline, or a path to a file holding one — of
+ * `{ devices, buckets, windows, readings }`, each an array of exactly the shape
+ * the corresponding route ANSWERS with, and stores it as if that device had
+ * pushed it. Every field is optional and anything missing takes the same default
+ * an ingested row would.
+ *
+ * Seeded buckets are stored AS GIVEN rather than folded from events, because
+ * what a verifier wants to state is "this peer spent $3 in that hour", not a
+ * plausible list of turns that adds up to it. They are given fresh revs, so a
+ * client that has already pulled sees them on its next pass.
+ *
+ * It is a test-double facility and, unlike `/debug/store`, it writes nothing a
+ * device caller could read that the protocol does not already return. It goes to
+ * the hub repository with the rest of this file; a real hub has no such flag.
  *
  * The two fault injectors cover the `/v1/*` routes and NOTHING else. They used
  * to be applied before dispatch, so `--flaky` broke `/debug/store` too and the
@@ -61,7 +80,15 @@
  *
  * With no `--client-id`/`--client-secret` the gate is OFF and any caller passes,
  * which is the convenient default for a manual poke with `curl`.
+ *
+ * ## Lifetime
+ *
+ * It exits when its STDIN closes, so it cannot outlive the harness that started
+ * it. See the handler at the bottom for why that is the signal rather than a
+ * parent-pid poll or a signal handler.
  */
+
+import { readFileSync } from 'node:fs'
 
 // ---------------------------------------------------------------------------
 // The protocol, restated (see the header on why it is not imported)
@@ -155,7 +182,8 @@ const options = {
   rejectSchema: flag('reject-schema') === undefined ? null : Number(flag('reject-schema')),
   flaky: Number(flag('flaky') ?? 0),
   epoch: Number(flag('epoch') ?? 1),
-  debugStore: process.argv.includes('--debug-store')
+  debugStore: process.argv.includes('--debug-store'),
+  seed: flag('seed')
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +299,102 @@ function maskLabel(label: string | null): string | null {
   const host = dot > 0 ? domain.slice(0, dot) : domain
   const tld = dot > 0 ? domain.slice(dot) : ''
   return `${user[0]}•••@${host[0]}•••${tld}`
+}
+
+// ---------------------------------------------------------------------------
+// Seeding (see the `--seed` section of the header)
+// ---------------------------------------------------------------------------
+
+interface SeedFile {
+  devices?: Array<Partial<StoredDevice> & { deviceId: string }>
+  buckets?: Array<Partial<StoredBucket> & { deviceId: string; hourUtc: number }>
+  windows?: Array<Record<string, unknown> & { deviceId: string }>
+  readings?: Array<Partial<StoredReading> & { accountKey: string; windowKind: string }>
+}
+
+/** Another machine's window-value rows, kept exactly as `GET /v1/windows` answers them. */
+const seededWindows: Array<Record<string, unknown>> = []
+
+function readSeed(raw: string): SeedFile {
+  // A leading brace means the JSON is inline; anything else is a path. Inline
+  // is awkward to quote on Windows, so both spellings are accepted.
+  const text = raw.trim().startsWith('{') ? raw : readFileSync(raw, 'utf-8')
+  const parsed = JSON.parse(text) as unknown
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('--seed takes a JSON object')
+  }
+  return parsed as SeedFile
+}
+
+function applySeed(seed: SeedFile): void {
+  for (const device of seed.devices ?? []) {
+    devices.set(device.deviceId, {
+      deviceId: device.deviceId,
+      deviceName: device.deviceName ?? device.deviceId,
+      appVersion: device.appVersion ?? 'unknown',
+      os: device.os ?? 'unknown',
+      lastPushAt: device.lastPushAt ?? Date.now(),
+      retired: device.retired ?? false
+    })
+  }
+
+  for (const given of seed.buckets ?? []) {
+    const bucket: StoredBucket = {
+      deviceId: given.deviceId,
+      hourUtc: given.hourUtc,
+      accountKey: given.accountKey ?? 'unknown',
+      billingType: given.billingType ?? 'subscription',
+      engineId: given.engineId ?? 'claude',
+      vendorId: given.vendorId ?? 'anthropic',
+      modelId: given.modelId ?? 'unknown',
+      origin: given.origin ?? 'session',
+      inputTokens: given.inputTokens ?? 0,
+      outputTokens: given.outputTokens ?? 0,
+      cacheWriteTokens: given.cacheWriteTokens ?? 0,
+      cacheWrite1hTokens: given.cacheWrite1hTokens ?? 0,
+      cacheReadTokens: given.cacheReadTokens ?? 0,
+      apiCostUsd: given.apiCostUsd ?? 0,
+      billedCostUsd: given.billedCostUsd ?? 0,
+      unbilledApiCostUsd: given.unbilledApiCostUsd ?? 0,
+      unknownApiCostCount: given.unknownApiCostCount ?? 0,
+      unknownBilledCostCount: given.unknownBilledCostCount ?? 0,
+      requestCount: given.requestCount ?? 1,
+      source: given.source ?? 'rollup',
+      // A fresh rev, so a client that has already pulled sees it next pass.
+      rev: nextRev++
+    }
+    buckets.set(bucketKey(bucket), bucket)
+    // A seeded bucket implies the device exists, even when the file named none.
+    if (!devices.has(bucket.deviceId)) {
+      devices.set(bucket.deviceId, {
+        deviceId: bucket.deviceId,
+        deviceName: bucket.deviceId,
+        appVersion: 'unknown',
+        os: 'unknown',
+        lastPushAt: Date.now(),
+        retired: false
+      })
+    }
+  }
+
+  for (const window of seed.windows ?? []) {
+    seededWindows.push({ ...window, rev: nextRev++ })
+  }
+
+  for (const given of seed.readings ?? []) {
+    readings.set(JSON.stringify([given.accountKey, given.windowKind]), {
+      deviceId: given.deviceId ?? '',
+      accountKey: given.accountKey,
+      windowKind: given.windowKind,
+      accountLabel: given.accountLabel ?? null,
+      vendorId: given.vendorId ?? 'anthropic',
+      plan: given.plan ?? null,
+      windowMinutes: given.windowMinutes ?? null,
+      usedPercent: given.usedPercent ?? 0,
+      resetsAt: given.resetsAt ?? null,
+      observedAt: given.observedAt ?? Date.now()
+    })
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -460,11 +584,18 @@ async function handle(request: Request): Promise<Response> {
   if (request.method === 'GET' && path === '/v1/windows') {
     // The window ledger is the hub's own rollup in the real thing (ADR-072 §4),
     // and a fake that invented numbers would let a wrong merge look right
-    // against figures nothing produced. So the page is always empty — but it
-    // carries the `rev` envelope, because the client's paging loop is real and
-    // has to terminate against it.
+    // against figures nothing produced. So nothing is DERIVED here: the page is
+    // empty unless `--seed` stated the rows outright. It carries the `rev`
+    // envelope either way, because the client's paging loop is real and has to
+    // terminate against it.
     const since = Number(url.searchParams.get('since') ?? 0)
-    return json({ epoch, rev: since, windows: [] })
+    const exclude = url.searchParams.get('exclude_device') ?? ''
+    const page = seededWindows
+      .filter((w) => Number(w.rev) > since && w.deviceId !== exclude)
+      .sort((a, b) => Number(a.rev) - Number(b.rev))
+      .slice(0, 500)
+    const rev = page.reduce((max, w) => Math.max(max, Number(w.rev)), since)
+    return json({ epoch, rev, windows: page })
   }
 
   if (request.method === 'GET' && path === '/v1/limits') {
@@ -503,10 +634,37 @@ async function handle(request: Request): Promise<Response> {
   return json({ error: 'no such route' }, 404)
 }
 
+if (options.seed !== undefined) {
+  // Before the first request, and fatal on a bad file: a verifier that asked for
+  // a peer and silently got none would read an empty machine list as a bug in
+  // the app.
+  applySeed(readSeed(options.seed))
+  process.stdout.write(
+    `seeded ${devices.size} device(s), ${buckets.size} bucket(s), ` +
+      `${seededWindows.length} window(s), ${readings.size} reading(s)\n`
+  )
+}
+
 const server = Bun.serve({
   port: options.port,
   fetch: (request) =>
     handle(request).catch((err) => json({ error: 'fake hub failed', detail: String(err) }, 500))
 })
+
+/**
+ * Die with whoever started this.
+ *
+ * A harness that starts a hub and is then killed — a cancelled run, a timeout, a
+ * shell wrapper that swallowed the kill signal before it reached this process —
+ * leaves a listening server behind with nothing left to stop it. One integration
+ * run leaked a dozen, and they accumulated into the hundreds on a developer
+ * machine. A CLOSED STDIN is the one signal that arrives in every one of those
+ * cases, so it is the one this listens for. A person running it by hand keeps
+ * their terminal's stdin open and is unaffected; pass `< /dev/null` and it
+ * exits, which is the correct reading of "nobody is holding this open".
+ */
+process.stdin.on('end', () => process.exit(0))
+process.stdin.on('close', () => process.exit(0))
+process.stdin.resume()
 
 process.stdout.write(`fake usage hub listening on http://127.0.0.1:${server.port}\n`)

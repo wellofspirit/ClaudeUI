@@ -25,14 +25,25 @@
  * nothing about when the day was spent. Everything below therefore draws
  * `Column`s rather than days: the grain decides the key, the x label and the
  * tooltip heading, and nothing else in the geometry changes.
+ *
+ * TWO MACHINES INSIDE ONE SEGMENT (S5c). Under the combined scope each
+ * provider's segment is drawn twice: its local part solid and the rest HATCHED
+ * in the same colour, from `byProviderRemote`, which is a SUBSET of the segment
+ * rather than an addition — so a column still totals `byProvider`, the axis
+ * never moves, and every equality the card had is untouched. The tooltip then
+ * lists both halves, and they add up to the line the provider had before. A
+ * third mode drops the provider stack and splits every column by MACHINE, from
+ * the second per-cell split the query carries for exactly that: the question
+ * there is not what the money went on but where it came from.
  */
 
 import { useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { DashboardDay, UsageDashboardData } from '../../../../shared/types'
+import type { DashboardDay, DashboardMachine, UsageDashboardData } from '../../../../shared/types'
 import type { DashboardGroupBy } from './UsageView'
 import { providerLabel } from '../../../../shared/provider-label'
 import {
   PROVIDER_OVERFLOW_COLOR,
+  buildSeriesColorMap,
   formatCost,
   formatHourLabel,
   formatShortDate
@@ -76,7 +87,7 @@ const MIN_LABEL_PX = 46
 /** Variant B's rows: small, because there is one per provider. */
 const ROW_HEIGHT = 34
 
-export type SpendChartMode = 'stacked' | 'perProvider'
+export type SpendChartMode = 'stacked' | 'perProvider' | 'machine'
 
 interface SpendChartProps {
   data: UsageDashboardData
@@ -97,6 +108,10 @@ interface Column {
   /** React key, and the identity the hover index is resolved against. */
   key: string
   byProvider: DashboardDay['byProvider']
+  /** The other machines' part of {@link byProvider} — empty under `local`. */
+  byProviderRemote: DashboardDay['byProvider']
+  /** The same slot split by device instead — empty under `local`. */
+  byMachine: DashboardDay['byProvider']
   /** The x-axis tick under the column. */
   label: string
   /** The tooltip's heading, and variant B's `<title>` — the full slot, not the tick. */
@@ -121,6 +136,8 @@ function buildColumns(data: UsageDashboardData): { columns: Column[]; granularit
         return {
           key: String(hour.hourUtc),
           byProvider: hour.byProvider,
+          byProviderRemote: hour.byProviderRemote ?? {},
+          byMachine: hour.byMachine ?? {},
           label,
           // The whole slot, so the reader is never left wondering whether
           // `09:00` means the instant or the hour that follows it.
@@ -135,6 +152,8 @@ function buildColumns(data: UsageDashboardData): { columns: Column[]; granularit
     columns: data.days.map((day) => ({
       key: day.date,
       byProvider: day.byProvider,
+      byProviderRemote: day.byProviderRemote ?? {},
+      byMachine: day.byMachine ?? {},
       label: formatShortDate(day.date),
       heading: formatShortDate(day.date),
       date: day.date
@@ -224,6 +243,16 @@ function columnTotal(column: Column): number {
 }
 
 /**
+ * The part of one provider's segment that came from another machine, clamped to
+ * the segment. The clamp is the invariant, not a guess: the remote split is a
+ * SUBSET of the column, and a pull that ever landed otherwise must not be able
+ * to draw a hatch taller than the bar it qualifies.
+ */
+function remoteOf(column: Column, providerId: string, usd: number): number {
+  return Math.min(usd, column.byProviderRemote[providerId]?.displayCostUsd ?? 0)
+}
+
+/**
  * A figure at the precision `formatCost` will PRINT it at — cents above a cent,
  * four places below one.
  */
@@ -256,6 +285,7 @@ function displayedColumnTotal(column: Column): number {
 
 export function SpendChart({ data, providerColors, groupBy }: SpendChartProps): React.JSX.Element {
   const [mode, setMode] = useState<SpendChartMode>('stacked')
+  const combined = data.scope === 'all'
   const { columns, granularity } = useMemo(() => buildColumns(data), [data])
   const series = useMemo(
     () => buildSeries(data, columns, providerColors),
@@ -265,11 +295,15 @@ export function SpendChart({ data, providerColors, groupBy }: SpendChartProps): 
     () => columns.reduce((sum, column) => sum + columnTotal(column), 0),
     [columns]
   )
+  // The chosen mode survives a scope change only while its rows still exist:
+  // dropping back to `local` with `per machine` selected would draw one row and
+  // call it a comparison. The selection is KEPT, so switching back restores it.
+  const activeMode: SpendChartMode = !combined && mode === 'machine' ? 'stacked' : mode
 
   return (
     <div
       data-testid="SpendChart"
-      data-mode={mode}
+      data-mode={activeMode}
       className="bg-bg-secondary rounded-xl border border-border/50 p-3"
     >
       <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2">
@@ -281,10 +315,15 @@ export function SpendChart({ data, providerColors, groupBy }: SpendChartProps): 
             {granularity} · {data.range}
           </span>
         </div>
-        <ModeToggle mode={mode} onChange={setMode} />
+        <ModeToggle mode={activeMode} onChange={setMode} combined={combined} />
       </div>
 
-      {groupBy !== 'provider' && (
+      {/* The subtitle explains a PROVIDER stack that is not what the header
+          asked for. Under `per machine` the chart is not stacked by provider at
+          all, so the sentence would be wrong about both halves — and outright
+          absurd when the group-by it claims cannot be drawn IS `machine`. The
+          mode's own tooltip and `machineRowsNote` carry that variant's caveats. */}
+      {groupBy !== 'provider' && activeMode !== 'machine' && (
         <p data-testid="SpendChart.subtitle" className="text-[9px] text-text-muted mb-2">
           Stacked by provider: the {granularity} series is the only split the ledger keeps per{' '}
           {granularity === 'hourly' ? 'hour' : 'day'}, so it cannot be broken down by {groupBy}. The
@@ -299,8 +338,10 @@ export function SpendChart({ data, providerColors, groupBy }: SpendChartProps): 
         >
           Nothing spent in this range
         </div>
-      ) : mode === 'stacked' ? (
-        <StackedColumns columns={columns} series={series} />
+      ) : activeMode === 'stacked' ? (
+        <StackedColumns columns={columns} series={series} combined={combined} />
+      ) : activeMode === 'machine' ? (
+        <PerMachineRows columns={columns} machines={data.machines} />
       ) : (
         <PerProviderRows columns={columns} series={series} />
       )}
@@ -310,10 +351,13 @@ export function SpendChart({ data, providerColors, groupBy }: SpendChartProps): 
 
 function ModeToggle({
   mode,
-  onChange
+  onChange,
+  combined
 }: {
   mode: SpendChartMode
   onChange: (next: SpendChartMode) => void
+  /** The third mode is offered only when there is more than one machine. */
+  combined: boolean
 }): React.JSX.Element {
   const options: Array<{ id: SpendChartMode; label: string; title: string }> = [
     {
@@ -327,7 +371,17 @@ function ModeToggle({
       label: 'per provider',
       title:
         'One row per provider, each on its own scale — shows a small provider’s rhythm, but the rows are not comparable.'
-    }
+    },
+    ...(combined
+      ? [
+          {
+            id: 'machine' as const,
+            label: 'per machine',
+            title:
+              'One row per machine, each on its own scale — when a machine started or stopped contributing.'
+          }
+        ]
+      : [])
   ]
   return (
     <div
@@ -400,10 +454,12 @@ export function shouldPinToLatest({
 
 function StackedColumns({
   columns,
-  series
+  series,
+  combined
 }: {
   columns: Column[]
   series: Series[]
+  combined: boolean
 }): React.JSX.Element {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null)
   const [viewportWidth, setViewportWidth] = useState(0)
@@ -455,6 +511,27 @@ function StackedColumns({
 
   return (
     <div className="relative">
+      {/* One <pattern> per series, referenced by every hatched segment. A fill
+          pattern cannot be written as a per-rect style, and a <pattern> inside
+          each column would be ninety of them on a ninety-day range. */}
+      {combined && (
+        <svg width={0} height={0} className="absolute" aria-hidden="true">
+          <defs>
+            {series.map((s) => (
+              <pattern
+                key={s.providerId}
+                id={hatchPatternId(s.providerId)}
+                width={6}
+                height={6}
+                patternTransform="rotate(45)"
+                patternUnits="userSpaceOnUse"
+              >
+                <rect width={3} height={6} fill={s.color} />
+              </pattern>
+            ))}
+          </defs>
+        </svg>
+      )}
       <div className="flex items-start">
         <svg
           data-testid="SpendChart.axis"
@@ -522,7 +599,16 @@ function StackedColumns({
                   // (ADR-030 in geometry), and the floor is then pushed UP off
                   // the baseline rather than allowed to hang below the axis.
                   const height = Math.max(MIN_SEGMENT_H, trueH - SEGMENT_GAP)
-                  return { s, top: Math.min(top, PLOT_BOTTOM - height), height }
+                  // The remote part is drawn over the TOP of the same segment
+                  // rather than beside or above it: it is a subset, so it moves
+                  // neither the segment's height nor the column's total.
+                  const remote = combined ? remoteOf(column, s.providerId, usd) : 0
+                  return {
+                    s,
+                    top: Math.min(top, PLOT_BOTTOM - height),
+                    height,
+                    remoteH: Math.min(height, (remote / usd) * height)
+                  }
                 })
                 .filter((seg): seg is NonNullable<typeof seg> => seg !== null)
 
@@ -538,19 +624,32 @@ function StackedColumns({
                   {/* Hit target is the whole slot, which is wider than the bar. */}
                   <rect x={i * slot} y={PAD_T} width={slot} height={CHART_H} fill="transparent" />
                   {drawn.map((seg, j) => (
-                    <rect
-                      key={seg.s.providerId}
-                      data-testid="SpendChart.segment"
-                      data-provider-id={seg.s.providerId}
-                      x={x}
-                      y={seg.top}
-                      width={barWidth}
-                      height={seg.height}
-                      rx={j === drawn.length - 1 ? 2 : 0}
-                      fill={seg.s.color}
-                      fillOpacity={isHovered ? 1 : 0.85}
-                      className="transition-opacity duration-100"
-                    />
+                    <g key={seg.s.providerId}>
+                      <rect
+                        data-testid="SpendChart.segment"
+                        data-provider-id={seg.s.providerId}
+                        x={x}
+                        y={seg.top}
+                        width={barWidth}
+                        height={seg.height}
+                        rx={j === drawn.length - 1 ? 2 : 0}
+                        fill={seg.s.color}
+                        fillOpacity={isHovered ? 1 : 0.85}
+                        className="transition-opacity duration-100"
+                      />
+                      {seg.remoteH > 0 && (
+                        <rect
+                          data-testid="SpendChart.segment.remote"
+                          data-provider-id={seg.s.providerId}
+                          x={x}
+                          y={seg.top}
+                          width={barWidth}
+                          height={seg.remoteH}
+                          rx={j === drawn.length - 1 ? 2 : 0}
+                          fill={`url(#${hatchPatternId(seg.s.providerId)})`}
+                        />
+                      )}
+                    </g>
                   ))}
                 </g>
               )
@@ -585,14 +684,40 @@ function StackedColumns({
           {series.map((s) => {
             const usd = hovered.byProvider[s.providerId]?.displayCostUsd ?? 0
             if (usd <= 0) return null
+            const remote = combined ? remoteOf(hovered, s.providerId, usd) : 0
+            // Two lines only when there IS a remote part. A column this machine
+            // alone spent on would otherwise trade its plain provider name for
+            // a `$0.00` second line that says nothing.
+            if (remote <= 0) {
+              return (
+                <div key={s.providerId} className="flex items-center gap-1.5">
+                  <i
+                    className="inline-block w-2 h-2 rounded-full shrink-0"
+                    style={{ backgroundColor: s.color }}
+                  />
+                  <span className="text-text-muted flex-1">{s.label}</span>
+                  <span className="text-text-primary font-mono">{formatCost(usd)}</span>
+                </div>
+              )
+            }
             return (
-              <div key={s.providerId} className="flex items-center gap-1.5">
-                <i
-                  className="inline-block w-2 h-2 rounded-full shrink-0"
-                  style={{ backgroundColor: s.color }}
-                />
-                <span className="text-text-muted flex-1">{s.label}</span>
-                <span className="text-text-primary font-mono">{formatCost(usd)}</span>
+              <div key={s.providerId}>
+                <div data-testid="SpendChart.tooltip.local" className="flex items-center gap-1.5">
+                  <i
+                    className="inline-block w-2 h-2 rounded-full shrink-0"
+                    style={{ backgroundColor: s.color }}
+                  />
+                  <span className="text-text-muted flex-1">{s.label} · this machine</span>
+                  <span className="text-text-primary font-mono">{formatCost(usd - remote)}</span>
+                </div>
+                <div data-testid="SpendChart.tooltip.remote" className="flex items-center gap-1.5">
+                  <i
+                    className="inline-block w-2 h-2 rounded-sm shrink-0"
+                    style={hatchSwatch(s.color)}
+                  />
+                  <span className="text-text-muted flex-1">{s.label} · other machines</span>
+                  <span className="text-text-primary font-mono">{formatCost(remote)}</span>
+                </div>
               </div>
             )
           })}
@@ -608,6 +733,30 @@ function StackedColumns({
       <Legend series={series} />
     </div>
   )
+}
+
+/**
+ * The `<pattern>` id for one series. Sanitised, because a provider id is a free
+ * string and an SVG id carrying whitespace or a `#` breaks the `url(#…)` that
+ * references it.
+ */
+function hatchPatternId(providerId: string): string {
+  // Every character that is not alphanumeric becomes `-<hex>-`, and `-` is
+  // itself escaped that way, so the encoding is INJECTIVE: a collapse-to-`_`
+  // scheme would have given `a.b` and `a_b` one pattern, and one of the two
+  // providers would have been hatched in the other's colour.
+  const safe = providerId.replace(
+    /[^a-zA-Z0-9]/g,
+    (c) => `-${c.codePointAt(0)?.toString(16) ?? 'x'}-`
+  )
+  return `spendchart-hatch-${safe}`
+}
+
+/** The legend and tooltip swatch for a hatched mark — a gradient, not a pattern. */
+function hatchSwatch(color: string): React.CSSProperties {
+  return {
+    backgroundImage: `repeating-linear-gradient(135deg, ${color} 0 3px, transparent 3px 6px)`
+  }
 }
 
 /**
@@ -630,6 +779,131 @@ function Legend({ series }: { series: Series[] }): React.JSX.Element {
           {s.label}
         </span>
       ))}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Variant C — one row per machine (S5c)
+// ---------------------------------------------------------------------------
+
+/**
+ * One row per machine, on variant B's geometry and for variant B's reason: the
+ * machines differ by orders of magnitude, and on a shared scale the small one is
+ * a hairline.
+ *
+ * It reads `byMachine`, the query's second per-slot split, rather than
+ * apportioning each machine's RANGE total across the slots — which would have
+ * been a chart of an assumption, the same trap the provider stack avoids by
+ * refusing to split a day by model.
+ *
+ * Rows follow the machine list's order (this machine, then peers by spend,
+ * retired last), so the card below reads in the same order as the chart. A
+ * machine that spent nothing in the range is dropped: an empty baseline is
+ * indistinguishable from a row whose data failed to load, and the footnote
+ * counts it instead.
+ */
+function PerMachineRows({
+  columns,
+  machines
+}: {
+  columns: Column[]
+  machines: ReadonlyArray<DashboardMachine>
+}): React.JSX.Element {
+  const width = Math.max(columns.length * MIN_SLOT, FALLBACK_VIEWPORT)
+  const slot = width / columns.length
+  const barWidth = Math.min(MAX_BAR_WIDTH, Math.max(2, slot - BAR_GAP))
+  // A machine has no cross-profile identity, so it takes a palette slot by
+  // sorted id exactly as an engine or a model row does.
+  const colors = buildSeriesColorMap(machines.map((m) => m.deviceId))
+
+  const drawn = machines
+    .map((machine) => ({
+      machine,
+      values: columns.map((c) => c.byMachine[machine.deviceId]?.displayCostUsd ?? 0)
+    }))
+    .filter((row) => row.values.some((v) => v > 0))
+  const hidden = machines.length - drawn.length
+
+  return (
+    <div>
+      {drawn.map(({ machine, values }) => {
+        const rowMax = values.reduce((m, v) => Math.max(m, v), 0)
+        const color = colors.get(machine.deviceId) ?? PROVIDER_OVERFLOW_COLOR
+        const label =
+          machine.deviceName.trim() === '' ? machine.deviceId.slice(0, 8) : machine.deviceName
+        return (
+          <div
+            key={machine.deviceId}
+            data-testid="SpendChart.machineRow"
+            data-device-id={machine.deviceId}
+            data-self={machine.self ? 'true' : undefined}
+            className="flex items-center gap-2.5 mb-1.5"
+          >
+            <div className="w-[110px] shrink-0">
+              <div className="flex items-center gap-1.5 text-[10px] text-text-secondary truncate">
+                <i
+                  className="inline-block w-2 h-2 rounded-sm shrink-0"
+                  style={machine.self ? { backgroundColor: color } : hatchSwatch(color)}
+                />
+                <span className="truncate" title={label}>
+                  {label}
+                </span>
+              </div>
+              <div
+                data-testid="SpendChart.machineRow.total"
+                className="font-mono text-[10px] text-text-primary"
+              >
+                {formatCost(values.reduce((sum, v) => sum + v, 0))}
+              </div>
+            </div>
+            <svg
+              viewBox={`0 0 ${width} ${ROW_HEIGHT}`}
+              preserveAspectRatio="none"
+              className="block flex-1 min-w-0"
+              style={{ height: ROW_HEIGHT }}
+            >
+              <line
+                x1={0}
+                y1={ROW_HEIGHT - 0.5}
+                x2={width}
+                y2={ROW_HEIGHT - 0.5}
+                stroke="currentColor"
+                strokeWidth={0.5}
+                className="text-border/60"
+              />
+              {values.map((usd, i) => {
+                if (usd <= 0) return null
+                const h = rowMax > 0 ? (usd / rowMax) * (ROW_HEIGHT - 3) : 0
+                return (
+                  <rect
+                    key={columns[i].key}
+                    data-testid="SpendChart.machineRow.bar"
+                    data-date={columns[i].date}
+                    data-hour={columns[i].hourUtc}
+                    x={i * slot + (slot - barWidth) / 2}
+                    y={ROW_HEIGHT - Math.max(MIN_SEGMENT_H, h)}
+                    width={barWidth}
+                    height={Math.max(MIN_SEGMENT_H, h)}
+                    rx={2}
+                    fill={color}
+                    fillOpacity={machine.self ? 1 : 0.55}
+                  >
+                    <title>{`${label} · ${columns[i].heading} · ${formatCost(usd)}`}</title>
+                  </rect>
+                )
+              })}
+            </svg>
+          </div>
+        )
+      })}
+      <p
+        data-testid="SpendChart.machineRowsNote"
+        className="text-[9px] text-text-muted mt-1 ml-[120px]"
+      >
+        Each row has its own scale — heights are comparable within a row, never between rows.
+        {hidden > 0 && ` · ${hidden} ${hidden === 1 ? 'machine' : 'machines'} with no spend hidden`}
+      </p>
     </div>
   )
 }
