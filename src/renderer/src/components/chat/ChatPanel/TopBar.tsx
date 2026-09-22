@@ -212,6 +212,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const statusLine = useActiveSession((s) => s.statusLine)
   const fallbackCost = useActiveSession((s) => s.status.totalCostUsd)
   const engineId = useActiveSession((s) => s.status.engineId)
+  const billingType = useActiveSession((s) => s.status.account?.billingType)
   const canUseMcp = useActiveSession((s) => s.status.capabilities.canUseMcp)
   const capSkills = useActiveSession((s) => s.status.capabilities.skills)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
@@ -640,9 +641,17 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   // the dispatched spend is real money and the row says the rest is unknown,
   // rather than silently reporting the dispatched part as the whole total.
   const totalInclDispatchedUsd = (cost ?? 0) + dispatchedCostUsd
+  // A known zero on a FREE vendor is an answer, not an absence: without this
+  // the tile vanishes and a free session looks exactly like one nothing is
+  // known about. The billing type comes off the session, never from the
+  // figure — a known zero on any other billing type stays hidden, because an
+  // empty session also totals a known 0 (`totalCosts` docblock) and must not
+  // grow a `$0.00` tile before its first turn.
+  const costFree = billingType === 'free' && cost === 0
   // Show the Cost tile when there is something to say: a real figure, a
-  // dispatched figure, or an explicit "we could not price this".
-  const showCost = cost === null || cost > 0 || hasDispatchedCost
+  // dispatched figure, a free vendor's zero, or an explicit "we could not
+  // price this".
+  const showCost = cost === null || cost > 0 || hasDispatchedCost || costFree
 
   // Tick every second while the tooltip is open and a turn is in flight, so
   // "Session time" keeps counting up live instead of freezing until the next
@@ -905,6 +914,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
                                       · nothing billed
                                     </span>
                                   )}
+                                  {costFree && <span data-testid="TopBar.costFree"> · free</span>}
                                   {unpricedMessages > 0 && (
                                     <span data-testid="TopBar.costUnpriced">
                                       {' '}

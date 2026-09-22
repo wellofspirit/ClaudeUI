@@ -470,8 +470,8 @@ describe('StatusLine — {cost} placeholder', () => {
     expect(line.textContent).not.toContain('$')
   })
 
-  it('renders a real $0.0000 for a known-zero cost', () => {
-    expect(renderWithCost(0)).toHaveTextContent('Cost: $0.0000')
+  it('renders a real $0.00 for a known-zero cost', () => {
+    expect(renderWithCost(0)).toHaveTextContent('Cost: $0.00')
   })
 
   it('renders a priced figure unchanged', () => {

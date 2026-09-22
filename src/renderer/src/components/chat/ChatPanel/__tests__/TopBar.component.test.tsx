@@ -22,7 +22,13 @@ import { TopBar } from '../TopBar'
 import { TIER1_HIDE, TIER1_ROW_HIDE, TIER2_HIDE, TIER2_ROW_HIDE } from '../top-bar-tiers'
 import { useEscapeLayer } from '../../../shared/use-escape-layer'
 import { SidebarContext } from '../../../SessionView'
-import type { GitStatusData, SessionStatus, StatusLineData } from '../../../../../../shared/types'
+import type {
+  AccountRef,
+  BillingType,
+  GitStatusData,
+  SessionStatus,
+  StatusLineData
+} from '../../../../../../shared/types'
 import type { IdeAvailability } from '../../../../../../shared/remote-protocol'
 import { resolveClaudeCapabilities } from '../../../../../../shared/model-capabilities'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
@@ -61,6 +67,29 @@ function makeStatusLine(overrides: Partial<StatusLineData> = {}): StatusLineData
     turnStartedAtMs: null,
     ...overrides
   }
+}
+
+function makeAccount(billingType: BillingType): AccountRef {
+  return {
+    engineId: 'opencode',
+    vendorId: 'alicloud',
+    billingType,
+    authState: 'authenticated'
+  }
+}
+
+/** An opencode session on a vendor that charges nothing. */
+function makeFreeStatus(): SessionStatus {
+  return {
+    state: 'idle',
+    sessionId: null,
+    model: null,
+    cwd: '/d/repo',
+    totalCostUsd: 0,
+    engineId: 'opencode',
+    capabilities: resolveClaudeCapabilities('default'),
+    account: makeAccount('free')
+  } as SessionStatus
 }
 
 describe('TopBar — Session time / API time', () => {
@@ -395,7 +424,7 @@ describe('TopBar — unknown (unpriced) cost', () => {
     unmount()
   })
 
-  it('renders $0.0000 for a KNOWN zero cost (free model), never the placeholder', () => {
+  it('renders $0.00 for a KNOWN zero cost (free model), never the placeholder', () => {
     // A zero with a dispatched row present, so the Cost tile is rendered at all
     // — the "cost is 0 and nothing was dispatched" case still hides, as before.
     seed.statusLine(
@@ -412,7 +441,8 @@ describe('TopBar — unknown (unpriced) cost', () => {
     fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
 
     const cell = screen.getByTestId('TopBar.cost')
-    expect(cell).toHaveTextContent('$0.0000')
+    expect(cell).toHaveTextContent('$0.00')
+    expect(cell.textContent).not.toContain('$0.0000')
     expect(cell.textContent).not.toContain('unknown')
     unmount()
   })
@@ -567,6 +597,38 @@ describe('TopBar — billed cost and coverage', () => {
     // headline has no figure to cover.
     expect(screen.queryByTestId('TopBar.costCovered')).toBeNull()
     expect(screen.getByTestId('TopBar.costUnpriced')).toHaveTextContent('1 unpriced')
+    unmount()
+  })
+
+  // A free vendor's zero is a KNOWN figure, and `resolveCosts` returns it as
+  // one. Hiding the tile made a free session indistinguishable from a session
+  // nothing is known about, so the zero is now said out loud — but only when
+  // the session's own billing type says free, never inferred from the figure.
+  it('shows a free vendor\'s known zero as "$0.00 · free" instead of hiding the tile', () => {
+    seed.status(ROUTE, makeFreeStatus())
+    seed.statusLine(ROUTE, makeStatusLine({ totalCostUsd: 0 }))
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    // An exact zero is `$0.00`, never the four-decimal sub-cent form that
+    // reads as a tiny charge.
+    expect(screen.getByTestId('TopBar.cost')).toHaveTextContent('$0.00')
+    expect(screen.getByTestId('TopBar.costFree')).toHaveTextContent('free')
+    unmount()
+  })
+
+  it('still hides a known zero on a subscription vendor (the empty session)', () => {
+    // The regression this guards: an empty session totals a known 0 too, and
+    // must not grow a `$0.00` tile before its first turn.
+    seed.status(ROUTE, { ...makeFreeStatus(), account: makeAccount('subscription') })
+    seed.statusLine(ROUTE, makeStatusLine({ totalCostUsd: 0 }))
+
+    const { unmount } = render(<TopBar hasContent />)
+    fireEvent.mouseEnter(screen.getByTestId('TopBar.info'))
+
+    expect(screen.queryByTestId('TopBar.cost')).toBeNull()
+    expect(screen.queryByTestId('TopBar.costFree')).toBeNull()
     unmount()
   })
 })
