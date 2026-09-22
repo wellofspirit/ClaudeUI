@@ -8,10 +8,10 @@
  *
  * Push: the ledger's rows past a rowid cursor, in batches of 500, skipping the
  * unattributed ones; plus the limit readings the sample writer has just written.
- * Pull: the other machines' hourly buckets (paged by the hub's `rev`), their
- * window-value rows (paged by `updatedAt`) and the latest limit reading per
- * account and window. Nothing here blocks or fails a turn — the same rule
- * `recordUsageEvent` already follows.
+ * Pull: the other machines' hourly buckets and window-value rows (each paged by
+ * the hub's own `rev`), the latest limit reading per account and window, the
+ * machine list and the account list (both re-read whole). Nothing here blocks or
+ * fails a turn — the same rule `recordUsageEvent` already follows.
  *
  * ## Triggers, and why there are four
  *
@@ -21,7 +21,7 @@
  *   - a ten-minute timer, as the backstop for anything the notifier missed (a
  *     write from another process, a push that failed while the app was asleep);
  *   - the same timer pulls;
- *   - `syncNow()`, from the settings button and from the dashboard opening.
+ *   - `syncNow()`, from the settings card's button and the dashboard's machines card.
  *
  * `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` suppresses the first three and not
  * the fourth: a person pressing Sync has asked, which is the same rule the
@@ -54,6 +54,7 @@ import {
   getHubConfigRow,
   listRemoteDevices,
   oldestUsageEventTs,
+  replaceRemoteAccounts,
   replaceRemoteDevices,
   upsertHubConfig,
   upsertRemoteLimits,
@@ -78,6 +79,7 @@ import {
 } from './device'
 import { nextEventBatch, pendingEventCount } from './ledger-cursor'
 import {
+  decodePullAccountsResponse,
   decodePullBucketsResponse,
   decodePullDevicesResponse,
   decodePullLimitsResponse,
@@ -569,10 +571,11 @@ export class UsageHubClient {
      * Whether the hub still has to be TOLD about this machine.
      *
      * The hub learns a device exists only from an events push, and a rename
-     * only travels on one. A fresh device's cursor starts at `MAX(rowid)`
-     * (ADR-072 §2), so a machine that enables sync and presses Sync now has
-     * nothing to send — and without this it would pull happily while the hub's
-     * machine list never mentioned it, which is what the S5b verifier found.
+     * only travels on one. A machine whose ledger holds nothing but `unknown`
+     * rows has nothing to send however far back its cursor reaches (ADR-072
+     * §2), and neither has one with an empty ledger — without this either would
+     * pull happily while the hub's machine list never mentioned it, which is
+     * what the S5b verifier found.
      */
     const announced = lastAnnounced()
     let mustAnnounce =
@@ -749,6 +752,34 @@ export class UsageHubClient {
           retired: device.retired
         }))
     )
+
+    // The account list (ADR-072 §6, S6). The one route that can NAME an account
+    // key, and the only source for a key with no rate-limit meter — an API key
+    // has none, so the limit relay is silent about it whichever machine spends
+    // on it. Unlike the machine list this one is kept whole: an account is not a
+    // per-device fact, and a label this machine reads for itself outranks the
+    // hub's masked one in the dashboard anyway.
+    const accountsResult = await this.send(
+      url,
+      `${HUB_ROUTES.accounts}?${SCHEMA_VERSION_PARAM}=${SCHEMA_VERSION}`,
+      null
+    )
+    if (accountsResult.kind !== 'ok') {
+      this.applyFailure(accountsResult)
+      return false
+    }
+    const accounts = decodePullAccountsResponse(accountsResult.payload)
+    if (this.classifyEpoch(accounts.epoch) !== 'ok') return this.abandonPass()
+    if (!this.writable()) return false
+    replaceRemoteAccounts(
+      accounts.accounts.map((account) => ({
+        accountKey: account.accountKey,
+        vendorId: account.vendorId,
+        labelMasked: account.labelMasked,
+        lastSeenAt: account.lastSeenAt
+      }))
+    )
+
     upsertHubConfig({ lastPullAt: this.now() })
     return true
   }

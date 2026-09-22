@@ -92,13 +92,18 @@ function seedV25(db: Db): void {
 }
 
 describe('migration v26 — the usage hub tables', () => {
-  it('is the latest migration', () => {
+  it('applies on its own, without the migrations that came after it', () => {
     const db = openRawDb()
     try {
-      runMigrations(db)
-      // Bump alongside MIGRATIONS in db.ts — currently v26 (the usage hub's
-      // client state and the cached remote rows).
+      runMigrations(
+        db,
+        MIGRATIONS.filter((m) => m.version <= 26)
+      )
+      // The "is this the latest" assertion moved to the newest migration's own
+      // test (`usage-hub-v27-migration.test.ts`) when v27 landed; what belongs
+      // here is that v26 still stands up by itself.
       expect(userVersion(db)).toBe(26)
+      expect(db.prepare('SELECT COUNT(*) AS n FROM remote_device').get()).toEqual({ n: 0 })
     } finally {
       db.close()
     }

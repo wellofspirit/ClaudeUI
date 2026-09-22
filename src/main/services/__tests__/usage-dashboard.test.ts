@@ -927,6 +927,134 @@ describe('buildUsageDashboard — round 2 corrections', () => {
   })
 })
 
+describe('buildUsageDashboard — names from the hub account list (S6)', () => {
+  /** An API-key account the hub knows a name for and this machine does not. */
+  const REMOTE_KEY = 'anthropic:key:abcd1234abcd1234'
+
+  it('names a remote-only key from remote_account, and marks the name partial', async () => {
+    const { db, dashboard } = await fresh()
+    enableHub(db)
+    // Only the peer has ever spent on it, and no reading can name it: an API
+    // key has no rate-limit meter, so `GET /v1/limits` says nothing about it.
+    // Without the account list the row would read `Anthropic key`, which is
+    // what every other Anthropic key on the machine would read as too.
+    db.upsertRemoteUsageBuckets([
+      remoteBucket(PEER_DEVICE, {
+        hourUtc: DAY_D + 2 * HOUR,
+        accountKey: REMOTE_KEY,
+        billingType: 'apiKey',
+        apiCostUsd: 1
+      })
+    ])
+    db.replaceRemoteAccounts([
+      { accountKey: REMOTE_KEY, vendorId: 'anthropic', labelMasked: '1234', lastSeenAt: NOW }
+    ])
+
+    const data = await dashboard.buildUsageDashboard({ range: '7d', scope: 'all', now: NOW })
+    const account = data.providers.flatMap((p) => p.accounts)[0]
+
+    expect(account.accountKey).toBe(REMOTE_KEY)
+    expect(account.label).toBe('1234')
+    expect(account.labelMasked).toBe(true)
+  })
+
+  it('leaves an account with no masked label on the hub to its own fallback', async () => {
+    const { db, dashboard } = await fresh()
+    enableHub(db)
+    db.upsertRemoteUsageBuckets([
+      remoteBucket(PEER_DEVICE, {
+        hourUtc: DAY_D + 2 * HOUR,
+        accountKey: REMOTE_KEY,
+        billingType: 'apiKey',
+        apiCostUsd: 1
+      })
+    ])
+    // Registered but never named — the hub keeps the key either way.
+    db.replaceRemoteAccounts([
+      { accountKey: REMOTE_KEY, vendorId: 'anthropic', labelMasked: null, lastSeenAt: NOW }
+    ])
+
+    const data = await dashboard.buildUsageDashboard({ range: '7d', scope: 'all', now: NOW })
+    const account = data.providers.flatMap((p) => p.accounts)[0]
+
+    expect(account.label).toBe('anthropic key')
+    expect(account.labelMasked).toBeUndefined()
+  })
+
+  it('changes nothing under local', async () => {
+    const { db, dashboard } = await fresh()
+    enableHub(db)
+    // A LOCAL bucket this time, so the account is on screen under both scopes.
+    db.upsertUsageBuckets([
+      bucket({
+        hourUtc: DAY_D + 2 * HOUR,
+        accountKey: REMOTE_KEY,
+        billingType: 'apiKey',
+        apiCostUsd: 1
+      })
+    ])
+    db.replaceRemoteAccounts([
+      { accountKey: REMOTE_KEY, vendorId: 'anthropic', labelMasked: '1234', lastSeenAt: NOW }
+    ])
+
+    const local = await dashboard.buildUsageDashboard({ range: '7d', now: NOW })
+    const account = local.providers.flatMap((p) => p.accounts)[0]
+
+    // `local` is the view of this machine alone, and the hub's cache is not part
+    // of it — the same rule the relayed readings already follow.
+    expect(account.label).toBe('anthropic key')
+    expect(account.labelMasked).toBeUndefined()
+  })
+
+  it('a label this machine read beats the hub list', async () => {
+    const { db, dashboard } = await fresh()
+    enableHub(db)
+    db.upsertUsageBuckets([bucket({ hourUtc: DAY_D + 2 * HOUR, apiCostUsd: 1 })])
+    hoisted.limits = [limitsReading(ACCOUNT_A, 'work@example.test')]
+    db.replaceRemoteAccounts([
+      {
+        accountKey: ACCOUNT_A,
+        vendorId: 'anthropic',
+        labelMasked: 'w•••@e•••.test',
+        lastSeenAt: NOW
+      }
+    ])
+
+    const data = await dashboard.buildUsageDashboard({ range: '7d', scope: 'all', now: NOW })
+    const account = data.providers.flatMap((p) => p.accounts)[0]
+
+    // The machine holds the credential: it has the whole name, so a mask of the
+    // same name is strictly worse and must not replace it.
+    expect(account.label).toBe('work@example.test')
+    expect(account.labelMasked).toBeUndefined()
+  })
+
+  it('a relayed reading outranks the hub list for the same key', async () => {
+    const { db, dashboard } = await fresh()
+    enableHub(db)
+    db.upsertUsageBuckets([bucket({ hourUtc: DAY_D + 2 * HOUR, apiCostUsd: 1 })])
+    hoisted.limits = [
+      {
+        ...limitsReading(ACCOUNT_A, 'a•••@e•••.test'),
+        labelMasked: true,
+        source: { deviceId: PEER_DEVICE, deviceName: 'studio' }
+      }
+    ]
+    db.replaceRemoteAccounts([
+      { accountKey: ACCOUNT_A, vendorId: 'anthropic', labelMasked: 'stale', lastSeenAt: NOW }
+    ])
+
+    const data = await dashboard.buildUsageDashboard({ range: '7d', scope: 'all', now: NOW })
+    const account = data.providers.flatMap((p) => p.accounts)[0]
+
+    // Both are masked, so neither is more truthful — but a reading is written
+    // when a window is observed, and the account list is whatever the hub was
+    // last told, so the reading is the fresher of the two.
+    expect(account.label).toBe('a•••@e•••.test')
+    expect(account.labelMasked).toBe(true)
+  })
+})
+
 describe('sanitizeDashboardScope', () => {
   it('takes the two scopes and nothing else', async () => {
     const { dashboard } = await fresh()

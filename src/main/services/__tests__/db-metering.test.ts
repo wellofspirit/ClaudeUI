@@ -49,9 +49,9 @@ describe('DB migrations — v3 usage_event + v4 usage_window_sample', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      // Bump alongside MIGRATIONS in db.ts — currently v26 (the usage hub's
-      // client state and the cached remote rows).
-      expect(userVersion(db)).toBe(26)
+      // Bump alongside MIGRATIONS in db.ts — currently v27 (the hub's account
+      // names and the one-time cursor reset).
+      expect(userVersion(db)).toBe(27)
     } finally {
       db.close()
     }

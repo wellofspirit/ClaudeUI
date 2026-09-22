@@ -31,7 +31,6 @@
 import {
   deleteHubConfig,
   getHubConfigRow,
-  maxUsageEventRowid,
   truncateHubRemoteTables,
   upsertHubConfig,
   type HubConfigRow
@@ -193,11 +192,13 @@ export function getHubConfig(): HubConfigView {
 /**
  * Write the non-secret settings.
  *
- * **Enabling initialises the cursor to `MAX(rowid)`** (owner, 2026-09-21: start
- * fresh). The hub's combined view begins where this machine joined it; history
- * before that stays in the "this machine" view, and nothing older is ever
- * pushed. Only the OFF → ON transition does it, so toggling a URL or a name on a
- * hub that is already syncing does not silently skip everything unpushed.
+ * **Enabling moves no cursor** (owner, 2026-09-22, reversing the 2026-09-21
+ * "start fresh" rule this used to implement). Attribution is the trust
+ * boundary, not the instant sync was switched on: every properly attributed row
+ * is pushed however old it is, and an `unknown` one never is. So a fresh
+ * configuration syncs from rowid 0 and a re-enable keeps the mark it had — the
+ * first rule cost the owner a whole day of one subscription's history, which
+ * had been written before the switch was flipped at midday.
  */
 export function configureHub(input: HubConfigureInput): HubConfigView {
   const before = getHubConfigRow()
@@ -211,7 +212,6 @@ export function configureHub(input: HubConfigureInput): HubConfigView {
     enabled: input.enabled
   }
   if (input.enabled && !(before?.enabled ?? false)) {
-    patch.cursorRowid = maxUsageEventRowid()
     // A freshly enabled hub has no error to show, and the last one may be from
     // the previous configuration entirely.
     patch.lastError = null
@@ -220,11 +220,7 @@ export function configureHub(input: HubConfigureInput): HubConfigView {
     deviceId()
   }
   upsertHubConfig(patch)
-  logger.info(
-    LOG_SOURCE,
-    `hub configured: ${patch.enabled ? 'enabled' : 'disabled'}` +
-      (patch.cursorRowid === undefined ? '' : `, cursor starts at rowid ${patch.cursorRowid}`)
-  )
+  logger.info(LOG_SOURCE, `hub configured: ${patch.enabled ? 'enabled' : 'disabled'}`)
   return getHubConfig()
 }
 

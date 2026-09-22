@@ -17,6 +17,7 @@ import {
   getRemoteUsageBucketsSince,
   insertUsageEvent,
   insertUsageEvents,
+  listRemoteAccounts,
   resetUsageEventWrittenListeners,
   upsertHubConfig,
   type UsageEventInsert
@@ -121,6 +122,7 @@ function happyHub(overrides: Partial<Record<string, () => Response>> = {}): type
     if (url.includes('/v1/buckets')) return jsonResponse({ epoch: 1, rev: 0, buckets: [] })
     if (url.includes('/v1/windows')) return jsonResponse({ epoch: 1, rev: 0, windows: [] })
     if (url.includes('/v1/devices?')) return jsonResponse({ epoch: 1, devices: [] })
+    if (url.includes('/v1/accounts')) return jsonResponse({ epoch: 1, accounts: [] })
     if (url.includes('/v1/limits')) return jsonResponse({ epoch: 1, readings: [] })
     if (url.includes('/resync')) return jsonResponse({ deleted: 0, epoch: 2 })
     return jsonResponse({ error: 'unexpected route' }, 404)
@@ -173,7 +175,7 @@ describe('every request', () => {
 
     const push = calls.find((call) => call.url.includes('/v1/events'))
     const body = JSON.parse(push!.init.body as string) as Record<string, unknown>
-    expect(body.schemaVersion).toBe(1)
+    expect(body.schemaVersion).toBe(2)
     expect(body.deviceName).toBe('workshop')
     expect(typeof body.appVersion).toBe('string')
     expect(body.os).toBe(process.platform)
@@ -616,6 +618,119 @@ describe('the pull', () => {
     ])
   })
 
+  it('fills the account list from GET /v1/accounts, this machine included', async () => {
+    enable()
+    const hub = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/v1/accounts')) {
+        calls.push({ url, init: init ?? {} })
+        return jsonResponse({
+          epoch: 1,
+          accounts: [
+            {
+              accountKey: 'anthropic:org-a:acct-a',
+              vendorId: 'anthropic',
+              labelMasked: 's•••@e•••.com',
+              lastSeenAt: TS
+            },
+            // Never named: the hub registers a key whatever it is called, so a
+            // null label is a row rather than a gap in the list.
+            {
+              accountKey: 'apikey:openai:abcd',
+              vendorId: 'openai',
+              labelMasked: null,
+              lastSeenAt: TS - 1_000
+            }
+          ]
+        })
+      }
+      return happyHub()(input, init)
+    }) as unknown as typeof fetch
+
+    await build(hub).syncNow()
+
+    // No `exclude_device` and no filtering afterwards, unlike the machine list:
+    // an account is not a per-device fact, and the hub's list is the answer to
+    // "what is this key called", whoever has been spending on it.
+    expect(listRemoteAccounts()).toEqual([
+      {
+        accountKey: 'anthropic:org-a:acct-a',
+        vendorId: 'anthropic',
+        labelMasked: 's•••@e•••.com',
+        lastSeenAt: TS
+      },
+      {
+        accountKey: 'apikey:openai:abcd',
+        vendorId: 'openai',
+        labelMasked: null,
+        lastSeenAt: TS - 1_000
+      }
+    ])
+    const accountsCall = calls.find((call) => call.url.includes('/v1/accounts'))
+    expect(accountsCall!.url).toContain('schemaVersion=2')
+    expect(accountsCall!.url).not.toContain('exclude_device')
+  })
+
+  it('replaces the account list whole — one the hub has forgotten goes', async () => {
+    enable()
+    let listed = [
+      {
+        accountKey: 'anthropic:org-a:acct-a',
+        vendorId: 'anthropic',
+        labelMasked: 'a',
+        lastSeenAt: TS
+      },
+      { accountKey: 'apikey:openai:abcd', vendorId: 'openai', labelMasked: 'b', lastSeenAt: TS }
+    ]
+    const hub = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/v1/accounts')) return jsonResponse({ epoch: 1, accounts: listed })
+      return happyHub()(input, init)
+    }) as unknown as typeof fetch
+
+    const client = build(hub)
+    await client.syncNow()
+    expect(listRemoteAccounts()).toHaveLength(2)
+
+    // The route is not paged, so the answer IS the list. A merge would keep
+    // naming an account the hub no longer has a row for.
+    listed = listed.slice(0, 1)
+    await client.syncNow()
+    expect(listRemoteAccounts().map((account) => account.accountKey)).toEqual([
+      'anthropic:org-a:acct-a'
+    ])
+  })
+
+  it('abandons the pass when the accounts read reports a different epoch', async () => {
+    enable()
+    const hub = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/v1/accounts')) {
+        return jsonResponse({
+          epoch: 9,
+          accounts: [
+            {
+              accountKey: 'anthropic:org-a:acct-a',
+              vendorId: 'anthropic',
+              labelMasked: 'a',
+              lastSeenAt: TS
+            }
+          ]
+        })
+      }
+      return happyHub()(input, init)
+    }) as unknown as typeof fetch
+
+    const client = build(hub)
+    await client.syncNow()
+
+    // The same rule every other read follows (ADR-072 §3): the hub rebuilt
+    // underneath this pass, so nothing from it is written and the next pass
+    // starts against the generation that is live.
+    expect(client.status().state).toBe('backoff')
+    expect(listRemoteAccounts()).toEqual([])
+  })
+
   it('excludes itself in the query it sends', async () => {
     enable()
     const client = build(happyHub())
@@ -824,7 +939,7 @@ describe('limit readings ride the same push', () => {
       schemaVersion: number
       readings: Array<Record<string, unknown>>
     }
-    expect(body.schemaVersion).toBe(1)
+    expect(body.schemaVersion).toBe(2)
     expect(body.readings).toHaveLength(1)
     expect(body.readings[0]).toMatchObject({
       accountKey: 'anthropic:org-a:acct-a',
@@ -1075,9 +1190,9 @@ describe('the hub keeps its promises, or the pass fails', () => {
     for (const call of calls) {
       if (call.init.method === 'POST') {
         const body = JSON.parse(call.init.body as string) as { schemaVersion?: number }
-        expect(body.schemaVersion).toBe(1)
+        expect(body.schemaVersion).toBe(2)
       } else {
-        expect(new URL(call.url).searchParams.get('schemaVersion')).toBe('1')
+        expect(new URL(call.url).searchParams.get('schemaVersion')).toBe('2')
       }
     }
     // And a GET is one of them, so the loop above is not vacuous.

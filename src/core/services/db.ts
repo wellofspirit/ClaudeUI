@@ -1318,6 +1318,37 @@ export const MIGRATIONS: Migration[] = [
         );
       `)
     }
+  },
+  {
+    // v27 — S6: the hub's account names, and one re-evaluation of the ledger.
+    //
+    // `remote_account` is `GET /v1/accounts` cached, the fifth of the
+    // `remote_*` tables and the only one that is not about a device: it is the
+    // NAME behind an account key, which no bucket carries and which the limit
+    // relay can only supply for an account that has a rate-limit meter. An API
+    // key has none, so without this a key only another machine spends on could
+    // be shown as nothing but its own last four characters.
+    //
+    // The cursor reset is ADR-072 §2's new rule applied to the history already
+    // on disk (owner, 2026-09-22): attribution decides what is pushed, not the
+    // instant sync was enabled, so the whole local ledger is re-read once under
+    // that rule. It costs one pass over rows the hub already holds — ingest
+    // deduplicates on `message_id` and counts them as duplicates — and on a
+    // machine with ~60,000 rows, most of them `unknown`, the few thousand that
+    // are attributed drain in two or three passes of 50 batches each.
+    version: 27,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS remote_account (
+          account_key  TEXT PRIMARY KEY,
+          vendor_id    TEXT NOT NULL,
+          label_masked TEXT,
+          last_seen_at INTEGER NOT NULL DEFAULT 0
+        );
+
+        UPDATE usage_hub_config SET cursor_rowid = 0;
+      `)
+    }
   }
 ]
 
@@ -2285,9 +2316,10 @@ export function readUsageEventsAfterRowid(rowid: number, limit: number): UsageEv
 /**
  * The highest rowid in the ledger, or 0 when it is empty.
  *
- * This is what enabling sync sets the cursor to (owner: start fresh) — the hub's
- * combined view begins at the moment a machine joined it, and nothing older is
- * ever pushed.
+ * Enabling sync USED to set the hub cursor to this (owner, 2026-09-21: start
+ * fresh); the 2026-09-22 ruling in ADR-072 §2 replaced that with "every
+ * attributed row is pushed, however old", so nothing seeds a cursor from it any
+ * more and it is left as the plain ceiling over the ledger that it is.
  */
 export function maxUsageEventRowid(): number {
   const db = getDb()
@@ -4271,6 +4303,7 @@ export function deleteHubConfig(): void {
     db.prepare('DELETE FROM remote_usage_window').run()
     db.prepare('DELETE FROM remote_limits').run()
     db.prepare('DELETE FROM remote_device').run()
+    db.prepare('DELETE FROM remote_account').run()
     db.prepare('COMMIT').run()
   } catch (err) {
     db.prepare('ROLLBACK').run()
@@ -4292,9 +4325,11 @@ export function truncateHubRemoteTables(): void {
     db.prepare('DELETE FROM remote_usage_bucket').run()
     db.prepare('DELETE FROM remote_usage_window').run()
     db.prepare('DELETE FROM remote_limits').run()
-    // The device list is pulled whole on every pass, so dropping it costs one
-    // request and keeps "forget the cache" meaning all of it.
+    // The device list and the account list are both pulled whole on every pass,
+    // so dropping them costs one request each and keeps "forget the cache"
+    // meaning all of it.
     db.prepare('DELETE FROM remote_device').run()
+    db.prepare('DELETE FROM remote_account').run()
     db.prepare('COMMIT').run()
   } catch (err) {
     db.prepare('ROLLBACK').run()
@@ -4648,5 +4683,62 @@ export function listRemoteDevices(): RemoteDeviceRow[] {
     appVersion: row.app_version,
     lastPushAt: row.last_push_at,
     retired: row.retired !== 0
+  }))
+}
+
+/** One account the hub has seen, as `GET /v1/accounts` described it (ADR-072 §6). */
+export interface RemoteAccountRow {
+  accountKey: string
+  vendorId: string
+  /** Masked by the hub for a device caller; null when the hub was never told a label. */
+  labelMasked: string | null
+  /** The newest instant the hub saw the account on any row, in milliseconds. */
+  lastSeenAt: number
+}
+
+/**
+ * Replace the cached account list with what the hub just answered.
+ *
+ * REPLACE, like the machine list and for the same reason: the route is not
+ * paged, so the answer IS the list, and a merge would keep naming an account
+ * the hub has forgotten. Unlike the machine list this one keeps THIS machine's
+ * accounts too — an account is not a per-device fact, and the dashboard prefers
+ * a locally read label over anything from here anyway.
+ */
+export function replaceRemoteAccounts(rows: ReadonlyArray<RemoteAccountRow>): void {
+  const db = getDb()
+  db.prepare('BEGIN').run()
+  try {
+    db.prepare('DELETE FROM remote_account').run()
+    const stmt = db.prepare(
+      `INSERT INTO remote_account (account_key, vendor_id, label_masked, last_seen_at)
+       VALUES (?, ?, ?, ?)`
+    )
+    for (const r of rows) {
+      stmt.run(r.accountKey, r.vendorId, r.labelMasked, r.lastSeenAt)
+    }
+    db.prepare('COMMIT').run()
+  } catch (err) {
+    db.prepare('ROLLBACK').run()
+    throw err
+  }
+}
+
+/** The cached account list, most recently seen first. */
+export function listRemoteAccounts(): RemoteAccountRow[] {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT * FROM remote_account ORDER BY last_seen_at DESC, account_key ASC')
+    .all() as Array<{
+    account_key: string
+    vendor_id: string
+    label_masked: string | null
+    last_seen_at: number
+  }>
+  return rows.map((row) => ({
+    accountKey: row.account_key,
+    vendorId: row.vendor_id,
+    labelMasked: row.label_masked,
+    lastSeenAt: row.last_seen_at
   }))
 }

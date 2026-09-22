@@ -28,12 +28,14 @@ import {
   getHubConfigRow,
   getRemoteUsageBucketsSince,
   insertUsageEvents,
+  listRemoteAccounts,
   resetUsageEventWrittenListeners,
   upsertHubConfig,
   type UsageEventInsert
 } from '../../core/services/db'
 import { configureHub, setHubSecret } from '../../core/services/usage-hub/config'
 import { UsageHubClient } from '../../core/services/usage-hub/client'
+import { buildUsageDashboard } from '../../core/services/usage-dashboard'
 import { recordLimitSamples, resetWindowSampleDedup } from '../../core/services/window-samples'
 
 const CLIENT_ID = 'fixture-client-id'
@@ -60,6 +62,7 @@ interface HubStore {
     lastPushAt: number
     retired: boolean
   }>
+  accounts: Array<{ accountKey: string; vendorId: string; label: string | null }>
 }
 
 const spawned: ChildProcess[] = []
@@ -228,6 +231,50 @@ function enable(hub: FakeHub): void {
   setHubSecret(CLIENT_SECRET)
 }
 
+/**
+ * One turn pushed under ANOTHER machine's id, over the real route.
+ *
+ * `--seed` can preload a peer's buckets, but a bucket carries no label, so a
+ * seeded peer's account is registered unnamed — and a name is the whole point
+ * of the account list. Ingest is where the hub learns one, so this suite gets
+ * its peer the way the hub actually gets one.
+ */
+async function pushAsPeer(
+  hub: FakeHub,
+  deviceId: string,
+  event: { messageId: string; ts: number; accountKey: string; accountLabel: string | null }
+): Promise<void> {
+  const response = await fetch(`${hub.url}/v1/events`, {
+    method: 'POST',
+    headers: { ...AUTH_HEADERS, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      schemaVersion: 2,
+      deviceId,
+      deviceName: 'studio',
+      appVersion: '3.3.0',
+      os: 'darwin',
+      events: [
+        {
+          ...event,
+          engineId: 'claude',
+          vendorId: 'anthropic',
+          modelId: 'claude-opus-5',
+          inputTokens: 100,
+          outputTokens: 20,
+          cacheWriteTokens: 0,
+          cacheWrite1hTokens: 0,
+          cacheReadTokens: 0,
+          apiCostUsd: 1,
+          billedCostUsd: 0,
+          billingType: 'apiKey',
+          origin: 'session'
+        }
+      ]
+    })
+  })
+  if (!response.ok) throw new Error(`the peer push answered HTTP ${response.status}`)
+}
+
 beforeEach(() => {
   closeDb()
   resetUsageEventWrittenListeners()
@@ -347,9 +394,10 @@ describe('the client and the fake hub agree on the wire', () => {
     const hub = await startFakeHub()
     enable(hub)
     await withClient(async (client) => {
-      // No ledger rows at all: a freshly enabled machine's cursor sits at the
-      // newest row it holds, so it may have nothing to send for days (ADR-072
-      // §2). Without the announce the hub would never learn it exists.
+      // No ledger rows at all, and a machine whose rows are all `unknown` is in
+      // the same position: there is nothing the hub may be told, possibly for
+      // days (ADR-072 §2). Without the announce it would never learn the
+      // machine exists.
       await client.syncNow()
       expect(client.status().state).toBe('idle')
 
@@ -374,7 +422,7 @@ describe('the client and the fake hub agree on the wire', () => {
       headers: AUTH_HEADERS
     })
     expect(answer.status).toBe(426)
-    expect(await answer.json()).toEqual({ hubSchemaVersion: 1 })
+    expect(await answer.json()).toEqual({ hubSchemaVersion: 2 })
   })
 
   it('resync makes the hub drop this device rows and the client push them again', async () => {
@@ -447,6 +495,82 @@ describe('the client and the fake hub agree on the wire', () => {
       // watermark where it was rather than walk for ever.
       expect(getHubConfigRow()?.remoteWindowRev).toBe(0)
       expect(getRemoteUsageBucketsSince(0)).toEqual([])
+    })
+  })
+})
+
+describe('the account list names what nothing else can (S6)', () => {
+  it('names a key only another machine has spent on, on the combined dashboard', async () => {
+    const hub = await startFakeHub()
+    enable(hub)
+    const now = Date.now()
+    // An API-key account this machine has never held a credential for and never
+    // written a ledger row about. Nothing relays a reading for one — an API key
+    // has no rate-limit meter — so `GET /v1/accounts` is the only route that
+    // can say what it is called.
+    const peerKey = 'anthropic:key:zzzz1111zzzz1111'
+    await pushAsPeer(hub, 'device-studio', {
+      messageId: 'msg-peer',
+      ts: now - 60 * 60 * 1000,
+      accountKey: peerKey,
+      accountLabel: 'partner@example.com'
+    })
+
+    await withClient(async (client) => {
+      await client.syncNow()
+
+      // Masked on the wire, because this client is a device caller.
+      expect(listRemoteAccounts()).toEqual([
+        {
+          accountKey: peerKey,
+          vendorId: 'anthropic',
+          labelMasked: 'p•••@e•••.com',
+          lastSeenAt: now - 60 * 60 * 1000
+        }
+      ])
+
+      const data = await buildUsageDashboard({ range: '7d', scope: 'all', now })
+      const account = data.providers.flatMap((provider) => provider.accounts)[0]
+      expect(account.accountKey).toBe(peerKey)
+      // Without the account list this would read `anthropic key`, which every
+      // other Anthropic key on the machine would read as too.
+      expect(account.label).toBe('p•••@e•••.com')
+      expect(account.labelMasked).toBe(true)
+    })
+  })
+})
+
+describe('every attributed row is pushed, however old (ruling 1, S6)', () => {
+  it('sends the rows written BEFORE sync was enabled, and no unattributed one', async () => {
+    const hub = await startFakeHub()
+    // The order is the whole test: three turns are on disk before anything is
+    // configured, which is the case the old rule got wrong — it seeded the
+    // cursor at MAX(rowid) on the OFF → ON edge, and the owner's first day on
+    // the hub lost a morning of one subscription's turns that way (ADR-072 §2,
+    // amended 2026-09-22).
+    insertUsageEvents([
+      // One hour between them, so the two that arrive fold into one bucket.
+      row('msg-old-a', { ts: TS - 6 * 60 * 60 * 1000 }),
+      row('msg-old-b', { ts: TS - 6 * 60 * 60 * 1000 + 60_000 }),
+      row('msg-old-unknown', { ts: TS - 6 * 60 * 60 * 1000 + 120_000, accountKey: 'unknown' })
+    ])
+    enable(hub)
+
+    await withClient(async (client) => {
+      await client.syncNow()
+
+      const store = await readStore(hub)
+      // Attribution is the trust boundary, not the enable instant: the two
+      // attributed turns arrive and the unattributed one never leaves. Under
+      // the old rule this list was empty — the cursor had been seeded past all
+      // three before the first pass ran.
+      expect(store.events.map((event) => event.messageId).sort()).toEqual([
+        'msg-old-a',
+        'msg-old-b'
+      ])
+      expect(store.buckets).toHaveLength(1)
+      expect(store.buckets[0].requestCount).toBe(2)
+      expect(getHubConfigRow()?.cursorRowid).toBe(3)
     })
   })
 })

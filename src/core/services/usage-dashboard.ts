@@ -56,6 +56,7 @@ import {
   getRemoteUsageBucketsSince,
   getUsageBucketsSince,
   latestAccountLabels,
+  listRemoteAccounts,
   listRemoteDevices,
   type UsageBucketRow
 } from './db'
@@ -240,7 +241,11 @@ const limitsLabelCache = new Map<DashboardScope, { readAt: number; labels: Limit
 interface LimitsLabels {
   /** Names this machine read for itself. */
   own: Map<string, string>
-  /** `d•••@e•••.com` — as much as the hub gives a device caller (ADR-072 §6). */
+  /**
+   * `d•••@e•••.com` — as much as the hub gives a device caller (ADR-072 §6).
+   * Two sources under scope `all`: a relayed limit reading first, then the hub's
+   * account list for every key no reading named.
+   */
   masked: Map<string, string>
 }
 
@@ -261,9 +266,9 @@ interface LimitsLabels {
  * the name is partial. What must never happen is the silent rename: a masked
  * label with nothing on screen admitting it.
  *
- * Under `local` nothing relayed is read at all, which costs this nothing: a key
- * only another machine has spent on has no local bucket, so it is never a ledger
- * row under that scope.
+ * Under `local` neither the relay nor the hub's account list is read at all,
+ * which costs this nothing: a key only another machine has spent on has no
+ * local bucket, so it is never a ledger row under that scope.
  *
  * A failure yields the last labels rather than none — a provider being briefly
  * unreadable should not rename every account on the dashboard.
@@ -281,6 +286,18 @@ async function limitsLabels(scope: DashboardScope): Promise<LimitsLabels> {
       if (account.accountKey === UNKNOWN_ACCOUNT_KEY || !account.label) continue
       const into = account.labelMasked === true ? labels.masked : labels.own
       into.set(account.accountKey, account.label)
+    }
+    // Then the hub's own account list (S6), which names what no reading can: an
+    // API-key account has no rate-limit meter, so the relay above is silent
+    // about it however much another machine has spent on it. Ranked BELOW a
+    // relayed reading, because a reading is the fresher of the two masked
+    // sources, so a key already named here is left alone.
+    if (scope === 'all') {
+      for (const account of listRemoteAccounts()) {
+        if (account.accountKey === UNKNOWN_ACCOUNT_KEY || !account.labelMasked) continue
+        if (labels.masked.has(account.accountKey)) continue
+        labels.masked.set(account.accountKey, account.labelMasked)
+      }
     }
     limitsLabelCache.set(scope, { readAt, labels })
     return labels

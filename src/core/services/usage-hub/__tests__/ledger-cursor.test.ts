@@ -80,8 +80,13 @@ function row(messageId: string, overrides: Partial<UsageEventInsert> = {}): Usag
   }
 }
 
-describe('the cursor starts where sync was enabled', () => {
-  it('enabling sets the cursor to MAX(rowid), so nothing older is ever pushed', () => {
+describe('the cursor starts at 0 and enabling never moves it', () => {
+  it('enabling leaves the cursor at 0, so history already on disk is pushed', () => {
+    // The rule this replaces (owner, 2026-09-21) seeded the cursor at
+    // `MAX(rowid)`, and on the hub's first day that silently dropped a whole
+    // morning of one subscription's turns. Attribution decides what is pushed
+    // now, not the instant the switch was flipped (owner, 2026-09-22, ADR-072
+    // §2) — so these three rows are all still waiting.
     insertUsageEvents([row('msg-a'), row('msg-b'), row('msg-c')])
     expect(maxUsageEventRowid()).toBe(3)
 
@@ -92,7 +97,37 @@ describe('the cursor starts where sync was enabled', () => {
       enabled: true
     })
 
-    expect(getHubConfig().cursorRowid).toBe(3)
+    expect(getHubConfig().cursorRowid).toBe(0)
+    expect(pendingEventCount(getHubConfig().cursorRowid)).toBe(3)
+  })
+
+  it('a re-enable keeps the cursor it had rather than starting over', () => {
+    configureHub({
+      url: 'https://hub.example.com',
+      deviceName: 'workshop',
+      clientId: 'client-a',
+      enabled: true
+    })
+    insertUsageEvents([row('msg-a'), row('msg-b')])
+    // Pushed: the cursor is past both rows.
+    upsertHubConfig({ cursorRowid: 2 })
+
+    configureHub({
+      url: 'https://hub.example.com',
+      deviceName: 'workshop',
+      clientId: 'client-a',
+      enabled: false
+    })
+    configureHub({
+      url: 'https://hub.example.com',
+      deviceName: 'workshop',
+      clientId: 'client-a',
+      enabled: true
+    })
+
+    // An OFF → ON edge is where the old rule seeded, and it must not re-send
+    // rows the hub already accepted just because someone toggled the switch.
+    expect(getHubConfig().cursorRowid).toBe(2)
     expect(pendingEventCount(getHubConfig().cursorRowid)).toBe(0)
   })
 
