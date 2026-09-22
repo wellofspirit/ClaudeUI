@@ -1,17 +1,18 @@
 /**
  * The usage hub's wire protocol, version 1 (ADR-072 §8).
  *
- * ## This folder is a DRAFT that changes owner
+ * ## This folder is the protocol's home
  *
- * The hub is a standalone project and owns its protocol. It does not exist yet,
- * so the first draft of the types, the golden fixtures and the fake hub that
- * serves them live here, where the client's constraints shape them. When the hub
- * repository is created they MOVE there and ClaudeUI vendors a copy. So this
- * folder is deliberately self-contained: no import from `shared/types.ts`, no
- * import from `core/`, nothing but these declarations. `billingType`, `origin`
- * and `windowKind` are plain strings for the same reason — the hub must accept a
- * value a newer client knows and it does not, and a union here would be a
- * promise neither side can keep.
+ * The hub owns its protocol: these types, the golden fixtures beside them and
+ * the fake hub under `test/fake-hub/` are the contract, and every client vendors
+ * a copy (ClaudeUI keeps one under `src/core/services/usage-hub/protocol/`).
+ * The first draft was written in ClaudeUI, where the client's constraints
+ * shaped it, and moved here unchanged. The folder is deliberately
+ * self-contained: no import from the Worker, nothing but these declarations, so
+ * a client can copy it as it is. `billingType`, `origin` and `windowKind` are
+ * plain strings for the same reason — the hub must accept a value a newer client
+ * knows and it does not, and a union here would be a promise neither side can
+ * keep.
  *
  * ## Two rules that are not about shapes
  *
@@ -59,6 +60,9 @@ export const HUB_CLIENT_SECRET_HEADER = 'CF-Access-Client-Secret'
 
 /** The most events one `POST /v1/events` may carry. */
 export const MAX_EVENTS_PER_PUSH = 500
+
+/** The most limit readings one `POST /v1/limits` may carry, and the depth of the client's queue. */
+export const MAX_READINGS_PER_PUSH = 500
 
 // ---------------------------------------------------------------------------
 // Common

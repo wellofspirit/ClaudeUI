@@ -1,8 +1,10 @@
 /**
  * The usage hub protocol's encoder and decoder (ADR-072 §8).
  *
- * Moves to the hub repository with `types.ts` and the fixtures, so it imports
- * nothing but them.
+ * The CLIENT side of the wire: it builds requests and reads answers. The Worker
+ * validates requests with its own code, so a disagreement between the two shows
+ * up in the contract test instead of being shared away. Imports nothing but
+ * `types.ts`, so a client can vendor the folder as it is.
  *
  * ## Why an encoder at all, rather than `JSON.stringify(row)`
  *

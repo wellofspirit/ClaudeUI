@@ -95,6 +95,7 @@ import {
   HUB_CLIENT_SECRET_HEADER,
   HUB_ROUTES,
   MAX_EVENTS_PER_PUSH,
+  MAX_READINGS_PER_PUSH,
   SCHEMA_VERSION,
   SCHEMA_VERSION_PARAM,
   type RemoteBucket,
@@ -122,8 +123,12 @@ const SYNC_INTERVAL_MS = 10 * 60 * 1000
 const BACKOFF_MS = [5_000, 15_000, 60_000, 300_000]
 const BACKOFF_CEILING_MS = 60 * 60 * 1000
 
-/** How many unsent limit readings to hold. A window's meter is worth seconds, not megabytes. */
-const MAX_QUEUED_READINGS = 500
+/**
+ * How many unsent limit readings to hold: exactly what one push may carry, so the
+ * queue is never larger than the batch the hub will take. A window's meter is
+ * worth seconds, not megabytes.
+ */
+const MAX_QUEUED_READINGS = MAX_READINGS_PER_PUSH
 
 /** How many bucket pages one pull will walk before giving the loop back. */
 const MAX_PULL_PAGES = 50

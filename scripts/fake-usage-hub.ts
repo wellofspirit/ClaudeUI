@@ -1,21 +1,23 @@
 /**
  * A fake usage hub (ADR-072 §8).
  *
- *     bun scripts/fake-usage-hub.ts --client-id <id> --client-secret <secret>
+ *     bun test/fake-hub/fake-usage-hub.ts --client-id <id> --client-secret <secret>
  *
  * ## What this is for
  *
- * The real hub is a Cloudflare Worker in its own repository and it does not
- * exist yet. This serves the same protocol from memory so that the client can be
- * driven end to end: the gated integration test starts it on a random port, and
- * a real-app verifier points a running ClaudeUI at it.
+ * The reference implementation of the protocol, from memory and without
+ * Cloudflare. The contract test runs its cases against this AND against the
+ * Worker under `wrangler dev`, so a case the Worker passes and this fails (or
+ * the other way round) is a disagreement about the contract, not a bug in one
+ * implementation. A client repository can also run it as a stand-in: ClaudeUI's
+ * gated integration test starts it on a random port, and a real-app verifier
+ * points a running ClaudeUI at it.
  *
- * **It goes to the hub repository as that project's first contract test**, which
- * is why it is self-contained: `Bun.serve` and nothing installed, no import from
- * `src/`, and the protocol restated here in the shapes the fixtures hold rather
- * than imported from the client's types. A fake that shared the client's
- * declarations could not catch the client and the hub disagreeing, which is the
- * one thing two repositories need catching.
+ * It is self-contained on purpose: `Bun.serve` and nothing installed, no import
+ * from `protocol/` or the Worker, and the protocol restated here in the shapes
+ * the fixtures hold. A fake that shared the Worker's declarations could not
+ * catch the Worker and the contract disagreeing, which is the one thing it is
+ * for.
  *
  * ## What it implements faithfully, and where it is deliberately thin
  *
@@ -540,11 +542,12 @@ async function handle(request: Request): Promise<Response> {
       if (!reading?.accountKey || !reading.windowKind) continue
       const key = JSON.stringify([reading.accountKey, reading.windowKind])
       const existing = readings.get(key)
-      // Latest wins, and only the latest: two devices watching one account must
-      // not be able to move its meter backwards.
+      // Taken, whether or not it is the newest: a real hub keeps every reading as a
+      // sample, so "accepted" means the hub has it. Latest wins for the RELAY only —
+      // two devices watching one account must not move its meter backwards.
+      accepted++
       if (existing && existing.observedAt > reading.observedAt) continue
       readings.set(key, { ...reading, deviceId })
-      accepted++
     }
     return json({ accepted, epoch })
   }
