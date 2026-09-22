@@ -424,6 +424,34 @@ export function rekeyTargetFor(
  * "did this event change state?" answerable from the table alone.
  *
  */
+/**
+ * One terminal event per RUN. cli.js reports a run's end twice — a
+ * `task_updated` patch, which ClaudeSession forwards with an empty summary and
+ * no usage, and then the `task_notification` with the full record — and the
+ * wire does not promise that order. A second event for the same tool_use id and
+ * run index folds into the first, keeping whichever side carries the summary,
+ * output file and usage, so `latestNotification` reads a complete entry
+ * whatever arrived last (ADR-073 §4). A different run index appends: that is
+ * the resume case, and the runs must stay distinguishable.
+ */
+function foldTerminalEvent(list: TaskNotification[], next: TaskNotification): TaskNotification[] {
+  if (!next.toolUseId) return [...list, next]
+  for (let i = list.length - 1; i >= 0; i--) {
+    const prev = list[i]
+    if (prev.toolUseId !== next.toolUseId) continue
+    if (prev.runIndex !== next.runIndex) break
+    const merged: TaskNotification = {
+      ...prev,
+      ...next,
+      summary: next.summary || prev.summary,
+      outputFile: next.outputFile || prev.outputFile,
+      usage: next.usage ?? prev.usage
+    }
+    return [...list.slice(0, i), merged, ...list.slice(i + 1)]
+  }
+  return [...list, next]
+}
+
 export function applyEvent(state: CanonicalState, event: ReducerEvent): CanonicalState {
   const spec = channelSpec(event.channel)
   if (!spec || !spec.canonical) return state
@@ -1057,7 +1085,10 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
               Object.entries(s.activeTasks).filter(([id]) => id !== notification.toolUseId)
             )
           : s.activeTasks
-        return { taskNotifications: [...s.taskNotifications, notification], activeTasks }
+        return {
+          taskNotifications: foldTerminalEvent(s.taskNotifications, notification),
+          activeTasks
+        }
       })
     }
 

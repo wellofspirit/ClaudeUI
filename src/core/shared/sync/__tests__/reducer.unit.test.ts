@@ -1313,6 +1313,100 @@ describe('reducer — subagents', () => {
     expect(s.sessions['rid'].taskNotifications).toHaveLength(1)
   })
 
+  it('folds the two terminal events of one run into one entry, whichever arrives first', () => {
+    const empty = {
+      taskId: 'a',
+      toolUseId: 't1',
+      status: 'completed',
+      outputFile: '',
+      summary: '',
+      runIndex: 1
+    }
+    const full = {
+      taskId: 'a',
+      toolUseId: 't1',
+      status: 'completed',
+      outputFile: '/tmp/out.txt',
+      summary: 'found it',
+      usage: { totalTokens: 9, toolUses: 2, durationMs: 300 },
+      runIndex: 1
+    }
+    const started: Array<[string, string, unknown]> = [
+      ['session:task-started', 'rid', { toolUseId: 't1', taskId: 'a', taskType: 'local_agent' }]
+    ]
+    // The wire's usual order: the task_updated patch first, then the notification.
+    const usual = fold([
+      created(),
+      ...started,
+      ['session:task-notification', 'rid', empty],
+      ['session:task-notification', 'rid', full]
+    ])
+    expect(usual.sessions['rid'].taskNotifications).toEqual([full])
+    // The other order must read the same — nothing may depend on which came last.
+    const flipped = fold([
+      created(),
+      ...started,
+      ['session:task-notification', 'rid', full],
+      ['session:task-notification', 'rid', empty]
+    ])
+    expect(flipped.sessions['rid'].taskNotifications).toEqual([full])
+  })
+
+  it('appends a later run instead of folding it, so the runs stay distinguishable', () => {
+    const s = fold([
+      created(),
+      ['session:task-started', 'rid', { toolUseId: 't1', taskId: 'a', taskType: 'local_agent' }],
+      [
+        'session:task-notification',
+        'rid',
+        {
+          taskId: 'a',
+          toolUseId: 't1',
+          status: 'completed',
+          outputFile: '',
+          summary: 'run one',
+          runIndex: 1
+        }
+      ],
+      [
+        'session:task-started',
+        'rid',
+        { toolUseId: 't1', taskId: 'a', taskType: 'local_agent', runIndex: 2 }
+      ],
+      [
+        'session:task-notification',
+        'rid',
+        {
+          taskId: 'a',
+          toolUseId: 't1',
+          status: 'failed',
+          outputFile: '',
+          summary: 'run two',
+          runIndex: 2
+        }
+      ]
+    ])
+    expect(s.sessions['rid'].taskNotifications.map((n) => [n.runIndex, n.summary])).toEqual([
+      [1, 'run one'],
+      [2, 'run two']
+    ])
+    // A notification with no tool_use id (the legacy XML path with nothing to match) always appends.
+    const t = fold([
+      created(),
+      [
+        'session:task-notification',
+        'rid',
+        { taskId: 'z', toolUseId: null, status: 'completed', outputFile: '', summary: '' }
+      ],
+      [
+        'session:task-notification',
+        'rid',
+        { taskId: 'z', toolUseId: null, status: 'completed', outputFile: '', summary: '' }
+      ]
+    ])
+    expect(t.sessions['rid'].taskNotifications).toHaveLength(2)
+  })
+
   it('carries runIndex on the active record, so a resumed agent can say so', () => {
     const s = fold([
       created(),
