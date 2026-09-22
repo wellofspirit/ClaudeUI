@@ -32,6 +32,7 @@ import { IdeUnavailableDialog } from '../IdeUnavailableDialog'
 import { shortModelName } from '../../usage/usage-utils'
 import { COST_UNKNOWN, formatCostOrUnknown, formatCostUsd } from '../../../utils/cost'
 import { ideLaunchPageHtml } from '../../../../../shared/ide-launch-page'
+import { displayCwd } from '../../../../../shared/display-path'
 import {
   ideUnavailableReason,
   isIdeUnavailableError,
@@ -864,14 +865,14 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
                       <div className="bg-bg-primary border border-border rounded-lg shadow-lg py-2 px-3 space-y-2 min-w-[200px] max-w-[400px] animate-fade-in">
                         {cwd && (
                           <button
-                            onClick={() => handleCopy(cwd, 'cwd')}
+                            onClick={() => handleCopy(displayCwd(cwd), 'cwd')}
                             className="w-full text-left cursor-default group/row"
                           >
                             <div className="text-[10px] text-text-muted mb-0.5">
                               Working Directory
                             </div>
                             <div className="text-[11px] text-text-secondary font-mono truncate group-hover/row:text-text-primary transition-colors">
-                              {copiedField === 'cwd' ? 'Copied!' : cwd}
+                              {copiedField === 'cwd' ? 'Copied!' : displayCwd(cwd)}
                             </div>
                           </button>
                         )}
