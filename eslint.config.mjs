@@ -20,7 +20,6 @@ const TEST_AND_SCRIPT_FILES = [
   'src/test/**',
   'src/e2e/**',
   'src/integration/**',
-  'src/layout/**',
   'scripts/**',
   'patch/**',
   '**/*.config.{ts,mts,cts,js,mjs,cjs}'

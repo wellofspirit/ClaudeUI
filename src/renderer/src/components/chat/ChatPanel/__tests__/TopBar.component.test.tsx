@@ -1010,7 +1010,7 @@ describe('TopBar — mobile entry points', () => {
     // at all times and CSS picks one — jsdom has no layout and therefore no
     // opinion about which. What a jsdom test can still pin is that the ⋯ is
     // gated by tier 2's exact complement rather than by a device check that
-    // has come back: `TopBar.layout.test.tsx` measures which one is visible.
+    // has come back; which one is visible is a fact about geometry jsdom cannot see.
     expect(screen.getByTestId('TopBar.permissions')).toBeInTheDocument()
     expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument()
     expect(screen.getByTestId('TopBar.permissions').className).toContain(TIER2_HIDE)
@@ -1308,7 +1308,7 @@ describe('TopBar — terminal toggle button', () => {
     renderTopBar(true)
     // No longer `!isMobileCtx`: the button is in the DOM and tier 2 hides it,
     // and a phone is inside tier 2 by construction (T2 === MOBILE_BREAKPOINT —
-    // pinned in `TopBar.layout.test.tsx`, which also measures the 390px bar).
+    // stated in `top-bar-tiers.ts`).
     expect(screen.getByTestId('TopBar.terminal').className).toContain(TIER2_HIDE)
     expect(screen.getByTestId('TopBar.overflowMenu')).toBeInTheDocument()
   })
